@@ -689,6 +689,36 @@ html.titlebar .top.fit-3 .since-btn { display: none; }
 .replay-pill b { color: var(--gold); font-weight: 600; font-size: 12px; }
 .replay-pill .count-k { color: var(--dim); }
 .replay-pill:hover .count-k { color: var(--text); }
+/* "Update available · 3" (update.js): green, and its card under the header's right end */
+.update-pill { cursor: pointer; color: var(--mint); border-color: rgba(61, 255, 168, 0.35); }
+.update-pill b { color: var(--mint); }
+.update-pill .count-k { color: var(--dim); }
+.update-pill:hover .count-k { color: var(--text); }
+.update-pill.updated { cursor: default; }
+.update-card {
+  position: fixed; top: calc(var(--top-h) + 10px); right: 16px; z-index: 40; width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - var(--top-h) - 60px); overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+  background: var(--glass-bg-strong); border: 1px solid var(--glass-edge); border-radius: 16px; color: var(--text);
+  -webkit-backdrop-filter: blur(28px) saturate(1.25); backdrop-filter: blur(28px) saturate(1.25);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45), inset 0 1px 0 var(--glass-highlight); font: 13px/1.45 var(--font-ui);
+}
+.update-head { display: flex; align-items: baseline; gap: 8px; }
+.update-head b { font: 650 14px/1.2 var(--font-display); }
+.update-ver { color: var(--dim); font-variant-numeric: tabular-nums; flex: 1; }
+.update-x { background: none; border: 0; color: var(--dim); font-size: 18px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.update-x:hover { color: var(--text); }
+.update-k { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.update-notes { margin: 0; padding-left: 18px; color: var(--dim); display: flex; flex-direction: column; gap: 3px; }
+.update-warn { color: var(--gold); }
+.update-note { color: var(--text); }
+.update-auto { display: flex; align-items: center; gap: 8px; color: var(--dim); cursor: pointer; }
+.update-acts { display: flex; justify-content: flex-end; gap: 8px; }
+.update-btn {
+  height: 28px; padding: 0 12px; border-radius: var(--radius-sm); cursor: pointer; font: 500 12.5px/1 var(--font-ui);
+  background: var(--glass-bg); border: 1px solid var(--glass-edge); color: var(--text);
+}
+.update-btn.primary { border-color: rgba(61, 255, 168, 0.45); color: var(--mint); }
+.update-btn:disabled { opacity: 0.45; cursor: default; }
 /* "Since you looked": a frosted card at the top centre, the detail panel's surface */
 .since {
   position: fixed; top: calc(var(--top-h) + 14px); left: 50%; translate: -50% 0; z-index: 40;

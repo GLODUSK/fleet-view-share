@@ -25,7 +25,7 @@
 // line is { t: 'hello', token }, with the random token from %LOCALAPPDATA%\fleet-view\host.json
 // ({ pid, pipe, token, startedAt, version }); anything else, or a wrong token, closes the connection. Then:
 //   { t: 'req', n?, op, a: [args] }  ->  { t: 'res', n, v } or { t: 'res', n, err }   (no n: no reply)
-//   ops: open(o), create(o) (o.chrome, o.forkFrom: see create below), write(id, data), resize(id, cols, rows), kill(id), list(), snapshot(id),
+//   ops: open(o), create(o) (o.chrome, o.forkFrom, o.model, o.effort: see create below), write(id, data), resize(id, cols, rows), kill(id), list(), snapshot(id),
 //        endAll(graceMs), killAll(), setUi(ui), quitAll({ ui }), restart({ now, by }) (see Restart), log(text)
 //   events: { t: 'ev', e: 'data', id, d } / { e: 'exit', id, code } / { e: 'rekey', from, id } / { e: 'sessions', list }
 // list() gives each session: id, pid, alive, exitCode, startedAt, pending, created, forkFrom, cwd, handoffFrom,
@@ -149,6 +149,8 @@ function fileHash(file) { try { return crypto.createHash('sha1').update(fs.readF
 // newSessionEffort: the effort a new conversation starts at (`claude --effort <level>`), "medium" when unset;
 // "last" adds no flag, so Claude Code's saved default (the last /effort typed anywhere) applies.
 const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+// a model name as create takes it (`claude --model <m>`): nothing cmd reads as special
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9.\-\[\]]{0,59}$/;
 function newEffort(v) {
   if (v === 'last') return '';
   return EFFORT_LEVELS.has(v) ? v : 'medium';
@@ -516,6 +518,9 @@ function createPtys(opts = {}) {
   // when a flag was added, so a caller can tell this host from an older one that ignores it.
   // o.forkFrom, a conversation id (hex and dashes only), starts `claude --resume <id> --fork-session` instead: a new
   // conversation that carries that one's history; the original stays as it was. The reply echoes forkFrom.
+  // o.model (letters, digits, . - [ ] only) adds --model <m>, and o.effort (a level) --effort <e> in place of the set
+  // one: for this session only, where /model and /effort typed in it would save them as the default for every new
+  // session. The reply echoes both.
   function create(o) {
     if (!loadPty()) return noPty();
     o = o || {};
@@ -525,11 +530,15 @@ function createPtys(opts = {}) {
     // the pid files already there are never this one
     const known = new Set(readPidFiles(dirs()).map((f) => f.pid));
     // a plain new conversation starts at the set effort, not at whatever /effort a session saved last
-    const effort = fork ? '' : newEffort(getSettings().newSessionEffort);
-    const cmd = fork ? `${commandFor(fork)} --fork-session` : newCommand + (effort ? ` --effort ${effort}` : '');
+    const model = typeof o.model === 'string' && MODEL_RE.test(o.model) ? o.model : null;
+    const asked = EFFORT_LEVELS.has(o.effort) ? o.effort : null;
+    const effort = asked || (fork ? '' : newEffort(getSettings().newSessionEffort));
+    const cmd = (fork ? `${commandFor(fork)} --fork-session` : newCommand) + (model ? ` --model ${model}` : '') + (effort ? ` --effort ${effort}` : '');
     const r = spawnPty(key, cmd + flag, o, { isNew: true, created: true, known, forkFrom: fork });
     if (r.ok && flag) r.chrome = o.chrome;
     if (r.ok && fork) r.forkFrom = fork;
+    if (r.ok && model) r.model = model;
+    if (r.ok && asked) r.effort = asked;
     return r;
   }
 
@@ -663,6 +672,7 @@ function createPtys(opts = {}) {
         if (data.startsWith('\x1b[200~', i)) { t.inPaste = true; i += 6; continue; }
         const next = data[i + 1];
         if (next === undefined) { t.line = ''; return; } // Esc on its own
+        if (next === '\r') { add('\n'); i += 2; continue; } // Alt+Enter: a new line in the prompt
         if (next === '[') { // CSI: parameters and intermediates up to the final byte
           let j = i + 2;
           while (j < data.length && !/[@-~]/.test(data[j])) j++;
@@ -1104,7 +1114,8 @@ function runHost() {
           const o = a[0] && typeof a[0] === 'object' ? a[0] : {};
           if (typeof o.cwd !== 'string' || !o.cwd) return reply({ ok: false, message: 'no folder given' });
           return reply(ptys.create({ cwd: o.cwd, account: o.account === 'A' ? 'A' : 'B', cols: o.cols, rows: o.rows, chrome: typeof o.chrome === 'boolean' ? o.chrome : undefined,
-            forkFrom: typeof o.forkFrom === 'string' && ID_RE.test(o.forkFrom) ? o.forkFrom : undefined }));
+            forkFrom: typeof o.forkFrom === 'string' && ID_RE.test(o.forkFrom) ? o.forkFrom : undefined,
+            model: typeof o.model === 'string' && MODEL_RE.test(o.model) ? o.model : undefined, effort: EFFORT_LEVELS.has(o.effort) ? o.effort : undefined }));
         }
         case 'write': if (typeof a[0] === 'string' && KEY_RE.test(a[0])) ptys.write(a[0], a[1]); return reply(true);
         case 'resize': if (typeof a[0] === 'string' && KEY_RE.test(a[0])) ptys.resize(a[0], Number(a[1]), Number(a[2])); return reply(true);

@@ -124,6 +124,7 @@ contextBridge.exposeInMainWorld('fleetDesktop', {
   toggleMini: () => ipcRenderer.send('fv:toggle-mini'),
   showMain: (id) => ipcRenderer.send('fv:show-main', typeof id === 'string' ? id.slice(0, 200) : null),
   hideMini: () => ipcRenderer.send('fv:hide-mini'),
+  relaunch: () => ipcRenderer.send('fv:relaunch'),
   fitMini: (h) => ipcRenderer.send('fv:fit-mini', Number(h) || 0),
   onMiniChange: (cb) => {
     if (typeof cb !== 'function') return () => {};

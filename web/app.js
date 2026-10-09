@@ -113,6 +113,7 @@ import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, e
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { sendOrder, sendEach, sendNote, summary as orderSummary, teamBrief, firstWords, unreachable } from './orders.js';
 import { mountSince, sinceFromState } from './since.js';
+import { mountUpdate } from './update.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner } from './compose.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects'];
@@ -269,6 +270,7 @@ function rebase(st) {
   for (const s of st.sessions || []) {
     s.last = sh(s.last); s.turnStart = sh(s.turnStart); s.endedAt = sh(s.endedAt);
     if (s.lastAction) s.lastAction.t = sh(s.lastAction.t);
+    for (const r of s.running || []) r.at = sh(r.at);
     for (const f of s.files || []) f.t = sh(f.t);
     for (const c of s.calls || []) c.t = sh(c.t);
     if (s.ship && s.ship.app) s.ship.app.at = sh(s.ship.app.at);
@@ -303,6 +305,7 @@ async function poll() {
     setAccounts(st.accounts);
     online = true;
     if (st.settings) syncHiddenRepos(st.settings.hiddenRepos);
+    if (settingsLoaded && st.settings) mergeServerHidden(st.settings.hidden);
     if (!settingsLoaded && st.settings) {
       settingsLoaded = true;
       const s = st.settings;
@@ -378,8 +381,38 @@ const activeAt = (s) => (Number.isFinite(s.active) ? s.active : s.last || 0);
 function isHidden(s) {
   const at = hidden.get(s.id);
   if (at === undefined) return false;
-  if (s.state !== 'DONE' && s.state !== 'QUESTION' && activeAt(s) > at) { hidden.delete(s.id); hiddenSaveDue = true; return false; }
+  if (s.state !== 'DONE' && s.state !== 'QUESTION' && activeAt(s) > at) { unhide(s.id); hiddenSaveDue = true; return false; }
   return true;
+}
+// takes one off the local list, and remembers when, so the server's copy (which still has it until the page's
+// save lands) doesn't put it back on the next /state
+const unhiddenAt = new Map(); // id -> when the page took it off the list (ms)
+function unhide(id) {
+  hidden.delete(id);
+  unhiddenAt.set(id, Date.now());
+}
+// The server hides conversations too (the automation API: stop {remove}, remove, temp sessions), and the page
+// loads settings.hidden only once at start. So each /state adds the server's entries the page doesn't have:
+// never drops a local one (the page's own saves are the source of the list), and skips an entry the page took off
+// the list itself unless the server hid it again after that. True when it added any (render() follows the poll).
+function mergeServerHidden(list) {
+  if (!Array.isArray(list)) return false;
+  const now = Date.now();
+  for (const [id, t] of unhiddenAt) if (now - t > 120e3) unhiddenAt.delete(id);
+  let added = false;
+  for (const h of list) {
+    const id = h && typeof h === 'object' ? h.id : h;
+    if (typeof id !== 'string' || hidden.has(id)) continue;
+    const at = (h && Number(h.at)) || now, gone = unhiddenAt.get(id);
+    if (gone !== undefined && at <= gone) continue;
+    hidden.set(id, at);
+    unhiddenAt.delete(id);
+    continued.delete(id);
+    if (ui.selectedId === id) ui.selectedId = null;
+    if (ui.detailId === id) ui.detailId = null;
+    added = true;
+  }
+  return added;
 }
 function hideConversation(s, how = 'hidden') {
   hidden.set(s.id, Date.now());
@@ -577,7 +610,7 @@ function removedMenuItem(list, withRepo) {
 async function continueConversation(r) {
   if (!r || !r.id) return;
   if (r.repo && r.repo.root) unhideRepo(r.repo.root);
-  if (hidden.has(r.id)) { hidden.delete(r.id); saveHidden(); }
+  if (hidden.has(r.id)) { unhide(r.id); saveHidden(); }
   flushSettings();
   continued.set(r.id, { at: Date.now(), r });
   toast(`Continuing ${r.name}`, C.mint);
@@ -2094,6 +2127,9 @@ async function getJson(url) {
 }
 const since = mountSince({ fetchJson: getJson, onPick: (id) => pickFromAnywhere(id), fallback: (t) => sinceFromState(state, t) });
 $('since-btn')?.addEventListener('click', (e) => { e.stopPropagation(); since.toggle(); });
+
+// ---------- "Update available" (update.js; updater.js on the server) ----------
+if (!FIXTURE) mountUpdate({ pill: $('update-pill'), getJson });
 
 // ---------- desktop notifications ----------
 // New entries in state.alerts (n only grows) of these kinds raise a Notification while the window is not

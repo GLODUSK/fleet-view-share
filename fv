@@ -1,0 +1,3 @@
+#!/bin/sh
+# fv: Fleet View automation CLI (scripts/fv.js); fv.cmd is the same for cmd and PowerShell
+exec node "$(dirname "$0")/scripts/fv.js" "$@"

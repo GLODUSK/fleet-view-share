@@ -1,0 +1,5 @@
+{
+  "name": "fleet-view-feed",
+  "version": "0.1.0",
+  "description": "Tells Fleet View the moment a turn starts or ends and which tool is running, so it never has to guess from the logs"
+}

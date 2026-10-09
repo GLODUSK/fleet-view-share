@@ -62,6 +62,37 @@ if (-not ($parts | Where-Object { $_.TrimEnd('\') -ieq $dir.TrimEnd('\') })) {
   Say 'Added to your PATH: type fleet-view in any new console window'
 } else { Say 'Already on your PATH' }
 
+# ---------- the fleet-view skill, so Claude Code sessions know the fv command ----------
+# into each Claude login there is (~/.claude, and ~/.claude-a for a second account); replaced on every run
+$skill = Join-Path $dir 'skills\fleet-view\SKILL.md'
+foreach ($cfg in @('.claude', '.claude-a')) {
+  $root = Join-Path $HOME $cfg
+  if (-not (Test-Path $root) -or -not (Test-Path $skill)) { continue }
+  $to = Join-Path $root 'skills\fleet-view'
+  New-Item -ItemType Directory -Force $to | Out-Null
+  Copy-Item $skill (Join-Path $to 'SKILL.md') -Force
+  Say "Skill fleet-view installed in ~/$cfg"
+}
+
+# ---------- the fleet-view-feed mod: each claude tells Fleet View when a turn starts and ends and what runs ----------
+# The mod folder is a marketplace read in place, so a git pull updates it; new sessions load the new copy.
+$mods = Join-Path $dir 'mod'
+if ((Test-Path (Join-Path $mods '.claude-plugin\marketplace.json')) -and (Get-Command claude -ErrorAction SilentlyContinue)) {
+  $prevCfg = $env:CLAUDE_CONFIG_DIR
+  try {
+    foreach ($cfg in @('.claude', '.claude-a')) {
+      $root = Join-Path $HOME $cfg
+      if (-not (Test-Path $root)) { continue }
+      $env:CLAUDE_CONFIG_DIR = $(if ($cfg -eq '.claude') { $null } else { $root })
+      $known = (& claude plugin marketplace list 2>$null) -join "`n"
+      if ($known -notmatch '\bfleet-view\b') { & claude plugin marketplace add $mods *> $null }
+      & claude plugin install fleet-view-feed@fleet-view --scope user *> $null
+      if ($LASTEXITCODE -eq 0) { Say "Live feed mod installed in ~/$cfg" }
+      else { Write-Host "  Could not install the live feed mod in ~/$cfg (claude plugin install fleet-view-feed@fleet-view); Fleet View works without it." -ForegroundColor Yellow }
+    }
+  } finally { $env:CLAUDE_CONFIG_DIR = $prevCfg }
+}
+
 if ($StartAtSignIn) { & node (Join-Path $dir 'fleet-view.js') --install-startup }
 
 if (-not $NoLaunch) {

@@ -14,6 +14,7 @@ const CMDS = require(path.join(__dirname, 'commands.js'));
 const FILES = require(path.join(__dirname, 'files.js'));
 const CHANGES = require(path.join(__dirname, 'changes.js'));
 const PREVIEW = require(path.join(__dirname, 'preview.js'));
+const UPDATER = require(path.join(__dirname, 'updater.js'));
 
 // ---------- options ----------
 const argv = process.argv.slice(2);
@@ -124,6 +125,16 @@ function cleanHidden(list, now = Date.now()) {
   return [...out.values()];
 }
 let hidden = cleanHidden(saved.hidden) || [];
+// Hidden by the automation API (api.js: stop { remove }, remove, a temp session that ended): id -> when. The page
+// keeps its own copy of the hidden list and saves all of it back; one saved in the half minute after the server
+// hid something, before the page's /state poll took that up, would put the conversation back. So for that long a
+// save that leaves it out keeps it (applySettings).
+const apiHidAt = new Map();
+const API_HIDE_GUARD_MS = 30e3;
+// the API's throwaway sessions (POST /api/sessions { temp: true }): conversation ids, hidden from the map as soon
+// as they are stopped or end (sweepTemp), at most 200, kept in settings so a restart doesn't forget them
+const API_TEMP_MAX = 200;
+let apiTemp = DEMO ? [] : (Array.isArray(saved.apiTemp) ? saved.apiTemp : []).filter((x) => typeof x === 'string' && UUID_RE.test(x)).map((x) => x.toLowerCase()).slice(-API_TEMP_MAX);
 // repos removed from the page (the repo menu's ×, Delete or "Remove from list", or "Remove repo" on a repo's
 // right-click menu): [{ root, at }], at most 200. /state leaves them out of repos[]; the page leaves them and their
 // conversations out of every view. A hidden repo comes back by itself, and leaves the list, once a conversation in
@@ -444,7 +455,7 @@ function flushSettings() {
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, compact, finishedOpen, steady, miniOpen, hidden, hiddenRepos, addedRepos, mapSpots,
-    mapLens, mapViews, notify, teams,
+    mapLens, mapViews, notify, teams, apiTemp,
     moved: [...moved.values()],
     names: Object.fromEntries(names),
     pushTargets: { sessions: [...pushTargets.sessions.values()], repos: [...pushTargets.repos.values()] },
@@ -1092,6 +1103,7 @@ function ingestMain(s, recs) {
         if (msg.id && msg.id === s.replyId) { if (!s.lastReply.endsWith(said)) s.lastReply = (s.lastReply + '\n\n' + said).slice(-20000); }
         else s.lastReply = said.slice(0, 20000);
         s.replyId = msg.id || null;
+        s.replyAt = t;
       }
       // an API error ends the turn too, but the session is stuck until you retry
       if (d.isApiErrorMessage) { s.turnOpen = false; s.apiError = true; s.errAt = t; }
@@ -1774,13 +1786,15 @@ function pollOne(s, now, budget) {
   const quiet = now - s.last;
   const prev = s.state;
   const lp = liveProcs.get(s.id);
+  const fd = feedOf(lp);
+  s.running = fd ? fd.tools : null;
   s.bgList = s.demo ? [] : bgLiveList(s, lp, now);
   s.bgLive = s.bgList.filter((b) => !b.server).length;
   // only DONE is hidden; a turn that went quiet mid-way may be a permission prompt, so it stays (STALLED)
   s.state = s.wf && !s.wf.done && s.wf.agents.some((a) => a.state === 'run') ? 'AGENTS'
     : s.asking ? 'ASKING'
     : s.apiError ? 'ERROR'
-    : s.turnOpen ? (quiet < 5 * 60e3 ? 'WORKING' : 'STALLED')
+    : (fd ? fd.turnOpen : s.turnOpen) ? (quiet < 5 * 60e3 || (fd && (fd.tools.length || quiet < 15 * 60e3)) ? 'WORKING' : 'STALLED')
     : s.liveAgents > 0 ? 'AGENTS'
     : s.endedOnQuestion ? 'QUESTION'
     : s.bgLive > 0 ? 'WORKING' : 'DONE';
@@ -3481,6 +3495,30 @@ const accountFor = (s) => liveAccount.get(s.id) || (s.account === 'A' ? 'A' : 'B
 // status is 'busy', 'idle' or 'waiting' (else null); waitingFor says on what while it waits: 'dialog open' (a
 // panel such as /usage), "approve Bash(…)", a question's text, "input needed". The state rules read both.
 let liveProcs = new Map();
+// The fleet-view-feed mod (mod/fleet-view-feed) writes <LOG_DIR>\live\<sessionId>.json from inside each claude
+// on every turn start and end and every tool call: { loadedAt, turnOpen, turnAt, lastTurn, tools }. It counts
+// only when written by the claude that runs now (loaded after that process started); then it, not the log,
+// says whether a turn is open and which tools run (feedOf).
+const FEED_DIR = path.join(LOG_DIR, 'live');
+function readFeed(sid, startedAt) {
+  const j = readJson(path.join(FEED_DIR, `${sid}.json`));
+  if (!j || j.v !== 1 || j.sessionId !== sid || !(j.loadedAt >= (startedAt || 0) - 5000)) return null;
+  const tools = (Array.isArray(j.tools) ? j.tools : []).filter((t) => t && typeof t.tool === 'string' && Number.isFinite(t.at))
+    .map((t) => ({ tool: t.tool.slice(0, 60), what: typeof t.what === 'string' ? t.what.slice(0, 160) : '', agent: typeof t.agent === 'string' ? t.agent : null, at: t.at }));
+  return { turnOpen: j.turnOpen === true, turnAt: Number.isFinite(j.turnAt) ? j.turnAt : null, lastTurn: j.lastTurn && typeof j.lastTurn.reason === 'string' ? j.lastTurn : null, tools, at: j.at || 0 };
+}
+// one file per conversation ever run: those untouched for 3 days go (at start, then hourly)
+function pruneFeeds(now = Date.now()) {
+  for (const f of ls(FEED_DIR)) {
+    if (!f.endsWith('.json')) continue;
+    try { const fp = path.join(FEED_DIR, f); if (now - fs.statSync(fp).mtimeMs > 3 * 86400e3) fs.unlinkSync(fp); } catch {}
+  }
+}
+// the feed, once it has seen a turn in this process. Before that the log decides: a conversation killed
+// mid-turn and resumed has no open turn in its new claude, and is STALLED? (tell it to continue) by its log.
+// With it, a turn open in claude is WORKING while a tool runs, however long (a build, a test run), and
+// STALLED? only after 15 quiet minutes with none; one it closed is closed, whatever the log's tail says.
+const feedOf = (lp) => (lp && lp.feed && (lp.feed.turnOpen || lp.feed.lastTurn) ? lp.feed : null);
 const LIVE_STATUS = new Set(['busy', 'idle', 'waiting']), PANEL_OPEN = 'dialog open';
 const pidAlive = (pid) => {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -3504,6 +3542,7 @@ function scanLiveProcs() {
       if (!old || at > old.at) byId.set(j.sessionId, { pid: j.pid, at, startedAt: j.startedAt || 0,status: LIVE_STATUS.has(j.status) ? j.status : null, waitingFor: wf || null, statusAt: j.statusUpdatedAt || at });
     }
   }
+  for (const [sid, p] of byId) p.feed = readFeed(sid, p.startedAt);
   liveProcs = byId;
 }
 function accountsFromProcesses() {
@@ -3643,6 +3682,8 @@ function sessionJson(s, now) {
     goal: plain(wf && !wf.done ? wf.desc || wf.name : s.prompt, 400) || null,
     lastAction: s.lastAction ? { t: Math.round(s.lastAction.t), who: s.lastAction.who, verb: s.lastAction.verb, what: s.lastAction.what } : null,
     waitingOn: waitingOf(s),
+    // the tool calls running right now, from the fleet-view-feed mod (null without it): main's and its subagents'
+    running: s.running && s.running.length ? s.running.map((r) => ({ tool: r.tool, what: plain(r.what, 160), agent: r.agent, at: Math.round(r.at) })) : null,
     // what it runs in the background (a shell, an async agent or workflow): servers do not count as work
     background: (s.bgList || []).map((b) => ({ label: b.label, t: Math.round(b.t), server: !!b.server })),
     turnStart: s.promptAt || null,
@@ -4648,7 +4689,13 @@ function applySettings(b) {
   if ('hidden' in b) {
     const h = cleanHidden(b.hidden);
     if (h) {
-      const now = Date.now(), still = new Set(h.map((x) => x.id));
+      const now = Date.now();
+      // one the API hid moments ago, which the page had not taken up yet when it saved its list
+      for (const [id, at] of apiHidAt) {
+        if (now - at > API_HIDE_GUARD_MS) { apiHidAt.delete(id); continue; }
+        if (!h.some((x) => x.id === id)) { const was = hidden.find((x) => x.id === id); if (was) h.push(was); }
+      }
+      const still = new Set(h.map((x) => x.id));
       for (const x of hidden) if (!still.has(x.id)) recentlyContinued.set(x.id, now);
       for (const [id, t] of recentlyContinued) if (now - t > 120e3 || still.has(id)) recentlyContinued.delete(id);
       hidden = h;
@@ -4778,6 +4825,90 @@ async function reveal(b) {
   return [200, await revealFile(abs, line)];
 }
 
+// ---------- what the automation API does to the map ----------
+// hide a conversation the way the page's "Hide from map" does (settings.hidden; the page takes it up from /state)
+function hideConversation(id) {
+  if (typeof id !== 'string' || !UUID_RE.test(id) || DEMO) return false;
+  id = id.toLowerCase();
+  const now = Date.now();
+  hidden = hidden.filter((h) => h.id !== id);
+  hidden.push({ id, at: now });
+  if (hidden.length > HIDDEN_MAX) hidden.sort((a, b) => a.at - b.at).splice(0, hidden.length - HIDDEN_MAX);
+  recentlyContinued.delete(id);
+  apiHidAt.set(id, now);
+  apiTemp = apiTemp.filter((x) => x !== id);
+  tempGoneAt.delete(id);
+  saveSettings();
+  return true;
+}
+function markTemp(id) {
+  if (typeof id !== 'string' || !UUID_RE.test(id) || DEMO) return false;
+  id = id.toLowerCase();
+  if (!apiTemp.includes(id)) { apiTemp.push(id); if (apiTemp.length > API_TEMP_MAX) apiTemp.splice(0, apiTemp.length - API_TEMP_MAX); saveSettings(); }
+  return true;
+}
+// A temp session that is no longer running in the session host is hidden and leaves apiTemp. Run every 10 s while
+// there are any. It must be gone (or ended) on looks at least TEMP_GONE_MS apart, so a session host restarting (it
+// ends every session and its successor resumes them) doesn't count; while the host is down nothing changes.
+const tempGoneAt = new Map(); // id -> first look that found it gone
+const TEMP_GONE_MS = 15e3;
+let tempSweeping = false;
+function sweepTemp() {
+  if (DEMO || !apiTemp.length || tempSweeping) return;
+  tempSweeping = true;
+  API.hostList().then((list) => {
+    tempSweeping = false;
+    if (!list) return;
+    const now = Date.now();
+    for (const id of [...apiTemp]) {
+      const p = list.find((x) => x && typeof x.id === 'string' && x.id.toLowerCase() === id);
+      if (p && p.alive) { tempGoneAt.delete(id); continue; }
+      const first = tempGoneAt.get(id) || now;
+      tempGoneAt.set(id, first);
+      if (now - first >= TEMP_GONE_MS) { hideConversation(id); logOnce('api-temp:' + id, `api: temp session ${id} ended: hidden from the map`); }
+    }
+    for (const id of tempGoneAt.keys()) if (!apiTemp.includes(id)) tempGoneAt.delete(id);
+  }, () => { tempSweeping = false; });
+}
+// where a conversation Fleet View knows lives: { known (its log is on disk), cwd, account }
+function whereIs(id) {
+  if (typeof id !== 'string' || !UUID_RE.test(id) || DEMO) return { known: false, cwd: null, account: null };
+  id = id.toLowerCase();
+  const log = conversationLog(id);
+  if (!log || !log.file) return { known: false, cwd: null, account: null };
+  const s = sessions.get(id);
+  if (s && !s.demo) return { known: true, cwd: s.cwd || null, account: accountFor(s) };
+  const r = removedSession(id);
+  if (r) return { known: true, cwd: r.cwd || null, account: liveAccount.get(id) || (r.account === 'A' ? 'A' : 'B') };
+  const f = findLog(id);
+  const info = f && readLogInfo(f.file, f.pdir, id);
+  return { known: true, cwd: (info && info.cwd) || null, account: liveAccount.get(id) || (f && f.account === 'A' ? 'A' : 'B') };
+}
+// GET /api/conversations: every conversation /state lists, compact. q: { state, repo (a piece of its root or name),
+// all (hidden ones too: removed, or in a removed repo), limit }. hosted and alive are filled in by api.js.
+function conversationsFor(q) {
+  const st = buildState();
+  const hid = new Map(hidden.map((h) => [h.id, h.at]));
+  const want = q.state ? String(q.state).toUpperCase() : null, repo = q.repo ? String(q.repo).toLowerCase() : null;
+  const out = [];
+  for (const s of st.sessions) {
+    // hidden as the page sees it: on the list and quiet since, or in a removed repo
+    const at = hid.get(s.id);
+    const isHidden = (at !== undefined && !(s.active > at)) || !!(s.repo && repoHidden(s.repo.root));
+    if (isHidden && !q.all) continue;
+    if (want && s.state !== want) continue;
+    if (repo && !(s.repo && (s.repo.root.toLowerCase().includes(repo) || s.repo.name.toLowerCase().includes(repo)))) continue;
+    out.push({
+      id: s.id, name: s.name, state: s.state, label: s.label, account: s.account, repo: s.repo ? s.repo.root : null,
+      branch: s.branch || null, cwd: s.cwd || null, lastReply: s.lastReply ? plain(s.lastReply, 500) : null,
+      waitingOn: s.waitingOn || null, active: s.active || null, pr: s.ship && Number.isInteger(s.ship.pr) ? s.ship.pr : null,
+      openElsewhere: !!s.openElsewhere, hidden: isHidden, temp: apiTemp.includes(s.id),
+    });
+    if (out.length >= q.limit) break;
+  }
+  return out;
+}
+
 // what the automation API (api.js) needs from the server: the folders a new session may start in (the window's
 // rule for "New session": repos /state lists, and the conversations' repo roots and checkouts) and one
 // conversation as /state shows it
@@ -4799,7 +4930,7 @@ const apiCtx = {
     const s = sessions.get(id);
     if (!s) return null;
     return { promptAt: s.promptAt || 0, turnEndT: s.turnEndT || 0, turnOpen: !!s.turnOpen, asking: !!s.asking, askAt: s.askAt || 0,
-      askText: s.asking ? s.askFull || s.askText || null : null, apiError: !!s.apiError, errAt: s.errAt || 0, lastReply: s.lastReply || '' };
+      askText: s.asking ? s.askFull || s.askText || null : null, apiError: !!s.apiError, errAt: s.errAt || 0, lastReply: s.lastReply || '', replyAt: s.replyAt || 0 };
   },
   // a conversation's name for the "[Message from teammate …]" line, or null when Fleet View doesn't know it
   // (control characters out: titles come from records anyone's log can hold, and an ESC would end the paste)
@@ -4809,6 +4940,22 @@ const apiCtx = {
   },
   // a message one conversation sent another went in: team messages, the feed, maybe an alert
   noteMessage(from, to, text) { try { noteMessage(from, to, text); } catch (e) { logOnce('note-message:' + (e && e.message), `noting a message failed\n${errorText(e)}`); } },
+  // its Fleet View name (the page's Rename) -> [code, json]
+  rename: (id, name) => renameSession(id, name),
+  // off the map (settings.hidden), and off the temp list -> true when it was a conversation id
+  hide: hideConversation,
+  // a throwaway session: hidden once it is stopped or ends
+  markTemp,
+  isTemp: (id) => typeof id === 'string' && apiTemp.includes(id.toLowerCase()),
+  conversations: conversationsFor,
+  // its transcript, compact (conversation.js transcriptOf) -> Promise of { total, from, items } or null (no log)
+  transcript(id, q) {
+    const where = conversationLog(id);
+    if (!where) return Promise.resolve(null);
+    if (where.demo) return Promise.resolve({ total: 0, from: 0, items: [] });
+    return CONV.transcriptOf(where.file, q);
+  },
+  whereIs,
 };
 
 // the log the Chat tab reads (conversation.js): a conversation in the window, else any log under the projects
@@ -4864,6 +5011,7 @@ function handleRequest(req, res) {
   if (pathname === '/changes' || pathname.startsWith('/changes/')) return void Promise.resolve(CHANGES.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   if (pathname === '/preview' || pathname.startsWith('/preview/')) return void Promise.resolve(PREVIEW.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   if (pathname === '/file') return void Promise.resolve(FILES.serve(req, res, pageCtx)).catch((e) => requestFailed(req, res, e));
+  if (pathname === '/update' || pathname.startsWith('/update/')) return UPDATER.handle(req, res, pathname, pageCtx);
   if (req.method === 'POST') {
     if (pathname === '/open') {
       return readBody(req, res, (b) => {
@@ -5092,6 +5240,8 @@ function startWeb() {
     for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => exitWith(0, sig));
     watchForUpdates(() => { console.log('fleet-view.js changed: reloading'); logLine('fleet-view.js changed on disk: reloading (exit 75)'); server.close(); exitWith(EXIT_UPDATE, 'update'); });
     // test only: FV_TEST_CRASH=1 throws an exception nothing catches 3 s after start, to check the crash log and restart
+    // updates from the folder's git upstream (updater.js): the page's "Update available" pill
+    if (!DEMO) UPDATER.start({ log: logLine, busy: () => [...sessions.values()].filter((s) => inState(s) && (s.state === 'WORKING' || s.state === 'AGENTS')).length });
     if (process.env.FV_TEST_CRASH === '1') setTimeout(() => { throw new Error('FV_TEST_CRASH: test crash 3 s after start'); }, 3000);
     const every = (ms, name, fn) => setInterval(() => { try { fn(); } catch (e) { logOnce(name + ':' + (e && e.message), `${name} failed\n${errorText(e)}`); } }, ms);
     if (DEMO) {
@@ -5108,6 +5258,8 @@ function startWeb() {
     accountsFromProcesses();
     readWeekLeft();
     every(1500, 'procs', scanLiveProcs);
+    pruneFeeds();
+    every(3600e3, 'feeds', pruneFeeds);
     every(10000, 'accounts', accountsFromProcesses);
     const prs = () => refreshGithub().catch((e) => logOnce('github:' + (e && e.message), `GitHub lookup failed\n${errorText(e)}`));
     const deploys = () => refreshDeploys().catch((e) => logOnce('deploys:' + (e && e.message), `deploy lookup failed\n${errorText(e)}`));
@@ -5116,6 +5268,8 @@ function startWeb() {
     every(1500, 'poll', poll);
     every(8000, 'discover', discover);
     every(5000, 'github', github);
+    // the API's throwaway sessions: off the map once they end
+    every(10000, 'api-temp', sweepTemp);
   });
 }
 
@@ -5199,7 +5353,7 @@ function registerLauncher() {
 // and size. A version that doesn't parse is left alone. Without the loop (started some other way) it only says an update is ready.
 function watchForUpdates(reload) {
   const me = path.resolve(__filename);
-  const files = [me, path.join(__dirname, 'api.js'), path.join(__dirname, 'screen.js'), path.join(__dirname, 'conversation.js')];
+  const files = [me, path.join(__dirname, 'api.js'), path.join(__dirname, 'screen.js'), path.join(__dirname, 'conversation.js'), path.join(__dirname, 'updater.js')];
   let timer = null;
   for (const file of files) {
     let last = mtime(file);

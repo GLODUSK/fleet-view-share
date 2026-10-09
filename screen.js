@@ -5,14 +5,17 @@
 // text: ConPTY and Claude Code redraw by moving the cursor, so the same rows are written over many times. So
 // render() plays the output into a small grid the way a terminal would (printable text with auto-wrap, the
 // cursor moves, erases, scroll regions, insert and delete, the alternate screen) and gives back its lines, and
-// menuIn() is a port of parseMenu's test for "a menu is up" over those lines. api.js uses them so that a message
-// is never pasted, and never followed by Enter, while Claude shows a permission prompt, a question or the plan
-// approval: the Enter would pick the highlighted option.
+// menuDetails() is a port of parseMenu over those lines. api.js uses them so that a message is never pasted, and
+// never followed by Enter, while Claude shows a permission prompt, a question or the plan approval (the Enter
+// would pick the highlighted option), and to show a caller that menu and answer it (GET/POST /api/sessions/:id/menu,
+// /answer).
 //
 //   render(raw, cols, rows, lastN = 40, join = true) -> [line]  the last lastN lines (soft-wrapped rows joined
 //                                                   unless join is false, blank rows at the bottom dropped), like
 //                                                   term.js screenText
-//   menuIn(lines) -> { options: [{ n, label, on }] } | null
+//   menuDetails(lines) -> { kind, title, context, more, options: [{ n, label, desc, on }], sig } | null
+//   menuDetailsShown(raw, cols, rows) -> the same, from raw output (its rows unjoined)
+//   menuIn(lines) -> { options: [{ n, label, on }] } | null   (menuDetails, cut down)
 //   menuShown(raw, cols, rows) -> the same, from raw output
 'use strict';
 
@@ -180,22 +183,54 @@ function render(raw, cols, rows, lastN = 40, join = true) {
   return out.slice(-lastN);
 }
 
-// ---------- the menu (a port of web/compose.js parseMenu's test; keep the two in step) ----------
+// ---------- the menu (a port of web/compose.js parseMenu; keep the two in step) ----------
 const isRule = (l) => /^\s*[─━═]{6,}/.test(l) && !/[╭╮╰╯┌┐└┘]/.test(l);
+const isBoxEdge = (l) => /^\s*[╭╰┌└][─━═]/.test(l);
+// a line of an older boxed dialog: "│ text │" -> "  text"
 const unbox = (l) => String(l ?? '').replace(/^(\s*)[│┃](\s?)/, '$1 $2').replace(/\s*[│┃]\s*$/, '');
 const OPT_RE = /^(\s*)([❯›])?\s*(\d{1,2})[.)]\s+(.*\S)\s*$/;
-// A select menu at the bottom: at least two options numbered one after another in the last ~30 non-empty lines,
-// one of them with the ❯ pointer; not the prompt box (❯ under a rule, a typed "1. … 2. …" list), and not a menu
-// with the prompt drawn under it.
-function menuIn(lines) {
-  const L = (Array.isArray(lines) ? lines : []).map((l) => unbox(String(l ?? '')));
+
+// What kind of menu it is, so a caller can tell a question it may answer from a tool call it must not approve:
+//   'question'   AskUserQuestion: its tab bar (☐ / ☒ / ✔ Submit), its "Type something." / "Chat about this"
+//                options, or its last step ("Ready to submit your answers?")
+//   'trust'      the folder trust question at startup
+//   'plan'       the plan approval ("Would you like to proceed?" with auto-accept edits / keep planning)
+//   'permission' a tool's permission prompt ("Do you want to proceed?", "Do you want to make this edit to x?",
+//                "Do you want to create x?", or a "Yes, and don't ask again" / "Yes, allow" option)
+//   'other'      anything else (a picker, a notice)
+// above: the few lines around the dialog's top rule or box edge, where the tab bar sits
+function kindOf(title, context, options, above) {
+  const labels = options.map((o) => o.label);
+  const all = [title, ...context].join('\n');
+  // permission, plan and trust first: a question is the one kind answered without allowPermission, so a doubt fails closed
+  if (/trust the files in this folder|do you trust/i.test(all)) return 'trust';
+  if (/would you like to proceed\?/i.test(title)
+    && (labels.some((l) => /auto-accept|keep planning|manually approve|bypass permissions|clear context/i.test(l)) || /\bplan\b/i.test(all))) return 'plan';
+  if (/^Do you want to (?:proceed|make this edit|create|allow|run|write|delete|overwrite|fetch|use)\b/i.test(title)
+    || labels.some((l) => /^Yes, (?:and don't ask again|allow)\b/i.test(l))) return 'permission';
+  if (/^Ready to submit your answers\?/i.test(title) || labels.some((l) => /^(?:Type something\.?|Chat about this)$/i.test(l))
+    || above.some((l) => /^\s*(?:←\s*)?[☐☒✔]/.test(l) && /[☐☒]\s*\S/.test(l) && /✔\s*Submit\s*(?:→\s*)?$/.test(l))) return 'question';
+  return 'other';
+}
+
+// A select menu at the bottom of the screen: Claude Code's permission prompts, AskUserQuestion, the plan
+// approval, the folder trust question. Only when at least two options numbered one after another sit in the last
+// ~30 non-empty lines and one of them carries the ❯ pointer; the prompt box (❯ under a rule, where a typed
+// "1. … 2. …" list would look the same) and a menu with the prompt drawn under it are not menus. Read it over the
+// rows as drawn (render(..., join = false)): joined soft-wrapped rows hide a narrow panel's menu.
+// -> { kind, title, context: [lines], more, options: [{ n, label, desc, on }], sig } or null; everything but kind
+// is exactly what parseMenu gives for the same lines
+function menuDetails(lines) {
+  const raw = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
+  const L = raw.map(unbox);
   let start = L.length, seen = 0;
   while (start > 0 && seen < 30) { start--; if (L[start].trim()) seen++; }
   const opts = [];
   for (let i = start; i < L.length; i++) {
     const m = OPT_RE.exec(L[i]);
-    if (m) opts.push({ i, n: +m[3], on: !!m[2], label: m[4] });
+    if (m) opts.push({ i, n: +m[3], on: !!m[2], label: m[4], col: L[i].indexOf(m[3]), boxed: /^\s*[│┃]/.test(raw[i]) });
   }
+  // runs of options numbered one after another, at most 8 lines (descriptions, wrapped in a narrow panel) between two
   let run = null, cur = [];
   const close = () => { if (cur.length >= 2 && cur.some((o) => o.on)) run = cur; };
   for (const o of opts) {
@@ -208,13 +243,61 @@ function menuIn(lines) {
   const first = run[0], last = run[run.length - 1];
   let k = first.i - 1;
   while (k >= 0 && !L[k].trim()) k--;
-  if (first.on && k >= 0 && isRule(L[k])) return null;
+  if (first.on && k >= 0 && isRule(L[k])) return null; // the prompt box with a typed list in it
+  // the prompt drawn under it: the menu is not what Claude waits on
   for (let j = last.i + 1; j < L.length; j++) if (/^\s*❯(\s|$)/.test(L[j]) && !OPT_RE.test(L[j])) return null;
-  return { options: run.map((o) => ({ n: o.n, label: o.label.replace(/\s+/g, ' '), on: o.on })) };
+  // descriptions: the lines under an option indented past its number
+  const options = run.map((o, x) => {
+    const end = x + 1 < run.length ? run[x + 1].i : Math.min(L.length, o.i + 3);
+    const desc = [];
+    for (let j = o.i + 1; j < end; j++) {
+      const l = L[j];
+      if (!l.trim() || isRule(l)) continue;
+      if (l.search(/\S/) > o.col) desc.push(l.trim());
+      else break;
+    }
+    return { n: o.n, label: o.label.replace(/\s+/g, ' '), desc: desc.join(' ').slice(0, 200), on: o.on };
+  });
+  // the title: the line above the first option; the context: what's above it, up to the dialog's top
+  let title = '';
+  if (k >= 0 && !isRule(L[k]) && !isBoxEdge(L[k]) && !OPT_RE.test(L[k])) { title = L[k].trim(); k--; }
+  const ctx = [];
+  let top = k;
+  for (; k >= 0 && ctx.length < 30; k--) {
+    const l = L[k];
+    top = k;
+    if (isRule(l) || /^\s*[●⎿]/.test(l) || (isBoxEdge(l) && /^\s*[╭┌]/.test(l) && first.boxed)) break;
+    if (isBoxEdge(l)) continue;
+    ctx.unshift(l.replace(/\s+$/, ''));
+  }
+  // the question reads better as the title than a note under it ("Do you trust the files in this folder?")
+  const qi = /\?$/.test(title) ? -1 : ctx.map((l) => /\?$/.test(l)).lastIndexOf(true);
+  if (qi >= 0) {
+    const pad = ctx[qi].match(/^\s*/)[0];
+    const q = ctx.splice(qi, 1)[0].trim();
+    if (title) ctx.push(pad + title);
+    title = q;
+  }
+  while (ctx.length && !ctx[0].trim()) ctx.shift();
+  while (ctx.length && !ctx[ctx.length - 1].trim()) ctx.pop();
+  const squeezed = ctx.filter((l, x) => l.trim() || (ctx[x - 1] || '').trim()); // no two blank lines in a row
+  const ind = Math.min(...squeezed.filter((l) => l.trim()).map((l) => l.search(/\S/)), 99);
+  const context = squeezed.map((l) => l.slice(Math.min(ind, l.match(/^\s*/)[0].length)));
+  const more = context.length > 8;
+  const sig = JSON.stringify([title, options.map((o) => [o.n, o.label, o.on])]);
+  const kind = kindOf(title, context, options, L.slice(Math.max(0, top - 3), Math.min(first.i, top + 3)));
+  return { kind, title, context: context.slice(0, 8), more, options, sig };
+}
+
+// the test for "a menu is up" (api.js before typing, the host before its auto-continue note): menuDetails, cut down
+function menuIn(lines) {
+  const m = menuDetails(lines);
+  return m ? { options: m.options.map(({ n, label, on }) => ({ n, label, on })) } : null;
 }
 
 // over the rows as drawn: Claude Code pads a menu's rows to the full width, which ConPTY then marks as wrapped,
 // and joined they'd hide its options ("❯ 1. Yes      Some description   2. No" on one line)
+const menuDetailsShown = (raw, cols, rows) => menuDetails(render(raw, cols, rows, 40, false));
 const menuShown = (raw, cols, rows) => menuIn(render(raw, cols, rows, 40, false));
 
-module.exports = { render, menuIn, menuShown, widthOf };
+module.exports = { render, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf };

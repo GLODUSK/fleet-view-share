@@ -201,8 +201,11 @@ export function lastAction(s) {
   // the newest call carries the file the last action touched, when it was one
   const c = (s.calls || [])[0];
   const file = c && c.file && c.verb === a.verb && c.what === a.what ? c.file : null;
+  // a tool of the main loop still running (the fleet-view-feed mod says so): how long it has been at it
+  const run = (s.running || []).find((r) => !r.agent);
   return `<span class="act-ic">${verbIcon(a.verb, 14)}</span>${a.who && a.who !== 'main' ? `<span class="who">${esc(a.who)}</span>` : ''}`
-    + `<span class="verb">${esc(a.verb)}</span>${revealLink('file', file, `<span class="what">${esc(a.what)}</span>`)}`;
+    + `<span class="verb">${esc(a.verb)}</span>${revealLink('file', file, `<span class="what">${esc(a.what)}</span>`)}`
+    + (run ? `<span class="dim" title="${esc(run.tool)} running since ${new Date(run.at).toLocaleTimeString()}"> · ${ago(Date.now() - run.at)}</span>` : '');
 }
 
 // "working 14m" while a turn runs, "waiting 3m" while it waits on you

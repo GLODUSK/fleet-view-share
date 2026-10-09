@@ -16,8 +16,9 @@
 // Rewind with the new text (the event's `edit`): that is sent as soon as the restore puts the old one back.
 //
 // It never starts a headless claude. Text goes into the same interactive pty the Session tab shows
-// (window.fleetDesktop.term, see term.js), exactly the way api.js sends a message: a bracketed paste
-// (ESC[200~ text ESC[201~, new lines as \r so they stay in the prompt), 300 ms, then Enter on its own. A
+// (window.fleetDesktop.term, see term.js), exactly the way api.js sends a message: bracketed pastes of one line
+// at most 400 characters each, Alt+Enter between lines (term.js typeInto: a long or multi-line paste reaches
+// the model as <pasted_content>, not the user's words), 300 ms, then Enter on its own. A
 // conversation that isn't running here is started first (term.js ensureLive: like the Session tab's explicit
 // open, then wait until Claude is idle). Images go to the server first (POST /chat/image saves them under
 // %LOCALAPPDATA%\fleet-view\chat-images and answers the path); the message then carries their paths after the
@@ -54,7 +55,7 @@
 import { esc } from './cards.js';
 import { voiceSupported, startVoice, stopVoice, onVoice } from './voice.js';
 import { icon } from './icons.js';
-import { termApi, hosts, closePanel as closeHostPanel, ensureLive, isStarting, screenText, screenMarked, screenReady, keepSession, openElsewhere, quoteSelection, onRekey } from './term.js';
+import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, keepSession, openElsewhere, quoteSelection, onRekey } from './term.js';
 import { takeHandoff } from './handto.js';
 
 const POLL_MS = 400;
@@ -855,7 +856,7 @@ export function mountCompose(slot, s) {
   // the screen's rows as drawn, colour marks dropped (rules and the rows by them fill the width, which screenText joins)
   const screenRows = (id, n) => (hosts.get(id)?.alive ? screenMarked(id, n).map((l) => l.replace(/[\x01\x02]/g, '')) : []);
   const boxNow = (id) => parsePromptBox(screenRows(id, 60));
-  const pasteKeys = (id, text) => writeKey(`\x1b[200~${cleanText(text).replace(/\n/g, '\r')}\x1b[201~`);
+  const pasteKeys = (id, text) => typeInto(writeKey, cleanText(text));
   // Ctrl+U until the prompt is empty -> true when it is
   async function clearBox(id) {
     for (let i = 0; i < 40; i++) {
@@ -894,7 +895,7 @@ export function mountCompose(slot, s) {
       if (!(await clearBox(id))) { err('Couldn\'t clear the prompt: the queued messages are in it (Session tab)'); return false; }
       for (const m of rest) {
         if (!m) continue;
-        pasteKeys(id, m);
+        await pasteKeys(id, m);
         await sleep(ENTER_DELAY_MS);
         writeKey('\r');
         await sleep(250);
@@ -914,7 +915,7 @@ export function mountCompose(slot, s) {
       if (screenReady(id) && !(await closePanel(id))) { err('A panel is open in the session: close it (Esc) first'); return; }
       const b = boxNow(id);
       if (!b || b.text) { err('Something is typed in the session\'s prompt: clear it first'); return; }
-      pasteKeys(id, '/rewind');
+      await pasteKeys(id, '/rewind');
       await sleep(ENTER_DELAY_MS);
       writeKey('\r');
       let r = null;
@@ -1050,7 +1051,7 @@ export function mountCompose(slot, s) {
         t.write(id, '!');
         await sleep(BANG_MS);
       }
-      t.write(id, `\x1b[200~${msg.replace(/\r?\n/g, '\r')}\x1b[201~`);
+      await typeInto((w) => t.write(id, w), msg.replace(/\r\n?/g, '\n'));
       await sleep(ENTER_DELAY_MS);
       if (blocked()) { err('A question came up before Enter: the text is in Claude\'s prompt, not sent'); return; }
       t.write(id, '\r');

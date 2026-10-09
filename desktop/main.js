@@ -633,6 +633,13 @@ if (!app.requestSingleInstanceLock()) {
   }
   ipcMain.on('fv:toggle-mini', (e) => { if (senderOk(e)) toggleMini(); });
   ipcMain.on('fv:hide-mini', (e) => { if (senderOk(e)) hideMini(); });
+  // an update changed desktop/ (updater.js): start the window again the way the Start menu does, after this one
+  // quits (the server goes with it and comes back with the new one; the sessions live in the host and stay)
+  ipcMain.on('fv:relaunch', (e) => {
+    if (!senderOk(e)) return;
+    app.relaunch({ execPath: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe'), args: ['//nologo', FV_VBS] });
+    app.quit();
+  });
   ipcMain.on('fv:show-main', (e, id) => { if (senderOk(e)) showMain(typeof id === 'string' ? id : null); });
   ipcMain.on('fv:fit-mini', (e, h) => { if (senderOk(e, true)) fitMini(Number(h)); });
   // the chat box's mic is on: the page keeps full speed while the window is behind another one or minimized

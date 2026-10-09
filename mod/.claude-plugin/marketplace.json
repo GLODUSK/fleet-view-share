@@ -1,0 +1,5 @@
+{
+  "name": "fleet-view",
+  "owner": { "name": "GLODUSK" },
+  "plugins": [{ "name": "fleet-view-feed", "source": "./fleet-view-feed" }]
+}

@@ -657,9 +657,38 @@ export async function closePanel(id) {
   return `The ${cmd} panel is still open: close it in the Session tab first`;
 }
 
-// Type a message into a hosted session and send it, the way the compose box and api.js do: a bracketed paste
-// (ESC[200~ text ESC[201~, new lines as \r so they stay in the prompt), 300 ms, then Enter on its own. Control
-// characters other than new lines and tabs are dropped first, so nothing can end the paste early or press a key.
+// The writes that type text into Claude Code's prompt as the user's own words: each line as bracketed pastes
+// (ESC[200~ text ESC[201~) of at most PASTE_MAX characters (never splitting a surrogate pair), Alt+Enter (a new
+// line in the prompt) between lines. Claude Code wraps a paste of several lines, or a long one, in
+// <pasted_content> tags, which tell the model the text is not the user's own request; pieces this small stay
+// plain. Kept in step with api.js pasteWrites.
+const PASTE_MAX = 400, PASTE_GAP_MS = 40;
+export function pasteWrites(text) {
+  const out = [];
+  String(text).split('\n').forEach((line, x) => {
+    if (x) out.push('\x1b\r');
+    for (let i = 0; i < line.length;) {
+      let j = Math.min(line.length, i + PASTE_MAX);
+      if (j < line.length && /[\ud800-\udbff]/.test(line[j - 1])) j--;
+      out.push(`\x1b[200~${line.slice(i, j)}\x1b[201~`);
+      i = j;
+    }
+  });
+  return out;
+}
+// Write pasteWrites(text) with write(data) (false: it could not), PASTE_GAP_MS apart: an Alt+Enter Claude Code
+// reads in one chunk with the pastes around it is lost. -> true when every write went
+export async function typeInto(write, text) {
+  for (const [x, w] of pasteWrites(text).entries()) {
+    if (x) await sleep(PASTE_GAP_MS);
+    if (write(w) === false) return false;
+  }
+  return true;
+}
+
+// Type a message into a hosted session and send it, the way the compose box and api.js do: typeInto, 300 ms,
+// then Enter on its own. Control characters other than new lines and tabs are dropped first, so nothing can end
+// a paste early or press a key.
 // The session must already run here (ensureLive first). Typing makes a preview session the user's.
 // Resolves { ok, message?, menu? }. Used by orders.js (orders, team messages, notes to a conversation).
 // o.beforeEnter: a check just before the Enter (async is fine); when it answers true the Enter is not sent and
@@ -674,7 +703,7 @@ export async function sendText(id, text, o = {}) {
   try {
     const panel = await closePanel(id);
     if (panel) return { ok: false, message: panel };
-    t.write(id, `\x1b[200~${msg.replace(/\n/g, '\r')}\x1b[201~`);
+    await typeInto((w) => t.write(id, w), msg);
     await sleep(SEND_ENTER_MS);
     if (!hosts.get(id)?.alive) return { ok: false, message: 'the session ended before Enter' };
     if (o.beforeEnter && await o.beforeEnter()) {
@@ -967,6 +996,7 @@ export function installFakeTerm() {
         else if (data === '\x1b') { p.panel = null; emit(id, `\r\n${E}2m${'─'.repeat(50)}${E}0m\r\n${E}1m>${E}0m `); }
         return;
       }
+      if (data === '\x1b\r') { p.line += '\n'; emit(id, '\r\n'); return; } // Alt+Enter: a new line in the prompt
       if (data === '\x1b') { p.status = 'idle'; emit(id, `\r\n${E}2m(Esc reached the session)${E}0m\r\n${E}1m>${E}0m ${p.line}`); return; }
       // Shift+Tab: the next permission mode, shown as Claude Code's footer line (the Chat tab's mode picker reads it)
       if (data === '\x1b[Z') {

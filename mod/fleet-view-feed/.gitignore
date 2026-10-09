@@ -1,0 +1,3 @@
+# laid by Claude Code each time it loads the mod from this folder (types for the editor)
+.claude-plugin/types/
+tsconfig.json

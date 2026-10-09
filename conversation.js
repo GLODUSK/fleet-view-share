@@ -454,6 +454,49 @@ async function conversation(req, res, ctx) {
   ctx.sendJson(res, 200, { id, total, from, items, bg: live ? bgList(L) : [], queue: live ? L.queue.slice(0, 50) : [], cut: L.cut });
 }
 
+// ---------- the automation API's transcript (api.js GET /api/sessions/:id/transcript) ----------
+// The same items, compact, for a script or another Claude to read: { total, from, items: [{ i, type, t, text?,
+// tool? }] }, type 'user' | 'assistant' | 'tool' | 'note' | 'thinking'. Text is cut to 4000 characters; a tool
+// gives its name, its input as one line (300) and its result (2000, null while it runs). Default the last 50
+// items; since=n gives the items from n on; limit at most 500.
+const T_TEXT = 4000, T_INPUT = 300, T_RESULT = 2000, T_DEFAULT = 50, T_MAX = 500;
+const cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+// a tool's input as one line: the field that says what it does (a command, a file, a pattern...), else its JSON
+const INPUT_KEYS = ['command', 'pattern', 'file_path', 'path', 'url', 'query', 'description', 'prompt', 'skill', 'notebook_path', 'task_id'];
+function inputLine(input) {
+  const i = input && typeof input === 'object' ? input : {};
+  const parts = [];
+  for (const k of INPUT_KEYS) if (typeof i[k] === 'string' && i[k].trim() && parts.push(oneLine(i[k])) >= 2) break;
+  let s = parts.join(' · ');
+  if (!s) { try { s = oneLine(JSON.stringify(i)); } catch { s = ''; } }
+  return cut(s, T_INPUT);
+}
+async function transcriptOf(file, o = {}) {
+  const L = await load(file);
+  const total = L.items.length;
+  const limit = intArg(o.limit, 1, T_MAX, T_DEFAULT);
+  const from = o.since != null && o.since !== '' ? intArg(o.since, 0, total, total) : Math.max(0, total - limit);
+  const to = Math.min(total, from + limit);
+  const rd = lineReader(L.file);
+  const items = [];
+  try {
+    for (let i = from; i < to; i++) {
+      const b = build(L.items[i], rd, '');
+      const it = { i, type: b.kind, t: b.t || null };
+      if (b.kind === 'tool') {
+        it.tool = { name: b.name, input: inputLine(b.input), result: b.result ? cut(b.result.text, T_RESULT) : null, isError: !!(b.result && b.result.isError) };
+      } else {
+        let text = b.text || '';
+        if (b.images && b.images.length) text = `${text}${text ? ' ' : ''}[${b.images.length} image${b.images.length > 1 ? 's' : ''}]`;
+        it.text = cut(text, T_TEXT);
+      }
+      items.push(it);
+    }
+  } finally { rd.close(); }
+  return { total, from, items };
+}
+
 // ---------- GET /conversation/image?id=<id>&key=<item key>&n=<i> ----------
 // one image of a prompt, as bytes (its link in the user item above)
 async function conversationImage(req, res, ctx) {
@@ -535,4 +578,4 @@ function saveImage(req, res, ctx) {
   });
 }
 
-module.exports = { conversation, conversationImage, saveImage, _test: { load, build, lineReader, logs, bgList } };
+module.exports = { conversation, conversationImage, saveImage, transcriptOf, _test: { load, build, lineReader, logs, bgList } };
