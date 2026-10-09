@@ -433,9 +433,29 @@ function addScratchRepo() {
   for (let n = 1; n <= 999; n++) {
     const dir = path.join(SCRATCH_DIR, n === 1 ? `scratch-${day}` : `scratch-${day}-${n}`);
     try { fs.mkdirSync(dir); } catch (e) { if (e.code === 'EEXIST') continue; return [500, { ok: false, message: `could not make ${dir}: ${e.code || e.message}` }]; }
+    trustFolder(dir);
     return addRepo(dir);
   }
   return [500, { ok: false, message: `${SCRATCH_DIR} already has 999 scratchpads for today` }];
+}
+// Marks a folder Fleet View just made as trusted in each account's Claude Code config (~/.claude.json, and
+// ~/.claude-a/.claude.json for account A), as answering "Do you trust the files in this folder?" with Yes does.
+// Without it a new scratchpad opens on that question (unless a parent folder, like the home folder, is trusted),
+// and the panel's prompt can't reach Claude. A config that is missing or unreadable is left alone.
+function trustFolder(dir) {
+  const key = path.resolve(dir).replace(/\\/g, '/');
+  for (const f of [path.join(os.homedir(), '.claude.json'), path.join(os.homedir(), '.claude-a', '.claude.json')]) {
+    try {
+      const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (!j || typeof j !== 'object') continue;
+      const projects = j.projects && typeof j.projects === 'object' ? j.projects : (j.projects = {});
+      if (projects[key]?.hasTrustDialogAccepted === true) continue;
+      projects[key] = { ...(projects[key] || {}), hasTrustDialogAccepted: true };
+      const tmp = `${f}.fv-${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(j, null, 2));
+      try { fs.renameSync(tmp, f); } catch { fs.writeFileSync(f, JSON.stringify(j, null, 2)); try { fs.unlinkSync(tmp); } catch {} }
+    } catch (e) { if (e.code !== 'ENOENT') logOnce('trust:' + f, `could not mark ${dir} trusted in ${f}: ${e.code || e.message}`); }
+  }
 }
 function removeAddedRepo(root) {
   if (typeof root !== 'string' || !root) return [400, { ok: false, message: 'no folder given' }];
@@ -804,10 +824,27 @@ function sideOf(s, root) {
   return out;
 }
 
-// the repo a session works in: the one its recent tool calls point at most, else its folder
+// Claude Code's folder name under projects\ for a launch folder (Z:\Github\fleet-view -> z--github-fleet-view)
+const projDirKey = (dir) => String(dir).replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+// the workspace a conversation was started in: the repo of its launch folder (its log's projects\ folder names it),
+// or that folder when it is a workspace added by hand (a scratchpad). null when started outside any (the home folder)
+function homeRootOf(s) {
+  if (!s.homeCwd) return null;
+  const g = gitInfo(path.join(s.homeCwd, '_'));
+  if (g) return g.root;
+  const k = rootKey(s.homeCwd);
+  const a = addedRepos.find((r) => rootKey(r.root) === k);
+  return a ? a.root : null;
+}
+
+// the repo a session works in: the one it was moved to, else the one it was started in, else the one its recent
+// tool calls point at most, else its folder. Reading or editing another repo (a teammate's, after "Work together")
+// does not move it: only "Move to workspace" does
 function repoOf(s, now) {
   const mv = movedRootOf(s);
   if (mv) return mv;
+  const home = homeRootOf(s);
+  if (home) return home;
   const count = new Map();
   // a finished conversation counts the hour before its turn ended, so it keeps its repo while the
   // "recently finished" strip shows it (3 hours), instead of falling back to its folder after an hour
@@ -1063,7 +1100,7 @@ function ingestMain(s, recs) {
     if (d.isSidechain || (d.type !== 'assistant' && d.type !== 'user')) continue;
     const t = Date.parse(d.timestamp) || Date.now();
     if (t > (s.actT || 0)) s.actT = t; // the last prompt, tool result or reply: real activity, unlike cost records
-    if (d.cwd) s.cwd = d.cwd;
+    if (d.cwd) { s.cwd = d.cwd; if (!s.homeCwd && s.dir && projDirKey(d.cwd) === path.basename(path.dirname(s.dir)).toLowerCase()) s.homeCwd = d.cwd; }
     if (d.gitBranch) s.gitBranch = d.gitBranch === 'HEAD' ? null : d.gitBranch; // the branch of its folder, when no tool call names a checkout
     const content = d.message?.content;
     const blocks = Array.isArray(content) ? content : [];

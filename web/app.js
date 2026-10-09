@@ -95,7 +95,7 @@
 // - Orders (orders.js, through the live sessions of term.js, never a headless claude): a repo's right-click menu
 //   (map hub, repo chips, the repo menu's rows) has "Give orders ▸" (Prompt, Model, Effort, Fast mode): one text to every unfinished
 //   conversation in it, made one team (POST /teams) when there are 2+, so each gets its teammates' ids and the
-//   fleet-msg.js command. A multi-selection's menu has "Work together" (a team), "Send to each", "Interrupt all",
+//   fleet-msg.js command. A multi-selection's menu has "Give orders ▸" (Work together: a team, Send to each, Model, Effort, Fast mode), "Interrupt all",
 //   "Open all here", "Clear selection" and "Remove N conversations"; a team's has "Message the team", "Add <picked>", "Pick <member>" and
 //   "Disband team"; a conflict's or clash's has "Send a note to all"
 //   (prefilled by kind), "Open the file in VS Code", "Pick" and "Interrupt" per conversation; one
@@ -1638,7 +1638,7 @@ function moveMenuItem(s) {
   const repos = (state?.repos || []).filter((r) => r.root && normRoot(r.root) !== cur && !repoIsHidden(r.root))
     .sort((a, b) => isHomeRoot(a.root) - isHomeRoot(b.root) || repoName(a.root).localeCompare(repoName(b.root)));
   const children = repos.map((r) => ({ label: r.name || repoName(r.root), icon: 'folder', run: () => moveConversation(s, r.root) }));
-  if (s.moved) children.unshift({ label: 'Back to the workspace it works in', icon: 'reply', run: () => moveConversation(s, null) }, ...(children.length ? [{ sep: true }] : []));
+  if (s.moved) children.unshift({ label: 'Back to the workspace it started in', icon: 'reply', run: () => moveConversation(s, null) }, ...(children.length ? [{ sep: true }] : []));
   if (!children.length) return { label: 'Move to workspace', icon: 'folder', disabled: true, note: 'no other workspace listed' };
   return { label: 'Move to workspace', icon: 'folder', children };
 }
@@ -1649,7 +1649,7 @@ function moveConversation(s, root) {
     if (FIXTURE) return false;
     if (!r || !r.ok) { toast(r?.message || 'could not move it', C.red); return false; }
     const undo = () => post('/sessions/move', { id: s.id, root: before }).then(() => poll());
-    toast(root ? `Moved ${s.name} to ${r.name}` : `${s.name} is back in the workspace it works in`, C.mint, { label: 'Undo', run: undo });
+    toast(root ? `Moved ${s.name} to ${r.name}` : `${s.name} is back in the workspace it started in`, C.mint, { label: 'Undo', run: undo });
     poll();
     return true;
   });
@@ -1931,15 +1931,21 @@ async function runSet(list, cmd) {
   toast(`${cmd} · ${orderSummary(res)}`, res.ok ? C.mint : C.red, null, res.results.some((x) => !x.ok) ? 9000 : 0);
   render();
 }
-// the "N conversations" menu (a multi-selection)
+// the "N conversations" menu (a multi-selection). "Give orders ▸" as on a workspace: Work together (one team),
+// Send to each, then Model ▸, Effort ▸ and Fast mode ▸ for all of them
 function sessionsMenu(list, x, y) {
   const desk = !!termApi();
   const live = list.filter((s) => isHosted(s.id));
+  const set = setItems(list);
+  const orders = desk
+    ? { label: 'Give orders', icon: 'send', note: `${list.length} conversations`, children: [
+      orderItem('Work together', list, { team: true, icon: 'merge', subnote: 'as one team: they get each other\'s ids and can talk', placeholder: 'The order for all of them. They become a team and can message each other.' }),
+      orderItem('Send to each', list, { team: false, icon: 'reply', placeholder: 'The same message to each of them' }),
+      ...(set.length ? [{ sep: true }, ...set] : []),
+    ] }
+    : { label: 'Give orders', icon: 'send', disabled: true, note: 'desktop window only' };
   openCtxMenu({ x, y, title: `${list.length} conversations`, dot: C.cyan, sub: list.map((s) => s.name).join(' · '), items: [
-    orderItem('Work together', list, { team: true, placeholder: 'The order for all of them. They become a team and can message each other.' }),
-    orderItem('Send to each', list, { team: false, placeholder: 'The same message to each of them' }),
-    { sep: true },
-    ...setItems(list), { sep: true },
+    orders, { sep: true },
     live.length ? { label: 'Interrupt all', icon: 'stop', note: `${live.length} running here`, run: () => interruptAll(live) } : { label: 'Interrupt all', icon: 'stop', disabled: true, note: 'none of them runs here' },
     desk ? { label: 'Open all here', icon: 'shell', run: () => openAllHere(list) } : { label: 'Open all here', icon: 'shell', disabled: true, note: 'desktop window only' },
     { sep: true },
