@@ -1187,6 +1187,38 @@ function rearrange(unpin) {
   saveSpotsSoon(300, true);
 }
 
+// A dragged repo's members (conversations, PRs, files) ease toward their place around the hub each frame instead
+// of moving with it as one rigid block: conversations keep up closely, the dots around them lag a little more,
+// the far ones a little more again. No overshoot, and it ends on the shape the group had when the drag began.
+function startTrail(hub) {
+  if (I.trail && I.trail.hub === hub) return;
+  const offs = new Map();
+  for (const m of I.sim) if (m.p && m !== hub && m.cl === hub.id) offs.set(m, { x: m.p.x - hub.p.x, y: m.p.y - hub.p.y });
+  I.trail = { hub, offs, t: performance.now() };
+}
+function trailStep(now) {
+  const tr = I.trail;
+  if (!tr) return false;
+  if (!tr.hub.p || I.byId.get(tr.hub.id) !== tr.hub) { I.trail = null; return false; }
+  const dt = Math.min(64, Math.max(1, now - tr.t)) / 16.7;
+  tr.t = now;
+  let most = 0;
+  for (const [m, o] of tr.offs) {
+    if (!m.p || m.cl !== tr.hub.id) { tr.offs.delete(m); continue; }
+    const tx = tr.hub.p.x + o.x, ty = tr.hub.p.y + o.y, ex = tx - m.p.x, ey = ty - m.p.y;
+    const far = Math.min(1, Math.hypot(o.x, o.y) / 500);
+    const k = (m.kind === 'session' ? 0.3 : 0.2) * (1 - 0.35 * far);
+    const f = 1 - Math.pow(1 - k, dt);
+    m.p.x += ex * f; m.p.y += ey * f; m.p.vx = m.p.vy = 0;
+    most = Math.max(most, Math.abs(ex), Math.abs(ey));
+  }
+  if (most < 0.3 && !(I.drag && I.drag.node === tr.hub.id)) {
+    for (const [m, o] of tr.offs) if (m.p) { m.p.x = tr.hub.p.x + o.x; m.p.y = tr.hub.p.y + o.y; }
+    I.trail = null;
+  }
+  return true;
+}
+
 function simStep() {
   const ns = I.sim, n = ns.length, al = I.alpha;
   if (!n) return;
@@ -1215,6 +1247,7 @@ function simStep() {
     b.p.vx -= fx / MASS[b.kind]; b.p.vy -= fy / MASS[b.kind];
   }
   for (const nd of ns) {
+    if (I.trail && I.trail.offs.has(nd)) continue; // trailing a dragged repo: trailStep moves it
     const h = I.homeXY.get(nd.kind === 'repo' ? nd.id : nd.cl) || { x: 0, y: 0 };
     if (nd.kind === 'repo' && h.pin) { nd.p.x = h.x; nd.p.y = h.y; nd.p.vx = nd.p.vy = 0; continue; }
     const cp = nd.kind === 'session' && convPin(nd);
@@ -1386,6 +1419,7 @@ function frame() {
   if (I.alpha > 0.01) { simStep(); simStep(); I.dirty = true; }
   else if (separate(0.15) > 0.05) I.dirty = true; // settled: still never let anything sit too close
   if (gather() > 0.05) I.dirty = true;
+  if (trailStep(t0)) I.dirty = true;
   if (I.spotsMoved) { I.spotsMoved = false; saveSpotsSoon(3000); }
   // the camera fits the map when it first shows (and on 0 or a re-arrange), then holds still: changes never pan
   // or zoom the view by themselves
@@ -2911,9 +2945,11 @@ function wireMouse(cv) {
           const to = dropRepo(hub);
           I.drag.drop = to ? to.id : null;
         } else if (hub && hub.kind === 'repo' && hub.p) {
-          // the hub and everything on it, together; its spot follows and is pinned
+          // the hub follows the mouse and everything on it trails behind, easing back into the same shape
+          // (trailStep); its spot follows and is pinned
           const wx = dx / K(), wy = dy / K();
-          for (const m of I.sim) if (m.p && (m === hub || m.cl === hub.id)) { m.p.x += wx; m.p.y += wy; }
+          hub.p.x += wx; hub.p.y += wy; hub.p.vx = hub.p.vy = 0;
+          startTrail(hub);
           // its territory glow moves with it (its easing is for changes of shape, not for the drag)
           const t = I.terr && I.terr.get(hub.id);
           if (t) { t.x += wx; t.y += wy; }
