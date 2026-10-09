@@ -1,0 +1,18 @@
+{
+  "name": "fleet-view-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fleet View's desktop window: an Electron shell with Windows 11 acrylic behind the page",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --url=http://127.0.0.1:4777/?glass=1"
+  },
+  "dependencies": {
+    "electron": "^44.5.1",
+    "node-pty": "^1.1.0"
+  },
+  "fleetView": {
+    "ptyModule": "node-pty",
+    "ptyNote": "node-pty 1.1.0 ships N-API prebuilds (prebuilds/win32-x64) that load in Electron 44 as they are, no rebuild; terms.js falls back to @lydell/node-pty if it ever fails to load"
+  }
+}

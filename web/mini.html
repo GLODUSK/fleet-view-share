@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet View mini</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1l7 7-7 7-7-7z' fill='%23ff6a2b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="mini.css">
+<script>
+  // glass: the desktop mini window (Electron, ?glass=1) has acrylic behind the page, so the page goes see-through
+  (function () {
+    var h = document.documentElement;
+    if (/[?&]glass=1(&|$)/.test(location.search) || navigator.userAgent.indexOf('Electron') >= 0) h.classList.add('glass');
+    if (window.fleetDesktop && window.fleetDesktop.isDesktop) h.classList.add('desktop');
+  })();
+</script>
+</head>
+<body>
+<header id="bar" class="bar">
+  <svg class="mark" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><defs><linearGradient id="mk" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6a2b"/><stop offset=".55" stop-color="#ffc24a"/><stop offset="1" stop-color="#ff4d8d"/></linearGradient></defs><path d="M8 1.2l6.8 6.8L8 14.8 1.2 8z" fill="url(#mk)"/></svg>
+  <span id="counts" class="counts"></span>
+  <span class="grow"></span>
+  <span id="clock" class="clock"></span>
+  <span class="btns">
+    <button type="button" id="b-main" class="wbtn" title="back to the full view (Esc)" aria-label="back to the full view"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 3.5h6v6"/><path d="M20.5 3.5 13.5 10.5"/><path d="M9.5 20.5h-6v-6"/><path d="M3.5 20.5l7-7"/></svg></button>
+  </span>
+</header>
+<main id="list" class="list" aria-live="polite"></main>
+<script type="module" src="mini.js"></script>
+</body>
+</html>

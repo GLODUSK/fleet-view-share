@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet View</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1l7 7-7 7-7-7z' fill='%23ff6a2b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="views.css" onerror="this.remove()">
+<link rel="stylesheet" href="chat.css" onerror="this.remove()">
+<link rel="stylesheet" href="compose.css" onerror="this.remove()">
+<link rel="stylesheet" href="changes.css" onerror="this.remove()">
+<link rel="stylesheet" href="preview.css" onerror="this.remove()">
+<link rel="stylesheet" href="viewer.css" onerror="this.remove()">
+<script>
+  // glass: the desktop window (Electron, ?glass=1) has acrylic behind the page, so the page goes see-through.
+  // titlebar: that window has no title bar of its own (titlebar=overlay from desktop/main.js); the header is
+  // the drag region and leaves room on the right for the native min / max / close buttons.
+  (function () {
+    var q = location.search, h = document.documentElement, electron = navigator.userAgent.indexOf('Electron') >= 0;
+    if (/[?&]glass=1(&|$)/.test(q) || electron) h.classList.add('glass');
+    var wco = navigator.windowControlsOverlay;
+    if (electron && (/[?&]titlebar=overlay(&|$)/.test(q) || (wco && wco.visible))) h.classList.add('titlebar');
+  })();
+</script>
+</head>
+<body>
+<header class="top">
+  <div class="brand-wrap">
+    <button id="brand" class="brand" type="button" aria-haspopup="listbox" aria-expanded="false" title="pick a repo (r)">
+      <svg class="brand-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><defs><linearGradient id="bm" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6a2b"/><stop offset=".55" stop-color="#ffc24a"/><stop offset="1" stop-color="#ff4d8d"/></linearGradient></defs><path d="M8 1.2l6.8 6.8L8 14.8 1.2 8z" fill="url(#bm)"/></svg>
+      <span class="brand-text"><span id="brand-name">ALL REPOS</span></span>
+      <svg id="brand-caret" class="brand-caret" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <span class="brand-tail">Fleet View</span>
+    <div id="repo-menu" class="menu" role="listbox" hidden></div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <span class="tab-ind" aria-hidden="true"></span>
+    <button type="button" data-view="cards" role="tab">Cards</button>
+    <button type="button" data-view="map" role="tab">Map</button>
+    <button type="button" data-view="wall" role="tab">Wall</button>
+    <button type="button" data-view="projects" role="tab">Projects</button>
+  </nav>
+  <div id="filter-box" class="filter" hidden>
+    <span class="filter-k">/</span><input id="filter-input" type="text" spellcheck="false" autocomplete="off" placeholder="filter by name, goal or repo">
+  </div>
+  <div class="grow"></div>
+  <button type="button" id="replay-pill" class="count replay-pill" title="the map shows a replay: click to go back to live" hidden></button>
+  <button type="button" id="since-btn" class="since-btn" title="Since you looked (w)" aria-label="Since you looked"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></button>
+  <div id="counts" class="counts"></div>
+  <div id="clock" class="clock"></div>
+</header>
+<div class="rule"></div>
+<div id="alert" class="alert"></div>
+<section id="finished" class="finished" hidden aria-label="recently finished conversations">
+  <button type="button" id="finished-toggle" class="fin-head" aria-expanded="true" aria-controls="finished-list">
+    <svg id="finished-chev" class="fin-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg><span class="fin-title">Recently finished</span><span id="finished-count" class="fin-count"></span><span id="finished-peek" class="fin-peek"></span>
+  </button>
+  <div class="fin-body"><div class="fin-clip"><div id="finished-list" class="fin-list"></div></div></div>
+</section>
+<div id="work" class="work">
+  <main id="main">
+    <section id="view-cards" class="view" hidden></section>
+    <section id="view-map" class="view view-map" hidden></section>
+    <section id="view-wall" class="view" hidden></section>
+    <section id="view-projects" class="view view-projects" hidden></section>
+  </main>
+  <aside id="detail" class="detail" aria-label="conversation details" aria-hidden="true"></aside>
+</div>
+<footer class="foot">
+  <span id="keys" class="keys"></span>
+  <span class="grow"></span>
+  <span id="foot-info" class="foot-info"></span>
+</footer>
+<div id="reconnecting" class="reconnecting" hidden>reconnecting…</div>
+<div id="confirm" class="confirm" hidden role="dialog" aria-modal="false">
+  <div id="confirm-text" class="confirm-text"></div>
+  <div class="confirm-actions">
+    <button type="button" id="confirm-yes" class="btn primary">Open a second copy</button>
+    <button type="button" id="confirm-no" class="btn">Cancel</button>
+  </div>
+</div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<script type="module" src="app.js"></script>
+<script type="module" src="find.js"></script>
+</body>
+</html>
