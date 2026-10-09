@@ -622,6 +622,7 @@ export function mountCompose(slot, s) {
     errs: [], // [{ key, text }] until dismissed or the next send works
     elsewhereAt: 0, answeredSig: null, answeredAt: 0,
     dict: null, drain: null, // the mic: listening, and stopped but still writing out its last words: { token, ready, note, busy, live }
+    sendAfter: false, // Send was pressed while the mic still had words to write out: it sends once they are in
     // (live: { text, stretch }, the preview of what is being said, drawn after the text until its final comes)
     drawn: {}, timer: 0, saveTimer: 0, alive: true,
   };
@@ -811,7 +812,7 @@ export function mountCompose(slot, s) {
     }
     else if (!h && openElsewhere(st.s)) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>Open in another window: sending here starts a second copy</span></span>`);
     const v = st.dict || st.drain;
-    if (v && (v.note || v.busy)) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>${esc(v.note || 'Writing out what you said…')}</span></span>`);
+    if (v && (v.note || v.busy || st.sendAfter)) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>${esc(v.note || (st.sendAfter ? 'Sending as soon as what you said is written out…' : 'Writing out what you said…'))}</span></span>`);
     for (const e of st.errs) bits.push(`<span class="cmp-chip err">${icon('error', 13)}<span>${esc(e.text)}</span><button type="button" class="cmp-chip-x" data-e="${e.key}" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
     const html = bits.join('');
     if (st.drawn.notes !== html) { notes.innerHTML = html; st.drawn.notes = html; }
@@ -823,7 +824,7 @@ export function mountCompose(slot, s) {
   const hasDraft = () => !!(ta.value.trim() || (!st.d.shell && (st.d.atts.length || st.d.quote)));
   function drawSend() {
     const t = termApi();
-    const empty = !hasDraft();
+    const empty = !hasDraft() && !liveText(); // words still being written out count: Send waits for them
     // Claude is working and there's nothing to send: the button stops it instead
     const halt = empty && st.busy && !st.sending;
     const key = `${!!t}|${empty}|${st.sending}|${halt}`;
@@ -1015,6 +1016,11 @@ export function mountCompose(slot, s) {
     const t = termApi();
     if (!t || st.sending) return false;
     const fromBox = cmd == null;
+    // the mic is on or still writing out: stop listening, and send once every word said is in the box
+    if (fromBox && (st.dict || st.drain)) {
+      if (st.dict) stopDictation(true);
+      if (st.dict || st.drain) { st.sendAfter = true; drawNotes(); drawSend(); return false; }
+    }
     const shell = fromBox && !!st.d.shell;
     const raw = fromBox ? ta.value : cmd;
     const quote = fromBox && !shell ? st.d.quote : '';
@@ -1646,8 +1652,8 @@ export function mountCompose(slot, s) {
 
   // ----- the mic: voice.js records it and Whisper (on this PC) writes out each stretch of speech after its pause;
   // the words go in after what is in the box. It listens until the mic is clicked again (what was said up to then
-  // is still written out), and stops at once, dropping what was not written yet, when the message is sent or the
-  // box shows another conversation. -----
+  // is still written out) or the message is sent (it goes once the last words are in), and stops at once, dropping
+  // what was not written yet, when the box shows another conversation. -----
   const joinSpoken = (a, b) => (!b ? a : !a || /\s$/.test(a) ? a + b : `${a} ${b}`);
   function drawMic() {
     const mic = $('[data-c="mic"]'), d = st.dict, w = st.drain;
@@ -1659,15 +1665,17 @@ export function mountCompose(slot, s) {
       : w ? 'Writing out the last words…' : 'Talk instead of typing: it listens until you click again';
     drawNotes();
     if (!ghost.hidden && !liveText()) grow(); // the mic stopped (or was dropped): its preview goes too
+    drawSend();
   }
   // the preview moved: redrawn after the text, kept in view while the caret is at the end
   function drawLive() {
-    grow();
+    grow(); drawSend();
     if (liveText() && ta.selectionEnd === ta.value.length) { ta.scrollTop = ta.scrollHeight; ghost.scrollTop = ta.scrollTop; }
   }
   async function dictate() {
     if (ta.disabled || !voiceSupported()) return;
     if (st.dict) { stopDictation(true); return; }
+    if (st.sendAfter) { st.sendAfter = false; drawNotes(); drawSend(); } // talking again: the send waits for the next press
     const d = { token: null, ready: false, note: '', busy: 0, live: null };
     st.dict = d;
     drawMic();
@@ -1714,6 +1722,7 @@ export function mountCompose(slot, s) {
       if (st.drain === d) st.drain = null;
       drawMic();
       if (ev.t === 'error') err(`The mic stopped: ${text}`);
+      if (st.sendAfter && !st.dict && !st.drain) { st.sendAfter = false; drawNotes(); drawSend(); send(); }
     }
   });
 
@@ -1913,6 +1922,7 @@ export function mountCompose(slot, s) {
       if (next.id !== st.id) {
         // another conversation in the same box: keep this draft, show that one's
         stopDictation(false);
+        st.sendAfter = false;
         st.d.text = ta.value;
         storeText(st.id, ta.value);
         st.id = next.id;

@@ -87,9 +87,10 @@ self.onmessage = ({ data }) => {
     if (!interim || !waiting) {
       try {
         const asr = await load();
-        // a preview gets a cap on its words (about 8 tokens a second, far above how fast anyone talks), so Whisper
-        // repeating itself on a noisy stretch can't hold up the final behind it
-        const r = await asr(data.audio, interim ? { max_new_tokens: Math.min(224, Math.ceil((data.audio.length / 16000) * 8) + 8) } : undefined);
+        // a cap on its words (a preview about 8 tokens a second, a final 12: far above how fast anyone talks), so
+        // Whisper repeating itself on a noisy stretch can't run on to its 224-token limit and hold up the rest
+        const perSec = interim ? 8 : 12;
+        const r = await asr(data.audio, { max_new_tokens: Math.min(224, Math.ceil((data.audio.length / 16000) * perSec) + 8) });
         text = clean(r && r.text);
       } catch {}
     }

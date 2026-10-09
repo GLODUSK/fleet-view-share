@@ -19,7 +19,11 @@ const FRAME = 480; // 30 ms
 const PREROLL = 10; // frames kept from before speech starts (300 ms), so the first syllable is not cut
 const START = 3; // loud frames in a row that start a stretch
 const END_QUIET = 27; // quiet frames (~800 ms) that end one
-const MAX_FRAMES = Math.round((25 * SR) / FRAME); // a stretch never runs past 25 s (Whisper hears 30 s at a time)
+// a long stretch ends at a shorter pause (a breath between sentences): written out while the talking goes on, so
+// when it stops only the last few seconds are left to write out, not half a minute
+const LONG_QUIET = [[Math.round((6 * SR) / FRAME), 12], [Math.round((12 * SR) / FRAME), 7]]; // [past this long, quiet frames that end it] (~360 ms after 6 s, ~210 ms after 12 s)
+const quietToEnd = (len) => { let q = END_QUIET; for (const [at, n] of LONG_QUIET) if (len >= at) q = n; return q; };
+const MAX_FRAMES = Math.round((20 * SR) / FRAME); // a stretch never runs past 20 s (Whisper hears 30 s at a time)
 const MIN_VOICED = 8; // a stretch with less speech than this (~240 ms) is a cough or a click: dropped
 // the preview ("partial"): while a stretch goes on, what it holds so far is written out about every second, but
 // only when the worker has nothing else to do, so a preview never waits behind another run and a stretch's final
@@ -153,7 +157,7 @@ function segmenter(token) {
       }
       seg.push(f);
       if (loud) { voiced++; quietRun = 0; } else quietRun++;
-      if (quietRun >= END_QUIET || seg.length >= MAX_FRAMES) { close(); loudRun = 0; }
+      if (quietRun >= quietToEnd(seg.length) || seg.length >= MAX_FRAMES) { close(); loudRun = 0; }
       else preview();
     },
     flush: close,
