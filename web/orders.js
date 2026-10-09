@@ -53,7 +53,7 @@ export function firstWords(text, n = 5, max = 40) {
   return w.length > max ? `${w.slice(0, max - 1).trimEnd()}…` : w;
 }
 
-const repoOf = (s) => (s && s.repo ? s.repo.name || String(s.repo.root || '').split(/[\\/]/).filter(Boolean).pop() : null) || 'no repo';
+const repoOf = (s) => (s && s.repo ? s.repo.name || String(s.repo.root || '').split(/[\\/]/).filter(Boolean).pop() : null) || 'no workspace';
 const msgTool = (state) => (state && state.tools && typeof state.tools.msg === 'string' && state.tools.msg) || 'scripts/fleet-msg.js (in the Fleet View folder)';
 
 // The text a team member gets. me: that member; members: every member (me included)

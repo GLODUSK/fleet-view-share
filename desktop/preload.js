@@ -9,7 +9,7 @@
 //   fleetDesktop.fitMini(h)      mini view only: the height its content needs, in CSS pixels
 //   fleetDesktop.onMiniChange(cb)  cb(open) now and whenever the mini view opens or closes
 //   fleetDesktop.pickFolder() -> Promise<{ ok, path?, canceled? }>   main view only: the system folder picker
-//                                ("Add repo…"); the page then posts the path to the server (POST /repos/add)
+//                                ("Add workspace…"); the page then posts the path to the server (POST /repos/add)
 //   fleetDesktop.pathForFile(file) -> string   main view only: where a dropped, picked or pasted File is on disk
 //                                ('' when it has no file behind it, like a pasted screenshot); the chat box sends it
 //   fleetDesktop.capture({ x, y, width, height }) -> Promise<Uint8Array|null>   main view only: a PNG of that part

@@ -63,9 +63,9 @@
 //
 // Right-click (ctxmenu.js): a repo (map anchor, repo chip) offers New session · A / B (desktop window) and
 // Open folder; a conversation offers Open session, Open in terminal and Remove (ends it if hosted here and takes it off the map; was End session / Hide from map) (DONE and
-// QUESTION), Open in terminal, Rename (renameMenuItem) and Move to repo (moveMenuItem). A repo also offers "Removed conversations"
+// QUESTION), Open in terminal, Rename (renameMenuItem) and Move to workspace (moveMenuItem). A repo also offers "Removed conversations"
 // (a submenu of state.removed) to continue one (see continueConversation). A repo also offers "Remove repo", and
-// empty space "Add repo" and "Add recent repo ▸" (removed repos, to add one back). The browser's own menu
+// empty space "Add workspace" and "Add recent workspace ▸" (removed repos, to add one back). The browser's own menu
 // is kept only in text inputs and the live terminal (and in Edge outside those targets).
 //
 // New sessions (term.js createSession) are listed in state.pending (and state.allSessions) as stand-ins
@@ -80,8 +80,8 @@
 // repo" on a repo's right-click in any view; settings.hiddenRepos, [{ root, at }], POST /settings) takes it and its
 // conversations out of every view: the menu, its map anchor, territory and nodes, the cards, wall tiles and the
 // finished strip. "Undo" stays on a toast for 6 s. One comes back by itself when a conversation in it works after
-// `at` (the server drops it from the list; the page follows). Removing the picked repo switches to All repos.
-// Adding a repo ("Add repo" at the bottom of the repo menu, or on empty space's right-click) offers three
+// `at` (the server drops it from the list; the page follows). Removing the picked repo switches to All workspaces.
+// Adding a repo ("Add workspace" at the bottom of the repo menu, or on empty space's right-click) offers three
 // ways: "Paste path" (a path box; quotes around a pasted path are dropped, forward slashes are fine), "New
 // scratchpad" (POST /repos/scratch: the server makes an empty scratch-YYYY-MM-DD folder under ~/Scratchpads and
 // adds it) and "Browse" (the system folder picker, fleetDesktop.pickFolder; desktop window only). POST
@@ -209,7 +209,7 @@ const ui = {
     return w.tab;
   },
   contextMenu: (target, x, y) => openContextMenu(target, x, y),
-  // the map: a conversation dropped on another repo moves there (as the menu's "Move to repo")
+  // the map: a conversation dropped on another repo moves there (as the menu's "Move to workspace")
   moveSession: (id, root) => {
     const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === id);
     return s && root ? moveConversation(s, root) : false;
@@ -339,7 +339,7 @@ async function poll() {
 const normRoot = (p) => String(p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
 // the home folder (state.home) is "no repo": where conversations sit until they work in a repo; listed last
 const isHomeRoot = (root) => !!root && !!state?.home && normRoot(root) === normRoot(state.home);
-const repoName = (root) => (isHomeRoot(root) ? 'no repo' : String(root || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'no repo');
+const repoName = (root) => (isHomeRoot(root) ? 'no workspace' : String(root || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'no workspace');
 function inRepo(repo) {
   if (!local.repo) return true;
   if (!repo) return false;
@@ -463,7 +463,7 @@ function removeRepo(it) {
   if (!it || !it.root) return;
   const listed = (state?.repos || []).find((r) => normRoot(r.root) === normRoot(it.root));
   const root = listed ? listed.root : repoForFolder(state || {}, it.root).root || it.root;
-  const name = it.name && it.name !== 'All repos' ? it.name : repoName(root);
+  const name = it.name && it.name !== 'All workspaces' ? it.name : repoName(root);
   const k = normRoot(root), before = hiddenRepos.get(k);
   const wasPicked = isCurrent({ root, name }), prevRepo = local.repo;
   // an added repo leaves addedRepos for good (Undo adds it back)
@@ -489,7 +489,7 @@ function removeRepo(it) {
   lastRemoved = { undo, until: Date.now() + 6000 };
   if (menuOpen) drawMenu();
   render();
-  toast(`Removed ${name}${wasPicked ? ' · showing every repo' : ''}. It comes back if it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
+  toast(`Removed ${name}${wasPicked ? ' · showing every workspace' : ''}. It comes back if it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
 }
 
 // ---------- adding a repo ----------
@@ -535,11 +535,11 @@ async function pickAndAddRepo() {
   return true;
 }
 const canPickFolder = () => !!(window.fleetDesktop && typeof window.fleetDesktop.pickFolder === 'function');
-const ADD_HINT = 'Paste a folder path, e.g. Z:\\Github\\my-repo';
+const ADD_HINT = 'Paste a folder path, e.g. Z:\\Github\\my-project';
 // the right-click menu's item: a submenu of the three ways (Browse is a quiet line outside the desktop window)
 function addRepoMenuItem() {
   return {
-    label: 'Add repo', icon: 'plus',
+    label: 'Add workspace', icon: 'plus',
     children: [
       { label: 'Paste path', icon: 'plus', input: { placeholder: ADD_HINT, hint: 'Enter adds · Esc closes', submit: (text) => addRepoPath(text) } },
       { label: 'New scratchpad', icon: 'plus', note: 'an empty folder', run: () => addScratchRepo() },
@@ -563,15 +563,15 @@ function shortMenu(kids, timeOf) {
   return [...kids.slice(0, n), { label: `Show ${kids.length - n} more`, icon: 'chevron', more: kids.slice(n) }];
 }
 
-// "Add recent repo ▸" (empty space's right-click): the removed repos (hiddenRepos), newest first, up to 20; picking
-// one adds it back like "Add repo" (POST /repos/add takes it off the server's hidden list too)
+// "Add recent workspace ▸" (empty space's right-click): the removed repos (hiddenRepos), newest first, up to 20; picking
+// one adds it back like "Add workspace" (POST /repos/add takes it off the server's hidden list too)
 function recentRepoMenuItem() {
   const now = Date.now();
   const keys = hiddenRepoKeys();
   const list = [...hiddenRepos].filter(([k]) => keys.has(k)).map(([, h]) => h).sort((a, b) => b.at - a.at).slice(0, 20);
-  if (!list.length) return { label: 'Add recent repo', icon: 'folder', disabled: true, note: 'none removed' };
+  if (!list.length) return { label: 'Add recent workspace', icon: 'folder', disabled: true, note: 'none removed' };
   return {
-    label: 'Add recent repo', icon: 'folder',
+    label: 'Add recent workspace', icon: 'folder',
     children: shortMenu(list.map((h) => ({
       label: repoName(h.root), icon: 'folder', note: `removed ${removedAgo(now - h.at)}`, at: h.at,
       run: async () => { const err = await addRepoPath(h.root); if (err) toast(err, C.red); },
@@ -602,7 +602,7 @@ function removedMenuItem(list, withRepo) {
     label: 'Removed conversations', icon: 'hide',
     children: shortMenu(list.map((r) => ({
       label: r.name, tag: r.account === 'A' || r.account === 'B' ? r.account : null, icon: 'shell',
-      note: `${withRepo ? `${r.repo ? r.repo.name : 'no repo'} · ` : ''}removed ${removedAgo(now - (r.removedAt || now))}`, at: r.removedAt || now,
+      note: `${withRepo ? `${r.repo ? r.repo.name : 'no workspace'} · ` : ''}removed ${removedAgo(now - (r.removedAt || now))}`, at: r.removedAt || now,
       run: () => continueConversation(r),
     })), (k) => k.at),
   };
@@ -798,7 +798,7 @@ function drawClock() {
 function brandText() {
   const serverRepo = state.settings?.repo ?? null;
   if (state.title && serverRepo === (local.repo || null)) return state.title;
-  return (local.repo ? repoName(local.repo) : 'all repos').toUpperCase();
+  return (local.repo ? repoName(local.repo) : 'all workspaces').toUpperCase();
 }
 
 // what is left of each account's weekly Claude limit: "A 3%  B 98% week left"
@@ -1092,10 +1092,10 @@ for (const type of ['dblclick', 'auxclick']) {
 
 // footer keys: [keys (each drawn as a key cap; '/' between two of them reads "or"), what they do]
 const KEYS = {
-  cards: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['c', 'compact'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'repo'], ['w', 'since you looked'], ['esc', 'clear']],
-  map: [['v', 'view'], ['click', 'select'], ['ctrl+click', 'select more'], ['double-click', 'open'], ['right-click', 'menu'], ['wheel', 'zoom'], ['drag', 'pan'], ['0', 'recenter'], ['n/N', 'needs you'], ['k', 'lens'], ['t', 'replay'], ['l', 'legend'], ['/', 'filter'], ['r', 'repo']],
-  wall: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'repo'], ['w', 'since you looked'], ['esc', 'clear']],
-  projects: [['v', 'view'], ['↑↓', 'pick'], ['enter', 'type'], ['right-click', 'menu'], ['/', 'filter'], ['r', 'repo'], ['esc', 'clear']],
+  cards: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['c', 'compact'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
+  map: [['v', 'view'], ['click', 'select'], ['ctrl+click', 'select more'], ['double-click', 'open'], ['right-click', 'menu'], ['wheel', 'zoom'], ['drag', 'pan'], ['0', 'recenter'], ['n/N', 'needs you'], ['k', 'lens'], ['t', 'replay'], ['l', 'legend'], ['/', 'filter'], ['r', 'workspace']],
+  wall: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
+  projects: [['v', 'view'], ['↑↓', 'pick'], ['enter', 'type'], ['right-click', 'menu'], ['/', 'filter'], ['r', 'workspace'], ['esc', 'clear']],
 };
 const MOUSE = new Set(['click', 'double-click', 'right-click', 'wheel', 'drag', 'ctrl+click']);
 const keyHtml = ([keys, label]) => {
@@ -1195,7 +1195,7 @@ function buildMenuItems() {
   const repos = repoList(state).sort((a, b) => isHomeRoot(a.root) - isHomeRoot(b.root) || b.live - a.live || a.name.localeCompare(b.name));
   if (local.repo && !repoIsHidden(local.repo) && !repos.some((r) => inRepo({ root: r.root, name: r.name }))) repos.push({ root: local.repo, name: repoName(local.repo), live: 0 });
   const total = repos.reduce((n, r) => n + (r.live || 0), 0);
-  return [{ root: null, name: 'All repos', live: total }, ...repos];
+  return [{ root: null, name: 'All workspaces', live: total }, ...repos];
 }
 const isCurrent = (it) => (it.root ? !!local.repo && inRepo({ root: it.root, name: it.name }) : !local.repo);
 function openMenu() {
@@ -1215,7 +1215,7 @@ function closeMenu() {
   $('brand').setAttribute('aria-expanded', 'false');
   render();
 }
-// "Add repo" in the menu: picking it shows its three ways in its place (addChoose); "Paste path" then
+// "Add workspace" in the menu: picking it shows its three ways in its place (addChoose); "Paste path" then
 // becomes a path box ({ value, msg, err }), null while it is a row
 let addBox = null, addChoose = false;
 const ADD_WAYS = [
@@ -1235,7 +1235,7 @@ function drawMenu() {
     + (it.root ? `<button type="button" class="mi-x" data-rm="${i}" tabindex="-1" aria-label="Remove ${esc(it.name)} from the list" title="Remove from the list">×</button>` : '<span></span>')
     + '</div>').join('')
     + (addBox
-      ? `<div class="mi-add-box"><input class="mi-add-input path-input" type="text" spellcheck="false" autocomplete="off" placeholder="${esc(ADD_HINT)}" aria-label="Add repo: folder path">`
+      ? `<div class="mi-add-box"><input class="mi-add-input path-input" type="text" spellcheck="false" autocomplete="off" placeholder="${esc(ADD_HINT)}" aria-label="Add workspace: folder path">`
         + `<div class="mi-add-msg${addBox.err ? ' err' : ''}" aria-live="polite">${esc(addBox.msg || 'Enter adds · Esc goes back')}</div></div>`
       : addChoose
       ? '<div class="mi-ways">' + ADD_WAYS.map((w) => {
@@ -1244,8 +1244,8 @@ function drawMenu() {
           + `<span class="mi-add-ic" aria-hidden="true">${icon(w.icon, 14) || '+'}</span><span></span><span class="mi-name">${esc(w.label)}</span>`
           + `<span class="mi-key">${off ? 'desktop window only' : w.key}</span></div>`;
       }).join('') + '</div>'
-      : `<div class="menu-item mi-add" data-add="1" role="option" aria-selected="false" title="add a repo: paste a path, a new scratchpad or browse">`
-        + `<span class="mi-add-ic" aria-hidden="true">${icon('plus', 14) || '+'}</span><span></span><span class="mi-name">Add repo</span></div>`)
+      : `<div class="menu-item mi-add" data-add="1" role="option" aria-selected="false" title="add a workspace: paste a path, a new scratchpad or browse">`
+        + `<span class="mi-add-ic" aria-hidden="true">${icon('plus', 14) || '+'}</span><span></span><span class="mi-name">Add workspace</span></div>`)
     + `<div class="menu-hint">${addChoose ? 'p path · s scratchpad · b browse · esc back' : '↑↓ pick · enter show · 1-9 jump · del remove · a add · esc close'}</div>`;
   const menu = $('repo-menu');
   if (menu._html !== html) {
@@ -1256,7 +1256,7 @@ function drawMenu() {
     if (nb && addBox) { nb.value = addBox.value; if (had || addBox.focus) { addBox.focus = false; nb.focus({ preventScroll: true }); if (caret !== null) nb.setSelectionRange(caret, caret); } }
   }
 }
-// the menu's "Add repo": its three ways in its place
+// the menu's "Add workspace": its three ways in its place
 function chooseAddInMenu(on = true) {
   addChoose = on; addBox = null;
   drawMenu();
@@ -1287,7 +1287,7 @@ function pickRepo(it) {
   if (!it) return;
   ui.selectedId = null;
   saveSettings({ repo: it.root });
-  toast(`showing ${it.root ? repoName(it.root) : 'every repo'}`, C.mint);
+  toast(`showing ${it.root ? repoName(it.root) : 'every workspace'}`, C.mint);
   render();
 }
 $('brand').addEventListener('click', (e) => { e.stopPropagation(); menuOpen ? closeMenu() : openMenu(); });
@@ -1320,7 +1320,7 @@ $('repo-menu').addEventListener('contextmenu', (e) => {
   if (!it) return;
   const color = it.root ? state?.sessions?.find((s) => s.repo && normRoot(s.repo.root) === normRoot(it.root))?.repo.color || C.dim : C.text;
   closeMenu();
-  const items = [{ label: it.root ? `Show only ${it.name}` : 'Show every repo', icon: 'repo', run: () => pickRepo(it) }];
+  const items = [{ label: it.root ? `Show only ${it.name}` : 'Show every workspace', icon: 'repo', run: () => pickRepo(it) }];
   if (it.root) items.push(...repoOrderItems(it.root, it.name), { sep: true }, { label: 'Remove from list', icon: 'hide', run: () => removeRepo(it) });
   openCtxMenu({ x: e.clientX, y: e.clientY, title: it.name, dot: color, sub: it.root || `${it.live} live`, items });
 });
@@ -1559,7 +1559,7 @@ function openContextMenu(target, x, y) {
     const rm = removedMenuItem(removedFor(folder).slice(0, 15), false);
     if (rm) items.push({ sep: true }, rm);
     // the repo and its conversations leave every view (the repo menu too); Undo on the toast
-    items.push({ sep: true }, { label: 'Remove repo', icon: 'close', danger: true, run: () => removeRepo({ root: folder, name: target.name || repo.name }) });
+    items.push({ sep: true }, { label: 'Remove workspace', icon: 'close', danger: true, run: () => removeRepo({ root: folder, name: target.name || repo.name }) });
     openCtxMenu({ x, y, title: target.name || repo.name || repoName(folder), dot: color, sub: folder, items });
     return;
   }
@@ -1605,7 +1605,7 @@ const pushPick = (on, label, run) => ({ label, icon: on ? 'check' : null, run })
 function sessionPushItem(s) {
   const own = s.push?.own || null, repo = s.push?.repo || 'production';
   const children = [
-    pushPick(!own, `Repo default (${PUSH_NAME[repo]})`, () => setPushTarget({ id: s.id }, null, `${s.name} follows its repo again: ${PUSH_NAME[repo]}`)),
+    pushPick(!own, `Workspace default (${PUSH_NAME[repo]})`, () => setPushTarget({ id: s.id }, null, `${s.name} follows its workspace again: ${PUSH_NAME[repo]}`)),
     { sep: true },
     ...['production', 'preview'].map((t) => pushPick(own === t, PUSH_NAME[t], () => setPushTarget({ id: s.id }, t, `${s.name} pushes to ${PUSH_NAME[t]}`))),
   ];
@@ -1630,7 +1630,7 @@ function unpinItem(target) {
   if (local.view !== 'map' || !mapPins || !mapPins.pinned(target)) return null;
   return { label: 'Unpin from the map', icon: 'reply', run: () => mapPins.unpin(target) };
 }
-// "Move to repo": a submenu of the other listed repos; a moved one also offers going back to the repo its own
+// "Move to workspace": a submenu of the other listed repos; a moved one also offers going back to the repo its own
 // tool calls point at. The server keeps the move (POST /sessions/move), and a pickup of this conversation's
 // handoff stays in the repo it was moved to. Undo on the toast.
 function moveMenuItem(s) {
@@ -1638,9 +1638,9 @@ function moveMenuItem(s) {
   const repos = (state?.repos || []).filter((r) => r.root && normRoot(r.root) !== cur && !repoIsHidden(r.root))
     .sort((a, b) => isHomeRoot(a.root) - isHomeRoot(b.root) || repoName(a.root).localeCompare(repoName(b.root)));
   const children = repos.map((r) => ({ label: r.name || repoName(r.root), icon: 'folder', run: () => moveConversation(s, r.root) }));
-  if (s.moved) children.unshift({ label: 'Back to the repo it works in', icon: 'reply', run: () => moveConversation(s, null) }, ...(children.length ? [{ sep: true }] : []));
-  if (!children.length) return { label: 'Move to repo', icon: 'folder', disabled: true, note: 'no other repo listed' };
-  return { label: 'Move to repo', icon: 'folder', children };
+  if (s.moved) children.unshift({ label: 'Back to the workspace it works in', icon: 'reply', run: () => moveConversation(s, null) }, ...(children.length ? [{ sep: true }] : []));
+  if (!children.length) return { label: 'Move to workspace', icon: 'folder', disabled: true, note: 'no other workspace listed' };
+  return { label: 'Move to workspace', icon: 'folder', children };
 }
 function moveConversation(s, root) {
   const before = s.moved && s.repo ? s.repo.root : null;
@@ -1649,7 +1649,7 @@ function moveConversation(s, root) {
     if (FIXTURE) return false;
     if (!r || !r.ok) { toast(r?.message || 'could not move it', C.red); return false; }
     const undo = () => post('/sessions/move', { id: s.id, root: before }).then(() => poll());
-    toast(root ? `Moved ${s.name} to ${r.name}` : `${s.name} is back in the repo it works in`, C.mint, { label: 'Undo', run: undo });
+    toast(root ? `Moved ${s.name} to ${r.name}` : `${s.name} is back in the workspace it works in`, C.mint, { label: 'Undo', run: undo });
     poll();
     return true;
   });

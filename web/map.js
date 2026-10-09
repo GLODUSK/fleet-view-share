@@ -36,7 +36,7 @@
 // pins are saved (settings.mapSpots), so they survive reloads. A conversation can be dragged too: it stays
 // where it was dropped, as an offset from its repo's hub (saved under its node id, 's:<id>'), so it moves along
 // with its repo, and the others make way for it. Dropping a conversation on another repo's group (a dashed ring
-// marks it while dragging) moves it there (ui.moveSession, the same as the menu's "Move to repo"). A repo's or
+// marks it while dragging) moves it there (ui.moveSession, the same as the menu's "Move to workspace"). A repo's or
 // conversation's right-click menu offers "Unpin" (mapPinned / mapUnpin). `g` re-arranges the repos that aren't pinned, `G` unpins every
 // repo and conversation too. The camera fits the map when it first shows (and on `0` or `g`), then holds
 // still. A resize (the panel opening) keeps the view where it is, held by its top-left corner.

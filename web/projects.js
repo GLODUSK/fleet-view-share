@@ -56,7 +56,7 @@ function groups(state) {
   const put = (s, k) => {
     let g = byRoot.get(rootOf(s));
     if (!g) {
-      if (!other) other = { root: '', name: 'no repo', color: C.dim, live: [], done: [] };
+      if (!other) other = { root: '', name: 'no workspace', color: C.dim, live: [], done: [] };
       g = other;
     }
     g[k].push(s);
@@ -91,7 +91,7 @@ function sideHtml(gs, now, ui) {
     const shut = folded.has(g.root);
     const n = g.live.length;
     const head = `<div class="pj-repo${shut ? ' shut' : ''}" data-root="${esc(g.root)}">`
-      + `<button type="button" class="pj-repo-h" data-fold="${esc(g.root)}" aria-expanded="${!shut}" title="${esc(g.root || 'conversations outside any repo')}">`
+      + `<button type="button" class="pj-repo-h" data-fold="${esc(g.root)}" aria-expanded="${!shut}" title="${esc(g.root || 'conversations outside any workspace')}">`
       + `<span class="pj-chev">${icon('chevron', 12)}</span><span class="pj-dia" style="background:${esc(g.color || C.dim)}"></span>`
       + `<span class="pj-repo-n">${esc(g.name)}</span>${n ? `<span class="pj-count">${n}</span>` : ''}</button>`
       + (g.root ? `<button type="button" class="pj-new" data-new="${esc(g.root)}" title="New session in ${esc(g.name)}">${icon('plus', 13)}</button>` : '')

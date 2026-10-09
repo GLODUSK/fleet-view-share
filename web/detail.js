@@ -286,7 +286,7 @@ export function mdHtml(text) {
 function metaRows(s) {
   const rows = [];
   const row = (ic, k, v) => v && rows.push(`<span class="d-k">${icon(ic, 13)}<span>${k}</span></span><span class="d-v">${v}</span>`);
-  row('repo', 'repo', repoChip(s) || '<span class="dim">no repo</span>');
+  row('workspace', 'repo', repoChip(s) || '<span class="dim">no workspace</span>');
   const l = linksOf(s);
   if (s.branch) row('branch', 'branch', `<span class="mono">${urlLink(l.branch, esc(s.branch), `open branch ${s.branch} on GitHub`)}</span>`);
   if (s.worktree) row('worktree', 'worktree', `<span class="mono">${esc(s.worktree)}</span>`);

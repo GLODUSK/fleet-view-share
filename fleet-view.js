@@ -31,11 +31,11 @@ if (opt('help', false)) {
   --port <n>          web: port to serve on (default 4777)
   --no-open           web: serve without opening a window
   --window <min>      show sessions active in the last N minutes (default 45)
-  --scratch-dir <dir> where "Add repo… · New scratchpad" makes its folders (default ~/Scratchpads)
+  --scratch-dir <dir> where "Add workspace… · New scratchpad" makes its folders (default ~/Scratchpads)
   --filter <regex>    only sessions whose title, goal or folder matches
   --root <dir>        one projects folder (default: both ~/.claude/projects and ~/.claude-a/projects)
   --title <text>      fixed header text (default: the repo picked in the header menu)
-  --repo <name>       start on one repo (folder name or path); "all" shows every repo
+  --repo <name>       start on one workspace (folder name or path); "all" shows every workspace
   --solid             paint a solid background instead of letting the terminal blur show
   --no-github         skip PR, check and deploy lookups
   --install-profile   add the blurred "Fleet View" profile to Windows Terminal
@@ -166,7 +166,7 @@ function pruneHiddenRepos(list) {
   return true;
 }
 const repoHidden = (root) => !!root && hiddenRepos.some((h) => rootKey(h.root) === rootKey(root));
-// repos added by hand (the page's "Add repo…", POST /repos/add): [{ root, name, at }], at most 100. /state lists
+// repos added by hand (the page's "Add workspace…", POST /repos/add): [{ root, name, at }], at most 100. /state lists
 // them in repos[] even with no conversations, so the page draws them and a new session may start in them.
 // Removing one (POST /repos/remove) drops it for good; adding a hidden repo takes it off hiddenRepos.
 const ADDED_REPOS_MAX = 100;
@@ -259,7 +259,7 @@ function cleanTeams(list, now = Date.now()) {
 // (plain is defined with the web helpers further down; this one is for settings read before them)
 function plainText(s, n) { s = String(s || '').replace(/\s+/g, ' ').trim(); return n && s.length > n ? s.slice(0, n - 1) + '…' : s; }
 let teams = DEMO ? [] : cleanTeams(saved.teams) || [];
-// conversations moved to another repo by hand (a conversation's right-click, "Move to repo", POST /sessions/move):
+// conversations moved to another repo by hand (a conversation's right-click, "Move to workspace", POST /sessions/move):
 // [{ id, root, at }], at most 500; root null puts it back in the repo its tool calls point at. The move wins over
 // the tool calls, and a conversation picked up from a handoff takes its predecessor's move (movedRootOf).
 const MOVED_MAX = 500;
@@ -352,7 +352,7 @@ function setPushTarget(b) {
     while (pushTargets.sessions.size > MOVED_MAX) pushTargets.sessions.delete(pushTargets.sessions.keys().next().value);
   } else {
     const root = b.root;
-    if (typeof root !== 'string' || root.length > 1024 || UNSAFE_PATH.test(root) || !path.isAbsolute(root)) return [400, { ok: false, message: 'give the full path of the repo' }];
+    if (typeof root !== 'string' || root.length > 1024 || UNSAFE_PATH.test(root) || !path.isAbsolute(root)) return [400, { ok: false, message: 'give the full path of the workspace' }];
     const g = gitInfo(path.join(root, '_'));
     let r = g ? g.root : path.resolve(root);
     if (r.length > 3) r = r.replace(/[\/]+$/, '');
@@ -402,7 +402,7 @@ function addRepo(p) {
   // a pasted path may come quoted ("…" or '…', Explorer's "Copy as path") and with forward slashes
   p = p.trim().replace(/^(["'])(.*)\1$/, '$2').trim().replace(/\//g, path.sep);
   if (UNSAFE_PATH.test(p)) return [400, { ok: false, message: 'that path has characters Fleet View will not pass on' }];
-  if (!path.isAbsolute(p) || (process.platform === 'win32' && !/^([a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(p))) return [400, { ok: false, message: 'give the full path of the folder (like Z:\\Github\\my-repo)' }];
+  if (!path.isAbsolute(p) || (process.platform === 'win32' && !/^([a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(p))) return [400, { ok: false, message: 'give the full path of the folder (like Z:\\Github\\my-project)' }];
   const dir = path.resolve(p);
   let st = null;
   try { st = fs.statSync(dir); } catch {}
@@ -864,7 +864,7 @@ function movedRootOf(s) {
   }
   return null;
 }
-// POST /sessions/move { id, root }: root a folder (stored as its repo's root, like Add repo) or null (back to
+// POST /sessions/move { id, root }: root a folder (stored as its repo's root, like Add workspace) or null (back to
 // the repo its tool calls point at). Returns [code, json].
 function moveSession(id, root) {
   if (typeof id !== 'string' || !UUID_RE.test(id)) return [400, { ok: false, message: 'no conversation given' }];
@@ -872,7 +872,7 @@ function moveSession(id, root) {
   if (root == null || root === '') {
     moved.set(id, { id, root: null, at: Date.now() });
   } else {
-    if (typeof root !== 'string' || root.length > 1024 || UNSAFE_PATH.test(root) || !path.isAbsolute(root)) return [400, { ok: false, message: 'give the full path of the repo' }];
+    if (typeof root !== 'string' || root.length > 1024 || UNSAFE_PATH.test(root) || !path.isAbsolute(root)) return [400, { ok: false, message: 'give the full path of the workspace' }];
     const g = gitInfo(path.join(root, '_'));
     let r = g ? g.root : path.resolve(root);
     if (r.length > 3) r = r.replace(/[\\/]+$/, '');
@@ -1981,7 +1981,7 @@ function refreshHue(s, now) {
 // calls point at a repo, so it is shown as "no repo" rather than the user's name
 const HOME_KEY = String(os.homedir()).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
 const isHomeRoot = (root) => !!root && String(root).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() === HOME_KEY;
-const repoName = (root) => (!root || isHomeRoot(root) ? 'no repo' : path.basename(root) || String(root).replace(/[\\/]+$/, '') || root);
+const repoName = (root) => (!root || isHomeRoot(root) ? 'no workspace' : path.basename(root) || String(root).replace(/[\\/]+$/, '') || root);
 // a picked path matches that repo root; a bare folder name (--repo detailforge-web) matches any root with that name
 function inRepo(root) {
   if (!repoSel) return true;
@@ -1990,8 +1990,8 @@ function inRepo(root) {
   return repoName(root).toLowerCase() === repoSel.toLowerCase();
 }
 const menu = { open: false, sel: 0, items: [], hits: [], title: null }; // title: { y, x0, x1 } of the clickable name
-const brand = () => TITLE || (repoSel ? repoName(repoSel) : 'all repos').toUpperCase();
-// "All repos" first, then every repo with a live conversation, busiest first; the picked one stays listed
+const brand = () => TITLE || (repoSel ? repoName(repoSel) : 'all workspaces').toUpperCase();
+// "All workspaces" first, then every repo with a live conversation, busiest first; the picked one stays listed
 function menuItems(now) {
   const count = new Map();
   pruneHiddenRepos([...sessions.values()]);
@@ -1999,7 +1999,7 @@ function menuItems(now) {
   const repos = [...count].sort((a, b) => b[1] - a[1] || repoName(a[0]).localeCompare(repoName(b[0])));
   if (repoSel && !repos.some(([r]) => inRepo(r))) repos.push([repoSel, 0]);
   const all = [...count.values()].reduce((a, b) => a + b, 0);
-  return [{ root: null, label: 'All repos', n: all }, ...repos.map(([root, n]) => ({ root, label: repoName(root), n }))];
+  return [{ root: null, label: 'All workspaces', n: all }, ...repos.map(([root, n]) => ({ root, label: repoName(root), n }))];
 }
 const isCurrent = (it) => (it.root ? !!repoSel && inRepo(it.root) : !repoSel);
 function openMenu() {
@@ -2013,7 +2013,7 @@ function pickRepo(it) {
   repoSel = it.root;
   pick.sid = null; map.sel = null; focus.sid = null;
   saveSettings();
-  notice = { text: `  showing ${it.root ? repoName(it.root) : 'every repo'}`, color: C.mint, until: Date.now() + 2500 };
+  notice = { text: `  showing ${it.root ? repoName(it.root) : 'every workspace'}`, color: C.mint, until: Date.now() + 2500 };
 }
 
 // sessions shown in every view: the picked repo, --filter and the / filter, most urgent first
@@ -2506,7 +2506,7 @@ function details(n, W, f, now, lines) {
   const users = [...n.users.entries()].map(([sid, wrote]) => [sessions.get(sid), wrote]).filter(([s]) => s);
   return [
     [seg(' ● ', look.color, true), seg(n.rel, C.text, true), seg(n.writers >= 2 ? `  edited by ${n.writers} sessions` : `  touched by ${users.length} sessions`, n.writers >= 2 ? C.red : C.gold, true)],
-    [seg('   repo  ', C.faint), seg(n.root || '—', C.dim)],
+    [seg('   workspace  ', C.faint), seg(n.root || '—', C.dim)],
     [seg('   '), ...users.flatMap(([s, wrote], i) => [seg(i ? '  ·  ' : '', C.faint), seg(wrote ? '✎ ' : '◌ ', wrote ? C.red : C.dim), seg(clean(s.name, 30), C.text)])],
   ];
 }
@@ -2670,7 +2670,7 @@ function mapRows(f) {
   map.rows = rows;
   for (const r of canvasRows(cv)) out.push(r);
   // the selected node's details
-  const kindName = sel ? { session: 'session', agent: 'agent', repo: 'repo', pr: 'pull request', file: 'shared file' }[sel.kind] : 'selection';
+  const kindName = sel ? { session: 'session', agent: 'agent', repo: 'workspace', pr: 'pull request', file: 'shared file' }[sel.kind] : 'selection';
   out.push([seg('  ─ ', C.faint), seg(kindName + ' ', C.dim), seg('─'.repeat(Math.max(0, W - kindName.length - 6)), C.line)]);
   const det = details(sel, W, f, now, stripH - 1).slice(0, stripH - 1);
   while (det.length < stripH - 1) det.push([]);
@@ -3665,7 +3665,7 @@ function sessionJson(s, now) {
     state: s.state, label: st.label, stateColor: toHex(st.color),
     hue: toHex(s.hue),
     repo: root ? { root, name: repoName(root), color: toHex(familyColor(root)) } : null,
-    // moved to its repo by hand ("Move to repo"), itself or the conversation it picked up from
+    // moved to its repo by hand ("Move to workspace"), itself or the conversation it picked up from
     moved: !s.demo && !!movedRootOf(s),
     // where its work goes ("Push to"): its own choice (null: it follows the repo's) and the repo's (production by default)
     push: { own: pushTargetOf(s), repo: repoPushTarget(root) || 'production' },

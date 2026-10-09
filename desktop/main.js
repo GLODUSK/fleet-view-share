@@ -23,7 +23,7 @@
 // the host next starts (it logs that a newer one is on disk).
 // The page can also start a new conversation (term.create): a plain `claude` in a repo folder that /state
 // lists (checked here against a fresh GET /state), keyed new-<n> until Claude Code reports its id (onRekey).
-// "Add repo…" asks for a folder with the system picker (fleetDesktop.pickFolder, main window only); a repo the
+// "Add workspace…" asks for a folder with the system picker (fleetDesktop.pickFolder, main window only); a repo the
 // server then lists (POST /repos/add) is in /state's repos[], so a new session may start there.
 //
 // Preview tab (web/preview.js): a local dev server's page in a frame of the main window. Only for such frames,
@@ -689,7 +689,7 @@ if (!app.requestSingleInstanceLock()) {
     if (!isDir) return { ok: false, message: `the folder is gone: ${o.cwd}` };
     return terms.create({ cwd: o.cwd, account: o.account === 'A' ? 'A' : 'B', cols: o.cols, rows: o.rows, forkFrom });
   });
-  // "Add repo…": the system folder picker, over the main window (main window only). FV_TEST_PICK_FOLDER, honoured
+  // "Add workspace…": the system folder picker, over the main window (main window only). FV_TEST_PICK_FOLDER, honoured
   // only in a hidden test run (FV_TEST_HIDDEN=1), answers with that path instead of showing the dialog.
   // The server checks the folder again (POST /repos/add); this only picks it.
   let picking = false;
@@ -700,7 +700,7 @@ if (!app.requestSingleInstanceLock()) {
     if (picking) return { ok: false, canceled: true, message: 'the folder picker is already open' };
     picking = true;
     try {
-      const r = await dialog.showOpenDialog(win, { title: 'Add a repo to Fleet View', properties: ['openDirectory'] });
+      const r = await dialog.showOpenDialog(win, { title: 'Add a workspace to Fleet View', properties: ['openDirectory'] });
       const p = !r.canceled && Array.isArray(r.filePaths) ? r.filePaths[0] : null;
       return p ? { ok: true, path: p } : { ok: false, canceled: true };
     } finally { picking = false; }
