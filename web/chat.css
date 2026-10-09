@@ -479,3 +479,5 @@ details.ci-note[open] > .cn-row svg { transform: rotate(90deg); }
 .cu-cmd { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .ci-bashout { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
 .ci-bashout .tb-out { max-height: 320px; border-left: 2px solid rgba(255, 77, 141, 0.35); }
+/* read only (read.html): nothing that types into the session */
+.chat-ro .chat-compose, .chat-ro .chat-reply, .chat-ro [data-edit], .chat-ro [data-rewind] { display: none !important; }

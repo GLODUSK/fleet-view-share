@@ -173,6 +173,9 @@ html.glass .card.multi.picked, html.glass .tile.multi.picked {
 .c-meta .m.ho { flex-wrap: wrap; column-gap: 5px; }
 .ho-k { color: var(--faint); white-space: nowrap; }
 .ho-n { min-width: 0; overflow-wrap: anywhere; }
+/* a pickup's "Chat" and "Summary" (cards.js readLink, summaryLink) */
+.ho-x { margin-left: 6px; padding: 0 7px; border-radius: 9px; font-size: 11.5px; color: var(--dim); background: rgba(255, 255, 255, 0.06); text-decoration: none; white-space: nowrap; }
+.ho-x:hover { color: var(--text); background: rgba(255, 255, 255, 0.12); }
 /* the quiet "182k / 200k" against the handoff size, after the context gauge */
 .ctx-n { color: var(--faint); font-variant-numeric: tabular-nums; }
 .c-goal:empty, .c-wait:empty, .c-steps:empty, .c-chips:empty, .c-meta:empty, .c-clash:empty, .t-agents:empty { display: none; }
@@ -705,3 +708,23 @@ html.glass .work.detail-float .detail, html.glass .work.detail-float .detail:has
 @media (prefers-reduced-motion: reduce) {
   .work.detail-float .detail, .work.detail-float .detail.open { transition: none; }
 }
+/* the Chat tab's splits (detail.js drawSplits): the selected conversations' chats, then the previous one (the peek) */
+.d-chat > .d-cell, .d-extras > .d-cell { flex: 1 1 0; min-height: 150px; display: flex; flex-direction: column; }
+.d-extras { display: contents; }
+.d-cell + .d-cell, .d-extras > .d-cell, .d-peek { border-top: 1px solid rgba(255, 255, 255, 0.10); }
+.d-cell-chat, .d-peek-md { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.d-peek-md { display: block; overflow: auto; padding: 10px 14px; }
+.d-peek-md[hidden], .d-cell-chat[hidden] { display: none; }
+.d-cell-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; padding: 4px 8px 4px 12px; font-size: 12px; background: rgba(255, 255, 255, 0.035); }
+.d-cb-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.d-cb-k { font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim); white-space: nowrap; }
+.d-cb-n { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.d-cb-s, .d-cb-more { color: var(--dim); white-space: nowrap; font-size: 11px; }
+.d-cb-tab { border: 0; background: transparent; color: var(--dim); padding: 2px 8px; border-radius: 9px; cursor: pointer; font-size: 11.5px; }
+.d-cb-tab.on { color: var(--text); background: rgba(255, 255, 255, 0.10); }
+.d-cb-tab:disabled { opacity: 0.4; cursor: default; }
+.d-cb-x { border: 0; background: transparent; color: var(--dim); width: 24px; height: 22px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.d-cb-x:hover { color: var(--text); background: rgba(255, 255, 255, 0.12); }
+/* split: a chat's toolbar row (attach, mode, model, mic, send) shows only in the one being typed in; Enter still sends */
+.d-chat.d-split .d-cell:not(:focus-within) .cmp-foot { display: none; }
+.d-chat.d-split .chat-top { display: none !important; }

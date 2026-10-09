@@ -903,15 +903,35 @@ export function mountCompose(slot, s) {
       return true;
     } finally { working = false; }
   }
+  // A session not running here is started first (as Send does), and one mid-turn is stopped first (Esc, as the
+  // Stop button does), waiting until it is idle: the rewind never fails just because of either.
   // edit: the text to send in the message's place once Claude Code has restored (Edit in the feed)
   async function rewindTo(id, text, nth, edit = null) {
     if (id !== st.id || working) return;
-    if (!termApi() || !hosts.get(id)?.alive) { err('Open the session here first (Session tab), then rewind'); return; }
-    if (st.busy) { err('Claude is working: stop it first, then rewind'); return; }
+    if (!termApi()) { err('Rewinding needs the desktop window'); return; }
     if (st.menu) { err('Answer the question above first'); return; }
     working = true;
     st.step = 'Rewinding…'; drawNotes();
     try {
+      if (!hosts.get(id)?.alive) {
+        if (openElsewhere(st.s)) { err('It is open in another window: end it there, then rewind here'); return; }
+        const r = await ensureLive(st.s, { sizeEl: pane, onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
+        if (st.id !== id) return;
+        st.step = 'Rewinding…'; drawNotes();
+        if (!r || !r.ok) { err((r && r.message) || 'Could not start the session to rewind it'); return; }
+        for (let i = 0; i < 60 && !screenReady(id); i++) await sleep(150);
+      }
+      const midTurn = () => hosts.get(id)?.status === 'busy' || !!parseSpinner(screenRows(id, 40))?.strong;
+      if (midTurn()) {
+        st.step = 'Stopping Claude, then rewinding…'; drawNotes();
+        if (!writeKey('\x1b')) return;
+        let idle = false;
+        for (let i = 0; i < 60 && !idle; i++) { await sleep(250); idle = !midTurn(); }
+        if (!idle) { err('Claude didn\'t stop: press Esc in the Session tab, then rewind'); return; }
+        await sleep(500); // let the prompt come back before /rewind is typed (two quick Escs open Claude Code's own rewind)
+        st.step = 'Rewinding…'; drawNotes();
+      }
+      if (menuNow(id) && !typesText(menuNow(id))) { err('Claude is asking something: answer it first, then rewind'); return; }
       if (screenReady(id) && !(await closePanel(id))) { err('A panel is open in the session: close it (Esc) first'); return; }
       const b = boxNow(id);
       if (!b || b.text) { err('Something is typed in the session\'s prompt: clear it first'); return; }

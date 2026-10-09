@@ -3648,7 +3648,7 @@ function handoffLinks(now = Date.now()) {
   return hoCache;
 }
 const titleOf = (id) => { const x = sessions.get(id); return x ? plain(baseName(x) || x.name || '') || null : null; };
-// { handoff: { next, nextName, at } | null, pickedUpFrom: { id, name } | null } for /state
+// { handoff: { next, nextName, at } | null, pickedUpFrom: { id, name, file } | null } for /state (file: the handoff summary)
 function handoffOf(s, now) {
   if (s.demo) {
     // the demo's handoff chain: demo.handedOffTo / demo.pickedUpFrom name another demo conversation
@@ -3669,7 +3669,7 @@ function handoffOf(s, now) {
   if (h && !next) for (const x of sessions.values()) if (x.pickupArg && path.basename(x.pickupArg).toLowerCase() === path.basename(h.file).toLowerCase()) { next = x.id; break; }
   return {
     handoff: h && (next || h.handedOffAt || s.state === 'DONE') ? { next, nextName: next ? titleOf(next) : null, at: Math.round(h.handedOffAt || h.created) } : null,
-    pickedUpFrom: from && from.session !== s.id ? { id: from.session, name: titleOf(from.session) || (from.title ? plain(from.title, 80) : null) } : null,
+    pickedUpFrom: from && from.session !== s.id ? { id: from.session, name: titleOf(from.session) || (from.title ? plain(from.title, 80) : null), file: from.file || null } : null,
   };
 }
 
@@ -5017,12 +5017,13 @@ function conversationLog(id) {
   return best ? { file: best } : null;
 }
 // the folders the page may read from (GET /changes, GET /file, /preview): every conversation's folder and repo, the
-// remembered repos and the ones added by hand
+// remembered repos, the ones added by hand and the handoff folder
 function knownFolders() {
   const out = new Set();
   for (const s of sessions.values()) { if (s.cwd) out.add(s.cwd); if (s.root) out.add(s.root); }
   for (const r of remembered.repos.keys()) out.add(r);
   for (const a of addedRepos) if (a && a.root) out.add(a.root);
+  if (!DEMO) out.add(HO.dir()); // the handoff summaries (a pickup's "Summary", opened in the viewer)
   return [...out];
 }
 const pageCtx = { sendJson, readBody, folders: knownFolders, log: (t) => logOnce('page:' + t, t) };

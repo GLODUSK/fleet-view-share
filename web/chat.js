@@ -15,7 +15,7 @@
 // read 2 files", that opens to show those rows; while a step runs, the line says which. Todo lists, plans and
 // questions stay out in the open.
 // Selecting text shows a Reply button that hands the text to the compose box (the 'fv-chat-quote' event).
-// A "/pickup <file>" note has an Open link to that handoff summary (VS Code).
+// A "/pickup <file>" note has an Open link to that handoff summary (in the viewer, viewer.js).
 // Scrolled up past your last message, a bar at the top shows it; a click scrolls back to it.
 // Above the compose box, a tray lists what the session runs in the background (shells, async agents, workflows,
 // monitors: the reply's `bg`, see conversation.js), like the task list under a Claude Code terminal. Folded it is
@@ -43,7 +43,7 @@
 // ?fixture=1 reads ./fixtures/conversation-sample.json instead of the server (same JSON); with it,
 // ?chatWindow=<n> shrinks the first page (to try "Show earlier") and ?chatRepeat=<n> repeats the sample n times
 // (to time a long conversation).
-import { esc, spinner, C, clockTime, ago, revealLink } from './cards.js';
+import { esc, spinner, C, clockTime, ago } from './cards.js';
 import { icon } from './icons.js';
 import { mountCompose } from './compose.js';
 import { onRekey } from './term.js';
@@ -590,10 +590,10 @@ function renderItem(it, c) {
   }
   return el;
 }
-// "/pickup <handoff file>": an Open link to the summary (VS Code, through POST /reveal)
+// "/pickup <handoff file>": an Open link to the summary, in Fleet View's own viewer (Ctrl+click: VS Code)
 function pickupOpen(text) {
   const m = /^\/pickup\s+"?([^"\n]+?\.md)"?\s*$/i.exec(text);
-  return m ? revealLink('file', m[1], `${icon('file', 12)}<span>Open</span>`, `open the handoff in VS Code: ${m[1]}`, 'cn-open') : '';
+  return m ? `<span ${pathAttrs(m[1]).replace('class="fpath"', 'class="fpath cn-open"')}>${icon('file', 12)}<span>Open</span></span>` : '';
 }
 const isLongNote = (t) => String(t || '').length > 160 || String(t || '').includes('\n');
 
@@ -1258,12 +1258,14 @@ function reset(c, s) {
   try { c.compose?.destroy(); } catch {}
   c.compose = null;
   c.composeEl.textContent = '';
-  try { c.compose = mountCompose(c.composeEl, s); } catch (e) { console.error('chat: compose', e); }
+  if (!c.readOnly) try { c.compose = mountCompose(c.composeEl, s); } catch (e) { console.error('chat: compose', e); }
 }
 
 export function renderChatPane(pane, s, opts = {}) {
   if (!s || !s.id) return;
   const c = pane._chat || buildPane(pane);
+  // readOnly (read.html, a past conversation): no compose box, and no Rewind, Edit or Reply (chat.css .chat-ro)
+  if (opts.readOnly && !c.readOnly) { c.readOnly = true; pane.classList.add('chat-ro'); }
   const fresh = c.id !== s.id;
   c.cwd = String(s.cwd || '');
   if (fresh) reset(c, s);

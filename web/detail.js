@@ -42,7 +42,8 @@ function build(el, ui) {
   <span class="d-preview" hidden>preview — closes when you move on unless you type</span>
   <span class="d-place" role="group" aria-label="where the panel goes">${PLACES.map(([p, ic, t]) => `<button type="button" class="d-wide" data-place="${p}" title="${t}" aria-label="${t}">${icon(ic, 14)}</button>`).join('')}</span>
 </div>
-<div class="d-chat" role="tabpanel" hidden></div>
+<div class="d-chat" role="tabpanel" hidden><div class="d-cell d-cell-main"><div class="d-cell-bar" hidden></div><div class="d-cell-chat"></div></div><div class="d-extras"></div>
+<div class="d-cell d-peek" hidden><div class="d-cell-bar d-peek-bar"></div><div class="d-cell-chat d-peek-chat"></div><div class="d-peek-md md" tabindex="0" hidden></div></div></div>
 <div class="d-session" role="tabpanel" hidden></div>
 <div class="d-changes" role="tabpanel" hidden></div>
 <div class="d-previewpane" role="tabpanel" hidden></div>
@@ -64,6 +65,14 @@ function build(el, ui) {
   el._replySec = el.querySelector('.d-reply-sec');
   el._session = el.querySelector('.d-session');
   el._chat = el.querySelector('.d-chat');
+  el._mainBar = el.querySelector('.d-cell-main .d-cell-bar');
+  el._chatMain = el.querySelector('.d-cell-main .d-cell-chat');
+  el._extras = el.querySelector('.d-extras');
+  el._cells = new Map(); // id -> { root, bar, chat }: the other selected conversations' chats, under the main one
+  el._peek = el.querySelector('.d-peek');
+  el._peekBar = el.querySelector('.d-peek-bar');
+  el._peekChat = el.querySelector('.d-peek-chat');
+  el._peekMd = el.querySelector('.d-peek-md');
   el._changes = el.querySelector('.d-changes');
   el._previewPane = el.querySelector('.d-previewpane');
   // review comments (Changes) or a screenshot (Preview) handed to the chat box: show the Chat tab (see handto.js)
@@ -84,8 +93,12 @@ function build(el, ui) {
     if (e.target.closest('[data-rename]')) { startRename(el, ui); return; }
     const tab = e.target.closest('[data-tab]');
     const cp = e.target.closest('[data-cp="reply"]');
+    const cellX = e.target.closest('[data-cell-x]'), peekK = e.target.closest('[data-peek-kind]');
     if (cp) copyText(el._replyFull || '', cp);
-    else if (e.target.closest('[data-close]')) ui.showDetail(null);
+    else if (e.target.closest('[data-peek-x]')) { peek = null; ui.showDetail(el._id); }
+    else if (peekK) { if (peek) peek.kind = peekK.dataset.peekKind; ui.showDetail(el._id); }
+    else if (cellX) ui.dropMulti?.(cellX.dataset.cellX);
+    else if (e.target.closest('[data-close]')) { if (el._cells.size) ui.clearMulti?.(); ui.showDetail(null); }
     else if (e.target.closest('[data-open]') && el._id) (ui.openTerminal || ui.open)(el._id);
     else if (tab) { el._tab = tab.dataset.tab; el._tabPicked = true; ui.showDetail(el._id); if (el._tab === 'session') focusTerm(el); else if (el._tab === 'chat') focusCompose(el); }
     else if (e.target.closest('[data-place]')) { setPlace(e.target.closest('[data-place]').dataset.place); el._placed = null; ui.showDetail(el._id); }
@@ -215,7 +228,68 @@ function placeFloat(el, work, id, byMouse) {
   el.style.setProperty('--fh', `${Math.round(h)}px`);
   el._placed = id;
 }
-const focusCompose = (el) => requestAnimationFrame(() => el._chat.querySelector('.chat-compose textarea')?.focus());
+const focusCompose = (el) => requestAnimationFrame(() => el._chatMain.querySelector('.chat-compose textarea')?.focus());
+
+// ---------- the Chat tab's splits ----------
+// Under the main chat: (1) the other selected conversations (a Ctrl+click or Shift+drag selection), up to
+// SPLIT_MAX chats in all, each with its own bar (its name, ✕ takes it out of the selection) and its own compose
+// box; (2) the peek, a picked-up conversation's previous one: its chat, read only (chat.js readOnly), or its
+// handoff summary (the .md, GET /file, drawn as markdown), switched by the bar's Chat / Summary, ✕ closes it.
+// The peek belongs to the conversation it was opened for and goes when another one is shown.
+export const SPLIT_MAX = 3;
+let peek = null; // { for, kind: 'chat' | 'summary', id, name, file }
+export function openPeek(p) { peek = p && p.for && p.id ? { ...p, kind: p.kind === 'summary' ? 'summary' : 'chat' } : null; }
+const cellBar = (s, x) => `<span class="d-cb-dot" style="background:${esc(statusColor(s))}"></span><span class="d-cb-n" title="${esc(s.name)}">${esc(s.name)}</span>`
+  + `<span class="d-cb-s">${esc(s.label || s.state || '')}</span><span class="grow"></span>`
+  + (x ? `<button type="button" class="d-cb-x" data-cell-x="${esc(s.id)}" title="close: take it out of the selection" aria-label="close ${esc(s.name)}">${icon('close', 13)}</button>` : '');
+// a handoff summary's front matter (session:, cwd:, pid: … between --- lines) is for the tools, not for reading
+const stripFront = (t) => String(t).replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---[ \t]*\r?\n/, '');
+function drawSplits(el, s, extras, on) {
+  // the other selected conversations
+  const want = on ? extras.slice(0, SPLIT_MAX - 1) : [];
+  const keep = new Set(want.map((x) => x.id));
+  for (const [id, c] of el._cells) if (!keep.has(id)) { c.root.remove(); el._cells.delete(id); }
+  let prev = null;
+  for (const x of want) {
+    let c = el._cells.get(x.id);
+    if (!c) {
+      const root = document.createElement('div');
+      root.className = 'd-cell';
+      root.innerHTML = '<div class="d-cell-bar"></div><div class="d-cell-chat"></div>';
+      c = { root, bar: root.firstChild, chat: root.lastChild };
+      el._cells.set(x.id, c);
+    }
+    // in the selection's order
+    if ((prev ? prev.nextSibling : el._extras.firstChild) !== c.root) el._extras.insertBefore(c.root, prev ? prev.nextSibling : el._extras.firstChild);
+    prev = c.root;
+    setHTML(c.bar, cellBar(x, true));
+    renderChatPane(c.chat, x, { visible: true });
+  }
+  const more = extras.length - want.length;
+  el._mainBar.hidden = !want.length;
+  el._chat.classList.toggle('d-split', want.length > 0);
+  if (want.length) setHTML(el._mainBar, cellBar(s, true) + (more > 0 ? `<span class="d-cb-more" title="${SPLIT_MAX} chats show at most">+${more} more selected</span>` : ''));
+  // the peek
+  const p = on && peek && peek.for === s.id ? peek : null;
+  if (peek && peek.for !== s.id) peek = null;
+  el._peek.hidden = !p;
+  if (!p) return;
+  const tab = (k, label, dis) => `<button type="button" class="d-cb-tab${p.kind === k ? ' on' : ''}" data-peek-kind="${k}"${dis ? ' disabled title="no summary file"' : ''}>${label}</button>`;
+  setHTML(el._peekBar, `<span class="d-cb-k">Previous conversation</span><span class="d-cb-n" title="${esc(p.name || p.id)}">${esc(p.name || p.id.slice(0, 8))}</span><span class="grow"></span>`
+    + `${tab('chat', 'Chat')}${tab('summary', 'Summary', !p.file)}<button type="button" class="d-cb-x" data-peek-x title="close it" aria-label="close the previous conversation">${icon('close', 13)}</button>`);
+  const md = p.kind === 'summary' && !!p.file;
+  el._peekChat.hidden = md;
+  el._peekMd.hidden = !md;
+  if (!md) { renderChatPane(el._peekChat, { id: p.id, name: p.name, cwd: '' }, { visible: true, readOnly: true }); return; }
+  if (el._peekMd._file === p.file) return;
+  el._peekMd._file = p.file;
+  el._peekMd.innerHTML = '<p class="dim">Loading the summary…</p>';
+  fetch(`/file?path=${encodeURIComponent(p.file)}`).then((r) => r.json()).then((j) => {
+    if (el._peekMd._file !== p.file) return;
+    el._peekMd.innerHTML = j && j.ok && typeof j.text === 'string' ? mdHtml(stripFront(j.text)) : `<p class="dim">${esc((j && j.message) || 'The summary could not be read')}</p>`;
+    el._peekMd.scrollTop = 0;
+  }).catch(() => { if (el._peekMd._file === p.file) { el._peekMd._file = null; el._peekMd.innerHTML = '<p class="dim">The summary could not be read</p>'; } });
+}
 const focusTerm = (el) => requestAnimationFrame(() => el._session.querySelector('.term-host textarea')?.focus());
 
 const head = (ic, text, extra = '') => `<h4>${icon(ic, 13)}<span>${text}</span>${extra ? ` <span class="h-extra">${extra}</span>` : ''}</h4>`;
@@ -419,8 +493,9 @@ function startRename(el, ui) {
   box.addEventListener('dblclick', (e) => e.stopPropagation());
 }
 
-// el: the panel; s: the session (or null to close); gone: s is the last copy of one that left the list
-export function renderDetail(el, s, ui, gone = false) {
+// el: the panel; s: the session (or null to close); gone: s is the last copy of one that left the list;
+// extras: the other selected conversations, whose chats show under its own (drawSplits)
+export function renderDetail(el, s, ui, gone = false, extras = []) {
   const open = !!s;
   el.classList.toggle('open', open);
   el.setAttribute('aria-hidden', String(!open));
@@ -429,7 +504,7 @@ export function renderDetail(el, s, ui, gone = false) {
   work?.classList.toggle('detail-float', float);
   if (dockW) work?.style.setProperty('--detail-w', `${dockW}px`);
   // the panel closed or moved on: the preview sessions it started end (after the switch, never the one shown)
-  if (!open) { el._id = null; el._placed = null; if (el._renaming) { el._renaming = null; el._slots.head._html = null; } endPreviews(null); return; }
+  if (!open) { el._id = null; el._placed = null; peek = null; if (el._renaming) { el._renaming = null; el._slots.head._html = null; } endPreviews(null); return; }
   if (!el._built) build(el, ui);
   const now = Date.now();
   const sl = el._slots;
@@ -453,7 +528,7 @@ export function renderDetail(el, s, ui, gone = false) {
   // the floating card moves to each new pick (arrow keys too); a redraw leaves it where it is
   if (float && work && (intent || el._placed !== s.id)) placeFloat(el, work, s.id, intent === 'preview' || intent === 'explicit');
   if (intent === 'explicit' && desk && !openElsewhere(s)) ensureLive(s, { sizeEl: el._chat }).catch(() => {});
-  drawTabs(el, s, ui, work, intent === 'preview' || intent === 'explicit' ? intent : null);
+  drawTabs(el, s, ui, work, intent === 'preview' || intent === 'explicit' ? intent : null, extras);
   // a click, Enter or a double-click (and a new session or Fork) puts the keyboard straight in the chat box;
   // arrow keys leave it on the list
   if ((intent === 'preview' || intent === 'explicit') && el._tab === 'chat') focusCompose(el);
@@ -491,7 +566,7 @@ export function renderDetail(el, s, ui, gone = false) {
   setHTML(sl.usage, usageHtml(s));
 }
 
-function drawTabs(el, s, ui, work, auto) {
+function drawTabs(el, s, ui, work, auto, extras = []) {
   const tab = ['session', 'chat', 'changes', 'preview'].includes(el._tab) ? el._tab : 'details';
   for (const b of el._tabs) {
     const on = b.dataset.tab === tab;
@@ -510,7 +585,8 @@ function drawTabs(el, s, ui, work, auto) {
   for (const b of el._placeBtns) b.setAttribute('aria-pressed', String(b.dataset.place === place));
   // the terminal starts a preview by itself only while it shows; the chat reads the log and starts one on Send
   renderSessionPane(el._session, s, { ui, visible: tab === 'session', auto: tab === 'session' ? auto : null, onOpened: () => { if (el._tab !== 'chat') el._tab = 'session'; ui.refresh?.(); } });
-  if (tab === 'chat') renderChatPane(el._chat, s, { visible: true });
+  if (tab === 'chat') renderChatPane(el._chatMain, s, { visible: true });
+  drawSplits(el, s, extras, tab === 'chat');
   if (tab === 'changes') renderChangesPane(el._changes, s, { ui });
   if (tab === 'preview') renderPreviewPane(el._previewPane, s, { ui });
   // after the pane (an auto-open there may have just made it a preview)

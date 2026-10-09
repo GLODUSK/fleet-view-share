@@ -107,12 +107,15 @@ export function ctxGauge(ctx, withHandoff = false) {
 // A link that shows another conversation (the shell's data-act="session": picks it, or opens its panel when it
 // has finished). The name wraps inside its chip, never cut; the full id is in the tooltip.
 export const sessionLink = (id, name, cls = '') => `<a class="lnk${cls ? ' ' + cls : ''}" data-act="session" data-id="${esc(id)}" href="#" title="show ${name ? `${esc(name)} (${esc(id)})` : esc(id)}">${esc(name || String(id).slice(0, 8))}</a>`;
-// "handed off → <next>" / "picked up from <old>" (the server's s.handoff / s.pickedUpFrom); [] when neither
+// "Chat" / "Summary": a picked-up conversation's previous one, under its chat in the panel (the shell's
+// data-act="peek", detail.js openPeek): that chat read only, or the handoff summary
+const peekLink = (forId, kind, label, title) => `<a class="lnk ho-x" data-act="peek" data-for="${esc(forId)}" data-kind="${kind}" href="#" title="${esc(title)}">${label}</a>`;
+// "handed off → <next>" / "picked up from <old> · Chat · Summary" (the server's s.handoff / s.pickedUpFrom); [] when neither
 export function handoffBits(s) {
   const out = [];
   const h = s?.handoff, p = s?.pickedUpFrom;
   if (h) out.push(h.next ? ['handed off →', sessionLink(h.next, h.nextName, 'ho-n')] : ['handed off', '<span class="ho-n dim">waiting for its pickup</span>']);
-  if (p && p.id) out.push(['picked up from', sessionLink(p.id, p.name, 'ho-n')]);
+  if (p && p.id) out.push(['picked up from', `${sessionLink(p.id, p.name, 'ho-n')} ${peekLink(s.id, 'chat', 'Chat', 'read its chat under this one (read only)')}${p.file ? ` ${peekLink(s.id, 'summary', 'Summary', `read the handoff summary under this chat: ${p.file}`)}` : ''}`]);
   return out;
 }
 

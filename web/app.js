@@ -107,7 +107,7 @@
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects } from './projects.js';
-import { renderDetail } from './detail.js';
+import { renderDetail, openPeek } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady } from './term.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
@@ -997,15 +997,23 @@ $('finished-list').addEventListener('keydown', (e) => {
 });
 
 // ---------- detail panel ----------
+let splitKey = ''; // the selection the panel last opened for by itself (drawDetail)
 let detailLast = null; // the panel's last copy of its conversation, shown (marked) if it leaves the list
 function drawDetail(v) {
   const shut = local.view === 'projects' && !projPanel;
   let s = ui.detailId && !shut ? v.allSessions.find((x) => x.id === ui.detailId) : null;
+  // 2+ selected: their chats share the panel (detail.js drawSplits, SPLIT_MAX at most); with none shown, the first opens it
+  const sel = multi.size >= 2 ? [...multi].map((id) => v.allSessions.find((x) => x.id === id)).filter(Boolean) : [];
+  // (once per selection: a panel closed by hand stays closed until the selection changes)
+  const key = sel.map((x) => x.id).join(',');
+  if (!s && !shut && sel.length >= 2 && key !== splitKey) { s = sel[0]; ui.detailId = s.id; }
+  splitKey = key;
+  const extras = s ? sel.filter((x) => x.id !== s.id) : [];
   let gone = false;
   if (!shut && ui.detailId && !s && detailLast?.id === ui.detailId) { s = detailLast; gone = true; }
   if (!s) { if (!shut) ui.detailId = null; }
   else if (!gone) detailLast = s;
-  try { renderDetail($('detail'), s, ui, gone); } catch (e) { console.error(e); }
+  try { renderDetail($('detail'), s, ui, gone, extras); } catch (e) { console.error(e); }
   if (s && !$('work').classList.contains('detail-open')) detailShownAt = performance.now();
   $('work').classList.toggle('detail-open', !!s);
 }
@@ -1054,6 +1062,27 @@ function activate(d) {
   if (d.act === 'url') ui.openUrl(d.url);
   else if (d.act === 'reveal') ui.reveal({ kind: d.kind, path: d.path, line: parseInt(d.line, 10) || undefined });
   else if (d.act === 'session') showSession(d.id);
+  else if (d.act === 'peek') openPeekFor(d.for, d.kind);
+}
+// a picked-up conversation's previous one, under its chat in the panel (detail.js openPeek): its chat, read only,
+// or its handoff summary. It doesn't come back on the map and nothing starts.
+function openPeekFor(forId, kind) {
+  const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === forId);
+  const p = s && s.pickedUpFrom;
+  if (!p || !p.id) return;
+  openPeek({ for: s.id, kind, id: p.id, name: p.name, file: p.file || null });
+  tabWant = { id: s.id, tab: 'chat' };
+  if (local.view === 'projects') projPanel = true;
+  ui.showDetail(s.id);
+}
+// a picked-up conversation's "Previous conversation ▸": its chat (read only) and the handoff summary, under its chat
+function previousMenuItem(s) {
+  const p = s.pickedUpFrom;
+  if (!p || !p.id) return null;
+  return { label: 'Previous conversation', icon: 'clock', note: p.name || null, children: [
+    { label: 'Read its chat', icon: 'read', note: 'under this one, read only', run: () => openPeekFor(s.id, 'chat') },
+    p.file ? { label: 'Read the handoff summary', icon: 'file', run: () => openPeekFor(s.id, 'summary') } : { label: 'Read the handoff summary', icon: 'file', disabled: true, note: 'no summary file' },
+  ] };
 }
 // a link to another conversation (handoffs): a shown one is picked like a click on it; a finished or filtered
 // out one opens in the panel
@@ -1579,6 +1608,7 @@ function openContextMenu(target, x, y) {
     else items.push({ label: 'Open session', icon: 'shell', run: () => openHereFromMenu(s.id) });
   }
   if (!s.pending) items.push({ label: 'Open in terminal', icon: 'open', run: () => ui.openTerminal(s.id) });
+  if (previousMenuItem(s)) items.push(previousMenuItem(s));
   items.push(renameMenuItem(s));
   if (desk && !s.pending && !s.demo) items.push(forkMenuItem(s));
   if (!s.pending && !s.demo) { const mv = moveMenuItem(s); if (mv) items.push(mv); }
@@ -1823,6 +1853,13 @@ function toggleMulti(id) {
   setMulti([...next], 'cards');
 }
 ui.clearMulti = () => setMulti([], 'cards');
+// a split chat's ✕ (detail.js): out of the selection; the panel's own conversation hands its place to the next one
+ui.dropMulti = (id) => {
+  const rest = [...multi].filter((x) => x !== id);
+  if (ui.detailId === id) ui.detailId = rest[0] || null;
+  setMulti(rest.length >= 2 ? rest : [], 'cards');
+  render();
+};
 function markMulti(el) {
   if (!el || local.view === 'map') return;
   // conversations that left every view leave the selection too
