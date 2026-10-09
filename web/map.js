@@ -2894,6 +2894,19 @@ function wireMouse(cv) {
           // one conversation: it follows the mouse, kept as an offset from its repo's hub
           hub.p.x += dx / K(); hub.p.y += dy / K(); hub.p.vx = hub.p.vy = 0;
           I.homeXY.set(hub.id, { x: hub.p.x - base.x, y: hub.p.y - base.y, pin: true });
+          // its PR and recent files come along most of the way (only the ones tied to it alone), so they
+          // trail a little behind instead of being hauled by the weak springs; the springs settle the rest
+          if (!I.drag.dots) {
+            const ties = new Map();
+            for (const s of I.springs) for (const id of [s.a, s.b]) ties.set(id, (ties.get(id) || 0) + 1);
+            I.drag.dots = [];
+            for (const s of I.springs) {
+              const o = s.a === hub.id ? s.b : s.b === hub.id ? s.a : null;
+              const m = o && ties.get(o) === 1 && I.byId.get(o);
+              if (m && m.p && (m.kind === 'pr' || m.kind === 'recent')) I.drag.dots.push(m);
+            }
+          }
+          for (const m of I.drag.dots) { m.p.x += 0.8 * dx / K(); m.p.y += 0.8 * dy / K(); }
           I.alpha = Math.max(I.alpha, 0.05);
           const to = dropRepo(hub);
           I.drag.drop = to ? to.id : null;
