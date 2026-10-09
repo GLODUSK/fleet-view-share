@@ -182,7 +182,7 @@ export function parseMode(lines) {
 
 // A select menu at the bottom of the screen: Claude Code's permission prompts ("Do you want to proceed?",
 // "Do you want to make this edit to x?"), AskUserQuestion, the plan approval ("Would you like to proceed?"),
-// the folder trust question. Only when at least two options numbered one after another sit in the last ~20
+// the folder trust question. Only when at least two options numbered one after another sit in the last ~30
 // non-empty lines and one of them carries the ❯ pointer; the prompt box (❯ under a rule, where a typed
 // "1. … 2. …" list would look the same) and a menu with the prompt drawn under it are not menus.
 // -> { title, context: [lines], more, options: [{ n, label, desc, on }], sig } or null
@@ -190,18 +190,18 @@ export function parseMenu(lines) {
   const raw = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
   const L = raw.map(unbox);
   let start = L.length, seen = 0;
-  while (start > 0 && seen < 20) { start--; if (L[start].trim()) seen++; }
+  while (start > 0 && seen < 30) { start--; if (L[start].trim()) seen++; }
   const opts = [];
   for (let i = start; i < L.length; i++) {
     const m = OPT_RE.exec(L[i]);
     if (m) opts.push({ i, n: +m[3], on: !!m[2], label: m[4], col: L[i].indexOf(m[3]), boxed: /^\s*[│┃]/.test(raw[i]) });
   }
-  // runs of options numbered one after another, at most 4 lines (descriptions) between two of them
+  // runs of options numbered one after another, at most 8 lines (descriptions, wrapped in a narrow panel) between two
   let run = null, cur = [];
   const close = () => { if (cur.length >= 2 && cur.some((o) => o.on)) run = cur; };
   for (const o of opts) {
     const last = cur[cur.length - 1];
-    if (last && o.n === last.n + 1 && o.i - last.i <= 5) cur.push(o);
+    if (last && o.n === last.n + 1 && o.i - last.i <= 9) cur.push(o);
     else { close(); cur = [o]; }
   }
   close();
@@ -973,7 +973,7 @@ export function mountCompose(slot, s) {
   }
 
   // a menu on the live screen now, not the one the last poll saw (it is up to 400 ms old)
-  const menuNow = (id) => (hosts.get(id)?.alive ? parseMenu(screenText(id, 40)) : null);
+  const menuNow = (id) => (hosts.get(id)?.alive ? parseMenu(screenText(id, 40, { rows: true })) : null);
   // a command's panel on the live screen now, and closing it: Esc until it is gone (one with a search box takes
   // two: the first clears the search). -> true when none is up
   const panelNow = (id) => (hosts.get(id)?.alive ? parsePanel(screenMarked(id, PANEL_LINES)) : null);
@@ -1567,7 +1567,7 @@ export function mountCompose(slot, s) {
     let panel = alive && lines.some((l) => /▔{12}/.test(l)) ? parsePanel(screenMarked(st.id, PANEL_LINES), { loose }) : null;
     lines = lines.slice(-40);
     const spin = parseSpinner(lines);
-    let menu = alive ? parseMenu(lines) : null;
+    let menu = alive && lines.length ? parseMenu(screenText(st.id, 40, { rows: true })) : null;
     // the one a "/command" sent from here opened is that command's, numbered list or not (/model); else a numbered
     // menu is a question Claude asks (a permission prompt), which the menu card answers
     const owned = !!panel && (st.panelOwned || Date.now() - st.cmdAt < PANEL_OWN_MS);

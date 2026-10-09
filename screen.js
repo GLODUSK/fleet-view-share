@@ -9,8 +9,9 @@
 // is never pasted, and never followed by Enter, while Claude shows a permission prompt, a question or the plan
 // approval: the Enter would pick the highlighted option.
 //
-//   render(raw, cols, rows, lastN = 40) -> [line]  the last lastN lines (soft-wrapped rows joined, blank rows at
-//                                                   the bottom dropped), like term.js screenText
+//   render(raw, cols, rows, lastN = 40, join = true) -> [line]  the last lastN lines (soft-wrapped rows joined
+//                                                   unless join is false, blank rows at the bottom dropped), like
+//                                                   term.js screenText
 //   menuIn(lines) -> { options: [{ n, label, on }] } | null
 //   menuShown(raw, cols, rows) -> the same, from raw output
 'use strict';
@@ -28,7 +29,7 @@ function widthOf(cp) {
 
 const clampInt = (v, lo, hi, def) => (Number.isInteger(v) && v >= lo && v <= hi ? v : def);
 
-function render(raw, cols, rows, lastN = 40) {
+function render(raw, cols, rows, lastN = 40, join = true) {
   const W = clampInt(cols, 2, 1000, 120), Hh = clampInt(rows, 2, 500, 32);
   const s = String(raw || '');
   const blank = () => ({ c: [], w: false });
@@ -173,7 +174,7 @@ function render(raw, cols, rows, lastN = 40) {
   const out = [];
   for (const l of L) {
     const text = l.c.map((c) => (c == null ? ' ' : c)).join('').replace(/\s+$/, '');
-    if (l.w && out.length) out[out.length - 1] += text; else out.push(text);
+    if (join && l.w && out.length) out[out.length - 1] += text; else out.push(text);
   }
   while (out.length && !out[out.length - 1].trim()) out.pop();
   return out.slice(-lastN);
@@ -183,13 +184,13 @@ function render(raw, cols, rows, lastN = 40) {
 const isRule = (l) => /^\s*[─━═]{6,}/.test(l) && !/[╭╮╰╯┌┐└┘]/.test(l);
 const unbox = (l) => String(l ?? '').replace(/^(\s*)[│┃](\s?)/, '$1 $2').replace(/\s*[│┃]\s*$/, '');
 const OPT_RE = /^(\s*)([❯›])?\s*(\d{1,2})[.)]\s+(.*\S)\s*$/;
-// A select menu at the bottom: at least two options numbered one after another in the last ~20 non-empty lines,
+// A select menu at the bottom: at least two options numbered one after another in the last ~30 non-empty lines,
 // one of them with the ❯ pointer; not the prompt box (❯ under a rule, a typed "1. … 2. …" list), and not a menu
 // with the prompt drawn under it.
 function menuIn(lines) {
   const L = (Array.isArray(lines) ? lines : []).map((l) => unbox(String(l ?? '')));
   let start = L.length, seen = 0;
-  while (start > 0 && seen < 20) { start--; if (L[start].trim()) seen++; }
+  while (start > 0 && seen < 30) { start--; if (L[start].trim()) seen++; }
   const opts = [];
   for (let i = start; i < L.length; i++) {
     const m = OPT_RE.exec(L[i]);
@@ -199,7 +200,7 @@ function menuIn(lines) {
   const close = () => { if (cur.length >= 2 && cur.some((o) => o.on)) run = cur; };
   for (const o of opts) {
     const last = cur[cur.length - 1];
-    if (last && o.n === last.n + 1 && o.i - last.i <= 5) cur.push(o);
+    if (last && o.n === last.n + 1 && o.i - last.i <= 9) cur.push(o);
     else { close(); cur = [o]; }
   }
   close();
@@ -212,6 +213,8 @@ function menuIn(lines) {
   return { options: run.map((o) => ({ n: o.n, label: o.label.replace(/\s+/g, ' '), on: o.on })) };
 }
 
-const menuShown = (raw, cols, rows) => menuIn(render(raw, cols, rows, 40));
+// over the rows as drawn: Claude Code pads a menu's rows to the full width, which ConPTY then marks as wrapped,
+// and joined they'd hide its options ("❯ 1. Yes      Some description   2. No" on one line)
+const menuShown = (raw, cols, rows) => menuIn(render(raw, cols, rows, 40, false));
 
 module.exports = { render, menuIn, menuShown, widthOf };

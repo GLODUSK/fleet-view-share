@@ -16,7 +16,7 @@ if ($env:OS -ne 'Windows_NT') { Fail 'Fleet View runs on Windows 10/11 only.' }
 # ---------- what it needs ----------
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { Fail 'Node.js is missing. Install it (winget install OpenJS.NodeJS.LTS), open a new PowerShell window and run this again.' }
-$major = [int]((& node -p 'process.versions.node.split(".")[0]').Trim())
+$major = [int]((& node -v).Trim().TrimStart('v').Split('.')[0])
 if ($major -lt 18) { Fail "Node $major is too old: Fleet View needs 18 or newer (winget upgrade OpenJS.NodeJS.LTS)." }
 Say "Node $(& node -v)"
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail 'git is missing. Install it (winget install Git.Git) and run this again.' }
@@ -44,6 +44,12 @@ if (-not $NoDesktop) {
     try { & npm.cmd ci --no-audit --no-fund --loglevel=error } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { Fail 'npm ci in desktop\ failed (see above). Run this again, or add -NoDesktop to use the Edge window.' }
     Set-Content -Path $stamp -Value $want -Encoding ascii
+  }
+  # some npm setups skip electron's postinstall, which downloads electron.exe: fetch it here then
+  if (-not (Test-Path (Join-Path $desk 'node_modules\electron\dist\electron.exe'))) {
+    Say 'Downloading electron.exe...'
+    & node (Join-Path $desk 'node_modules\electron\install.js')
+    if ($LASTEXITCODE -ne 0) { Write-Host '  electron.exe could not be downloaded; Fleet View opens in an Edge window until this runs again.' -ForegroundColor Yellow }
   }
   Say 'Desktop window ready'
 }

@@ -79,7 +79,7 @@ const menuOn = (lines) => {
 };
 async function menuUp(id) {
   for (const until = Date.now() + SCREEN_WAIT_MS; ;) {
-    const lines = screenText(id, 40); // the first call starts building the view
+    const lines = screenText(id, 40, { rows: true }); // the first call starts building the view
     if (screenReady(id) && lines.length) return menuOn(lines);
     if (Date.now() >= until) return null;
     await sleep(SCREEN_POLL_MS);
@@ -88,7 +88,7 @@ async function menuUp(id) {
 // just before the Enter: the view is built by now, so one look (a screen that went unreadable counts as a menu)
 function menuNow(id) {
   if (!screenReady(id)) return true;
-  const lines = screenText(id, 40);
+  const lines = screenText(id, 40, { rows: true });
   return !lines.length || menuOn(lines);
 }
 

@@ -696,7 +696,9 @@ export function interruptSession(id) {
 }
 
 // The rendered lines of a hosted session's screen, the last lastN of them (soft-wrapped rows joined, blank rows at
-// the bottom dropped), as Claude drew them: what the Chat tab reads for menus, the spinner and the mode. [] until
+// the bottom dropped), as Claude drew them: what the Chat tab reads for the spinner and the mode. o.rows: the rows
+// as drawn, not joined, for menus (Claude Code pads a menu's rows to the full width, which ConPTY then marks as
+// wrapped, and joined they'd hide its options: "❯ 1. Yes      Some description   2. No" on one line). [] until
 // its view holds the screen: the first call makes the view off-screen (o.sizeEl sizes it when this page never
 // sized its pty) and feeds it the snapshot, so call it again on the next poll.
 const preparing = new Set();
@@ -711,7 +713,7 @@ export function screenText(id, lastN = 40, o = {}) {
     const line = b.getLine(y);
     if (!line) continue;
     const text = line.translateToString(true);
-    if (line.isWrapped && out.length) out[out.length - 1] += text; else out.push(text);
+    if (line.isWrapped && out.length && !o.rows) out[out.length - 1] += text; else out.push(text);
   }
   while (out.length && !out[out.length - 1].trim()) out.pop();
   return out.slice(-lastN);
