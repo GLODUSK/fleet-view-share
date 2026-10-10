@@ -15,7 +15,7 @@
 // read 2 files", that opens to show those rows; while a step runs, the line says which. Todo lists, plans and
 // questions stay out in the open.
 // Selecting text shows a Reply button that hands the text to the compose box (the 'fv-chat-quote' event).
-// A "/pickup <file>" note has an Open link to that handoff summary (in the viewer, viewer.js).
+// A "/pickup <file>" note has a file icon that opens that handoff summary (in the viewer, viewer.js).
 // Scrolled up past your last message, a bar at the top shows it; a click scrolls back to it.
 // Above the compose box, a tray lists what the session runs in the background (shells, async agents, workflows,
 // monitors: the reply's `bg`, see conversation.js), like the task list under a Claude Code terminal. Folded it is
@@ -592,10 +592,10 @@ function renderItem(it, c) {
   }
   return el;
 }
-// "/pickup <handoff file>": an Open link to the summary, in Fleet View's own viewer (Ctrl+click: VS Code)
+// "/pickup <handoff file>": a file icon that opens the summary, in Fleet View's own viewer (Ctrl+click: VS Code)
 function pickupOpen(text) {
   const m = /^\/pickup\s+"?([^"\n]+?\.md)"?\s*$/i.exec(text);
-  return m ? `<span ${pathAttrs(m[1]).replace('class="fpath"', 'class="fpath cn-open"')}>${icon('file', 12)}<span>Open</span></span>` : '';
+  return m ? `<span ${pathAttrs(m[1]).replace('class="fpath"', 'class="fpath cn-open" aria-label="Open the handoff summary"')}>${icon('file', 12)}</span>` : '';
 }
 const isLongNote = (t) => String(t || '').length > 160 || String(t || '').includes('\n');
 

@@ -356,7 +356,7 @@ html:not(.glass) .tb-diff { background: #0c0f17; }
 .ci-note { display: flex; justify-content: center; text-align: center; color: var(--faint); font: 11.5px/1.45 var(--font-ui); padding: 0 12px; }
 .ci-note .cn-t { max-width: 100%; overflow-wrap: anywhere; }
 .ci-note.cmd .cn-t { font: 11.5px/1.45 var(--font-mono); color: var(--dim); padding: 1px 8px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); }
-.ci-note .cn-open { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 1px 8px; border-radius: 10px; color: var(--dim); background: rgba(255, 255, 255, 0.06); text-decoration: none; }
+.ci-note .cn-open { display: inline-flex; align-items: center; margin-left: 6px; padding: 3px 5px; border-radius: 10px; color: var(--dim); background: rgba(255, 255, 255, 0.06); text-decoration: none; }
 .ci-note .cn-open:hover { color: var(--text, #fff); background: rgba(255, 255, 255, 0.12); }
 .ci-note.bad { color: rgba(255, 120, 132, 0.62); }
 details.ci-note { flex-direction: column; align-items: center; }
