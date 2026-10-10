@@ -1936,6 +1936,9 @@ onRekey((oldKey, id) => {
   if (pickIntent?.id === oldKey) pickIntent.id = id;
   if (tabWant?.id === oldKey) tabWant.id = id;
   if (mapRekey) { try { mapRekey(oldKey, id); } catch (e) { console.error(e); } }
+  // the multi-selection too: else markMulti drops the new key as gone, and a selection that took the new session
+  // along (Ctrl+click after it was picked) falls back to one conversation, whose menu has no "Give orders"
+  if (multi.has(oldKey)) { setMulti([...multi].map((x) => (x === oldKey ? id : x)), 'cards'); return; }
   render();
 });
 // cards, tiles, repo chips and finished rows; the map opens its own (ui.contextMenu). The browser's menu stays

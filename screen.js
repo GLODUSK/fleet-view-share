@@ -189,6 +189,22 @@ const isBoxEdge = (l) => /^\s*[╭╰┌└][─━═]/.test(l);
 // a line of an older boxed dialog: "│ text │" -> "  text"
 const unbox = (l) => String(l ?? '').replace(/^(\s*)[│┃](\s?)/, '$1 $2').replace(/\s*[│┃]\s*$/, '');
 const OPT_RE = /^(\s*)([❯›])?\s*(\d{1,2})[.)]\s+(.*\S)\s*$/;
+// The prompt box: a "❯" row right under a rule, closed by another rule below it. A past message on the screen
+// ("❯ 4. text" in the scrollback) and the text typed in the box look like a pointed-at option, so a reply ending
+// in "3. …" over a box holding "4. … 5. …" would read as a menu. AskUserQuestion's "❯ 4. Chat about this" sits
+// under a rule too, but nothing closes it: its keys line ("Enter to select · ↑/↓ to navigate") follows.
+const MENU_KEYS = /\bEnter to (?:select|confirm)\b|↑\/↓ to (?:navigate|select)|\bEsc to cancel\b/i;
+function promptBoxAt(L, i) {
+  if (!/^\s*❯(\s|$)/.test(L[i])) return false;
+  let k = i - 1;
+  while (k >= 0 && !L[k].trim()) k--;
+  if (k < 0 || !isRule(L[k])) return false;
+  for (let j = i + 1; j < L.length && j <= i + 30; j++) {
+    if (MENU_KEYS.test(L[j])) return false;
+    if (isRule(L[j])) return true;
+  }
+  return false;
+}
 
 // What kind of menu it is, so a caller can tell a question it may answer from a tool call it must not approve:
 //   'question'   AskUserQuestion: its tab bar (☐ / ☒ / ✔ Submit), its "Type something." / "Chat about this"
@@ -246,6 +262,9 @@ function menuDetails(lines) {
   if (first.on && k >= 0 && isRule(L[k])) return null; // the prompt box with a typed list in it
   // the prompt drawn under it: the menu is not what Claude waits on
   for (let j = last.i + 1; j < L.length; j++) if (/^\s*❯(\s|$)/.test(L[j]) && !OPT_RE.test(L[j])) return null;
+  // the prompt box among its options or under them (a typed "4. …" continuing a reply's "3. …"): no menu is up,
+  // since Claude Code hides the box while one is
+  for (let j = first.i; j < L.length; j++) if (promptBoxAt(L, j)) return null;
   // descriptions: the lines under an option indented past its number
   const options = run.map((o, x) => {
     const end = x + 1 < run.length ? run[x + 1].i : Math.min(L.length, o.i + 3);
