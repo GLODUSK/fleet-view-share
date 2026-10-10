@@ -122,6 +122,7 @@ import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { mountUsage } from './usage.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner } from './compose.js';
+import { forkAt } from './forkat.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects'];
 const params = new URLSearchParams(location.search);
@@ -2052,11 +2053,14 @@ async function forkFromMenu(s) {
   ui.setSelected(r.key, 'explicit');
 }
 // A queued message's Fork / New chat (chat.js, 'fv-chat-fork'): it is out of Claude Code's queue by now; a fork of
-// its conversation (or a new one in its folder) starts in the panel and gets it once it is up (orders.js sendWhenUp)
+// its conversation (or a new one in its folder) starts in the panel and gets it once it is up (orders.js sendWhenUp).
+// how 'at' (Fork on a message in the feed): the fork goes back to just before that message (forkat.js), which then
+// waits in its chat box; nothing left any queue, so a failure needs no clipboard
 window.addEventListener('fv-chat-fork', async (e) => {
   const d = e.detail || {};
   const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === d.id);
   const text = String(d.text || '');
+  if (d.how === 'at') { forkFromMessage(s, text, d.nth | 0); return; }
   const fork = d.how !== 'new';
   const why = !s ? 'that conversation is no longer listed' : !s.cwd ? 'no folder known for it' : '';
   const r = why ? { ok: false, message: why } : await createSession({ cwd: s.cwd, account: s.account, ...(fork ? { forkFrom: s.id } : {}), ...newSize() });
@@ -2071,6 +2075,16 @@ window.addEventListener('fv-chat-fork', async (e) => {
     + (d.images ? ' (without its images)' : ''), C.text);
   ui.setSelected(r.key, 'explicit');
 });
+async function forkFromMessage(s, text, nth) {
+  const why = !s ? 'that conversation is no longer listed' : !s.cwd ? 'no folder known for it' : '';
+  const r = why ? { ok: false, message: why } : await createSession({ cwd: s.cwd, account: s.account, forkFrom: s.id, ...newSize() });
+  if (!r || !r.ok) { toast(`Could not fork it: ${(r && r.message) || 'failed'}`, C.red); return; }
+  toast(`Forking ${s.name} from your message: the fork goes back to just before it…`, C.text);
+  ui.setSelected(r.key, 'explicit');
+  const w = await forkAt(r.key, text, nth);
+  if (w.ok) toast('The fork is back to just before your message: it waits in the chat box to edit and send', C.text);
+  else toast(`The fork has the whole conversation: it could not go back to your message (${w.message})`, C.red, null, 9000);
+}
 // ---------- Rename ----------
 // A conversation's name in Fleet View: right-click "Rename" (a text box in the menu) or the panel's title (detail.js,
 // double-click, the pencil or F2). POST /rename keeps it in settings.names, and it wins over Claude Code's own title

@@ -31,7 +31,9 @@
 // A long message (yours, sent or shown) folds to a few lines behind "Show more", like Claude Code's pasted text.
 // Rewind on one of your messages ('fv-chat-rewind') runs Claude Code's /rewind back to just before it; the
 // conversation then drops what came after (the reply's `cut` changes, and the list loads again). Edit opens the
-// message in place; its Send is a Rewind that then sends the edited text instead (the event's `edit`).
+// message in place; its Send is a Rewind that then sends the edited text instead (the event's `edit`). Fork on
+// one of your messages ('fv-chat-fork', how 'at') starts a fork of the conversation that goes back to just before
+// that message (forkat.js), and the message waits in the fork's chat box; this conversation stays as it is.
 // File paths open in Fleet View's own viewer (viewer.js) instead of VS Code: the file on a Read, Edit, Write,
 // MultiEdit or NotebookEdit row (and in its opened body), the paths a Grep or Glob printed, and inline code in a
 // reply that looks like a path (`web/chat.js`, `chat.js:120`, `C:\x\y`: a known extension, an absolute path, or a
@@ -544,7 +546,7 @@ function renderItem(it, c) {
         : `<span class="cu-noimg">${icon('image', 13)}<span>image too large to show</span></span>`)).join('');
       const long = isLong(text);
       el.innerHTML = `<div class="cu-bubble${long ? ' clamp' : ''}"${timeTitle(it.t)}>${imgs ? `<div class="cu-imgs">${imgs}</div>` : ''}${text ? `<div class="cu-body">${userTextHtml(text)}</div>` : ''}${long ? moreBtn(text) : ''}</div>`
-        + (text ? `<div class="ci-acts">${copyBtn('msg', 'Copy message')}<button type="button" class="cp" data-edit title="Edit: change this message and send it again (goes back to just before it first)" aria-label="edit and resend this message">${icon('edit', 14)}</button><button type="button" class="cp" data-rewind title="Rewind: go back to just before this message (Claude Code's /rewind)" aria-label="rewind to before this message">${icon('rewind', 14)}</button></div>` : '');
+        + (text ? `<div class="ci-acts">${copyBtn('msg', 'Copy message')}<button type="button" class="cp" data-edit title="Edit: change this message and send it again (goes back to just before it first)" aria-label="edit and resend this message">${icon('edit', 14)}</button><button type="button" class="cp" data-rewind title="Rewind: go back to just before this message (Claude Code's /rewind)" aria-label="rewind to before this message">${icon('rewind', 14)}</button><button type="button" class="cp" data-fork-at title="Fork from here: a new conversation with the history before this message, and this message in its chat box to edit and send. This one stays as it is" aria-label="fork the conversation from this message">${icon('branch', 14)}</button></div>` : '');
       el._text = text;
       el._images = (it.images || []).map((im) => im?.src);
       break;
@@ -745,11 +747,19 @@ async function unsend(c, el, fork = null) {
 // Rewind on one of your messages: which of the same text it is, counted from the end, so the /rewind list
 // (newest at the bottom) picks the right one
 // edit: the text to send in its place once the rewind is done (Edit)
-function rewind(c, el, edit = null) {
+function nthFromEnd(c, el) {
   const text = el._text || '';
   const same = c.items.filter((it) => it.kind === 'user' && norm(it.text) === norm(text));
   const k = same.findIndex((it) => String(it.key) === el.dataset.key);
-  c.pane.dispatchEvent(new CustomEvent('fv-chat-rewind', { detail: { id: c.id, text, nth: k < 0 ? 0 : same.length - 1 - k, edit } }));
+  return k < 0 ? 0 : same.length - 1 - k;
+}
+function rewind(c, el, edit = null) {
+  c.pane.dispatchEvent(new CustomEvent('fv-chat-rewind', { detail: { id: c.id, text: el._text || '', nth: nthFromEnd(c, el), edit } }));
+}
+// Fork on one of your messages: app.js starts the fork, forkat.js takes it back to just before the message
+function forkAt(c, el) {
+  if (!el._text) return;
+  window.dispatchEvent(new CustomEvent('fv-chat-fork', { detail: { id: c.id, text: el._text, how: 'at', nth: nthFromEnd(c, el) } }));
 }
 // Edit on one of your messages: its bubble becomes a text box with Cancel and Send. Send rewinds to just before
 // the message (Claude Code asks what to restore, in the menu card) and then sends the new text in its place.
@@ -932,6 +942,7 @@ function wire(c) {
     else if ((b = t.closest('[data-now]'))) { e.preventDefault(); sendNow(c); }
     else if ((b = t.closest('[data-unsend]'))) { e.preventDefault(); unsend(c, b.closest('.ci')); }
     else if ((b = t.closest('[data-fork]'))) { e.preventDefault(); unsend(c, b.closest('.ci'), b.dataset.fork === 'new' ? 'new' : 'fork'); }
+    else if ((b = t.closest('[data-fork-at]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) forkAt(c, el); }
     else if ((b = t.closest('[data-rewind]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) rewind(c, el); }
     else if ((b = t.closest('[data-edit]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) editMsg(c, el); }
     else if ((b = t.closest('[data-img]'))) { e.preventDefault(); const src = b.closest('.ci')?._images?.[+b.dataset.img]; if (okImage(src)) showImage(src); }
