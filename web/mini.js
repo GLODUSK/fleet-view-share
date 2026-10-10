@@ -23,7 +23,7 @@ const COLOR = { WORKING: '#3fd8ff', AGENTS: '#a47bff', ASKING: '#ffc24a', QUESTI
 const ICON = { ASKING: 'ask', QUESTION: 'ask', ERROR: 'error', STALLED: 'waiting' };
 const HEX = /^#[0-9a-f]{3,8}$/i;
 const colorOf = (s) => COLOR[s.state] || (typeof s.stateColor === 'string' && HEX.test(s.stateColor) ? s.stateColor : '#8a92b2');
-const acct = (a) => ((a === 'A' || a === 'B') && !(state && Array.isArray(state.accounts) && state.accounts.length === 1) ? `<span class="acct acct-${a}" title="Claude account ${a}">${a}</span>` : '');
+const acct = (a) => (typeof a === 'string' && /^[A-Z]$/.test(a) && !(state && Array.isArray(state.accounts) && state.accounts.length === 1) ? `<span class="acct acct-${a}" title="Claude account ${a}">${a}</span>` : '');
 const FINISHED_MS = 3600e3, FINISHED_MAX = 3;
 
 let state = null, skew = 0, offline = false;

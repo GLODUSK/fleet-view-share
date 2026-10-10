@@ -45,6 +45,9 @@
 import { esc } from './cards.js';
 import { icon } from './icons.js';
 
+// a Claude account letter: one letter (A, B, C, ...), else B, the default login
+const acctOf = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
+
 const ID_RE = /^[0-9a-f-]{36}$/i;
 // a hosted session's key: a conversation id, or new-<n> for a new conversation that has no id yet
 const KEY_RE = /^(?:[0-9a-f-]{36}|new-\d{1,9})$/i;
@@ -91,7 +94,7 @@ function applyList(list) {
     if (dismissed.has(p.id) && !p.alive && dismissed.get(p.id) === p.startedAt) continue;
     hosts.set(p.id, {
       id: p.id, pid: p.pid ?? null, alive: !!p.alive, exitCode: p.exitCode ?? null, startedAt: p.startedAt ?? 0,
-      pending: !!p.pending, created: !!p.created, cwd: typeof p.cwd === 'string' ? p.cwd : null, account: p.account === 'A' ? 'A' : 'B',
+      pending: !!p.pending, created: !!p.created, cwd: typeof p.cwd === 'string' ? p.cwd : null, account: acctOf(p.account),
       status: typeof p.status === 'string' ? p.status : null, interrupted: !!p.interrupted,
       waitingFor: typeof p.waitingFor === 'string' ? p.waitingFor.slice(0, 300) : null, autoContinue: !!p.autoContinue,
       slashPanel: typeof p.slashPanel === 'string' && /^\/[\w:-]{1,39}$/.test(p.slashPanel) ? p.slashPanel : null,
@@ -162,7 +165,7 @@ export async function createSession({ cwd, account, cols, rows, forkFrom } = {})
   const t = termApi();
   if (!t || typeof t.create !== 'function') return { ok: false, message: 'new sessions need the Fleet View desktop window' };
   let r;
-  try { r = await t.create({ cwd, account: account === 'A' ? 'A' : 'B', cols, rows, ...(forkFrom ? { forkFrom } : {}) }); } catch (e) { r = { ok: false, message: String(e?.message || e) }; }
+  try { r = await t.create({ cwd, account: acctOf(account), cols, rows, ...(forkFrom ? { forkFrom } : {}) }); } catch (e) { r = { ok: false, message: String(e?.message || e) }; }
   // a host from before forks would start a plain new conversation: it says forkFrom back when it forked
   if (forkFrom && r && r.ok && r.forkFrom !== forkFrom.toLowerCase()) {
     if (typeof r.key === 'string') { try { t.kill(r.key); } catch {} }
@@ -183,7 +186,7 @@ export async function sendToAccount(s, account, size = {}) {
   preview.delete(s.id);
   disposeView(s.id);
   let r;
-  try { r = await t.sendTo({ id: s.id, cwd: s.cwd || null, account: account === 'A' ? 'A' : 'B', cols: size.cols, rows: size.rows }); } catch (e) { r = { ok: false, message: String(e?.message || e) }; }
+  try { r = await t.sendTo({ id: s.id, cwd: s.cwd || null, account: acctOf(account), cols: size.cols, rows: size.rows }); } catch (e) { r = { ok: false, message: String(e?.message || e) }; }
   if (r && r.ok && size.cols > 0 && size.rows > 0) sizes.set(s.id, { cols: size.cols, rows: size.rows });
   await refreshHosts();
   return r || { ok: false, message: 'could not send it' };
@@ -487,7 +490,7 @@ function openHtml(s, pane) {
     // a terminal (or another Claude window) has it open right now: say where, open here only on purpose
     return `<div class="s-card s-elsewhere"><div class="s-ic">${icon('shell', 20)}</div><div class="s-title">Open in another window</div>`
       + `<div class="s-text">A Claude Code window has this conversation open right now. Type into it there: look for the terminal tab named <b>${esc(s.name)}</b>`
-      + `${s.account === 'A' || s.account === 'B' ? ` (account ${esc(s.account)})` : ''}. Opening it here as well runs a second copy, and both write to the same log.</div>`
+      + `${/^[A-Z]$/.test(s.account || '') ? ` (account ${esc(s.account)})` : ''}. Opening it here as well runs a second copy, and both write to the same log.</div>`
       + whereHtml + errHtml
       + `<div class="s-actions"><button type="button" class="btn s-go" data-s="open-anyway">${icon('shell', 15)}<span>Open here anyway</span></button></div></div>`;
   }
@@ -578,7 +581,7 @@ async function startPty(s, { cols, rows }, stillWanted = () => true) {
   }
   if (!stillWanted()) return null;
   let r = null;
-  try { r = await t.open({ id: s.id, cwd: s.cwd || null, account: s.account === 'A' ? 'A' : 'B', cols, rows }); } catch (e) { r = { ok: false, message: String(e?.message || e) }; }
+  try { r = await t.open({ id: s.id, cwd: s.cwd || null, account: acctOf(s.account), cols, rows }); } catch (e) { r = { ok: false, message: String(e?.message || e) }; }
   if (r && r.ok) sizes.set(s.id, { cols, rows });
   return r;
 }
@@ -1035,7 +1038,7 @@ export function installFakeTerm() {
     async create({ cwd, account } = {}) {
       if (typeof cwd !== 'string' || !cwd) return { ok: false, message: 'no folder given' };
       const key = `new-${++newSeq}`;
-      const p = { id: key, cwd, account: account === 'A' ? 'A' : 'B', pid: 42000 + newSeq, alive: true, exitCode: null, startedAt: Date.now(), buf: '', line: '', raw: '', isNew: true, created: true, status: 'idle' };
+      const p = { id: key, cwd, account: acctOf(account), pid: 42000 + newSeq, alive: true, exitCode: null, startedAt: Date.now(), buf: '', line: '', raw: '', isNew: true, created: true, status: 'idle' };
       ptys.set(key, p);
       setTimeout(() => emit(p.id, welcome(p)), 80);
       if (fake.autoRekeyMs > 0) setTimeout(() => rekey(key), fake.autoRekeyMs);

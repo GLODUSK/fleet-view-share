@@ -145,7 +145,8 @@ function list(c) {
 const logPaths = new Map(); // id -> path
 const logMiss = new Map(); // id -> when a look found nothing
 function projectRoots() {
-  const out = [path.join(os.homedir(), '.claude', 'projects'), path.join(os.homedir(), '.claude-a', 'projects')];
+  const out = [path.join(os.homedir(), '.claude', 'projects')];
+  try { for (const e of fs.readdirSync(os.homedir())) if (/^\.claude-[a-z]$/i.test(e)) out.push(path.join(os.homedir(), e, 'projects')); } catch {}
   if (process.env.CLAUDE_CONFIG_DIR) out.push(path.join(process.env.CLAUDE_CONFIG_DIR, 'projects'));
   return [...new Set(out)];
 }

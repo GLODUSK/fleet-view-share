@@ -14,7 +14,7 @@
 // The 1h / 6h / 24h chips in its head look further back. Esc, its × or a click outside closes it.
 //
 // Calm by rule, like everything here: it drops in once (180 ms), rows never flash, nothing counts up.
-import { esc, fmtCost, clockTime, ago, C } from './cards.js';
+import { esc, fmtCost, clockTime, ago, C, acctTag } from './cards.js';
 import { icon } from './icons.js';
 
 const KEY = 'fv.lastSeen';
@@ -170,7 +170,7 @@ export function mountSince({ fetchJson, onPick, fallback } = {}) {
     const cost = d.cost || {};
     const by = cost.byAccount || {};
     const costLine = `<div class="sn-cost">${icon('cost', 13)}<b>${esc(fmtCost(cost.total || 0))}</b><span class="faint">at API prices</span>`
-      + ['A', 'B'].map((a) => `<span class="acct acct-${a}">${a}</span><span>${esc(fmtCost(by[a] || 0))}</span>`).join('') + '</div>';
+      + Object.keys(by).sort().map((a) => acctTag(a) && `${acctTag(a)}<span>${esc(fmtCost(by[a] || 0))}</span>`).join('') + '</div>';
     const body = [
       section('waiting', C.gold, 'Needs you', needs),
       section('error', C.red, 'Failed', failed),
@@ -200,8 +200,8 @@ export function sinceFromState(st, t) {
   const ses = st?.sessions || [];
   const NEED = new Set(['ASKING', 'QUESTION', 'ERROR', 'STALLED']);
   const total = ses.reduce((n, s) => n + (Number(s.cost) || 0), 0);
-  const byAccount = { A: 0, B: 0 };
-  for (const s of ses) if (s.account === 'A' || s.account === 'B') byAccount[s.account] += Number(s.cost) || 0;
+  const byAccount = Object.fromEntries((Array.isArray(st?.accounts) && st.accounts.length ? st.accounts : ['A', 'B']).map((a) => [a, 0]));
+  for (const s of ses) if (/^[A-Z]$/.test(s.account || '')) byAccount[s.account] = (byAccount[s.account] || 0) + (Number(s.cost) || 0);
   const pr = (a) => { const m = /PR #(\d+)/.exec(a.text || ''); return m ? Number(m[1]) : null; };
   return {
     ok: true, since: t, now,

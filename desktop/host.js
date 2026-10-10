@@ -13,7 +13,7 @@
 // New sessions (create): a plain interactive `claude` in a repo folder, or a fork of a conversation (`claude
 // --resume <id> --fork-session`: a new conversation with its history), keyed "new-<n>" until Claude Code
 // says which conversation it is. Every interactive claude writes <config>/sessions/<pid>.json with its
-// sessionId (~/.claude/sessions for account B, ~/.claude-a/sessions for A; both are read, deduplicated by
+// sessionId (~/.claude/sessions for account B, ~/.claude-<x>/sessions for the others; all are read, deduplicated by
 // their real path). While any pty runs, those files are read every 800 ms: a new file whose process descends
 // from a pending pty's shell (checked once per candidate through Win32_Process; without that check, a file
 // in the same folder started after the pty) re-keys the pty to its sessionId, and a rekey event goes out.
@@ -171,8 +171,15 @@ function settings(fresh) {
 function projectRoots() {
   if (isTestPipe() && process.env.FV_HOST_PROJECTS_DIR) return [process.env.FV_HOST_PROJECTS_DIR];
   const home = process.env.USERPROFILE || os.homedir();
-  return [path.join(home, '.claude', 'projects'), path.join(home, '.claude-a', 'projects')];
+  return [path.join(home, '.claude', 'projects'), ...acctHomes().map((d) => path.join(d, 'projects'))];
 }
+// every other account's config folder: ~/.claude-<letter> (~/.claude-a is A, ~/.claude-c is C, ...)
+function acctHomes() {
+  const home = process.env.USERPROFILE || os.homedir();
+  try { return fs.readdirSync(home).filter((e) => /^\.claude-[a-z]$/i.test(e)).map((e) => path.join(home, e)); } catch { return []; }
+}
+// an account letter as the callers send it: one letter, else B (the default ~/.claude)
+const acctId = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
 function findTranscript(id, cwd) {
   const name = `${String(id).toLowerCase()}.jsonl`;
   const at = (f) => { try { const st = fs.statSync(f); return st.isFile() ? { file: f, size: st.size } : null; } catch { return null; } };
@@ -249,8 +256,8 @@ function childEnv(account, launchKey) {
     if (DROP_EXACT.has(K) || DROP_PREFIX.some((p) => K.startsWith(p))) continue;
     env[k] = v;
   }
-  // account A: ~/.claude-a; B (or anything else): the default ~/.claude, no CLAUDE_CONFIG_DIR
-  if (account === 'A') env.CLAUDE_CONFIG_DIR = path.join(process.env.USERPROFILE || os.homedir(), '.claude-a');
+  // account X: ~/.claude-x (A: ~/.claude-a, C: ~/.claude-c, ...); B (or anything else): the default ~/.claude, no CLAUDE_CONFIG_DIR
+  if (acctId(account) !== 'B') env.CLAUDE_CONFIG_DIR = path.join(process.env.USERPROFILE || os.homedir(), '.claude-' + acctId(account).toLowerCase());
   env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = '1';
   if (launchKey) env.CLAUDE_LAUNCH_KEY = launchKey;
   env.COLORTERM = 'truecolor';
@@ -279,7 +286,7 @@ function treeKill(pid, sync) {
 function sessionDirs(extra) {
   const home = process.env.USERPROFILE || os.homedir();
   const out = [], seen = new Set();
-  for (const d of [...(extra || []), path.join(home, '.claude', 'sessions'), path.join(home, '.claude-a', 'sessions')]) {
+  for (const d of [...(extra || []), path.join(home, '.claude', 'sessions'), ...acctHomes().map((h) => path.join(h, 'sessions'))]) {
     let real;
     try { real = fs.realpathSync(d).toLowerCase(); } catch { continue; }
     if (seen.has(real)) continue;
@@ -419,7 +426,7 @@ function createPtys(opts = {}) {
     }
     const t = {
       id: key, pty: p, pid: p.pid, alive: true, exitCode: null, startedAt: Date.now(), chunks: [], size: 0, pending: '', timer: null, dismissed: false,
-      cwd, account: o.account === 'A' ? 'A' : 'B', cols, rows, isNew: false, created: false, claudePid: null, status: null, known: null,
+      cwd, account: acctId(o.account), cols, rows, isNew: false, created: false, claudePid: null, status: null, known: null,
       interrupted: false, restored: false, launchKey, pickup: null, handoffFrom: null, waitingFor: null, seenIdle: false, idleSince: 0,
       outAt: 0, inputAt: 0, line: '', inPaste: false, slash: null, nudge: null, restartBy: false, ...extra,
     };
@@ -489,7 +496,7 @@ function createPtys(opts = {}) {
     return r;
   }
 
-  // "Send to Claude B" (or A): the conversation carries on under the other account in a fresh conversation. Its
+  // "Send to Claude B" (or A, C, ...): the conversation carries on under another account in a fresh conversation. Its
   // claude here, if one runs, is ended first (Ctrl+C, as kill does); then it is resumed under o.account with
   // /handoff as its first prompt. The summary's restart request starts the /pickup in its place under that same
   // account (handoff above). The prompt is fixed text: nothing from the caller goes into the command line.
@@ -498,7 +505,7 @@ function createPtys(opts = {}) {
     const { id } = o || {};
     if (typeof id !== 'string' || !ID_RE.test(id)) return Promise.reject(new Error('bad conversation id'));
     if (!loadPty()) return Promise.resolve(noPty());
-    const account = o.account === 'A' ? 'A' : 'B';
+    const account = acctId(o.account);
     const old = terms.get(id);
     const gone = old && old.alive ? new Promise((r) => { old.dismissed = true; end(old, 2500, r); }) : Promise.resolve();
     return gone.then(() => {
@@ -979,7 +986,7 @@ function runHost() {
           const file = HO.safeFile(s.pickup);
           let r = { ok: false, message: 'the handoff file is gone' };
           if (file) {
-            try { r = ptys.startPickup(from, file, { cwd: s.cwd, account: s.account === 'A' ? 'A' : 'B', cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: from }); } catch (e) { r = { ok: false, message: e.message }; }
+            try { r = ptys.startPickup(from, file, { cwd: s.cwd, account: acctId(s.account), cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: from }); } catch (e) { r = { ok: false, message: e.message }; }
           }
           log(`restore: pickup of ${s.pickup} ${r.ok ? `started again (pid ${r.pid})` : `failed: ${r.message}`}`);
           if (r.ok) n++;
@@ -1002,7 +1009,7 @@ function runHost() {
       }
       let r;
       try {
-        r = ptys.open({ id, cwd: s.cwd, account: s.account === 'A' ? 'A' : 'B', cols: s.cols, rows: s.rows }, { interrupted, restored: true, nudge });
+        r = ptys.open({ id, cwd: s.cwd, account: acctId(s.account), cols: s.cols, rows: s.rows }, { interrupted, restored: true, nudge });
       } catch (e) { r = { ok: false, message: e.message }; }
       log(`restore: ${id} ${r.ok ? `resumed (pid ${r.pid})${interrupted ? ', was interrupted' : ''}${nudge ? `, note due (${nudge.kind})` : ''}` : `failed: ${r.message}`}`);
       if (r.ok) n++;
@@ -1104,16 +1111,16 @@ function runHost() {
       switch (msg.op) {
         case 'open': {
           const o = a[0] && typeof a[0] === 'object' ? a[0] : {};
-          return reply(ptys.open({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: o.account === 'A' ? 'A' : 'B', cols: o.cols, rows: o.rows }));
+          return reply(ptys.open({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: acctId(o.account), cols: o.cols, rows: o.rows }));
         }
         case 'sendTo': {
           const o = a[0] && typeof a[0] === 'object' ? a[0] : {};
-          return ptys.sendTo({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: o.account === 'A' ? 'A' : 'B', cols: o.cols, rows: o.rows }).then(reply, fail);
+          return ptys.sendTo({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: acctId(o.account), cols: o.cols, rows: o.rows }).then(reply, fail);
         }
         case 'create': {
           const o = a[0] && typeof a[0] === 'object' ? a[0] : {};
           if (typeof o.cwd !== 'string' || !o.cwd) return reply({ ok: false, message: 'no folder given' });
-          return reply(ptys.create({ cwd: o.cwd, account: o.account === 'A' ? 'A' : 'B', cols: o.cols, rows: o.rows, chrome: typeof o.chrome === 'boolean' ? o.chrome : undefined,
+          return reply(ptys.create({ cwd: o.cwd, account: acctId(o.account), cols: o.cols, rows: o.rows, chrome: typeof o.chrome === 'boolean' ? o.chrome : undefined,
             forkFrom: typeof o.forkFrom === 'string' && ID_RE.test(o.forkFrom) ? o.forkFrom : undefined,
             model: typeof o.model === 'string' && MODEL_RE.test(o.model) ? o.model : undefined, effort: EFFORT_LEVELS.has(o.effort) ? o.effort : undefined }));
         }

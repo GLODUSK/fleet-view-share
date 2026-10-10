@@ -176,7 +176,7 @@ function createHost(opts = {}) {
       if (!o || typeof o.id !== 'string' || !H.ID_RE.test(o.id)) return Promise.reject(new Error('bad conversation id'));
       return askOk('open', o);
     },
-    // "Send to Claude A/B" (host.js sendTo): ends it here, then resumes it under o.account with /handoff
+    // "Send to Claude A/B/C..." (host.js sendTo): ends it here, then resumes it under o.account with /handoff
     sendTo: async (o) => {
       if (!o || typeof o.id !== 'string' || !H.ID_RE.test(o.id)) throw new Error('bad conversation id');
       if (!ready && !(await connect(8000))) return { ok: false, message: 'the session host is not running; try again' };

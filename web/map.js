@@ -115,7 +115,7 @@
 const COL = {
   bg: '#0a0c13', text: '#eef0fa', dim: '#8a92b2', faint: '#4c5372',
   ember: '#ff6a2b', gold: '#ffc24a', rose: '#ff4d8d', violet: '#a47bff', cyan: '#3fd8ff',
-  mint: '#3dffa8', red: '#ff4d5e', accA: '#3fb950', accB: '#d97757',
+  mint: '#3dffa8', red: '#ff4d5e', accA: '#3fb950', accB: '#d97757', accC: '#58a6ff',
 };
 const UI = "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif";
 const DISPLAY = "'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif";
@@ -201,7 +201,10 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const hashNum = (s) => { let h = 7; for (const ch of String(s)) h = (h * 33 + ch.charCodeAt(0)) >>> 0; return (h % 1000) / 1000; };
 const ctxColor = (pct) => (pct > 90 ? COL.red : pct >= 70 ? COL.gold : COL.mint);
 const ctxPct = (s) => (s.context && s.context.limit ? Math.round((100 * s.context.used) / s.context.limit) : null);
-const accColor = (a) => (a === 'A' ? COL.accA : COL.accB);
+// each Claude account's colour (the same as its Windows Terminal tab); the accounts drawn so far go in the legend
+const ACC_COL = { A: COL.accA, B: COL.accB, C: COL.accC, D: '#bc8cff', E: '#e3b341', F: '#f778ba' };
+const accSeen = new Set(['A', 'B']);
+const accColor = (a) => { const k = typeof a === 'string' && /^[A-Z]$/.test(a) ? a : 'B'; accSeen.add(k); return ACC_COL[k] || COL.dim; };
 const lastParts = (rel) => String(rel || '').replace(/\\/g, '/').split('/').filter(Boolean).slice(-2).join('/');
 function ago(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -3577,7 +3580,9 @@ function buildLegend() {
   item(pr(13, COL.gold) + `<rect x="19" y="3" width="5" height="8" rx="1.3" fill="none" stroke="${COL.gold}" stroke-width="1.1"/>`, 'PR shipping to the phones (the badge: the app step)');
   sec('Lenses (k)');
   item(orbSvg(6, 10, 2.6, COL.mint) + orbSvg(15, 10, 4, COL.gold) + orbSvg(25, 10, 5.4, COL.red), 'cost: bigger and hotter as it costs more');
-  item(orbSvg(9, 10, 4, COL.accA) + orbSvg(21, 10, 4, COL.accB), 'account: A · B');
+  // the accounts in the legend: up to 3 fit its 30 px swatch
+  const accs = [...accSeen].sort().slice(0, 3), accX = (i) => (accs.length > 2 ? 5 + i * 10 : 8 + i * 14);
+  item(accs.map((a, i) => orbSvg(accX(i) + (accs.length > 2 ? 0 : 1), 10, accs.length > 2 ? 3.4 : 4, ACC_COL[a] || COL.dim)).join(''), 'account: ' + accs.join(' · '));
   item(orbSvg(9, 10, 4, COL.cyan) + orbSvg(21, 10, 4, mixHex(COL.cyan, COL.faint, 0.8)), 'idle: fresh · quiet for an hour');
   item(orbSvg(6, 10, 3.6, COL.mint) + orbSvg(15, 10, 3.6, COL.gold) + orbSvg(24, 10, 3.6, COL.red), 'context: little · much · nearly full');
   sec('Double-click (or click when picked)');
@@ -3588,9 +3593,10 @@ function buildLegend() {
   act('repo: open the folder in Explorer');
   act('right-click a conversation, a repo, a team or a conflict: its menu');
   sec('Accounts');
-  const acc = (cx, c, t) => `<circle cx="${cx}" cy="10" r="6.5" fill="${rgba(c, 0.2)}" stroke="${rgba(c, 0.55)}"/>` +
-    `<text x="${cx}" y="13.2" text-anchor="middle" font-family="Segoe UI Variable Text, Segoe UI" font-weight="700" font-size="9" fill="${c}">${t}</text>`;
-  item(acc(8, COL.accA, 'A') + acc(22, COL.accB, 'B'), 'Claude account A · B');
+  const small = accs.length > 2;
+  const acc = (cx, c, t) => `<circle cx="${cx}" cy="10" r="${small ? 4.8 : 6.5}" fill="${rgba(c, 0.2)}" stroke="${rgba(c, 0.55)}"/>` +
+    `<text x="${cx}" y="${small ? 12.5 : 13.2}" text-anchor="middle" font-family="Segoe UI Variable Text, Segoe UI" font-weight="700" font-size="${small ? 7 : 9}" fill="${c}">${t}</text>`;
+  item(accs.map((a, i) => acc(accX(i), ACC_COL[a] || COL.dim, a)).join(''), 'Claude account ' + accs.join(' · '));
   const keys = document.createElement('div');
   keys.style.cssText = `margin-top:10px;padding-top:8px;border-top:1px solid var(--line, rgba(120,130,170,0.18));color:${COL.dim};font:11px ${CSS_UI}`;
   keys.textContent = 'wheel zoom · drag pan · drag a repo or conversation to pin it · g re-arrange (G unpins all) · 0 recenter · arrows pick · Enter/o open or act · ' +

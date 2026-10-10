@@ -8,7 +8,7 @@ import { icon, verbIcon } from './icons.js';
 export const C = {
   bg: '#0a0c13', panel: '#11141e', line: '#262c42', text: '#eef0fa', dim: '#8a92b2', faint: '#4c5372',
   ember: '#ff6a2b', gold: '#ffc24a', rose: '#ff4d8d', violet: '#a47bff', cyan: '#3fd8ff', mint: '#3dffa8', red: '#ff4d5e',
-  agent: '#71a9ff', acctA: '#3fb950', acctB: '#d97757',
+  agent: '#71a9ff', acctA: '#3fb950', acctB: '#d97757', acctC: '#58a6ff',
 };
 
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -90,7 +90,12 @@ export const hereTag = () => `<span class="here-tag" title="running here, in Fle
 let oneAccount = false;
 export const setAccounts = (list) => { oneAccount = Array.isArray(list) && list.length === 1; };
 export const singleAccount = () => oneAccount;
-export const acctTag = (a) => (a && !oneAccount ? `<span class="acct acct-${esc(a)}" title="Claude account ${esc(a)}">${esc(a)}</span>` : '');
+// each Claude account's colour, the same as its Windows Terminal tab (A green, B orange, C blue, then D, E, F); grey past F
+const ACCT_COLORS = { A: C.acctA, B: C.acctB, C: C.acctC, D: '#bc8cff', E: '#e3b341', F: '#f778ba' };
+export const acctColor = (a) => ACCT_COLORS[a] || C.dim;
+// an account letter: one capital letter (A, B, C, ...)
+export const isAcct = (a) => typeof a === 'string' && /^[A-Z]$/.test(a);
+export const acctTag = (a) => (isAcct(a) && !oneAccount ? `<span class="acct acct-${a}" style="background:${acctColor(a)}" title="Claude account ${a}">${a}</span>` : '');
 export const ctxColor = (f) => (f > 0.9 ? C.red : f >= 0.7 ? C.gold : C.mint);
 
 // withHandoff: also the quiet "182k / 200k" against the size the session hands off at (ctx.handoff, handoff.js)

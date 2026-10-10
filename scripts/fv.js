@@ -18,7 +18,7 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   fv api                                    the server's endpoint list
   fv ls [--all] [--state S] [--repo R]      conversations Fleet View shows (* = hosted and alive)
   fv hosted                                 sessions the desktop app hosts
-  fv start <repo> <prompt> [--account A|B] [--name N] [--model M] [--effort E]
+  fv start <repo> <prompt> [--account A|B|C…] [--name N] [--model M] [--effort E]
            [--fork <id>] [--temp] [--chrome|--no-chrome] [--wait [s]]
   fv send <id> <text> [--wait [s]] [--from <id>]
   fv wait <id> [--timeout s]                until it is ready for you (reply, question, menu, exit)
@@ -26,7 +26,7 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   fv menu <id>                              the select menu it shows, if any
   fv answer <id> <n|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
   fv interrupt <id>                         Esc: stop Claude mid-turn
-  fv open <id> [--account A|B] [--prompt P] [--wait [s]]   resume a conversation in the desktop app
+  fv open <id> [--account A|B|C…] [--prompt P] [--wait [s]]   resume a conversation in the desktop app
   fv transcript <id> [--since n] [--limit m]
   fv stop <id> [--remove]
   fv rm <id>                                hide a conversation from the map (never deletes its log)
@@ -240,7 +240,7 @@ async function run(argv, env) {
   };
   const noMore = (n) => { if (pos.length > n) throw new Usage(`unexpected argument "${pos[n]}"`); };
   const id = async () => encodeURIComponent(await resolveId(call, pos[0]));
-  const acct = (a) => { if (a !== undefined && !/^[AB]$/.test(a)) throw new Usage('--account is A or B'); return a; };
+  const acct = (a) => { if (a !== undefined && !/^[a-z]$/i.test(a)) throw new Usage('--account is one letter: A, B, C…'); return a === undefined ? a : a.toUpperCase(); };
 
   switch (cmd) {
     case 'api': {

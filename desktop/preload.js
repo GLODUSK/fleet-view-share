@@ -20,7 +20,7 @@
 //                                speed behind other windows (main.js turns Chromium's background slow-down off)
 //   fleetDesktop.term            main view only (absent in the mini view): live Claude sessions hosted in the window
 //     term.open({ id, cwd, account, cols?, rows? }) -> Promise<{ ok, message, pid? }>   starts the interactive
-//         `claude --resume <id>` in a pty (rejects a bad id; cwd falls back to home; account 'A' or 'B';
+//         `claude --resume <id>` in a pty (rejects a bad id; cwd falls back to home; account: one letter, 'A', 'B', 'C', ...;
 //         120x32 by default). Already running: ok without starting another. Ended: starts it again.
 //     term.create({ cwd, account, cols?, rows? }) -> Promise<{ ok, message, key?, pid? }>   starts a new
 //         conversation: the interactive `claude` (no --resume) in cwd, which must be a repo root or checkout
@@ -28,7 +28,7 @@
 //         --fork-session` instead, in that conversation's folder: a new conversation with its history.
 //         Keyed key ("new-<n>") until Claude Code writes its sessions/<pid>.json;
 //         then onRekey fires and every call uses the conversation id instead
-//     term.sendTo({ id, cwd, account, cols?, rows? }) -> Promise<{ ok, message, pid? }>   "Send to Claude A/B":
+//     term.sendTo({ id, cwd, account, cols?, rows? }) -> Promise<{ ok, message, pid? }>   "Send to Claude A/B/C...":
 //         ends its claude here if one runs, then resumes it under account with /handoff as the first prompt;
 //         the handoff's pickup starts in its place under that account
 //     term.write(id, data)  term.resize(id, cols, rows)
@@ -75,21 +75,21 @@ const term = {
   open: (o) => {
     const x = o && typeof o === 'object' ? o : {};
     return ipcRenderer.invoke('fv:term-open', {
-      id: String(x.id || ''), cwd: typeof x.cwd === 'string' ? x.cwd : null, account: x.account === 'A' ? 'A' : 'B',
+      id: String(x.id || ''), cwd: typeof x.cwd === 'string' ? x.cwd : null, account: typeof x.account === 'string' && /^[a-z]$/i.test(x.account) ? x.account.toUpperCase() : 'B',
       cols: Number(x.cols) || undefined, rows: Number(x.rows) || undefined,
     });
   },
   sendTo: (o) => {
     const x = o && typeof o === 'object' ? o : {};
     return ipcRenderer.invoke('fv:term-send-to', {
-      id: String(x.id || ''), cwd: typeof x.cwd === 'string' ? x.cwd : null, account: x.account === 'A' ? 'A' : 'B',
+      id: String(x.id || ''), cwd: typeof x.cwd === 'string' ? x.cwd : null, account: typeof x.account === 'string' && /^[a-z]$/i.test(x.account) ? x.account.toUpperCase() : 'B',
       cols: Number(x.cols) || undefined, rows: Number(x.rows) || undefined,
     });
   },
   create: (o) => {
     const x = o && typeof o === 'object' ? o : {};
     return ipcRenderer.invoke('fv:term-create', {
-      cwd: typeof x.cwd === 'string' ? x.cwd : '', account: x.account === 'A' ? 'A' : 'B',
+      cwd: typeof x.cwd === 'string' ? x.cwd : '', account: typeof x.account === 'string' && /^[a-z]$/i.test(x.account) ? x.account.toUpperCase() : 'B',
       cols: Number(x.cols) || undefined, rows: Number(x.rows) || undefined,
       ...(typeof x.forkFrom === 'string' ? { forkFrom: x.forkFrom } : {}),
     });

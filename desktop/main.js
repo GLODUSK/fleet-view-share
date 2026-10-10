@@ -39,6 +39,8 @@ const backdrop = require('./backdrop');
 const { iconPng } = require('./icon');
 const termHost = require('./terms');
 const serverOwner = require('./server');
+// a Claude account letter from the page: one letter (A, B, C, ...), else B, the default ~/.claude
+const acctId = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
 
 function arg(name, argv = process.argv) {
   const pre = `--${name}=`;
@@ -138,7 +140,7 @@ if (!app.requestSingleInstanceLock()) {
       const box = {
         type: busy ? 'warning' : 'question', title: 'Fleet View', noLink: true,
         message: `${n} Claude session${s} ${n === 1 ? 'is' : 'are'} open. Keep working in Windows Terminal, or close ${n === 1 ? 'it' : 'them'}?`,
-        detail: `Move to Terminal tabs: ${n === 1 ? 'it opens' : 'they open'} again in one Terminal window, a tab each (green for claude-a, orange for claude-b).\n`
+        detail: `Move to Terminal tabs: ${n === 1 ? 'it opens' : 'they open'} again in one Terminal window, a tab each in its account's colour (green claude-a, orange claude-b, blue claude-c).\n`
           + `Close them: ${n === 1 ? 'it opens' : 'they open'} again the next time Fleet View starts.`
           + (busy ? `\n\n${busy} ${busy === 1 ? 'is' : 'are'} mid-turn and will say ${busy === 1 ? 'it was' : 'they were'} interrupted.` : ''),
         buttons: ['Move to Terminal tabs', 'Close them', 'Cancel'], defaultId: 0, cancelId: 2, signal: ac.signal,
@@ -163,22 +165,24 @@ if (!app.requestSingleInstanceLock()) {
   }
 
   // Opens each conversation (ended here just before) as a tab of one new Windows Terminal window, in its folder:
-  // through the account's launcher when the machine has one (`claude-a --resume <id>`, tab green #3fb950, or
-  // `claude-b --resume <id>`, orange #d97757, with their "Claude A" / "Claude B" profiles), else plain
-  // `claude --resume <id>` (with CLAUDE_CONFIG_DIR ~/.claude-a for account A). Then takes them off the restore list
+  // through the account's launcher when the machine has one (`claude-a --resume <id>`, tab green #3fb950,
+  // `claude-b` orange #d97757, `claude-c` blue #58a6ff, ..., with their "Claude A" / "Claude B" / ... profiles), else plain
+  // `claude --resume <id>` (with CLAUDE_CONFIG_DIR ~/.claude-<x> for any account but B). Then takes them off the restore list
   // (sessions.json, which the host froze before ending them), so the next start doesn't open them a second time.
+  // each account's Windows Terminal tab colour (claude-tabcolor.vbs uses the same ones)
+  const TAB_COLOR = { A: '#3fb950', B: '#d97757', C: '#58a6ff', D: '#bc8cff', E: '#e3b341', F: '#f778ba' };
   function moveToTerminal(list) {
     const args = ['-w', 'new'];
     const npmDir = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'npm');
     for (const x of list) {
-      const a = x.account === 'A';
+      const L = typeof x.account === 'string' && /^[a-z]$/i.test(x.account) ? x.account.toUpperCase() : 'B', l = L.toLowerCase();
       // wt splits its command line at ';', so a folder with one in it opens in the home folder instead
       const cwd = typeof x.cwd === 'string' && x.cwd && !x.cwd.includes(';') ? x.cwd.replace(/[\\/]+$/, '') || x.cwd : os.homedir();
-      const launcher = fs.existsSync(path.join(npmDir, `claude-${a ? 'a' : 'b'}.cmd`));
-      const cmd = launcher ? `claude-${a ? 'a' : 'b'} --resume ${x.id}`
-        : `${a ? `$env:CLAUDE_CONFIG_DIR='${path.join(os.homedir(), '.claude-a').replace(/'/g, "''")}'; ` : ''}claude --resume ${x.id}`;
+      const launcher = fs.existsSync(path.join(npmDir, `claude-${l}.cmd`));
+      const cmd = launcher ? `claude-${l} --resume ${x.id}`
+        : `${L !== 'B' ? `$env:CLAUDE_CONFIG_DIR='${path.join(os.homedir(), '.claude-' + l).replace(/'/g, "''")}'; ` : ''}claude --resume ${x.id}`;
       if (args.length > 2) args.push(';');
-      args.push('new-tab', ...(launcher ? ['-p', a ? 'Claude A' : 'Claude B'] : []), '-d', cwd, '--tabColor', a ? '#3fb950' : '#d97757',
+      args.push('new-tab', ...(launcher ? ['-p', 'Claude ' + L] : []), '-d', cwd, '--tabColor', TAB_COLOR[L] || '#8b949e',
         'powershell.exe', '-NoExit', '-Command', cmd);
     }
     // the tabs must not inherit this app's markers: a CLAUDE_CODE_CHILD_SESSION turns transcripts off, NO_COLOR greys Claude
@@ -687,7 +691,7 @@ if (!app.requestSingleInstanceLock()) {
     let isDir = false;
     try { isDir = fs.statSync(o.cwd).isDirectory(); } catch {}
     if (!isDir) return { ok: false, message: `the folder is gone: ${o.cwd}` };
-    return terms.create({ cwd: o.cwd, account: o.account === 'A' ? 'A' : 'B', cols: o.cols, rows: o.rows, forkFrom });
+    return terms.create({ cwd: o.cwd, account: acctId(o.account), cols: o.cols, rows: o.rows, forkFrom });
   });
   // "Add workspace…": the system folder picker, over the main window (main window only). FV_TEST_PICK_FOLDER, honoured
   // only in a hidden test run (FV_TEST_HIDDEN=1), answers with that path instead of showing the dialog.
@@ -722,12 +726,12 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('fv:term-open', (e, o) => {
     if (!termSenderOk(e)) throw new Error('not allowed');
     if (!o || typeof o !== 'object' || !validId(o.id)) throw new Error('bad conversation id');
-    return terms.open({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: o.account === 'A' ? 'A' : 'B', cols: o.cols, rows: o.rows });
+    return terms.open({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: acctId(o.account), cols: o.cols, rows: o.rows });
   });
   ipcMain.handle('fv:term-send-to', (e, o) => {
     if (!termSenderOk(e)) throw new Error('not allowed');
     if (!o || typeof o !== 'object' || !validId(o.id)) throw new Error('bad conversation id');
-    return terms.sendTo({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: o.account === 'A' ? 'A' : 'B', cols: o.cols, rows: o.rows });
+    return terms.sendTo({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: acctId(o.account), cols: o.cols, rows: o.rows });
   });
   ipcMain.handle('fv:term-list', (e) => {
     if (!termSenderOk(e)) throw new Error('not allowed');

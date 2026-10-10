@@ -8,7 +8,7 @@
 // Session or Details button asks for it (ui.panel). Ctrl+click and Shift+click on rows build the shell's
 // multi-selection; right-click on one of them opens its "N conversations" menu. The picked id and the folded repos are kept in this window's
 // storage. Keys: ↑↓ (or j/k) move through the list, Enter puts the cursor in the chat box.
-import { C, esc, setHTML, setIcon, badge, acctTag, ago, statusColor, isBusy, needsYou, repoChip, branchChip } from './cards.js';
+import { C, esc, setHTML, setIcon, badge, acctTag, isAcct, ago, statusColor, isBusy, needsYou, repoChip, branchChip } from './cards.js';
 import { icon } from './icons.js';
 import { renderChatPane } from './chat.js';
 import { onRekey } from './term.js';
@@ -81,7 +81,7 @@ function row(s, now, picked, ui, extra = '') {
 function olderRow(h, now, picked) {
   return `<button type="button" class="pj-row done old${picked ? ' on' : ''}" data-old="${esc(h.id)}" title="${esc(h.name || h.id)}">`
     + `<span class="pj-ic">${icon('clock', 13)}</span><span class="pj-name">${esc(h.name || h.id.slice(0, 8))}</span>`
-    + `${h.removed ? '<span class="pj-tag">removed</span>' : ''}${acctTag(h.account === 'A' || h.account === 'B' ? h.account : '')}`
+    + `${h.removed ? '<span class="pj-tag">removed</span>' : ''}${acctTag(h.account)}`
     + `<span class="pj-ago">${h.lastActive ? coarseAgo(now - h.lastActive) : ''}</span></button>`;
 }
 
@@ -124,7 +124,7 @@ function picked(state) {
   if (s) return s;
   for (const o of older.values()) {
     const h = (o.items || []).find((x) => x.id === selId);
-    if (h) return { id: h.id, name: h.name || h.id.slice(0, 8), account: h.account === 'A' ? 'A' : 'B', cwd: h.cwd || null, repo: h.repo || null, state: 'DONE', label: 'OLDER', last: h.lastActive || 0, past: true };
+    if (h) return { id: h.id, name: h.name || h.id.slice(0, 8), account: isAcct(h.account) ? h.account : 'B', cwd: h.cwd || null, repo: h.repo || null, state: 'DONE', label: 'OLDER', last: h.lastActive || 0, past: true };
   }
   return selLast && selLast.id === selId ? selLast : null;
 }

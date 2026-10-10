@@ -108,7 +108,7 @@ import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects } from './projects.js';
 import { renderDetail, openPeek } from './detail.js';
-import { C, esc, needsYou, ago, fmtCost, acctTag, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
+import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady } from './term.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { sendOrder, sendEach, sendNote, summary as orderSummary, teamBrief, firstWords, unreachable } from './orders.js';
@@ -623,7 +623,7 @@ function removedMenuItem(list, withRepo) {
   return {
     label: 'Removed conversations', icon: 'hide',
     children: shortMenu(list.map((r) => ({
-      label: r.name, tag: r.account === 'A' || r.account === 'B' ? r.account : null, icon: 'shell',
+      label: r.name, tag: isAcct(r.account) ? r.account : null, icon: 'shell',
       note: `${withRepo ? `${r.repo ? r.repo.name : 'no workspace'} · ` : ''}removed ${removedAgo(now - (r.removedAt || now))}`, at: r.removedAt || now,
       run: () => continueConversation(r),
     })), (k) => k.at),
@@ -655,7 +655,7 @@ function continuedSessions(st) {
     if (hidden.has(id) || (real && real.state !== 'DONE') || (!isHosted(id) && now - c.at > CONTINUED_MS)) { continued.delete(id); continue; }
     const r = c.r;
     const base = real || {
-      id, name: r.name, account: r.account === 'A' ? 'A' : 'B', repo: r.repo || null, cwd: r.cwd || null,
+      id, name: r.name, account: isAcct(r.account) ? r.account : 'B', repo: r.repo || null, cwd: r.cwd || null,
       last: r.lastActive || c.at, turnStart: null, goal: null, lastAction: null, waitingOn: null, agents: [], files: [], calls: [], spark: [],
       ship: null, progress: { mode: 'ship', pct: 0 }, planSteps: null, context: null, branch: null, worktree: null, model: null,
       links: { pr: null, branch: null, deploy: null, repoFolder: r.cwd || null }, lastReply: null, tokens: 0, cost: 0,
@@ -680,7 +680,7 @@ function pendingSessions(st) {
   for (const h of hosts.values()) {
     // started here, or the pickup of a handoff (re-keyed from the conversation it took over: the panel follows it)
     if (!(h.created || h.handoffFrom) || !h.alive || listed.has(h.id) || !h.cwd) continue;
-    const color = h.account === 'A' ? C.acctA : C.acctB;
+    const color = acctColor(h.account);
     out.push({
       id: h.id, pending: true, name: h.forkFrom ? 'forked session' : h.handoffFrom && !h.created ? 'picked-up session' : 'new session', account: h.account, state: 'NEW', label: 'NEW SESSION', stateColor: color, hue: color,
       repo: repoForFolder(st, h.cwd), cwd: h.cwd, last: h.startedAt || Date.now(), turnStart: null, goal: null, lastAction: null, waitingOn: null,
@@ -823,9 +823,9 @@ function brandText() {
   return (local.repo ? repoName(local.repo) : 'all workspaces').toUpperCase();
 }
 
-// what is left of each account's weekly Claude limit: "A 3%  B 98% week left"
+// what is left of each account's weekly Claude limit: "A 3%  B 98%  C 70% week left"
 function weekPill(wk) {
-  const acs = ['A', 'B'].filter((a) => wk && wk[a]);
+  const acs = Object.keys(wk || {}).filter((a) => isAcct(a) && wk[a]).sort();
   if (!acs.length) return '';
   const col = (n) => (n <= 10 ? C.red : n <= 25 ? C.gold : C.text);
   const tip = acs.map((a) => `account ${a}: ${wk[a].left}% of the week left${wk[a].resets ? ', resets ' + new Date(wk[a].resets).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : ''}`).join('\n');
@@ -1669,7 +1669,7 @@ function openContextMenu(target, x, y) {
   items.push(renameMenuItem(s));
   if (desk && !s.pending && !s.demo) items.push(forkMenuItem(s));
   if (!s.pending && !s.demo) { const mv = moveMenuItem(s); if (mv) items.push(mv); }
-  if (desk && !s.pending && !s.demo && !singleAccount()) items.push(sendToMenuItem(s, hosted));
+  if (desk && !s.pending && !s.demo && !singleAccount()) items.push(...sendToMenuItems(s, hosted));
   if (!s.pending && !s.demo) items.push(sessionPushItem(s));
   if (leaveTeamItem(s)) items.push(leaveTeamItem(s));
   if (unpinItem(target)) items.push(unpinItem(target));
@@ -1741,11 +1741,14 @@ function moveConversation(s, root) {
     return true;
   });
 }
-// "Send to Claude B" (A for a B conversation): it writes a handoff summary and a fresh conversation picks it up
-// under the other account, in a panel here (term.js sendToAccount). One running here is ended first; one open in
-// another window has to be ended there.
-function sendToMenuItem(s, hosted) {
-  const to = s.account === 'B' ? 'A' : 'B';
+// "Send to Claude A / B / C ...", one for each other account here: it writes a handoff summary and a fresh conversation
+// picks it up under that account, in a panel here (term.js sendToAccount). One running here is ended first; one open
+// in another window has to be ended there.
+function sendToMenuItems(s, hosted) {
+  const here = Array.isArray(state.accounts) && state.accounts.length ? state.accounts : ['A', 'B'];
+  return here.filter((a) => a !== (s.account || 'B')).map((to) => sendToMenuItem(s, hosted, to));
+}
+function sendToMenuItem(s, hosted, to) {
   const label = `Send to Claude ${to}`;
   if (acctEmpty(to)) return { label, icon: 'push', disabled: true, note: acctEmpty(to) };
   if (openElsewhere(s) && !hosted) return { label, icon: 'push', disabled: true, note: 'open in another window; end it there' };

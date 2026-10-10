@@ -33,7 +33,7 @@ if (opt('help', false)) {
   --window <min>      show sessions active in the last N minutes (default 45)
   --scratch-dir <dir> where "Add workspace… · New scratchpad" makes its folders (default ~/Scratchpads)
   --filter <regex>    only sessions whose title, goal or folder matches
-  --root <dir>        one projects folder (default: both ~/.claude/projects and ~/.claude-a/projects)
+  --root <dir>        one projects folder (default: every account's, ~/.claude/projects and ~/.claude-<x>/projects)
   --title <text>      fixed header text (default: the repo picked in the header menu)
   --repo <name>       start on one workspace (folder name or path); "all" shows every workspace
   --solid             paint a solid background instead of letting the terminal blur show
@@ -54,13 +54,34 @@ if (opt('help', false)) {
   process.exit(0);
 }
 const DEMO = !!opt('demo', false);
-// Session logs live under both Claude accounts' config dirs: ~/.claude (account B) and ~/.claude-a (account A).
-// --root picks one folder; its account comes from the folder name.
-const accountOf = (dir) => (/\.claude-a(?:[\\/]|$)/i.test(dir) ? 'A' : 'B');
+// Claude accounts: one letter each. B is the default login in ~/.claude; every other is a folder ~/.claude-<letter>
+// (~/.claude-a is A, ~/.claude-c is C, and so on), each with its launcher %APPDATA%\npm\claude-<letter>.cmd.
+// A new ~/.claude-<letter> folder is a new account here with no code change (the list is read again every minute).
+const acctId = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
+const acctDir = (a) => path.join(os.homedir(), acctId(a) === 'B' ? '.claude' : '.claude-' + acctId(a).toLowerCase());
+let acctList = null, acctListAt = 0;
+function accountsHere() {
+  if (acctList && Date.now() - acctListAt < 60e3) return acctList;
+  const out = new Set(['B']);
+  try {
+    for (const e of fs.readdirSync(os.homedir(), { withFileTypes: true })) {
+      const m = /^\.claude-([a-z])$/i.exec(e.name);
+      if (!m) continue;
+      try { if (fs.statSync(path.join(os.homedir(), e.name)).isDirectory()) out.add(m[1].toUpperCase()); } catch {}
+    }
+  } catch {}
+  acctList = [...out].sort();
+  acctListAt = Date.now();
+  return acctList;
+}
+// the account a config folder (or a folder in it) belongs to: ~/.claude-<x> is X, anything else B
+const accountOf = (dir) => { const m = /[\\/]\.claude-([a-z])(?:[\\/]|$)/i.exec(dir || ''); return m ? m[1].toUpperCase() : 'B'; };
+// Session logs live under every account's config dir; --root picks one folder (its account comes from the folder name).
+// B's folder comes first, so a junction shared by several accounts is read once, as B's.
 const ROOTS = typeof opt('root', null) === 'string'
   ? [{ dir: path.resolve(opt('root')), account: accountOf(path.resolve(opt('root'))) }]
-  : [{ dir: path.join(os.homedir(), '.claude', 'projects'), account: 'B' }, { dir: path.join(os.homedir(), '.claude-a', 'projects'), account: 'A' }];
-// on some machines ~/.claude-a/projects is a junction to ~/.claude/projects: read a folder once
+  : accountsHere().map((a) => ({ dir: path.join(acctDir(a), 'projects'), account: a })).sort((x, y) => (x.account === 'B' ? -1 : y.account === 'B' ? 1 : 0));
+// on some machines ~/.claude-<x>/projects is a junction to ~/.claude/projects: read a folder once
 // (then which account a conversation belongs to comes from its running process, see accountsFromProcesses)
 {
   const seen = new Set();
@@ -439,12 +460,12 @@ function addScratchRepo() {
   return [500, { ok: false, message: `${SCRATCH_DIR} already has 999 scratchpads for today` }];
 }
 // Marks a folder Fleet View just made as trusted in each account's Claude Code config (~/.claude.json, and
-// ~/.claude-a/.claude.json for account A), as answering "Do you trust the files in this folder?" with Yes does.
+// ~/.claude-<x>/.claude.json for the others), as answering "Do you trust the files in this folder?" with Yes does.
 // Without it a new scratchpad opens on that question (unless a parent folder, like the home folder, is trusted),
 // and the panel's prompt can't reach Claude. A config that is missing or unreadable is left alone.
 function trustFolder(dir) {
   const key = path.resolve(dir).replace(/\\/g, '/');
-  for (const f of [path.join(os.homedir(), '.claude.json'), path.join(os.homedir(), '.claude-a', '.claude.json')]) {
+  for (const f of accountsHere().map((a) => (a === 'B' ? path.join(os.homedir(), '.claude.json') : path.join(acctDir(a), '.claude.json')))) {
     try {
       const j = JSON.parse(fs.readFileSync(f, 'utf8'));
       if (!j || typeof j !== 'object') continue;
@@ -1075,15 +1096,13 @@ const fmtCost = (c) => '$' + (c >= 100 ? Math.round(c).toLocaleString('en-US') :
 // token claude keeps in <config>/.credentials.json. Read only: an expired token is skipped until claude
 // refreshes it (a refresh here would rotate the token out from under claude). A value past its reset is dropped.
 // Every 5 minutes; 30 s after a miss (the first read often times out while the logs are still being read).
-// Account A is a second login in ~/.claude-a; most machines have only the default ~/.claude (account B)
-const hasAccountA = () => fs.existsSync(path.join(os.homedir(), '.claude-a'));
-const weekLeft = { A: null, B: null }; // account -> { left: 0-100, resets: ms }
+// Every account here (accountsHere: B in ~/.claude, the others in ~/.claude-<x>); most machines have only B
+const weekLeft = {}; // account -> { left: 0-100, resets: ms }
 async function readWeekLeft() {
   let missed = false;
-  for (const [a, dir] of [['A', '.claude-a'], ['B', '.claude']]) {
-    if (a === 'A' && !hasAccountA()) continue;
+  for (const a of accountsHere()) {
     try {
-      const o = JSON.parse(fs.readFileSync(path.join(os.homedir(), dir, '.credentials.json'), 'utf8')).claudeAiOauth;
+      const o = JSON.parse(fs.readFileSync(path.join(acctDir(a), '.credentials.json'), 'utf8')).claudeAiOauth;
       if (!o || !o.accessToken || (o.expiresAt && o.expiresAt < Date.now())) { missed = true; continue; }
       const r = await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { Authorization: 'Bearer ' + o.accessToken, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(20e3) });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2223,17 +2242,19 @@ function openConversation(s, now) {
 }
 
 // start claude --resume <id> in a Windows Terminal tab under the conversation's account (CLAUDE_CONFIG_DIR
-// ~/.claude-a for A, the default ~/.claude for B), with that account's tab colour. No confirmation here:
+// ~/.claude-<x> for X, the default ~/.claude for B), with that account's tab colour. No confirmation here:
 // the terminal view and the page each confirm before calling it. Returns { ok, message }.
-// It runs through the account's launcher (%APPDATA%\npm\claude-a.cmd / claude-b.cmd) when there is one, so /swap
+// It runs through the account's launcher (%APPDATA%\npm\claude-<x>.cmd) when there is one, so /swap
 // and session handoffs (handoff.js) restart in that same tab; else the bare claude. A conversation from another
 // config folder (--root) keeps the bare claude: the launcher would set its own.
 const launcherFor = (acct, configDir) => {
   const norm = (d) => path.resolve(d).toLowerCase();
-  if (configDir ? norm(configDir) !== norm(path.join(os.homedir(), acct === 'A' ? '.claude-a' : '.claude')) : acct === 'A') return null;
-  const f = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'npm', acct === 'A' ? 'claude-a.cmd' : 'claude-b.cmd');
+  if (configDir ? norm(configDir) !== norm(acctDir(acct)) : acct !== 'B') return null;
+  const f = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'npm', `claude-${acctId(acct).toLowerCase()}.cmd`);
   return fs.existsSync(f) ? f : null;
 };
+// each account's Windows Terminal tab colour (claude-tabcolor.vbs uses the same ones)
+const ACCT_TAB = { A: '#3fb950', B: '#d97757', C: '#58a6ff', D: '#bc8cff', E: '#e3b341', F: '#f778ba' };
 function launchConversation(s) {
   if (s.demo) return { ok: false, message: 'demo conversation: nothing to open' };
   // tests only: FV_TEST_NO_LAUNCH=1 writes what it would open to server.log instead of starting Windows Terminal
@@ -2245,12 +2266,12 @@ function launchConversation(s) {
   // (FLEET_VIEW_* and FV_NO_OPEN are fleet-view.cmd's own: left in, "fleet-view" typed in that tab would skip its launcher)
   for (const k of Object.keys(env)) if (k === 'NO_COLOR' || k === 'WT_SESSION' || k === 'CLAUDECODE' || k === 'CLAUDE_PID' || k === 'CLAUDE_SWAP_KEY' || k === 'CLAUDE_SWAP_PAYER' || k === 'CLAUDE_LAUNCH_KEY' || k === 'CLAUDE_CONFIG_DIR' || k === 'FLEET_VIEW_CHILD' || k === 'FLEET_VIEW_LOOP' || k === 'FV_NO_OPEN' || /^CLAUDE_CODE_(CHILD_SESSION|SESSION_ID|MESSAGING_SOCKET|MESSAGING_TOKEN|ENTRYPOINT|SESSION_ATTENDED|OAUTH_TOKEN)$/.test(k)) delete env[k];
   const acct = accountFor(s);
-  const configDir = s.projRoot && accountOf(s.projRoot) === acct ? path.dirname(s.projRoot) : acct === 'A' ? path.join(os.homedir(), '.claude-a') : null;
+  const configDir = s.projRoot && accountOf(s.projRoot) === acct ? path.dirname(s.projRoot) : acct !== 'B' ? acctDir(acct) : null;
   if (configDir && path.resolve(configDir).toLowerCase() !== path.join(os.homedir(), '.claude').toLowerCase()) env.CLAUDE_CONFIG_DIR = configDir;
   const cwd = s.cwd && fs.existsSync(s.cwd) ? s.cwd : os.homedir();
   const name = s.name || s.id.slice(0, 8);
   const title = name.replace(/[;"]/g, ' ');
-  const tabColor = acct === 'A' ? '#3fb950' : '#d97757';
+  const tabColor = ACCT_TAB[acct] || '#8b949e';
   try {
     const launcher = launcherFor(acct, configDir);
     const child = spawn('wt.exe', ['-w', windowFor(s.root), 'new-tab', '--title', title, '--tabColor', tabColor, '-d', cwd, 'cmd', '/k', launcher || 'claude', '--resume', s.id], { env, detached: true, stdio: 'ignore', windowsHide: true });
@@ -3497,10 +3518,10 @@ function topOf(s, root) {
 // Which account a conversation runs on. Both accounts can share one projects folder (a junction), and /swap
 // changes who pays without changing the folder, so the running claude process is asked: every live one has a
 // <pid>.json in <config>/sessions naming its conversation, and its environment says the account
-// (CLAUDE_SWAP_PAYER from the claude-a loop, else a B token, else CLAUDE_CONFIG_DIR ~/.claude-a = A, else B).
+// (CLAUDE_SWAP_PAYER from the claude-a loop, else a B token, else CLAUDE_CONFIG_DIR ~/.claude-<x> = X, else B).
 // The answer is kept per conversation for the rest of the run; one without a live process keeps its folder's.
-const procAccount = new Map(); // "pid:sessionId" -> 'A' | 'B' | null (unreadable)
-const liveAccount = new Map(); // sessionId -> 'A' | 'B'
+const procAccount = new Map(); // "pid:sessionId" -> account letter | null (unreadable)
+const liveAccount = new Map(); // sessionId -> account letter
 let procBusy = false;
 const ENV_PS = `$cs = @'
 using System; using System.Runtime.InteropServices; using System.Text;
@@ -3534,7 +3555,7 @@ foreach ($id in $env:FV_PIDS.Split(',')) {
     if ($kv -like 'CLAUDE_CONFIG_DIR=*') { $cfg = $kv.Substring(18) } elseif ($kv -like 'CLAUDE_SWAP_PAYER=*') { $payer = $kv.Substring(18) } elseif ($kv -like 'CLAUDE_CODE_OAUTH_TOKEN=*') { $tok = 1 } } }
   "$id|$(if ($e) { 1 } else { 0 })|$cfg|$payer|$tok"
 }`;
-const accountFor = (s) => liveAccount.get(s.id) || (s.account === 'A' ? 'A' : 'B');
+const accountFor = (s) => liveAccount.get(s.id) || acctId(s.account);
 // The live claude processes, from the same <config>/sessions/<pid>.json files: sessionId -> { pid, at, status,
 // waitingFor, statusAt }, the newest file per conversation (a conversation open twice: the one that spoke last).
 // A file whose pid is gone (claude was killed before it could remove it) does not count. Read on every poll: a few small files and a
@@ -3575,7 +3596,7 @@ const pidAlive = (pid) => {
 function scanLiveProcs() {
   if (DEMO) return;
   const byId = new Map(), seenDirs = new Set();
-  for (const r of ROOTS.concat(typeof opt('root', null) === 'string' ? [] : [{ dir: path.join(os.homedir(), '.claude-a', 'projects') }])) {
+  for (const r of ROOTS.concat(typeof opt('root', null) === 'string' ? [] : accountsHere().map((a) => ({ dir: path.join(acctDir(a), 'projects') })))) {
     const dir = path.join(path.dirname(r.dir), 'sessions');
     let real = dir;
     try { real = fs.realpathSync(dir).toLowerCase(); } catch { continue; }
@@ -3607,7 +3628,7 @@ function accountsFromProcesses() {
     for (const line of String(out || '').split(/\r?\n/)) {
       const [pid, ok, cfg, payer, tok] = line.trim().split('|');
       if (!pid) continue;
-      got.set(+pid, ok !== '1' ? null : /^[ab]$/i.test(payer || '') ? payer.toUpperCase() : tok === '1' ? 'B' : /\.claude-a[\\/]*$/i.test(cfg || '') ? 'A' : 'B');
+      got.set(+pid, ok !== '1' ? null : /^[a-z]$/i.test(payer || '') ? payer.toUpperCase() : tok === '1' ? 'B' : accountOf((cfg || '').replace(/[\\/]+$/, '') + '/'));
     }
     for (const [sid, p] of ask) {
       if (!got.has(p.pid) && err) continue; // the helper failed: try again next round
@@ -4305,14 +4326,14 @@ function sinceOut(q) {
   const base = new Map(frame ? frame.sessions.map((x) => [x.id, x.cost || 0]) : []);
   // since: the time of the frame the costs were measured from (null: the timeline doesn't reach back to t, so
   // each conversation counts all of its cost)
-  const cost = { total: 0, byAccount: { A: 0, B: 0 }, since: frame ? frame.t : null };
+  const cost = { total: 0, byAccount: Object.fromEntries((DEMO ? ['A', 'B'] : accountsHere()).map((a) => [a, 0])), since: frame ? frame.t : null };
   for (const s of list) {
     const d = Math.max(0, (s.cost || 0) - (base.get(s.id) || 0));
     cost.total += d;
-    cost.byAccount[accountFor(s)] += d;
+    cost.byAccount[accountFor(s)] = (cost.byAccount[accountFor(s)] || 0) + d;
   }
   const r2 = (v) => Math.round(v * 100) / 100;
-  cost.total = r2(cost.total); cost.byAccount.A = r2(cost.byAccount.A); cost.byAccount.B = r2(cost.byAccount.B);
+  cost.total = r2(cost.total); for (const a of Object.keys(cost.byAccount)) cost.byAccount[a] = r2(cost.byAccount[a]);
   const calls = new Map();
   for (const e of tl.events) if (e.t > since && e.verb !== 'message') calls.set(e.sid, (calls.get(e.sid) || 0) + 1);
   const nameOf = (id) => { const x = sessions.get(id); return x ? plain(baseName(x) || x.name || id.slice(0, 8)) : id.slice(0, 8); };
@@ -4465,7 +4486,7 @@ function removedOne(h, now, budget) {
   const { title, prompt, cwd } = c.info;
   const g = cwd ? gitInfo(path.join(cwd, '_')) : null;
   const root = g ? g.root : cwd || null;
-  const acct = liveAccount.get(h.id) || (c.account === 'A' ? 'A' : 'B');
+  const acct = liveAccount.get(h.id) || acctId(c.account);
   return {
     id: h.id, name: plain(names.get(h.id) || title || plain(prompt, 60) || h.id.slice(0, 8), 80), account: acct,
     repo: root ? { name: repoName(root), root, color: toHex(familyColor(root)) } : null,
@@ -4521,7 +4542,7 @@ const HISTORY_MAX = 20; // conversations per repo in the menu
 const histIndex = new Map(); // log file -> entry
 let histQueue = []; // { file, pdir, m, account, projRoot, id }, newest first
 let histListedAt = 0, histListed = false, histDirty = false, histSavedAt = 0, histReads = 0, histOn = false;
-const histFields = (e) => ({ id: e.id, file: e.file, m: e.m, title: e.title || null, prompt: e.prompt || null, cwd: e.cwd || null, account: e.account === 'A' ? 'A' : 'B', projRoot: e.projRoot || null, repoRoot: e.repoRoot || null });
+const histFields = (e) => ({ id: e.id, file: e.file, m: e.m, title: e.title || null, prompt: e.prompt || null, cwd: e.cwd || null, account: acctId(e.account), projRoot: e.projRoot || null, repoRoot: e.repoRoot || null });
 function loadHistory() {
   const j = readJson(HISTORY_FILE);
   if (!j || j.version !== HISTORY_VERSION || !Array.isArray(j.entries)) return;
@@ -4693,8 +4714,8 @@ function buildState() {
     repos: [...repos.values()].sort((a, b) => b.live - a.live || a.name.localeCompare(b.name)),
     counts: { live: c.live, agents: c.agents, waiting: c.waiting, mergedToday: c.merged, cost: c.spent },
     week: DEMO ? { A: { left: 64 }, B: { left: 91 } } : weekNow(now),
-    // the Claude accounts here: ['A', 'B'] with a second login in ~/.claude-a, else just ['B'] (the page then shows no letters)
-    accounts: DEMO || hasAccountA() ? ['A', 'B'] : ['B'],
+    // the Claude accounts here: B plus one per ~/.claude-<x> folder, sorted (just ['B']: the page shows no letters)
+    accounts: DEMO ? ['A', 'B'] : accountsHere(),
     alert: al ? { t: al.t, sid: al.s.id, name: nameNow(al.s.id, al.s.name), text: al.text, color: toHex(al.color) } : null,
     hiddenDone: all.filter((s) => (s.state === 'DONE' || s.state === 'IDLE') && inWindow(s, now)).length,
     sessions: out,
@@ -4935,10 +4956,10 @@ function whereIs(id) {
   const s = sessions.get(id);
   if (s && !s.demo) return { known: true, cwd: s.cwd || null, account: accountFor(s) };
   const r = removedSession(id);
-  if (r) return { known: true, cwd: r.cwd || null, account: liveAccount.get(id) || (r.account === 'A' ? 'A' : 'B') };
+  if (r) return { known: true, cwd: r.cwd || null, account: liveAccount.get(id) || acctId(r.account) };
   const f = findLog(id);
   const info = f && readLogInfo(f.file, f.pdir, id);
-  return { known: true, cwd: (info && info.cwd) || null, account: liveAccount.get(id) || (f && f.account === 'A' ? 'A' : 'B') };
+  return { known: true, cwd: (info && info.cwd) || null, account: liveAccount.get(id) || acctId(f && f.account) };
 }
 // GET /api/conversations: every conversation /state lists, compact. q: { state, repo (a piece of its root or name),
 // all (hidden ones too: removed, or in a removed repo), limit }. hosted and alive are filled in by api.js.
@@ -4969,7 +4990,7 @@ function conversationsFor(q) {
 // rule for "New session": repos /state lists, and the conversations' repo roots and checkouts) and one
 // conversation as /state shows it
 const apiCtx = {
-  sendJson, readBody, log: (t) => logOnce('api:' + t, t), UNSAFE_PATH,
+  sendJson, readBody, log: (t) => logOnce('api:' + t, t), UNSAFE_PATH, accounts: () => (DEMO ? ['A', 'B'] : accountsHere()),
   allowedFolders() {
     const st = buildState(), out = [];
     const add = (p) => { if (typeof p === 'string' && p) out.push(p); };

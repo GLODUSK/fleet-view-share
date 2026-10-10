@@ -70,7 +70,7 @@ function readAll() {
     if (!session) continue;
     const st = readJson(path.join(d, '.state', `${session}.json`)) || {};
     const rec = {
-      file, session, next: lowId(f.next_session) || lowId(st.next), account: f.account === 'A' ? 'A' : f.account === 'B' ? 'B' : null,
+      file, session, next: lowId(f.next_session) || lowId(st.next), account: typeof f.account === 'string' && /^[a-z]$/i.test(f.account) ? f.account.toUpperCase() : null,
       cwd: f.cwd || null, title: f.title ? String(f.title).slice(0, 200) : null, created: Date.parse(f.created) || Math.round(m),
       handedOffAt: Date.parse(st.handedOffAt) || null,
     };

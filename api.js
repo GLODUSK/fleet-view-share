@@ -347,7 +347,7 @@ function describe(p, info, ctx) {
     state: info ? info.state : null, label: info ? info.label : null,
     lastReply: info ? info.lastReply || null : null, waitingOn: info ? info.waitingOn || null : null,
     endedAt: info ? info.endedAt || null : null,
-    cwd: (info && info.cwd) || p.cwd || null, account: p.account === 'A' ? 'A' : 'B',
+    cwd: (info && info.cwd) || p.cwd || null, account: /^[A-Z]$/.test(p.account) ? p.account : 'B',
     temp: !!(ctx && ctx.isTemp && ctx.isTemp(p.id)),
   };
 }
@@ -394,7 +394,7 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api', does: 'this list' },
   { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive' },
   { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status and latest reply' },
-  { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B", prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends' },
+  { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, its turn; tail: the last characters of its screen' },
   { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from? }', does: 'send a message (refused while a menu is up); wait: until the turn ends' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
@@ -412,12 +412,15 @@ function describeApi() {
 }
 
 // POST /api/sessions { repo, account, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }
+// the Claude accounts on this machine (ctx.accounts from fleet-view.js: B plus one per ~/.claude-<x>), else A and B
+const acctsOf = (ctx) => { try { const a = typeof ctx.accounts === 'function' ? ctx.accounts() : null; if (Array.isArray(a) && a.length) return a; } catch {} return ['A', 'B']; };
+const acctOk = (a, ctx) => typeof a === 'string' && acctsOf(ctx).includes(a);
 async function startSession(b, ctx, gone) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
   const repo = b.repo, prompt = cleanText(b.prompt);
   if (typeof repo !== 'string' || !repo || repo.length > 1024 || !path.isAbsolute(repo)) return [400, { ok: false, message: 'repo must be an absolute folder path' }];
   if (ctx.UNSAFE_PATH.test(repo)) return [400, { ok: false, message: 'that path has characters Fleet View will not pass on' }];
-  if (b.account !== 'A' && b.account !== 'B') return [400, { ok: false, message: 'account must be "A" or "B"' }];
+  if (!acctOk(b.account, ctx)) return [400, { ok: false, message: `account must be one of ${acctsOf(ctx).join(', ')}` }];
   if (!prompt) return [400, { ok: false, message: 'prompt must be text, without control characters other than new lines and tabs' }];
   if ('chrome' in b && typeof b.chrome !== 'boolean') return [400, { ok: false, message: 'chrome must be true or false' }];
   if (b.name != null && (typeof b.name !== 'string' || !b.name.trim() || b.name.length > 80 || NAME_BAD.test(b.name))) return [400, { ok: false, message: 'name must be text of 1 to 80 characters, without control characters' }];
@@ -764,7 +767,7 @@ async function openSession(key, b, ctx, gone) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
   const id = convId(resolveKey(key));
   if (!id) return [400, { ok: false, message: 'give a conversation id' }];
-  if (b.account != null && b.account !== 'A' && b.account !== 'B') return [400, { ok: false, message: 'account must be "A" or "B"' }];
+  if (b.account != null && !acctOk(b.account, ctx)) return [400, { ok: false, message: `account must be one of ${acctsOf(ctx).join(', ')}` }];
   let prompt = null;
   if (b.prompt != null) {
     prompt = cleanText(b.prompt);

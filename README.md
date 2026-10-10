@@ -22,7 +22,7 @@ Windows 10/11 with [Node.js 18+](https://nodejs.org) (`winget install OpenJS.Nod
 powershell -NoProfile -ExecutionPolicy Bypass -Command "git clone https://github.com/GLODUSK/fleet-view-share.git $HOME\fleet-view; & $HOME\fleet-view\install.ps1"
 ```
 
-`install.ps1` checks what it needs, installs the desktop window (`desktop/`, Electron), puts the folder on your user PATH, installs the `fleet-view-feed` mod into Claude Code (below) and starts Fleet View. Add `-StartAtSignIn` to start it at sign-in, `-NoDesktop` to use an Edge app window instead. To update, run the same `install.ps1` again: it pulls and reinstalls only what changed (a running Fleet View reloads by itself). It needs no admin rights and sends nothing anywhere: it reads your own `~/.claude` and serves its page on `127.0.0.1` only, to this machine's own browser window; the scripting API needs a token made on first start (`%LOCALAPPDATA%\fleet-view\api-token`). It works with one Claude account (`~/.claude`); a second login in `~/.claude-a` adds the A/B tags and "Send to Claude A/B". The share repo is published from the main repo with `node scripts/publish-share.js`.
+`install.ps1` checks what it needs, installs the desktop window (`desktop/`, Electron), puts the folder on your user PATH, installs the `fleet-view-feed` mod into Claude Code (below) and starts Fleet View. Add `-StartAtSignIn` to start it at sign-in, `-NoDesktop` to use an Edge app window instead. To update, run the same `install.ps1` again: it pulls and reinstalls only what changed (a running Fleet View reloads by itself). It needs no admin rights and sends nothing anywhere: it reads your own `~/.claude` and serves its page on `127.0.0.1` only, to this machine's own browser window; the scripting API needs a token made on first start (`%LOCALAPPDATA%\fleet-view\api-token`). It works with one Claude account (`~/.claude`); every other login in a `~/.claude-<letter>` folder (`~/.claude-a` is A, `~/.claude-c` is C, and so on) is another account, with its letter tag, "New session · <letter>" and "Send to Claude <letter>". A new folder shows up within a minute, with no code change. The share repo is published from the main repo with `node scripts/publish-share.js`.
 
 ## Run
 
@@ -183,7 +183,7 @@ In the terminal view (`--tui`):
 
 **Saved settings.** The view, map zoom, `/` filter, picked repo, compact cards, whether the "recently finished" strip is open (`finishedOpen`), the app window's place and size (`webBounds`), steady or live card order (`steady`, steady unless turned off with `s`), and the mini view's place and size (`miniBounds`; `miniOpen` is still saved but the app starts on the main window) are kept in `~/.fleet-view.json` and restored next time. Keys the server doesn't know are kept as they are. Flags on the command line win. `--demo` and `--snapshot` never save.
 
-**Both accounts.** Conversations come from both Claude accounts: `~/.claude/projects` (account B) and `~/.claude-a/projects` (account A). When one is a junction to the other, the folder is read once. A conversation's account comes from its running `claude` process when there is one (the `<pid>.json` files in `sessions/` name the conversation, and the process's environment says who pays: `CLAUDE_SWAP_PAYER` from `/swap`, a B token, or `CLAUDE_CONFIG_DIR` = `~/.claude-a`), otherwise from its folder. The app window tags each card A (green) or B (orange), and opening a conversation resumes it under its account with that tab colour.
+**Every account.** Conversations come from every Claude account: `~/.claude/projects` (account B) and each `~/.claude-<letter>/projects` (account A from `~/.claude-a`, C from `~/.claude-c`, and so on; launcher `%APPDATA%\npm\claude-<letter>.cmd`). When one is a junction to the other, the folder is read once. A conversation's account comes from its running `claude` process when there is one (the `<pid>.json` files in `sessions/` name the conversation, and the process's environment says who pays: `CLAUDE_SWAP_PAYER` from `/swap`, a B token, or `CLAUDE_CONFIG_DIR` = `~/.claude-<letter>`), otherwise from its folder. The app window tags each card with its letter (A green, B orange, C blue, then D purple, E yellow, F pink), and opening a conversation resumes it under its account with that tab colour.
 
 ## Live sessions in the panel
 
@@ -433,14 +433,14 @@ A script on this machine can drive the live sessions the desktop app hosts: star
 | `fv api` | the endpoint list (`GET /api`) |
 | `fv ls [--all] [--state S] [--repo R]` | every conversation: id, name, state, repo, the hosted ones marked |
 | `fv hosted` | the hosted sessions |
-| `fv start <repo> <prompt> [--account A\|B] [--name N] [--model M] [--effort E] [--fork <id>] [--temp] [--chrome\|--no-chrome] [--wait [s]]` | starts a session (account B unless told) |
+| `fv start <repo> <prompt> [--account A\|B\|C…] [--name N] [--model M] [--effort E] [--fork <id>] [--temp] [--chrome\|--no-chrome] [--wait [s]]` | starts a session (account B unless told) |
 | `fv send <id> <text> [--wait [s]] [--from <id>]` | a follow-up |
 | `fv wait <id> [--timeout s]` | waits until it is ready for you |
 | `fv read <id> [--tail n]` | its status and latest reply |
 | `fv menu <id>` | the menu on its screen: title, numbered options with descriptions, kind, sig |
 | `fv answer <id> <n\|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]` | answers it |
 | `fv interrupt <id>` | Esc, mid-turn |
-| `fv open <id> [--account A\|B] [--prompt P] [--wait [s]]` | resumes an old conversation |
+| `fv open <id> [--account A\|B\|C…] [--prompt P] [--wait [s]]` | resumes an old conversation |
 | `fv transcript <id> [--since n] [--limit m]` | its transcript |
 | `fv stop <id> [--remove]` | ends it (and takes it off the map) |
 | `fv rm <id>` | takes a conversation off the map |

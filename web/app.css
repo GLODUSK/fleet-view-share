@@ -15,7 +15,7 @@
   --ease: cubic-bezier(.2, .8, .2, 1);
   /* ---- shell ---- */
   --bg: #0a0c13; --panel: #11141e; --panel2: #151927;
-  --agent: #71a9ff; --acctA: #3fb950; --acctB: #d97757;
+  --agent: #71a9ff; --acctA: #3fb950; --acctB: #d97757; --acctC: #58a6ff;
   --mono: var(--font-mono); --body: var(--font-ui); /* older names, still used by the view styles */
   --hover: rgba(255, 255, 255, 0.055); --press: rgba(255, 255, 255, 0.09);
   --side: 18px; /* page gutter */
@@ -319,6 +319,10 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; transiti
 }
 .acct-A { background: var(--acctA); }
 .acct-B { background: var(--acctB); }
+.acct-C { background: var(--acctC); }
+.acct-D { background: #bc8cff; }
+.acct-E { background: #e3b341; }
+.acct-F { background: #f778ba; }
 .chip {
   display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; max-width: 100%;
   background: var(--panel2); border: 1px solid var(--line); color: var(--dim); font: 12px/1.4 var(--mono);

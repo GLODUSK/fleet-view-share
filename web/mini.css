@@ -9,7 +9,7 @@
   --glass-edge: rgba(255, 255, 255, 0.07);
   --text: #eef0fa; --dim: #8a92b2; --faint: #4c5372; --line: rgba(120, 130, 170, 0.18);
   --ember: #ff6a2b; --gold: #ffc24a; --rose: #ff4d8d; --violet: #a47bff; --cyan: #3fd8ff; --mint: #3dffa8; --red: #ff4d5e;
-  --acctA: #3fb950; --acctB: #d97757;
+  --acctA: #3fb950; --acctB: #d97757; --acctC: #58a6ff;
   --hover: rgba(255, 255, 255, 0.055); --press: rgba(255, 255, 255, 0.09);
   --bg: #0a0c13;
   --ease: cubic-bezier(.2, .8, .2, 1);
@@ -74,6 +74,10 @@ html:not(.desktop) .btns { display: none; }
 }
 .acct-A { background: var(--acctA); }
 .acct-B { background: var(--acctB); }
+.acct-C { background: var(--acctC); }
+.acct-D { background: #bc8cff; }
+.acct-E { background: #e3b341; }
+.acct-F { background: #f778ba; }
 .age { flex: none; margin-left: auto; padding-left: 6px; font: 12px/1.6 var(--font-mono); color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* waitingOn and the last action are secondary: one line, cut with an ellipsis when long (full text in the tooltip) */
 .l2 { min-width: 0; color: var(--dim); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
