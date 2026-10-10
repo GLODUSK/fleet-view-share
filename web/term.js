@@ -545,9 +545,12 @@ async function openHere(pane, s, asPreview = false) {
   rerender(pane);
   const r = await startPty(s, guessSize(pane), () => pane._opening?.id === s.id);
   if (r === null) return; // the panel moved on while an earlier run of it was still ending
+  // it was already running (the API or another window started it after the hosts list was read): term.open only
+  // attached, so it is not this panel's to end and never a preview
+  const attached = !!(r && r.ok && r.message === 'already running');
   if (pane._opening?.id !== s.id) {
     // the panel moved on while it started: a preview nobody saw is ended at once
-    if (asPreview && r && r.ok) { preview.add(s.id); endPreviews(pane._id); }
+    if (asPreview && r && r.ok && !attached) { preview.add(s.id); endPreviews(pane._id); }
     return;
   }
   if (!r || !r.ok) {
@@ -559,7 +562,7 @@ async function openHere(pane, s, asPreview = false) {
   dismissed.delete(s.id);
   ending.delete(s.id);
   if (pane._opening.explicit) asPreview = false;
-  if (asPreview) preview.add(s.id);
+  if (asPreview) { if (!attached) preview.add(s.id); }
   else { preview.delete(s.id); pane._focusNext = s.id; } // the terminal takes the keyboard once it shows
   await refreshHosts();
   // not listed yet: try again shortly, and give up waiting after 6 s
