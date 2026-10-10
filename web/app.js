@@ -324,6 +324,7 @@ async function poll() {
     setAccounts(st.accounts);
     online = true;
     if (st.settings) syncHiddenRepos(st.settings.hiddenRepos);
+    if (st.settings && Array.isArray(st.settings.offAccounts) && !('offAccounts' in pendingSave) && Date.now() - offSentAt > 3000) offAccts = st.settings.offAccounts.filter(isAcct);
     if (settingsLoaded && st.settings) mergeServerHidden(st.settings.hidden);
     if (!settingsLoaded && st.settings) {
       settingsLoaded = true;
@@ -441,7 +442,8 @@ function hideConversation(s, how = 'hidden') {
   if (ui.selectedId === s.id) ui.selectedId = null;
   if (ui.detailId === s.id) ui.detailId = null;
   if (pinnedId === s.id) setPin(null);
-  toast(how === 'removed' ? `Removed ${s.name}. It comes back if it works again` : `${s.name} is hidden until it works again`, C.dim);
+  const undo = () => { if (hidden.has(s.id)) { unhide(s.id); saveHidden(); render(); } };
+  toast(how === 'removed' ? `Removed ${s.name}. It comes back if it works again` : `${s.name} is hidden until it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
   render();
 }
 
@@ -478,6 +480,9 @@ function unhideRepo(root) {
   hiddenRepos.delete(k);
   saveHiddenRepos();
 }
+// Ctrl+Z's list: { run, text, el, at } for each toast that offered Undo, newest last (see undoLast)
+const undoStack = [];
+const UNDO_MS = 10 * 60e3;
 let lastRemoved = null; // { undo, until }: what "Undo" (or u in the menu) puts back
 // it: { root, name } from the repo menu, a map anchor or a repo chip (a checkout folder maps to its repo)
 function removeRepo(it) {
@@ -1150,9 +1155,9 @@ for (const type of ['dblclick', 'auxclick']) {
 
 // footer keys: [keys (each drawn as a key cap; '/' between two of them reads "or"), what they do]
 const KEYS = {
-  cards: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['c', 'compact'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
-  map: [['v', 'view'], ['click', 'select'], ['ctrl+click', 'select more'], ['double-click', 'open'], ['right-click', 'menu'], ['wheel', 'zoom'], ['drag', 'pan'], ['0', 'recenter'], ['n/N', 'needs you'], ['k', 'lens'], ['t', 'replay'], ['l', 'legend'], ['/', 'filter'], ['r', 'workspace']],
-  wall: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
+  cards: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+z', 'undo'], ['c', 'compact'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
+  map: [['v', 'view'], ['click', 'select'], ['ctrl+click', 'select more'], ['double-click', 'open'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+z', 'undo'], ['wheel', 'zoom'], ['drag', 'pan'], ['0', 'recenter'], ['n/N', 'needs you'], ['k', 'lens'], ['t', 'replay'], ['l', 'legend'], ['/', 'filter'], ['r', 'workspace']],
+  wall: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+z', 'undo'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
   projects: [['v', 'view'], ['↑↓', 'pick'], ['enter', 'type'], ['right-click', 'menu'], ['/', 'filter'], ['r', 'workspace'], ['esc', 'clear']],
 };
 const MOUSE = new Set(['click', 'double-click', 'right-click', 'wheel', 'drag', 'ctrl+click']);
@@ -1451,6 +1456,8 @@ function toast(text, color = C.text, action = null, ms = 0) {
   el.className = 'toast';
   el.innerHTML = `<span class="toast-dot" style="background:${esc(color)}"></span><span class="toast-t">${esc(text)}</span>`;
   const life = action?.ms || ms || 4000;
+  let entry = null;
+  if (action && action.label === 'Undo') { entry = { run: action.run, text, el, at: Date.now() }; undoStack.push(entry); if (undoStack.length > 30) undoStack.shift(); }
   if (action) {
     const b = document.createElement('button');
     b.type = 'button';
@@ -1461,6 +1468,7 @@ function toast(text, color = C.text, action = null, ms = 0) {
       if (el.classList.contains('gone')) return;
       el.classList.add('gone');
       setTimeout(() => el.remove(), 800);
+      if (entry) dropUndo(entry);
       action.run();
     });
     el.appendChild(b);
@@ -1469,6 +1477,52 @@ function toast(text, color = C.text, action = null, ms = 0) {
   setTimeout(() => el.classList.add('gone'), life);
   setTimeout(() => el.remove(), life + 800);
 }
+
+// ---------- Ctrl+Z: undo the newest change that offered Undo (removing, moving, renaming), up to 10 minutes back ----------
+function dropUndo(entry) { const i = undoStack.indexOf(entry); if (i >= 0) undoStack.splice(i, 1); }
+function undoLast() {
+  while (undoStack.length && Date.now() - undoStack[undoStack.length - 1].at > UNDO_MS) undoStack.pop();
+  const u = undoStack.pop();
+  if (!u) { toast('Nothing to undo', C.dim); return; }
+  if (u.el.isConnected) { u.el.classList.add('gone'); setTimeout(() => u.el.remove(), 800); }
+  if (lastRemoved?.undo === u.run) lastRemoved = null;
+  try { u.run(); } catch (e) { console.error(e); }
+  toast(`Undone: ${u.text.replace(/\. (It|Each) comes back.*$/, '')}`, C.mint);
+}
+// ---------- Ctrl+C: copy what is picked (outside text boxes, with no text selected) ----------
+// conversations: "name (id)" a line each, the multi-selection or the picked one; a workspace picked on the map or
+// the workspace menu's highlighted row: its folder path
+async function copyPicked() {
+  let text = '', what = '';
+  const p = local.view === 'map' ? mapMod?.mapPicked?.() : null;
+  const list = sessionsOf(multi.size ? [...multi] : ui.selectedId ? [ui.selectedId] : ui.detailId ? [ui.detailId] : []);
+  if (menuOpen && menuItems[menuSel]?.root) { text = menuItems[menuSel].root; what = menuItems[menuSel].name || repoName(text); }
+  else if (p && p.kind === 'repo' && p.root) { text = p.root; what = p.name || repoName(p.root); }
+  else if (list.length) {
+    text = list.map((s) => (s.pending ? s.name : `${s.name} (${s.id})`)).join('\n');
+    what = list.length === 1 ? list[0].name : `${list.length} conversations`;
+  }
+  if (!text) { toast('Pick a conversation or workspace to copy', C.dim); return; }
+  try { await navigator.clipboard.writeText(text); toast(`Copied ${what}`, C.mint); }
+  catch { toast('Could not reach the clipboard', C.red); }
+}
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+  const k = e.key.toLowerCase();
+  if (k !== 'c' && k !== 'z') return;
+  if (e.target.closest?.('.term-host, .chat-compose, input, textarea, select, [contenteditable]')) return;
+  if (!$('confirm').hidden) return;
+  if (k === 'c') {
+    // selected text copies as usual
+    const sel = window.getSelection?.();
+    if (sel && !sel.isCollapsed && String(sel).trim()) return;
+    e.preventDefault();
+    copyPicked();
+    return;
+  }
+  e.preventDefault();
+  undoLast();
+});
 
 // ---------- keys ----------
 // the live terminal (term.js) owns the keyboard while it has focus: no shortcut fires, Esc goes to Claude
@@ -1634,9 +1688,9 @@ function openContextMenu(target, x, y) {
     const items = [];
     if (desk) {
       // an account out of its weekly or 5-hour limit is left out; both out: one quiet line saying so
-      const here = Array.isArray(state.accounts) && state.accounts.length ? state.accounts : ['A', 'B'];
+      const all = allAccounts(), here = onAccounts();
       const ok = here.filter((a) => !acctEmpty(a));
-      for (const a of ok) items.push({ label: here.length === 1 ? 'New session' : `New session · ${a}`, icon: 'plus', run: () => newSession(folder, a) });
+      for (const a of ok) items.push({ label: all.length === 1 ? 'New session' : `New session · ${a}`, icon: 'plus', run: () => newSession(folder, a) });
       if (!ok.length) items.push({ label: 'New session', icon: 'plus', disabled: true, note: here.map((a) => (here.length === 1 ? '' : a + ' ') + acctEmpty(a)).join(' · ') });
       items.push({ sep: true });
     }
@@ -1656,6 +1710,7 @@ function openContextMenu(target, x, y) {
   if (target.kind === 'space') {
     // empty space on the map, or around the cards or tiles: add a repo (removed conversations are on a repo's menu)
     const extra = [{ sep: true }, notifyMenuItem()];
+    if (accountsMenuItem()) extra.push(accountsMenuItem());
     if (multi.size) extra.push({ label: `Clear selection (${multi.size})`, icon: 'close', run: () => setMulti([], 'menu') });
     openCtxMenu({ x, y, items: [addRepoMenuItem({ x, y }), recentRepoMenuItem({ x, y }), ...extra] });
     return;
@@ -1749,8 +1804,7 @@ function moveConversation(s, root) {
 // picks it up under that account, in a panel here (term.js sendToAccount). One running here is ended first; one open
 // in another window has to be ended there.
 function sendToMenuItems(s, hosted) {
-  const here = Array.isArray(state.accounts) && state.accounts.length ? state.accounts : ['A', 'B'];
-  return here.filter((a) => a !== (s.account || 'B')).map((to) => sendToMenuItem(s, hosted, to));
+  return onAccounts().filter((a) => a !== (s.account || 'B')).map((to) => sendToMenuItem(s, hosted, to));
 }
 function sendToMenuItem(s, hosted, to) {
   const label = `Send to Claude ${to}`;
@@ -2078,7 +2132,9 @@ function removeMany(ids) {
   saveHidden();
   multi.clear();
   try { mapMod?.setMapSelection?.([]); } catch (e) { console.error(e); }
-  toast(n === 1 ? `Removed ${first.name}. It comes back if it works again` : `Removed ${n} conversations. Each comes back if it works again`, C.dim);
+  const gone = ids.filter((id) => hidden.has(id));
+  const undo = () => { const back = gone.filter((id) => hidden.has(id)); if (!back.length) return; for (const id of back) unhide(id); saveHidden(); render(); };
+  toast(n === 1 ? `Removed ${first.name}. It comes back if it works again` : `Removed ${n} conversations. Each comes back if it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
   render();
 }
 function interruptAll(list) {
@@ -2296,6 +2352,30 @@ function askNotify() {
 }
 document.addEventListener('pointerdown', askNotify, { once: true, capture: true });
 document.addEventListener('keydown', askNotify, { once: true, capture: true });
+// ---------- accounts turned on and off (right-click on empty space · Accounts ▸ ✓ A ✓ B ✓ C) ----------
+// One turned off: the server leaves its conversations (and workspaces only it uses) out of /state, and the menus
+// offer no "New session · X" or "Send to Claude X" on it. Sessions running on it keep running. At least one stays on.
+let offAccts = [], offSentAt = 0;
+const allAccounts = () => (Array.isArray(state?.accounts) && state.accounts.length ? state.accounts : ['A', 'B']);
+const onAccounts = () => allAccounts().filter((a) => !offAccts.includes(a));
+function setAccountOn(a, on) {
+  const next = on ? offAccts.filter((x) => x !== a) : [...new Set([...offAccts, a])].sort();
+  if (!on && !allAccounts().some((x) => !next.includes(x))) { toast('Keep at least one account on', C.dim); return; }
+  offAccts = next;
+  offSentAt = Date.now();
+  saveSettings({ offAccounts: next });
+  flushSettings();
+  toast(on ? `Account ${a} is on: its conversations show again` : `Account ${a} is off: its conversations are hidden and get no new sessions`, C.dim);
+  setTimeout(poll, 500);
+}
+function accountsMenuItem() {
+  const all = allAccounts();
+  if (all.length < 2) return null;
+  const off = all.filter((a) => offAccts.includes(a));
+  return { label: 'Accounts', icon: 'agent', badge: off.length ? `${off.join(' ')} off` : null,
+    children: all.map((a) => ({ label: `Claude ${a}`, tag: a, icon: offAccts.includes(a) ? null : 'check', run: () => setAccountOn(a, offAccts.includes(a)) })) };
+}
+
 function notifyMenuItem() {
   const on = local.notify !== false;
   return { label: on ? 'Turn off desktop notifications' : 'Turn on desktop notifications', icon: 'alert',

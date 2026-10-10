@@ -234,6 +234,11 @@ function cleanMapViews(v) {
 let mapViews = cleanMapViews(saved.mapViews) || {};
 // desktop notifications for new alerts (the page asks; on unless turned off)
 let notify = saved.notify !== false;
+// accounts turned off (right-click on empty space · Accounts): their conversations, and workspaces only they use,
+// leave /state and the terminal view; the page offers no new sessions on them. Running sessions keep running.
+const cleanOffAccounts = (v) => (Array.isArray(v) ? [...new Set(v.filter((a) => typeof a === 'string' && /^[A-Z]$/.test(a)))].sort() : null);
+let offAccounts = cleanOffAccounts(saved.offAccounts) || [];
+const acctOff = (s) => offAccounts.length > 0 && offAccounts.includes(accountFor(s));
 // Parity rules: in a repo with one, a change users see is made on the website and in the phone app in the same
 // task. Each rule names a repo by its folder name and the path prefixes (relative to the checkout) of its sides:
 // web, app (the phone app) and core (code both use). A file matches the first side, in the order app, core, web,
@@ -496,7 +501,7 @@ function flushSettings() {
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, compact, finishedOpen, steady, miniOpen, hidden, hiddenRepos, addedRepos, mapSpots,
-    mapLens, mapViews, notify, teams, apiTemp,
+    mapLens, mapViews, notify, offAccounts, teams, apiTemp,
     moved: [...moved.values()],
     names: Object.fromEntries(names),
     pushTargets: { sessions: [...pushTargets.sessions.values()], repos: [...pushTargets.repos.values()] },
@@ -2088,7 +2093,7 @@ function visibleList() {
   let q = null;
   try { q = query ? new RegExp(query, 'i') : null; } catch { q = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); }
   const list = activeSessions(Date.now()).filter((s) => {
-    if (!inRepo(s.root)) return false;
+    if (!inRepo(s.root) || acctOff(s)) return false;
     const text = `${s.name} ${s.prompt || ''} ${s.cwd || ''} ${s.wf?.desc || ''}`;
     return (!FILTER || FILTER.test(text)) && (!q || q.test(text));
   });
@@ -4662,7 +4667,7 @@ function rememberMap(all, repos, now) {
 const inState = (s) => s.name && s.state && (!FILTER || FILTER.test(`${s.name} ${s.prompt || ''} ${s.cwd || ''} ${s.wf?.desc || ''}`));
 function buildState() {
   const now = Date.now();
-  const all = [...sessions.values()].filter(inState);
+  const all = [...sessions.values()].filter((s) => inState(s) && !acctOff(s));
   all.sort((a, b) => (RANK[a.state] ?? 9) - (RANK[b.state] ?? 9) || b.last - a.last);
   const out = all.map((s) => sessionJson(s, now));
   // the repo menu: every repo in the window, busiest first, less the ones taken off it; the picked one stays listed
@@ -4671,8 +4676,15 @@ function buildState() {
   for (const s of all) if (s.root && !repoHidden(s.root) && (s.state !== 'DONE' || inWindow(s, now))) { const r = repos.get(s.root) || { root: s.root, name: repoName(s.root), live: 0 }; if (s.state !== 'DONE') r.live++; repos.set(s.root, r); }
   rememberMap(all, repos, now);
   // repos the map showed before (remembered) stay listed with or without conversations, until removed
+  // (or until every conversation in them is on an account turned off)
+  const offRoots = new Set();
+  if (offAccounts.length) {
+    const on = new Set();
+    for (const s of sessions.values()) if (s.root) (acctOff(s) ? offRoots : on).add(rootKey(s.root));
+    for (const k of on) offRoots.delete(k);
+  }
   for (const root of remembered.repos.keys()) {
-    if (repoHidden(root) || [...repos.keys()].some((r) => rootKey(r) === rootKey(root))) continue;
+    if (repoHidden(root) || offRoots.has(rootKey(root)) || [...repos.keys()].some((r) => rootKey(r) === rootKey(root))) continue;
     repos.set(root, { root, name: repoName(root), live: 0, remembered: true });
   }
   // repos added by hand show even with no conversations (merged with a listed one of the same root)
@@ -4710,7 +4722,7 @@ function buildState() {
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
     settings: { view, zoom: map.zoom, query, repo: repoSel, compact, finishedOpen, steady, miniBounds, miniOpen, hidden, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
-      mapLens, mapViews, notify, parity: parityRules },
+      mapLens, mapViews, notify, parity: parityRules, offAccounts },
     repos: [...repos.values()].sort((a, b) => b.live - a.live || a.name.localeCompare(b.name)),
     counts: { live: c.live, agents: c.agents, waiting: c.waiting, mergedToday: c.merged, cost: c.spent },
     week: DEMO ? { A: { left: 64 }, B: { left: 91 } } : weekNow(now),
@@ -4744,7 +4756,7 @@ function buildState() {
 // hidden (an array of up to 500 conversation ids, or { id, at } with the time it was hidden; replaces the list),
 // hiddenRepos (an array of up to 200 { root, at }, root a string of at most 1024 characters; replaces the list),
 // mapSpots (the map's repo spots, up to 300 { id, x, y, pin }; replaces the list), mapLens (one of MAP_LENSES),
-// mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), notify (bool), parity (rules, see PARITY_BUILTIN)
+// mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), notify (bool), offAccounts (account letters turned off), parity (rules, see PARITY_BUILTIN)
 function applySettings(b) {
   if (!b || typeof b !== 'object') return;
   if (VIEWS.includes(b.view) || (WEB && b.view === WEB_ONLY_VIEW)) view = b.view;
@@ -4777,6 +4789,7 @@ function applySettings(b) {
   if (MAP_LENSES.includes(b.mapLens)) mapLens = b.mapLens;
   if ('mapViews' in b) { const v = cleanMapViews(b.mapViews); if (v) mapViews = v; }
   if (typeof b.notify === 'boolean') notify = b.notify;
+  if ('offAccounts' in b) { const o = cleanOffAccounts(b.offAccounts); if (o) offAccounts = o; }
   if ('parity' in b) { const p = cleanParity(b.parity); if (p) { parityRules = p; saved.parity = p; } }
   if (b.miniBounds === null) miniBounds = null;
   else if (okBounds(b.miniBounds, 80, 40)) miniBounds = roundBounds(b.miniBounds);
