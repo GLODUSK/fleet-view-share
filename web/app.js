@@ -114,7 +114,7 @@ import { renderDetail, openPeek, SPLIT_MAX } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady } from './term.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
-import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued, onTeamJoin, setServerQueued } from './orders.js';
+import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued, onTeamJoin, setServerQueued, sendWhenUp } from './orders.js';
 import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner } from './compose.js';
@@ -1859,6 +1859,26 @@ async function forkFromMenu(s) {
   toast(`Forked ${s.name}: a new conversation with its history`, C.text);
   ui.setSelected(r.key, 'explicit');
 }
+// A queued message's Fork / New chat (chat.js, 'fv-chat-fork'): it is out of Claude Code's queue by now; a fork of
+// its conversation (or a new one in its folder) starts in the panel and gets it once it is up (orders.js sendWhenUp)
+window.addEventListener('fv-chat-fork', async (e) => {
+  const d = e.detail || {};
+  const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === d.id);
+  const text = String(d.text || '');
+  const fork = d.how !== 'new';
+  const why = !s ? 'that conversation is no longer listed' : !s.cwd ? 'no folder known for it' : acctEmpty(s.account);
+  const r = why ? { ok: false, message: why } : await createSession({ cwd: s.cwd, account: s.account, ...(fork ? { forkFrom: s.id } : {}), ...newSize() });
+  if (!r || !r.ok) {
+    // nothing started: the message is out of the queue, so it goes to the clipboard rather than being lost
+    try { await navigator.clipboard.writeText(text); } catch {}
+    toast(`${fork ? 'Could not fork it' : 'Could not start a new conversation'}: ${(r && r.message) || 'failed'}. Your message is on the clipboard`, C.red, null, 9000);
+    return;
+  }
+  sendWhenUp({ id: r.key, name: fork ? `the fork of ${s.name}` : 'the new conversation' }, text);
+  toast((fork ? `Forked ${s.name}: your message goes in once it is up` : `New conversation in ${repoName(s.cwd)}: your message goes in once it is up`)
+    + (d.images ? ' (without its images)' : ''), C.text);
+  ui.setSelected(r.key, 'explicit');
+});
 // ---------- Rename ----------
 // A conversation's name in Fleet View: right-click "Rename" (a text box in the menu) or the panel's title (detail.js,
 // double-click, the pencil or F2). POST /rename keeps it in settings.names, and it wins over Claude Code's own title
@@ -2073,6 +2093,11 @@ async function runOrder(list, text, o) {
 // an order waiting for a conversation's question or trust prompt to be answered (orders.js) goes in by itself:
 // a toast says when, or why it didn't; its right-click menu can cancel it
 onQueueDone((q, r) => {
+  if (q.why === 'start') {
+    if (!r.ok) toast(`Your message for ${q.name} was not sent: ${r.message}`, C.red, null, 9000);
+    render();
+    return;
+  }
   toast(r.ok ? `Order sent to ${q.name} after it was answered` : `Order for ${q.name} not sent: ${r.message}`, r.ok ? C.mint : C.red, null, r.ok ? 0 : 9000);
   render();
 });

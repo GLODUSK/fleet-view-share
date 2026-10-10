@@ -160,15 +160,19 @@ function loadQueue() {
 }
 function saveQueue() {
   try {
-    if (queue.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(queue.map(({ id, name, text, at }) => ({ id, name, text, at }))));
+    if (queue.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(queue.map(({ id, name, text, at, why }) => ({ id, name, text, at, why }))));
     else localStorage.removeItem(QUEUE_KEY);
   } catch { /* storage blocked: it still waits while the page is open */ }
 }
-function enqueue(s, text) {
-  if (!queue.some((q) => q.id === s.id && q.text === text)) queue.push({ id: s.id, name: s.name || 'conversation', text, at: Date.now() });
+// why: what it is for, handed back to onQueueDone ('start': a new conversation's first message, sendWhenUp)
+function enqueue(s, text, why = null) {
+  if (!queue.some((q) => q.id === s.id && q.text === text)) queue.push({ id: s.id, name: s.name || 'conversation', text, at: Date.now(), ...(why ? { why } : {}) });
   saveQueue();
   wake();
 }
+// a conversation just started here (a fork, a new chat): text goes in once its screen is up with no menu on it,
+// and follows it from new-<n> to its id (onRekey below). onQueueDone tells how it went (why 'start')
+export function sendWhenUp(s, text) { if (s && s.id && String(text || '').trim()) enqueue(s, String(text), 'start'); }
 function wake() { if (!queueTimer && queue.length) queueTimer = setInterval(tick, WAIT_TICK_MS); }
 export const queuedFor = (id) => queue.filter((q) => q.id === id).map(({ name, text, at }) => ({ id, name, text, at }));
 export function cancelQueued(id) {
@@ -181,7 +185,7 @@ function settle(q, ok, message) {
   if (!queue.includes(q)) return; // cancelled meanwhile
   queue = queue.filter((x) => x !== q);
   saveQueue();
-  for (const f of doneL) { try { f({ id: q.id, name: q.name, text: q.text, at: q.at }, { ok, message }); } catch (e) { console.error(e); } }
+  for (const f of doneL) { try { f({ id: q.id, name: q.name, text: q.text, at: q.at, why: q.why || null }, { ok, message }); } catch (e) { console.error(e); } }
 }
 // any menu on its screen (true), none (false), or null while its screen can't be read yet (the first look starts
 // building its view)

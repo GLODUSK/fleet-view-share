@@ -25,7 +25,9 @@
 // replaces it. A queued one has an Interrupt button: Claude stops the step it is on and takes your message now
 // (compose.js presses Claude Code's own "send now" keys, which send every queued message at once). Unsend takes
 // it back out of Claude Code's queue ('fv-chat-unsend': compose.js pulls the queue into the prompt, clears it,
-// and queues the others again; the reply's `queue` says what is queued).
+// and queues the others again; the reply's `queue` says what is queued). Fork and New chat take it out the same way
+// and hand it to a new conversation instead ('fv-chat-fork' on window, app.js): a fork of this one (its history) or
+// a fresh one in its folder, which gets the message once it is up.
 // A long message (yours, sent or shown) folds to a few lines behind "Show more", like Claude Code's pasted text.
 // Rewind on one of your messages ('fv-chat-rewind') runs Claude Code's /rewind back to just before it; the
 // conversation then drops what came after (the reply's `cut` changes, and the list loads again). Edit opens the
@@ -699,11 +701,13 @@ function addSent(c, d) {
   const imgs = (d.images || []).map((src, n) => `<span class="cu-img"><img src="${esc(src)}" alt="attached image ${n + 1}"></span>`).join('');
   const long = isLong(String(d.text || ''));
   el.innerHTML = `<div class="cu-bubble${long ? ' clamp' : ''}">${imgs ? `<div class="cu-imgs">${imgs}</div>` : ''}${d.text ? `<div class="cu-body">${userTextHtml(d.text)}</div>` : ''}${long ? moreBtn(String(d.text)) : ''}</div>`
-    + `<div class="cu-status">${d.busy ? `<span>Queued: Claude reads it after this step</span><button type="button" class="cu-now" data-unsend title="Take it back out of the queue">${icon('close', 11)}<span>Unsend</span></button><button type="button" class="cu-now" data-now title="Stop what Claude is doing and send this now">${icon('stop', 11)}<span>Interrupt</span></button>` : 'Sending…'}</div>`;
+    + `<div class="cu-status">${d.busy ? `<span>Queued: Claude reads it after this step</span><button type="button" class="cu-now" data-unsend title="Take it back out of the queue">${icon('close', 11)}<span>Unsend</span></button><button type="button" class="cu-now" data-now title="Stop what Claude is doing and send this now">${icon('stop', 11)}<span>Interrupt</span></button>`
+      + (d.text ? `<button type="button" class="cu-now cu-new" data-fork="fork" title="Take it out of the queue and send it to a fork of this conversation: a new one with its history so far">${icon('branch', 11)}<span>Fork</span></button>`
+        + `<button type="button" class="cu-now cu-new" data-fork="new" title="Take it out of the queue and send it to a new conversation in this folder">${icon('plus', 11)}<span>New chat</span></button>` : '') : 'Sending…'}</div>`;
   // used: the user messages and notes already in the feed (or matched to another sent one), which can't be this one
   const used = new Set(c.items.filter((it) => it.kind === 'user' || it.kind === 'note').map((it) => String(it.key)));
   const text = norm(d.text), cmd = /^\/[^\s/]+/.exec(text)?.[0] || null;
-  c.sent.push({ at: Date.now(), text, cmd, images: d.images || [], el, used });
+  c.sent.push({ at: Date.now(), text, raw: String(d.text || ''), cmd, images: d.images || [], el, used });
   c.outbox.appendChild(el);
   drawState(c);
   toBottom(c);
@@ -718,18 +722,23 @@ function sendNow(c) {
     if (st && st.querySelector('[data-now]')) st.textContent = 'Interrupting: Claude takes it now';
   }
 }
-// Unsend on a queued message: compose.js takes it out of Claude Code's queue (the rest stay queued)
-async function unsend(c, el) {
+// Unsend on a queued message: compose.js takes it out of Claude Code's queue (the rest stay queued).
+// fork: 'fork' | 'new' (its Fork / New chat): out of the queue, then to a new conversation (app.js)
+async function unsend(c, el, fork = null) {
   const s = c.sent.find((x) => x.el === el);
   if (!s || s.unsending) return;
   const st = el.querySelector('.cu-status');
   const before = st.innerHTML;
   s.unsending = true;
-  st.textContent = 'Unsending…';
+  st.textContent = fork ? 'Taking it out of the queue…' : 'Unsending…';
   const ev = new CustomEvent('fv-chat-unsend', { detail: { id: c.id, text: s.text, queue: () => c.queue || [], done: null } });
   c.pane.dispatchEvent(ev);
   const ok = await (ev.detail.done || Promise.resolve(false));
-  if (ok) { dropSent(c, s); return; }
+  if (ok) {
+    dropSent(c, s);
+    if (fork) window.dispatchEvent(new CustomEvent('fv-chat-fork', { detail: { id: c.id, text: s.raw || s.text, how: fork, images: s.images.length } }));
+    return;
+  }
   s.unsending = false;
   if (el.isConnected) st.innerHTML = before;
 }
@@ -922,6 +931,7 @@ function wire(c) {
     else if ((b = t.closest('[data-cp]'))) { e.preventDefault(); e.stopPropagation(); copyText(copySource(b), b); }
     else if ((b = t.closest('[data-now]'))) { e.preventDefault(); sendNow(c); }
     else if ((b = t.closest('[data-unsend]'))) { e.preventDefault(); unsend(c, b.closest('.ci')); }
+    else if ((b = t.closest('[data-fork]'))) { e.preventDefault(); unsend(c, b.closest('.ci'), b.dataset.fork === 'new' ? 'new' : 'fork'); }
     else if ((b = t.closest('[data-rewind]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) rewind(c, el); }
     else if ((b = t.closest('[data-edit]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) editMsg(c, el); }
     else if ((b = t.closest('[data-img]'))) { e.preventDefault(); const src = b.closest('.ci')?._images?.[+b.dataset.img]; if (okImage(src)) showImage(src); }

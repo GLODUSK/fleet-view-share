@@ -1035,14 +1035,14 @@ export function installFakeTerm() {
       }
     },
     // a new conversation: keyed new-<n>, given an id after autoRekeyMs (as Claude Code's pid file would)
-    async create({ cwd, account } = {}) {
+    async create({ cwd, account, forkFrom } = {}) {
       if (typeof cwd !== 'string' || !cwd) return { ok: false, message: 'no folder given' };
       const key = `new-${++newSeq}`;
       const p = { id: key, cwd, account: acctOf(account), pid: 42000 + newSeq, alive: true, exitCode: null, startedAt: Date.now(), buf: '', line: '', raw: '', isNew: true, created: true, status: 'idle' };
       ptys.set(key, p);
       setTimeout(() => emit(p.id, welcome(p)), 80);
       if (fake.autoRekeyMs > 0) setTimeout(() => rekey(key), fake.autoRekeyMs);
-      return { ok: true, message: 'started (fake)', key, pid: p.pid };
+      return { ok: true, message: 'started (fake)', key, pid: p.pid, ...(forkFrom ? { forkFrom: String(forkFrom).toLowerCase() } : {}) };
     },
     resize(id, cols, rows) { const p = ptys.get(id); if (p) { p.cols = cols; p.rows = rows; } },
     kill(id) { if (ptys.get(id)?.alive) end(id, 1); ptys.delete(id); },
