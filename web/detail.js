@@ -40,7 +40,7 @@ function build(el, ui) {
   <button type="button" role="tab" class="d-tab" data-tab="details"><span class="d-tab-t">Details</span></button>
   <span class="grow"></span>
   <span class="d-preview" hidden>preview — closes when you move on unless you type</span>
-  <span class="d-place" role="group" aria-label="where the panel goes"><button type="button" class="d-wide d-pin" data-pin aria-pressed="false">${icon('pin', 14)}</button>${PLACES.map(([p, ic, t]) => `<button type="button" class="d-wide" data-place="${p}" title="${t}" aria-label="${t}">${icon(ic, 14)}</button>`).join('')}</span>
+  <span class="d-place" role="group" aria-label="where the panel goes"><button type="button" class="d-wide d-pin" data-pin aria-pressed="false">${icon('pin', 14)}</button><button type="button" class="d-wide" data-place></button></span>
 </div>
 <div class="d-chat" role="tabpanel" hidden><div class="d-cell d-cell-main"><div class="d-cell-bar" hidden></div><div class="d-cell-chat"></div></div><div class="d-extras"></div>
 <div class="d-cell d-peek" hidden><div class="d-cell-bar d-peek-bar"></div><div class="d-cell-chat d-peek-chat"></div><div class="d-peek-md md" tabindex="0" hidden></div></div></div>
@@ -79,7 +79,7 @@ function build(el, ui) {
   window.addEventListener('fv-handto', (e) => { if (e.detail && e.detail.id === el._id) { el._tab = 'chat'; el._tabPicked = true; ui.showDetail(el._id); } });
   el._tabs = [...el.querySelectorAll('.d-tab')];
   el._here = el.querySelector('.d-here');
-  el._placeBtns = [...el.querySelectorAll('[data-place]')];
+  el._placeBtn = el.querySelector('[data-place]');
   el._previewHint = el.querySelector('.d-preview');
   // the title renames the conversation in place: a double-click on it, its pencil, or F2 anywhere in the panel
   // but the live terminal (whose keys are Claude's)
@@ -102,7 +102,7 @@ function build(el, ui) {
     else if (e.target.closest('[data-close]')) { if (el._cells.size) ui.clearMulti?.(); ui.showDetail(null); }
     else if (e.target.closest('[data-open]') && el._id) (ui.openTerminal || ui.open)(el._id);
     else if (tab) { el._tab = tab.dataset.tab; el._tabPicked = true; ui.showDetail(el._id); if (el._tab === 'session') focusTerm(el); else if (el._tab === 'chat') focusCompose(el); }
-    else if (e.target.closest('[data-place]')) { setPlace(e.target.closest('[data-place]').dataset.place); el._placed = null; ui.showDetail(el._id); }
+    else if (e.target.closest('[data-place]')) { setPlace(nextPlace()); el._placed = null; ui.showDetail(el._id); }
   });
   // the floating card moves by its header (not by its buttons or links), and stays inside the area under the header
   el.querySelector('.d-top').addEventListener('pointerdown', (e) => {
@@ -174,11 +174,13 @@ function build(el, ui) {
 // where the panel goes: 'left' or 'right' (docked, full height) or 'float' (the card beside the picked conversation),
 // remembered in this window's storage (per user; Edge and the desktop window each keep their own). The older
 // fv.detailFloat / fv.detailLeft keys seed it once.
+// one button cycles them in this order, showing where the panel is now
 const PLACES = [
-  ['left', 'panelLeft', 'dock the panel on the left of the window'],
-  ['float', 'floatWin', 'float the panel beside the conversation you pick'],
-  ['right', 'panelRight', 'dock the panel on the right of the window'],
+  ['left', 'panelLeft', 'docked on the left'],
+  ['float', 'floatWin', 'floating beside the conversation you pick'],
+  ['right', 'panelRight', 'docked on the right'],
 ];
+const nextPlace = () => PLACES[(PLACES.findIndex(([p]) => p === place) + 1) % PLACES.length][0];
 let place = 'float';
 try {
   const v = localStorage.getItem('fv.detailPlace');
@@ -600,7 +602,13 @@ function drawTabs(el, s, ui, work, auto, extras = []) {
   el._changes.hidden = tab !== 'changes';
   el._previewPane.hidden = tab !== 'preview';
   el.classList.toggle('on-session', tab !== 'details');
-  for (const b of el._placeBtns) b.setAttribute('aria-pressed', String(b.dataset.place === place));
+  if (el._placeBtn.dataset.at !== place) {
+    const [, ic, now] = PLACES.find(([p]) => p === place), [, , next] = PLACES.find(([p]) => p === nextPlace());
+    el._placeBtn.dataset.at = place;
+    el._placeBtn.innerHTML = icon(ic, 14);
+    el._placeBtn.title = `panel: ${now}. Click for ${next}`;
+    el._placeBtn.setAttribute('aria-label', `move the panel: now ${now}, next ${next}`);
+  }
   // the terminal starts a preview by itself only while it shows; the chat reads the log and starts one on Send
   renderSessionPane(el._session, s, { ui, visible: tab === 'session', auto: tab === 'session' ? auto : null, onOpened: () => { if (el._tab !== 'chat') el._tab = 'session'; ui.refresh?.(); } });
   if (tab === 'chat') renderChatPane(el._chatMain, s, { visible: true });
