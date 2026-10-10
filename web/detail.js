@@ -198,7 +198,8 @@ let floatSize = null;
 try { const v = JSON.parse(localStorage.getItem('fv.floatSize') || 'null'); if (v && v.w > 0 && v.h > 0) floatSize = v; } catch {}
 // where the last press was: a pick by mouse puts the card right where you clicked
 let lastPress = null;
-document.addEventListener('pointerdown', (e) => { lastPress = { x: e.clientX, y: e.clientY, t: performance.now() }; }, true);
+// (a press in a menu isn't: "Open session" picks the conversation the menu is for, not the menu's spot)
+document.addEventListener('pointerdown', (e) => { lastPress = e.target?.closest?.('.menu') ? null : { x: e.clientX, y: e.clientY, t: performance.now() }; }, true);
 const FLOAT_W = 460, FLOAT_H = 600, GAP = 10, EDGE = 8, MIN_W = 320, MIN_H = 240;
 const GRIPS = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
 // put the floating card next to where the conversation was picked: beside the click (a pick by mouse), else
@@ -211,7 +212,14 @@ function anchorOf(el, id, byMouse) {
   const a = [...document.querySelectorAll(`main .view:not([hidden]) ${sel}, #finished ${sel}`)].find((x) => x.getClientRects().length && !el.contains(x));
   return a?.getBoundingClientRect() || null;
 }
-function placeFloat(el, work, id, byMouse) {
+const covers = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+// An open card stays where it is for a new pick, unless it covers the conversation picked: only then does it move.
+function placeFloat(el, work, id, byMouse, wasOpen = false) {
+  if (wasOpen && el._placed) {
+    const own = anchorOf(el, id, false);
+    if (!own || !covers(el.getBoundingClientRect(), { left: own.left, right: own.right, top: own.top, bottom: own.bottom ?? own.top + 56 })) { el._placed = id; return; }
+    byMouse = false; // it moves beside the conversation it covered, not beside the click (a row elsewhere)
+  }
   const wr = work.getBoundingClientRect();
   const w = Math.min(floatSize?.w || FLOAT_W, wr.width - 2 * EDGE), h = Math.min(floatSize?.h || FLOAT_H, wr.height - 2 * EDGE);
   const r = anchorOf(el, id, byMouse);
@@ -496,7 +504,7 @@ function startRename(el, ui) {
 // el: the panel; s: the session (or null to close); gone: s is the last copy of one that left the list;
 // extras: the other selected conversations, whose chats show under its own (drawSplits)
 export function renderDetail(el, s, ui, gone = false, extras = []) {
-  const open = !!s;
+  const open = !!s, wasOpen = el.classList.contains('open');
   el.classList.toggle('open', open);
   el.setAttribute('aria-hidden', String(!open));
   const work = el.closest('.work');
@@ -525,8 +533,8 @@ export function renderDetail(el, s, ui, gone = false, extras = []) {
   const wantTab = ui.takeTab ? ui.takeTab(s.id) : null;
   if (wantTab === 'details' || wantTab === 'chat' || wantTab === 'changes' || wantTab === 'preview' || (wantTab === 'session' && desk)) el._tab = wantTab;
   else if (intent) el._tab = 'chat';
-  // the floating card moves to each new pick (arrow keys too); a redraw leaves it where it is
-  if (float && work && (intent || el._placed !== s.id)) placeFloat(el, work, s.id, intent === 'preview' || intent === 'explicit');
+  // the floating card goes beside a pick when it opens, and later moves only off a pick it covers (placeFloat)
+  if (float && work && (intent || el._placed !== s.id)) placeFloat(el, work, s.id, intent === 'preview' || intent === 'explicit', wasOpen);
   if (intent === 'explicit' && desk && !openElsewhere(s)) ensureLive(s, { sizeEl: el._chat }).catch(() => {});
   drawTabs(el, s, ui, work, intent === 'preview' || intent === 'explicit' ? intent : null, extras);
   // a click, Enter or a double-click (and a new session or Fork) puts the keyboard straight in the chat box;
