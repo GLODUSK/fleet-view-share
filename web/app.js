@@ -767,6 +767,10 @@ function repoForFolder(st, folder) {
   const r = (st.repos || []).find((x) => normRoot(x.root) === f);
   return { root: r ? r.root : folder, name: r ? r.name : repoName(folder), color: C.dim };
 }
+// a pasted copy (Ctrl+V, pasteCopied) -> { name, from }: it goes by the name of the conversation it was copied from
+// (its stand-in at once, POST /rename once it has its own id; a fork's first id can still be the original's, so
+// that one waits for the next)
+const pasteNames = new Map();
 function pendingSessions(st) {
   const listed = new Set((st.sessions || []).map((s) => s.id));
   const out = [];
@@ -775,7 +779,7 @@ function pendingSessions(st) {
     if (!(h.created || h.handoffFrom) || !h.alive || listed.has(h.id) || !h.cwd) continue;
     const color = acctColor(h.account);
     out.push({
-      id: h.id, pending: true, name: h.forkFrom ? 'forked session' : h.handoffFrom && !h.created ? 'picked-up session' : 'new session', account: h.account, state: 'NEW', label: 'NEW SESSION', stateColor: color, hue: color,
+      id: h.id, pending: true, name: pasteNames.get(h.id)?.name || (h.forkFrom ? 'forked session' : h.handoffFrom && !h.created ? 'picked-up session' : 'new session'), account: h.account, state: 'NEW', label: 'NEW SESSION', stateColor: color, hue: color,
       repo: repoForFolder(st, h.cwd), cwd: h.cwd, last: h.startedAt || Date.now(), turnStart: null, goal: null, lastAction: null, waitingOn: null,
       agents: [], files: [], calls: [], spark: [], ship: null, progress: { mode: 'ship', pct: 0 }, planSteps: null, context: null,
       links: { pr: null, branch: null, deploy: null, repoFolder: h.cwd }, lastReply: null, tokens: 0, cost: 0, endedAt: null, openElsewhere: false, calls20: 0,
@@ -1650,6 +1654,7 @@ async function pasteCopied() {
     const r = await createSession({ cwd: folder, account: c.account, ...(c.empty ? {} : { forkFrom: c.id }), ...newSize() });
     if (!r || !r.ok) { toast((r && r.message) || `could not copy ${c.name}`, C.red); continue; }
     n++; first = first || r.key;
+    if (!c.empty && c.name) pasteNames.set(r.key, { name: c.name, from: c.id });
     // side by side when several land on one spot
     const px = x + i * 34, py = y;
     if (!c.empty && normRoot(target) !== normRoot(natural)) pasteMoves.set(r.key, { root: target, x: px, y: py });
@@ -1662,6 +1667,15 @@ async function pasteCopied() {
 }
 // a pasted fork that goes to another workspace: moved there once Claude Code gave it its id
 onRekey((oldKey, id) => {
+  const pn = pasteNames.get(oldKey);
+  if (pn) {
+    pasteNames.delete(oldKey);
+    if (id === pn.from) pasteNames.set(id, pn);
+    else {
+      renamesNow.set(id, { name: pn.name, until: Date.now() + RENAME_SHOW_MS });
+      post('/rename', { id, name: pn.name }).then((r) => { if (!(r && r.ok) && !FIXTURE) renamesNow.delete(id); poll(); });
+    }
+  }
   const m = pasteMoves.get(oldKey);
   if (!m) return;
   pasteMoves.delete(oldKey);
