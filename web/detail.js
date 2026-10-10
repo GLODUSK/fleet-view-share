@@ -98,6 +98,7 @@ function build(el, ui) {
     else if (e.target.closest('[data-peek-x]')) { peek = null; ui.showDetail(el._id); }
     else if (peekK) { if (peek) peek.kind = peekK.dataset.peekKind; ui.showDetail(el._id); }
     else if (cellX) ui.dropMulti?.(cellX.dataset.cellX);
+    else if (e.target.closest('[data-split-pin]')) ui.toggleSplitPin?.(e.target.closest('[data-split-pin]').dataset.splitPin);
     else if (e.target.closest('[data-pin]')) ui.togglePin?.();
     else if (e.target.closest('[data-close]')) { if (el._cells.size) ui.clearMulti?.(); ui.showDetail(null); }
     else if (e.target.closest('[data-open]') && el._id) (ui.openTerminal || ui.open)(el._id);
@@ -245,19 +246,30 @@ const focusCompose = (el) => requestAnimationFrame(() => el._chatMain.querySelec
 
 // ---------- the Chat tab's splits ----------
 // Under the main chat: (1) the other selected conversations (a Ctrl+click or Shift+drag selection), up to
-// SPLIT_MAX chats in all, each with its own bar (its name, ✕ takes it out of the selection) and its own compose
+// SPLIT_MAX chats in all, each with its own bar (its name, a pin, ✕ takes it out of the selection) and its own compose
 // box; (2) the peek, a picked-up conversation's previous one: its chat, read only (chat.js readOnly), or its
 // handoff summary (the .md, GET /file, drawn as markdown), switched by the bar's Chat / Summary, ✕ closes it.
 // The peek belongs to the conversation it was opened for and goes when another one is shown.
 export const SPLIT_MAX = 3;
 let peek = null; // { for, kind: 'chat' | 'summary', id, name, file }
 export function openPeek(p) { peek = p && p.for && p.id ? { ...p, kind: p.kind === 'summary' ? 'summary' : 'chat' } : null; }
-const cellBar = (s, x) => `<span class="d-cb-dot" style="background:${esc(statusColor(s))}"></span><span class="d-cb-n" title="${esc(s.name)}">${esc(s.name)}</span>`
+// pin: the bar's pin button, { on, attr, title } (the leading chat's is the panel's pin, the others' their own)
+const pinBtn = (s, p) => `<button type="button" class="d-cb-x d-cb-pin" ${p.attr} aria-pressed="${p.on}" title="${esc(p.title)}" aria-label="${esc(p.title)}: ${esc(s.name)}">${icon('pin', 13)}</button>`;
+const cellBar = (s, x, pin) => `<span class="d-cb-dot" style="background:${esc(statusColor(s))}"></span><span class="d-cb-n" title="${esc(s.name)}">${esc(s.name)}</span>`
   + `<span class="d-cb-s">${esc(s.label || s.state || '')}</span><span class="grow"></span>`
+  + (pin ? pinBtn(s, pin) : '')
   + (x ? `<button type="button" class="d-cb-x" data-cell-x="${esc(s.id)}" title="close: take it out of the selection" aria-label="close ${esc(s.name)}">${icon('close', 13)}</button>` : '');
+const splitPin = (ui, s) => {
+  const on = !!ui.splitPinned?.(s.id);
+  return { on, attr: `data-split-pin="${esc(s.id)}"`, title: on ? 'unpin: it leaves the panel with the selection' : 'pin it here: it stays in the panel after the selection goes' };
+};
+const panelPin = (ui) => {
+  const on = !!ui.pinned?.();
+  return { on, attr: 'data-pin', title: on ? 'unpin the panel: it closes again on Esc or an empty click' : 'pin the panel open: any chat you pick opens here' };
+};
 // a handoff summary's front matter (session:, cwd:, pid: … between --- lines) is for the tools, not for reading
 const stripFront = (t) => String(t).replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---[ \t]*\r?\n/, '');
-function drawSplits(el, s, extras, on) {
+function drawSplits(el, s, extras, on, ui) {
   // the other selected conversations
   const want = on ? extras.slice(0, SPLIT_MAX - 1) : [];
   const keep = new Set(want.map((x) => x.id));
@@ -275,13 +287,13 @@ function drawSplits(el, s, extras, on) {
     // in the selection's order
     if ((prev ? prev.nextSibling : el._extras.firstChild) !== c.root) el._extras.insertBefore(c.root, prev ? prev.nextSibling : el._extras.firstChild);
     prev = c.root;
-    setHTML(c.bar, cellBar(x, true));
+    setHTML(c.bar, cellBar(x, true, splitPin(ui, x)));
     renderChatPane(c.chat, x, { visible: true });
   }
   const more = extras.length - want.length;
   el._mainBar.hidden = !want.length;
   el._chat.classList.toggle('d-split', want.length > 0);
-  if (want.length) setHTML(el._mainBar, cellBar(s, true) + (more > 0 ? `<span class="d-cb-more" title="${SPLIT_MAX} chats show at most">+${more} more selected</span>` : ''));
+  if (want.length) setHTML(el._mainBar, cellBar(s, true, panelPin(ui)) + (more > 0 ? `<span class="d-cb-more" title="${SPLIT_MAX} chats show at most">+${more} more selected</span>` : ''));
   // the peek
   const p = on && peek && peek.for === s.id ? peek : null;
   if (peek && peek.for !== s.id) peek = null;
@@ -612,7 +624,7 @@ function drawTabs(el, s, ui, work, auto, extras = []) {
   // the terminal starts a preview by itself only while it shows; the chat reads the log and starts one on Send
   renderSessionPane(el._session, s, { ui, visible: tab === 'session', auto: tab === 'session' ? auto : null, onOpened: () => { if (el._tab !== 'chat') el._tab = 'session'; ui.refresh?.(); } });
   if (tab === 'chat') renderChatPane(el._chatMain, s, { visible: true });
-  drawSplits(el, s, extras, tab === 'chat');
+  drawSplits(el, s, extras, tab === 'chat', ui);
   if (tab === 'changes') renderChangesPane(el._changes, s, { ui });
   if (tab === 'preview') renderPreviewPane(el._previewPane, s, { ui });
   // after the pane (an auto-open there may have just made it a preview)

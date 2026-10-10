@@ -727,6 +727,7 @@ html.glass .work.detail-float .detail, html.glass .work.detail-float .detail:has
 .d-cb-tab:disabled { opacity: 0.4; cursor: default; }
 .d-cb-x { border: 0; background: transparent; color: var(--dim); width: 24px; height: 22px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
 .d-cb-x:hover { color: var(--text); background: rgba(255, 255, 255, 0.12); }
+.d-cb-pin[aria-pressed="true"] { color: var(--cyan); background: rgba(63, 216, 255, 0.1); }
 /* split: a chat's toolbar row (attach, mode, model, mic, send) shows only in the one being typed in; Enter still sends */
 .d-chat.d-split .d-cell:not(:focus-within) .cmp-foot { display: none; }
 .d-chat.d-split .chat-top { display: none !important; }

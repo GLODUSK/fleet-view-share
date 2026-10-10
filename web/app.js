@@ -109,7 +109,7 @@
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects } from './projects.js';
-import { renderDetail, openPeek } from './detail.js';
+import { renderDetail, openPeek, SPLIT_MAX } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady } from './term.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
@@ -182,6 +182,14 @@ function setPin(on) {
   pinned = !!on;
   try { if (pinned) localStorage.setItem('fv.pin', '1'); else localStorage.removeItem('fv.pin'); } catch {}
 }
+// split chats pinned by their own pin (detail.js cell bars): they stay under the panel's chat when the selection
+// clears or changes, until their pin or ✕ lets go. At most SPLIT_MAX - 1 (the oldest goes); kept like the pin.
+let splitPins = [];
+try { splitPins = JSON.parse(localStorage.getItem('fv.splitPins') || '[]').filter((x) => typeof x === 'string' && x).slice(-(SPLIT_MAX - 1)); } catch {}
+function setSplitPins(ids) {
+  splitPins = [...new Set(ids)].slice(-(SPLIT_MAX - 1));
+  try { if (splitPins.length) localStorage.setItem('fv.splitPins', JSON.stringify(splitPins)); else localStorage.removeItem('fv.splitPins'); } catch {}
+}
 const intentOf = (how) => (how === 'keys' ? 'keys' : how === 'explicit' ? 'explicit' : how ? 'preview' : null);
 const ui = {
   selectedId: null,
@@ -212,6 +220,12 @@ const ui = {
   // the panel's pin button: keeps the panel open, or lets it close again
   togglePin() {
     setPin(!pinned);
+    render();
+  },
+  splitPinned: (id) => splitPins.includes(id),
+  // a split chat's pin: keeps it in the panel after the selection goes, or lets it go with the selection
+  toggleSplitPin(id) {
+    setSplitPins(splitPins.includes(id) ? splitPins.filter((x) => x !== id) : splitPins.concat(id));
     render();
   },
   takeIntent(id) {
@@ -255,7 +269,8 @@ const ui = {
   refresh: () => render(),
   // the multi-selection (Ctrl+click on cards, tiles or map nodes; Shift+drag on the map): the map calls
   // setMulti(ids) when its selection changes; ui.multi is the current list (read only)
-  setMulti: (ids) => setMulti(ids, 'map'),
+  // (a first Ctrl+click there takes the panel's chat along, as on the cards: tell the map the list it grew to)
+  setMulti: (ids) => { const w = withShown(ids); setMulti(w, w === ids ? 'map' : 'shell'); },
   get multi() { return [...multi]; },
   toggleMulti: (id) => toggleMulti(id),
   selectMany: (ids) => setMulti(ids, 'cards'),
@@ -1037,7 +1052,9 @@ function drawDetail(v) {
   const key = sel.map((x) => x.id).join(',');
   if (!shut && sel.length >= 2 && key !== splitKey && !(s && sel.some((x) => x.id === s.id))) { s = sel[0]; ui.detailId = s.id; }
   splitKey = key;
-  const extras = s ? sel.filter((x) => x.id !== s.id) : [];
+  // under it: the pinned splits first (still listed, not the one leading), then the rest of the selection
+  const pins = splitPins.map((id) => v.allSessions.find((x) => x.id === id)).filter(Boolean);
+  const extras = s ? [...new Set(pins.concat(sel))].filter((x) => x.id !== s.id) : [];
   let gone = false;
   if (!shut && ui.detailId && !s && detailLast?.id === ui.detailId) { s = detailLast; gone = true; }
   if (!s) { if (!shut) ui.detailId = null; }
@@ -1973,19 +1990,26 @@ function setMulti(ids, from = 'shell') {
   if (from !== 'map') { try { mapMod?.setMapSelection?.([...multi]); } catch (e) { console.error(e); } }
   render();
 }
+// the first Ctrl+click takes the picked conversation along, or the one the panel shows (a pinned panel keeps its
+// chat after an empty click picks nothing): Ctrl+click on a second card makes two
+const shownId = () => ui.selectedId || (document.getElementById('detail')?.classList.contains('open') ? ui.detailId : null);
+const withShown = (ids) => (!multi.size && ids?.length === 1 && shownId() && shownId() !== ids[0] ? [shownId(), ids[0]] : ids);
 function toggleMulti(id) {
   if (!id) return;
   const next = new Set(multi);
-  // the first Ctrl+click takes the picked conversation along: Ctrl+click on a second card makes two
-  if (!next.size && ui.selectedId && ui.selectedId !== id) next.add(ui.selectedId);
+  if (!next.size && shownId() && shownId() !== id) next.add(shownId());
   if (next.has(id)) next.delete(id); else next.add(id);
   setMulti([...next], 'cards');
 }
 ui.clearMulti = () => setMulti([], 'cards');
 // a split chat's ✕ (detail.js): out of the selection; the panel's own conversation hands its place to the next one
+// A pinned split's ✕ lets go of its pin as well; the leading chat's ✕ hands its place to a pinned split when no
+// other conversation is selected
 ui.dropMulti = (id) => {
+  if (splitPins.includes(id)) setSplitPins(splitPins.filter((x) => x !== id));
   const rest = [...multi].filter((x) => x !== id);
-  if (ui.detailId === id) ui.detailId = rest[0] || null;
+  const listed = new Set((view?.allSessions || []).map((x) => x.id));
+  if (ui.detailId === id) ui.detailId = rest[0] || splitPins.find((x) => listed.has(x)) || null;
   setMulti(rest.length >= 2 ? rest : [], 'cards');
   render();
 };
