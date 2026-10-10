@@ -602,6 +602,17 @@ function readNew(file, initialTail) {
 const mtime = (f) => { try { return fs.statSync(f).mtimeMs; } catch { return 0; } };
 const ls = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+// the model a new conversation starts on: `model` in its account's settings.json (null when unset), read at most every 10 s
+const defModels = new Map(); // config folder -> { at, model }
+function defaultModelOf(projRoot) {
+  const dir = projRoot ? path.dirname(projRoot) : path.join(os.homedir(), '.claude');
+  let c = defModels.get(dir);
+  if (!c || Date.now() - c.at > 10e3) {
+    const m = (readJson(path.join(dir, 'settings.json')) || {}).model;
+    defModels.set(dir, c = { at: Date.now(), model: typeof m === 'string' && m.trim() ? m.trim() : null });
+  }
+  return c.model;
+}
 
 // ---------- model ----------
 const sessions = new Map(); // id -> session
@@ -3711,6 +3722,8 @@ function sessionJson(s, now) {
     branch,
     worktree,
     model: s.model || null,
+    // what it runs before its first reply names a model (the account's default; 'opus', 'sonnet' and the like are aliases)
+    defaultModel: s.demo ? null : defaultModelOf(s.projRoot),
     effort: s.effort || null,
     fast: typeof s.fast === 'boolean' ? s.fast : null,
     // handoff: the context size it checkpoints itself at (handoff.js), for the "182k / 200k" readout

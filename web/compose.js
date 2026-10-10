@@ -405,6 +405,16 @@ const modelKey = (model, big) => {
   const m = String(model || '').replace(/\[1m\]$/i, '');
   return m ? (big ? `${m}[1m]` : m) : null;
 };
+// the settings.json `model` as a menu id: an alias ('opus', 'sonnet[1m]', 'opusplan') becomes the newest of its family;
+// unset or 'default' is Opus, what Claude Code runs on a Max plan
+export function defaultModelKey(setting) {
+  const raw = String(setting || '').trim().toLowerCase();
+  const big = /\[1m\]$/.test(raw), m = raw.replace(/\[1m\]$/, '');
+  const fam = !m || m === 'default' || m === 'best' || m === 'opusplan' ? 'opus' : /^(opus|sonnet|haiku|fable)$/.test(m) ? m : null;
+  if (!fam) return modelKey(m, big);
+  const id = MODEL_IDS.find((k) => k.startsWith(`claude-${fam}-`) && !k.endsWith('[1m]'));
+  return id ? modelKey(id, big) : null;
+}
 
 // ---------- drafts, per conversation ----------
 // quote: what Reply took from the feed, as "> " lines; it shows as a bubble above the text and goes in first.
@@ -1450,7 +1460,7 @@ export function mountCompose(slot, s) {
   // until the session shows it (the model shows with the next reply) or 10 minutes pass
   function current() {
     const s = st.s, big = !!(s.context && s.context.limit >= 1000000);
-    let model = modelKey(s.model, big), effort = st.effort || s.effort || null;
+    let model = s.model ? modelKey(s.model, big) : defaultModelKey(s.defaultModel), effort = st.effort || s.effort || null;
     const w = st.want;
     if (w && Date.now() - w.at > 10 * 60e3) st.want = null;
     else if (w) {
