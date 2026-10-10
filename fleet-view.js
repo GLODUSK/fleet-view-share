@@ -16,7 +16,7 @@ const CHANGES = require(path.join(__dirname, 'changes.js'));
 const PREVIEW = require(path.join(__dirname, 'preview.js'));
 const UPDATER = require(path.join(__dirname, 'updater.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
-const CODEGRAPH = require(path.join(__dirname, 'codegraph.js'));
+const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
 
 // ---------- options ----------
 const argv = process.argv.slice(2);
@@ -5880,7 +5880,7 @@ function startWeb() {
   });
 }
 
-// code graphs (codegraph.js): the main checkout of every repo added, or seen in the last week, and the checkout of
+// code graphs (code-index.js): the main checkout of every repo added, or seen in the last week, and the checkout of
 // every conversation active in the last day (its worktree, say) get a CodeGraph index, built one at a time
 function codeGraphs() {
   const want = (dir) => {

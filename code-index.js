@@ -50,7 +50,7 @@ function exclude(root) {
 function findCodegraph() {
   if (finding || (found !== null && Date.now() - foundAt < FIND_EVERY_MS)) return;
   finding = true;
-  execFile(process.platform === 'win32' ? 'where' : 'which', ['codegraph'], { windowsHide: true, timeout: 10e3 }, (err) => {
+  execFile(process.platform === 'win32' ? 'where' : 'which', [process.platform === 'win32' ? 'codegraph.cmd' : 'codegraph'], { windowsHide: true, timeout: 10e3 }, (err) => {
     finding = false;
     const was = found;
     found = !err; foundAt = Date.now();
@@ -83,9 +83,10 @@ function next() {
   const t0 = Date.now();
   log(`${job.top}: building`);
   const win = process.platform === 'win32';
-  // the npm command is a .cmd on Windows, so cmd.exe runs it; the path was checked for characters cmd treats specially
+  // the npm command is a .cmd on Windows, so cmd.exe runs it, named in full: a bare `codegraph` can find a .js file of
+  // that name first (PATHEXT). The path was checked for characters cmd treats specially
   const p = win
-    ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"codegraph init --yes "${job.top}""`], { cwd: job.top, windowsHide: true, windowsVerbatimArguments: true, stdio: ['ignore', 'ignore', 'pipe'] })
+    ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"codegraph.cmd init --yes "${job.top}""`], { cwd: job.top, windowsHide: true, windowsVerbatimArguments: true, stdio: ['ignore', 'ignore', 'pipe'] })
     : spawn('codegraph', ['init', '--yes', job.top], { cwd: job.top, stdio: ['ignore', 'ignore', 'pipe'] });
   try { os.setPriority(p.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch {}
   let err = '';
