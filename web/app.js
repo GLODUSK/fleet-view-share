@@ -856,20 +856,6 @@ function weekPill(wk) {
     + `<span class="count-k">week left</span></span>`;
 }
 
-// why an account can't start a conversation now ("1% of its week left, resets Fri 3 PM"), or '' when it can.
-// 2% or less counts as out: a fresh conversation's first turns use about that. No usage data for it (not read
-// yet, a failed read) counts as fine: nothing is held back on a guess.
-const EMPTY_AT = 2;
-function acctEmpty(a) {
-  const w = state?.week?.[a], now = Date.now();
-  if (!w) return '';
-  const when = (t) => (t ? ', resets ' + new Date(t).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '');
-  if (w.left <= EMPTY_AT) return `${w.left}% of its week left${when(w.resets)}`;
-  const f = w.five;
-  if (f && f.left <= EMPTY_AT && !(f.resets && f.resets < now)) return `${f.left}% of its 5-hour limit left${when(f.resets)}`;
-  return '';
-}
-
 function drawHeader(v) {
   $('brand-name').textContent = brandText();
   const list = v.sessions;
@@ -1701,11 +1687,9 @@ function openContextMenu(target, x, y) {
     const color = target.color || repo.color || C.dim;
     const items = [];
     if (desk) {
-      // an account out of its weekly or 5-hour limit is left out; both out: one quiet line saying so
-      const all = allAccounts(), here = onAccounts();
-      const ok = here.filter((a) => !acctEmpty(a));
-      for (const a of ok) items.push({ label: all.length === 1 ? 'New session' : `New session · ${a}`, icon: 'plus', run: () => newSession(folder, a) });
-      if (!ok.length) items.push({ label: 'New session', icon: 'plus', disabled: true, note: here.map((a) => (here.length === 1 ? '' : a + ' ') + acctEmpty(a)).join(' · ') });
+      // every account that is on, however little of its weekly or 5-hour limit is left (Henry, 2026-10-10)
+      const all = allAccounts();
+      for (const a of onAccounts()) items.push({ label: all.length === 1 ? 'New session' : `New session · ${a}`, icon: 'plus', run: () => newSession(folder, a) });
       items.push({ sep: true });
     }
     items.push({ label: 'Open folder', icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
@@ -1833,7 +1817,6 @@ function sendToMenuItems(s, hosted) {
 }
 function sendToMenuItem(s, hosted, to) {
   const label = `Send to Claude ${to}`;
-  if (acctEmpty(to)) return { label, icon: 'push', disabled: true, note: acctEmpty(to) };
   if (openElsewhere(s) && !hosted) return { label, icon: 'push', disabled: true, note: 'open in another window; end it there' };
   const st = hosted ? hostStatus(s.id) : null;
   const busy = hosted && (st ? st === 'busy' : s.state === 'WORKING' || s.state === 'AGENTS');
@@ -1850,7 +1833,6 @@ async function sendToFromMenu(s, to) {
 function forkMenuItem(s) {
   const label = 'Fork';
   if (!s.cwd) return { label, icon: 'branch', disabled: true, note: 'no folder known for it' };
-  if (acctEmpty(s.account)) return { label, icon: 'branch', disabled: true, note: acctEmpty(s.account) };
   return { label, icon: 'branch', run: () => forkFromMenu(s) };
 }
 async function forkFromMenu(s) {
@@ -1866,7 +1848,7 @@ window.addEventListener('fv-chat-fork', async (e) => {
   const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === d.id);
   const text = String(d.text || '');
   const fork = d.how !== 'new';
-  const why = !s ? 'that conversation is no longer listed' : !s.cwd ? 'no folder known for it' : acctEmpty(s.account);
+  const why = !s ? 'that conversation is no longer listed' : !s.cwd ? 'no folder known for it' : '';
   const r = why ? { ok: false, message: why } : await createSession({ cwd: s.cwd, account: s.account, ...(fork ? { forkFrom: s.id } : {}), ...newSize() });
   if (!r || !r.ok) {
     // nothing started: the message is out of the queue, so it goes to the clipboard rather than being lost

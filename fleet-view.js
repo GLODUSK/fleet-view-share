@@ -1132,7 +1132,7 @@ async function readWeekLeft() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = await r.json(), w = j.seven_day, f = j.five_hour;
       const left = (x) => ({ left: Math.max(0, Math.round(100 - x.utilization)), resets: Date.parse(x.resets_at) || null });
-      // five: the 5-hour session limit, which can run out with week left (the new-session menu skips such an account)
+      // five: the 5-hour session limit, which can run out with week left
       if (w && typeof w.utilization === 'number') weekLeft[a] = { ...left(w), five: f && typeof f.utilization === 'number' ? left(f) : null };
     } catch (e) { missed = true; logOnce('week:' + a + ':' + (e && e.message), `weekly limit read for account ${a} failed: ${e && e.message}`); }
   }
