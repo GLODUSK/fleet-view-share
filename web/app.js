@@ -1188,9 +1188,9 @@ for (const type of ['dblclick', 'auxclick']) {
 
 // footer keys: [keys (each drawn as a key cap; '/' between two of them reads "or"), what they do]
 const KEYS = {
-  cards: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+z', 'undo'], ['c', 'compact'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
-  map: [['v', 'view'], ['click', 'select'], ['ctrl+click', 'select more'], ['double-click', 'open'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+z', 'undo'], ['wheel', 'zoom'], ['drag', 'pan'], ['0', 'recenter'], ['n/N', 'needs you'], ['k', 'lens'], ['t', 'replay'], ['l', 'legend'], ['/', 'filter'], ['r', 'workspace']],
-  wall: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+z', 'undo'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
+  cards: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['c', 'compact'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
+  map: [['v', 'view'], ['click', 'select'], ['ctrl+click', 'select more'], ['double-click', 'open'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['wheel', 'zoom'], ['drag', 'pan'], ['0', 'recenter'], ['n/N', 'needs you'], ['k', 'lens'], ['t', 'replay'], ['l', 'legend'], ['/', 'filter'], ['r', 'workspace']],
+  wall: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
   projects: [['v', 'view'], ['↑↓', 'pick'], ['enter', 'type'], ['right-click', 'menu'], ['/', 'filter'], ['r', 'workspace'], ['esc', 'clear']],
 };
 const MOUSE = new Set(['click', 'double-click', 'right-click', 'wheel', 'drag', 'ctrl+click']);
@@ -1536,15 +1536,92 @@ async function copyPicked() {
     what = list.length === 1 ? list[0].name : `${list.length} conversations`;
   }
   if (!text) { toast('Pick a conversation or workspace to copy', C.dim); return; }
-  try { await navigator.clipboard.writeText(text); toast(`Copied ${what}`, C.mint); }
+  // conversations (new, empty ones too) can be pasted as copies (Ctrl+V); a workspace path can't
+  copied = list.length && text && !(menuOpen && menuItems[menuSel]?.root) && !(p && p.kind === 'repo' && p.root)
+    ? list.map((s) => ({ id: s.id, name: s.name, empty: !!s.pending, cwd: s.cwd || s.links?.repoFolder || '', account: s.account, root: s.repo?.root || '' })).filter((c) => c.cwd)
+    : [];
+  try { await navigator.clipboard.writeText(text); toast(`Copied ${what}${copied.length && termApi() ? ': Ctrl+V pastes a copy where the mouse is' : ''}`, C.mint); }
   catch { toast('Could not reach the clipboard', C.red); }
 }
-document.addEventListener('keydown', (e) => {
+// ---------- Ctrl+V: copies of the copied conversations, where the mouse is ----------
+// A conversation with history comes back as a fork (claude --resume <id> --fork-session, like the menu's Fork); a
+// new, empty one as a new session in the same folder and account. Over a workspace (its group on the map, or a
+// card, tile, row or workspace heading of it) the copies go there: an empty one starts in that folder, a fork
+// starts in its own folder (forks resume from there) and moves to it once it has its id (Move to workspace). On
+// the map each copy sits where it was pasted. A copy only lasts while this window has the keyboard: one made in
+// another app since would otherwise turn a stray Ctrl+V outside the chat box into forks.
+let copied = [];
+const mouseAt = { x: NaN, y: NaN };
+document.addEventListener('mousemove', (e) => { mouseAt.x = e.clientX; mouseAt.y = e.clientY; }, { passive: true, capture: true });
+window.addEventListener('blur', () => { copied = []; });
+document.addEventListener('copy', () => { copied = []; }); // text copied in the page
+const pasteMoves = new Map(); // a fork's key -> { root, x, y }: moved there once it has its id
+// the workspace under the mouse, or null (each copy then stays in its own)
+function pasteRoot(x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  if (local.view === 'map') return mapMod?.mapRepoAt?.(x, y) || null;
+  const el = document.elementFromPoint(x, y);
+  const head = el?.closest?.('.pj-repo[data-root], [data-act="reveal"][data-kind="folder"][data-path]');
+  if (head) return head.dataset.root || head.dataset.path || null;
+  const row = el?.closest?.('.card[data-id], .tile[data-id], .fin-row[data-id], [data-pick]');
+  const s = row && sessionsOf([row.dataset.id || row.dataset.pick])[0];
+  return s?.repo?.root || null;
+}
+async function pasteCopied() {
+  if (!copied.length) { toast('Ctrl+C a conversation first, then Ctrl+V where its copy should go', C.dim); return; }
+  if (!termApi()) { toast('copies need the Fleet View desktop window', C.red); return; }
+  const list = copied.slice(), x = mouseAt.x, y = mouseAt.y;
+  const root = pasteRoot(x, y);
+  let first = null, n = 0;
+  for (const [i, c] of list.entries()) {
+    const here = root && normRoot(root) !== normRoot(c.root) ? root : null;
+    const folder = c.empty && here ? here : c.cwd;
+    // where the new session shows by itself (its folder's repo), and where the copy belongs (a moved original's too)
+    const natural = repoForFolder(state || {}, folder).root || folder, target = here || c.root || natural;
+    unhideRepo(natural);
+    const r = await createSession({ cwd: folder, account: c.account, ...(c.empty ? {} : { forkFrom: c.id }), ...newSize() });
+    if (!r || !r.ok) { toast((r && r.message) || `could not copy ${c.name}`, C.red); continue; }
+    n++; first = first || r.key;
+    // side by side when several land on one spot
+    const px = x + i * 34, py = y;
+    if (!c.empty && normRoot(target) !== normRoot(natural)) pasteMoves.set(r.key, { root: target, x: px, y: py });
+    else mapMod?.mapPlaceSession?.(r.key, natural, px, py);
+  }
+  if (!n) return;
+  const where = root ? ` in ${repoName(root)}` : '';
+  toast(n === 1 ? `Pasted a copy of ${list[0].name}${where}` : `Pasted ${n} copies${where}`, C.mint);
+  ui.setSelected(first, 'explicit');
+}
+// a pasted fork that goes to another workspace: moved there once Claude Code gave it its id
+onRekey((oldKey, id) => {
+  const m = pasteMoves.get(oldKey);
+  if (!m) return;
+  pasteMoves.delete(oldKey);
+  post('/sessions/move', { id, root: m.root }).then((r) => {
+    if (!r || !r.ok) { if (!FIXTURE) toast(r?.message || 'could not move the copy', C.red); return; }
+    mapMod?.mapPlaceSession?.(id, m.root, m.x, m.y);
+    poll();
+  });
+});
+function pickKeys(e) {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
   const k = e.key.toLowerCase();
-  if (k !== 'c' && k !== 'z') return;
-  if (e.target.closest?.('.term-host, .chat-compose, input, textarea, select, [contenteditable]')) return;
+  if (k !== 'c' && k !== 'z' && k !== 'v') return;
+  if (e.target.closest?.('.term-host')) return;
+  // the chat box often has the cursor just from picking a conversation: with the mouse away from the panel and
+  // nothing selected in the box, Ctrl+C and Ctrl+V (with a copy waiting) still mean the conversations
+  if (e.target.closest?.('.chat-compose')) {
+    const ta = e.target, away = !document.elementFromPoint(mouseAt.x, mouseAt.y)?.closest?.('#detail');
+    const ok = ta.matches?.('textarea') && away && (k === 'c' ? ta.selectionStart === ta.selectionEnd : k === 'v' && copied.length > 0);
+    if (!ok) return;
+  } else if (e.target.closest?.('input, textarea, select, [contenteditable]')) return;
   if (!$('confirm').hidden) return;
+  if (k === 'v') {
+    if (e.repeat) return;
+    e.preventDefault();
+    pasteCopied();
+    return;
+  }
   if (k === 'c') {
     // selected text copies as usual
     const sel = window.getSelection?.();
@@ -1555,7 +1632,10 @@ document.addEventListener('keydown', (e) => {
   }
   e.preventDefault();
   undoLast();
-});
+}
+// the chat box keeps its keys from the page (compose.js stops them), so its case is heard on the way down
+document.addEventListener('keydown', (e) => { if (!e.target.closest?.('.chat-compose')) pickKeys(e); });
+document.addEventListener('keydown', (e) => { if (e.target.closest?.('.chat-compose')) pickKeys(e); }, true);
 
 // ---------- keys ----------
 // the live terminal (term.js) owns the keyboard while it has focus: no shortcut fires, Esc goes to Claude

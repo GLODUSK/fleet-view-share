@@ -586,6 +586,36 @@ export function mapPlaceRepo(root, clientX, clientY) {
   return true;
 }
 
+// Ctrl+V (app.js): the workspace whose group reaches a point on the map (client coordinates), the nearest one,
+// or null over empty space or when the map isn't showing
+export function mapRepoAt(clientX, clientY) {
+  if (!active() || !I.cam || !I.canvas || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const r = I.canvas.getBoundingClientRect();
+  const [x, y] = toWorld(clientX - r.left, clientY - r.top);
+  const ext = groupExt(I.sim);
+  let best = null, bd = Infinity;
+  for (const n of I.sim) {
+    if (n.kind !== 'repo' || !n.p || !n.root) continue;
+    const d = Math.hypot(x - n.p.x, y - n.p.y);
+    if (d <= Math.max(70, (ext.get(n.id) || 40) * 0.9) && d < bd) { bd = d; best = n; }
+  }
+  return best ? best.root : null;
+}
+// a pasted conversation (its key, new-<n> until it has an id) sits where it was pasted, pinned to its repo's
+// group like a dropped one; false when the map isn't showing or that repo isn't on it
+export function mapPlaceSession(key, root, clientX, clientY) {
+  if (!active() || !I.cam || !I.canvas || !key || !root || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+  const hub = I.byId.get(repoId(root)), base = hub && hub.p ? hub.p : I.homeXY.get(repoId(root));
+  if (!base) return false;
+  const r = I.canvas.getBoundingClientRect();
+  const [x, y] = toWorld(clientX - r.left, clientY - r.top);
+  I.homeXY.set('s:' + key, { x: x - base.x, y: y - base.y, pin: true });
+  I.alpha = Math.max(I.alpha, 0.3);
+  I.dirty = true;
+  saveSpotsSoon(300, true);
+  return true;
+}
+
 // for tests: the map's inner numbers
 export function mapDebug() {
   if (!I) return null;
@@ -620,7 +650,8 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
 export function rekeyNode(oldKey, id) {
   if (!I || !oldKey || !id) return;
   const from = 's:' + oldKey, to = 's:' + id;
-  for (const m of [I.pos, I.aura, I.look]) if (m.has(from) && !m.has(to)) { m.set(to, m.get(from)); m.delete(from); }
+  for (const m of [I.pos, I.aura, I.look, I.homeXY]) if (m.has(from) && !m.has(to)) { m.set(to, m.get(from)); m.delete(from); }
+  if (I.homeXY.has(to)) saveSpotsSoon(300, true);
   // the drawn node too, so the next rebuild doesn't see it leave (no fade for a node that only changed its key)
   const n = I.byId.get(from);
   if (n && !I.byId.has(to)) { I.byId.delete(from); n.id = to; n.sid = id; I.byId.set(to, n); }
@@ -2977,7 +3008,7 @@ function wireMouse(cv) {
         b.x1 = e.clientX - r.left; b.y1 = e.clientY - r.top;
         const x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1), y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
         const set = new Set(b.base);
-        for (const n of I.nodes) if (n.kind === 'session' && !n.s.pending && onScreen(n) && n.sx >= x0 && n.sx <= x1 && n.sy >= y0 && n.sy <= y1) set.add(n.sid);
+        for (const n of I.nodes) if (n.kind === 'session' && onScreen(n) && n.sx >= x0 && n.sx <= x1 && n.sy >= y0 && n.sy <= y1) set.add(n.sid);
         I.multi = set; I.band = b; I.dirty = true;
         hideTip();
         return;
@@ -3067,10 +3098,10 @@ function wireMouse(cv) {
     let n = hitTest(e.clientX - r.left, e.clientY - r.top);
     if (d.mod || d.shift) {
       // Ctrl+click: in or out of the multi-selection (the conversation picked so far joins it first)
-      const sid = n && (n.kind === 'session' || n.kind === 'agent') && !(n.s && n.s.pending) ? n.sid : null;
+      const sid = n && (n.kind === 'session' || n.kind === 'agent') ? n.sid : null; // new (empty) ones too
       if (!sid) return;
       const set = new Set(I.multi), cur = !set.size && I.sel ? I.byId.get(I.sel) : null;
-      if (cur && cur.kind === 'session' && cur.sid && cur.sid !== sid && !cur.s.pending) set.add(cur.sid);
+      if (cur && cur.kind === 'session' && cur.sid && cur.sid !== sid) set.add(cur.sid);
       if (set.has(sid)) set.delete(sid); else set.add(sid);
       I.lastClick = null;
       setMulti(set);
