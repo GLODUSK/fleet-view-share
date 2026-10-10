@@ -7,5 +7,8 @@ args = ""
 For Each a In WScript.Arguments
   args = args & " """ & a & """"
 Next
+' Start in our own folder: the window and server keep their start folder open, so starting from a worktree
+' would lock that worktree until they exit.
+sh.CurrentDirectory = dir
 sh.Environment("Process")("FLEET_VIEW_CHILD") = "1"
 sh.Run "cmd /d /c """"" & dir & "\fleet-view.cmd""" & args & """", 0, False
