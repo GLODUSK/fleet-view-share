@@ -2,8 +2,8 @@
 // section by section on every poll, so its scroll position (and the reply box's) stays where you left it.
 // Links inside it ([data-act]) are handled by the shell in app.js, like the ones in cards and tiles.
 // Two tabs: Session (the live Claude Code session, term.js) and Details (everything below). In the desktop
-// window every conversation opens on Session (Edge, which can't run one, opens on Details); the tab picked
-// stays until another conversation is shown, and nothing is remembered per conversation. A pick by click
+// window every conversation opens on Chat, or on the tab it was last shown on (kept per conversation in this
+// window's storage, so closing the panel or the app and opening it again comes back to that tab; Henry, 2026-10-10). A pick by click
 // (ui.takeIntent) starts the session there by itself, as a preview: see term.js. Three buttons place the panel
 // (kept per user): docked on the left, floating (the default), or docked on the right. Floating, it is a card beside
 // the conversation that was picked, over the view: its header moves it and its edges and corners resize it. Docked,
@@ -27,7 +27,23 @@ const coarseAgo = (ms) => (ms < 60e3 ? 'now' : ago(ms));
 // a new conversation got its id (after its first message): still the same one, so the panel stays on its tab and
 // where it was scrolled, instead of starting over as if another conversation had been picked
 const built = new Set();
-onRekey((oldKey, id) => { for (const el of built) if (el._id === oldKey) el._id = id; });
+onRekey((oldKey, id) => { for (const el of built) if (el._id === oldKey) el._id = id; const t = lastTab(oldKey); if (t) rememberTab(id, t); });
+
+// the tab each conversation was last shown on (fv.tabs: id -> tab, the newest TABS_KEEP)
+const TABS_KEEP = 200;
+let tabMem = {};
+try { const v = JSON.parse(localStorage.getItem('fv.tabs') || '{}'); if (v && typeof v === 'object') tabMem = v; } catch {}
+function lastTab(id) { const t = id && tabMem[id]; return ['chat', 'session', 'changes', 'preview', 'details'].includes(t) ? t : null; }
+function rememberTab(id, tab) {
+  if (!id || tabMem[id] === tab) return;
+  delete tabMem[id];
+  tabMem[id] = tab; // the newest last, so the oldest go first
+  const ids = Object.keys(tabMem);
+  for (const k of ids.slice(0, Math.max(0, ids.length - TABS_KEEP))) delete tabMem[k];
+  try { localStorage.setItem('fv.tabs', JSON.stringify(tabMem)); } catch {}
+}
+// the tab a conversation opens on: the one it was last shown on (Session only where sessions run), else Chat
+const openTab = (id, desk) => { const t = lastTab(id); return t && (t !== 'session' || desk) ? t : 'chat'; };
 
 function build(el, ui) {
   el.innerHTML = `<div class="d-top"><span data-slot="icon" class="c-icon"></span><div data-slot="head" class="d-head"></div>
@@ -121,7 +137,7 @@ function build(el, ui) {
       el.style.setProperty('--fx', `${Math.round(x)}px`);
       el.style.setProperty('--fy', `${Math.round(y)}px`);
     };
-    const end = () => { el.classList.remove('dragging'); top.removeEventListener('pointermove', move); top.removeEventListener('pointerup', end); top.removeEventListener('pointercancel', end); };
+    const end = () => { el.classList.remove('dragging'); saveFloatPos(el); top.removeEventListener('pointermove', move); top.removeEventListener('pointerup', end); top.removeEventListener('pointercancel', end); };
     top.addEventListener('pointermove', move);
     top.addEventListener('pointerup', end);
     top.addEventListener('pointercancel', end);
@@ -162,6 +178,7 @@ function build(el, ui) {
       el.classList.remove('dragging');
       work.classList.remove('detail-sizing');
       try { if (float) localStorage.setItem('fv.floatSize', JSON.stringify(floatSize)); else if (dockW) localStorage.setItem('fv.dockW', String(dockW)); } catch {}
+      if (float) saveFloatPos(el);
       grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', end); grip.removeEventListener('pointercancel', end);
     };
     grip.addEventListener('pointermove', move);
@@ -200,7 +217,17 @@ try { const v = Number(localStorage.getItem('fv.dockW')); if (v >= DOCK_MIN) doc
 // the floating card's size as last resized by hand, remembered the same way
 let floatSize = null;
 try { const v = JSON.parse(localStorage.getItem('fv.floatSize') || 'null'); if (v && v.w > 0 && v.h > 0) floatSize = v; } catch {}
-// where the last press was: a pick by mouse puts the card right where you clicked
+// where the floating card was last moved or resized to (its top-left in the area under the header): an open that
+// isn't a pick (the app or the page starting again with the panel open) puts it back there
+let floatPos = null;
+try { const v = JSON.parse(localStorage.getItem('fv.floatPos') || 'null'); if (v && Number.isFinite(v.x) && Number.isFinite(v.y)) floatPos = v; } catch {}
+function saveFloatPos(el) {
+  const x = parseFloat(el.style.getPropertyValue('--fx')), y = parseFloat(el.style.getPropertyValue('--fy'));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  floatPos = { x: Math.round(x), y: Math.round(y) };
+  try { localStorage.setItem('fv.floatPos', JSON.stringify(floatPos)); } catch {}
+}
+// where the last press was:a pick by mouse puts the card right where you clicked
 let lastPress = null;
 // (a press in a menu isn't: "Open session" picks the conversation the menu is for, not the menu's spot)
 document.addEventListener('pointerdown', (e) => { lastPress = e.target?.closest?.('.menu') ? null : { x: e.clientX, y: e.clientY, t: performance.now() }; }, true);
@@ -218,7 +245,8 @@ function anchorOf(el, id, byMouse) {
 }
 const covers = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 // An open card stays where it is for a new pick, unless it covers the conversation picked: only then does it move.
-function placeFloat(el, work, id, byMouse, wasOpen = false) {
+// atSaved: an open that isn't a pick goes where the card was last put by hand (floatPos), when there is one
+function placeFloat(el, work, id, byMouse, wasOpen = false, atSaved = false) {
   if (wasOpen && el._placed) {
     const own = anchorOf(el, id, false);
     if (!own || !covers(el.getBoundingClientRect(), { left: own.left, right: own.right, top: own.top, bottom: own.bottom ?? own.top + 56 })) { el._placed = id; return; }
@@ -226,9 +254,10 @@ function placeFloat(el, work, id, byMouse, wasOpen = false) {
   }
   const wr = work.getBoundingClientRect();
   const w = Math.min(floatSize?.w || FLOAT_W, wr.width - 2 * EDGE), h = Math.min(floatSize?.h || FLOAT_H, wr.height - 2 * EDGE);
-  const r = anchorOf(el, id, byMouse);
+  const saved = atSaved && floatPos;
+  const r = saved ? null : anchorOf(el, id, byMouse);
   let x, y;
-  if (!r) { x = wr.width - w - EDGE; y = EDGE; } else {
+  if (saved) { x = floatPos.x; y = floatPos.y; } else if (!r) { x = wr.width - w - EDGE; y = EDGE; } else {
     x = r.right + GAP + w <= wr.right - EDGE ? r.right + GAP - wr.left : r.left - GAP - w >= wr.left + EDGE ? r.left - GAP - w - wr.left : r.right + GAP - wr.left;
     y = r.top - wr.top;
   }
@@ -538,20 +567,21 @@ export function renderDetail(el, s, ui, gone = false, extras = []) {
   // 'keys' (arrows: shown, never started), or null (a redraw)
   const intent = ui.takeIntent ? ui.takeIntent(s.id) : null;
   if (el._id !== s.id) {
-    // a different conversation: start at the top, on Chat
+    // a different conversation: start at the top, on the tab it was last shown on, else Chat
     el._id = s.id;
     el._body.scrollTop = 0;
     el._reply.scrollTop = 0;
-    el._tab = 'chat';
+    el._tab = openTab(s.id, desk);
     endPreviews(s.id);
   }
   // a tab asked for once (the Projects view's Session / Details buttons), else Chat for a pick. An explicit open (Enter, a
   // double-click) also starts the live session in the background, so the chat box is ready to send at once
   const wantTab = ui.takeTab ? ui.takeTab(s.id) : null;
   if (wantTab === 'details' || wantTab === 'chat' || wantTab === 'changes' || wantTab === 'preview' || (wantTab === 'session' && desk)) el._tab = wantTab;
-  else if (intent) el._tab = 'chat';
-  // the floating card goes beside a pick when it opens, and later moves only off a pick it covers (placeFloat)
-  if (float && work && (intent || el._placed !== s.id)) placeFloat(el, work, s.id, intent === 'preview' || intent === 'explicit', wasOpen);
+  else if (intent) el._tab = openTab(s.id, desk);
+  // the floating card goes beside a pick when it opens, and later moves only off a pick it covers (placeFloat);
+  // opened without a pick (the panel restored when the app starts), it goes where it was last put
+  if (float && work && (intent || el._placed !== s.id)) placeFloat(el, work, s.id, intent === 'preview' || intent === 'explicit', wasOpen, !intent && !wasOpen);
   if (intent === 'explicit' && desk && !openElsewhere(s)) ensureLive(s, { sizeEl: el._chat }).catch(() => {});
   drawTabs(el, s, ui, work, intent === 'preview' || intent === 'explicit' ? intent : null, extras);
   // a click, Enter or a double-click (and a new session or Fork) puts the keyboard straight in the chat box;
@@ -600,6 +630,7 @@ export function renderDetail(el, s, ui, gone = false, extras = []) {
 
 function drawTabs(el, s, ui, work, auto, extras = []) {
   const tab = ['session', 'chat', 'changes', 'preview'].includes(el._tab) ? el._tab : 'details';
+  rememberTab(s.id, tab);
   for (const b of el._tabs) {
     const on = b.dataset.tab === tab;
     b.classList.toggle('on', on);

@@ -1029,7 +1029,37 @@ $('finished-list').addEventListener('keydown', (e) => {
 // ---------- detail panel ----------
 let splitKey = ''; // the selection the panel last opened for by itself (drawDetail)
 let detailLast = null; // the panel's last copy of its conversation, shown (marked) if it leaves the list
+// The open panel (its conversation and the selection whose chats split it) is kept in this window's storage
+// (fv.panelOpen) and opened again when the app or the page starts (Henry, 2026-10-10). Its place, size, spot and
+// each conversation's tab are kept by detail.js. Put back once, on the first lists that have the conversation, if
+// nothing was picked by then; given up after PANEL_RESTORE_MS (it may have been removed meanwhile).
+const PANEL_RESTORE_MS = 30e3;
+let panelSaved = null, panelKey = null, panelSince = 0;
+try { const v = JSON.parse(localStorage.getItem('fv.panelOpen') || 'null'); if (v && typeof v.id === 'string') panelSaved = v; } catch {}
+function restorePanel(v) {
+  if (!panelSaved) return;
+  if (!panelSince) panelSince = Date.now();
+  const p = panelSaved;
+  if (ui.detailId || ui.selectedId || multi.size || Date.now() - panelSince > PANEL_RESTORE_MS) { panelSaved = null; return; }
+  if (!v.allSessions.some((x) => x.id === p.id)) return;
+  panelSaved = null;
+  ui.detailId = p.id;
+  if (v.sessions.some((x) => x.id === p.id)) ui.selectedId = p.id;
+  const ids = (Array.isArray(p.multi) ? p.multi : []).filter((id) => typeof id === 'string' && v.allSessions.some((x) => x.id === id));
+  if (ids.length >= 2) {
+    for (const id of ids) multi.add(id);
+    splitKey = ids.join(','); // the panel keeps the conversation it had, not the selection's first
+    setTimeout(() => { try { mapMod?.setMapSelection?.([...multi]); } catch (e) { console.error(e); } }, 0);
+  }
+}
+function savePanel(id) {
+  const key = id ? JSON.stringify({ id, multi: [...multi] }) : '';
+  if (key === panelKey || panelSaved) return; // unchanged, or not put back yet
+  panelKey = key;
+  try { if (key) localStorage.setItem('fv.panelOpen', key); else localStorage.removeItem('fv.panelOpen'); } catch {}
+}
 function drawDetail(v) {
+  restorePanel(v);
   const shut = local.view === 'projects' && !projPanel && !pinned;
   let s = ui.detailId && !shut ? v.allSessions.find((x) => x.id === ui.detailId) : null;
   // 2+ selected: their chats share the panel (detail.js drawSplits, SPLIT_MAX at most); with none shown, or one shown
@@ -1047,6 +1077,7 @@ function drawDetail(v) {
   if (!s) { if (!shut) ui.detailId = null; }
   else if (!gone) detailLast = s;
   try { renderDetail($('detail'), s, ui, gone, extras); } catch (e) { console.error(e); }
+  if (!shut) savePanel(s && !gone ? s.id : null);
   if (s && !$('work').classList.contains('detail-open')) detailShownAt = performance.now();
   $('work').classList.toggle('detail-open', !!s);
 }
@@ -1807,10 +1838,19 @@ function canSendTo(s, to) {
   const x = t[to], own = t[s.account || 'B'];
   return !!(x && x.commands && own && x.folder === own.folder);
 }
-// "Send elsewhere ▸ Claude A / C ...": one submenu of the accounts that are on (Henry, 2026-10-10)
+// an account with nothing left of its weekly or 5-hour limit (until that limit resets): nothing can be sent to it.
+// No usage read for it yet counts as not out.
+function acctOut(a) {
+  const w = state?.week?.[a], now = Date.now();
+  if (!w) return false;
+  const out = (x) => x && x.left <= 0 && !(x.resets && x.resets < now);
+  return out(w) || out(w.five);
+}
+// "Send elsewhere ▸ Claude A / C ...": one submenu of the accounts that are on (Henry, 2026-10-10), less those out
+// of their 5-hour or weekly limit, which aren't shown at all (Henry, 2026-10-10)
 function sendElsewhereItem(s, hosted) {
   const label = 'Send elsewhere';
-  const to = onAccounts().filter((a) => a !== (s.account || 'B') && canSendTo(s, a));
+  const to = onAccounts().filter((a) => a !== (s.account || 'B') && canSendTo(s, a) && !acctOut(a));
   if (!to.length) return null;
   if (openElsewhere(s) && !hosted) return { label, icon: 'send', disabled: true, note: 'open in another window; end it there' };
   const st = hosted ? hostStatus(s.id) : null;
