@@ -16,6 +16,7 @@ const CHANGES = require(path.join(__dirname, 'changes.js'));
 const PREVIEW = require(path.join(__dirname, 'preview.js'));
 const UPDATER = require(path.join(__dirname, 'updater.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
+const CODEGRAPH = require(path.join(__dirname, 'codegraph.js'));
 
 // ---------- options ----------
 const argv = process.argv.slice(2);
@@ -462,6 +463,7 @@ function addRepo(p) {
   }
   if (wasHidden) hiddenRepos = hiddenRepos.filter((h) => rootKey(h.root) !== k);
   saveSettings();
+  if (g && !DEMO) CODEGRAPH.want(g.top, g.root);
   const r = had || addedRepos[addedRepos.length - 1];
   return [200, { ok: true, repo: { root: r.root, name: r.name, color: toHex(familyColor(r.root)) }, git: !!g, already: !!had, unhidden: wasHidden }];
 }
@@ -5698,11 +5700,27 @@ function startWeb() {
     every(1500, 'poll', poll);
     every(8000, 'discover', discover);
     every(5000, 'github', github);
+    every(60e3, 'codegraph', codeGraphs);
+    setTimeout(() => { try { codeGraphs(); } catch {} }, 20e3);
     // the API's throwaway sessions: off the map once they end
     every(10000, 'api-temp', sweepTemp);
     // messages and orders that waited for a menu before the last restart (api.js's queue)
     API.startQueue(apiCtx);
   });
+}
+
+// code graphs (codegraph.js): the main checkout of every repo added, or seen in the last week, and the checkout of
+// every conversation active in the last day (its worktree, say) get a CodeGraph index, built one at a time
+function codeGraphs() {
+  const want = (dir) => {
+    if (!dir || isHomeRoot(dir)) return;
+    const g = gitInfo(path.join(dir, '_'));
+    if (g && !isHomeRoot(g.top)) CODEGRAPH.want(g.top, g.root);
+  };
+  for (const r of addedRepos) if (!repoHidden(r.root)) want(r.root);
+  const week = Date.now() - 7 * 24 * 3600e3, since = Date.now() - 24 * 3600e3;
+  for (const [root, at] of remembered.repos) if (at > week && !repoHidden(root)) want(root);
+  for (const s of sessions.values()) if (!s.demo && s.cwd && (s.last || s.mtime || 0) > since) want(s.cwd);
 }
 
 // ---------- autostart: a "Fleet View" shortcut in the user's Startup folder ----------
