@@ -93,7 +93,7 @@
 //
 // Map command center (the shell's side; map.js, map-overlay.js and replay.js draw the rest):
 // - Orders (orders.js, through the live sessions of term.js, never a headless claude): a repo's right-click menu
-//   (map hub, repo chips, the repo menu's rows) has "Give orders ▸" (Prompt, Model, Effort, Fast mode): one text to every unfinished
+//   (map hub, repo chips, the repo menu's rows) has "Give orders ▸" (Prompt, Model, Effort, Fast mode): one text to every
 //   conversation in it, made one team (POST /teams) when there are 2+, so each gets its teammates' ids and the
 //   fleet-msg.js command. A multi-selection's menu has "Give orders ▸" (Work together: a team, Send to each, Model, Effort, Fast mode), "Interrupt all",
 //   "Open all here", "Clear selection" and "Remove N conversations"; a team's has "Message the team", "Add <picked>", "Pick <member>" and
@@ -1697,7 +1697,7 @@ function openContextMenu(target, x, y) {
     items.push({ label: 'Open folder', icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
     items.push(repoPushItem(folder, repo.push || 'production'));
     if (unpinItem(target)) items.push(unpinItem(target));
-    // orders for every unfinished conversation in it (one team), or the same text to each
+    // orders for every conversation in it, idle and new ones too (one team), or the same text to each
     items.push({ sep: true }, ...repoOrderItems(folder, target.name || repo.name || repoName(folder)));
     // its removed conversations (only when it has any), to continue one
     const rm = removedMenuItem(removedFor(folder).slice(0, 15), false);
@@ -2034,10 +2034,14 @@ async function runOrder(list, text, o) {
   render();
   return res;
 }
-// a repo's unfinished conversations (the repo's root or one of its checkouts), not removed
+// a repo's conversations (the repo's root or one of its checkouts), not removed: working ones first, then idle
+// ones (DONE: resumed to take the order), then new sessions with nothing in them yet (pending stand-ins)
 function repoSessions(folder) {
-  const k = normRoot(repoForFolder(state || {}, folder).root || folder);
-  return (state?.sessions || []).filter((s) => s.repo && normRoot(s.repo.root) === k && s.state !== 'DONE' && !isHidden(s));
+  const st = state || {};
+  const k = normRoot(repoForFolder(st, folder).root || folder);
+  const inIt = (s) => s.repo && normRoot(s.repo.root) === k && !isHidden(s);
+  const listed = (st.sessions || []).filter(inIt);
+  return [...listed.filter((s) => s.state !== 'DONE'), ...listed.filter((s) => s.state === 'DONE'), ...pendingSessions(st).filter(inIt)];
 }
 // "Give orders ▸" (4 conversations): Prompt (one text to each, made one team when 2+), then Model ▸, Effort ▸ and
 // Fast mode ▸ for all of them, folded into one row to keep the menu short. The count is the conversations it will reach: one open in another window can't be typed into from here
@@ -2045,7 +2049,7 @@ function repoSessions(folder) {
 function repoOrderItems(folder, name) {
   const all = repoSessions(folder);
   const off = (msg) => [{ label: 'Give orders', icon: 'send', disabled: true, note: msg }];
-  if (!all.length) return off(`no unfinished conversation in ${name}`);
+  if (!all.length) return off(`no conversation in ${name}`);
   if (!termApi()) return off('desktop window only');
   const list = all.filter((s) => !unreachable(s));
   const away = all.length - list.length;
@@ -2053,10 +2057,12 @@ function repoOrderItems(folder, name) {
   if (!list.length) return off(`${away === 1 ? 'its one conversation is' : `all ${away} are`} open in another window`);
   const n = list.length;
   const count = `${n} conversation${n === 1 ? '' : 's'}`;
+  // a team has at most 12: more than that get it one by one
+  const team = n >= 2 && n <= 12;
   const prompt = orderItem('Prompt', list, {
-    team: n >= 2, name: (text) => `${name} · ${firstWords(text, 4, 34)}`,
-    subnote: n >= 2 ? 'as one team: they get each other\'s ids and can talk' : null,
-    placeholder: n >= 2 ? `The order for every conversation in ${name}. They become one team.` : `The order for ${list[0].name}`,
+    team, name: (text) => `${name} · ${firstWords(text, 4, 34)}`,
+    subnote: team ? 'as one team: they get each other\'s ids and can talk' : n > 12 ? 'to each (a team has at most 12)' : null,
+    placeholder: team ? `The order for every conversation in ${name}. They become one team.` : n > 12 ? `The order for every conversation in ${name}` : `The order for ${list[0].name}`,
   });
   const set = setItems(list);
   return [{ label: 'Give orders', icon: 'send', note: [count, awayNote].filter(Boolean).join(' · '), children: [prompt, ...(set.length ? [{ sep: true }, ...set] : [])] }];
@@ -2156,9 +2162,9 @@ function teamMenu(t, x, y) {
   const sel = ui.selectedId && !t.members.includes(ui.selectedId) ? sessionsOf([ui.selectedId])[0] : null;
   const items = [
     orderItem('Message the team', members, { team: false, prefix: `[Fleet View · team ${t.name}]`, placeholder: `A message to every conversation in "${t.name}"` }),
-    sel && sel.state !== 'DONE' && !sel.pending
+    sel && !unreachable(sel) && /^[0-9a-f-]{36}$/i.test(sel.id)
       ? { label: `Add ${sel.name}`, icon: 'plus', note: 'the picked conversation', run: () => addToTeam(t, sel, members) }
-      : { label: 'Add picked conversation', icon: 'plus', disabled: true, note: ui.selectedId ? 'it is in this team already, or finished' : 'pick one first' },
+      : { label: 'Add picked conversation', icon: 'plus', disabled: true, note: ui.selectedId ? 'it is in this team already, or can\'t be reached here' : 'pick one first' },
     { sep: true },
     ...members.map((s) => ({ label: `Pick ${s.name}`, icon: 'shell', run: () => pickFromAnywhere(s.id) })),
     { sep: true },

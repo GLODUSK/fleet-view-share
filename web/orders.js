@@ -15,7 +15,9 @@
 //     name:     the team's name (the server's default is the first words of the order)
 //     prefix:   a first line for a plain message, e.g. '[Fleet View · team "x"]'
 //   results: [{ id, name, ok, message }] per conversation; skipped: the ones that could not be reached at all
-//   (open in another window, finished, or a stand-in with no conversation yet), also listed in results.
+//   (open in another window, or a stand-in that no longer runs here), also listed in results. An idle
+//   conversation (DONE: between turns, even with no live claude) is resumed first, and a new session with nothing
+//   in it yet (a pending stand-in hosted here) is typed into like any other.
 //
 //   teamBrief(team, me, members, state, text)  the text one team member gets: the order, its teammates, how to
 //                                             talk to them (exported for tests and the "Add to team" path)
@@ -36,12 +38,12 @@ import { parseMenu } from './compose.js';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ORDER_MAX = 4000; // the server's limit for a team's order
 const TEAM_MAX = 12; // members of one team
+const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // a conversation's id (the server's teams take only these)
 
 // can this window type into it at all? null when yes, else why not
 export function unreachable(s) {
   if (!s || !s.id) return 'not a conversation';
   if (!termApi()) return 'sending needs the desktop window';
-  if (s.state === 'DONE' && !isHosted(s.id)) return 'it has finished';
   if (s.pending && !isHosted(s.id)) return 'it has not started yet';
   if (openElsewhere(s) && !isHosted(s.id)) return 'open in another window: end it there or open it here';
   return null;
@@ -133,17 +135,23 @@ export async function sendOrder(sessions, text, o = {}) {
   const skipped = [], live = [];
   for (const s of list) { const why = unreachable(s); if (why) skipped.push({ id: s.id, name: s.name, ok: false, message: why }); else live.push(s); }
   let team = null, results;
-  if (o.team && live.length >= 2) {
+  // a session started seconds ago is keyed new-<n> until its claude names its id: no team member yet, so it
+  // gets the order as a plain message
+  const ids = live.filter((s) => ID_RE.test(s.id)), keyed = live.filter((s) => !ID_RE.test(s.id));
+  if (o.team && ids.length >= 2) {
     if (body.length > ORDER_MAX) return { ok: false, team: null, results: [], skipped, message: `an order is at most ${ORDER_MAX} characters` };
-    if (live.length > TEAM_MAX) return { ok: false, team: null, results: [], skipped, message: `a team has at most ${TEAM_MAX} conversations; pick fewer` };
-    const want = { members: live.map((s) => s.id), order: body };
+    if (ids.length > TEAM_MAX) return { ok: false, team: null, results: [], skipped, message: `a team has at most ${TEAM_MAX} conversations; pick fewer` };
+    const want = { members: ids.map((s) => s.id), order: body };
     if (o.name) want.name = String(o.name).slice(0, 80);
     const post = o.post || defaultPost;
     const r = await post('/teams', want);
     // with ?fixture=1 nothing answers: a team as the server would make it
     team = r && r.ok && r.team ? r.team : r == null && o.fixture ? { id: 'fixture-team', name: want.name || firstWords(body), members: want.members, order: body } : null;
     if (!team) return { ok: false, team: null, results: [], skipped, message: (r && r.message) || 'could not make the team' };
-    results = await eachLimited(live, SEND_AT_ONCE, (s) => deliver(s, teamBrief(team, s, live, o.state, body)).catch((e) => failed(s, e)));
+    results = [
+      ...await eachLimited(ids, SEND_AT_ONCE, (s) => deliver(s, teamBrief(team, s, ids, o.state, body)).catch((e) => failed(s, e))),
+      ...await sendEach(keyed, o.prefix ? `${o.prefix}\n${body}` : body),
+    ];
   } else {
     results = await sendEach(live, o.prefix ? `${o.prefix}\n${body}` : body);
   }
