@@ -281,6 +281,10 @@ export function renderMap(el, state, ui) {
   I.deploy = deployByRepo(state);
   if (!I.W) { const r = el.getBoundingClientRect(); I.W = Math.round(r.width); I.H = Math.round(r.height); I.sized = false; }
   syncSettings(state.settings || {});
+  // a workspace picked from the header's menu: the view recenters on what's shown now, as 0 does
+  const repo = String((state.settings && state.settings.repo) || '').toLowerCase();
+  if (I.repoSeen !== undefined && I.repoSeen !== repo) recenter(2500);
+  I.repoSeen = repo;
   rebuild();
   ingestFeed(state);
   ingestTeams(state);
@@ -1429,6 +1433,11 @@ const K = () => I.cam.fit * I.zoom;
 const toScreen = (x, y) => [(x - I.cam.cx - I.pan.x) * K() + I.W / 2, (y - I.cam.cy - I.pan.y) * K() + I.H / 2];
 const toWorld = (sx, sy) => [(sx - I.W / 2) / K() + I.cam.cx + I.pan.x, (sy - I.H / 2) / K() + I.cam.cy + I.pan.y];
 
+// drop the hand's pan and zoom; the camera fits everything shown for the next ms
+function recenter(ms) {
+  I.pan = { x: 0, y: 0 }; I.zoom = 1; I.camUntil = performance.now() + ms;
+  zoomAt(I.W / 2, I.H / 2, 1);
+}
 function zoomAt(sx, sy, factor) {
   if (!I.cam) return;
   I.glide = null; // the hand wins over a glide
@@ -3191,7 +3200,7 @@ function onKey(e) {
     else moveSel(dx, dy);
   } else if (key === '+' || key === '=' || e.code === 'NumpadAdd') zoomAt(I.W / 2, I.H / 2, 1.25);
   else if (key === '-' || key === '_' || e.code === 'NumpadSubtract') zoomAt(I.W / 2, I.H / 2, 0.8);
-  else if (key === '0') { I.pan = { x: 0, y: 0 }; I.zoom = 1; I.camUntil = performance.now() + 1500; zoomAt(I.W / 2, I.H / 2, 1); }
+  else if (key === '0') recenter(1500);
   else if (key === 'l' || key === 'L') setLegend(!I.legend);
   else if (key === 'g') rearrange(false);
   else if (key === 'G') rearrange(true);
