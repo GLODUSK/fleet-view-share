@@ -116,7 +116,7 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
   function accountHtml(a, u) {
     const e = u.episode;
     const status = e ? `<span class="uw-chip away">used elsewhere${e.acked || acked.has(e.id) ? ' · you know' : ' now'}</span>`
-      : u.away5 > 0 ? '<span class="uw-chip some">some from elsewhere</span>' : '<span class="uw-chip here">only this PC</span>';
+      : u.away5 > 0 ? '<span class="uw-chip some">some from elsewhere</span>' : '<span class="uw-chip here">This PC</span>';
     const lines = [];
     lines.push(u.away5 > 0 ? `From elsewhere in the last 5 hours: <b class="uw-away">+${u.away5}%</b> of the 5-hour limit.` : 'Nothing from elsewhere in the last 5 hours.');
     if (e) lines.push(`Going on since ${hm(e.start)}: +${e.total}%${e.credits ? ` and ${usd(e.credits)} of credits` : ''}, last seen ${hm(e.last)}.`);
