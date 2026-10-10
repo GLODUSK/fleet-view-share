@@ -29,10 +29,11 @@
 //   summary(res)                              one line for a toast: "Sent to 3 · 1 failed: x (why)"
 //
 // A conversation is skipped when another window has it open (term.js openElsewhere: typing there would start a
-// second copy of it here) or when Claude shows a question or a permission prompt (the text would land in it, and
-// a digit in it would pick an option). Its screen is read before the paste and again just before the Enter, and
-// one that can't be read is not typed into. Those come back as failures with the reason, for the toast.
-import { ensureLive, sendText, isHosted, openElsewhere, termApi, screenText, screenReady } from './term.js';
+// second copy of it here). Its screen is read before the paste and again just before the Enter, and one that
+// can't be read is not typed into; those come back as failures with the reason, for the toast. One that shows a
+// question, a permission prompt or the trust dialog (the text would land in it, and a digit would pick an
+// option) gets its text later: it waits in the queue below and comes back as { ok: true, queued: true }.
+import { ensureLive, sendText, isHosted, openElsewhere, termApi, screenText, screenReady, onRekey } from './term.js';
 import { parseMenu } from './compose.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -77,12 +78,9 @@ export function teamBrief(team, me, members, state, text) {
 // true / false, or null when its screen could not be read. The first look at a session's screen builds its
 // off-screen view and replays its output into it, so this waits (up to SCREEN_WAIT_MS) until that view is fed and
 // drawn. It fails closed: a screen it can't read is never typed into, since an Enter there could approve a prompt.
+// Any menu counts, even a question with "Type something" picked: the order would become its answer.
 const SCREEN_WAIT_MS = 10000, SCREEN_POLL_MS = 250;
-const menuOn = (lines) => {
-  const m = parseMenu(lines);
-  const on = m && m.options.find((o) => o.on);
-  return !!m && !(on && /^(type something|other\b|chat about this)/i.test(on.label));
-};
+const menuOn = (lines) => !!parseMenu(lines);
 async function menuUp(id) {
   for (const until = Date.now() + SCREEN_WAIT_MS; ;) {
     const lines = screenText(id, 40, { rows: true }); // the first call starts building the view
@@ -107,11 +105,108 @@ async function deliver(s, text) {
   if (!r || !r.ok) { out.message = (r && r.message) || 'could not start the session'; return out; }
   const menu = await menuUp(s.id);
   if (menu === null) { out.message = 'could not read its screen, so nothing was typed'; return out; }
-  if (menu) { out.message = 'Claude is asking something: answer it first'; return out; }
+  // a question, a permission prompt or the trust dialog: the text waits until it's answered (see below)
+  if (menu) {
+    const trust = trustAsked(s.id);
+    enqueue(s, text);
+    out.ok = true; out.queued = true;
+    out.message = trust ? 'waits for you to trust its folder: it goes in once you do' : 'waits on its question: it goes in once you answer';
+    return out;
+  }
   const w = await sendText(s.id, text, { beforeEnter: () => menuNow(s.id) });
   out.ok = !!w.ok;
   out.message = w.ok ? (r.started ? 'started and sent' : 'sent') : w.message || 'not sent';
   return out;
+}
+
+// ---------- orders that wait for an answer ----------
+// A conversation showing a question, a permission prompt or the trust dialog (a new session in a folder Claude
+// hasn't been told to trust) can't be typed into: a digit would pick an option and Enter would accept it. Its
+// order waits here instead and goes in once no menu has been on its screen for WAIT_CLEAR_MS (any menu, even one
+// on "Type something", so the order never lands in a question's answer). Waiting orders are kept in
+// localStorage (fv.orderQueue), so a reload (every update restarts the page) carries on with them, and they follow
+// a new session's re-key to its id. One still waiting after WAIT_MAX_MS, or whose session stopped running here
+// for WAIT_GONE_MS, is dropped. Several for one conversation go in oldest first, one per tick.
+//   onQueueDone(cb)   cb({ id, name, text, at }, { ok, message }) once each one is sent, fails or is dropped
+//   queuedFor(id)     its waiting orders [{ id, name, text, at }]
+//   cancelQueued(id)  drops them -> how many
+const QUEUE_KEY = 'fv.orderQueue', WAIT_TICK_MS = 2000, WAIT_CLEAR_MS = 1500, WAIT_MAX_MS = 2 * 3600e3, WAIT_GONE_MS = 5 * 60e3;
+let queue = loadQueue(), queueTimer = 0, ticking = false;
+const doneL = new Set();
+export function onQueueDone(cb) { doneL.add(cb); return () => doneL.delete(cb); }
+function loadQueue() {
+  try {
+    const list = JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]');
+    return Array.isArray(list) ? list.filter((q) => q && typeof q.id === 'string' && typeof q.text === 'string' && Number.isFinite(q.at)) : [];
+  } catch { return []; }
+}
+function saveQueue() {
+  try {
+    if (queue.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(queue.map(({ id, name, text, at }) => ({ id, name, text, at }))));
+    else localStorage.removeItem(QUEUE_KEY);
+  } catch { /* storage blocked: it still waits while the page is open */ }
+}
+function enqueue(s, text) {
+  if (!queue.some((q) => q.id === s.id && q.text === text)) queue.push({ id: s.id, name: s.name || 'conversation', text, at: Date.now() });
+  saveQueue();
+  wake();
+}
+function wake() { if (!queueTimer && queue.length) queueTimer = setInterval(tick, WAIT_TICK_MS); }
+export const queuedFor = (id) => queue.filter((q) => q.id === id).map(({ name, text, at }) => ({ id, name, text, at }));
+export function cancelQueued(id) {
+  const n = queue.length;
+  queue = queue.filter((q) => q.id !== id);
+  saveQueue();
+  return n - queue.length;
+}
+function settle(q, ok, message) {
+  if (!queue.includes(q)) return; // cancelled meanwhile
+  queue = queue.filter((x) => x !== q);
+  saveQueue();
+  for (const f of doneL) { try { f({ id: q.id, name: q.name, text: q.text, at: q.at }, { ok, message }); } catch (e) { console.error(e); } }
+}
+// any menu on its screen (true), none (false), or null while its screen can't be read yet (the first look starts
+// building its view)
+function anyMenu(id) {
+  const lines = screenText(id, 40, { rows: true });
+  if (!screenReady(id) || !lines.length) return null;
+  return !!parseMenu(lines);
+}
+async function tick() {
+  if (ticking) return;
+  if (!queue.length) { clearInterval(queueTimer); queueTimer = 0; return; }
+  ticking = true;
+  try {
+    const now = Date.now(), seen = new Set();
+    for (const q of [...queue]) {
+      if (seen.has(q.id)) continue;
+      seen.add(q.id);
+      if (now - q.at > WAIT_MAX_MS) { settle(q, false, 'still waiting after 2 hours, so it was dropped'); continue; }
+      if (!termApi() || !isHosted(q.id)) {
+        q.clearAt = 0;
+        if (!q.goneAt) q.goneAt = now;
+        else if (now - q.goneAt > WAIT_GONE_MS) settle(q, false, 'it stopped running here before it could take it');
+        continue;
+      }
+      q.goneAt = 0;
+      if (anyMenu(q.id) !== false) { q.clearAt = 0; continue; }
+      if (!q.clearAt) { q.clearAt = now; continue; }
+      if (now - q.clearAt < WAIT_CLEAR_MS) continue;
+      const w = await sendText(q.id, q.text, { beforeEnter: () => anyMenu(q.id) !== false });
+      settle(q, !!w.ok, w.ok ? 'sent' : w.message || 'not sent');
+    }
+  } catch (e) { console.error(e); } finally { ticking = false; }
+}
+// a new session's order follows it from new-<n> to its id
+onRekey((oldKey, id) => {
+  let hit = false;
+  for (const q of queue) if (q.id === oldKey) { q.id = id; hit = true; }
+  if (hit) saveQueue();
+});
+wake();
+// the trust dialog (a new session in a folder Claude hasn't been told to trust), not another question
+function trustAsked(id) {
+  return screenText(id, 40, { rows: true }).some((l) => /\btrust\b.*\b(folder|files|project)\b|\b(folder|files|project)\b.*\btrust\b/i.test(l));
 }
 
 // at most `n` at a time: each one's first look at a screen replays its whole output, and a dozen of those at
@@ -187,8 +282,15 @@ export async function sendNote(sessions, text, state, prefix = '[Fleet View · n
 // "Sent to 3 · not sent: parity-wave-4 (open in another window…)"
 export function summary(res, what = 'Sent') {
   const rs = (res && res.results) || [];
-  const ok = rs.filter((x) => x.ok), bad = rs.filter((x) => !x.ok);
-  const head = ok.length ? `${what} to ${ok.length === 1 ? ok[0].name : `${ok.length} conversations`}${res.team ? ` · team "${res.team.name}"` : ''}` : (res && res.message) || 'Nothing was sent';
-  if (!bad.length) return head;
-  return `${head} · not sent: ${bad.slice(0, 3).map((x) => `${x.name} (${x.message})`).join(', ')}${bad.length > 3 ? ` and ${bad.length - 3} more` : ''}`;
+  const sent = rs.filter((x) => x.ok && !x.queued), wait = rs.filter((x) => x.queued), bad = rs.filter((x) => !x.ok);
+  const team = res && res.team ? `team "${res.team.name}"` : '';
+  const parts = [];
+  if (sent.length) parts.push(`${what} to ${sent.length === 1 ? sent[0].name : `${sent.length} conversations`}${team ? ` · ${team}` : ''}`);
+  else if (team && wait.length) parts.push(`Made ${team}`);
+  // "x waits on its question: it goes in once you answer"
+  if (wait.length === 1) parts.push(`${wait[0].name} ${wait[0].message}`);
+  else if (wait.length) parts.push(`${wait.length} wait on a question or their folder's trust prompt: each gets it once answered`);
+  if (!parts.length) parts.push((res && res.message) || 'Nothing was sent');
+  if (bad.length) parts.push(`not sent: ${bad.slice(0, 3).map((x) => `${x.name} (${x.message})`).join(', ')}${bad.length > 3 ? ` and ${bad.length - 3} more` : ''}`);
+  return parts.join(' · ');
 }

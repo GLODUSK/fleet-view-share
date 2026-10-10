@@ -111,7 +111,7 @@ import { renderDetail, openPeek } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady } from './term.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
-import { sendOrder, sendEach, sendNote, summary as orderSummary, teamBrief, firstWords, unreachable, handedOff } from './orders.js';
+import { sendOrder, sendEach, sendNote, summary as orderSummary, teamBrief, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued } from './orders.js';
 import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner } from './compose.js';
@@ -1731,6 +1731,7 @@ function openContextMenu(target, x, y) {
   if (desk && !s.pending && !s.demo && !singleAccount()) items.push(...sendToMenuItems(s, hosted));
   if (!s.pending && !s.demo) items.push(sessionPushItem(s));
   if (leaveTeamItem(s)) items.push(leaveTeamItem(s));
+  if (waitingOrderItem(s)) items.push(waitingOrderItem(s));
   if (unpinItem(target)) items.push(unpinItem(target));
   // Remove: ends the session if it runs here, and takes the conversation off the map, cards and strip (Henry: "to me end
   // is delete"). Its log stays on disk; it comes back by itself if it works again (open in another window, say).
@@ -1911,6 +1912,7 @@ function removeFromMenu(id) {
   const s = view?.allSessions.find((x) => x.id === id);
   if (!s) return;
   if (isHosted(id)) endSession(id);
+  cancelQueued(id);
   continued.delete(id);
   if (s.pending) { if (ui.selectedId === id) ui.selectedId = null; if (ui.detailId === id) ui.detailId = null; if (pinnedId === id) setPin(null); render(); return; }
   hideConversation(s, 'removed');
@@ -2029,10 +2031,24 @@ async function runOrder(list, text, o) {
       res = await sendOrder(list, text, { team: !!o.team, state, post, fixture: FIXTURE, prefix: o.prefix || null, name: o.name ? o.name(text) : null });
     }
   } catch (e) { res = { ok: false, results: [], message: String(e?.message || e) }; }
-  toast(orderSummary(res), res.ok ? C.mint : C.red, null, res.results?.some((x) => !x.ok) ? 9000 : 0);
+  toast(orderSummary(res), res.ok ? C.mint : C.red, null, res.results?.some((x) => !x.ok || x.queued) ? 9000 : 0);
   if (DEBUG) window.__fvOrders = (window.__fvOrders || []).concat([{ text, team: res.team || null, results: res.results || [] }]);
   render();
   return res;
+}
+// an order waiting for a conversation's question or trust prompt to be answered (orders.js) goes in by itself:
+// a toast says when, or why it didn't; its right-click menu can cancel it
+onQueueDone((q, r) => {
+  toast(r.ok ? `Order sent to ${q.name} after it was answered` : `Order for ${q.name} not sent: ${r.message}`, r.ok ? C.mint : C.red, null, r.ok ? 0 : 9000);
+  render();
+});
+function waitingOrderItem(s) {
+  const q = queuedFor(s.id);
+  if (!q.length) return null;
+  return {
+    label: q.length === 1 ? 'Cancel waiting order' : `Cancel ${q.length} waiting orders`, icon: 'close', note: firstWords(q[0].text.replace(/^\[Fleet View[^\]]*\]\s*/, ''), 6, 40),
+    run: () => { const n = cancelQueued(s.id); toast(n ? `Cancelled ${n === 1 ? 'the order' : `${n} orders`} waiting for ${s.name}` : 'it was sent already', C.dim); },
+  };
 }
 // a repo's conversations (the repo's root or one of its checkouts), not removed: working ones first, then idle
 // ones (DONE: resumed to take the order; not ones that handed off), then new sessions with nothing in them yet (pending stand-ins)
@@ -2090,7 +2106,7 @@ async function runSet(list, cmd) {
   toast(`${cmd} → ${list.length === 1 ? list[0].name : `${list.length} conversations`}…`, C.dim);
   let res;
   try { res = { results: await sendEach(list, cmd) }; res.ok = res.results.some((x) => x.ok); } catch (e) { res = { ok: false, results: [], message: String(e?.message || e) }; }
-  toast(`${cmd} · ${orderSummary(res)}`, res.ok ? C.mint : C.red, null, res.results.some((x) => !x.ok) ? 9000 : 0);
+  toast(`${cmd} · ${orderSummary(res)}`, res.ok ? C.mint : C.red, null, res.results.some((x) => !x.ok || x.queued) ? 9000 : 0);
   render();
 }
 // the "N conversations" menu (a multi-selection). "Give orders ▸" as on a workspace: Work together (one team),
@@ -2127,6 +2143,7 @@ function removeMany(ids) {
     const s = view?.allSessions.find((x) => x.id === id);
     if (!s) continue;
     if (isHosted(id)) endSession(id);
+    cancelQueued(id);
     continued.delete(id);
     if (!s.pending) hidden.set(id, Date.now());
     if (ui.selectedId === id) ui.selectedId = null;
