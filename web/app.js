@@ -120,6 +120,7 @@ import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued, onTeamJoin, setServerQueued, sendWhenUp } from './orders.js';
 import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
+import { mountUsage } from './usage.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner } from './compose.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects'];
@@ -324,6 +325,7 @@ function rebase(st) {
   return st;
 }
 
+let usageUi = null; // usage.js: the plan-usage card and the "used somewhere else" heads-up (mounted below)
 async function poll() {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 4000);
@@ -365,6 +367,7 @@ async function poll() {
     }
     if (pendingSelect) { const id = pendingSelect; pendingSelect = null; queueMicrotask(() => fvSelect(id)); }
     try { notifyAlerts(st); } catch (e) { console.warn(e); }
+    try { usageUi?.update(st); } catch (e) { console.warn(e); }
   } catch {
     online = false;
   } finally {
@@ -926,8 +929,11 @@ function weekPill(wk) {
   if (!acs.length) return '';
   const col = (n) => (n <= 10 ? C.red : n <= 25 ? C.gold : C.text);
   const tip = acs.map((a) => `account ${a}: ${wk[a].left}% of the week left${wk[a].resets ? ', resets ' + new Date(wk[a].resets).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : ''}`).join('\n');
-  return `<span class="count week" title="${esc(tip)}">`
-    + acs.map((a) => `${singleAccount() ? '' : `<span class="acct acct-${a}">${a}</span>`}<b style="color:${col(wk[a].left)}">${wk[a].left}%</b>`).join('')
+  // a click opens the plan-usage card (usage.js); a rose dot: used somewhere other than this PC in the last 5 hours
+  const away = acs.filter((a) => usageUi?.awayNow(a));
+  const more = (away.length ? [`used somewhere else lately: ${away.join(', ')}`] : []).concat('click: plan usage, this PC vs. elsewhere');
+  return `<span class="count week" role="button" tabindex="0" title="${esc([tip, ...more].join('\n'))}">`
+    + acs.map((a) => `${singleAccount() ? '' : `<span class="acct acct-${a}">${a}</span>`}<b style="color:${col(wk[a].left)}">${wk[a].left}%</b>${away.includes(a) ? '<i class="week-away" aria-label="used elsewhere"></i>' : ''}`).join('')
     + `<span class="count-k">week left</span></span>`;
 }
 
@@ -2767,6 +2773,12 @@ async function getJson(url) {
 }
 const since = mountSince({ fetchJson: getJson, onPick: (id) => pickFromAnywhere(id), fallback: (t) => sinceFromState(state, t) });
 $('since-btn')?.addEventListener('click', (e) => { e.stopPropagation(); since.toggle(); });
+
+// ---------- plan usage: this PC vs. elsewhere (usage.js; usage-watch.js on the server) ----------
+usageUi = mountUsage({ post, notifyOn: () => local.notify !== false, focusWindow: () => window.fleetDesktop?.focus?.() });
+if (state) usageUi.update(state);
+$('counts')?.addEventListener('click', (e) => { if (e.target.closest('.count.week')) { e.stopPropagation(); usageUi.toggle(); } });
+$('counts')?.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('.count.week')) { e.preventDefault(); usageUi.toggle(); } });
 
 // ---------- "Update available" (update.js; updater.js on the server) ----------
 if (!FIXTURE) mountUpdate({ pill: $('update-pill'), verBtn: $('ver-btn'), getJson });

@@ -1091,7 +1091,7 @@ const priceOf = (model) => { const k = PRICE_KEYS.find((p) => String(model || ''
 
 // A streamed reply is logged once per content block with the same message id, and the
 // usage on the last copy is the final one: keep the latest per id and count the difference.
-function addUsage(s, msg) {
+function addUsage(s, msg, at) {
   const u = msg && msg.usage;
   if (!u || !msg.id) return;
   const c5 = u.cache_creation ? u.cache_creation.ephemeral_5m_input_tokens || 0 : u.cache_creation_input_tokens || 0;
@@ -1109,6 +1109,8 @@ function addUsage(s, msg) {
   const g = allUsage.get(msg.id);
   spentAll += cost - (g || 0);
   allUsage.set(msg.id, cost);
+  // this PC's spend per account at the reply's own time, for telling usage from elsewhere (usage-watch.js)
+  if (cost !== (g || 0)) USAGE.addLocal(accountFor(s), Date.parse(at), cost - (g || 0));
 }
 const allUsage = new Map(); // message id -> cost, across every conversation seen this run
 let spentAll = 0;
@@ -1136,7 +1138,7 @@ function scanUsage(s, files, budget) {
     if (cut < 0) continue;
     for (const line of text.slice(0, cut).split('\n')) {
       if (!line.includes('"usage"') || !line.includes('"assistant"')) continue;
-      try { const d = JSON.parse(line); if (d.type === 'assistant') addUsage(s, d.message); } catch {}
+      try { const d = JSON.parse(line); if (d.type === 'assistant') addUsage(s, d.message, d.timestamp); } catch {}
     }
     if (st.off < size) { s.usagePending = true; return; }
   }
@@ -1153,7 +1155,14 @@ const fmtCost = (c) => '$' + (c >= 100 ? Math.round(c).toLocaleString('en-US') :
 // Every 5 minutes; 30 s after a miss (the first read often times out while the logs are still being read).
 // Every account here (accountsHere: B in ~/.claude, the others in ~/.claude-<x>); most machines have only B.
 // An account with no .credentials.json (an API key, or not logged in) is skipped quietly at the 5-minute pace.
+// Each read also goes to usage-watch.js, which compares the climb with what this PC spent to tell when an account is
+// being used somewhere else; while something looks off it is read every 2 minutes.
 const weekLeft = {}; // account -> { left: 0-100, resets: ms }
+const UW = require(path.join(__dirname, 'usage-watch.js'));
+const USAGE = UW.createWatch({
+  file: DEMO ? null : path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view', 'usage-watch.json'),
+  alertPct: () => saved.usageAlertPct, alertUsd: () => saved.usageAlertUsd,
+});
 async function readWeekLeft() {
   let missed = false;
   for (const a of accountsHere()) {
@@ -1169,9 +1178,11 @@ async function readWeekLeft() {
       const left = (x) => ({ left: Math.max(0, Math.round(100 - x.utilization)), resets: Date.parse(x.resets_at) || null });
       // five: the 5-hour session limit, which can run out with week left
       if (w && typeof w.utilization === 'number') weekLeft[a] = { ...left(w), five: f && typeof f.utilization === 'number' ? left(f) : null };
+      const u = UW.fromEndpoint(j, Date.now());
+      if (u) USAGE.read(a, u, { pending: [...sessions.values()].some((x) => x.usagePending) });
     } catch (e) { missed = true; logOnce('week:' + a + ':' + (e && e.message), `weekly limit read for account ${a} failed: ${e && e.message}`); }
   }
-  setTimeout(readWeekLeft, missed ? 30e3 : 5 * 60e3).unref();
+  setTimeout(readWeekLeft, missed ? 30e3 : USAGE.suspicious() ? 2 * 60e3 : 5 * 60e3).unref();
 }
 const weekNow = (now) => Object.fromEntries(Object.entries(weekLeft).filter(([, w]) => w && !(w.resets && w.resets < now)));
 
@@ -5193,6 +5204,8 @@ function buildState() {
     repos: [...repos.values()].sort((a, b) => b.live - a.live || a.name.localeCompare(b.name)),
     counts: { live: c.live, agents: c.agents, waiting: c.waiting, mergedToday: c.merged, cost: c.spent },
     week: DEMO ? { A: { left: 64 }, B: { left: 91 } } : weekNow(now),
+    // each account's plan usage, and how much of it came from somewhere other than this PC (usage-watch.js)
+    usage: DEMO ? {} : USAGE.view(now),
     // the Claude accounts here: B plus one per ~/.claude-<x> folder, sorted (just ['B']: the page shows no letters)
     accounts: DEMO ? ['A', 'B'] : accountsHere(),
     alert: al ? { t: al.t, sid: al.s.id, name: nameNow(al.s.id, al.s.name), text: al.text, color: toHex(al.color) } : null,
@@ -5684,6 +5697,13 @@ function handleRequest(req, res) {
       });
     }
     if (pathname === '/chat/image') return CONV.saveImage(req, res, convCtx);
+    // "I know, keep using": the heads-up for that episode of usage from elsewhere stays away
+    if (pathname === '/usage/ack') {
+      return readBody(req, res, (b) => {
+        if (!b || typeof b.account !== 'string' || typeof b.episode !== 'string') return sendJson(res, 400, { ok: false, message: 'account and episode are needed' });
+        sendJson(res, 200, { ok: USAGE.ack(acctId(b.account), b.episode.slice(0, 40)) });
+      });
+    }
     if (pathname === '/settings') return readBody(req, res, (b) => { if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' }); applySettings(b); sendJson(res, 200, { ok: true }); });
     return sendJson(res, 404, { ok: false, message: 'not found' });
   }
