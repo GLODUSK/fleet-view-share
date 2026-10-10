@@ -9,6 +9,8 @@
 //     Claude Code's MCP server (`codegraph serve --mcp`) keeps one in step with edits by itself.
 //   - .codegraph goes in the repo's .git\info\exclude, so it never shows up in git status or a commit.
 //   - a failed build is retried after an hour; the log is %LOCALAPPDATA%\fleet-view\codegraph.log.
+//   - a build cut short (Fleet View restarted, the PC went down) leaves an index CodeGraph itself marks "indexing";
+//     once it has sat like that for longer than a build may take, it is built again from scratch.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -32,7 +34,31 @@ function log(text) {
     fs.appendFileSync(LOG, `${new Date().toISOString().replace('T', ' ').slice(0, 19)} ${text}\n`);
   } catch {}
 }
-const indexed = (top) => fs.existsSync(path.join(top, DIR, 'codegraph.db'));
+const dbOf = (top) => path.join(top, DIR, 'codegraph.db');
+const complete = new Set(); // checkout keys whose index was found complete: not opened again
+const checking = new Set(); // checkout keys being checked now
+
+// check(top, cb): is the checkout's index finished? CodeGraph's own project_metadata.index_state reads "complete"
+// once a build is done. cb gets 'done' (complete, or a state it can't read: an older CodeGraph, no node:sqlite, a
+// file it is better to leave alone), 'busy' (a build may be running now) or 'partial' (a build stopped part way).
+// A child process opens the database: one a daemon let go of can take half a minute to open (its write-ahead log
+// is played back), which the server must never wait on. Electron's node runs it as plain node.
+const CHECK = `let d, r;
+try {
+  d = new (require('node:sqlite').DatabaseSync)(process.argv[1]);
+  r = d.prepare("select value, updated_at from project_metadata where key = 'index_state'").get() || {};
+} catch (e) { r = { error: String(e.message) }; } finally { try { if (d) d.close(); } catch {} }
+process.stdout.write(JSON.stringify(r));`;
+function check(top, cb) {
+  execFile(process.execPath, ['--no-warnings', '-e', CHECK, dbOf(top)], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, windowsHide: true, timeout: 120e3 }, (err, out) => {
+    let r = null;
+    try { r = JSON.parse(out); } catch {}
+    if (!r) return cb(err && err.killed ? 'busy' : 'done');
+    if (r.error) return cb(/locked|busy/i.test(r.error) ? 'busy' : 'done');
+    if (!r.value || r.value === 'complete') return cb('done');
+    cb(Date.now() - Number(r.updated_at) < BUILD_MAX_MS ? 'busy' : 'partial');
+  });
+}
 
 // the repo's own .git\info\exclude (a worktree's root is its main repo) gets the folder once
 function exclude(root) {
@@ -67,27 +93,41 @@ function want(top, root) {
   const k = key(top);
   if ((building && key(building) === k) || queue.some((q) => key(q.top) === k)) return;
   if (Date.now() - (failed.get(k) || 0) < RETRY_MS) return;
-  if (indexed(top)) return;
-  queue.push({ top, root: root || top });
-  next();
+  if (!fs.existsSync(dbOf(top))) {
+    complete.delete(k);
+    queue.push({ top, root: root || top });
+    return next();
+  }
+  if (complete.has(k) || checking.has(k)) return;
+  checking.add(k);
+  check(top, (s) => {
+    checking.delete(k);
+    if (s === 'done') complete.add(k);
+    else if (s === 'partial' && !(building && key(building) === k) && !queue.some((q) => key(q.top) === k)) {
+      queue.push({ top, root: root || top, rebuild: true });
+      next();
+    }
+  });
 }
 
 function next() {
   if (building || !found) return;
   let job;
-  while ((job = queue.shift()) && indexed(job.top)) {}
+  while ((job = queue.shift()) && !job.rebuild && fs.existsSync(dbOf(job.top))) {}
   if (!job) return;
   try { if (!fs.statSync(job.top).isDirectory()) return next(); } catch { return next(); }
   building = job.top;
   exclude(job.root);
   const t0 = Date.now();
-  log(`${job.top}: building`);
+  // `init` makes a new index; one a build left part way is made again from scratch by `index`
+  const args = job.rebuild ? ['index', '--quiet'] : ['init', '--yes'];
+  log(`${job.top}: ${job.rebuild ? 'rebuilding (the last build stopped part way)' : 'building'}`);
   const win = process.platform === 'win32';
   // the npm command is a .cmd on Windows, so cmd.exe runs it, named in full: a bare `codegraph` can find a .js file of
   // that name first (PATHEXT). The path was checked for characters cmd treats specially
   const p = win
-    ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"codegraph.cmd init --yes "${job.top}""`], { cwd: job.top, windowsHide: true, windowsVerbatimArguments: true, stdio: ['ignore', 'ignore', 'pipe'] })
-    : spawn('codegraph', ['init', '--yes', job.top], { cwd: job.top, stdio: ['ignore', 'ignore', 'pipe'] });
+    ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"codegraph.cmd ${args.join(' ')} "${job.top}""`], { cwd: job.top, windowsHide: true, windowsVerbatimArguments: true, stdio: ['ignore', 'ignore', 'pipe'] })
+    : spawn('codegraph', [...args, job.top], { cwd: job.top, stdio: ['ignore', 'ignore', 'pipe'] });
   try { os.setPriority(p.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch {}
   let err = '';
   p.stderr.on('data', (d) => { if (err.length < 4000) err += d; });
@@ -97,7 +137,7 @@ function next() {
     clearTimeout(timer);
     building = null;
     const s = Math.round((Date.now() - t0) / 1000);
-    if (code === 0 && indexed(job.top)) log(`${job.top}: built in ${s}s`);
+    if (code === 0 && fs.existsSync(dbOf(job.top))) { complete.add(key(job.top)); log(`${job.top}: built in ${s}s`); }
     else { failed.set(key(job.top), Date.now()); log(`${job.top}: failed after ${s}s (exit ${code})${err.trim() ? `\n    ${err.trim().slice(-800).replace(/\r?\n/g, '\n    ')}` : ''}`); }
     next();
   };
