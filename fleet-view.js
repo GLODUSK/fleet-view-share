@@ -1202,7 +1202,8 @@ async function readWeekLeft() {
   }
   setTimeout(readWeekLeft, missed ? 30e3 : USAGE.suspicious() ? 2 * 60e3 : 5 * 60e3).unref();
 }
-const weekNow = (now) => Object.fromEntries(Object.entries(weekLeft).filter(([, w]) => w && !(w.resets && w.resets < now)));
+const onlyListed = (o) => Object.fromEntries(Object.entries(o || {}).filter(([a]) => accountsHere().includes(a)));
+const weekNow = (now) =>Object.fromEntries(Object.entries(weekLeft).filter(([, w]) => w && !(w.resets && w.resets < now)));
 
 function ingestMain(s, recs) {
   for (const { d, raw } of recs) {
@@ -5221,9 +5222,10 @@ function buildState() {
       mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts },
     repos: [...repos.values()].sort((a, b) => b.live - a.live || a.name.localeCompare(b.name)),
     counts: { live: c.live, agents: c.agents, waiting: c.waiting, mergedToday: c.merged, cost: c.spent },
-    week: DEMO ? { A: { left: 64 }, B: { left: 91 } } : weekNow(now),
-    // each account's plan usage, and how much of it came from somewhere other than this PC (usage-watch.js)
-    usage: DEMO ? {} : USAGE.view(now),
+    week: DEMO ? { A: { left: 64 }, B: { left: 91 } } : onlyListed(weekNow(now)),
+    // each account's plan usage, and how much of it came from somewhere other than this PC (usage-watch.js);
+    // an account that is gone, or is now an alias of another (same login), is left out though its history is kept
+    usage: DEMO ? {} : onlyListed(USAGE.view(now)),
     // the Claude accounts here: B plus one per ~/.claude-<x> folder, sorted (just ['B']: the page shows no letters)
     accounts: DEMO ? ['A', 'B'] : accountsHere(),
     alert: al ? { t: al.t, sid: al.s.id, name: nameNow(al.s.id, al.s.name), text: al.text, color: toHex(al.color) } : null,
