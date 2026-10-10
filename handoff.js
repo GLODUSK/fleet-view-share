@@ -87,10 +87,11 @@ function readAll() {
 const newLaunchKey = () => `fv-${crypto.randomUUID()}`;
 
 // A handoff file path that is safe to put on a cmd command line inside double quotes: a .md file directly in
-// the handoffs folder, no quotes or cmd metacharacters, and it exists. Returns the path or null.
+// the handoffs folder, no quotes or cmd metacharacters (letters of any language are fine, as in a home folder
+// named after its owner), and it exists. Returns the path or null.
 function safeFile(file) {
   if (typeof file !== 'string' || !file || file.length > 400) return null;
-  if (!/^[\w .:\\/()+,=@~-]+\.md$/i.test(file)) return null;
+  if (!/^[\p{L}\p{N}_ .:\\/()+,=@~-]+\.md$/iu.test(file)) return null;
   let abs;
   try { abs = path.resolve(file); } catch { return null; }
   if (path.dirname(abs).toLowerCase() !== path.resolve(dir()).toLowerCase()) return null;

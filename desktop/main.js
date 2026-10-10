@@ -5,7 +5,8 @@
 // or is refused.
 //
 // Besides the main window there is a mini view (web/mini.html): a small always-on-top glass window with what
-// needs you, what is working and what just finished, and a tray icon (Show Fleet View, Mini view, Quit). The two
+// needs you, what is working and what just finished, and a tray icon (Show Fleet View, Mini view, Close window,
+// Quit everything). The two
 // take turns: opening the mini view hides the main window, and leaving it (its expand button, a row, Esc) brings
 // the main window back as it was. Closing the main window quits the app, mini view and tray included.
 //
@@ -18,7 +19,7 @@
 // running and connects to before the page loads, so page and server reloads, and closing the window, never end
 // them: the next window reconnects and replays each screen. Only the main window's page may use them
 // (fleetDesktop.term). Closing the window just closes it (no question any more). The tray's "Quit everything"
-// asks whether to move the sessions to Windows Terminal tabs or close them, then has the host save the restore
+// asks whether to move the sessions to Windows Terminal tabs (console windows on a PC without it) or close them, then has the host save the restore
 // list, end every session and exit; the next start resumes the closed ones. Updating desktop/ restarts only the window; a changed host.js takes effect when
 // the host next starts (it logs that a newer one is on disk).
 // The page can also start a new conversation (term.create): a plain `claude` in a repo folder that /state
@@ -121,8 +122,8 @@ if (!app.requestSingleInstanceLock()) {
     ]);
   }
   // The tray's "Quit everything": while sessions run, asks what happens to them (one question at a time):
-  //   "Move to Terminal tabs": each conversation opens again as a tab of one new Windows Terminal window
-  //     (moveToTerminal below), so the work goes on there, and leaves the restore list;
+  //   "Move to Terminal tabs" ("Move to console windows" on a PC without Windows Terminal): each conversation opens
+  //     again outside Fleet View (moveToTerminal below), so the work goes on there, and leaves the restore list;
   //   "Close them": they stay on the restore list and the next start resumes them.
   // Either way the host saves the restore list (every running session, the busy ones marked), ends them all
   // (Ctrl+C twice, then their trees) and exits; then the app quits.
@@ -137,13 +138,16 @@ if (!app.requestSingleInstanceLock()) {
       dialogAbort = ac;
       const parent = win && !win.isDestroyed() ? win : null;
       const s = n === 1 ? '' : 's';
+      const wt = hasWt();
+      const move = wt ? 'Move to Terminal tabs' : 'Move to console windows';
       const box = {
         type: busy ? 'warning' : 'question', title: 'Fleet View', noLink: true,
-        message: `${n} Claude session${s} ${n === 1 ? 'is' : 'are'} open. Keep working in Windows Terminal, or close ${n === 1 ? 'it' : 'them'}?`,
-        detail: `Move to Terminal tabs: ${n === 1 ? 'it opens' : 'they open'} again in one Terminal window, a tab each in its account's colour (green claude-a, orange claude-b, blue claude-c).\n`
+        message: `${n} Claude session${s} ${n === 1 ? 'is' : 'are'} open. Keep working in ${wt ? 'Windows Terminal' : 'console windows'}, or close ${n === 1 ? 'it' : 'them'}?`,
+        detail: (wt ? `${move}: ${n === 1 ? 'it opens' : 'they open'} again in one Terminal window, a tab each in its account's colour.\n`
+          : `${move}: ${n === 1 ? 'it opens' : 'each opens'} again in a console window of its own.\n`)
           + `Close them: ${n === 1 ? 'it opens' : 'they open'} again the next time Fleet View starts.`
           + (busy ? `\n\n${busy} ${busy === 1 ? 'is' : 'are'} mid-turn and will say ${busy === 1 ? 'it was' : 'they were'} interrupted.` : ''),
-        buttons: ['Move to Terminal tabs', 'Close them', 'Cancel'], defaultId: 0, cancelId: 2, signal: ac.signal,
+        buttons: [move, 'Close them', 'Cancel'], defaultId: 0, cancelId: 2, signal: ac.signal,
       };
       if (parent) { if (parent.isMinimized()) parent.restore(); parent.show(); }
       go = (parent ? dialog.showMessageBox(parent, box) : dialog.showMessageBox(box))
@@ -157,51 +161,89 @@ if (!app.requestSingleInstanceLock()) {
       const ui = await readUi();
       const r = await terms.quitEverything(ui);
       hlog(`quit everything: ${JSON.stringify(r)}`);
-      if (moving.length) moveToTerminal(moving);
+      if (moving.length) await moveToTerminal(moving);
       app.quit();
       return true;
     }).finally(() => { asking = null; dialogAbort = null; });
     return asking;
   }
 
-  // Opens each conversation (ended here just before) as a tab of one new Windows Terminal window, in its folder:
-  // through the account's launcher when the machine has one (`claude-a --resume <id>`, tab green #3fb950,
-  // `claude-b` orange #d97757, `claude-c` blue #58a6ff, ..., with their "Claude A" / "Claude B" / ... profiles), else plain
-  // `claude --resume <id>` (with CLAUDE_CONFIG_DIR ~/.claude-<x> for any account but B). Then takes them off the restore list
-  // (sessions.json, which the host froze before ending them), so the next start doesn't open them a second time.
+  // Opens each conversation (ended here just before) again in its folder: as a tab of one new Windows Terminal window
+  // when the PC has Windows Terminal, else each in a console window of its own (`cmd /c start`). Each runs
+  // `cmd /k claude --resume <id>`, never through PowerShell (its script policy can refuse npm's claude.ps1). The
+  // account is set in that command for any account but B (`set CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude-<x>&&claude …`:
+  // no space or quote in any word, so wt and start pass them on as they are), or it runs the account's launcher when
+  // the machine has one (`claude-a --resume <id>`, ..., with its "Claude A" / ... Terminal profile). A conversation
+  // leaves the restore list (sessions.json, which the host froze before ending them) only once its window started,
+  // so the next start doesn't open it a second time and one that never opened is resumed then. Resolves when every
+  // start was tried.
   // each account's Windows Terminal tab colour (claude-tabcolor.vbs uses the same ones)
   const TAB_COLOR = { A: '#3fb950', B: '#d97757', C: '#58a6ff', D: '#bc8cff', E: '#e3b341', F: '#f778ba' };
-  function moveToTerminal(list) {
-    const args = ['-w', 'new'];
-    const npmDir = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'npm');
-    for (const x of list) {
-      const L = typeof x.account === 'string' && /^[a-z]$/i.test(x.account) ? x.account.toUpperCase() : 'B', l = L.toLowerCase();
-      // wt splits its command line at ';', so a folder with one in it opens in the home folder instead
-      const cwd = typeof x.cwd === 'string' && x.cwd && !x.cwd.includes(';') ? x.cwd.replace(/[\\/]+$/, '') || x.cwd : os.homedir();
-      const launcher = fs.existsSync(path.join(npmDir, `claude-${l}.cmd`));
-      const cmd = launcher ? `claude-${l} --resume ${x.id}`
-        : `${L !== 'B' ? `$env:CLAUDE_CONFIG_DIR='${path.join(os.homedir(), '.claude-' + l).replace(/'/g, "''")}'; ` : ''}claude --resume ${x.id}`;
-      if (args.length > 2) args.push(';');
-      args.push('new-tab', ...(launcher ? ['-p', 'Claude ' + L] : []), '-d', cwd, '--tabColor', TAB_COLOR[L] || '#8b949e',
-        'powershell.exe', '-NoExit', '-Command', cmd);
+  // Windows Terminal is there: wt on PATH (Windows 11 has it; Windows 10 only once it was installed)
+  let wtFound = null;
+  function hasWt() {
+    if (wtFound === null) {
+      try { wtFound = require('child_process').spawnSync('where.exe', ['wt'], { windowsHide: true, stdio: 'ignore', timeout: 5000 }).status === 0; } catch { wtFound = false; }
     }
-    // the tabs must not inherit this app's markers: a CLAUDE_CODE_CHILD_SESSION turns transcripts off, NO_COLOR greys Claude
+    return wtFound;
+  }
+  function moveToTerminal(list) {
+    const { spawn } = require('child_process');
+    const npmDir = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'npm');
+    const items = list.map((x) => {
+      const L = typeof x.account === 'string' && /^[a-z]$/i.test(x.account) ? x.account.toUpperCase() : 'B', l = L.toLowerCase();
+      // wt splits its command line at ';', and cmd reads a '%' as a variable: such a folder opens in the home folder instead
+      const cwd = typeof x.cwd === 'string' && x.cwd && !/[;%"]/.test(x.cwd) ? x.cwd.replace(/([^:])[\\/]+$/, '$1') : os.homedir();
+      const launcher = fs.existsSync(path.join(npmDir, `claude-${l}.cmd`));
+      const words = launcher ? [`claude-${l}`, '--resume', x.id] : L === 'B' ? ['claude', '--resume', x.id]
+        : ['set', `CLAUDE_CONFIG_DIR=%USERPROFILE%\\.claude-${l}&&claude`, '--resume', x.id];
+      return { id: x.id, L, cwd, launcher, words };
+    });
+    // the windows must not inherit this app's markers: a CLAUDE_CODE_CHILD_SESSION turns transcripts off, NO_COLOR greys Claude
     const env = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: '1' };
     for (const k of Object.keys(env)) if (k === 'NO_COLOR' || (/^CLAUDE/i.test(k) && k !== 'CLAUDE_CODE_FORCE_SESSION_PERSISTENCE')) delete env[k];
-    try {
-      const { spawn } = require('child_process');
-      spawn('wt.exe', args, { env, detached: true, stdio: 'ignore', windowsHide: false }).on('error', (e) => hlog(`move to Terminal: ${e.message}`)).unref();
-      hlog(`move to Terminal: ${list.length} tab(s): ${list.map((x) => x.id.slice(0, 8)).join(', ')}`);
-    } catch (e) { hlog(`move to Terminal failed: ${e.message}`); return; }
-    const f = path.join(termHost.dataDir(), 'sessions.json');
-    try {
-      const j = JSON.parse(fs.readFileSync(f, 'utf8'));
-      const ids = new Set(list.map((x) => x.id.toLowerCase()));
-      j.sessions = (j.sessions || []).filter((s) => !(s && typeof s.id === 'string' && ids.has(s.id.toLowerCase())));
-      j.reason = 'moved to Terminal';
-      fs.writeFileSync(`${f}.tmp`, JSON.stringify(j, null, 1));
-      fs.renameSync(`${f}.tmp`, f);
-    } catch (e) { hlog(`move to Terminal: could not update the restore list: ${e.message}`); }
+    const short = (xs) => xs.map((x) => x.id.slice(0, 8)).join(', ');
+    // each in a console window of its own; ok once `start` said it started it (exit code 0)
+    const consoles = (xs) => Promise.all(xs.map((x) => new Promise((resolve) => {
+      const line = `/d /c start "Claude ${x.L}" /D "${x.cwd}" cmd /k ${x.words.join(' ').replace(/&/g, '^&')}`;
+      try {
+        const c = spawn(process.env.ComSpec || 'cmd.exe', [line], { env, windowsVerbatimArguments: true, windowsHide: true, stdio: 'ignore' });
+        c.on('error', (e) => { hlog(`move to a console window: ${x.id.slice(0, 8)}: ${e.message}`); resolve(null); });
+        c.on('exit', (code) => { if (code !== 0) hlog(`move to a console window: ${x.id.slice(0, 8)}: start said ${code}`); resolve(code === 0 ? x : null); });
+      } catch (e) { hlog(`move to a console window: ${x.id.slice(0, 8)}: ${e.message}`); resolve(null); }
+    }))).then((r) => {
+      const ok = r.filter(Boolean);
+      if (ok.length) hlog(`move to console windows: ${ok.length} window(s): ${short(ok)}`);
+      return ok;
+    });
+    // one new Windows Terminal window, a tab each; console windows instead when wt won't start
+    const tabs = (xs) => new Promise((resolve) => {
+      const args = ['-w', 'new'];
+      for (const x of xs) {
+        if (args.length > 2) args.push(';');
+        args.push('new-tab', ...(x.launcher ? ['-p', 'Claude ' + x.L] : []), '-d', x.cwd, '--tabColor', TAB_COLOR[x.L] || '#8b949e', 'cmd.exe', '/k', ...x.words);
+      }
+      let c;
+      try { c = spawn('wt.exe', args, { env, detached: true, stdio: 'ignore', windowsHide: false }); } catch (e) {
+        hlog(`move to Terminal: ${e.message}; console windows instead`);
+        return resolve(consoles(xs));
+      }
+      c.on('spawn', () => { hlog(`move to Terminal: ${xs.length} tab(s): ${short(xs)}`); resolve(xs); });
+      c.on('error', (e) => { hlog(`move to Terminal: ${e.message}; console windows instead`); resolve(consoles(xs)); });
+      c.unref();
+    });
+    return (hasWt() ? tabs(items) : consoles(items)).then((moved) => {
+      if (!moved.length) return;
+      const f = path.join(termHost.dataDir(), 'sessions.json');
+      try {
+        const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+        const ids = new Set(moved.map((x) => x.id.toLowerCase()));
+        j.sessions = (j.sessions || []).filter((s) => !(s && typeof s.id === 'string' && ids.has(s.id.toLowerCase())));
+        j.reason = 'moved to Terminal';
+        fs.writeFileSync(`${f}.tmp`, JSON.stringify(j, null, 1));
+        fs.renameSync(`${f}.tmp`, f);
+      } catch (e) { hlog(`move to Terminal: could not update the restore list: ${e.message}`); }
+    });
   }
   app.on('before-quit', () => { quitting = true; });
 

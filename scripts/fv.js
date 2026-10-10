@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // fv: Fleet View's automation API from the command line (README: "Automation API"), for a person or a Claude
 // Code session that orchestrates other sessions: start one, send it a message, wait for it, read its menu and
-// answer it, read its transcript, stop and remove it. `fv help` lists the commands; `fv api` asks the server.
+// answer it, read its transcript, stop and remove it, and make teams of them. `fv help` lists the commands; `fv api`
+// asks the server.
 //
 // Node only, no dependencies. The token comes from %LOCALAPPDATA%\fleet-view\api-token (made by the server's first
-// start), the port from --port, FLEET_VIEW_PORT or 4777. Nothing else is read or written. Output is short and
+// start), the port from --port, FLEET_VIEW_PORT or 4777. Nothing else is read (but the folder's version.json and git
+// history, for fv version) or written. Output is short and
 // human readable; --json prints the server's raw reply instead. Exit code 0 ok, 1 refused or failed, 2 bad usage.
 // A text argument given as "-" is read from stdin. Ids may be shortened to their first 8+ hex characters.
 'use strict';
@@ -16,11 +18,13 @@ const http = require('http');
 const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation API")
 
   fv api                                    the server's endpoint list
+  fv version                                Fleet View's version here (and the running server's); also --version
   fv ls [--all] [--state S] [--repo R]      conversations Fleet View shows (* = hosted and alive)
   fv hosted                                 sessions the desktop app hosts
   fv start <repo> <prompt> [--account A|B|C…] [--name N] [--model M] [--effort E]
            [--fork <id>] [--temp] [--chrome|--no-chrome] [--wait [s]]
-  fv send <id> <text> [--wait [s]] [--from <id>]
+  fv send <id> <text> [--wait [s]] [--from <your id>] [--no-open]
+                                            with --from: waits behind a menu, resumes one not running
   fv wait <id> [--timeout s]                until it is ready for you (reply, question, menu, exit)
   fv read <id> [--tail n]                   status and latest reply (and the screen's last n chars)
   fv menu <id>                              the select menu it shows, if any
@@ -30,6 +34,14 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   fv transcript <id> [--since n] [--limit m]
   fv stop <id> [--remove]
   fv rm <id>                                hide a conversation from the map (never deletes its log)
+
+  fv teams                                  teams and their members
+  fv team new <id> <id>… --order T [--name N]   make a team; each gets the order and its teammates
+  fv team add <team> <id>                   add a conversation (it gets the order, the others its id)
+  fv team rm <team> <id>                    take one out (it and the others are told)
+  fv team disband <team>                    end the team (every member is told)
+  fv team say <team> <text> [--from <your id>]   a message to every member (but you)
+  <team> is a team's id, the start of it, or its name.
 
   --json         the raw JSON reply          --port <n>   Fleet View's port (default 4777)
   --wait         without a number: the API's default (30 minutes); with one: 1..3600 seconds
@@ -41,8 +53,8 @@ class Refused extends Error {}
 
 // ---------- arguments ----------
 const VALUE_FLAGS = new Set(['account', 'name', 'model', 'effort', 'fork', 'from', 'timeout', 'tail', 'text', 'sig',
-  'prompt', 'since', 'limit', 'state', 'repo', 'port']);
-const BOOL_FLAGS = new Set(['temp', 'chrome', 'no-chrome', 'all', 'remove', 'allow-permission', 'json', 'help']);
+  'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order']);
+const BOOL_FLAGS = new Set(['temp', 'chrome', 'no-chrome', 'all', 'remove', 'allow-permission', 'json', 'help', 'version', 'no-open']);
 // -> { pos: [...], flags: { name: value | true } }; --wait takes the next argument only when it is a number
 function parseArgs(argv) {
   const pos = [], flags = {};
@@ -160,6 +172,20 @@ async function resolveId(call, given) {
   throw new Refused(`${given} matches ${hits.length} conversations: ${hits.join(', ')}; give more characters`);
 }
 
+// a team: its id, the start of its id, or its name (any case), when just one team has it
+async function resolveTeam(call, given) {
+  if (given === undefined) throw new Usage('give the team (its id, the start of it, or its name)');
+  const r = await call('GET', '/teams');
+  if (r.code !== 200 || !r.j.ok) throw new Refused(r.j.message || `HTTP ${r.code}`);
+  const ts = r.j.teams || [], g = String(given).toLowerCase();
+  const exact = ts.find((t) => t.id === g);
+  if (exact) return exact;
+  const hits = ts.filter((t) => t.id.startsWith(g) || String(t.name || '').toLowerCase() === g);
+  if (hits.length === 1) return hits[0];
+  if (!hits.length) throw new Refused(`no team is called or starts with "${given}" (fv teams lists them)`);
+  throw new Refused(`"${given}" matches ${hits.length} teams: ${hits.map((t) => `${t.id} "${t.name}"`).join(', ')}; give its id`);
+}
+
 // ---------- output ----------
 const short = (id) => (id && FULL_ID.test(id) ? id.slice(0, 8) : id || '?');
 const clip = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -206,6 +232,20 @@ function printSession(s) {
   return out;
 }
 
+// what a team call told each conversation: "  name (1234abcd): sent" | "queued: …" | "not told: why"
+function toldLines(list) {
+  return (list || []).map((x) => `  ${x.name || short(x.id)} (${short(x.id)}): ${x.ok ? (x.queued ? 'queued, it goes in once its question or prompt is answered' : 'sent') : `not told: ${x.message || 'failed'}`}`);
+}
+function teamLines(t) {
+  const out = [`${t.id}  "${t.name}"  ${(t.members || []).length} members · ${clip(t.order, 70)}`];
+  for (const m of t.roster || []) out.push(`  ${short(m.id)}  ${pad(clip(m.name || '', 32), 32)}  ${pad(m.state || 'gone', 8)}  ${m.repo || ''}${m.branch ? ` · ${m.branch}` : ''}${m.removed ? '  (removed from the map)' : ''}`.replace(/\s+$/, ''));
+  return out;
+}
+// the teams other teams' members were pulled out of (a new team, an add)
+function leftLines(left) {
+  return (left || []).map((x) => `${x.disbanded ? `team "${x.name}" is disbanded` : `team "${x.name}" lost a member`}; told ${x.told.filter((y) => y.ok).length}`);
+}
+
 function transcriptLines(j) {
   const out = [`${j.id}: items ${j.from}..${j.from + (j.items || []).length - 1} of ${j.total}`];
   for (const it of j.items || []) {
@@ -220,18 +260,40 @@ function transcriptLines(j) {
   return out;
 }
 
+// fv version: this folder's version (version.js, read directly: no server needed), and the running server's (GET /api's
+// fleetView) when it answers within a second and a half; a server that is down or older says nothing
+async function versionReply(env, port) {
+  const root = path.join(__dirname, '..');
+  let here = { version: '', commit: '' };
+  try { here = require(path.join(root, 'version.js')).versionAt(root); } catch {}
+  let running = '';
+  try {
+    const call = env.call || makeClient(port, env.token !== undefined ? env.token : readToken());
+    const r = await call('GET', '', null, 1500);
+    if (r.code === 200 && r.j && typeof r.j.fleetView === 'string') running = r.j.fleetView;
+  } catch {}
+  const lines = [`Fleet View ${here.version || 'version unknown'}${here.commit ? ` (${here.commit.slice(0, 7)})` : ''}`];
+  if (running) lines.push(running === here.version ? `running: the same, on port ${port}` : `running on port ${port}: ${running}`);
+  return { j: { ok: true, version: here.version, commit: here.commit, running: running || null }, lines };
+}
+
 // ---------- commands ----------
 // each: (ctx) -> { j, lines } (lines printed unless --json); a non-ok reply throws Refused with the server's message
 async function run(argv, env) {
   const { pos, flags } = parseArgs(argv);
   const cmd = pos.shift();
-  if (!cmd || flags.help || cmd === 'help') return { usage: true, ok: !!(cmd || flags.help) };
+  if (flags.help || cmd === 'help' || (!cmd && !flags.version)) return { usage: true, ok: !!(cmd || flags.help) };
   const port = flags.port !== undefined ? flags.port : env.FLEET_VIEW_PORT || 4777;
   if (!/^\d+$/.test(String(port)) || Number(port) < 1 || Number(port) > 65535) throw new Usage('--port must be a port number');
+  if (cmd === 'version' || (!cmd && flags.version)) {
+    if (pos.length) throw new Usage(`unexpected argument "${pos[0]}"`);
+    return versionReply(env, Number(port));
+  }
   const call = env.call || makeClient(Number(port), env.token !== undefined ? env.token : readToken());
   const need = async (method, p, body, ms) => {
     const r = await call(method, p, body, ms);
-    if (r.code !== 200 || r.j.ok === false) {
+    // 202: queued behind a menu
+    if ((r.code !== 200 && r.code !== 202) || r.j.ok === false) {
       const e = new Refused(r.j.message || `HTTP ${r.code}`);
       e.reply = r.j;
       throw e;
@@ -248,7 +310,7 @@ async function run(argv, env) {
       const j = await need('GET', '');
       const eps = j.endpoints || [];
       const w = Math.max(0, ...eps.map((e) => `${e.method} ${e.path}`.length));
-      return { j, lines: [`Fleet View API v${j.version}`, ...eps.map((e) => `${pad(`${e.method} ${e.path}`, w)}  ${e.does || ''}${e.body ? `  ${typeof e.body === 'string' ? e.body : JSON.stringify(e.body)}` : ''}`)] };
+      return { j, lines: [`Fleet View API v${j.version}${j.fleetView ? ` (Fleet View ${j.fleetView})` : ''}`, ...eps.map((e) => `${pad(`${e.method} ${e.path}`, w)}  ${e.does || ''}${e.body ? `  ${typeof e.body === 'string' ? e.body : JSON.stringify(e.body)}` : ''}`)] };
     }
     case 'ls': {
       noMore(0);
@@ -301,11 +363,14 @@ async function run(argv, env) {
       const text = await textArg(pos[1], 'text');
       noMore(2);
       const body = { text };
+      // from another conversation: it waits behind a menu and resumes one not running (the server's default)
       if (flags.from !== undefined) body.from = await resolveId(call, flags.from);
+      if (flags['no-open']) body.open = false;
       const w = waitValue(flags);
       if (w !== undefined) body.wait = w;
-      const j = await need('POST', `/sessions/${sid}/message`, body, callMs(w, 60000));
-      return { j, lines: [j.message || 'sent', ...waitLines(j, decodeURIComponent(sid))] };
+      const j = await need('POST', `/sessions/${sid}/message`, body, callMs(w, 180000));
+      const moved = j.redirected ? [`${j.queued ? 'queued for' : 'sent to'} ${j.redirected.to} (it picked up ${j.redirected.from})`] : [];
+      return { j, lines: [...moved, j.message || 'sent', ...waitLines(j, j.id || decodeURIComponent(sid))] };
     }
     case 'wait': {
       const sid = await id();
@@ -401,6 +466,55 @@ async function run(argv, env) {
       const j = await need('POST', `/sessions/${sid}/remove`, {});
       return { j, lines: [`removed ${short(decodeURIComponent(sid))} from the map (its log is kept)`] };
     }
+    case 'teams': {
+      noMore(0);
+      const j = await need('GET', '/teams');
+      const lines = (j.teams || []).flatMap(teamLines);
+      if (!lines.length) lines.push('(no teams)');
+      return { j, lines };
+    }
+    case 'team': {
+      const sub = pos.shift();
+      // briefs and adds may resume a conversation first: up to a minute each, side by side
+      const long = 240000;
+      if (sub === 'new') {
+        if (pos.length < 2) throw new Usage('give two or more conversation ids: fv team new <id> <id>… --order "…"');
+        const order = await textArg(flags.order, '--order');
+        const members = [];
+        for (const g of pos) members.push(await resolveId(call, g));
+        const body = { members, order };
+        if (flags.name !== undefined) body.name = flags.name;
+        const j = await need('POST', '/teams', body, long);
+        return { j, lines: [`made team ${j.team.id} "${j.team.name}" of ${j.team.members.length}; the brief:`, ...toldLines(j.sent), ...leftLines(j.left)] };
+      }
+      if (sub === 'add' || sub === 'rm' || sub === 'remove') {
+        const t = await resolveTeam(call, pos[0]);
+        const m = await resolveId(call, pos[1]);
+        noMore(2);
+        if (sub === 'add') {
+          const j = await need('POST', `/teams/${t.id}/add`, { member: m }, long);
+          return { j, lines: [`added ${short(m)} to "${t.name}"; the brief:`, ...toldLines([j.brief]), 'the others:', ...toldLines(j.told), ...leftLines(j.left)] };
+        }
+        const j = await need('POST', `/teams/${t.id}/remove`, { member: m });
+        return { j, lines: [`took ${short(m)} out of "${t.name}"${j.disbanded ? '; the team is disbanded (one member left)' : ''}`, ...toldLines(j.told)] };
+      }
+      if (sub === 'disband') {
+        const t = await resolveTeam(call, pos[0]);
+        noMore(1);
+        const j = await need('POST', `/teams/${t.id}/disband`, {});
+        return { j, lines: [`disbanded "${t.name}"`, ...toldLines(j.told)] };
+      }
+      if (sub === 'say') {
+        const t = await resolveTeam(call, pos[0]);
+        const text = await textArg(pos[1], 'text');
+        noMore(2);
+        const body = { text };
+        if (flags.from !== undefined) body.from = await resolveId(call, flags.from);
+        const j = await need('POST', `/teams/${t.id}/message`, body, long);
+        return { j, lines: [`"${t.name}": ${j.message}`, ...toldLines(j.results)] };
+      }
+      throw new Usage(sub ? `unknown team command "${sub}" (fv help)` : 'fv team new | add | rm | disband | say (fv help)');
+    }
     default: throw new Usage(`unknown command "${cmd}" (fv help)`);
   }
 }
@@ -428,4 +542,4 @@ async function main(argv, env = process.env, out = console.log, err = console.er
 }
 
 if (require.main === module) main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
-module.exports = { main, parseArgs, resolveId, menuLines, waitLines, transcriptLines };
+module.exports = { main, parseArgs, resolveId, resolveTeam, menuLines, waitLines, transcriptLines };

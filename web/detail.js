@@ -49,7 +49,7 @@ function build(el, ui) {
 <div class="d-previewpane" role="tabpanel" hidden></div>
 <div class="d-body" role="tabpanel">
   <div data-slot="meta" class="d-meta"></div>
-  <div class="d-open"><button type="button" class="btn primary d-open-btn" data-open>${icon('open', 15)}<span>Open conversation</span></button><span data-slot="note" class="d-note"></span></div>
+  <div class="d-open"><button type="button" class="btn primary d-open-btn" data-open>${icon('open', 15)}<span>Open in terminal</span></button><span data-slot="note" class="d-note"></span></div>
   <div data-slot="wait" class="c-wait d-wait"></div>
   <section class="d-sec d-reply-sec"><div data-slot="replyk" class="d-hslot"></div><div class="cp-box d-reply-box"><div class="d-reply md" tabindex="0"></div>${copyBtn('reply', 'Copy reply')}</div></section>
   <section data-slot="plan" class="d-sec"></section>

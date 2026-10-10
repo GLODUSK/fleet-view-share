@@ -8,7 +8,7 @@
 //   ui.open(id)            desktop window: open the live session in the panel's Session tab, kept (Enter,
 //                          double-click). Edge: open it in Windows Terminal; asks first unless it is DONE,
 //                          then shows the server's reply as a toast
-//   ui.openTerminal(id)    always Windows Terminal (the panel's "Open conversation" button)
+//   ui.openTerminal(id)    always a terminal window (the panel's "Open in terminal" button)
 //   ui.saveSettings(obj)   save any of { view, zoom, query, repo, compact, steady, webBounds, notify, mapLens,
 //                          mapViews } (POST /settings)
 //   ui.keys                {}: a view may set ui.keys[viewName] = (KeyboardEvent) => boolean. While that view
@@ -95,11 +95,13 @@
 // - Orders (orders.js, through the live sessions of term.js, never a headless claude): a repo's right-click menu
 //   (map hub, repo chips, the repo menu's rows) has "Give orders ▸" (Prompt, Model, Effort, Fast mode): one text to every
 //   conversation in it, made one team (POST /teams) when there are 2+, so each gets its teammates' ids and the
-//   fleet-msg.js command. A multi-selection's menu has "Give orders ▸" (Work together: a team, Send to each, Model, Effort, Fast mode), "Interrupt all",
-//   "Open all here", "Clear selection" and "Remove N conversations"; a team's has "Message the team", "Add <picked>", "Pick <member>" and
-//   "Disband team"; a conflict's or clash's has "Send a note to all"
-//   (prefilled by kind), "Open the file in VS Code", "Pick" and "Interrupt" per conversation; one
-//   conversation's gains "Leave team".
+//   fv send command. A multi-selection's menu has "Give orders ▸" (Work together: exactly those as a team, Send to
+//   each, Model, Effort, Fast mode), "Add to team ▸", "Interrupt all", "Open all here", "Clear selection" and
+//   "Remove N conversations"; a team's has "Message the team", "Add <picked>", "Remove member ▸", "Pick <member>"
+//   and "Disband team"; a conflict's or clash's has "Send a note to all" (prefilled by kind), "Open the file in VS
+//   Code", "Pick" and "Interrupt" per conversation; one conversation's gains "Add to team ▸" and, in a team,
+//   'Team "<name>" ▸' (Message the team, Leave team, Disband team). The server tells the members what changed
+//   (see the teams section); Remove takes a conversation out of its team.
 // - Replay: window 'fv-replay' { on, state } from the map overlay (see the replay section below).
 // - "Since you looked" (since.js): key w, the header's clock button, and by itself after 30+ min away.
 // - Desktop notifications for new state.alerts (settings.notify; see notifyAlerts).
@@ -111,7 +113,7 @@ import { renderDetail, openPeek } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady } from './term.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
-import { sendOrder, sendEach, sendNote, summary as orderSummary, teamBrief, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued } from './orders.js';
+import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued, onTeamJoin, setServerQueued } from './orders.js';
 import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner } from './compose.js';
@@ -319,6 +321,7 @@ async function poll() {
     applyRenames(st);
     state = st;
     setAccounts(st.accounts);
+    setServerQueued(st.queuedText);
     online = true;
     if (st.settings) syncHiddenRepos(st.settings.hiddenRepos);
     if (st.settings && Array.isArray(st.settings.offAccounts) && !('offAccounts' in pendingSave) && Date.now() - offSentAt > 3000) offAccts = st.settings.offAccounts.filter(isAcct);
@@ -559,7 +562,7 @@ async function pickAndAddRepo(at = null) {
   return true;
 }
 const canPickFolder = () => !!(window.fleetDesktop && typeof window.fleetDesktop.pickFolder === 'function');
-const ADD_HINT = 'Paste a folder path, e.g. Z:\\Github\\my-project';
+const ADD_HINT = 'Paste a folder path, e.g. C:\\Users\\you\\projects\\my-app';
 // the right-click menu's item: a submenu of the three ways (Browse is a quiet line outside the desktop window);
 // at: where the menu was opened, so the map puts the new repo there
 function addRepoMenuItem(at = null) {
@@ -1687,7 +1690,7 @@ function openContextMenu(target, x, y) {
       items.push({ sep: true });
     }
     items.push({ label: 'Open folder', icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
-    items.push(repoPushItem(folder, repo.push || 'production'));
+    if (pushHook()) items.push(repoPushItem(folder, repo.push || 'production'));
     if (unpinItem(target)) items.push(unpinItem(target));
     // orders for every conversation in it, idle and new ones too (one team), or the same text to each
     items.push({ sep: true }, ...repoOrderItems(folder, target.name || repo.name || repoName(folder)));
@@ -1721,8 +1724,8 @@ function openContextMenu(target, x, y) {
   if (desk && !s.pending && !s.demo) items.push(forkMenuItem(s));
   if (!s.pending && !s.demo) { const mv = moveMenuItem(s); if (mv) items.push(mv); }
   if (desk && !s.pending && !s.demo && !singleAccount()) items.push(...sendToMenuItems(s, hosted));
-  if (!s.pending && !s.demo) items.push(sessionPushItem(s));
-  if (leaveTeamItem(s)) items.push(leaveTeamItem(s));
+  if (!s.pending && !s.demo && pushHook()) items.push(sessionPushItem(s));
+  items.push(...teamItems(s));
   if (waitingOrderItem(s)) items.push(waitingOrderItem(s));
   if (unpinItem(target)) items.push(unpinItem(target));
   // Remove: ends the session if it runs here, and takes the conversation off the map, cards and strip (Henry: "to me end
@@ -1731,14 +1734,16 @@ function openContextMenu(target, x, y) {
   const busy = hosted && (st ? st === 'busy' : s.state === 'WORKING' || s.state === 'AGENTS');
   items.push({ sep: true });
   items.push({ label: 'Remove conversation', icon: 'close', danger: true, confirm: busy ? { text: BUSY_Q, yes: 'Remove anyway' } : null, run: () => removeFromMenu(s.id) });
-  const sub = s.pending ? `${s.repo?.name || ''} · account ${s.account}` : `${s.label || s.state}${s.repo ? ` · ${s.repo.name}` : ''}`;
+  const sub = s.pending ? `${s.repo?.name || ''}${singleAccount() ? '' : ` · account ${s.account}`}` : `${s.label || s.state}${s.repo ? ` · ${s.repo.name}` : ''}`;
   openCtxMenu({ x, y, title: s.name, dot: s.pending ? s.hue : statusColor(s), sub, items });
 }
 const statusColor = (s) => s.stateColor || C.dim;
 // "Push to": where the work goes when it's done. Production is the standing rule (merge to main and ship); Preview
 // pushes the branch for a preview and doesn't merge. A repo's choice is the default for its conversations, a
 // conversation's own wins; the server keeps both (POST /push-target) and a hook tells the conversation at every
-// prompt (scripts/push-target-hook.py).
+// prompt (scripts/push-target-hook.py). Without that hook nothing would tell it, so the items show only when the
+// server saw the hook set up (state.tools.pushHook; a server too old to say keeps them).
+const pushHook = () => state?.tools?.pushHook !== false;
 const PUSH_NAME = { production: 'Production', preview: 'Preview' };
 const pushPick = (on, label, run) => ({ label, icon: on ? 'check' : null, run });
 function sessionPushItem(s) {
@@ -1795,9 +1800,17 @@ function moveConversation(s, root) {
 }
 // "Send to Claude A / B / C ...", one for each other account here: it writes a handoff summary and a fresh conversation
 // picks it up under that account, in a panel here (term.js sendToAccount). One running here is ended first; one open
-// in another window has to be ended there.
+// in another window has to be ended there. Only accounts it can work on are offered (state.tools.sendTo, the same
+// rule the session host checks): the account has the /handoff and /pickup commands, and its projects folder is the
+// conversation's account's own (two logins share one only when one's folder links to the other's).
+function canSendTo(s, to) {
+  const t = state?.tools?.sendTo;
+  if (!t) return true; // a server too old to say
+  const x = t[to], own = t[s.account || 'B'];
+  return !!(x && x.commands && own && x.folder === own.folder);
+}
 function sendToMenuItems(s, hosted) {
-  return onAccounts().filter((a) => a !== (s.account || 'B')).map((to) => sendToMenuItem(s, hosted, to));
+  return onAccounts().filter((a) => a !== (s.account || 'B') && canSendTo(s, a)).map((to) => sendToMenuItem(s, hosted, to));
 }
 function sendToMenuItem(s, hosted, to) {
   const label = `Send to Claude ${to}`;
@@ -1907,6 +1920,7 @@ function removeFromMenu(id) {
   cancelQueued(id);
   continued.delete(id);
   if (s.pending) { if (ui.selectedId === id) ui.selectedId = null; if (ui.detailId === id) ui.detailId = null; render(); return; }
+  leaveOnRemove(s);
   hideConversation(s, 'removed');
 }
 // cols and rows for the new pty, from the room the panel will give it (the terminal fits itself once shown)
@@ -2117,7 +2131,7 @@ function sessionsMenu(list, x, y) {
     ] }
     : { label: 'Give orders', icon: 'send', disabled: true, note: 'desktop window only' };
   openCtxMenu({ x, y, title: `${list.length} conversations`, dot: C.cyan, sub: list.map((s) => s.name).join(' · '), items: [
-    orders, { sep: true },
+    orders, addManyItem(list), { sep: true },
     live.length ? { label: 'Interrupt all', icon: 'stop', note: `${live.length} running here`, run: () => interruptAll(live) } : { label: 'Interrupt all', icon: 'stop', disabled: true, note: 'none of them runs here' },
     desk ? { label: 'Open all here', icon: 'shell', run: () => openAllHere(list) } : { label: 'Open all here', icon: 'shell', disabled: true, note: 'desktop window only' },
     { sep: true },
@@ -2139,7 +2153,7 @@ function removeMany(ids) {
     if (isHosted(id)) endSession(id);
     cancelQueued(id);
     continued.delete(id);
-    if (!s.pending) hidden.set(id, Date.now());
+    if (!s.pending) { leaveOnRemove(s); hidden.set(id, Date.now()); }
     if (ui.selectedId === id) ui.selectedId = null;
     if (ui.detailId === id) ui.detailId = null;
     n++; first = first || s;
@@ -2166,41 +2180,123 @@ async function openAllHere(list) {
   const bad = rs.filter((r) => !r || !r.ok).length;
   toast(bad ? `${go.length - bad} running here · ${bad} did not start` : `${go.length} running here`, bad ? C.red : C.mint);
 }
-// a team (right-click its link or pill on the map)
+// ---------- teams ----------
+// The server keeps the teams and tells their members what changed (POST /teams/add, /teams/leave, /teams/remove):
+// a newcomer gets the order with its teammates, the others a note with its id; one that leaves or is taken out,
+// and the rest, get a note; a disband tells everyone. Notes go only to conversations running now (each costs a
+// Claude turn), and wait behind a question. The page only asks and says what happened in a toast.
+const TEAM_MAX = 12;
+const isConvId = (id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''));
+const teamById = (id) => (id && (state?.teams || []).find((t) => t.id === id)) || null;
+// "told 2" from a team call's reply: the notes that went in or wait behind a question
+const toldN = (list) => `told ${(list || []).filter((x) => x.ok).length}`;
+// a team (right-click its link or pill on the map, or a member's 'Team "x" ▸')
 function teamMenu(t, x, y) {
-  const members = sessionsOf(t.members);
-  const sel = ui.selectedId && !t.members.includes(ui.selectedId) ? sessionsOf([ui.selectedId])[0] : null;
-  const items = [
-    orderItem('Message the team', members, { team: false, prefix: `[Fleet View · team ${t.name}]`, placeholder: `A message to every conversation in "${t.name}"` }),
-    sel && !unreachable(sel) && /^[0-9a-f-]{36}$/i.test(sel.id)
-      ? { label: `Add ${sel.name}`, icon: 'plus', note: 'the picked conversation', run: () => addToTeam(t, sel, members) }
-      : { label: 'Add picked conversation', icon: 'plus', disabled: true, note: ui.selectedId ? 'it is in this team already, or can\'t be reached here' : 'pick one first' },
-    { sep: true },
-    ...members.map((s) => ({ label: `Pick ${s.name}`, icon: 'shell', run: () => pickFromAnywhere(s.id) })),
-    { sep: true },
-    { label: 'Disband team', icon: 'close', danger: true, confirm: { text: `Disband "${t.name}"? Its conversations keep working; they stop being a team.`, yes: 'Disband' }, run: () => disbandTeam(t) },
-  ];
-  openCtxMenu({ x, y, title: t.name, dot: t.color || C.cyan, sub: `${members.length} conversations · ${firstWords(t.order, 10, 70)}`, items });
+  openCtxMenu({ x, y, title: t.name, dot: t.color || C.cyan, sub: `${t.members.length} conversations · ${firstWords(t.order, 10, 70)}`, items: teamMenuItems(t, true) });
 }
-async function addToTeam(t, s, members) {
-  if (t.members.length >= 12) { toast('a team has at most 12 conversations', C.red); return; }
-  const r = await post('/teams', { members: [...t.members, s.id], order: t.order, name: t.name });
-  const team = r && r.ok && r.team ? r.team : FIXTURE && r == null ? { ...t, members: [...t.members, s.id] } : null;
-  if (!team) { toast((r && r.message) || 'could not add it to the team', C.red); return; }
-  const all = [...members, s];
-  // the newcomer gets the order with its teammates; the others hear who joined
-  const [a, b] = await Promise.all([
-    sendEach([s], teamBrief(team, s, all, state, t.order)),
-    sendNote(members, `${s.name} joined the team "${t.name}".`, state, `[Fleet View · team ${t.name}]`),
-  ]);
-  const res = { ok: a.some((x) => x.ok), team: null, results: [...a, ...b] };
-  toast(`Added ${s.name} to "${t.name}" · ${orderSummary(res, 'told')}`, res.ok ? C.mint : C.red);
+function teamMenuItems(t, full) {
+  // members removed from the map are left out of what goes to them
+  const all = sessionsOf(t.members), members = all.filter((s) => !isHidden(s));
+  const sel = ui.selectedId && !t.members.includes(ui.selectedId) ? sessionsOf([ui.selectedId])[0] : null;
+  const items = [orderItem('Message the team', members, { team: false, prefix: `[Fleet View · team "${t.name}"]`, placeholder: `A message to every conversation in "${t.name}"` })];
+  if (full) {
+    const why = !sel ? (ui.selectedId ? 'it is in this team already' : 'pick one first') : joinWhy(sel, t);
+    items.push(why ? { label: 'Add picked conversation', icon: 'plus', disabled: true, note: why }
+      : { label: `Add ${sel.name}`, icon: 'plus', note: 'the picked conversation', run: () => addToTeam(t, sel) });
+    items.push({ label: 'Remove member', icon: 'close', note: `${all.length}`, children: all.map((s) => ({ label: s.name, icon: 'close', run: () => leaveTeam(t, s, 'removed') })) });
+    items.push({ sep: true }, ...all.map((s) => ({ label: `Pick ${s.name}`, icon: 'shell', run: () => pickFromAnywhere(s.id) })));
+    items.push({ sep: true }, { label: 'Disband team', icon: 'close', danger: true, confirm: { text: `Disband "${t.name}"? Its conversations keep working; they stop being a team, and each is told.`, yes: 'Disband' }, run: () => disbandTeam(t) });
+  }
+  return items;
+}
+// why s can't join t, or null
+function joinWhy(s, t) {
+  if (t.members.length >= TEAM_MAX) return `a team has at most ${TEAM_MAX} conversations`;
+  return unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
+}
+// a conversation's menu: "Add to team ▸" (one row per team it isn't in) and, when it is in one, 'Team "x" ▸'
+// (Message the team, Leave team, Disband team: a second step asks first)
+function teamItems(s) {
+  if (s.pending || s.demo) return [];
+  const mine = teamById(s.team), others = (state?.teams || []).filter((t) => t !== mine);
+  const out = [];
+  if (others.length) {
+    const why = unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
+    out.push(why ? { label: 'Add to team', icon: 'plus', disabled: true, note: why }
+      : { label: 'Add to team', icon: 'plus', children: others.map((t) => {
+        const full = t.members.length >= TEAM_MAX;
+        return { label: t.name, icon: 'merge', disabled: full, note: full ? `full (${TEAM_MAX})` : `${t.members.length} conversations${mine ? ` · it leaves "${mine.name}"` : ''}`, run: () => addToTeam(t, s) };
+      }) });
+  }
+  if (mine) {
+    out.push({ label: `Team "${mine.name}"`, icon: 'merge', children: [
+      ...teamMenuItems(mine, false),
+      { label: 'Leave team', icon: 'close', run: () => leaveTeam(mine, s, 'left') },
+      { label: 'Disband team', icon: 'close', danger: true, children: [{ label: `Disband "${mine.name}": each is told`, icon: 'close', danger: true, run: () => disbandTeam(mine) }] },
+    ] });
+  }
+  return out;
+}
+// a multi-selection's "Add to team ▸": every selected one that can join, into the team picked
+function addManyItem(list) {
+  const teams = state?.teams || [];
+  if (!teams.length) return null;
+  const can = list.filter((s) => isConvId(s.id) && !unreachable(s));
+  if (!can.length) return { label: 'Add to team', icon: 'plus', disabled: true, note: 'none of them can join: not started yet, or not reachable here' };
+  return { label: 'Add to team', icon: 'plus', note: can.length < list.length ? `${can.length} of ${list.length} can join` : null, children: teams.map((t) => {
+    const go = can.filter((s) => !t.members.includes(s.id));
+    const room = TEAM_MAX - t.members.length;
+    const why = !go.length ? 'they are in it already' : go.length > room ? `room for ${room} more (at most ${TEAM_MAX})` : null;
+    return { label: t.name, icon: 'merge', disabled: !!why, note: why || `${t.members.length} + ${go.length}`, run: () => addManyToTeam(t, go) };
+  }) };
+}
+async function addToTeam(t, s) {
+  if (t.members.length >= TEAM_MAX) { toast(`a team has at most ${TEAM_MAX} conversations`, C.red); return; }
+  toast(`Adding ${s.name} to "${t.name}"…`, C.dim);
+  const r = await post('/teams/add', { id: t.id, member: s.id });
+  if (FIXTURE && r == null) return;
+  if (!r || !r.ok) { toast((r && r.message) || 'could not add it to the team', C.red); return; }
+  const b = r.brief || {};
+  const got = b.ok ? (b.queued ? `${s.name} gets the order once its question is answered` : null) : `${s.name} did not get the order (${b.message || 'not sent'})`;
+  toast([`Added ${s.name} to "${t.name}"`, toldN(r.told), got, leftText(r.left)].filter(Boolean).join(' · '), b.ok ? C.mint : C.red, null, b.ok ? 0 : 9000);
+}
+async function addManyToTeam(t, list) {
+  toast(`Adding ${list.length} to "${t.name}"…`, C.dim);
+  let added = 0, bad = null;
+  // one at a time: each add tells the members so far
+  for (const s of list) {
+    const r = await post('/teams/add', { id: t.id, member: s.id });
+    if (r && r.ok) added++; else if (!bad && !(FIXTURE && r == null)) bad = `${s.name} (${(r && r.message) || 'failed'})`;
+  }
+  if (FIXTURE) return;
+  toast(`Added ${added} to "${t.name}"${bad ? ` · not added: ${bad}` : ''}`, added ? C.mint : C.red);
+}
+// "· "x" lost a member" / "· "x" is disbanded": teams the new member was taken out of
+const leftText = (left) => (left || []).map((x) => (x.disbanded ? `"${x.name}" is disbanded` : `it left "${x.name}"`)).join(' · ');
+// why: 'left' (its own menu) or 'removed' (the team's Remove member); offMap: removed from the map (it is ending,
+// so only the rest are told), with no toast of its own
+async function leaveTeam(t, s, why, offMap = false) {
+  const r = await post('/teams/leave', { id: t.id, member: s.id, why, hidden: offMap });
+  if (offMap || (FIXTURE && r == null)) return;
+  if (!r || !r.ok) { toast((r && r.message) || 'could not take it out of the team', C.red); return; }
+  toast(`${s.name} ${why === 'left' ? 'left' : 'is out of'} "${t.name}" · ${toldN(r.told)}${r.disbanded ? ' · the team is disbanded (one was left)' : ''}`, C.dim);
 }
 async function disbandTeam(t) {
   const r = await post('/teams/remove', { id: t.id });
-  if (!FIXTURE && (!r || !r.ok)) { toast((r && r.message) || 'could not disband it', C.red); return; }
-  toast(`Disbanded "${t.name}"`, C.dim);
+  if (FIXTURE && r == null) return;
+  if (!r || !r.ok) { toast((r && r.message) || 'could not disband it', C.red); return; }
+  toast(`Disbanded "${t.name}" · ${toldN(r.told)}`, C.dim);
 }
+// a conversation removed from the page leaves its team (the server does the same when the hidden list reaches it)
+function leaveOnRemove(s) {
+  const t = teamById(s.team);
+  if (t && isConvId(s.id)) leaveTeam(t, s, 'removed', true);
+}
+// a new session that had no id yet when its team was made joined it once it had one (orders.js)
+onTeamJoin((name, teamName, r) => {
+  if (r && r.ok) toast(`${name} joined "${teamName}" · ${toldN(r.told)}`, C.mint);
+  else if (r) toast(`${name} could not join "${teamName}": ${r.message || 'failed'}`, C.red, null, 9000);
+});
 // a conflict or a clash (right-click its node on the map): kind2 'branch' | 'worktree' | 'migration', else a file
 const CONFLICT_NOTE = {
   branch: (l) => `Heads up: you are both on branch ${l}. Coordinate before pushing: agree who pushes first, and do not force-push.`,
@@ -2237,15 +2333,6 @@ function pickFromAnywhere(id) {
   if ((state?.sessions || []).some((s) => s.id === id && s.state !== 'DONE')) return fvSelect(id);
   if ((view?.allSessions || state?.sessions || []).some((s) => s.id === id)) return ui.showDetail(id, 'click');
   toast('that conversation is no longer listed', C.dim);
-}
-function leaveTeamItem(s) {
-  const t = s.team && (state?.teams || []).find((x) => x.id === s.team);
-  if (!t) return null;
-  return { label: `Leave team "${t.name}"`, icon: 'close', run: async () => {
-    const r = await post('/teams/leave', { id: t.id, member: s.id });
-    if (!FIXTURE && (!r || !r.ok)) { toast((r && r.message) || 'could not leave the team', C.red); return; }
-    toast(`${s.name} left "${t.name}"${r && r.disbanded ? ' · the team is gone' : ''}`, C.dim);
-  } };
 }
 
 // ---------- replay (the map overlay's replay bar, map-overlay.js / replay.js) ----------
@@ -2310,7 +2397,7 @@ const since = mountSince({ fetchJson: getJson, onPick: (id) => pickFromAnywhere(
 $('since-btn')?.addEventListener('click', (e) => { e.stopPropagation(); since.toggle(); });
 
 // ---------- "Update available" (update.js; updater.js on the server) ----------
-if (!FIXTURE) mountUpdate({ pill: $('update-pill'), getJson });
+if (!FIXTURE) mountUpdate({ pill: $('update-pill'), verBtn: $('ver-btn'), getJson });
 
 // ---------- desktop notifications ----------
 // New entries in state.alerts (n only grows) of these kinds raise a Notification while the window is not

@@ -180,12 +180,28 @@ function acctHomes() {
 }
 // an account letter as the callers send it: one letter, else B (the default ~/.claude)
 const acctId = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
-function findTranscript(id, cwd) {
+// an account's config folder: B is the default ~/.claude, any other letter ~/.claude-<letter>
+const acctDir = (a) => path.join(process.env.USERPROFILE || os.homedir(), acctId(a) === 'B' ? '.claude' : `.claude-${acctId(a).toLowerCase()}`);
+// What "Send to Claude <X>" needs in account X: '' when it has it all, else why not. It needs the /handoff and
+// /pickup commands (a skill or a command file, in X's folder or the conversation's own .claude folder), and the
+// conversation's log in X's projects folder (two logins share it only when one's folder links to the other's).
+function sendToMissing(id, account, cwd) {
+  const dir = acctDir(account), L = acctId(account);
+  const roots = [dir, ...(typeof cwd === 'string' && cwd ? [path.join(cwd, '.claude')] : [])];
+  const isFile = (f) => { try { return fs.statSync(f).isFile(); } catch { return false; } };
+  const has = (n) => roots.some((r) => isFile(path.join(r, 'skills', n, 'SKILL.md')) || isFile(path.join(r, 'commands', `${n}.md`)));
+  const lack = ['handoff', 'pickup'].filter((n) => !has(n));
+  if (lack.length) return `Claude ${L} has no ${lack.map((n) => `/${n}`).join(' or ')} command, which sending a conversation there needs`;
+  const projects = isTestPipe() && process.env.FV_HOST_PROJECTS_DIR ? process.env.FV_HOST_PROJECTS_DIR : path.join(dir, 'projects');
+  if (!findTranscript(id, cwd, [projects])) return `Claude ${L} can't see this conversation: its log is not in ${projects}`;
+  return '';
+}
+function findTranscript(id, cwd, roots = projectRoots()) {
   const name = `${String(id).toLowerCase()}.jsonl`;
   const at = (f) => { try { const st = fs.statSync(f); return st.isFile() ? { file: f, size: st.size } : null; } catch { return null; } };
   const slug = typeof cwd === 'string' && cwd ? cwd.replace(/[^A-Za-z0-9]/g, '-') : '';
-  for (const root of projectRoots()) { const r = slug && at(path.join(root, slug, name)); if (r) return r; }
-  for (const root of projectRoots()) {
+  for (const root of roots) { const r = slug && at(path.join(root, slug, name)); if (r) return r; }
+  for (const root of roots) {
     let dirs = [];
     try { dirs = fs.readdirSync(root); } catch { continue; }
     for (const d of dirs) { const r = at(path.join(root, d, name)); if (r) return r; }
@@ -241,13 +257,18 @@ const DROP_EXACT = new Set([
   'NO_COLOR', 'CLAUDECODE', 'CLAUDE_PID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID',
   'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_ENTRYPOINT',
   'CLAUDE_CODE_SESSION_ATTENDED', 'WT_SESSION',
-  // like the server's "Open conversation": the account comes from `account` alone
+  // like the server's "Open in terminal": the account comes from `account` alone
   'CLAUDE_CONFIG_DIR', 'CLAUDE_SWAP_KEY', 'CLAUDE_SWAP_PAYER', 'CLAUDE_CODE_OAUTH_TOKEN',
   'ELECTRON_RUN_AS_NODE',
   // its own, set below: a launcher's key from Fleet View's environment would hand a restart to that launcher
   'CLAUDE_LAUNCH_KEY',
 ]);
 const DROP_PREFIX = ['FLEET_VIEW_', 'FV_'];
+const FV_DIR = path.resolve(__dirname, '..');
+// Teammates talk with `fv send <id> "…" --from <me>`: every claude started here may run that one command without
+// asking, so a message between conversations never waits on an approval click. Nothing broader. It is one word,
+// "--allowedTools=…": the flag takes a list, and as two words it would take a prompt after it as one more tool.
+const ALLOW_FV = '"--allowedTools=Bash(fv send:*)"';
 
 function childEnv(account, launchKey) {
   const env = {};
@@ -257,7 +278,12 @@ function childEnv(account, launchKey) {
     env[k] = v;
   }
   // account X: ~/.claude-x (A: ~/.claude-a, C: ~/.claude-c, ...); B (or anything else): the default ~/.claude, no CLAUDE_CONFIG_DIR
-  if (acctId(account) !== 'B') env.CLAUDE_CONFIG_DIR = path.join(process.env.USERPROFILE || os.homedir(), '.claude-' + acctId(account).toLowerCase());
+  if (acctId(account) !== 'B') env.CLAUDE_CONFIG_DIR = acctDir(account);
+  // Fleet View's folder first on PATH, so `fv` runs in every session started here, also when this host was
+  // started from an environment older than the PATH install.ps1 set (the key is Path, whatever its case)
+  const pk = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'Path';
+  const rest = String(env[pk] || '').split(';').filter((p) => p && normDir(p) !== normDir(FV_DIR));
+  env[pk] = [FV_DIR, ...rest].join(';');
   env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = '1';
   if (launchKey) env.CLAUDE_LAUNCH_KEY = launchKey;
   env.COLORTERM = 'truecolor';
@@ -361,9 +387,9 @@ function loadPty() {
 function createPtys(opts = {}) {
   const send = opts.send || (() => {});
   const changed = opts.changed || (() => {});
-  const commandFor = opts.command || ((id) => `claude --resume ${id}`);
-  const newCommand = opts.newCommand || 'claude';
-  const pickupFor = opts.pickupCommand || HO.pickupCommand;
+  const commandFor = opts.command || ((id) => `claude ${ALLOW_FV} --resume ${id}`);
+  const newCommand = opts.newCommand || `claude ${ALLOW_FV}`;
+  const pickupFor = opts.pickupCommand || ((file) => HO.pickupCommand(file).replace(/^claude /, `claude ${ALLOW_FV} `));
   const log = opts.log || (() => {});
   const dirs = () => sessionDirs(opts.sessionDirs);
   const getSettings = opts.settings || (() => settings());
@@ -414,8 +440,8 @@ function createPtys(opts = {}) {
     const launchKey = HO.newLaunchKey();
     let p;
     try {
-      // the command line is built from checked parts only (an id of hex and dashes, the fixed new command, or a
-      // handoff file path HO.safeFile checked: no quotes, % or cmd metacharacters). It goes to cmd as one string,
+      // the command line is built from checked parts only (an id of hex and dashes, the fixed new command and
+      // ALLOW_FV, or a handoff file path HO.safeFile checked: no quotes, % or cmd metacharacters). It goes to cmd as one string,
       // `/c "<command>"`, which /s strips to the command itself: node-pty would escape a quote in it as \" (which
       // cmd does not read), and it already quoted a command with spaces the same way before
       p = ptyLib.spawn(shell, `/d /s /c "${command}"`, {
@@ -496,7 +522,8 @@ function createPtys(opts = {}) {
     return r;
   }
 
-  // "Send to Claude B" (or A, C, ...): the conversation carries on under another account in a fresh conversation. Its
+  // "Send to Claude B" (or A, C, ...): the conversation carries on under another account in a fresh conversation, when
+  // that account has the /handoff and /pickup commands and can see its log (sendToMissing; else nothing is ended). Its
   // claude here, if one runs, is ended first (Ctrl+C, as kill does); then it is resumed under o.account with
   // /handoff as its first prompt. The summary's restart request starts the /pickup in its place under that same
   // account (handoff above). The prompt is fixed text: nothing from the caller goes into the command line.
@@ -507,6 +534,9 @@ function createPtys(opts = {}) {
     if (!loadPty()) return Promise.resolve(noPty());
     const account = acctId(o.account);
     const old = terms.get(id);
+    // nothing is ended when that account can't carry it on
+    const why = sendToMissing(id, account, o.cwd || old?.cwd || null);
+    if (why) { log(`send to ${account}: ${id} refused: ${why}`); return Promise.resolve({ ok: false, message: why }); }
     const gone = old && old.alive ? new Promise((r) => { old.dismissed = true; end(old, 2500, r); }) : Promise.resolve();
     return gone.then(() => {
       if (terms.get(id) === old) terms.delete(id);

@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFile, spawn } = require('child_process');
+const { execFile, spawn, spawnSync } = require('child_process');
 const HO = require(path.join(__dirname, 'handoff.js'));
 const API = require(path.join(__dirname, 'api.js'));
 const CONV = require(path.join(__dirname, 'conversation.js'));
@@ -15,6 +15,7 @@ const FILES = require(path.join(__dirname, 'files.js'));
 const CHANGES = require(path.join(__dirname, 'changes.js'));
 const PREVIEW = require(path.join(__dirname, 'preview.js'));
 const UPDATER = require(path.join(__dirname, 'updater.js'));
+const VERSION = require(path.join(__dirname, 'version.js'));
 
 // ---------- options ----------
 const argv = process.argv.slice(2);
@@ -44,6 +45,7 @@ if (opt('help', false)) {
   --view cards|map|wall  start in the Cards, Map (graph) or Wall (big tiles) view
   --demo              made-up conversations instead of your real ones, for recordings
   --snapshot          print one frame of the active view and exit
+  --version           print Fleet View's version (1.0.12) and exit
 
   keys: q quit   v/Tab next view   r repo menu (or click the name top left)   / filter
         click a conversation to open it
@@ -51,6 +53,11 @@ if (opt('help', false)) {
         Map:   arrows/hjkl select   +/- zoom   shift+arrows pan   0 recenter   Enter open card   o open convo
 
   Your last view, zoom, filter, repo and compact settings are kept in ~/.fleet-view.json.`);
+  process.exit(0);
+}
+if (opt('version', false)) {
+  const v = VERSION.current();
+  console.log(`Fleet View ${VERSION.label(v, 'version unknown')}${v.commit ? ` (${v.commit.slice(0, 7)})` : ''}`);
   process.exit(0);
 }
 const DEMO = !!opt('demo', false);
@@ -78,20 +85,25 @@ function accountsHere() {
 const accountOf = (dir) => { const m = /[\\/]\.claude-([a-z])(?:[\\/]|$)/i.exec(dir || ''); return m ? m[1].toUpperCase() : 'B'; };
 // Session logs live under every account's config dir; --root picks one folder (its account comes from the folder name).
 // B's folder comes first, so a junction shared by several accounts is read once, as B's.
-const ROOTS = typeof opt('root', null) === 'string'
-  ? [{ dir: path.resolve(opt('root')), account: accountOf(path.resolve(opt('root'))) }]
-  : accountsHere().map((a) => ({ dir: path.join(acctDir(a), 'projects'), account: a })).sort((x, y) => (x.account === 'B' ? -1 : y.account === 'B' ? 1 : 0));
 // on some machines ~/.claude-<x>/projects is a junction to ~/.claude/projects: read a folder once
 // (then which account a conversation belongs to comes from its running process, see accountsFromProcesses)
-{
-  const seen = new Set();
-  for (let i = 0; i < ROOTS.length; i++) {
-    let real = ROOTS[i].dir;
+// The list is built again when accountsHere changes, so an account logged into while Fleet View runs shows within a minute.
+const ROOT_OPT = typeof opt('root', null) === 'string' ? path.resolve(opt('root')) : null;
+let rootsFor = null, rootsList = [];
+function roots() {
+  if (ROOT_OPT) return rootsList.length ? rootsList : (rootsList = [{ dir: ROOT_OPT, account: accountOf(ROOT_OPT) }]);
+  const accts = accountsHere();
+  if (accts.join() === rootsFor) return rootsList;
+  const seen = new Set(), out = [];
+  for (const r of accts.map((a) => ({ dir: path.join(acctDir(a), 'projects'), account: a })).sort((x, y) => (x.account === 'B' ? -1 : y.account === 'B' ? 1 : 0))) {
+    let real = r.dir;
     try { real = fs.realpathSync(real); } catch {}
-    if (seen.has(real.toLowerCase())) ROOTS.splice(i--, 1); else seen.add(real.toLowerCase());
+    if (!seen.has(real.toLowerCase())) { seen.add(real.toLowerCase()); out.push(r); }
   }
+  rootsFor = accts.join();
+  return (rootsList = out);
 }
-const ROOT = ROOTS.map((r) => r.dir).join(' + ');
+const rootLabel = () => roots().map((r) => r.dir).join(' + ');
 // --web (the default) serves the view to an app window; --tui (and --snapshot / --install-profile) is the terminal view;
 // --install-startup / --remove-startup only add or remove the autostart shortcut and leave
 const STARTUP_FLAG = opt('install-startup', false) ? 'install' : opt('remove-startup', false) ? 'remove' : null;
@@ -259,10 +271,11 @@ function cleanParity(list) {
 }
 let parityRules = cleanParity(saved.parity) || [];
 // Teams: conversations told to work together (the page's "Work together", POST /teams). Each is
-// { id, name, color, members: [ids], order, at, messages: [{ t, from, to, text }], seenAt }: messages are the last
-// 50 between members (through scripts/fleet-msg.js and the API's `from`), seenAt the last time a member was in the
-// session list. At most 50 teams of up to 12 members, saved with the rest; a team whose members have all been gone
-// for 24 hours is dropped (pruneTeams).
+// { id, name, color, members: [ids], order, at, messages: [{ t, from, to, text }], successors: [{ from, to, at }],
+// seenAt }: messages are the last 50 between members (through `fv send --from` and the API's `from`), successors the
+// last 10 members that handed off (or ran /clear) and were swapped for the conversation that carries on, seenAt the
+// last time a member was in the session list. At most 50 teams of up to 12 members, saved with the rest; a team
+// whose members have all been gone for 24 hours is dropped (pruneTeams).
 const TEAMS_MAX = 50, TEAM_MEMBERS_MAX = 12, TEAM_MSGS_MAX = 50, TEAM_GONE_MS = 24 * 3600e3;
 const TEAM_COLORS = ['#ff9f43', '#3fd8ff', '#3dffa8', '#a47bff', '#ff4d8d', '#ffc24a', '#4d9bff', '#7cf06a', '#ff6a2b', '#e58bff'];
 const MEMBER_RE = /^[\w.-]{1,80}$/;
@@ -277,8 +290,10 @@ function cleanTeams(list, now = Date.now()) {
     const at = Number.isFinite(x.at) && x.at > 0 && x.at <= now + 60e3 ? Math.round(x.at) : now;
     const msgs = (Array.isArray(x.messages) ? x.messages : []).filter((m) => m && Number.isFinite(m.t) && typeof m.from === 'string' && typeof m.to === 'string' && typeof m.text === 'string')
       .slice(-TEAM_MSGS_MAX).map((m) => ({ t: Math.round(m.t), from: m.from.slice(0, 80), to: m.to.slice(0, 80), text: m.text.slice(0, 300) }));
+    const succ = (Array.isArray(x.successors) ? x.successors : []).filter((m) => m && typeof m.from === 'string' && typeof m.to === 'string' && Number.isFinite(m.at))
+      .slice(-10).map((m) => ({ from: m.from.slice(0, 80), to: m.to.slice(0, 80), at: Math.round(m.at) }));
     out.push({ id: x.id, name: plainText(x.name, 80) || 'team', color: /^#[0-9a-f]{6}$/i.test(x.color || '') ? x.color : TEAM_COLORS[out.length % TEAM_COLORS.length],
-      members, order: typeof x.order === 'string' ? x.order.slice(0, 4000) : '', at, messages: msgs, seenAt: Number.isFinite(x.seenAt) ? Math.round(x.seenAt) : now });
+      members, order: typeof x.order === 'string' ? x.order.slice(0, 4000) : '', at, messages: msgs, successors: succ, seenAt: Number.isFinite(x.seenAt) ? Math.round(x.seenAt) : now });
   }
   return out;
 }
@@ -428,7 +443,7 @@ function addRepo(p) {
   // a pasted path may come quoted ("…" or '…', Explorer's "Copy as path") and with forward slashes
   p = p.trim().replace(/^(["'])(.*)\1$/, '$2').trim().replace(/\//g, path.sep);
   if (UNSAFE_PATH.test(p)) return [400, { ok: false, message: 'that path has characters Fleet View will not pass on' }];
-  if (!path.isAbsolute(p) || (process.platform === 'win32' && !/^([a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(p))) return [400, { ok: false, message: 'give the full path of the folder (like Z:\\Github\\my-project)' }];
+  if (!path.isAbsolute(p) || (process.platform === 'win32' && !/^([a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(p))) return [400, { ok: false, message: 'give the full path of the folder (like C:\\Users\\you\\projects\\my-app)' }];
   const dir = path.resolve(p);
   let st = null;
   try { st = fs.statSync(dir); } catch {}
@@ -1101,13 +1116,17 @@ const fmtCost = (c) => '$' + (c >= 100 ? Math.round(c).toLocaleString('en-US') :
 // token claude keeps in <config>/.credentials.json. Read only: an expired token is skipped until claude
 // refreshes it (a refresh here would rotate the token out from under claude). A value past its reset is dropped.
 // Every 5 minutes; 30 s after a miss (the first read often times out while the logs are still being read).
-// Every account here (accountsHere: B in ~/.claude, the others in ~/.claude-<x>); most machines have only B
+// Every account here (accountsHere: B in ~/.claude, the others in ~/.claude-<x>); most machines have only B.
+// An account with no .credentials.json (an API key, or not logged in) is skipped quietly at the 5-minute pace.
 const weekLeft = {}; // account -> { left: 0-100, resets: ms }
 async function readWeekLeft() {
   let missed = false;
   for (const a of accountsHere()) {
     try {
-      const o = JSON.parse(fs.readFileSync(path.join(acctDir(a), '.credentials.json'), 'utf8')).claudeAiOauth;
+      // no .credentials.json: an API key login, or not logged in yet. Nothing to read, and nothing wrong
+      const cred = path.join(acctDir(a), '.credentials.json');
+      if (!fs.existsSync(cred)) continue;
+      const o = JSON.parse(fs.readFileSync(cred, 'utf8')).claudeAiOauth;
       if (!o || !o.accessToken || (o.expiresAt && o.expiresAt < Date.now())) { missed = true; continue; }
       const r = await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { Authorization: 'Bearer ' + o.accessToken, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(20e3) });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1773,7 +1792,7 @@ function discover() {
   // every log in both accounts' projects folders; a conversation moved between accounts (/swap) can have
   // a log in each, and the one written last is the live one
   const found = new Map(); // id -> { file, pdir, m, account, root }
-  for (const r of ROOTS) {
+  for (const r of roots()) {
     for (const proj of ls(r.dir)) {
       const pdir = path.join(r.dir, proj);
       for (const f of ls(pdir)) {
@@ -2157,7 +2176,7 @@ function footer(W, keys) {
   else if (query) keys += `   ·  filter: ${query} (esc clears)`;
   const gone = [...sessions.values()].filter((s) => s.name && (s.state === 'DONE' || s.state === 'IDLE') && inWindow(s, Date.now())).length;
   if (gone && !typing) keys += `   ·  ${gone} finished, hidden`;
-  return lr([seg(keys, typing ? C.gold : C.faint)], [seg(DEMO ? 'demo data, nothing here is real  ' : `${GITHUB ? 'github on' : 'github off'}  ·  ${ROOT}  `, C.faint)], W);
+  return lr([seg(keys, typing ? C.gold : C.faint)], [seg(DEMO ? 'demo data, nothing here is real  ' : `${GITHUB ? 'github on' : 'github off'}  ·  ${rootLabel()}  `, C.faint)], W);
 }
 
 // the header's numbers for the conversations a view shows; shared by the terminal views and /state
@@ -2242,15 +2261,18 @@ function openConversation(s, now) {
     return;
   }
   pendingOpen = null;
-  const r = launchConversation(s);
-  notice = { text: '  ' + r.message, color: r.ok ? C.mint : C.red, until: now + (r.ok ? 4000 : 5000) };
+  launchConversation(s).then((r) => { notice = { text: '  ' + r.message, color: r.ok ? C.mint : C.red, until: Date.now() + (r.ok ? 4000 : 5000) }; });
 }
 
-// start claude --resume <id> in a Windows Terminal tab under the conversation's account (CLAUDE_CONFIG_DIR
-// ~/.claude-<x> for X, the default ~/.claude for B), with that account's tab colour. No confirmation here:
-// the terminal view and the page each confirm before calling it. Returns { ok, message }.
+// start claude --resume <id> under the conversation's account (~/.claude-<x> for X, the default ~/.claude for B):
+// in a Windows Terminal tab with that account's tab colour when the PC has Windows Terminal, else in a console
+// window of its own (`cmd /c start`; Windows 10 has no Windows Terminal until it is installed). No confirmation
+// here: the terminal view and the page each confirm before calling it. Resolves to { ok, message } once the
+// window's program started (or could not).
 // It runs through the account's launcher (%APPDATA%\npm\claude-<x>.cmd) when there is one, so /swap
-// and session handoffs (handoff.js) restart in that same tab; else the bare claude. A conversation from another
+// and session handoffs (handoff.js) restart in that same tab; else the bare claude, with the account set in the
+// command itself (`set CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude-<x>&&claude …`: a Windows Terminal that is already
+// open makes the tab itself and never sees the environment given to wt.exe). A conversation from another
 // config folder (--root) keeps the bare claude: the launcher would set its own.
 const launcherFor = (acct, configDir) => {
   const norm = (d) => path.resolve(d).toLowerCase();
@@ -2260,32 +2282,69 @@ const launcherFor = (acct, configDir) => {
 };
 // each account's Windows Terminal tab colour (claude-tabcolor.vbs uses the same ones)
 const ACCT_TAB = { A: '#3fb950', B: '#d97757', C: '#58a6ff', D: '#bc8cff', E: '#e3b341', F: '#f778ba' };
+// where wt.exe is, or null: its app alias in WindowsApps, else wherever `where` finds it. Looked up again after
+// 5 minutes, so a Windows Terminal installed while Fleet View runs is used from then on.
+let wtAt = { path: null, at: 0 };
+function wtPath() {
+  if (Date.now() - wtAt.at < 5 * 60e3) return wtAt.path;
+  let p = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Microsoft', 'WindowsApps', 'wt.exe');
+  try { fs.lstatSync(p); } catch {
+    p = null;
+    try {
+      const r = spawnSync('where.exe', ['wt'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+      if (r.status === 0) p = String(r.stdout).split(/\r?\n/).find((l) => l.trim()) || null;
+    } catch {}
+  }
+  wtAt = { path: p && p.trim(), at: Date.now() };
+  return wtAt.path;
+}
 function launchConversation(s) {
-  if (s.demo) return { ok: false, message: 'demo conversation: nothing to open' };
-  // tests only: FV_TEST_NO_LAUNCH=1 writes what it would open to server.log instead of starting Windows Terminal
+  if (s.demo) return Promise.resolve({ ok: false, message: 'demo conversation: nothing to open' });
+  // tests only: FV_TEST_NO_LAUNCH=1 writes what it would open to server.log instead of starting a window
   if (process.env.FV_TEST_NO_LAUNCH === '1') {
     logLine(`test launch: ${s.id} account ${accountFor(s)} cwd ${s.cwd || '-'}`);
-    return { ok: true, message: `test: would open ${s.name || s.id}` };
+    return Promise.resolve({ ok: true, message: `test: would open ${s.name || s.id}` });
   }
   const env = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: '1' };
-  // (FLEET_VIEW_* and FV_NO_OPEN are fleet-view.cmd's own: left in, "fleet-view" typed in that tab would skip its launcher)
-  for (const k of Object.keys(env)) if (k === 'NO_COLOR' || k === 'WT_SESSION' || k === 'CLAUDECODE' || k === 'CLAUDE_PID' || k === 'CLAUDE_SWAP_KEY' || k === 'CLAUDE_SWAP_PAYER' || k === 'CLAUDE_LAUNCH_KEY' || k === 'CLAUDE_CONFIG_DIR' || k === 'FLEET_VIEW_CHILD' || k === 'FLEET_VIEW_LOOP' || k === 'FV_NO_OPEN' || /^CLAUDE_CODE_(CHILD_SESSION|SESSION_ID|MESSAGING_SOCKET|MESSAGING_TOKEN|ENTRYPOINT|SESSION_ATTENDED|OAUTH_TOKEN)$/.test(k)) delete env[k];
+  // (FLEET_VIEW_* and FV_NO_OPEN are fleet-view.cmd's own: left in, "fleet-view" typed in that tab would skip its launcher;
+  // ELECTRON_RUN_AS_NODE and FV_SERVER_OWNER mark the server the desktop window runs, and would follow anything started there)
+  for (const k of Object.keys(env)) if (k === 'NO_COLOR' || k === 'WT_SESSION' || k === 'CLAUDECODE' || k === 'CLAUDE_PID' || k === 'CLAUDE_SWAP_KEY' || k === 'CLAUDE_SWAP_PAYER' || k === 'CLAUDE_LAUNCH_KEY' || k === 'CLAUDE_CONFIG_DIR' || k === 'FLEET_VIEW_CHILD' || k === 'FLEET_VIEW_LOOP' || k === 'FV_NO_OPEN' || k === 'ELECTRON_RUN_AS_NODE' || k === 'FV_SERVER_OWNER' || /^CLAUDE_CODE_(CHILD_SESSION|SESSION_ID|MESSAGING_SOCKET|MESSAGING_TOKEN|ENTRYPOINT|SESSION_ATTENDED|OAUTH_TOKEN)$/.test(k)) delete env[k];
   const acct = accountFor(s);
   const configDir = s.projRoot && accountOf(s.projRoot) === acct ? path.dirname(s.projRoot) : acct !== 'B' ? acctDir(acct) : null;
   if (configDir && path.resolve(configDir).toLowerCase() !== path.join(os.homedir(), '.claude').toLowerCase()) env.CLAUDE_CONFIG_DIR = configDir;
-  const cwd = s.cwd && fs.existsSync(s.cwd) ? s.cwd : os.homedir();
+  // wt splits its command line at ';', and cmd reads a '%' as a variable: such a folder opens in the home folder instead
+  const cwd = s.cwd && !/[;%"]/.test(s.cwd) && fs.existsSync(s.cwd) ? s.cwd.replace(/([^:])[\\/]+$/, '$1') : os.homedir();
   const name = s.name || s.id.slice(0, 8);
-  const title = name.replace(/[;"]/g, ' ');
-  const tabColor = ACCT_TAB[acct] || '#8b949e';
-  try {
-    const launcher = launcherFor(acct, configDir);
-    const child = spawn('wt.exe', ['-w', windowFor(s.root), 'new-tab', '--title', title, '--tabColor', tabColor, '-d', cwd, 'cmd', '/k', launcher || 'claude', '--resume', s.id], { env, detached: true, stdio: 'ignore', windowsHide: true });
-    child.on('error', () => { notice = { text: '  could not start Windows Terminal (wt.exe)', color: C.red, until: Date.now() + 5000 }; });
+  const title = name.replace(/[;"%&^|<>]/g, ' ');
+  const launcher = launcherFor(acct, configDir);
+  // the account's own folder (~/.claude-<x>) goes in the command; any other config folder (--root) only in env
+  const own = acct !== 'B' && configDir && path.resolve(configDir).toLowerCase() === acctDir(acct).toLowerCase();
+  // wt gets these as separate arguments (spawn quotes a launcher path with spaces itself)
+  const words = launcher ? [launcher, '--resume', s.id]
+    : own ? ['set', `CLAUDE_CONFIG_DIR=%USERPROFILE%\\.claude-${acct.toLowerCase()}&&claude`, '--resume', s.id] : ['claude', '--resume', s.id];
+  // a console window of its own; ok once `start` said it started it (exit code 0). Its command line is written out
+  // as is (verbatim), so a launcher path with spaces is quoted here.
+  const consoleWindow = () => new Promise((resolve) => {
+    const failed = (why) => { logOnce('open:console:' + why, `open in a console window: ${why}`); resolve({ ok: false, message: `could not open a console window for ${name}` }); };
+    const line = words.map((w, i) => (i === 0 && launcher && /\s/.test(w) ? `"${w}"` : w)).join(' ');
+    try {
+      const c = spawn(process.env.ComSpec || 'cmd.exe', [`/d /c start "${title}" /D "${cwd}" cmd /k ${line.replace(/&/g, '^&')}`], { env, windowsVerbatimArguments: true, windowsHide: true, stdio: 'ignore' });
+      c.on('error', (e) => failed(e.message));
+      c.on('exit', (code) => (code === 0 ? resolve({ ok: true, message: `opened ${name} in a new console window` }) : failed(`start said ${code}`)));
+    } catch (e) { failed(e.message); }
+  });
+  const wt = wtPath();
+  if (!wt) return consoleWindow();
+  // a Windows Terminal tab; a console window instead when wt.exe won't start
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(wt, ['-w', windowFor(s.root), 'new-tab', '--title', title, '--tabColor', ACCT_TAB[acct] || '#8b949e', '-d', cwd, 'cmd', '/k', ...words], { env, detached: true, stdio: 'ignore', windowsHide: true });
+    } catch (e) { logOnce('open:wt:' + e.message, `open in Windows Terminal: ${e.message}; a console window instead`); return resolve(consoleWindow()); }
+    child.on('spawn', () => resolve({ ok: true, message: `opened ${name} in a new Windows Terminal tab` }));
+    child.on('error', (e) => { logOnce('open:wt:' + e.message, `open in Windows Terminal: ${e.message}; a console window instead`); wtAt = { path: null, at: Date.now() }; resolve(consoleWindow()); });
     child.unref();
-    return { ok: true, message: `opened ${name} in a new Windows Terminal tab` };
-  } catch {
-    return { ok: false, message: 'could not start Windows Terminal (wt.exe)' };
-  }
+  });
 }
 const map = {
   pos: new Map(), // node id -> { x, y, vx, vy }, kept across frames so the map never jumps
@@ -3601,7 +3660,7 @@ const pidAlive = (pid) => {
 function scanLiveProcs() {
   if (DEMO) return;
   const byId = new Map(), seenDirs = new Set();
-  for (const r of ROOTS.concat(typeof opt('root', null) === 'string' ? [] : accountsHere().map((a) => ({ dir: path.join(acctDir(a), 'projects') })))) {
+  for (const r of roots().concat(ROOT_OPT ? [] : accountsHere().map((a) => ({ dir: path.join(acctDir(a), 'projects') })))) {
     const dir = path.join(path.dirname(r.dir), 'sessions');
     let real = dir;
     try { real = fs.realpathSync(dir).toLowerCase(); } catch { continue; }
@@ -3618,7 +3677,17 @@ function scanLiveProcs() {
   }
   for (const [sid, p] of byId) p.feed = readFeed(sid, p.startedAt);
   liveProcs = byId;
+  // a claude that went on in another conversation (/clear starts a new one, /resume opens another): the same
+  // process (pid and start time) under a new sessionId. Its team follows it (successorOf).
+  const now = Date.now();
+  for (const [sid, p] of byId) {
+    const was = procConv.get(p.pid);
+    if (was && was.startedAt === p.startedAt && was.id !== sid && UUID_RE.test(was.id)) cleared.set(was.id.toLowerCase(), { to: sid.toLowerCase(), at: now });
+  }
+  procConv = new Map([...byId].map(([sid, p]) => [p.pid, { id: sid, startedAt: p.startedAt }]));
+  for (const [id, c] of cleared) if (now - c.at > 24 * 3600e3) cleared.delete(id);
 }
+let procConv = new Map(); // claude pid -> { id, startedAt } at the last scan
 function accountsFromProcesses() {
   if (DEMO || process.platform !== 'win32' || procBusy) return;
   const byId = liveProcs;
@@ -3972,13 +4041,92 @@ function worktreesOf(roots, list, now) {
 
 // ---------- teams (see TEAMS_MAX) ----------
 const teamOf = (id) => (id ? teams.find((t) => t.members.includes(String(id).toLowerCase())) || null : null);
-const teamJson = (t) => ({ id: t.id, name: t.name, color: t.color, members: [...t.members], order: t.order, at: t.at, messages: t.messages.slice(-TEAM_MSGS_MAX).map((m) => ({ ...m })) });
-// POST /teams { members: [ids] (2..12), order, name? }: makes a team, or updates the one they are all in already
-function postTeam(b) {
+const teamJson = (t) => ({ id: t.id, name: t.name, color: t.color, members: [...t.members], order: t.order, at: t.at, messages: t.messages.slice(-TEAM_MSGS_MAX).map((m) => ({ ...m })),
+  successors: (t.successors || []).map((x) => ({ ...x })) });
+// a member as briefs and notes name it: its name, repo and branch, as /state shows them
+function memberOf(id) {
+  const s = sessions.get(id);
+  if (!s) return { id, name: nameNow(id, null) || String(id).slice(0, 8), repo: 'no workspace', branch: null };
+  const root = s.root || null;
+  return { id, name: plain(baseName(s) || s.name || id.slice(0, 8), 80), repo: root ? repoName(root) : 'no workspace',
+    branch: (s.demo ? s.demo.branch : branchOf(topOf(s, root)) || s.gitBranch) || null };
+}
+const memberLine = (m) => `- ${m.name} (id ${m.id}, repo ${m.repo}, branch ${m.branch || 'none'})`;
+// members talk with fv, which is on the PATH of the sessions Fleet View starts
+const talkLine = (me) => `Talk to them directly: fv send <their id> "message" --from ${me}.`;
+// The text a member gets with the team's order: the order, its teammates and how to reach them. This is the one
+// copy: POST /teams with send types it into each member (web/orders.js keeps a fallback only for ?fixture=1).
+function teamBrief(t, me) {
+  const others = t.members.filter((m) => m !== me).map(memberOf);
+  return [`[Fleet View order · team "${t.name}"]`, t.order, '', 'You are working together with:', ...others.map(memberLine),
+    `${talkLine(me)} Their messages reach you starting with [Message from teammate]. Agree who changes which files before `
+    + 'editing, tell them when you push or merge, and reply to their messages.'].join('\n');
+}
+// the lines that tell one member who the others in ids are and how to reach them (the notes below)
+function contactLines(me, ids) {
+  const list = ids.filter((m) => m !== me).map(memberOf);
+  if (!list.length) return '';
+  return [list.length === 1 ? 'The other conversation:' : 'The others:', ...list.map(memberLine),
+    `${talkLine(me)} Their messages reach you starting with [Message from teammate].`].join('\n');
+}
+const joinNames = (a) => (a.length < 2 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`);
+
+// Text for one conversation, through api.js deliverText (it follows a handoff, waits behind a menu, resumes one that
+// is not running). kind 'order' (a brief) may resume it; 'note' (who joined or left) goes only to a conversation
+// running now, since every typed note costs a Claude turn. Nothing is typed in the demo.
+// -> Promise of { id, name, ok, queued?, message }
+async function tell(id, text, kind) {
+  const name = memberOf(id).name;
+  if (DEMO) return { id, name, ok: false, message: 'the demo types nothing' };
+  try {
+    const [, r] = await API.deliverText(id, text, { kind }, apiCtx);
+    return { id: r.id || id, name, ok: !!r.ok, ...(r.queued ? { queued: true } : {}), message: r.message || '' };
+  } catch (e) { return { id, name, ok: false, message: String((e && e.message) || e) }; }
+}
+// a note to each of ids: the team's prefix, the text and, with contacts, that member's contact lines over those ids
+function noteEach(t, ids, text, contacts) {
+  return Promise.all(ids.map((id) => tell(id, [`[Fleet View · team "${t.name}"]`, text, ...(contacts ? ['', contactLines(id, contacts)] : [])].join('\n').trim(), 'note')));
+}
+// what a reply says it told: { id, name, ok, queued?, message } each
+const toldJson = (rs) => rs.map((r) => ({ id: r.id, name: r.name, ok: r.ok, ...(r.queued ? { queued: true } : {}), message: r.message }));
+
+// Members taken out of the teams they were in (into a new team, or added to another): the teams that lost some,
+// with a team left with one member dropped. -> [{ team, gone: [ids], disbanded }]
+function pullOut(ids, into) {
+  const out = [];
+  for (const x of teams) {
+    if (x === into) continue;
+    const gone = x.members.filter((m) => ids.includes(m));
+    if (!gone.length) continue;
+    x.members = x.members.filter((m) => !ids.includes(m));
+    out.push({ team: x, gone, disbanded: x.members.length < 2 });
+  }
+  teams = teams.filter((x) => x === into || x.members.length >= 2);
+  return out;
+}
+// tells the rest of each team pullOut took members from -> Promise of [{ id, name, members, disbanded, told }]
+function tellPulled(pulled, into) {
+  return Promise.all(pulled.map(async ({ team: x, gone, disbanded }) => {
+    const text = `${joinNames(gone.map((m) => memberOf(m).name))} left this team to join "${into.name}".`
+      + (disbanded ? ` The team "${x.name}" is disbanded: carry on with your own part.` : '');
+    const told = await noteEach(x, x.members, text, disbanded ? null : x.members);
+    return { id: x.id, name: x.name, members: [...x.members], disbanded, told: toldJson(told) };
+  }));
+}
+
+// POST /teams { members: [ids] (2..12), order, name? }: a team of exactly those members. The same set as a team
+// that is there already gives that team the new order (and name); any other set is a new team, and members pulled
+// out of other teams leave them (those teams are told; one left with one member is disbanded). The reply carries
+// briefs ({ id: the text that member gets }) and left: the teams pulled from.
+// o.send (the API's POST /api/teams, and the page's with send: true): the server sends each member its brief itself,
+// as an order, and the reply's sent says how each went. One writer for every team text, so a brief never mixes with
+// a note or a teammate's message typed into the same prompt (api.js typeOne).
+async function postTeam(b, o = {}) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
   const raw = Array.isArray(b.members) ? b.members : null;
   if (!raw || raw.some((m) => typeof m !== 'string' || !MEMBER_RE.test(m))) return [400, { ok: false, message: 'members must be conversation ids' }];
-  const members = [...new Set(raw.map((m) => m.toLowerCase()))];
+  // one that handed off or ran /clear counts as the conversation that carries on (its text would go there)
+  const members = [...new Set(raw.map((m) => successorOf(m) || m.toLowerCase()))];
   if (members.length < 2 || members.length > TEAM_MEMBERS_MAX) return [400, { ok: false, message: `a team has 2 to ${TEAM_MEMBERS_MAX} conversations` }];
   if (members.some((m) => !sessions.has(m) && !UUID_RE.test(m))) return [400, { ok: false, message: 'not a conversation Fleet View knows' }];
   if (typeof b.order !== 'string' || !b.order.trim() || b.order.length > 4000) return [400, { ok: false, message: 'order must be text of at most 4000 characters' }];
@@ -3986,47 +4134,169 @@ function postTeam(b) {
   const now = Date.now(), order = b.order.replace(/\r\n?/g, '\n').trim();
   const name = plain(b.name, 80) || clipWords(order.split(/\s+/).slice(0, 5).join(' '), 40) || 'team';
   const same = teamOf(members[0]);
-  let t;
-  if (same && members.every((m) => same.members.includes(m))) {
+  let t, pulled = [];
+  if (same && same.members.length === members.length && members.every((m) => same.members.includes(m))) {
     t = same;
     t.order = order; t.at = now; t.seenAt = now;
     if (b.name) t.name = name;
   } else {
-    for (const x of teams) x.members = x.members.filter((m) => !members.includes(m));
-    teams = teams.filter((x) => x.members.length >= 2);
+    pulled = pullOut(members, null);
     const used = new Set(teams.map((x) => x.color));
     t = { id: 't' + require('crypto').randomBytes(5).toString('hex'), name, color: TEAM_COLORS.find((c) => !used.has(c)) || TEAM_COLORS[teams.length % TEAM_COLORS.length],
-      members, order, at: now, messages: [], seenAt: now };
+      members, order, at: now, messages: [], successors: [], seenAt: now };
     teams.push(t);
     if (teams.length > TEAMS_MAX) teams.splice(0, teams.length - TEAMS_MAX);
   }
   saveSettings();
-  return [200, { ok: true, team: teamJson(t) }];
+  const briefs = Object.fromEntries(t.members.map((m) => [m, teamBrief(t, m)]));
+  const [left, sent] = await Promise.all([tellPulled(pulled, t), o.send ? Promise.all(t.members.map((m) => tell(m, briefs[m], 'order'))) : null]);
+  return [200, { ok: true, team: teamJson(t), briefs, ...(left.length ? { left } : {}), ...(sent ? { sent: toldJson(sent) } : {}) }];
 }
-function removeTeam(b) {
-  if (!b || typeof b.id !== 'string') return [400, { ok: false, message: 'no team given' }];
-  const n = teams.length;
-  teams = teams.filter((t) => t.id !== b.id);
-  if (teams.length !== n) saveSettings();
-  return [teams.length !== n ? 200 : 404, teams.length !== n ? { ok: true } : { ok: false, message: 'no such team' }];
-}
-function leaveTeam(b) {
+// POST /teams/add { id, member }: one more member. The team keeps its id, colour, order and messages; the member
+// leaves the team it was in (told as above). The newcomer gets the brief as an order, the others a note with every
+// member's id, the newcomer's too. -> { ok, team, brief: what the newcomer got, told: the notes, left? }
+async function addMember(b) {
   if (!b || typeof b.id !== 'string' || typeof b.member !== 'string') return [400, { ok: false, message: 'give the team and the member' }];
   const t = teams.find((x) => x.id === b.id);
   if (!t) return [404, { ok: false, message: 'no such team' }];
-  const m = b.member.toLowerCase();
+  if (!MEMBER_RE.test(b.member.toLowerCase())) return [400, { ok: false, message: 'member must be a conversation id' }];
+  // one that handed off or ran /clear joins as the conversation that carries on
+  const m = successorOf(b.member) || b.member.toLowerCase();
+  if (!MEMBER_RE.test(m) || (!sessions.has(m) && !UUID_RE.test(m))) return [400, { ok: false, message: 'member must be a conversation id' }];
+  if (t.members.includes(m)) return [409, { ok: false, message: m === b.member.toLowerCase() ? 'it is in that team already' : `${memberOf(m).name} carries on for it, and is in that team already` }];
+  if (t.members.length >= TEAM_MEMBERS_MAX) return [409, { ok: false, message: `a team has at most ${TEAM_MEMBERS_MAX} conversations` }];
+  const pulled = pullOut([m], t);
+  const old = [...t.members];
+  t.members.push(m);
+  t.seenAt = Date.now();
+  saveSettings();
+  const [brief, told, left] = await Promise.all([
+    tell(m, teamBrief(t, m), 'order'),
+    noteEach(t, old, `${memberOf(m).name} joined the team.`, t.members),
+    tellPulled(pulled, t),
+  ]);
+  return [200, { ok: true, team: teamJson(t), brief: toldJson([brief])[0], told: toldJson(told), ...(left.length ? { left } : {}) }];
+}
+// POST /teams/remove { id }: disbands it; every member is told. -> { ok, team (as it was), told }
+async function removeTeam(b) {
+  if (!b || typeof b.id !== 'string') return [400, { ok: false, message: 'no team given' }];
+  const t = teams.find((x) => x.id === b.id);
+  if (!t) return [404, { ok: false, message: 'no such team' }];
+  teams = teams.filter((x) => x !== t);
+  saveSettings();
+  const told = await noteEach(t, t.members, `The team "${t.name}" is disbanded. Finish your own part; don't message the others about it any more.`);
+  return [200, { ok: true, team: teamJson(t), told: toldJson(told) }];
+}
+// POST /teams/leave { id, member, why?: 'left' | 'removed', hidden?, quiet? }: one member out. The rest are told
+// (with the others' ids; a team left with one member is disbanded, and that one is told so), and so is the member,
+// that it left (why 'left') or was taken out ('removed'), unless it was removed from the map (hidden: it is
+// ending). quiet: nobody is told (an order that never reached it, orders.js). -> { ok, disbanded, team (the
+// members left), told }
+async function leaveTeam(b) {
+  if (!b || typeof b.id !== 'string' || typeof b.member !== 'string') return [400, { ok: false, message: 'give the team and the member' }];
+  const t = teams.find((x) => x.id === b.id);
+  if (!t) return [404, { ok: false, message: 'no such team' }];
+  // one that handed off or ran /clear: the conversation that carries on for it (not for quiet, which names the very
+  // member an order failed for: never its successor)
+  const lc = b.member.toLowerCase();
+  const m = t.members.includes(lc) || b.quiet === true ? lc : successorOf(b.member) || lc;
   if (!t.members.includes(m)) return [404, { ok: false, message: 'not in that team' }];
   t.members = t.members.filter((x) => x !== m);
   // a team of one is no team
-  if (t.members.length < 2) teams = teams.filter((x) => x !== t);
+  const disbanded = t.members.length < 2;
+  if (disbanded) teams = teams.filter((x) => x !== t);
   saveSettings();
-  return [200, { ok: true, disbanded: t.members.length < 2 }];
+  const out = { ok: true, disbanded, team: teamJson(t), told: [] };
+  if (b.quiet === true) return [200, out];
+  const removed = b.why === 'removed', who = memberOf(m).name;
+  const rest = disbanded
+    ? noteEach(t, t.members, `${who} ${removed ? 'was taken out' : 'left'}, so the team "${t.name}" is disbanded. Carry on with your own part.`)
+    : noteEach(t, t.members, removed ? `${who} was taken out of the team.` : `${who} left the team.`, t.members);
+  const self = b.hidden === true ? Promise.resolve([])
+    : noteEach(t, [m], removed ? `You were taken out of the team "${t.name}". Carry on with your own part; don't message its members about it.`
+      : `You left the team "${t.name}". Carry on with your own part; don't message its members about it unless they message you.`);
+  const [a, c] = await Promise.all([self, rest]);
+  out.told = toldJson([...a, ...c]);
+  return [200, out];
 }
-// teams whose members have all been gone from the session list for 24 hours leave; seenAt is saved every 10 minutes
+// a conversation removed from the map (the page's Remove, the API's remove, a temp session that ended) leaves its
+// team; it is ending, so only the rest are told
+function leaveOnHide(id) {
+  const t = teamOf(id);
+  if (!t) return;
+  leaveTeam({ id: t.id, member: id, why: 'removed', hidden: true })
+    .catch((e) => logOnce('team-hide:' + (e && e.message), `teams: taking a removed conversation out failed\n${errorText(e)}`));
+}
+// one removed from the map, unless it worked again since (the page's isHidden)
+function hiddenNow(id) {
+  const h = hidden.find((x) => x.id === id);
+  if (!h) return false;
+  const s = sessions.get(id);
+  return !(s && s.state !== 'DONE' && s.state !== 'QUESTION' && (s.actT || 0) > h.at);
+}
+// for the API (api.js): a team by id with the members that can be told (not removed from the map), or null
+function teamFor(id) {
+  const t = teams.find((x) => x.id === id);
+  return t ? { id: t.id, name: t.name, members: t.members.filter((m) => !hiddenNow(m)) } : null;
+}
+// GET /api/teams: every team, with its members' names, repos, branches and states
+function teamsList() {
+  return teams.map((t) => ({ ...teamJson(t), roster: t.members.map((m) => ({ ...memberOf(m), state: sessions.get(m)?.state || null, removed: hiddenNow(m) })) }));
+}
+
+// The conversation that carries on for id: following its handoff (the summary's next session, or the one that
+// picked it up) and /clear (cleared, see scanLiveProcs) for up to 8 hops, the last one Fleet View lists (or that
+// runs now). null when there is none.
+const cleared = new Map(); // id -> { to, at }: its claude went on in another conversation (/clear, /resume)
+function successorOf(id) {
+  if (typeof id !== 'string' || DEMO) return null;
+  let cur = id.toLowerCase(), found = null;
+  const seen = new Set([cur]);
+  for (let i = 0; i < 8; i++) {
+    const s = sessions.get(cur);
+    const next = cleared.get(cur)?.to || (s ? handoffOf(s, Date.now()).handoff?.next : null) || null;
+    if (!next || seen.has(next)) break;
+    seen.add(next);
+    if (sessions.has(next) || liveProcs.has(next)) found = next;
+    cur = next;
+  }
+  return found;
+}
+// a member handed off (or ran /clear): its successor gets the brief (as an order: it runs, it just started), the
+// others a note
+function handedOn(t, from, to) {
+  const was = memberOf(from).name, now = memberOf(to).name;
+  const how = cleared.get(from)?.to === to ? `${was} ran /clear and goes on as ${now} (id ${to}).` : `${was} handed off; ${now} (id ${to}) carries on its part.`;
+  Promise.all([
+    tell(to, teamBrief(t, to), 'order'),
+    noteEach(t, t.members.filter((x) => x !== to), `${how} Message that id from now on.`),
+  ]).then(([a, rest]) => logLine(`teams: ${from} handed off to ${to} in "${t.name}": brief ${a.ok ? (a.queued ? 'queued' : 'sent') : `not sent (${a.message})`}, ${rest.filter((x) => x.ok).length} told`),
+    (e) => logOnce('team-handoff:' + (e && e.message), `teams: telling a handoff failed\n${errorText(e)}`));
+}
+// Every poll: a member that handed off or ran /clear is swapped for the conversation that carries on, unless that
+// one is in another team. Teams whose members have all been gone from the session list for 24 hours leave; seenAt is
+// saved every 10 minutes.
 let teamsSavedAt = 0;
 function pruneTeams(now) {
   if (!teams.length) return;
   let changed = false;
+  const swaps = [];
+  for (const t of teams) {
+    for (const m of [...t.members]) {
+      const to = successorOf(m);
+      if (!to || to === m) continue;
+      const other = teamOf(to);
+      if (other && other !== t) continue;
+      // in this team already (added by hand): the old one just goes
+      t.members = other === t ? t.members.filter((x) => x !== m) : t.members.map((x) => (x === m ? to : x));
+      t.successors = [...(t.successors || []), { from: m, to, at: now }].slice(-10);
+      changed = true;
+      if (other !== t) swaps.push([t, m, to]);
+    }
+  }
+  if (changed) teams = teams.filter((t) => t.members.length >= 2);
+  // told once every member is swapped, so each brief and note names (and goes to) the ones that carry on
+  for (const [t, m, to] of swaps) if (teams.includes(t)) handedOn(t, m, to);
   for (const t of teams) if (t.members.some((m) => sessions.has(m))) t.seenAt = now;
   const keep = teams.filter((t) => now - (t.seenAt || 0) < TEAM_GONE_MS);
   if (keep.length !== teams.length) { teams = keep; changed = true; }
@@ -4383,7 +4653,7 @@ const removedLogs = new Map(); // id -> { file, account, root, m, info } | { mis
 // <id>.jsonl in the projects folders (both accounts'; the newest copy wins, like discover)
 function findLog(id) {
   let best = null;
-  for (const r of ROOTS) {
+  for (const r of roots()) {
     for (const proj of ls(r.dir)) {
       const file = path.join(r.dir, proj, `${id}.jsonl`), m = mtime(file);
       if (m && (!best || m > best.m)) best = { file, m, account: r.account, root: r.dir, pdir: path.join(r.dir, proj) };
@@ -4570,7 +4840,7 @@ function saveHistory() {
 // every <id>.jsonl in the projects folders: the ones not indexed yet, or changed since, go on the queue
 function listHistory() {
   const seen = new Set(), queue = [];
-  for (const r of ROOTS) {
+  for (const r of roots()) {
     for (const proj of ls(r.dir)) {
       const pdir = path.join(r.dir, proj);
       for (const f of ls(pdir)) {
@@ -4747,9 +5017,40 @@ function buildState() {
     // production deploys for the top bar: per repo the newest plus any building, last 3 hours (see refreshDeploys)
     deploys: deploysJson(now),
     deployRepos: deployReposJson(),
-    tools: { msg: path.join(__dirname, 'scripts', 'fleet-msg.js') },
+    // fleet-msg.js for older briefs, with forward slashes: node, Git Bash and PowerShell all take them;
+    // pushHook and sendTo say which menu items can work on this PC (toolsHere)
+    tools: { msg: path.join(__dirname, 'scripts', 'fleet-msg.js').replace(/\\/g, '/'), ...toolsHere() },
+    // conversations the server has text waiting for (api.js's queue): the page's own waiting orders go in after it
+    queuedText: DEMO ? [] : API.queuedIds(),
     feed: feed.slice(-120).map((e) => { const x = { t: Math.round(e.t), sid: e.sid, who: e.who, verb: e.verb, what: e.what }; if (e.to) x.to = e.to; return x; }),
   };
+}
+
+// What some menu items need from this PC, looked at once a minute:
+// pushHook: "Push to" only does something when the push-target hook (scripts/push-target-hook.py, which the shared
+// copy leaves out) is here and an account's settings.json runs it.
+// sendTo: per account, whether it has the /handoff and /pickup commands "Send to Claude <X>" runs (a skill or a
+// command file, as desktop/host.js sendToMissing checks) and its projects folder as a number, the same for
+// accounts that share one folder: X can only pick up a conversation whose log is in its own projects folder.
+let toolsSeen = null, toolsSeenAt = 0;
+function toolsHere() {
+  if (DEMO) return { pushHook: true, sendTo: { A: { commands: true, folder: 0 }, B: { commands: true, folder: 0 } } };
+  if (toolsSeen && Date.now() - toolsSeenAt < 60e3) return toolsSeen;
+  const isFile = (f) => { try { return fs.statSync(f).isFile(); } catch { return false; } };
+  const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
+  const hook = isFile(path.join(__dirname, 'scripts', 'push-target-hook.py'))
+    && accountsHere().some((a) => ['settings.json', 'settings.local.json'].some((n) => read(path.join(acctDir(a), n)).includes('push-target-hook')));
+  const folders = [], sendTo = {};
+  for (const a of accountsHere()) {
+    let real = path.join(acctDir(a), 'projects');
+    try { real = fs.realpathSync(real); } catch {}
+    if (!folders.includes(real.toLowerCase())) folders.push(real.toLowerCase());
+    const has = (n) => isFile(path.join(acctDir(a), 'skills', n, 'SKILL.md')) || isFile(path.join(acctDir(a), 'commands', `${n}.md`));
+    sendTo[a] = { commands: has('handoff') && has('pickup'), folder: folders.indexOf(real.toLowerCase()) };
+  }
+  toolsSeen = { pushHook: hook, sendTo };
+  toolsSeenAt = Date.now();
+  return toolsSeen;
 }
 
 // POST /settings: any of view, zoom, query, repo, compact, finishedOpen, webBounds, steady, miniBounds, miniOpen,
@@ -4778,10 +5079,12 @@ function applySettings(b) {
         if (now - at > API_HIDE_GUARD_MS) { apiHidAt.delete(id); continue; }
         if (!h.some((x) => x.id === id)) { const was = hidden.find((x) => x.id === id); if (was) h.push(was); }
       }
-      const still = new Set(h.map((x) => x.id));
+      const still = new Set(h.map((x) => x.id)), was = new Set(hidden.map((x) => x.id));
       for (const x of hidden) if (!still.has(x.id)) recentlyContinued.set(x.id, now);
       for (const [id, t] of recentlyContinued) if (now - t > 120e3 || still.has(id)) recentlyContinued.delete(id);
       hidden = h;
+      // removed on the page just now: out of its team too (the page usually took it out already)
+      for (const id of still) if (!was.has(id)) leaveOnHide(id);
     }
   }
   if ('hiddenRepos' in b) { const h = cleanHiddenRepos(b.hiddenRepos); if (h) hiddenRepos = h; }
@@ -4929,6 +5232,7 @@ function hideConversation(id) {
   apiTemp = apiTemp.filter((x) => x !== id);
   tempGoneAt.delete(id);
   saveSettings();
+  leaveOnHide(id);
   return true;
 }
 function markTemp(id) {
@@ -5038,6 +5342,21 @@ const apiCtx = {
   markTemp,
   isTemp: (id) => typeof id === 'string' && apiTemp.includes(id.toLowerCase()),
   conversations: conversationsFor,
+  // the conversation that carries on for one that handed off or ran /clear, or null
+  successorOf,
+  // open in a claude outside Fleet View (a terminal): resuming it here would run it twice
+  openElsewhere: (id) => !DEMO && liveProcs.has(String(id || '').toLowerCase()),
+  // the team a conversation is in: { id, name, members } or null
+  teamOf: (id) => { const t = teamOf(id); return t ? { id: t.id, name: t.name, members: [...t.members] } : null; },
+  // the API's /api/teams: each answers [code, json] or a Promise of one
+  teams: {
+    list: () => [200, { ok: true, teams: teamsList() }],
+    get: teamFor,
+    make: (b) => postTeam(b, { send: true }),
+    add: (id, member) => addMember({ id, member }),
+    remove: (id, member) => leaveTeam({ id, member, why: 'removed' }),
+    disband: (id) => removeTeam({ id }),
+  },
   // its transcript, compact (conversation.js transcriptOf) -> Promise of { total, from, items } or null (no log)
   transcript(id, q) {
     const where = conversationLog(id);
@@ -5064,7 +5383,7 @@ function conversationLog(id) {
   const missAt = convoMiss.get(id);
   if (missAt && Date.now() - missAt < CONVO_MISS_MS) return null;
   let best = null, bm = 0;
-  for (const r of ROOTS) for (const proj of ls(r.dir)) { const f = path.join(r.dir, proj, id + '.jsonl'), m = mtime(f); if (m > bm) { bm = m; best = f; } }
+  for (const r of roots()) for (const proj of ls(r.dir)) { const f = path.join(r.dir, proj, id + '.jsonl'), m = mtime(f); if (m > bm) { bm = m; best = f; } }
   if (best) { if (convoLogs.size > 200) convoLogs.clear(); convoLogs.set(id, best); convoMiss.delete(id); }
   else { if (convoMiss.size > 200) convoMiss.clear(); convoMiss.set(id, Date.now()); }
   return best ? { file: best } : null;
@@ -5109,7 +5428,7 @@ function handleRequest(req, res) {
         // a removed conversation outside the window (the page's Continue) opens from its log
         const s = b && typeof b.id === 'string' ? sessions.get(b.id) || removedSession(b.id) : null;
         if (!s) return sendJson(res, 404, { ok: false, message: 'no such conversation' });
-        sendJson(res, 200, launchConversation(s));
+        launchConversation(s).then((r) => sendJson(res, 200, r), (e) => requestFailed(req, res, e));
       });
     }
     if (pathname === '/reveal') {
@@ -5148,11 +5467,13 @@ function handleRequest(req, res) {
         sendJson(res, code, out);
       });
     }
-    if (pathname === '/teams' || pathname === '/teams/remove' || pathname === '/teams/leave') {
+    // the page's teams; each sends its own notes, so the reply comes once they went in (or were queued)
+    // (the page's Work together asks for send: the server types the briefs, as it types every other team text)
+    const teamRoute = { '/teams': (b) => postTeam(b, { send: !!(b && b.send === true) }), '/teams/add': addMember, '/teams/remove': removeTeam, '/teams/leave': leaveTeam }[pathname];
+    if (teamRoute) {
       return readBody(req, res, (b) => {
         if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
-        const [code, out] = pathname === '/teams' ? postTeam(b) : pathname === '/teams/remove' ? removeTeam(b) : leaveTeam(b);
-        sendJson(res, code, out);
+        teamRoute(b).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
       });
     }
     if (pathname === '/chat/image') return CONV.saveImage(req, res, convCtx);
@@ -5197,11 +5518,13 @@ function electronExe() {
   } catch { return null; }
 }
 
-// the app window: the Electron desktop window if it is installed, else Edge in app mode with its own
-// profile; either opens where the window was last time
+// the app window: the Electron desktop window if it is installed (and has not failed to start this run), else
+// Edge in app mode with its own profile; either opens where the window was last time. Returns electron.exe's
+// process when it started that.
+let noElectron = false;
 function openWindow() {
   const url = `http://127.0.0.1:${PORT}/`;
-  const electron = electronExe();
+  const electron = noElectron ? null : electronExe();
   if (electron) {
     try {
       const args = [path.join(__dirname, 'desktop'), `--url=${url}?glass=1`];
@@ -5211,7 +5534,7 @@ function openWindow() {
       const child = spawn(electron, args, { detached: true, stdio: 'ignore', windowsHide: false, env });
       child.on('error', () => console.log(`could not start the desktop window; open ${url} in a browser`));
       child.unref();
-      return;
+      return child;
     } catch {} // fall through to Edge
   }
   const edge = [path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
@@ -5245,13 +5568,15 @@ function probeFleetView(answer) {
   req.on('error', () => done(false));
 }
 
-// the code's version for the log: the git commit when git can say, and fleet-view.js's own time
+// the code's version for the log: "1.0.12 (02dddec), file <time> UTC": the version number (version.js), the git
+// commit in parentheses when git can say (a restart check compares it with git merge-base), and fleet-view.js's own time
 function versionOf() {
   let hash = '';
   try { hash = require('child_process').execFileSync('git', ['-C', __dirname, 'rev-parse', '--short', 'HEAD'], { timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch {}
   let at = '';
   try { at = fs.statSync(__filename).mtime.toISOString().slice(0, 19).replace('T', ' '); } catch {}
-  return [hash, at && `file ${at} UTC`].filter(Boolean).join(', ') || 'unknown';
+  const v = VERSION.current().version;
+  return [v && hash ? `${v} (${hash})` : v || hash, at && `file ${at} UTC`].filter(Boolean).join(', ') || 'unknown';
 }
 
 // The server never stops without a line in the log. An exception nothing caught is written with its stack and the
@@ -5282,12 +5607,26 @@ function startWeb() {
   // The desktop app owns the server: a plain launch (`fleet-view`, the sign-in shortcut) with the desktop window
   // installed just starts the app and leaves; the app starts this server hidden (--no-open) and stops it when it
   // quits, so no console window is left to close by accident. --no-open, --demo and the app's own start skip this.
-  if (!NO_OPEN && !DEMO && process.env.FV_SERVER_OWNER !== 'electron' && electronExe()) {
-    probeFleetView(() => {
-      openWindow();
-      logLine('launch: handed over to the desktop app (it runs the server)');
-      setTimeout(() => process.exit(0), 600);
+  // The app's server answering on the port is the sign it started. When electron.exe won't start or closes before
+  // that (blocked by antivirus, a graphics crash, a damaged download), or nothing answers within 20 s (60 s while
+  // electron.exe is still running: a first start an antivirus scan holds up), this goes on as the server with the
+  // Edge window instead, so a launch never ends with nothing running.
+  if (!NO_OPEN && !DEMO && !noElectron && process.env.FV_SERVER_OWNER !== 'electron' && electronExe()) {
+    const child = openWindow(), start = Date.now();
+    let failed = false, exited = false;
+    if (child) { child.on('error', () => { failed = true; }); child.on('exit', () => { exited = true; }); }
+    const wait = () => probeFleetView((up) => {
+      if (up) {
+        logLine('launch: handed over to the desktop app (it runs the server)');
+        return setTimeout(() => process.exit(0), 600);
+      }
+      const waited = Date.now() - start;
+      if (!failed && !exited && child && (waited < 20e3 || (child.exitCode === null && waited < 60e3))) return setTimeout(wait, 1000);
+      logLine(`launch: the desktop window ${failed || !child ? 'could not start' : exited ? 'closed before it answered' : `did not answer within ${Math.round(waited / 1000)} s`}; serving here, with the Edge window`);
+      noElectron = true;
+      startWeb();
     });
+    setTimeout(wait, 1000);
     return;
   }
   guardProcess();
@@ -5324,7 +5663,7 @@ function startWeb() {
   server.listen(PORT, '127.0.0.1');
   server.once('listening', () => {
     listening = true;
-    console.log(`Fleet View on http://127.0.0.1:${PORT}/  (${DEMO ? 'demo data' : ROOT}${GITHUB ? '' : ', github off'})`);
+    console.log(`Fleet View on http://127.0.0.1:${PORT}/  (${DEMO ? 'demo data' : rootLabel()}${GITHUB ? '' : ', github off'})`);
     console.log('Close this window, or press Ctrl+C, to stop it.');
     if (!NO_OPEN) openWindow();
     // Ctrl+C, a kill, or the console window closing (SIGHUP on Windows): a clean stop, so the loop ends
@@ -5361,6 +5700,8 @@ function startWeb() {
     every(5000, 'github', github);
     // the API's throwaway sessions: off the map once they end
     every(10000, 'api-temp', sweepTemp);
+    // messages and orders that waited for a menu before the last restart (api.js's queue)
+    API.startQueue(apiCtx);
   });
 }
 
@@ -5444,7 +5785,7 @@ function registerLauncher() {
 // and size. A version that doesn't parse is left alone. Without the loop (started some other way) it only says an update is ready.
 function watchForUpdates(reload) {
   const me = path.resolve(__filename);
-  const files = [me, path.join(__dirname, 'api.js'), path.join(__dirname, 'screen.js'), path.join(__dirname, 'conversation.js'), path.join(__dirname, 'updater.js')];
+  const files = [me, path.join(__dirname, 'api.js'), path.join(__dirname, 'screen.js'), path.join(__dirname, 'conversation.js'), path.join(__dirname, 'updater.js'), path.join(__dirname, 'version.js')];
   let timer = null;
   for (const file of files) {
     let last = mtime(file);

@@ -1,7 +1,8 @@
 // Fleet View automation API: lets a local script (or a Claude Code session, through scripts/fv.js) start Claude
 // Code sessions, send them messages, wait for them, read and answer their menus, read any conversation's
-// transcript, and stop and clear away what it started, through the live sessions the desktop app's session host
-// (desktop/host.js) already runs. fleet-view.js hands every /api request here (see handle()). GET /api lists the
+// transcript, stop and clear away what it started, and make teams of conversations that message each other, through
+// the live sessions the desktop app's session host (desktop/host.js) already runs. fleet-view.js hands every /api
+// request here (see handle()), and types its teams' briefs and notes through deliverText. GET /api lists the
 // endpoints (ENDPOINTS below).
 //
 // Who may call it: a script on this machine that can read %LOCALAPPDATA%\fleet-view\api-token. Every request
@@ -36,6 +37,7 @@ const crypto = require('crypto');
 // loads on first use), so the server gets the same pipe name and host.json path the window uses
 const H = require(path.join(__dirname, 'desktop', 'host.js'));
 const SCREEN = require(path.join(__dirname, 'screen.js'));
+const VERSION = require(path.join(__dirname, 'version.js'));
 
 const DATA_DIR = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view');
 const TOKEN_FILE = path.join(DATA_DIR, 'api-token');
@@ -205,6 +207,18 @@ async function sendText(host, id, text, beforeEnter) {
   await host.call('write', id, '\r');
   return { entered: true };
 }
+// One typing at a time into a conversation: deliver and the queue below both paste in chunks, and two at once (a
+// team note and a teammate's queued message, say) would mix into one prompt. typeOne(id, fn) runs fn once whatever
+// was typing into id has finished; typingInto(id): something is now.
+const typing = new Map(); // id -> the promise of the last typing queued for it
+function typeOne(id, fn) {
+  const run = (typing.get(id) || Promise.resolve()).then(fn);
+  const tail = run.catch(() => {});
+  typing.set(id, tail);
+  tail.then(() => { if (typing.get(id) === tail) typing.delete(id); });
+  return run;
+}
+const typingInto = (id) => typing.has(id);
 
 // ---------- is Claude showing a menu? ----------
 // The pty's size now: the host's list (a newer host), else sessions.json (the host rewrites it on every change),
@@ -337,6 +351,8 @@ function hosted(list, key) {
   const id = resolveKey(key);
   return (Array.isArray(list) ? list : []).find((p) => p && p.id === id) || null;
 }
+// a conversation's name for a reply, or the start of its id
+const nameFor = (id, ctx) => (ctx && ctx.nameOf && convId(id) && ctx.nameOf(convId(id))) || String(id).slice(0, 8);
 
 // what a caller sees of one session: the host's view joined with what /state knows of the conversation
 function describe(p, info, ctx) {
@@ -362,19 +378,34 @@ async function need(host, key, alive) {
 }
 
 // Send text into a hosted, live session as message does: a "/" panel closed first, never into a menu, then wait
-// as asked. note(id): called once it went in. -> [code, json]
-async function deliver(host, p, text, ms, ctx, gone, note, extra = {}) {
-  // a panel left open (like /usage) would take the text: one a "/" command opened is closed first
-  const shut = await closePanel(host, p);
-  if (shut.err) return [409, { ok: false, id: p.id, ...extra, panel: true, message: shut.err }];
-  // the status before it was sent: busy means Claude was mid-turn, and the message is queued behind it
-  const status = shut.p.status || null;
-  // a permission prompt, a question or the plan approval: the Enter would answer it for that session
-  const m = await menuNow(host, p);
-  if (m) return [409, { ok: false, id: p.id, ...extra, menu: m, message: MENU_UP }];
-  const sentAt = Date.now();
-  const sent = await sendText(host, p.id, text, () => menuNow(host, p));
-  if (!sent.entered) return [409, { ok: false, id: p.id, ...extra, menu: true, message: MENU_LATE }];
+// as asked. note(id): called once it went in. q: { from, original } to keep it in the queue (see below) instead of
+// refusing it while a menu or a panel is up; it goes in later. -> [code, json]
+async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null) {
+  const later = (more, why = 'is showing a question or a prompt; it goes in once that is answered') => {
+    enqueue(p.id, text, q);
+    return [202, { ok: true, id: p.id, ...extra, ...more, queued: true, message: `queued: ${nameFor(p.id, ctx)} ${why}` }];
+  };
+  // text still waiting for it goes in first: this one waits behind it
+  if (q && loadQueue().some((x) => x.id === p.id)) return later({ behind: true }, 'has text waiting for it already; this goes in after it');
+  const typed = await typeOne(p.id, async () => {
+    // as it is now: something else may have typed into it while this waited its turn
+    const cur = hosted(await host.call('list'), p.id);
+    if (!cur || !cur.alive) return { r: [409, { ok: false, id: p.id, ...extra, message: 'that session has ended' }] };
+    // a panel left open (like /usage) would take the text: one a "/" command opened is closed first
+    const shut = await closePanel(host, cur);
+    if (shut.err) return { r: q ? later({ panel: true }) : [409, { ok: false, id: p.id, ...extra, panel: true, message: shut.err }] };
+    // the status before it was sent: busy means Claude was mid-turn, and the message is queued behind it
+    const status = shut.p.status || null;
+    // a permission prompt, a question or the plan approval: the Enter would answer it for that session
+    const m = await menuNow(host, cur);
+    if (m) return { r: q ? later({ menu: m }) : [409, { ok: false, id: p.id, ...extra, menu: m, message: MENU_UP }] };
+    const sentAt = Date.now();
+    const sent = await sendText(host, p.id, text, () => menuNow(host, cur));
+    if (!sent.entered) return { r: [409, { ok: false, id: p.id, ...extra, menu: true, message: MENU_LATE }] };
+    return { sentAt, status };
+  });
+  if (typed.r) return typed.r;
+  const { sentAt, status } = typed;
   if (note) note(p.id);
   const w = await afterSend(host, p.id, sentAt, status, ms, ctx, gone);
   return [200, { ok: true, id: p.id, ...extra, status, ...w, message: doneText(w, ms, status === 'busy' ? 'sent while Claude was busy (queued)' : 'sent') }];
@@ -388,15 +419,191 @@ function doneText(w, ms, sent) {
     exit: `${sent}; the session ended`, gone: `${sent}; the session is gone` }[w.endedBy];
 }
 
+// ---------- text that waits for a menu to be answered ----------
+// A conversation showing a question, a permission prompt or the plan approval can't be typed into (Enter would
+// answer it), so text for it from deliverText waits here, by the same rules as the page's orders (web/orders.js):
+// every Q_TICK_MS each waiting one is looked at, and it goes in once no menu has been on that screen for Q_CLEAR_MS,
+// oldest first, one per conversation per tick. One still waiting after Q_MAX_MS, or whose conversation has not run
+// in the session host for Q_GONE_MS, is dropped (and logged). It is kept in msg-queue.json, so a restart (every
+// update) carries on with it, and follows a conversation that hands off to the one that carries on.
+const QUEUE_FILE = path.join(DATA_DIR, 'msg-queue.json');
+const Q_TICK_MS = 2000, Q_CLEAR_MS = 1500, Q_MAX_MS = 2 * 3600e3, Q_GONE_MS = 5 * 60e3;
+let queue = null, qTimer = null, qTicking = false, qCtx = null; // queue: [{ id, text, at, from?, original? }]
+function loadQueue() {
+  if (queue) return queue;
+  queue = [];
+  try {
+    const j = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8'));
+    if (Array.isArray(j)) queue = j.filter((q) => q && typeof q.id === 'string' && typeof q.text === 'string' && Number.isFinite(q.at)).slice(-500);
+  } catch {}
+  return queue;
+}
+function saveQueue() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(QUEUE_FILE + '.tmp', JSON.stringify(queue.map(({ id, text, at, from, original }) => ({ id, text, at, ...(from ? { from, original } : {}) }))));
+    fs.renameSync(QUEUE_FILE + '.tmp', QUEUE_FILE);
+  } catch (e) { if (qCtx) qCtx.log(`api: could not save the message queue: ${e.message}`); }
+}
+// q: { from, original } of a message between conversations (recorded once it goes in), or {}
+function enqueue(id, text, q) {
+  loadQueue();
+  if (!queue.some((x) => x.id === id && x.text === text)) queue.push({ id, text, at: Date.now(), ...(q && q.from ? { from: q.from, original: q.original } : {}) });
+  saveQueue();
+  wakeQueue();
+}
+function wakeQueue() {
+  if (qTimer || !loadQueue().length) return;
+  qTimer = setInterval(tickQueue, Q_TICK_MS);
+  if (qTimer.unref) qTimer.unref();
+}
+// at the server's start: what waited before the restart carries on
+function startQueue(ctx) { qCtx = ctx; wakeQueue(); }
+// the conversations with text waiting here (/state's queuedText: the page's own waiting orders go in after it)
+const queuedIds = () => [...new Set(loadQueue().map((x) => x.id))];
+function unqueue(q, why) {
+  queue = queue.filter((x) => x !== q);
+  saveQueue();
+  if (why && qCtx) qCtx.log(`api: a message waiting for ${q.id} was dropped: ${why}`);
+}
+async function tickQueue() {
+  if (qTicking) return;
+  if (!loadQueue().length) { clearInterval(qTimer); qTimer = null; return; }
+  qTicking = true;
+  const now = Date.now();
+  // no host: every waiting one counts as not running
+  const gone = (q, why) => { q.clearAt = 0; if (!q.goneAt) q.goneAt = now; else if (now - q.goneAt > Q_GONE_MS) unqueue(q, why); };
+  try {
+    await withHost(async (host) => {
+      const list = await host.call('list'), seen = new Set();
+      for (const q of [...queue]) {
+        if (now - q.at > Q_MAX_MS) { unqueue(q, 'still waiting after 2 hours'); continue; }
+        // it handed off meanwhile: the one that carries on takes it
+        const succ = qCtx && qCtx.successorOf && convId(q.id) ? qCtx.successorOf(convId(q.id)) : null;
+        if (succ && succ !== q.id) { q.id = succ; saveQueue(); }
+        if (seen.has(q.id)) continue;
+        seen.add(q.id);
+        const p = hosted(list, q.id);
+        if (!p || !p.alive) { gone(q, 'it stopped running in Fleet View before it could take it'); continue; }
+        q.goneAt = 0;
+        if (panelOpen(p)) { if (p.slashPanel) await closePanel(host, p); q.clearAt = 0; continue; }
+        if (await menuNow(host, p)) { q.clearAt = 0; continue; }
+        if (!q.clearAt) { q.clearAt = now; continue; }
+        if (now - q.clearAt < Q_CLEAR_MS) continue;
+        // something is typing into it now (a note, a message): next tick
+        if (typingInto(p.id)) continue;
+        const sent = await typeOne(p.id, () => sendText(host, p.id, q.text, () => menuNow(host, p)));
+        if (!sent.entered) { unqueue(q, 'a menu came up just before Enter (the text is in its prompt box, not sent)'); continue; }
+        unqueue(q);
+        if (q.from && qCtx && qCtx.noteMessage) qCtx.noteMessage(q.from, convId(p.id) || p.id, q.original || q.text);
+      }
+    });
+  } catch (e) {
+    if (e instanceof HostDown) for (const q of [...queue]) gone(q, 'the desktop app was not running');
+    else if (qCtx) qCtx.log(`api: the message queue failed: ${e.message}`);
+  } finally { qTicking = false; }
+}
+
+// ---------- resuming a conversation in the desktop app ----------
+// Can it be resumed here? Its log on disk, its folder known, inside a folder a new session could start in (its
+// repo, or a checkout of it), and still there. -> { cwd, account } or { err: [code, json] }
+function resumable(id, ctx) {
+  const where = ctx.whereIs(id);
+  if (!where.known) return { err: [404, { ok: false, id, message: 'no such conversation (its log is not on disk)' }] };
+  const cwd = where.cwd;
+  if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || ctx.UNSAFE_PATH.test(cwd)) return { err: [409, { ok: false, id, message: 'Fleet View does not know which folder that conversation worked in' }] };
+  const dir = H.normDir(cwd);
+  const allowed = ctx.allowedFolders().map(H.normDir).some((f) => dir === f || dir.startsWith(f.endsWith(path.sep) ? f : f + path.sep));
+  if (!allowed) return { err: [403, { ok: false, id, message: `its folder is not in a repo Fleet View lists: ${cwd}` }] };
+  let isDir = false;
+  try { isDir = fs.statSync(cwd).isDirectory(); } catch {}
+  if (!isDir) return { err: [409, { ok: false, id, message: `its folder is gone: ${cwd}` }] };
+  return { cwd, account: where.account };
+}
+// The host's open (claude --resume, in its last folder under its account), as the panel's Open does, unless it runs
+// here already; never one open in a terminal outside Fleet View (it would run twice, writing one transcript). Then
+// up to START_MS for it to be idle (a resumed claude says busy while it loads).
+// -> { p, alreadyRunning, ready, stopped? } or { err: [code, json] }
+async function resumeIn(host, id, where, account, ctx, gone) {
+  let p = hosted(await host.call('list'), id);
+  let alreadyRunning = !!(p && p.alive);
+  if (!alreadyRunning) {
+    if (ctx.openElsewhere && ctx.openElsewhere(id)) return { err: [409, { ok: false, id, elsewhere: true, message: 'it is open in a terminal outside Fleet View: end it there first' }] };
+    const r = await host.call('open', { id, cwd: where.cwd, account: account || where.account || 'B' });
+    if (!r || !r.ok) return { err: [502, { ok: false, id, message: (r && r.message) || 'the session host could not open it' }] };
+    if (r.message === 'already running') alreadyRunning = true; // it started meanwhile
+  }
+  // one already running is taken as it is (a message to a busy one is queued, as message does)
+  const until = Date.now() + START_MS;
+  for (;;) {
+    p = hosted(await host.call('list'), id);
+    if (!p || !p.alive) return { err: [502, { ok: false, id, alreadyRunning, message: `the session ended before it was ready${p ? ` (code ${p.exitCode})` : ''}` }] };
+    if (alreadyRunning || p.status === 'idle' || Date.now() >= until) break;
+    if (gone()) return { p, alreadyRunning, ready: false, stopped: true };
+    await sleep(POLL_MS);
+  }
+  return { p, alreadyRunning, ready: p.status === 'idle' };
+}
+
+// ---------- text for a conversation: teams and messages between conversations ----------
+// deliverText(key, text, o, ctx, gone) -> [code, json], the one way the server types text into a conversation for
+// a team (briefs, notes) or from another conversation (sendMessage with from). o: { kind, from?, original?, wait?,
+// open?, queue? }.
+// - The handoff chain is followed first (ctx.successorOf): text for a conversation that handed off or ran /clear
+//   goes to the one that carries on, and the reply says so (redirected: { from, to }).
+// - One running in the session host gets it as message does; one showing a menu gets it later, through the queue
+//   above (202 { queued: true }), unless queue is false.
+// - One not running here is resumed in the desktop app first (resumeIn), unless it is open in a terminal outside
+//   Fleet View (409 elsewhere), or open is false, or kind is 'note' (409 notRunning): a note about who joined or
+//   left a team costs a Claude turn, so it goes only to conversations running now.
+// text may be a function of the receiver's id (a message's reply line names it). from: the sender, refused as the
+// receiver; with original (the text as the sender wrote it), recorded through ctx.noteMessage once it goes in.
+async function deliverText(key, text, o, ctx, gone = () => false) {
+  qCtx = qCtx || ctx;
+  const asked = resolveKey(key);
+  const succ = convId(asked) && ctx.successorOf ? ctx.successorOf(convId(asked)) : null;
+  const id = succ && succ !== convId(asked) ? succ : asked;
+  const extra = id !== asked ? { redirected: { from: convId(asked), to: id } } : {};
+  if (o.from && convId(id) === o.from) return [400, { ok: false, id, ...extra, message: 'a conversation cannot message itself' }];
+  const body = typeof text === 'function' ? text(id) : text;
+  const name = nameFor(id, ctx), open = o.kind !== 'note' && o.open !== false;
+  return withHost(async (host) => {
+    let p = hosted(await host.call('list'), id);
+    if (!p || !p.alive) {
+      const cid = convId(id);
+      if (cid && ctx.openElsewhere && ctx.openElsewhere(cid)) {
+        return [409, { ok: false, id: cid, ...extra, elsewhere: true, message: `${name} is open in a terminal outside Fleet View, so nothing can be typed into it from here; tell the user` }];
+      }
+      if (!open || !cid) {
+        const why = o.kind === 'note' ? `${name} is not running now, so it was not told`
+          : o.from ? `${name} is not running in Fleet View (its panel was closed or it ended); without --no-open it is resumed first`
+            : p ? 'that session has ended' : 'no such hosted session';
+        return [p ? 409 : 404, { ok: false, id, ...extra, notRunning: true, message: why }];
+      }
+      const where = resumable(cid, ctx);
+      if (where.err) return [where.err[0], { ...where.err[1], ...extra, message: `${name} is not running in Fleet View and can't be resumed: ${where.err[1].message}` }];
+      const r = await resumeIn(host, cid, where, null, ctx, gone);
+      if (r.err) return [r.err[0], { ...r.err[1], ...extra }];
+      if (!r.ready) return [409, { ok: false, id: cid, ...extra, resumed: true, message: `${name} was resumed, but it was not idle within ${START_MS / 1000} s; nothing was typed` }];
+      p = r.p;
+      extra.resumed = !r.alreadyRunning;
+      if (extra.resumed) await sleep(SETTLE_MS);
+    }
+    const from = o.from || null;
+    const note = from && ctx.noteMessage ? (to) => ctx.noteMessage(from, convId(to) || to, o.original || body) : null;
+    return deliver(host, p, body, o.wait || 0, ctx, gone, note, extra, o.queue === false ? null : { from, original: o.original || body });
+  });
+}
+
 // ---------- the requests ----------
 // GET /api: what there is, for a caller (or a Claude) finding its way from the command line
 const ENDPOINTS = [
-  { method: 'GET', path: '/api', does: 'this list' },
+  { method: 'GET', path: '/api', does: 'this list, and fleetView: the Fleet View version (1.0.12; "" when unknown)' },
   { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive' },
   { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status and latest reply' },
   { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, its turn; tail: the last characters of its screen' },
-  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from? }', does: 'send a message (refused while a menu is up); wait: until the turn ends' },
+  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
   { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|other), title, context, options, sig; or null' },
   { method: 'POST', path: '/api/sessions/:id/answer', body: '{ option: n | "esc", sig?, text?, allowPermission?, wait? }', does: 'answer the menu (text: for a "Type something." option); any menu but a question needs allowPermission (esc never does)' },
@@ -405,9 +612,15 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/sessions/:id/transcript', query: 'since?, limit? (default the last 50, at most 500)', does: 'any conversation\'s transcript, compact: user, assistant, tool (name, input, result), note, thinking' },
   { method: 'POST', path: '/api/sessions/:id/stop', body: '{ remove? }', does: 'end the session (remove: also hide it from the map)' },
   { method: 'POST', path: '/api/sessions/:id/remove', does: 'hide a conversation from the map (not one still running: stop it first); logs are kept' },
+  { method: 'GET', path: '/api/teams', does: 'the teams: id, name, members, order, roster (each member\'s name, repo, branch, state), messages' },
+  { method: 'POST', path: '/api/teams', body: '{ members: [ids], order, name? }', does: 'make a team of exactly these 2..12 conversations (they leave other teams) and send each its brief: the order, its teammates and how to message them' },
+  { method: 'POST', path: '/api/teams/:id/add', body: '{ member }', does: 'add a conversation: it gets the brief, the others a note with its id' },
+  { method: 'POST', path: '/api/teams/:id/remove', body: '{ member }', does: 'take a conversation out; it and the others get a note (a team left with one is disbanded)' },
+  { method: 'POST', path: '/api/teams/:id/disband', does: 'end the team; every member gets a note (they keep working)' },
+  { method: 'POST', path: '/api/teams/:id/message', body: '{ text, from? }', does: 'the text to every member but from (queued behind a menu, resumed when not running)' },
 ];
 function describeApi() {
-  return [200, { ok: true, version: 2, auth: 'Authorization: Bearer <%LOCALAPPDATA%\\fleet-view\\api-token>', endpoints: ENDPOINTS,
+  return [200, { ok: true, version: 2, fleetView: VERSION.current().version, auth: 'Authorization: Bearer <%LOCALAPPDATA%\\fleet-view\\api-token>', endpoints: ENDPOINTS,
     notes: 'ids: a conversation id, or the new-<n> key POST /api/sessions gave. wait: true (30 min), false, or seconds 1..3600. A reply is { ok, message?, ... }; 400 bad input, 401 token, 403 refused, 404 no such session, 409 state conflict, 503 the desktop app is not running.' }];
 }
 
@@ -515,36 +728,94 @@ async function startSession(b, ctx, gone) {
   });
 }
 
-// POST /api/sessions/:id/message { text, wait?, from? }
-// from: the conversation id of the sender, when one conversation messages another (scripts/fleet-msg.js). The
-// text then goes in after a line saying who it is from, and the server records it (its team's messages, the
-// feed, an alert when the two share no team).
-const FROM_RE = /^[\w.-]{1,80}$/;
+// POST /api/sessions/:id/message { text, wait?, from?, queue?, open? }
+// from: the conversation id of the sender, when one conversation messages another (fv send --from, or the older
+// scripts/fleet-msg.js). It must be a conversation Fleet View knows; one that handed off counts as the one that
+// carries on. The text then goes in after a line saying who it is from ("teammate" when the two share a team) and
+// how to reply, and the server records it (its team's messages, the feed, an alert when they share no team).
+// queue and open (both true by default with from, false without) go to deliverText: with queue, a receiver showing
+// a menu gets it later (202 queued); with open, one not running here is resumed first. Without either it must be
+// running here, and a menu turns it down (409), as before.
 async function sendMessage(key, b, ctx, gone) {
-  let text = cleanText(b && b.text);
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  const text = cleanText(b.text);
   if (!text) return [400, { ok: false, message: 'text must be text, without control characters other than new lines and tabs' }];
   const ms = waitMs(b.wait);
   if (ms === null) return [400, { ok: false, message: WAIT_BAD }];
+  for (const k of ['queue', 'open']) if (k in b && typeof b[k] !== 'boolean') return [400, { ok: false, message: `${k} must be true or false` }];
   let from = null;
   if (b.from !== undefined && b.from !== null) {
-    if (typeof b.from !== 'string' || !FROM_RE.test(b.from)) return [400, { ok: false, message: 'from must be a conversation id' }];
-    from = H.ID_RE.test(b.from) ? b.from.toLowerCase() : b.from;
+    from = typeof b.from === 'string' ? convId(b.from) : null;
+    if (!from) return [400, { ok: false, message: 'from must be your conversation id' }];
+    if (!ctx.whereIs(from).known && !ctx.sessionInfo(from)) return [400, { ok: false, message: 'from is not a conversation Fleet View knows' }];
+    from = (ctx.successorOf && ctx.successorOf(from)) || from;
   }
-  const original = text;
-  if (from) {
-    // the name with no control characters (an ESC in a title could end the paste early and type the rest as
-    // keys), quotes or line breaks, so the first line stays one line of plain text
-    const name = String((ctx.nameOf && ctx.nameOf(from)) || '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/"/g, "'")
-      .replace(/\s+/g, ' ').trim().slice(0, 80) || from.slice(0, 8);
-    text = `[Message from teammate "${name}" (${from})]\n${text}`;
+  const queue = 'queue' in b ? b.queue : !!from, open = 'open' in b ? b.open : !!from;
+  if (!from) return deliverText(key, text, { kind: 'message', wait: ms, queue, open }, ctx, gone);
+  // the name with no control characters (an ESC in a title could end the paste early and type the rest as
+  // keys), quotes or line breaks, so the first line stays one line of plain text
+  const name = String(nameFor(from, ctx)).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim().slice(0, 80) || from.slice(0, 8);
+  const head = (to) => {
+    const t = ctx.teamOf ? ctx.teamOf(from) : null;
+    const mate = !!t && !!convId(to) && t.members.includes(convId(to));
+    return `[Message from ${mate ? 'teammate ' : ''}"${name}" (${from}). Reply with: fv send ${from} "message" --from ${convId(to) || to}]\n${text}`;
+  };
+  return deliverText(key, head, { kind: 'message', from, original: text, wait: ms, queue, open }, ctx, gone);
+}
+
+// ---------- teams ----------
+// GET /api/teams, POST /api/teams { members, order, name? }, POST /api/teams/:id/add { member },
+// POST /api/teams/:id/remove { member }, POST /api/teams/:id/disband, POST /api/teams/:id/message { text, from? }.
+// The teams are fleet-view.js's (ctx.teams), the same the page's "Work together" makes; each call sends the notes
+// the page's do (who joined or left: only to members running now). Making a team sends each member its brief as an
+// order, and adding one sends the newcomer its brief: both may resume a conversation that is not running.
+const memberId = (m) => (typeof m === 'string' ? convId(resolveKey(m)) : null);
+async function makeTeam(b, ctx) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  if (!Array.isArray(b.members)) return [400, { ok: false, message: 'members must be a list of conversation ids' }];
+  const members = b.members.map(memberId);
+  if (members.some((m) => !m)) return [400, { ok: false, message: 'members must be conversation ids (a new session has one once it has started)' }];
+  return ctx.teams.make({ members, order: b.order, name: b.name });
+}
+async function addToTeam(tid, b, ctx) {
+  const m = memberId(b && b.member);
+  if (!m) return [400, { ok: false, message: 'member must be a conversation id' }];
+  return ctx.teams.add(tid, m);
+}
+async function removeFromTeam(tid, b, ctx) {
+  const m = memberId(b && b.member);
+  if (!m) return [400, { ok: false, message: 'member must be a conversation id' }];
+  return ctx.teams.remove(tid, m);
+}
+// POST /api/teams/:id/message { text, from? }: to every member but from (one removed from the map left out). With
+// from, as from's message to each (sendMessage); without, after the team's line, as an order. Each one is resumed
+// or queued as deliverText does.
+async function messageTeam(tid, b, ctx, gone) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  const t = ctx.teams.get(tid);
+  if (!t) return [404, { ok: false, message: 'no such team' }];
+  const text = cleanText(b.text);
+  if (!text) return [400, { ok: false, message: 'text must be text, without control characters other than new lines and tabs' }];
+  let from = null;
+  if (b.from != null) {
+    from = memberId(b.from);
+    if (!from) return [400, { ok: false, message: 'from must be your conversation id' }];
+    from = (ctx.successorOf && ctx.successorOf(from)) || from;
   }
-  return withHost(async (host) => {
-    const { p, err } = await need(host, key, true);
-    if (err) return err;
-    if (from && p.id.toLowerCase() === from.toLowerCase()) return [400, { ok: false, message: 'a conversation cannot message itself' }];
-    const note = from && ctx.noteMessage ? (id) => ctx.noteMessage(from, convId(id) || id, original) : null;
-    return deliver(host, p, text, ms, ctx, gone, note);
-  });
+  const to = t.members.filter((m) => m !== from);
+  if (!to.length) return [409, { ok: false, message: 'nobody else in the team to tell' }];
+  const results = await Promise.all(to.map(async (m) => {
+    let r;
+    try {
+      [, r] = from ? await sendMessage(m, { text, from }, ctx, gone)
+        : await deliverText(m, `[Fleet View · team "${t.name}"]\n${text}`, { kind: 'order' }, ctx, gone);
+    } catch (e) { r = { ok: false, message: e instanceof HostDown ? e.message : String((e && e.message) || e) }; }
+    return { id: r.id || m, name: nameFor(r.id || m, ctx), ok: !!r.ok, ...(r.queued ? { queued: true } : {}), message: r.message || '' };
+  }));
+  const sent = results.filter((x) => x.ok && !x.queued).length, waiting = results.filter((x) => x.queued).length, bad = results.filter((x) => !x.ok);
+  const message = [sent ? `sent to ${sent}` : '', waiting ? `queued for ${waiting}` : '',
+    bad.length ? `not sent: ${bad.map((x) => `${x.name} (${x.message})`).join(', ')}` : ''].filter(Boolean).join(' · ');
+  return [200, { ok: results.some((x) => x.ok), team: tid, results, message }];
 }
 
 // GET /api/sessions/:id[?tail=N]
@@ -775,36 +1046,14 @@ async function openSession(key, b, ctx, gone) {
   }
   const ms = waitMs(b.wait);
   if (ms === null) return [400, { ok: false, message: WAIT_BAD }];
-  const where = ctx.whereIs(id);
-  if (!where.known) return [404, { ok: false, message: 'no such conversation (its log is not on disk)' }];
-  const cwd = where.cwd;
-  if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || ctx.UNSAFE_PATH.test(cwd)) return [409, { ok: false, id, message: 'Fleet View does not know which folder that conversation worked in' }];
-  // inside a folder a new session may start in (its repo, or a checkout of it)
-  const dir = H.normDir(cwd);
-  const allowed = ctx.allowedFolders().map(H.normDir).some((f) => dir === f || dir.startsWith(f.endsWith(path.sep) ? f : f + path.sep));
-  if (!allowed) return [403, { ok: false, id, message: `its folder is not in a repo Fleet View lists: ${cwd}` }];
-  let isDir = false;
-  try { isDir = fs.statSync(cwd).isDirectory(); } catch {}
-  if (!isDir) return [409, { ok: false, id, message: `its folder is gone: ${cwd}` }];
+  const where = resumable(id, ctx);
+  if (where.err) return where.err;
   return withHost(async (host) => {
-    let p = hosted(await host.call('list'), id);
-    let alreadyRunning = !!(p && p.alive);
-    if (!alreadyRunning) {
-      const r = await host.call('open', { id, cwd, account: b.account || where.account || 'B' });
-      if (!r || !r.ok) return [502, { ok: false, id, message: (r && r.message) || 'the session host could not open it' }];
-      if (r.message === 'already running') alreadyRunning = true; // it started meanwhile
-    }
-    // ready: idle (a resumed claude says busy while it loads); one already running is taken as it is (a message
-    // to a busy one is queued, as message does)
-    const until = Date.now() + START_MS;
-    for (;;) {
-      p = hosted(await host.call('list'), id);
-      if (!p || !p.alive) return [502, { ok: false, id, alreadyRunning, message: `the session ended before it was ready${p ? ` (code ${p.exitCode})` : ''}` }];
-      if (alreadyRunning || p.status === 'idle' || Date.now() >= until) break;
-      if (gone()) return [200, { ok: true, id, alreadyRunning, ready: false, message: 'stopped waiting' }];
-      await sleep(POLL_MS);
-    }
-    const ready = p.status === 'idle';
+    const r = await resumeIn(host, id, where, b.account, ctx, gone);
+    if (r.err) return r.err;
+    const { p, alreadyRunning } = r;
+    if (r.stopped) return [200, { ok: true, id, alreadyRunning, ready: false, message: 'stopped waiting' }];
+    const ready = r.ready;
     if (!prompt) return [200, { ok: true, id, alreadyRunning, ready, status: p.status || null, message: alreadyRunning ? 'it was already running' : ready ? 'opened; Claude is idle' : 'opened, but it is not idle yet' }];
     if (!ready && !alreadyRunning) return [200, { ok: false, id, alreadyRunning, ready, promptSent: false, message: `opened, but it was not idle within ${START_MS / 1000} s; the prompt was not sent` }];
     if (!alreadyRunning) await sleep(SETTLE_MS);
@@ -863,10 +1112,14 @@ async function listConversations(query, ctx) {
 //        nameOf(id) -> a conversation's name or null, noteMessage(from, to, text) -> records a message between two,
 //        rename(id, name) -> [code, json], hide(id) -> off the map, markTemp(id), isTemp(id),
 //        conversations({ state, repo, all, limit }) -> [row], transcript(id, { since, limit }) -> Promise,
-//        whereIs(id) -> { known, cwd, account } }
+//        whereIs(id) -> { known, cwd, account }, successorOf(id) -> the one that carries on or null,
+//        openElsewhere(id) -> open in a claude outside Fleet View, teamOf(id) -> { id, name, members } or null,
+//        teams: { list(), get(id) -> { id, name, members } or null, make(b), add(id, member), remove(id, member),
+//        disband(id) } each -> [code, json] or a Promise of one }
 const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript';
 const GET_VERBS = new Set(['menu', 'transcript']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
+const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|disband|message))?\/?$/;
 function handle(req, res, pathname, ctx) {
   const what = `${req.method} ${pathname}`;
   const answer = ([code, out]) => {
@@ -889,6 +1142,18 @@ function handle(req, res, pathname, ctx) {
   }
   if (pathname === '/api/conversations') {
     return req.method === 'GET' ? run(listConversations(query(), ctx)) : answer([405, { ok: false, message: 'method not allowed' }]);
+  }
+  const tm = TEAM_ROUTE.exec(pathname);
+  if (tm) {
+    const [, tid, tverb] = tm;
+    if (tid && !/^t[0-9a-f]{6,16}$/.test(tid)) return answer([400, { ok: false, message: 'not a team id (GET /api/teams lists them)' }]);
+    if (req.method === 'GET' && !tid) return answer(ctx.teams.list());
+    if (req.method !== 'POST' || (tid && !tverb) || (!tid && tverb)) return answer([405, { ok: false, message: 'method not allowed' }]);
+    if (!tid) return body((b) => makeTeam(b, ctx));
+    if (tverb === 'add') return body((b) => addToTeam(tid, b, ctx));
+    if (tverb === 'remove') return body((b) => removeFromTeam(tid, b, ctx));
+    if (tverb === 'disband') return run(Promise.resolve(ctx.teams.disband(tid)));
+    return body((b) => messageTeam(tid, b, ctx, gone));
   }
   const m = ROUTE.exec(pathname);
   if (!m) return answer([404, { ok: false, message: 'not found (GET /api lists the endpoints)' }]);
@@ -918,4 +1183,4 @@ function handle(req, res, pathname, ctx) {
   return answer([405, { ok: false, message: 'method not allowed' }]);
 }
 
-module.exports = { ensureToken, handle, hostList, plainText, cleanText, pasteWrites, TOKEN_FILE, ENDPOINTS };
+module.exports = { ensureToken, handle, hostList, plainText, cleanText, pasteWrites, deliverText, startQueue, queuedIds, TOKEN_FILE, ENDPOINTS };

@@ -695,6 +695,13 @@ html.titlebar .top.fit-3 .since-btn { display: none; }
 .update-pill .count-k { color: var(--dim); }
 .update-pill:hover .count-k { color: var(--text); }
 .update-pill.updated { cursor: default; }
+/* the footer's "v1.0.12" (update.js): quiet text; a click opens the update card above it; mint while an update waits */
+.ver-btn {
+  background: none; border: 0; padding: 0 2px; cursor: pointer; color: var(--dim); opacity: 0.7; font: 500 11.5px/1 var(--font-ui);
+  font-variant-numeric: tabular-nums; white-space: nowrap; transition: color 180ms var(--ease), opacity 180ms var(--ease);
+}
+.ver-btn:hover, .ver-btn:focus-visible { color: var(--text); opacity: 1; outline: none; }
+.ver-btn.behind { color: var(--mint); opacity: 1; }
 .update-card {
   position: fixed; top: calc(var(--top-h) + 10px); right: 16px; z-index: 40; width: min(420px, calc(100vw - 32px));
   max-height: calc(100vh - var(--top-h) - 60px); overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
@@ -702,6 +709,8 @@ html.titlebar .top.fit-3 .since-btn { display: none; }
   -webkit-backdrop-filter: blur(28px) saturate(1.25); backdrop-filter: blur(28px) saturate(1.25);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45), inset 0 1px 0 var(--glass-highlight); font: 13px/1.45 var(--font-ui);
 }
+/* opened from the footer's version: above the footer (update.js sets its bottom) */
+.update-card.at-foot { top: auto; }
 .update-head { display: flex; align-items: baseline; gap: 8px; }
 .update-head b { font: 650 14px/1.2 var(--font-display); }
 .update-ver { color: var(--dim); font-variant-numeric: tabular-nums; flex: 1; }

@@ -17,7 +17,7 @@
 //   term.snapshot(id) -> Promise<string>          the last ~512 KB of output, replayed when a view attaches
 //   term.onData(cb(id, chunk)) / term.onExit(cb(id, code)) / term.onRekey(cb(oldKey, id))  -> unsubscribe functions
 // Edge and plain browsers have no fleetDesktop.term: the Session tab then says so and offers the usual
-// "Open conversation" (a Windows Terminal tab) instead.
+// "Open in terminal" (a Windows Terminal tab, or a console window) instead.
 //
 // Opening by itself: a click on a conversation (renderSessionPane's o.auto) starts its session here, unless a
 // live claude process elsewhere has it open (/state's openElsewhere, ignored for the ones this window hosts):
@@ -474,8 +474,8 @@ export function renderSessionPane(pane, s, o) {
 
 function noDeskHtml() {
   return `<div class="s-card"><div class="s-ic">${icon('shell', 20)}</div><div class="s-title">Live sessions need the Fleet View desktop window</div>`
-    + '<div class="s-text">In the desktop window this tab runs the conversation itself, live, and you can type into it here. In this window, open it in Windows Terminal instead.</div>'
-    + `<div class="s-actions"><button type="button" class="btn primary d-open-btn" data-open>${icon('open', 15)}<span>Open conversation</span></button></div></div>`;
+    + '<div class="s-text">In the desktop window this tab runs the conversation itself, live, and you can type into it here. In this window, open it in a terminal instead.</div>'
+    + `<div class="s-actions"><button type="button" class="btn primary d-open-btn" data-open>${icon('open', 15)}<span>Open in terminal</span></button></div></div>`;
 }
 
 function openHtml(s, pane) {

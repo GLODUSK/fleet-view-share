@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 // fleet-msg: one Claude Code conversation sends a message to another through Fleet View's automation API
-// (README: "Automation API" and "Teams"). The message is pasted into the other conversation's prompt after a line
-// "[Message from teammate "<name>" (<id>)]", and Fleet View records it (its team's messages, the map's comet).
+// (README: "Automation API" and "Teams"). Team briefs now say `fv send <their id> "message" --from <my id>`, which
+// does the same; this stays for briefs given before that. The message is pasted into the other conversation's
+// prompt after a line "[Message from teammate "<name>" (<id>). Reply with: …]", and Fleet View records it (its
+// team's messages, the map's comet).
 //
 //   node fleet-msg.js --from <my id> --to <their id> "text"
 //   echo text | node fleet-msg.js --from <my id> --to <their id>
 //   node fleet-msg.js --list                  the sessions Fleet View hosts: id, name, status
 //   --port <n>                                a server on another port (default 4777)
 //   --wait <seconds>                          wait for their reply (at most 3600) and print it
+//   --no-open                                 only when it runs in Fleet View now: never resume it
 //
-// The receiver must be a session the desktop app hosts (its panel). The token comes from
-// %LOCALAPPDATA%\fleet-view\api-token, as for every API call; nothing else is read or written. Exit code 1 when
-// the message did not go in, e.g. while the receiver shows a permission prompt, a question or a plan approval
-// (Fleet View then types nothing: an Enter would answer it).
+// A receiver that handed off is followed to the conversation that carries on. One showing a permission prompt, a
+// question or a plan approval gets the message once that is answered (Fleet View queues it: an Enter now would
+// answer it), and one not running in Fleet View is resumed in the desktop app first, unless it is open in a
+// terminal outside Fleet View. The token comes from %LOCALAPPDATA%\fleet-view\api-token, as for every API call;
+// nothing else is read or written. Exit code 1 when the message was neither sent nor queued.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -26,7 +30,10 @@ const USAGE = `fleet-msg: send a message to another conversation through Fleet V
   node fleet-msg.js --list           hosted sessions (id, name, status)
 
   --port <n>       Fleet View's port (default 4777)
-  --wait <s>       wait up to s seconds for their reply and print it`;
+  --wait <s>       wait up to s seconds for their reply and print it
+  --no-open        only when it runs in Fleet View now: never resume it
+
+  The same as: fv send <their id> "message" --from <your id>`;
 
 const argv = process.argv.slice(2);
 const args = { text: [] };
@@ -34,6 +41,8 @@ for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--from' || a === '--to' || a === '--port' || a === '--wait') args[a.slice(2)] = argv[++i];
   else if (a === '--list') args.list = true;
+  else if (a === '--no-open') args.open = false;
+  else if (a === '--open') args.open = true;
   else if (a === '--help' || a === '-h') args.help = true;
   else args.text.push(a);
 }
@@ -98,21 +107,24 @@ async function main() {
   if (!text && !process.stdin.isTTY) text = await readStdin(5000);
   text = text.replace(/\r\n/g, '\n').replace(/\s+$/, '');
   if (!text.trim()) fail('no message: give it as an argument or on stdin');
-  const body = { text, from: args.from };
-  let timeout = 30000;
+  // queued behind a menu, resumed when not running (the server's defaults with from, said here for older servers' sake)
+  const body = { text, from: args.from, queue: true, open: args.open !== false };
+  // resuming it can take a minute
+  let timeout = 120000;
   if (args.wait !== undefined) {
     const w = Number(args.wait);
     if (!Number.isInteger(w) || w < 1 || w > 3600) fail('--wait takes a number of seconds from 1 to 3600');
     body.wait = w;
-    timeout = (w + 60) * 1000;
+    timeout = (w + 120) * 1000;
   }
   const { code, j } = await call('POST', `/sessions/${encodeURIComponent(args.to)}/message`, body, timeout);
-  // they have a permission prompt, a question or a plan approval open: nothing was sent (an Enter would answer it)
+  // a menu came up just as it was typed: nothing was sent (an Enter would answer it)
   if (code === 409 && j.menu) {
     fail(`NOT SENT: ${args.to} is waiting on a menu (a permission prompt, a question or a plan approval), and Enter would answer it.\n`
       + `  Fleet View says: ${j.message || 'Claude is asking something: answer it first'}\n  Try again in a while, once the user has answered it.`);
   }
-  if (code !== 200 || !j.ok) fail(j.message || `HTTP ${code}`);
+  if ((code !== 200 && code !== 202) || !j.ok) fail(j.message || `HTTP ${code}`);
+  if (j.redirected) console.log(`${j.queued ? 'queued for' : 'sent to'} ${j.redirected.to} (it picked up ${j.redirected.from})`);
   console.log(j.message || 'sent');
   if (j.reply) console.log(`\n${j.reply}`);
 }
