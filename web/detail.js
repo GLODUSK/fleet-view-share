@@ -274,7 +274,7 @@ function placeFloat(el, work, id, byMouse, wasOpen = false, atSaved = false) {
 const focusCompose = (el) => requestAnimationFrame(() => el._chatMain.querySelector('.chat-compose textarea')?.focus({ preventScroll: true }));
 
 // ---------- the Chat tab's splits ----------
-// Under the main chat: (1) the other selected conversations (a Ctrl+click or Shift+drag selection), up to
+// Under the main chat: (1) the other selected conversations (a Ctrl+click or Ctrl+drag selection), up to
 // SPLIT_MAX chats in all, each with its own bar (its name, a pin, ✕ takes it out of the selection) and its own compose
 // box; (2) the peek, a picked-up conversation's previous one: its chat, read only (chat.js readOnly), or its
 // handoff summary (the .md, GET /file, drawn as markdown), switched by the bar's Chat / Summary, ✕ closes it.

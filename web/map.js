@@ -75,8 +75,10 @@
 // each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label rectangles.
 //
 // Command center (2026-10-08). The map is also where many conversations are steered at once:
-//   Multi-select: Ctrl+click toggles a conversation into the selection; Shift+drag on empty space draws a thin
-//     dashed band (fixed alpha) and adds every conversation inside it. Selected ones wear a steady double ring.
+//   Multi-select: Ctrl+click toggles a conversation (or a workspace's hub) into the selection; Ctrl+drag on empty
+//     space draws a thin dashed band (fixed alpha) and adds every conversation and workspace hub inside it.
+//     Selected ones wear a steady double ring. Dragging a selected hub moves every selected hub with it; the
+//     hubs (I.multiRepos) stay the map's own, the shell only hears about conversations.
 //     A plain click goes back to a single pick, Esc clears the selection first. mapSelection() lists the ids,
 //     setMapSelection(ids) sets them (the cards' own multi-select), and every change calls ui.setMulti(ids).
 //     Right-click on a selected conversation (2+ selected) calls ui.contextMenu({ kind: 'sessions', ids }).
@@ -315,6 +317,7 @@ export function setMapSelection(ids) {
   const list = Array.isArray(ids) ? ids.filter((x) => typeof x === 'string' && x) : [];
   if (!I) { pendingMulti = new Set(list); return; }
   I.multi = new Set(list);
+  if (!list.length) I.multiRepos = new Set(); // cleared (Esc, the menu's Clear selection): its workspaces too
   I.dirty = true;
 }
 function setMulti(set) {
@@ -322,7 +325,10 @@ function setMulti(set) {
   I.dirty = true;
   try { I.ui.setMulti && I.ui.setMulti([...set]); } catch (err) { console.error(err); }
 }
-function clearMulti() { if (I.multi.size) setMulti(new Set()); }
+function clearMulti() {
+  if (I.multiRepos.size) { I.multiRepos = new Set(); I.dirty = true; }
+  if (I.multi.size) setMulti(new Set());
+}
 
 // the picked node, for the shell's Delete key: { kind, sid?, root?, name? } or null
 export function mapPicked() {
@@ -554,7 +560,7 @@ export function mapNodes() {
     pending: !!(n.s && n.s.pending), root: n.root || null, name: n.kind === 'session' ? n.s.name : n.name || null,
     // draw params: the bump scale (1 at rest), the alpha the node was drawn at, a hub's ring angle, finished
     fin: !!n.fin, state: n.kind === 'session' ? n.s.state : null, R: n.R, scale: n.bs || 1, alpha: n.da === undefined ? 1 : n.da, spin: n.spin === undefined ? null : n.spin,
-    multi: !!(n.kind === 'session' && I.multi.has(n.sid)),
+    multi: !!(n.kind === 'session' ? I.multi.has(n.sid) : n.kind === 'repo' && I.multiRepos.has(n.id)),
   }));
   for (const g of I.ghosts) out.push({ id: g.n.id, kind: g.n.kind, ghost: true, x: g.n.sx, y: g.n.sy, cx: r.left + g.n.sx, cy: r.top + g.n.sy, sid: g.n.sid || null });
   return out;
@@ -702,6 +708,7 @@ function createInstance(state) {
     stats: { sum: 0, n: 0, max: 0, frames: 0, ring: new Float32Array(120), i: 0 },
     // command center
     multi: pendingMulti || new Set(), // conversation ids in the multi-selection
+    multiRepos: new Set(), // repo hub ids in it (the map's own: Ctrl+drag's band or Ctrl+click on a hub)
     lens: LENSES.includes(state && state.settings && state.settings.mapLens) ? state.settings.mapLens : 'state', lensSeen: undefined,
     views: {}, viewsSeen: null, viewsLocal: false, glide: null,
     teams: [], teamAt: new Map(), teamInit: false, virt: new Map(), // team pills as comet ends ('T:<id>')
@@ -1254,31 +1261,35 @@ function rearrange(unpin) {
 // A dragged repo's members (conversations, PRs, files) ease toward their place around the hub each frame instead
 // of moving with it as one rigid block: conversations keep up closely, the dots around them lag a little more,
 // the far ones a little more again. No overshoot, and it ends on the shape the group had when the drag began.
+// I.trail: hub -> its trail, one for each hub on the move (several when a multi-selection's hubs move together)
 function startTrail(hub) {
-  if (I.trail && I.trail.hub === hub) return;
+  if (!I.trail) I.trail = new Map();
+  if (I.trail.has(hub)) return;
   const offs = new Map();
   for (const m of I.sim) if (m.p && m !== hub && m.cl === hub.id) offs.set(m, { x: m.p.x - hub.p.x, y: m.p.y - hub.p.y });
-  I.trail = { hub, offs, t: performance.now() };
+  I.trail.set(hub, { hub, offs, t: performance.now() });
 }
+const trailing = (nd) => { if (I.trail) for (const tr of I.trail.values()) if (tr.offs.has(nd)) return true; return false; };
 function trailStep(now) {
-  const tr = I.trail;
-  if (!tr) return false;
-  if (!tr.hub.p || I.byId.get(tr.hub.id) !== tr.hub) { I.trail = null; return false; }
-  const dt = Math.min(64, Math.max(1, now - tr.t)) / 16.7;
-  tr.t = now;
-  let most = 0;
-  for (const [m, o] of tr.offs) {
-    if (!m.p || m.cl !== tr.hub.id) { tr.offs.delete(m); continue; }
-    const tx = tr.hub.p.x + o.x, ty = tr.hub.p.y + o.y, ex = tx - m.p.x, ey = ty - m.p.y;
-    const far = Math.min(1, Math.hypot(o.x, o.y) / 500);
-    const k = (m.kind === 'session' ? 0.3 : 0.2) * (1 - 0.35 * far);
-    const f = 1 - Math.pow(1 - k, dt);
-    m.p.x += ex * f; m.p.y += ey * f; m.p.vx = m.p.vy = 0;
-    most = Math.max(most, Math.abs(ex), Math.abs(ey));
-  }
-  if (most < 0.3 && !(I.drag && I.drag.node === tr.hub.id)) {
-    for (const [m, o] of tr.offs) if (m.p) { m.p.x = tr.hub.p.x + o.x; m.p.y = tr.hub.p.y + o.y; }
-    I.trail = null;
+  if (!I.trail || !I.trail.size) return false;
+  for (const tr of I.trail.values()) {
+    if (!tr.hub.p || I.byId.get(tr.hub.id) !== tr.hub) { I.trail.delete(tr.hub); continue; }
+    const dt = Math.min(64, Math.max(1, now - tr.t)) / 16.7;
+    tr.t = now;
+    let most = 0;
+    for (const [m, o] of tr.offs) {
+      if (!m.p || m.cl !== tr.hub.id) { tr.offs.delete(m); continue; }
+      const tx = tr.hub.p.x + o.x, ty = tr.hub.p.y + o.y, ex = tx - m.p.x, ey = ty - m.p.y;
+      const far = Math.min(1, Math.hypot(o.x, o.y) / 500);
+      const k = (m.kind === 'session' ? 0.3 : 0.2) * (1 - 0.35 * far);
+      const f = 1 - Math.pow(1 - k, dt);
+      m.p.x += ex * f; m.p.y += ey * f; m.p.vx = m.p.vy = 0;
+      most = Math.max(most, Math.abs(ex), Math.abs(ey));
+    }
+    if (most < 0.3 && !(I.drag && I.drag.hubs && I.drag.hubs.includes(tr.hub))) {
+      for (const [m, o] of tr.offs) if (m.p) { m.p.x = tr.hub.p.x + o.x; m.p.y = tr.hub.p.y + o.y; }
+      I.trail.delete(tr.hub);
+    }
   }
   return true;
 }
@@ -1311,7 +1322,7 @@ function simStep() {
     b.p.vx -= fx / MASS[b.kind]; b.p.vy -= fy / MASS[b.kind];
   }
   for (const nd of ns) {
-    if (I.trail && I.trail.offs.has(nd)) continue; // trailing a dragged repo: trailStep moves it
+    if (trailing(nd)) continue; // trailing a dragged repo: trailStep moves it
     const h = I.homeXY.get(nd.kind === 'repo' ? nd.id : nd.cl) || { x: 0, y: 0 };
     if (nd.kind === 'repo' && h.pin) { nd.p.x = h.x; nd.p.y = h.y; nd.p.vx = nd.p.vy = 0; continue; }
     const cp = nd.kind === 'session' && convPin(nd);
@@ -1912,6 +1923,13 @@ function draw() {
     } else if (n.kind === 'repo') {
       drawHub(ctx, n);
       drawDeploy(ctx, n, ks);
+      if (I.multiRepos.has(n.id)) {
+        // in the multi-selection: the same steady double ring as a conversation's
+        const r = n.R * (n.bs || 1) * SAT_RING;
+        ctx.strokeStyle = COL.cyan; ctx.lineWidth = 1.2;
+        circle(ctx, n.sx, n.sy, r + 4.5 * ks); ctx.stroke();
+        circle(ctx, n.sx, n.sy, r + 7.7 * ks); ctx.stroke();
+      }
       if (I.drag && I.drag.drop === n.id) {
         // where a dragged conversation will move to
         ctx.save(); ctx.setLineDash([5, 4]); ctx.strokeStyle = rgba(n.color || COL.dim, 0.9); ctx.lineWidth = 2;
@@ -1945,7 +1963,7 @@ function draw() {
   }
 
   drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha);
-  // the rubber band (Shift+drag): a thin dashed rectangle at a fixed alpha
+  // the rubber band (Ctrl+drag): a thin dashed rectangle at a fixed alpha
   if (I.band) {
     const b = I.band, x = Math.min(b.x0, b.x1), y = Math.min(b.y0, b.y1), w = Math.abs(b.x1 - b.x0), h = Math.abs(b.y1 - b.y0);
     ctx.fillStyle = rgba(COL.cyan, 0.06); ctx.fillRect(x, y, w, h);
@@ -2993,18 +3011,23 @@ function wireMouse(cv) {
     e.preventDefault();
     // a left-drag on a repo's hub moves the repo (and pins it), on a conversation moves that conversation
     // (and pins it); anywhere else it pans
-    // Ctrl (or Shift) on a node: a click toggles it in the multi-selection, a drag pans; Shift on empty space
-    // draws the rubber band
+    // Ctrl (or Shift) on a node: a click toggles it in the multi-selection, a drag pans; Ctrl on empty space
+    // draws the rubber band, which takes conversations and workspaces (repo hubs). A drag on a hub that is in the
+    // multi-selection moves every selected hub with it.
     const r = cv.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
     const hit = e.button === 0 ? hitTest(sx, sy) : null;
     const mod = e.ctrlKey || e.metaKey;
-    if (e.button === 0 && e.shiftKey && !mod && !hit) {
+    if (e.button === 0 && mod && !e.shiftKey && !hit) {
       I.glide = null;
-      I.drag = { x: e.clientX, y: e.clientY, moved: false, button: 0, node: null, band: { x0: sx, y0: sy, x1: sx, y1: sy, base: new Set(I.multi) } };
+      I.drag = { x: e.clientX, y: e.clientY, moved: false, button: 0, node: null,
+        band: { x0: sx, y0: sy, x1: sx, y1: sy, base: new Set(I.multi), baseRepos: new Set(I.multiRepos) } };
       return;
     }
-    I.drag = { x: e.clientX, y: e.clientY, moved: false, button: e.button, mod, shift: e.shiftKey,
-      node: !mod && !e.shiftKey && hit && (hit.kind === 'repo' || hit.kind === 'session') ? hit.id : null };
+    const node = !mod && !e.shiftKey && hit && (hit.kind === 'repo' || hit.kind === 'session') ? hit.id : null;
+    const hubs = node && hit.kind === 'repo'
+      ? (I.multiRepos.has(node) ? [...I.multiRepos].map((id) => I.byId.get(id)).filter((h) => h && h.p) : [hit])
+      : null;
+    I.drag = { x: e.clientX, y: e.clientY, moved: false, button: e.button, mod, shift: e.shiftKey, node, hubs };
   });
   window.addEventListener('mousemove', (e) => {
     if (!I || I.canvas !== cv) return;
@@ -3016,9 +3039,13 @@ function wireMouse(cv) {
         const b = I.drag.band, r = cv.getBoundingClientRect();
         b.x1 = e.clientX - r.left; b.y1 = e.clientY - r.top;
         const x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1), y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
-        const set = new Set(b.base);
-        for (const n of I.nodes) if (n.kind === 'session' && onScreen(n) && n.sx >= x0 && n.sx <= x1 && n.sy >= y0 && n.sy <= y1) set.add(n.sid);
-        I.multi = set; I.band = b; I.dirty = true;
+        const set = new Set(b.base), repos = new Set(b.baseRepos);
+        for (const n of I.nodes) {
+          if (!onScreen(n) || n.sx < x0 || n.sx > x1 || n.sy < y0 || n.sy > y1) continue;
+          if (n.kind === 'session') set.add(n.sid);
+          else if (n.kind === 'repo') repos.add(n.id);
+        }
+        I.multi = set; I.multiRepos = repos; I.band = b; I.dirty = true;
         hideTip();
         return;
       }
@@ -3046,15 +3073,18 @@ function wireMouse(cv) {
           const to = dropRepo(hub);
           I.drag.drop = to ? to.id : null;
         } else if (hub && hub.kind === 'repo' && hub.p) {
-          // the hub follows the mouse and everything on it trails behind, easing back into the same shape
-          // (trailStep); its spot follows and is pinned
+          // the hub (and the other selected hubs with it) follows the mouse and everything on it trails behind,
+          // easing back into the same shape (trailStep); its spot follows and is pinned
           const wx = dx / K(), wy = dy / K();
-          hub.p.x += wx; hub.p.y += wy; hub.p.vx = hub.p.vy = 0;
-          startTrail(hub);
-          // its territory glow moves with it (its easing is for changes of shape, not for the drag)
-          const t = I.terr && I.terr.get(hub.id);
-          if (t) { t.x += wx; t.y += wy; }
-          I.homeXY.set(hub.id, { x: hub.p.x, y: hub.p.y, pin: true });
+          for (const h of I.drag.hubs || [hub]) {
+            if (!h.p) continue;
+            h.p.x += wx; h.p.y += wy; h.p.vx = h.p.vy = 0;
+            startTrail(h);
+            // its territory glow moves with it (its easing is for changes of shape, not for the drag)
+            const t = I.terr && I.terr.get(h.id);
+            if (t) { t.x += wx; t.y += wy; }
+            I.homeXY.set(h.id, { x: h.p.x, y: h.p.y, pin: true });
+          }
           I.alpha = Math.max(I.alpha, 0.05);
         } else { I.glide = null; I.pan.x -= dx / K(); I.pan.y -= dy / K(); }
         I.drag.x = e.clientX; I.drag.y = e.clientY;
@@ -3086,6 +3116,7 @@ function wireMouse(cv) {
     if (d.band) {
       I.band = null; I.dirty = true;
       const same = I.multi.size === d.band.base.size && [...I.multi].every((id) => d.band.base.has(id));
+      if (!d.moved) I.multiRepos = d.band.baseRepos;
       if (d.moved && !same) setMulti(new Set(I.multi));
       else I.multi = d.band.base;
       return;
@@ -3106,7 +3137,14 @@ function wireMouse(cv) {
     const r = cv.getBoundingClientRect();
     let n = hitTest(e.clientX - r.left, e.clientY - r.top);
     if (d.mod || d.shift) {
-      // Ctrl+click: in or out of the multi-selection (the conversation picked so far joins it first)
+      // Ctrl+click: in or out of the multi-selection (the conversation picked so far joins it first); a hub
+      // goes in or out of the selection's workspaces
+      if (n && n.kind === 'repo') {
+        const rs = new Set(I.multiRepos);
+        if (rs.has(n.id)) rs.delete(n.id); else rs.add(n.id);
+        I.multiRepos = rs; I.lastClick = null; I.dirty = true;
+        return;
+      }
       const sid = n && (n.kind === 'session' || n.kind === 'agent') ? n.sid : null; // new (empty) ones too
       if (!sid) return;
       const set = new Set(I.multi), cur = !set.size && I.sel ? I.byId.get(I.sel) : null;
@@ -3188,7 +3226,7 @@ function onKey(e) {
     // shell clears the filter and the pick
     let done = true;
     if (I.legend) setLegend(false);
-    else if (I.multi.size) clearMulti();
+    else if (I.multi.size || I.multiRepos.size) clearMulti();
     else done = overlayKey(e);
     if (done) e.preventDefault();
     return done;
@@ -3663,7 +3701,7 @@ function buildLegend() {
   item(`<path d="M3 13 Q15 6 26 10" fill="none" stroke="${COL.cyan}" stroke-width="1" stroke-dasharray="2 3" opacity="0.5"/><circle cx="27" cy="10" r="2" fill="none" stroke="${COL.dim}" stroke-width="1.1"/>`, 'file read, last 10 min');
   sec('Working together');
   item(`<circle cx="15" cy="10" r="6" fill="none" stroke="${COL.cyan}" stroke-width="1.1"/><circle cx="15" cy="10" r="8.6" fill="none" stroke="${COL.cyan}" stroke-width="1.1"/>` + orbSvg(15, 10, 3.6, COL.cyan),
-    'in the selection (Ctrl+click, Shift+drag; right-click: orders for all)');
+    'in the selection (Ctrl+click, Ctrl+drag; right-click: orders for all)');
   const braid = (c) => `<path d="M2 10 C6 6 9 6 12 10 S18 14 21 10 S26 6 28 10" fill="none" stroke="${rgba(c, 0.6)}" stroke-width="1.1"/>` +
     `<path d="M2 10 C6 14 9 14 12 10 S18 6 21 10 S26 14 28 10" fill="none" stroke="${rgba(c, 0.6)}" stroke-width="1.1"/>`;
   item(braid('#ff9f43'), 'a team: members braided in its colour, its name on a pill (hover: the order and messages)');
@@ -3709,7 +3747,7 @@ function buildLegend() {
   const keys = document.createElement('div');
   keys.style.cssText = `margin-top:10px;padding-top:8px;border-top:1px solid var(--line, rgba(120,130,170,0.18));color:${COL.dim};font:11px ${CSS_UI}`;
   keys.textContent = 'wheel zoom · drag pan · drag a repo or conversation to pin it · g re-arrange (G unpins all) · 0 recenter · arrows pick · Enter/o open or act · ' +
-    'Ctrl+click select · Shift+drag select an area · Esc clear · n / N next that needs you · k lens · Shift+1..9 save a view, 1..9 go back · l close';
+    'Ctrl+click select · Ctrl+drag on empty space select an area · Esc clear · n / N next that needs you · k lens · Shift+1..9 save a view, 1..9 go back · l close';
   wrapEl.appendChild(keys);
   return wrapEl;
 }

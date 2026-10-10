@@ -35,7 +35,7 @@
 //                          rel? } (state.conflicts, or a file clash: kind2 'clash' with rel), { kind: 'file', rel, abs?, wrote, sid }
 //                          or { kind: 'pr', num, url?, sid } (the map's file and PR dots); the map calls it, cards /
 //                          tiles / chips / the finished strip are caught by the page's own contextmenu listener
-//   ui.setMulti(ids)       the map's multi-selection changed (Ctrl+click, Shift+drag): the shell keeps one list for
+//   ui.setMulti(ids)       the map's multi-selection changed (Ctrl+click, Ctrl+drag): the shell keeps one list for
 //                          every view and outlines those cards and tiles; the shell tells the map with map.js
 //                          setMapSelection(ids). ui.multi: that list (read only). ui.toggleMulti(id) / ui.clearMulti():
 //                          the cards' and tiles' Ctrl+click and plain click (cards.js wirePick)
@@ -271,7 +271,7 @@ const ui = {
   get compact() { return local.compact; },
   isHosted: (id) => isHosted(id),
   refresh: () => render(),
-  // the multi-selection (Ctrl+click on cards, tiles or map nodes; Shift+drag on the map): the map calls
+  // the multi-selection (Ctrl+click on cards, tiles or map nodes; Ctrl+drag on the map): the map calls
   // setMulti(ids) when its selection changes; ui.multi is the current list (read only)
   // (a first Ctrl+click there takes the panel's chat along, as on the cards: tell the map the list it grew to)
   setMulti: (ids) => { const w = withShown(ids); setMulti(w, w === ids ? 'map' : 'shell'); },
@@ -2098,7 +2098,7 @@ document.addEventListener('contextmenu', (e) => {
   if (ctxMenuOpen()) closeCtxMenu(false);
   if (isDesktop()) e.preventDefault();
 });
-// ---------- multi-selection: Ctrl+click on cards, tiles and map nodes, Shift+drag on the map ----------
+// ---------- multi-selection: Ctrl+click on cards, tiles and map nodes, Ctrl+drag on the map ----------
 // One list for every view: the map tells the shell (ui.setMulti) and the shell tells the map
 // (map.js setMapSelection). Selected cards and tiles get a steady outline (.multi); right-click on one of them
 // with 2+ selected opens the "N conversations" menu. A plain click picks one and clears it; so does Esc.
