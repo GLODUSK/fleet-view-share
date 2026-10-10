@@ -32,7 +32,8 @@
 //   ui.contextMenu(target, clientX, clientY)   the right-click menu (ctxmenu.js) for { kind: 'session', id },
 //                          { kind: 'repo', root, name?, color? }, { kind: 'sessions', ids } (a multi-selection of 2+),
 //                          { kind: 'team', id } (state.teams) or { kind: 'conflict', id, kind2, label, sessions: [ids],
-//                          rel? } (state.conflicts, or a file clash: kind2 'clash' with rel); the map calls it, cards /
+//                          rel? } (state.conflicts, or a file clash: kind2 'clash' with rel), { kind: 'file', rel, abs?, wrote, sid }
+//                          or { kind: 'pr', num, url?, sid } (the map's file and PR dots); the map calls it, cards /
 //                          tiles / chips / the finished strip are caught by the page's own contextmenu listener
 //   ui.setMulti(ids)       the map's multi-selection changed (Ctrl+click, Shift+drag): the shell keeps one list for
 //                          every view and outlines those cards and tiles; the shell tells the map with map.js
@@ -1692,6 +1693,7 @@ function openContextMenu(target, x, y) {
     return;
   }
   if (target.kind === 'conflict') { conflictMenu(target, x, y); return; }
+  if (target.kind === 'file' || target.kind === 'pr') { dotMenu(target, x, y); return; }
   if (target.kind === 'repo') {
     const folder = String(target.root || '');
     if (!folder) return;
@@ -2351,6 +2353,25 @@ function conflictMenu(target, x, y) {
   items.push({ sep: true });
   for (const s of list) items.push(isHosted(s.id) ? { label: `Interrupt ${s.name}`, icon: 'stop', run: () => interruptAll([s]) } : { label: `Interrupt ${s.name}`, icon: 'stop', disabled: true, note: 'not running here' });
   openCtxMenu({ x, y, title, dot: kind === 'branch' || kind === 'file' ? C.gold : C.red, sub: list.map((s) => s.name).join(' · '), items });
+}
+// a file dot or a PR dot on the map (right-click): open it, copy its path or link, or pick its conversation
+// target: { kind: 'file', rel, abs?, wrote, sid } or { kind: 'pr', num, url?, sid }
+function dotMenu(target, x, y) {
+  const s = sessionsOf([target.sid])[0] || null;
+  const file = target.kind === 'file';
+  const name = file ? String(target.rel || '').split(/[\\/]/).pop() || target.rel : `PR #${target.num}`;
+  const items = file
+    ? [target.abs ? { label: 'Open the file in VS Code', icon: 'file', run: () => ui.reveal({ kind: 'file', path: target.abs }) } : { label: 'Open the file in VS Code', icon: 'file', disabled: true, note: 'its full path is not known' },
+      { label: 'Copy path', icon: 'copy', run: () => copyOut(target.abs || target.rel, name) }]
+    : [target.url ? { label: 'Open on GitHub', icon: 'external', run: () => openUrl(target.url) } : { label: 'Open on GitHub', icon: 'external', disabled: true, note: 'no GitHub link for it yet' },
+      ...(target.url ? [{ label: 'Copy link', icon: 'copy', run: () => copyOut(target.url, `the link to PR #${target.num}`) }] : [])];
+  if (s) items.push({ sep: true }, { label: `Pick ${s.name}`, icon: 'shell', run: () => pickFromAnywhere(s.id) });
+  const sub = file ? [target.rel, s ? `${target.wrote ? 'edited' : 'read'} by ${s.name}` : ''].filter(Boolean).join(' · ') : s ? s.name : '';
+  openCtxMenu({ x, y, title: name, dot: s?.hue || C.dim, sub, items });
+}
+async function copyOut(text, what) {
+  try { await navigator.clipboard.writeText(text); toast(`Copied ${what}`, C.mint); }
+  catch { toast('Could not reach the clipboard', C.red); }
 }
 // pick a conversation from a menu or a list: a shown one like a click on it, else its panel
 function pickFromAnywhere(id) {

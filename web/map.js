@@ -3050,9 +3050,8 @@ function wireMouse(cv) {
     // only keeps it picked: opening a terminal tab takes a double-click or Enter)
     if (n && n.id === I.sel && e.detail === 1 && n.kind !== 'session' && n.kind !== 'agent' && act(n)) return;
     if (e.detail >= 2 && n && n.id === I.sel) return; // already picked: don't re-pick (no extra redraw)
+    // (a file dot only gets picked: it opens from its right-click menu, a double-click or Enter)
     select(n, false);
-    // a file dot opens on its first click (it has nothing else to show)
-    if (n && n.kind === 'recent' && e.detail === 1) act(n);
   });
   cv.addEventListener('mouseleave', () => { if (I.hover || I.hoverX) { I.hover = null; I.hoverX = null; I.dirty = true; } hideTip(); });
   // right-click: the shell's menu for a conversation (or an agent's conversation) or a repo
@@ -3070,6 +3069,9 @@ function wireMouse(cv) {
     else if (n && n.kind === 'repo' && n.root) target = { kind: 'repo', root: n.root, name: n.name, color: n.color };
     else if (n && n.kind === 'conflict') target = conflictTarget(n.k);
     else if (n && n.kind === 'clash') target = clashTarget(n.c);
+    // a file dot or a PR dot: its own menu (Open, Copy, its conversation), not the empty-space one
+    else if (n && n.kind === 'recent') target = { kind: 'file', rel: n.f.rel, abs: fileAbs(n.f.key, n.f) || undefined, wrote: !!n.f.wrote, sid: n.s.id };
+    else if (n && n.kind === 'pr') target = { kind: 'pr', num: n.num, url: prUrl(n) || undefined, sid: n.sid };
     else if (!n) { const x = hitExtra(sx, sy); if (x && x.kind === 'team') target = { kind: 'team', id: x.id }; }
     if (!target && over && over.kind === 'worktree' && over.hub && over.hub.root) target = { kind: 'repo', root: over.hub.root, name: over.hub.name, color: over.hub.color };
     if (!target) return; // the shell decides about the browser's own menu
@@ -3180,12 +3182,8 @@ function fileAbs(key, own) {
 function nodeAction(n) {
   if (!n) return null;
   if (n.kind === 'pr') {
-    let url = n.s.links && n.s.links.pr;
-    if (!isHttps(url)) {
-      const o = allSessions().find((s) => s.ship && s.ship.pr === n.num && (s.ship.repo || '') === (n.ship.repo || '') && s.links && isHttps(s.links.pr));
-      url = o ? o.links.pr : null;
-    }
-    return isHttps(url) ? { hint: 'open PR on GitHub', run: () => openUrl(url) } : null;
+    const url = prUrl(n);
+    return url ? { hint: 'open PR on GitHub', run: () => openUrl(url) } : null;
   }
   if (n.kind === 'recent' || n.kind === 'clash') {
     const abs = n.kind === 'recent' ? fileAbs(n.f.key, n.f) : fileAbs(n.c.key, null);
@@ -3198,6 +3196,15 @@ function nodeAction(n) {
   if (n.kind === 'repo') return n.root ? { hint: 'open the folder in Explorer', run: () => reveal({ kind: 'folder', path: n.root }) } : null;
   if ((n.kind === 'session' || n.kind === 'agent') && n.sid) return { hint: 'open the conversation', run: () => openSid(n.sid) };
   return null;
+}
+// a PR dot's GitHub link: its conversation's, else another one's that shipped the same PR
+function prUrl(n) {
+  let url = n.s.links && n.s.links.pr;
+  if (!isHttps(url)) {
+    const o = allSessions().find((s) => s.ship && s.ship.pr === n.num && (s.ship.repo || '') === (n.ship.repo || '') && s.links && isHttps(s.links.pr));
+    url = o ? o.links.pr : null;
+  }
+  return isHttps(url) ? url : null;
 }
 // runs a node's action once: a click on the picked node followed by a double-click must not open it twice
 function act(n) {
@@ -3393,9 +3400,9 @@ function fillTip(n) {
   const a = nodeAction(n);
   let hint = null;
   if (n.kind === 'session') hint = 'click: details · double-click / Enter: open the conversation · Ctrl+click: select several';
-  else if (a) hint = n.kind === 'recent' ? `click: ${a.hint}` : `double-click / Enter: ${a.hint}`;
+  else if (a) hint = `double-click / Enter: ${a.hint}`;
   else if (n.kind === 'pr') hint = 'no GitHub link for this PR yet';
-  if (n.kind === 'clash' || n.kind === 'conflict') hint = (hint ? hint + ' · ' : '') + 'right-click: actions';
+  if (n.kind === 'clash' || n.kind === 'conflict' || n.kind === 'recent' || n.kind === 'pr') hint = (hint ? hint + ' · ' : '') + 'right-click: actions';
   if (hint) {
     const h = row(tip, '', hint, COL.dim);
     h.style.cssText += `;margin-top:6px;padding-top:5px;border-top:1px solid var(--line, rgba(120,130,170,0.18));font:11px ${CSS_UI}`;
