@@ -53,7 +53,7 @@
 // can't be read is not typed into; those come back as failures with the reason, for the toast. One that shows a
 // question, a permission prompt or the trust dialog (the text would land in it, and a digit would pick an
 // option) gets its text later: it waits in the queue below and comes back as { ok: true, queued: true }.
-import { ensureLive, sendText, isHosted, openElsewhere, termApi, screenText, screenReady, onRekey } from './term.js';
+import { ensureLive, sendText, isHosted, openElsewhere, termApi, screenText, screenReady, onRekey, noTermMsg } from './term.js';
 import { parseMenu } from './compose.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -66,7 +66,7 @@ export const handedOff = (s) => !!(s && s.handoff && (s.handoff.next || s.state 
 // can this window type into it at all? null when yes, else why not
 export function unreachable(s) {
   if (!s || !s.id) return 'not a conversation';
-  if (!termApi()) return 'sending needs the desktop window';
+  if (!termApi()) return noTermMsg('sending');
   if (s.pending && !isHosted(s.id)) return 'it has not started yet';
   // handed off: its pickup carries on, and resuming the old one would run the long conversation it left
   if (handedOff(s)) return `it handed off${s.handoff.nextName ? ` to ${s.handoff.nextName}` : ''}: give it to that one`;

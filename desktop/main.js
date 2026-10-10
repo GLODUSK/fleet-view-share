@@ -8,7 +8,11 @@
 // needs you, what is working and what just finished, and a tray icon (Show Fleet View, Mini view, Close window,
 // Quit everything). The two
 // take turns: opening the mini view hides the main window, and leaving it (its expand button, a row, Esc) brings
-// the main window back as it was. Closing the main window quits the app, mini view and tray included.
+// the main window back as it was. Closing the main window quits the app, mini view and tray included, except
+// while remote access is on (settings.remote.enabled, read from GET /state with the tray's counts): then closing
+// it only hides it to the tray, so the server keeps answering the other computer, and the PC is kept from
+// sleeping (powerSaveBlocker) for as long as it is the host. "Show Fleet View" or a tray click brings it back;
+// "Quit everything" and an update's relaunch still quit.
 //
 // Window places: main.js is the source of truth. It keeps both windows' places in its own profile folder
 // (window-state.json) and also posts them to the server (POST /settings: webBounds, miniBounds, miniOpen),
@@ -31,7 +35,7 @@
 // X-Frame-Options and CSP frame-ancestors are dropped (previewFrames), where they go is sent to the page, and
 // fleetDesktop.capture takes a PNG of the frame's area for "Screenshot to chat".
 'use strict';
-const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, screen, shell, webFrameMain } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, powerSaveBlocker, screen, shell, webFrameMain } = require('electron');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -246,6 +250,27 @@ if (!app.requestSingleInstanceLock()) {
     });
   }
   app.on('before-quit', () => { quitting = true; });
+
+  // ---------- remote access: keep hosting ----------
+  // settings.remote.enabled (the page's remote switch, saved by the server). While it is on, closing the main
+  // window hides it instead of quitting, and Windows is asked not to sleep (prevent-app-suspension: the screen may
+  // still turn off). An unanswered /state keeps the last known value, so a server restart doesn't flip it.
+  let remoteOn = false, awakeId = null;
+  function setRemote(on) {
+    on = !!on;
+    if (on && awakeId === null) {
+      try { awakeId = powerSaveBlocker.start('prevent-app-suspension'); hlog('remote access is on: closing the window keeps Fleet View running, and the PC stays awake'); } catch (e) { hlog(`could not keep the PC awake: ${e.message}`); }
+    } else if (!on && awakeId !== null) {
+      try { powerSaveBlocker.stop(awakeId); } catch {}
+      awakeId = null;
+      hlog('remote access is off: the PC may sleep again, and closing the window quits');
+    }
+    if (on === remoteOn) return;
+    remoteOn = on;
+    updateTrayMenu();
+  }
+  // Windows is signing out or shutting down: the window must really close then, never hide
+  const endingSession = () => { quitting = true; };
 
   app.on('second-instance', () => showMain(null));
 
@@ -501,9 +526,20 @@ if (!app.requestSingleInstanceLock()) {
     win.on('unmaximize', saveMainSoon);
     // close = quit the app: save both places in one go (at most 1.2 s), then the whole app goes, mini view and
     // tray too. The sessions keep running in the host; what the panel showed goes with them.
+    // While remote access is on (and nothing is quitting), close only hides: the place is saved, the mini view
+    // goes too, and the tray brings the window back as it was.
     let closing = false;
     win.on('close', (e) => {
       if (closing) return;
+      if (remoteOn && !quitting && !quittingAll && !HIDDEN) {
+        e.preventDefault();
+        clearTimeout(saveTimer);
+        if (!placing) saveMain();
+        if (local.miniOpen || miniIsOpen()) closeMini();
+        win.hide();
+        hlog('window closed while remote access is on: hidden to the tray, Fleet View keeps running');
+        return;
+      }
       closing = true;
       e.preventDefault();
       clearTimeout(saveTimer);
@@ -524,6 +560,8 @@ if (!app.requestSingleInstanceLock()) {
     });
     win.on('closed', () => { win = null; app.quit(); });
     win.on('page-title-updated', (e) => e.preventDefault()); // keep "Fleet View"
+    win.on('query-session-end', endingSession);
+    win.on('session-end', endingSession);
 
     win.loadURL(START.href);
   }
@@ -807,7 +845,8 @@ if (!app.requestSingleInstanceLock()) {
       { label: 'Show Fleet View', click: () => showMain(null) },
       { label: 'Mini view', type: 'checkbox', checked: !!local.miniOpen && miniIsOpen(), click: (item) => (item.checked ? openMini() : hideMini()) },
       { type: 'separator' },
-      { label: 'Close window (sessions keep running)', click: () => { if (win && !win.isDestroyed()) win.close(); else app.quit(); } },
+      ...(remoteOn ? [{ label: 'Remote access is on (closing hides the window)', enabled: false }, { type: 'separator' }] : []),
+      { label: remoteOn ? 'Hide window (Fleet View keeps running)' : 'Close window (sessions keep running)', click: () => { if (win && !win.isDestroyed()) win.close(); else app.quit(); } },
       { label: 'Quit everything', click: () => { quitEverything(); } },
     ]));
   }
@@ -818,10 +857,15 @@ if (!app.requestSingleInstanceLock()) {
       if (!tray || tray.isDestroyed()) return;
       const c = lastCounts, n = terms.aliveCount();
       const here = n ? ` · ${n} session${n === 1 ? '' : 's'} here` : '';
-      tray.setToolTip(c ? `Fleet View — ${c.live || 0} live, ${c.waiting || 0} waiting${here}` : `Fleet View — reconnecting${here}`);
+      const rem = remoteOn ? ' · remote on' : '';
+      tray.setToolTip(c ? `Fleet View — ${c.live || 0} live, ${c.waiting || 0} waiting${here}${rem}` : `Fleet View — reconnecting${here}${rem}`);
     };
     if (hostOnly === true) return show();
-    getState((st) => { lastCounts = (st && st.counts) || null; show(); });
+    getState((st) => {
+      lastCounts = (st && st.counts) || null;
+      if (st && st.settings) setRemote(!!(st.settings.remote && st.settings.remote.enabled === true));
+      show();
+    });
   }
   function createTray() {
     try { tray = new Tray(trayImage()); } catch { tray = null; return; }
@@ -856,6 +900,7 @@ if (!app.requestSingleInstanceLock()) {
     fvServer.stop(); // the server it started goes with the app (a server started some other way is left alone)
     terms.close(); // the host and its sessions keep running
     clearInterval(tipTimer);
+    if (awakeId !== null) { try { powerSaveBlocker.stop(awakeId); } catch {} awakeId = null; }
     if (tray && !tray.isDestroyed()) tray.destroy();
     tray = null;
     if (helper) helper.stop();

@@ -33,7 +33,9 @@
 // around the others, and one that leaves keeps its spot for when it comes back, so nothing else moves. The
 // spacing rule may still nudge a group a little (and its spot moves with it). Dragging a repo's hub moves its
 // whole group and pins it there: a pinned repo never moves by itself, and others make way for it. Spots and
-// pins are saved (settings.mapSpots), so they survive reloads. A repo added from the map's empty-space menu
+// pins are saved (settings.mapSpots), so they survive reloads, and they are shared live: a spot another screen
+// changes (Fleet View open on another computer too) is applied here from the next /state (syncSpots), so a repo
+// dragged there moves here within a second. Zoom, pan and selection stay this screen's own. A repo added from the map's empty-space menu
 // takes the spot where that menu was opened, pinned (mapPlaceRepo). A conversation can be dragged too: it stays
 // where it was dropped, as an offset from its repo's hub (saved under its node id, 's:<id>'), so it moves along
 // with its repo, and the others make way for it. Dropping a conversation on another repo's group (a dashed ring
@@ -286,6 +288,8 @@ export function renderMap(el, state, ui) {
   I.deploy = deployByRepo(state);
   if (!I.W) { const r = el.getBoundingClientRect(); I.W = Math.round(r.width); I.H = Math.round(r.height); I.sized = false; }
   syncSettings(state.settings || {});
+  syncSpots(state.settings || {});
+  if (I.spotsDue) sendSpots(); // a nudge's save, now that what other screens moved is in
   // a workspace picked from the header's menu: the view recenters on what's shown now, as 0 does
   const repo = String((state.settings && state.settings.repo) || '').toLowerCase();
   if (I.repoSeen !== undefined && I.repoSeen !== repo) recenter(2500);
@@ -688,6 +692,9 @@ function createInstance(state) {
     ang: new Map(),           // agent node id -> current orbit angle (eases toward its slot)
     homeOrder: [],
     homeXY: loadSpots(state), // cluster id -> its spot { x, y, pin }: sticky, saved as settings.mapSpots
+    spotsSeen: loadSpots(state), spotsSig: spotsSig(state && state.settings && state.settings.mapSpots), // the server's list as last applied (syncSpots)
+    spotsSent: [],            // the signatures of this screen's last few saves, so their echo is not taken as news
+    spotsDue: 0,              // a nudge's save waiting for the next /state (sendSpots)
     spotsTimer: 0,
     nodes: [], byId: new Map(), springs: [], paths: [], clashes: [],
     sig: '', alpha: 0, settledOnce: false,
@@ -1141,6 +1148,8 @@ function loadSpots(state) {
 }
 // save the spots in a moment (pinned ones first, at most 300). A save already waiting stays, so the small
 // nudges of the spacing rule can't keep putting it off; force (a drop, a re-arrange) saves sooner.
+// A nudge's save waits for the next /state (renderMap sends it right after syncSpots, or after 5 s if no new
+// state comes), so it carries what another screen just moved instead of overwriting it with what was here before.
 function saveSpotsSoon(ms = 1500, force = false) {
   if (I.replay) return; // replay: its spots are forgotten when it ends
   if (I.spotsTimer && !force) return;
@@ -1148,11 +1157,71 @@ function saveSpotsSoon(ms = 1500, force = false) {
   I.spotsTimer = setTimeout(() => {
     if (!I) return;
     I.spotsTimer = 0;
-    if (I.replay) return;
-    const list = [...I.homeXY].map(([id, h]) => ({ id, x: Math.round(h.x), y: Math.round(h.y), pin: !!h.pin }))
-      .sort((a, b) => rank(a) - rank(b)).slice(0, 300);
-    try { I.ui.saveSettings && I.ui.saveSettings({ mapSpots: list }); } catch { /* shell gone */ }
+    if (force) sendSpots(); else I.spotsDue = I.spotsDue || Date.now();
   }, ms);
+}
+function sendSpots() {
+  I.spotsDue = 0;
+  if (I.replay) return;
+  const list = [...I.homeXY].map(([id, h]) => ({ id, x: Math.round(h.x), y: Math.round(h.y), pin: !!h.pin }))
+    .sort((a, b) => rank(a) - rank(b)).slice(0, 300);
+  // nothing the server doesn't have already: not sent, so a screen whose spots only wobbled never overwrites
+  // a move another screen just saved
+  const sig = JSON.stringify(list);
+  if (sig === I.spotsSig) return;
+  I.spotsSent.push(sig);
+  if (I.spotsSent.length > 8) I.spotsSent.shift();
+  try { I.ui.saveSettings && I.ui.saveSettings({ mapSpots: list }); } catch { /* shell gone */ }
+}
+const spotsSig = (list) => JSON.stringify(Array.isArray(list) ? list : []);
+// Spots another screen changed: each /state carries the server's list, and when it differs from the one last
+// seen, only what changed between the two is applied here (a spot moved, added or dropped there). So the
+// spots this screen moved and hasn't saved yet stay as they are, and a save waiting here then carries both.
+// Not taken: the echo of one of this screen's own saves (else an older save coming back would snap a later move
+// back), the repo or conversation being dragged here right now (the drop decides), and anything during a replay
+// (its spots are its own; the change is taken once it ends). A moved repo's whole group goes there at once, as
+// it is: gliding it there would drag it through the groups in between, and the spacing rule would then push
+// those aside on this screen only, and save that, and the other screen would push back (two screens tried it:
+// the repos spread out across the map).
+function syncSpots(set) {
+  if (!('mapSpots' in set) || I.replay) return;
+  const sig = spotsSig(set.mapSpots);
+  if (sig === I.spotsSig) return;
+  const next = loadSpots({ settings: { mapSpots: set.mapSpots } }), prev = I.spotsSeen;
+  I.spotsSig = sig; I.spotsSeen = next;
+  if (I.spotsSent.includes(sig)) return;
+  const d = I.drag && I.drag.moved ? I.drag : null;
+  const held = new Set(d ? [d.node, ...((d.hubs || []).map((h) => h && h.id))].filter(Boolean) : []);
+  const same = (a, b) => a && b && a.x === b.x && a.y === b.y && a.pin === b.pin;
+  const moved = new Map(); // repo id -> how far its spot moved here
+  let convs = false;
+  for (const [id, h] of next) {
+    if (same(prev.get(id), h) || held.has(id)) continue;
+    const cur = I.homeXY.get(id);
+    if (same(cur && { x: Math.round(cur.x), y: Math.round(cur.y), pin: !!cur.pin }, h)) continue;
+    I.homeXY.set(id, { x: h.x, y: h.y, pin: h.pin });
+    if (id.startsWith('s:')) convs = true; else if (cur) moved.set(id, { dx: h.x - cur.x, dy: h.y - cur.y });
+  }
+  // a conversation unpinned there (its offset dropped) goes back on its repo's ring here too; repo spots are
+  // never dropped this way (a re-arrange there sends the new ones)
+  for (const id of prev.keys()) {
+    if (next.has(id) || held.has(id) || !id.startsWith('s:') || !I.homeXY.has(id)) continue;
+    I.homeXY.delete(id); convs = true;
+  }
+  if (!moved.size && !convs) return;
+  if (moved.size) {
+    for (const n of I.sim || []) {
+      const m = n.p && moved.get(n.kind === 'repo' ? n.id : n.cl);
+      if (m) { n.p.x += m.dx; n.p.y += m.dy; n.p.vx = n.p.vy = 0; }
+    }
+    for (const [id, m] of moved) {
+      const t = I.terr && I.terr.get(id);
+      if (t) { t.x += m.dx; t.y += m.dy; }
+      for (const tr of I.trail ? I.trail.values() : []) if (tr.hub.id === id) I.trail.delete(tr.hub);
+    }
+  }
+  if (convs) I.alpha = Math.max(I.alpha, 0.05);
+  I.dirty = true;
 }
 // kept first when there are too many: pinned repos, other repo spots, then pinned conversations
 const rank = (x) => (x.id.startsWith('s:') ? 2 : x.pin ? 0 : 1);
@@ -1540,6 +1609,7 @@ function frame() {
   if (gather() > 0.05) I.dirty = true;
   if (trailStep(t0)) I.dirty = true;
   if (I.spotsMoved) { I.spotsMoved = false; saveSpotsSoon(3000); }
+  if (I.spotsDue && Date.now() - I.spotsDue > 5000) sendSpots(); // no new state came (unchanged): send it anyway
   // the camera fits the map when it first shows (and on 0 or a re-arrange), then holds still: changes never pan
   // or zoom the view by themselves
   if (!(I.drag && I.drag.node) && performance.now() < (I.camUntil || Infinity) && updateCamera(false)) I.dirty = true;

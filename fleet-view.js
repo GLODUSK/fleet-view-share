@@ -32,6 +32,7 @@ if (opt('help', false)) {
   --tui               the terminal view instead of the app window
   --port <n>          web: port to serve on (default 4777)
   --no-open           web: serve without opening a window
+  --remote-serve      web: let a server on another port than 4777 change tailscale serve (remote access, for tests)
   --window <min>      show sessions active in the last N minutes (default 45)
   --scratch-dir <dir> where "Add workspace… · New scratchpad" makes its folders (default ~/Scratchpads)
   --filter <regex>    only sessions whose title, goal or folder matches
@@ -146,6 +147,20 @@ const OLD_SETTINGS_FILE = path.join(os.homedir(), '.agent-pulse.json'); // from 
 let saved = {};
 try { saved = JSON.parse(fs.readFileSync(fs.existsSync(SETTINGS_FILE) ? SETTINGS_FILE : OLD_SETTINGS_FILE, 'utf8')) || {}; } catch {}
 if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+// remote access (remote.js): the page in a browser on another device, over Tailscale. settings.remote.enabled is the
+// switch (off unless turned on); settings.remote.logins, by hand only, lets more Tailscale logins than this PC's
+// owner pair a browser. The demo keeps its devices in memory and never changes `tailscale serve`; nor does a server on
+// another port than 4777 (a test), unless it was started with --remote-serve.
+let LIVE = null; // live.js, loaded when the web server starts (startWeb)
+const REMOTE = require(path.join(__dirname, 'remote.js')).createRemote({
+  port: PORT, demo: DEMO, serve: PORT === 4777 || !!opt('remote-serve', false),
+  enabled: !DEMO && !!(saved.remote && saved.remote.enabled === true),
+  logins: (!DEMO && saved.remote && saved.remote.logins) || [],
+  file: DEMO ? null : path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view', 'remote-devices.json'),
+  log: (t) => logLine('remote: ' + t),
+  // switched off, or a device's approval taken back: live sockets that are no longer allowed close at once
+  onChange: () => { saveSettings(); if (LIVE) LIVE.recheck(); },
+});
 // the page's Projects view is kept for the page; the terminal view starts in Cards instead
 let view = VIEWS.includes(opt('view', null)) ? opt('view') : VIEWS.includes(saved.view) || (WEB && saved.view === WEB_ONLY_VIEW) ? saved.view : 'cards';
 let query = DEMO ? '' : typeof saved.query === 'string' ? saved.query : ''; // the / filter, matched like --filter
@@ -527,8 +542,9 @@ async function addScratchWith(paths) {
     const p = paths[i], st = kinds[i];
     if (!st) { failed.push({ path: p, message: 'not found' }); continue; }
     if (st.isDirectory()) { dirs.push(p); continue; }
-    const ext = path.extname(p), stem = path.basename(p, ext);
-    let name = path.basename(p);
+    // a file a browser sent (POST /upload) keeps its own name, without the upload's random prefix
+    const base = FILES.uploadedName(p) || path.basename(p), ext = path.extname(base), stem = path.basename(base, ext);
+    let name = base;
     for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${stem} (${n})${ext}`;
     taken.add(name.toLowerCase());
     try { await fs.promises.copyFile(p, path.join(dir, name)); copied.push({ name, from: p }); } catch (e) { failed.push({ path: p, message: e.code || e.message }); }
@@ -573,6 +589,7 @@ function flushSettings() {
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, compact, finishedOpen, steady, miniOpen, hidden, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp,
+    remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
     moved: [...moved.values()],
     names: Object.fromEntries(names),
     pushTargets: { sessions: [...pushTargets.sessions.values()], repos: [...pushTargets.repos.values()] },
@@ -5247,7 +5264,10 @@ function buildState() {
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
     settings: { view, zoom: map.zoom, query, repo: repoSel, compact, finishedOpen, steady, miniBounds, miniOpen, hidden, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
-      mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts },
+      mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() } },
+    // remote access (remote.js): the switch, the address, how turning it on went, browsers waiting for approval
+    // (with their codes) and the approved ones
+    remote: REMOTE.view(),
     repos: [...repos.values()].sort((a, b) => b.live - a.live || a.name.localeCompare(b.name)),
     counts: { live: c.live, agents: c.agents, waiting: c.waiting, mergedToday: c.merged, cost: c.spent },
     week: DEMO ? { A: { left: 64 }, B: { left: 91 } } : onlyListed(weekNow(now)),
@@ -5316,6 +5336,7 @@ function toolsHere() {
 // hiddenRepos (an array of up to 200 { root, at }, root a string of at most 1024 characters; replaces the list),
 // mapSpots (the map's repo spots, up to 300 { id, x, y, pin }; replaces the list), mapLens (one of MAP_LENSES),
 // mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), mapCamera ({ x, y, k }: the map's view), notify (bool), offAccounts (account letters turned off), parity (rules, see PARITY_BUILTIN)
+// remote ({ enabled }: remote access, remote.js) is taken from this PC's own page only, in the route itself
 function applySettings(b) {
   if (!b || typeof b !== 'object') return;
   if (VIEWS.includes(b.view) || (WEB && b.view === WEB_ONLY_VIEW)) view = b.view;
@@ -5364,10 +5385,45 @@ const TYPES = {
   '.json': 'application/json; charset=utf-8', '.woff2': 'font/woff2', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.map': 'application/json; charset=utf-8',
 };
 function sendJson(res, code, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(body) });
-  res.end(body);
+  sendBody(res, code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }, Buffer.from(JSON.stringify(obj)));
 }
+// A remote viewer (res.fvZip, set by the gate from its Accept-Encoding) gets JSON and the page's files over 1 KB
+// compressed: brotli when the browser takes it, else gzip. /state is ~390 KB of JSON a second; ~72 KB gzipped,
+// ~62 KB as brotli. This PC's own page gets them as they are (loopback costs nothing, compressing does).
+const zlib = require('zlib');
+const ZIP_MIN = 1024;
+function zipFor(req) {
+  const takes = (name) => String(req.headers['accept-encoding'] || '').toLowerCase().split(',').some((part) => {
+    const [enc, ...params] = part.split(';').map((x) => x.trim());
+    return enc === name && !params.some((p) => /^q=0(\.0*)?$/.test(p));
+  });
+  return takes('br') ? 'br' : takes('gzip') ? 'gzip' : null;
+}
+function sendBody(res, code, headers, buf, head = false) {
+  // text only: images and fonts are compressed already
+  const enc = res.fvZip && buf.length > ZIP_MIN && /json|text|javascript|svg/.test(headers['Content-Type'] || '') ? res.fvZip : null;
+  if (res.fvZip) headers.Vary = 'Accept-Encoding';
+  const send = (out, coding) => {
+    if (res.headersSent || res.destroyed) return;
+    res.writeHead(code, { ...headers, ...(coding ? { 'Content-Encoding': coding } : {}), 'Content-Length': out.length });
+    res.end(head ? undefined : out);
+  };
+  if (!enc) return send(buf, null);
+  const done = (err, out) => (err ? send(buf, null) : send(out, enc));
+  if (enc === 'br') zlib.brotliCompress(buf, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5, [zlib.constants.BROTLI_PARAM_SIZE_HINT]: buf.length } }, done);
+  else zlib.gzip(buf, { level: 6 }, done);
+}
+// GET /state with an ETag (the body's sha1): a poll that sends it back in If-None-Match gets 304 and no body while
+// nothing changed. Today nearly every second differs anyway (state.now, and the sessions' spark buckets, which
+// slide with it), so the saving comes from compression; the ETag pays off once those stop changing every poll.
+// One tag whatever the encoding: nothing between here and the browser caches it (no-store).
+function sendState(req, res) {
+  const body = Buffer.from(JSON.stringify(buildState()));
+  const tag = `"${require('crypto').createHash('sha1').update(body).digest('base64url')}"`;
+  if (etagMatches(req, tag)) { res.writeHead(304, { ETag: tag, 'Cache-Control': 'no-store' }); return res.end(); }
+  sendBody(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ETag: tag }, body);
+}
+const etagMatches = (req, tag) => String(req.headers['if-none-match'] || '').split(',').some((t) => t.trim().replace(/^W\//, '') === tag);
 function readBody(req, res, done) {
   let size = 0, called = false;
   const parts = [];
@@ -5663,29 +5719,69 @@ function knownFolders() {
   if (!DEMO) out.add(HO.dir()); // the handoff summaries (a pickup's "Summary", opened in the viewer)
   return [...out];
 }
-const pageCtx = { sendJson, readBody, folders: knownFolders, log: (t) => logOnce('page:' + t, t) };
+// remote(req): null for this PC's own page, else { name: this PC's tailnet name, login, device } (an approved browser on
+// another device; the gate lets no other remote request reach a handler)
+const remoteOf = (req) => { const w = req && req.fvWho; return w && w.kind === 'remote' && w.device ? { name: w.name, login: w.login, device: w.device.label } : null; };
+// repos(): the workspaces the page lists by hand or remembers, newest first (GET /folders' starting places)
+const pageRepos = () => [...new Set([...addedRepos.map((a) => a && a.root).filter(Boolean).reverse(), ...[...remembered.repos].sort((x, y) => y[1] - x[1]).map(([r]) => r)])];
+const pageCtx = { sendJson, readBody, folders: knownFolders, repos: pageRepos, log: (t) => logOnce('page:' + t, t), remote: remoteOf, tailnet: REMOTE };
+// live.js's: authorize(req) is true only for this PC's page (Origin http://127.0.0.1:PORT or localhost) or an approved
+// remote device (Origin https://<its tailnet name>); state() is GET /state's object
+const liveCtx = {
+  authorize(req) {
+    // asked again every few seconds for an open socket: classify afresh, not the verdict the upgrade cached on req
+    delete req.fvWho;
+    const who = REMOTE.classify(req), origin = req.headers.origin;
+    if (!origin) return false;
+    if (who.kind === 'local') return origin === `http://127.0.0.1:${PORT}` || origin === `http://localhost:${PORT}`;
+    return who.kind === 'remote' && !!who.device && origin === `https://${who.name}`;
+  },
+  state: () => buildState(),
+  log: (t) => logOnce('live:' + t, 'live: ' + t),
+  remote: remoteOf,
+};
 const convCtx = { sendJson, find: conversationLog, live: (id) => !DEMO && liveProcs.has(id), log: (t) => logOnce('chat:' + t, t) };
 
 // Only this machine's own page may talk to the server: the Host must be this address (no DNS rebinding),
 // and a browser's cross-site request (it carries another Origin) is refused. The automation API (/api/) takes
 // no Origin at all and needs its token instead (api.js).
+// The one other way in is remote access (remote.js): a request tailscale serve passed on from another device of the
+// tailnet owner's, with remote access on. It never reaches the API; until its browser is approved on the PC it only
+// gets the pairing page, and after that the page's routes like this PC's own page, with its own Origin checks.
 function handle(req, res) {
   try { handleRequest(req, res); } catch (e) { requestFailed(req, res, e); }
 }
 function handleRequest(req, res) {
-  const host = String(req.headers.host || '').toLowerCase();
-  if (host !== `127.0.0.1:${PORT}` && host !== `localhost:${PORT}`) return sendJson(res, 403, { ok: false, message: 'bad host' });
+  const who = REMOTE.classify(req);
+  if (who.kind === 'refused') {
+    // a browser opening the address gets the reason as a line of text ("remote access is off on the PC"), not JSON
+    if (req.headers['sec-fetch-mode'] === 'navigate') {
+      res.writeHead(who.code, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      return res.end(`Fleet View: ${who.message}.\n`);
+    }
+    return sendJson(res, who.code, { ok: false, message: who.message });
+  }
   let pathname;
   try { pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch { return sendJson(res, 400, { ok: false, message: 'bad url' }); }
-  if (pathname === '/api' || pathname.startsWith('/api/')) return API.handle(req, res, pathname, apiCtx);
-  const origin = req.headers.origin;
-  if (origin && origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) return sendJson(res, 403, { ok: false, message: 'bad origin' });
+  if (who.kind === 'remote') {
+    res.fvZip = zipFor(req);
+    if (REMOTE.route(req, res, pathname, who, pageCtx)) return;
+  } else {
+    if (pathname === '/api' || pathname.startsWith('/api/')) return API.handle(req, res, pathname, apiCtx);
+    const origin = req.headers.origin;
+    if (origin && origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) return sendJson(res, 403, { ok: false, message: 'bad origin' });
+  }
   // the page's own routes: never for another site (a previewed dev page's <img src> sends no Origin)
   const site = req.headers['sec-fetch-site'];
-  if ((site === 'cross-site' || site === 'same-site') && /^\/(changes|preview|file)(\/|$)/.test(pathname)) return sendJson(res, 403, { ok: false, message: 'bad origin' });
+  if ((site === 'cross-site' || site === 'same-site') && /^\/(changes|preview|file|folders|upload|chat\/kind|chat\/files)(\/|$)/.test(pathname)) return sendJson(res, 403, { ok: false, message: 'bad origin' });
+  // GET /remote/me, POST /remote/approve | deny | revoke { id }: this PC's page and approved devices
+  if (REMOTE.common(req, res, pathname, who, pageCtx)) return;
   if (pathname === '/changes' || pathname.startsWith('/changes/')) return void Promise.resolve(CHANGES.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   if (pathname === '/preview' || pathname.startsWith('/preview/')) return void Promise.resolve(PREVIEW.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   if (pathname === '/file') return void Promise.resolve(FILES.serve(req, res, pageCtx)).catch((e) => requestFailed(req, res, e));
+  // a browser's folder picker and its files (files.js): the PC's folders, and a file sent from the browser
+  if (pathname === '/folders') return void Promise.resolve(FILES.folders(req, res, pageCtx)).catch((e) => requestFailed(req, res, e));
+  if (pathname === '/upload') return FILES.upload(req, res, pageCtx);
   if (pathname === '/update' || pathname.startsWith('/update/')) return UPDATER.handle(req, res, pathname, pageCtx);
   if (req.method === 'POST') {
     if (pathname === '/open') {
@@ -5752,11 +5848,20 @@ function handleRequest(req, res) {
         sendJson(res, 200, { ok: USAGE.ack(acctId(b.account), b.episode.slice(0, 40)) });
       });
     }
-    if (pathname === '/settings') return readBody(req, res, (b) => { if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' }); applySettings(b); sendJson(res, 200, { ok: true }); });
+    if (pathname === '/settings') {
+      return readBody(req, res, (b) => {
+        if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
+        // remote access is switched on and off on the PC only, never from a device it lets in
+        if ('remote' in b && who.kind !== 'local') return sendJson(res, 403, { ok: false, message: 'remote access can only be changed on the PC' });
+        applySettings(b);
+        if (b.remote && typeof b.remote === 'object' && typeof b.remote.enabled === 'boolean' && (b.remote.enabled !== REMOTE.enabled() || REMOTE.view().status === 'error')) REMOTE.setEnabled(b.remote.enabled);
+        sendJson(res, 200, { ok: true });
+      });
+    }
     return sendJson(res, 404, { ok: false, message: 'not found' });
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { ok: false, message: 'method not allowed' });
-  if (pathname === '/state') return sendJson(res, 200, buildState());
+  if (pathname === '/state') return sendState(req, res);
   if (pathname === '/timeline') return sendJson(res, 200, timelineOut(new URL(req.url, 'http://x').searchParams));
   if (pathname === '/since') return sendJson(res, 200, sinceOut(new URL(req.url, 'http://x').searchParams));
   if (pathname === '/conversation') return void CONV.conversation(req, res, convCtx).catch((e) => requestFailed(req, res, e));
@@ -5771,14 +5876,27 @@ function handleRequest(req, res) {
     const [code, out] = repoHistory(new URL(req.url, 'http://x').searchParams.get('root'));
     return sendJson(res, code, out);
   }
+  // the pairing page is for browsers on other devices (remote.js); this PC's own page has nothing to pair
+  if (pathname === '/pair' && who.kind === 'local') { res.writeHead(302, { Location: '/', 'Content-Length': 0 }); return res.end(); }
   // static files from web/, never outside it
-  const file = path.resolve(WEB_DIR, '.' + (pathname === '/' ? '/index.html' : pathname));
+  const file = path.resolve(WEB_DIR, '.' + (pathname === '/' ? '/index.html' : pathname === '/pair' ? '/pair.html' : pathname));
   const type = TYPES[path.extname(file).toLowerCase()];
   if (pathname.includes('\0') || !file.startsWith(WEB_DIR + path.sep) || !type) return sendJson(res, 404, { ok: false, message: 'not found' });
   fs.readFile(file, (err, buf) => {
     if (err) return sendJson(res, 404, { ok: false, message: 'not found' });
-    res.writeHead(200, { 'Content-Type': type, 'Content-Length': buf.length, 'Cache-Control': 'no-cache' });
-    res.end(req.method === 'HEAD' ? undefined : buf);
+    // an ETag (the file's sha1), so a reload over Tailscale gets 304 for what did not change
+    const tag = `"${require('crypto').createHash('sha1').update(buf).digest('base64url')}"`;
+    const headers = { 'Content-Type': type, 'Cache-Control': 'no-cache', ETag: tag };
+    // the page itself may only be framed by itself (the pairing page by nothing), on this PC too: another site open in
+    // its browser could otherwise frame it and steer clicks (the remote access switch, Allow); the preview frames and
+    // chat images are other routes and keep their own headers
+    if (type.startsWith('text/html')) {
+      const self = path.basename(file) !== 'pair.html';
+      headers['X-Frame-Options'] = self ? 'SAMEORIGIN' : 'DENY';
+      headers['Content-Security-Policy'] = `frame-ancestors ${self ? "'self'" : "'none'"}`;
+    }
+    if (etagMatches(req, tag)) { res.writeHead(304, { ETag: tag, 'Cache-Control': 'no-cache' }); return res.end(); }
+    sendBody(res, 200, headers, buf, req.method === 'HEAD');
   });
 }
 
@@ -5862,6 +5980,8 @@ let exitReason = '';
 function exitWith(code, reason) {
   exitReason = reason;
   try { flushSettings(); } catch {}
+  try { REMOTE.flush(); } catch {}
+  try { REMOTE.unserveSync(); } catch {}
   try { if (histOn) saveHistory(); } catch {}
   try { tlFlushSync(); } catch {}
   process.exit(code);
@@ -5911,6 +6031,20 @@ function startWeb() {
   logLine(`start: port ${PORT}, version ${versionOf()}, node ${process.version}${DEMO ? ', demo' : ''}${NO_OPEN ? ', --no-open' : ''}${process.env.FLEET_VIEW_LOOP === '1' ? '' : ', no restart loop'}${after}`);
   setTimeout(registerLauncher, 5000);
   const server = http.createServer(handle);
+  // POST /upload takes up to 200 MB from a browser on another computer, which over Tailscale can take longer than
+  // Node's 5 minutes for a whole request; only loopback reaches this server, so a slow sender costs nothing here
+  server.requestTimeout = 30 * 60e3;
+  // files sent from a browser (POST /upload) are kept a week
+  setTimeout(() => { try { const n = FILES.pruneUploads(); if (n) logLine(`uploads: removed ${n} old folder${n === 1 ? '' : 's'}`); } catch {} }, 10e3).unref();
+  // WebSockets (/live: live.js streams the live sessions to a browser). Browsers send no CORS preflight for a
+  // WebSocket, so the Origin is required here: this PC's page, or an approved remote device on its https address.
+  // Without live.js (an older checkout) every upgrade is closed.
+  try { LIVE = require(path.join(__dirname, 'live.js')); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') logLine(`live.js did not load\n${errorText(e)}`); }
+  server.on('upgrade', (req, socket, head) => {
+    socket.on('error', () => {});
+    if (!LIVE || typeof LIVE.upgrade !== 'function') return socket.destroy();
+    try { LIVE.upgrade(req, socket, head, liveCtx); } catch (e) { logOnce('live:' + (e && e.message), `live upgrade failed\n${errorText(e)}`); socket.destroy(); }
+  });
   let tries = 0, listening = false;
   server.on('error', (e) => {
     if (listening || e.code !== 'EADDRINUSE') {
@@ -5949,6 +6083,8 @@ function startWeb() {
     if (!DEMO) UPDATER.start({ log: logLine, busy: () => [...sessions.values()].filter((s) => inState(s) && (s.state === 'WORKING' || s.state === 'AGENTS')).length });
     if (process.env.FV_TEST_CRASH === '1') setTimeout(() => { throw new Error('FV_TEST_CRASH: test crash 3 s after start'); }, 3000);
     const every = (ms, name, fn) => setInterval(() => { try { fn(); } catch (e) { logOnce(name + ':' + (e && e.message), `${name} failed\n${errorText(e)}`); } }, ms);
+    // remote access: this PC's tailnet name, read now and every minute; with the switch on, 443 is made to point here
+    REMOTE.start();
     if (DEMO) {
       demoInit();
       every(1500, 'demo', demoTick);

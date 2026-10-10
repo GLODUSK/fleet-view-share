@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>Fleet View</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1l7 7-7 7-7-7z' fill='%23ff6a2b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="pair.css">
+</head>
+<body>
+<!-- The pairing page (remote.js): a browser on another device that is not approved yet gets only this. It asks the
+     PC for a code, shows it, and waits until the PC allows it; then it goes to the page itself. -->
+<main class="pair">
+  <section class="card" aria-live="polite">
+    <div class="brand">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><defs><linearGradient id="bm" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6a2b"/><stop offset=".55" stop-color="#ffc24a"/><stop offset="1" stop-color="#ff4d8d"/></linearGradient></defs><path d="M8 1.2l6.8 6.8L8 14.8 1.2 8z" fill="url(#bm)"/></svg>
+      <span>Fleet View</span>
+      <span id="pc" class="pc"></span>
+    </div>
+    <h1 id="title">Asking the PC…</h1>
+    <p id="code" class="code" hidden></p>
+    <p id="msg" class="msg"></p>
+    <div class="acts"><button type="button" id="again" class="btn primary" hidden>Ask again</button></div>
+  </section>
+</main>
+<script src="pair.js"></script>
+</body>
+</html>

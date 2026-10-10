@@ -1,8 +1,11 @@
 // Live sessions: the real, interactive Claude Code session of a conversation, in the detail panel's Session tab.
 //
-// The desktop window (desktop/main.js) hosts a pseudo-terminal per conversation that runs `claude --resume <id>`
-// (interactive, never headless) and keeps it alive across page and server reloads. The page reaches it only
-// through window.fleetDesktop.term (desktop/preload.js):
+// The session host (desktop/host.js, started by the desktop window) runs a pseudo-terminal per conversation with
+// `claude --resume <id>` (interactive, never headless) and keeps it alive across page and server reloads. The
+// page reaches it through termApi(): window.fleetDesktop.term (desktop/preload.js) in the desktop window, and in
+// any other browser (Edge on this PC, a browser on another computer through Tailscale) the same API over a
+// WebSocket to the server's /live (remote-term.js, live.js; the server allows only this PC's own page and the
+// devices approved for remote access):
 //   term.open({ id, cwd, account }) -> Promise<{ ok, message, pid? }>   (ok without spawning when it already runs)
 //   term.create({ cwd, account }) -> Promise<{ ok, message, key? }>   a new conversation (plain `claude`) in a
 //                                     repo folder, keyed "new-<n>" until Claude Code reports its id (onRekey);
@@ -16,8 +19,12 @@
 //                             it after a minute left alone)
 //   term.snapshot(id) -> Promise<string>          the last ~512 KB of output, replayed when a view attaches
 //   term.onData(cb(id, chunk)) / term.onExit(cb(id, code)) / term.onRekey(cb(oldKey, id))  -> unsubscribe functions
-// Edge and plain browsers have no fleetDesktop.term: the Session tab then says so and offers the usual
-// "Open in terminal" (a Windows Terminal tab, or a console window) instead.
+// In a browser termApi() is null while the session host is not running (the server says so) or the server can't be
+// reached (a dropped socket gets 20 s to come back first): the Session tab then says which, and on this PC offers
+// the usual "Open in terminal" (a Windows Terminal tab, or a console window) instead. When the socket comes back,
+// or the host does, every view the page holds is drawn again from a fresh snapshot (hostChanged), since output
+// sent meanwhile never reached it. The desktop window's mini view (fleetDesktop without term) and ?fixture=1
+// (made-up conversations) have no live sessions at all.
 //
 // Opening by itself: a click on a conversation (renderSessionPane's o.auto) starts its session here, unless a
 // live claude process elsewhere has it open (/state's openElsewhere, ignored for the ones this window hosts):
@@ -44,6 +51,7 @@
 
 import { esc } from './cards.js';
 import { icon } from './icons.js';
+import { createRemoteTerm } from './remote-term.js';
 
 // a Claude account letter: one letter (A, B, C, ...), else B, the default login
 const acctOf = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
@@ -53,10 +61,43 @@ const ID_RE = /^[0-9a-f-]{36}$/i;
 const KEY_RE = /^(?:[0-9a-f-]{36}|new-\d{1,9})$/i;
 export const isNewKey = (id) => /^new-\d{1,9}$/.test(String(id || ''));
 
-export function termApi() {
-  const t = window.fleetDesktop && window.fleetDesktop.term;
-  return t && typeof t.open === 'function' && typeof t.list === 'function' && typeof t.write === 'function' ? t : null;
+// the term API behind the page, whether or not it can be used right now: the desktop window's, else (a browser,
+// not the fixture) the WebSocket one, made on first use
+let remote = null;
+const FIXTURE_PAGE = (() => { try { return new URLSearchParams(location.search).has('fixture'); } catch { return false; } })();
+function liveApi() {
+  const d = window.fleetDesktop;
+  if (d) {
+    const t = d.term;
+    return t && typeof t.open === 'function' && typeof t.list === 'function' && typeof t.write === 'function' ? t : null;
+  }
+  if (FIXTURE_PAGE) return null;
+  if (!remote) { try { remote = createRemoteTerm(); } catch (e) { console.warn(e); return null; } }
+  return remote;
 }
+// the term API when live sessions can be used now, else null
+export function termApi() {
+  const t = liveApi();
+  return t && t === remote && !remote.available() ? null : t;
+}
+// is this page on this PC (not another computer reaching it through Tailscale)?
+const onThisPc = () => /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(location.hostname);
+// why termApi() is null: 'nodesk' (no live sessions in this window), 'host' (the session host is not running),
+// 'away' (Fleet View on the PC can't be reached)
+function whyNoTerm() {
+  if (!remote) return 'nodesk';
+  return remote.hostUp() === false && remote.connected() ? 'host' : 'away';
+}
+// Why something that types into a live session can't now, in words that are true where the page is: the desktop
+// window's mini view and ?fixture=1 (no live sessions at all) need the desktop window; a browser needs the session
+// host on the PC (it runs with the desktop app) and the connection to Fleet View there. noTermMsg('Sending') is a
+// sentence ("Sending needs …"); noTermNote() the short form a menu item's note takes.
+export const noTermMsg = (what) => ({
+  nodesk: `${what} needs the Fleet View desktop window`,
+  host: `${what} needs the session host, which runs with the Fleet View desktop app on the PC; it is not running now`,
+  away: `${what} needs Fleet View on the PC, which can't be reached right now`,
+})[whyNoTerm()];
+export const noTermNote = () => ({ nodesk: 'desktop window only', host: 'the session host is not running on the PC', away: "can't reach Fleet View on the PC" })[whyNoTerm()];
 
 // ---------- which conversations Fleet View hosts (term.list, every 2 s, and onExit at once) ----------
 export const hosts = new Map(); // id -> { id, pid, alive, exitCode, startedAt, pending, created, cwd, account, status, interrupted,
@@ -124,7 +165,7 @@ export async function refreshHosts() {
 // starts the polling and the live wiring once; onChange runs whenever the hosted set or a state changes
 export function watchHosts(onChange) {
   if (onChange) listeners.add(onChange);
-  const t = termApi();
+  const t = liveApi();
   if (!t || started) return;
   started = true;
   try { t.onData((id, chunk) => { const v = views.get(id); if (v && v.term && !v.replaying) v.term.write(chunk); }); } catch (e) { console.warn(e); }
@@ -138,8 +179,23 @@ export function watchHosts(onChange) {
     });
   } catch (e) { console.warn(e); }
   try { if (typeof t.onRekey === 'function') t.onRekey((oldKey, id) => rekeyLocal(oldKey, id)); } catch (e) { console.warn(e); }
+  // a browser: the socket or the host went away and came back (onHost, remote-term.js)
+  try { if (typeof t.onHost === 'function') t.onHost((up) => hostChanged(up)); } catch (e) { console.warn(e); }
   refreshHosts();
   setInterval(refreshHosts, 2000);
+}
+
+// While the socket was down, or the host restarted, output went past this page: every view it holds is drawn again
+// from a fresh snapshot (the old screen cleared first), and the list is read again. Down: a redraw, so the tab and
+// the menus show what termApi() now says.
+let hostWasDown = false;
+function hostChanged(up) {
+  if (!up) { hostWasDown = true; hostsKey = hostKey(); notify(); return; }
+  if (hostWasDown) {
+    hostWasDown = false;
+    for (const v of views.values()) if (v.term && v.fed) replay(v, true);
+  }
+  refreshHosts().then(() => { hostsKey = hostKey(); notify(); });
 }
 
 // a new conversation got its id: its entry, its terminal view and its marks move to the id
@@ -163,7 +219,7 @@ function rekeyLocal(oldKey, id) {
 // folder; resolves { ok, message, key }
 export async function createSession({ cwd, account, cols, rows, forkFrom } = {}) {
   const t = termApi();
-  if (!t || typeof t.create !== 'function') return { ok: false, message: 'new sessions need the Fleet View desktop window' };
+  if (!t || typeof t.create !== 'function') return { ok: false, message: noTermMsg('Starting a new session') };
   let r;
   try { r = await t.create({ cwd, account: acctOf(account), cols, rows, ...(forkFrom ? { forkFrom } : {}) }); } catch (e) { r = { ok: false, message: String(e?.message || e) }; }
   // a host from before forks would start a plain new conversation: it says forkFrom back when it forked
@@ -181,7 +237,7 @@ export async function createSession({ cwd, account, cols, rows, forkFrom } = {})
 // handoff's pickup then takes its place there (host.js sendTo). Its terminal view starts over with the new process.
 export async function sendToAccount(s, account, size = {}) {
   const t = termApi();
-  if (!t || typeof t.sendTo !== 'function') return { ok: false, message: 'sending to the other account needs the Fleet View desktop window' };
+  if (!t || typeof t.sendTo !== 'function') return { ok: false, message: noTermMsg('Sending to the other account') };
   if (!s || !ID_RE.test(String(s.id || ''))) return { ok: false, message: 'not a conversation' };
   preview.delete(s.id);
   disposeView(s.id);
@@ -413,12 +469,18 @@ function disposeView(id) {
 // replay the buffered output once, then live chunks (dropped while the snapshot is on its way: they are in it,
 // since the host answers the snapshot and sends data over the same ordered channel)
 // v.parsed: xterm has drawn the snapshot (it parses a write in slices, later): only then is its screen readable
-async function replay(v) {
-  const t = termApi();
+// fresh: a resync (hostChanged): the screen is cleared just before the new snapshot goes in. Only a view's latest
+// replay writes, so a resync while its first replay is on the way never draws the screen twice.
+async function replay(v, fresh = false) {
+  const t = liveApi();
+  const gen = (v.replayGen || 0) + 1;
+  v.replayGen = gen;
   v.replaying = true;
   v.parsed = false;
   let snap = '';
   try { snap = (t && (await t.snapshot(v.id))) || ''; } catch {}
+  if (v.replayGen !== gen || views.get(v.id) !== v || !v.term) return;
+  if (fresh) { try { v.term.reset(); } catch {} }
   if (snap) {
     let done = false;
     const mark = () => { if (!done) { done = true; v.parsed = true; } };
@@ -472,10 +534,19 @@ export function renderSessionPane(pane, s, o) {
   if (o.visible) mount(pane, s.id);
 }
 
+// no live sessions now: why, and (on this PC) the terminal instead. A browser on another computer gets no button:
+// a terminal would open on the PC, not in front of you.
 function noDeskHtml() {
-  return `<div class="s-card"><div class="s-ic">${icon('shell', 20)}</div><div class="s-title">Live sessions need the Fleet View desktop window</div>`
-    + '<div class="s-text">In the desktop window this tab runs the conversation itself, live, and you can type into it here. In this window, open it in a terminal instead.</div>'
-    + `<div class="s-actions"><button type="button" class="btn primary d-open-btn" data-open>${icon('open', 15)}<span>Open in terminal</span></button></div></div>`;
+  const why = whyNoTerm();
+  const title = why === 'host' ? 'The session host is not running'
+    : why === 'away' ? "Can't reach Fleet View on the PC"
+      : 'Live sessions need the Fleet View desktop window';
+  const text = why === 'host' ? 'Live sessions run in the session host, which the Fleet View desktop app starts on the PC. Open the desktop app there and this tab connects by itself.'
+    : why === 'away' ? 'This tab runs the conversation live once it can reach Fleet View again; it keeps trying by itself.'
+      : 'In the desktop window this tab runs the conversation itself, live, and you can type into it here. In this window, open it in a terminal instead.';
+  const btn = why === 'away' || !onThisPc() ? ''
+    : `<div class="s-actions"><button type="button" class="btn primary d-open-btn" data-open>${icon('open', 15)}<span>Open in terminal</span></button></div>`;
+  return `<div class="s-card"><div class="s-ic">${icon('shell', 20)}</div><div class="s-title">${esc(title)}</div><div class="s-text">${esc(text)}</div>${btn}</div>`;
 }
 
 function openHtml(s, pane) {
@@ -601,7 +672,7 @@ const READY_MS = 60000, SETTLE_MS = 1000;
 // hears what it is doing. Resolves { ok, started, message? }.
 export function ensureLive(s, o = {}) {
   const t = termApi();
-  if (!t) return Promise.resolve({ ok: false, message: 'Sending needs the desktop window' });
+  if (!t) return Promise.resolve({ ok: false, message: noTermMsg('Sending') });
   if (!s || !KEY_RE.test(String(s.id || ''))) return Promise.resolve({ ok: false, message: 'not a conversation' });
   const h = hosts.get(s.id);
   if (h?.alive) { keep(s.id); return Promise.resolve({ ok: true, started: false }); }
@@ -702,7 +773,7 @@ export async function typeInto(write, text) {
 export const SEND_ENTER_MS = 300;
 export async function sendText(id, text, o = {}) {
   const t = termApi();
-  if (!t) return { ok: false, message: 'Sending needs the desktop window' };
+  if (!t) return { ok: false, message: noTermMsg('Sending') };
   if (!id || !hosts.get(id)?.alive) return { ok: false, message: 'it is not running here' };
   const msg = String(text ?? '').replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '').trim();
   if (!msg) return { ok: false, message: 'nothing to send' };

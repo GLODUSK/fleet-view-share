@@ -1,17 +1,26 @@
 // Fleet View: the Preview tab's server side (web/preview.js shows it): which local dev servers a conversation has
 // used, whether they answer, and starting and stopping the ones its folder's .claude/launch.json describes.
 // fleet-view.js hands every /preview… request here (handle), with ctx = { sendJson, readBody, folders, log } and,
-// when it offers one, ctx.find(id) -> { file } (the conversation's transcript, as the Chat tab finds it).
+// when it offers them, ctx.find(id) -> { file } (the conversation's transcript, as the Chat tab finds it),
+// ctx.remote(req) -> null for this PC's own page, else { name, login, device } (an approved browser on another
+// device, remote.js), and ctx.tailnet (remote.js's instance: whoAt, servePort, unservePort; see "From another
+// device" below).
 //
 //   GET  /preview/urls?id=<conversation>&cwd=<folder>[&current=<url>][&frame=1]
-//        -> { urls: [...], current? }
+//        -> { urls: [...], current?, remote? }
 //        urls, newest first: the addresses found in the transcript, { url, from: 'transcript', at, up }, then the
 //        launch.json configurations, { name, port, url, from: 'launch.json', launch: true, running, up }.
-//        current (when asked): { url, up, frame? }; frame=1 also fetches that page's headers and says whether it
-//        lets another page show it in a frame (X-Frame-Options, CSP frame-ancestors): the Edge window needs it,
-//        the desktop window strips those headers for previews itself (desktop/main.js).
+//        current (when asked): { url, up, frame?, share? }; frame=1 also fetches that page's headers and says
+//        whether it lets another page show it in a frame (X-Frame-Options, CSP frame-ancestors): the Edge window
+//        needs it, the desktop window strips those headers for previews itself (desktop/main.js).
+//        remote: true when the asking page is a browser on another device. Then current.share is how that browser
+//        reaches the page: { ok: true, url: 'https://<pc>.<tailnet>.ts.net:<port>/<path>', gen } (gen changes when
+//        the share was made again, so the frame loads it again), or { ok: false, message }.
 //   POST /preview/start { cwd, name } -> { ok, url, already?, message? }   starts that launch.json configuration
 //   POST /preview/stop  { cwd, name } -> { ok, message? }                  stops it, with its whole process tree
+//   POST /preview/shot  { id, cwd, url, width, height, scale? } -> image/png, or JSON { ok: false, message }
+//        a screenshot of that page taken on this PC by headless Edge, for a browser that can't capture the frame
+//        itself (anything but the desktop window); see "Screenshots" below
 //
 // Found addresses: the end of the transcript (its last TAIL bytes, then only what was appended) is searched for
 // http://localhost:<port>, http://127.0.0.1:<port> and http://[::1]:<port> (0.0.0.0 counts as localhost), in
@@ -33,7 +42,48 @@
 // whole tree (taskkill /T /F).
 //
 // Only folders inside ctx.folders() (the conversations' folders and the repos) are read or run. A request from
-// any other page (an Origin that isn't this server's own, such as the previewed dev page itself) is refused.
+// any other page (an Origin that isn't this server's own, such as the previewed dev page itself) is refused; for a
+// remote browser its own is https://<this PC's tailnet name>.
+//
+// From another device (Henry's Mac over Tailscale). There, http://localhost:<port> is the Mac's own localhost, so
+// the dev server has to be reached through the PC. How, and why this way:
+//   - A path-prefix proxy on Fleet View's own address (https://<pc>/preview-proxy/5173/…) breaks most dev servers:
+//     their pages load /@vite/client, /_next/static/…, /assets/… from the root and open their HMR WebSocket there.
+//   - `tailscale serve --https=<port>` straight at the dev server keeps the paths, but (measured 2026-10-10) Vite
+//     8 answers 403 "Blocked request. This host ("<pc>.ts.net") is not allowed" (server.allowedHosts, every Vite
+//     since 5.4.12), and Next 16 refuses /_next/* and its HMR socket from an Origin that isn't localhost
+//     (allowedDevOrigins); any device on the tailnet could open it with no approval at all; the browser would send
+//     it Fleet View's fv_device cookie (cookies don't care about the port); and X-Frame-Options would still keep
+//     it out of the frame.
+//   - So: `tailscale serve --bg --https=<the dev server's port>` points at a small proxy here on 127.0.0.1 (one
+//     listener for every shared port; tailscaled keeps the Host, so <pc>:<port> says which dev server). Each request
+//     and WebSocket is let through only for an approved device (ctx.tailnet.whoAt: the owner's Tailscale login and
+//     the fv_device cookie, as for the page itself; an open WebSocket is asked again every RECHECK_MS), and is
+//     passed on as the PC's own browser would send it: Host localhost:<port>, an Origin or Referer of the shared
+//     address turned back into http://localhost:<port>, Fleet View's cookies and tailscaled's Tailscale-* and
+//     X-Forwarded-* headers taken out. On the way back X-Frame-Options and CSP frame-ancestors go (as the desktop
+//     window drops them) and frame-ancestors 'self' https://<pc> is set instead, so only Fleet View's page (and
+//     the dev page itself) may frame it; a Location back to localhost:<port> becomes the shared address; a
+//     Set-Cookie for Fleet View's own cookie names is dropped and Domain=localhost taken off. Bodies pass as they
+//     are: a page that writes http://localhost:<port> into its own HTML or JS (rare: Vite and Next build HMR's
+//     address from the page's location) still points at the Mac's localhost there.
+//   - Only a port the Preview tab lists for that conversation (transcript or launch.json, so never Fleet View's own,
+//     never 443 or below 1024) is shared, only when an approved remote browser's poll names it as the page it
+//     shows, and only while it answers. A share nobody used (no poll naming it, no request through it) for
+//     SHARE_IDLE_MS is turned off, as is one whose launch.json configuration Stop ended; remote.js turns them all
+//     off when remote access is switched off, and on the next start any a stopped server left (its record in
+//     %LOCALAPPDATA%\fleet-view\preview-serve.json). Ports another tailscale serve entry uses are never taken.
+//   Cross-site: the dev page at https://<pc>:<port> is another origin than Fleet View's https://<pc> but the same
+//   site, so remote.js's check that refuses same-site requests keeps it from Fleet View's routes and /live. It can
+//   still set cookies on <pc> (not HttpOnly ones it didn't make, and not through this proxy under Fleet View's
+//   names); that dev code already runs on this PC anyway.
+//
+// Screenshots. The desktop window captures the frame's area itself (fleetDesktop.capture). Any other browser can't
+// read a cross-origin frame's pixels (getDisplayMedia could, but asks every time and shares a whole tab), so
+// POST /preview/shot loads the same address in headless Edge on this PC at the frame's size and returns the PNG
+// (one at a time, SHOT_MS at most, SHOT_MAX bytes, a fresh profile in a temp folder that is removed after). It
+// shows the page as a fresh load: signed out, scrolled to the top. A remote browser may only ask for a port its
+// conversation lists, as for sharing.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -57,6 +107,14 @@ const WIN = process.platform === 'win32';
 const DATA = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'fleet-view');
 const PROCS_FILE = path.join(DATA, 'preview-procs.json');
 const LOG_DIR = path.join(DATA, 'preview-logs');
+const SHARE_IDLE_MS = 10 * 60e3; // a share nobody used for this long is turned off
+const SWEEP_MS = 30e3;
+const RECHECK_MS = 5000; // an open WebSocket through a share: its device asked again this often
+const SOCKETS_MAX = 200; // open WebSockets through all shares together
+const SHOT_MS = 15000; // headless Edge, start to PNG
+const SHOT_MAX = 15 << 20;
+const SHOT_VT_MS = 4000; // Edge's virtual time for the page's scripts, before it takes the picture
+const FV_COOKIES = new Set(['__Host-fv_device', 'fv_pair', 'fv_device']); // remote.js's; never passed to a dev server, never set by one
 
 // ---------- addresses ----------
 // a local dev server's address, or null: http, localhost / 127.0.0.1 / [::1], an explicit port that isn't Fleet View's
@@ -371,22 +429,284 @@ function killTree(pid) {
   });
 }
 
+// ---------- sharing a dev server with another device (see "From another device" at the top) ----------
+let gate = null; // ctx.tailnet (remote.js), from the first request that brings it
+const shares = new Map(); // dev port -> { port, host, url, gen, lastUsed, sockets: Set, making? }
+let shareGen = 0;
+let proxy = null; // { server, port: Promise<number> }
+let sweeper = null;
+
+// the one proxy listener every share points at; its port
+function proxyPort() {
+  if (proxy) return proxy.port;
+  const server = http.createServer(proxyRequest);
+  server.on('upgrade', proxyUpgrade);
+  server.on('clientError', (e, sock) => { try { sock.destroy(); } catch {} });
+  server.headersTimeout = 30e3;
+  server.requestTimeout = 0; // a dev server's event stream may stay open
+  const port = new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+  });
+  proxy = { server, port };
+  port.catch(() => { proxy = null; });
+  return port;
+}
+const portOfHost = (host) => { const m = /:(\d{2,5})$/.exec(String(host || '')); return m ? Number(m[1]) : 0; };
+// the share a request through the proxy is for, when its device may use it: { sh, who } or null
+function admit(req) {
+  const p = portOfHost(req.headers.host);
+  const sh = shares.get(p);
+  if (!sh || sh.making || !gate) return null;
+  // another site's page never uses a share with the device's cookie: only the shared page's own requests, and a
+  // navigation into it (the Preview frame on Fleet View's page is same-site)
+  const site = req.headers['sec-fetch-site'], mode = req.headers['sec-fetch-mode'];
+  if (site === 'cross-site' || (site === 'same-site' && mode !== 'navigate' && mode !== 'nested-navigate')) return null;
+  const who = gate.whoAt(req, p);
+  if (!who) return null;
+  return { sh, who };
+}
+const localOrigin = (sh) => `http://${sh.host}:${sh.port}`;
+// a Cookie header without Fleet View's own cookies
+function dropOurCookies(v) {
+  const kept = String(v || '').split(';').map((x) => x.trim()).filter((x) => x && !FV_COOKIES.has(x.split('=')[0].trim()));
+  return kept.length ? kept.join('; ') : null;
+}
+// the request's headers as the PC's own browser would send them to the dev server (see the top). upgrade: keep the
+// WebSocket's Connection and Upgrade
+function forwardHeaders(h, sh, who, upgrade) {
+  const remoteOrigin = `https://${who.name}:${sh.port}`;
+  const out = {};
+  for (const [k, v] of Object.entries(h)) {
+    if (/^(tailscale-|x-forwarded-)/.test(k) || k === 'forwarded' || k === 'host' || k === 'proxy-connection' || k === 'keep-alive' || k === 'te' || k === 'trailer' || k === 'transfer-encoding') continue;
+    if (!upgrade && (k === 'connection' || k === 'upgrade')) continue;
+    out[k] = v;
+  }
+  out.host = `${sh.host}:${sh.port}`;
+  if (out.origin === remoteOrigin) out.origin = localOrigin(sh);
+  if (typeof out.referer === 'string' && (out.referer === remoteOrigin || out.referer.startsWith(remoteOrigin + '/'))) out.referer = localOrigin(sh) + out.referer.slice(remoteOrigin.length);
+  if (out.cookie !== undefined) { const c = dropOurCookies(out.cookie); if (c) out.cookie = c; else delete out.cookie; }
+  return out;
+}
+// the dev server's answer headers, for the remote browser (see the top); raw: [name, value, name, value, …]
+function backHeaders(raw, sh, who) {
+  const remoteOrigin = `https://${who.name}:${sh.port}`;
+  const local = new RegExp(`^https?://(localhost|127\\.0\\.0\\.1|\\[::1\\]):${sh.port}(?=/|$)`, 'i');
+  const out = [];
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    const name = raw[i], k = name.toLowerCase();
+    let v = raw[i + 1];
+    if (k === 'x-frame-options' || k === 'strict-transport-security' || k === 'connection' || k === 'keep-alive' || k === 'transfer-encoding' || k === 'proxy-connection') continue;
+    if (k === 'content-security-policy') {
+      v = v.split(';').filter((d) => !/^\s*frame-ancestors(\s|$)/i.test(d)).join(';').trim();
+      if (!v.replace(/;/g, '').trim()) continue;
+    } else if (k === 'location' || k === 'content-location' || k === 'access-control-allow-origin') {
+      v = v.replace(local, remoteOrigin);
+    } else if (k === 'set-cookie') {
+      if (FV_COOKIES.has(v.split('=')[0].trim())) continue;
+      v = v.replace(/;\s*domain=\.?(localhost|127\.0\.0\.1|\[::1\])\s*(?=;|$)/ig, '');
+    }
+    out.push(name, v);
+  }
+  out.push('Content-Security-Policy', `frame-ancestors 'self' https://${who.name}`);
+  return out;
+}
+function proxyRequest(req, res) {
+  const a = admit(req);
+  if (!a) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    return res.end('Fleet View: this preview is for the browsers approved on the PC, while the Preview tab shows it.\n');
+  }
+  const { sh, who } = a;
+  sh.lastUsed = Date.now();
+  const up = http.request({ host: connectHost(sh.host), port: sh.port, method: req.method, path: req.url, headers: forwardHeaders(req.headers, sh, who, false), autoSelectFamily: true });
+  up.on('response', (r) => {
+    res.writeHead(r.statusCode, r.statusMessage, backHeaders(r.rawHeaders, sh, who));
+    r.pipe(res);
+    res.on('close', () => r.destroy());
+  });
+  up.on('error', () => {
+    if (!res.headersSent) { res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(`Fleet View: nothing answers at ${sh.host}:${sh.port} on the PC right now.\n`); }
+    else res.destroy();
+  });
+  res.on('close', () => { if (!res.writableFinished) up.destroy(); }); // the browser went away mid-answer
+  req.pipe(up);
+}
+// a WebSocket (a dev server's HMR): checked like a request, and only from the shared page itself (its Origin). The
+// dev server's answer is read before anything is joined: only a 101 joins the two sockets (its headers filtered as
+// any answer's, so it sets no Fleet View cookie); any other answer goes back with the connection closed, so a refused
+// upgrade never leaves a plain pipe to the dev server open for tailscaled's next request (another device's, ungated).
+// Its device is asked again every RECHECK_MS while it stays open.
+function proxyUpgrade(req, sock, head) {
+  const a = admit(req);
+  const total = [...shares.values()].reduce((n, s) => n + s.sockets.size, 0);
+  const own = !!a && req.headers.origin === `https://${a.who.name}:${a.sh.port}`;
+  if (!own || total >= SOCKETS_MAX) { try { sock.end(`HTTP/1.1 ${own ? '503 Service Unavailable' : '403 Forbidden'}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch {} return; }
+  const { sh, who } = a;
+  sh.lastUsed = Date.now();
+  const up = http.request({ host: connectHost(sh.host), port: sh.port, method: req.method, path: req.url, headers: forwardHeaders(req.headers, sh, who, true), agent: false, autoSelectFamily: true });
+  const pair = { sock, up, req }; // up: the request, then the dev server's socket once it switched
+  let ended = false;
+  const end = () => { if (ended) return; ended = true; sh.sockets.delete(pair); sock.destroy(); pair.up.destroy(); up.destroy(); };
+  // not switched: this answer, then the connection closes (sock.end lets the answer out first)
+  const refuse = (status) => {
+    if (ended) return;
+    ended = true;
+    sh.sockets.delete(pair);
+    up.destroy();
+    try { sock.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch { sock.destroy(); }
+  };
+  sh.sockets.add(pair);
+  sock.on('error', end);
+  sock.on('close', end);
+  up.on('response', (r) => { r.resume(); refuse(`${r.statusCode} ${String(r.statusMessage || '').replace(/[\r\n]/g, '')}`); });
+  up.on('upgrade', (r, upSock, upHead) => {
+    pair.up = upSock;
+    if (ended) return void upSock.destroy();
+    const h = backHeaders(r.rawHeaders, sh, who);
+    let text = 'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n';
+    for (let i = 0; i + 1 < h.length; i += 2) text += `${h[i]}: ${h[i + 1]}\r\n`;
+    sock.write(text + '\r\n');
+    if (upHead && upHead.length) sock.write(upHead);
+    if (head && head.length) upSock.write(head);
+    upSock.on('error', end);
+    upSock.on('close', end);
+    upSock.pipe(sock);
+    sock.pipe(upSock);
+  });
+  up.on('error', () => { if (pair.up === up) refuse('502 Bad Gateway'); else end(); });
+  up.end();
+}
+// every RECHECK_MS: open WebSockets whose device may no longer use Fleet View close; every SWEEP_MS: idle shares go
+function startSweeper(ctx) {
+  if (sweeper) return;
+  let n = 0;
+  sweeper = setInterval(() => {
+    for (const sh of shares.values()) for (const pair of [...sh.sockets]) if (!gate || !gate.whoAt(pair.req, sh.port)) { pair.sock.destroy(); pair.up.destroy(); sh.sockets.delete(pair); }
+    if (++n % Math.round(SWEEP_MS / RECHECK_MS)) return;
+    for (const sh of [...shares.values()]) if (!sh.making && Date.now() - sh.lastUsed > SHARE_IDLE_MS) unshare(ctx, sh.port, 'not used for 10 minutes');
+  }, RECHECK_MS);
+  if (sweeper.unref) sweeper.unref();
+}
+// share this local dev page (a URL) with the remote browser asking: { ok, url, gen } or { ok: false, message }
+async function share(ctx, cur, rem) {
+  if (!gate) return { ok: false, message: 'this Fleet View server can\'t share previews with other devices' };
+  const p = Number(cur.port);
+  let sh = shares.get(p);
+  if (sh && sh.making) await sh.making;
+  sh = shares.get(p);
+  // gone on the tailscale side meanwhile (remote access was switched off and on): made again
+  if (sh && !gate.servedPorts().includes(p)) { unshare(ctx, p, 'tailscale serve no longer has it'); sh = null; }
+  if (!sh) {
+    sh = { port: p, host: cur.hostname, url: null, gen: 0, lastUsed: Date.now(), sockets: new Set(), making: null };
+    shares.set(p, sh);
+    sh.making = (async () => {
+      let target;
+      try { target = `http://127.0.0.1:${await proxyPort()}`; } catch (e) { return { ok: false, message: `could not start the preview proxy: ${e.message}` }; }
+      return gate.servePort(p, target);
+    })();
+    const r = await sh.making;
+    sh.making = null;
+    if (!r.ok) { shares.delete(p); return { ok: false, message: r.message }; }
+    sh.url = r.url;
+    sh.gen = ++shareGen;
+    startSweeper(ctx);
+    ctx.log(`preview: ${cur.host} shared at ${r.url} for ${rem.device} (${rem.login})`);
+  }
+  sh.host = cur.hostname; // the address the conversation uses for it (localhost, 127.0.0.1, [::1])
+  sh.lastUsed = Date.now();
+  return { ok: true, url: `${sh.url}${cur.pathname}${cur.search}`, gen: sh.gen };
+}
+function unshare(ctx, p, why) {
+  const sh = shares.get(p);
+  if (!sh || sh.making) return;
+  shares.delete(p);
+  for (const pair of sh.sockets) { pair.sock.destroy(); pair.up.destroy(); }
+  if (gate) gate.unservePort(p);
+  ctx.log(`preview: stopped sharing port ${p} (${why})`);
+}
+
+// ---------- screenshots on this PC (see "Screenshots" at the top) ----------
+function edgeExe() {
+  if (!WIN) return null;
+  const roots = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(Boolean);
+  for (const r of roots) { const f = path.join(r, 'Microsoft', 'Edge', 'Application', 'msedge.exe'); if (fs.existsSync(f)) return f; }
+  return null;
+}
+let shooting = false;
+// -> { ok: true, png } or { ok: false, code, message }
+function shoot(url, width, height, scale) {
+  const exe = edgeExe();
+  if (!exe) return Promise.resolve({ ok: false, code: 501, message: 'Microsoft Edge was not found on the PC, so it can\'t take the screenshot' });
+  if (shooting) return Promise.resolve({ ok: false, code: 429, message: 'a screenshot is being taken; try again in a moment' });
+  shooting = true;
+  let dir;
+  try { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fv-shot-')); } catch (e) { shooting = false; return Promise.resolve({ ok: false, code: 500, message: `no temp folder: ${e.message}` }); }
+  const out = path.join(dir, 'shot.png');
+  const args = ['--headless', '--disable-gpu', '--hide-scrollbars', '--mute-audio', '--no-first-run', '--no-default-browser-check',
+    '--disable-extensions', '--disable-sync', '--disable-background-networking', '--disable-component-update', '--disable-features=msEdgeFRE',
+    `--user-data-dir=${path.join(dir, 'profile')}`, `--window-size=${width},${height}`, `--force-device-scale-factor=${scale}`,
+    `--virtual-time-budget=${SHOT_VT_MS}`, `--screenshot=${out}`, url];
+  return new Promise((resolve) => {
+    let done = false, child = null;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      shooting = false;
+      // Edge may still hold its profile for a moment after it exits
+      fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 400 }, () => {});
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      if (child && child.pid) killTree(child.pid);
+      finish({ ok: false, code: 504, message: `Edge took longer than ${SHOT_MS / 1000} s` });
+    }, SHOT_MS);
+    try {
+      child = execFile(exe, args, { windowsHide: true, maxBuffer: 1 << 20 }, () => {
+        let st = null;
+        try { st = fs.statSync(out); } catch {}
+        if (!st || !st.size) return finish({ ok: false, code: 502, message: 'Edge did not write a screenshot' });
+        if (st.size > SHOT_MAX) return finish({ ok: false, code: 413, message: 'the screenshot is too large' });
+        let png;
+        try { png = fs.readFileSync(out); } catch (e) { return finish({ ok: false, code: 500, message: e.message }); }
+        finish({ ok: true, png });
+      });
+    } catch (e) { finish({ ok: false, code: 500, message: `could not start Edge: ${e.message}` }); }
+  });
+}
+// a whole number in [lo, hi], else d
+const clampInt = (v, lo, hi, d) => { const n = Math.round(Number(v)); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+
 // ---------- requests ----------
-async function urls(u, ctx, ownPort) {
-  const id = u.searchParams.get('id') || '';
-  const cwdRaw = u.searchParams.get('cwd') || '';
+// the ports a conversation's Preview tab lists (transcript and launch.json), with their urls entries
+function listed(u, ctx, ownPort) {
+  const id = u.get('id') || '';
+  const cwdRaw = u.get('cwd') || '';
   const cwd = cwdRaw ? folderOk(ctx, cwdRaw) : null;
   const found = id && id.length <= 100 ? (() => { const f = findLog(id, cwd || cwdRaw, ctx); return f ? scanLog(f, ownPort) : []; })() : [];
   const launch = cwd ? readLaunch(ctx, cwd, ownPort) : [];
+  const ports = new Set();
+  for (const x of [...found, ...launch]) { if (x.url) { const p = Number(new URL(x.url).port); if (p) ports.add(p); } }
+  return { cwd, found, launch, ports };
+}
+async function urls(u, ctx, ownPort, rem) {
+  const { cwd, found, launch, ports } = listed(u.searchParams, ctx, ownPort);
   const upOf = (url) => { if (!url) return Promise.resolve(false); const x = new URL(url); return tcpUp(x.hostname, Number(x.port)); };
   const [ups, lups] = await Promise.all([Promise.all(found.map((f) => upOf(f.url))), Promise.all(launch.map((c) => upOf(c.url)))]);
   const out = found.map((f, i) => ({ ...f, up: ups[i] }));
   launch.forEach((c, i) => out.push({ name: c.name, port: c.port, url: c.url, from: 'launch.json', launch: true, running: !!running(keyOf(cwd, c.name)), up: lups[i] }));
   const reply = { urls: out };
+  if (rem) reply.remote = true;
   const cur = localUrl(u.searchParams.get('current') || '', ownPort);
   if (cur) {
     reply.current = { url: cur.href, up: await tcpUp(cur.hostname, Number(cur.port)) };
-    if (u.searchParams.get('frame') === '1' && reply.current.up) reply.current.frame = (await frameCheck(cur)).frame;
+    if (rem) {
+      // another device: shown through a share (which drops the framing headers), only for a port listed here
+      if (!ports.has(Number(cur.port))) reply.current.share = { ok: false, message: 'Only the dev servers this conversation used (or its launch.json lists) can be shown on another device.' };
+      else if (reply.current.up) { reply.current.share = await share(ctx, cur, rem); reply.current.frame = true; }
+      else reply.current.share = { ok: false, message: '' };
+    } else if (u.searchParams.get('frame') === '1' && reply.current.up) reply.current.frame = (await frameCheck(cur)).frame;
   }
   return reply;
 }
@@ -418,26 +738,55 @@ async function stop(ctx, b) {
   if (procs.get(k) === e) procs.delete(k);
   saveProcs();
   upCache.clear();
+  // shared with another device: that goes too
+  const port = e.url ? Number(new URL(e.url).port) : 0;
+  if (port && shares.has(port)) unshare(ctx, port, `"${e.name}" was stopped`);
   ctx.log(`preview: stopped "${e.name}" (pid ${e.pid})${done ? '' : ', taskkill failed'}`);
   return [done ? 200 : 500, done ? { ok: true } : { ok: false, message: 'could not stop it' }];
 }
 
+// POST /preview/shot: [code, png] or [code, { ok: false, message }]
+async function shot(ctx, b, ownPort, rem) {
+  const u = localUrl(b && b.url, ownPort);
+  if (!u) return [400, { ok: false, message: 'only a local dev server\'s page can be taken' }];
+  if (rem) {
+    const q = new URLSearchParams({ id: typeof b.id === 'string' ? b.id : '', cwd: typeof b.cwd === 'string' ? b.cwd : '' });
+    if (!listed(q, ctx, ownPort).ports.has(Number(u.port))) return [403, { ok: false, message: 'only a dev server this conversation used can be taken from another device' }];
+  }
+  if (!(await tcpUp(u.hostname, Number(u.port)))) return [409, { ok: false, message: `nothing answers at ${u.host} right now` }];
+  const scale = Math.min(2, Math.max(1, Math.round((Number(b.scale) || 1) * 4) / 4));
+  const r = await shoot(u.href, clampInt(b.width, 200, 2560, 1280), clampInt(b.height, 150, 1600, 800), scale);
+  if (r.ok) ctx.log(`preview: screenshot of ${u.host} taken (${r.png.length} bytes)${rem ? ` for ${rem.device}` : ''}`);
+  return r.ok ? [200, r.png] : [r.code, { ok: false, message: r.message }];
+}
+
 function handle(req, res, pathname, ctx) {
-  // only Fleet View's own page: the previewed dev page runs in the same browser and could otherwise post here
+  if (ctx.tailnet && !gate) gate = ctx.tailnet;
+  // only Fleet View's own page: the previewed dev page runs in the same browser and could otherwise post here.
+  // Its own address is http://<Host> here, and https://<this PC's tailnet name> for an approved remote browser
+  const rem = typeof ctx.remote === 'function' ? ctx.remote(req) : null;
   const origin = req.headers.origin;
-  if (origin && origin !== `http://${String(req.headers.host || '').toLowerCase()}`) return ctx.sendJson(res, 403, { ok: false, message: 'bad origin' });
+  const own = rem ? `https://${rem.name}` : `http://${String(req.headers.host || '').toLowerCase()}`;
+  if (origin && origin !== own) return ctx.sendJson(res, 403, { ok: false, message: 'bad origin' });
   const ownPort = req.socket && req.socket.localPort;
   const fail = (e) => { ctx.log(`preview: ${pathname} failed: ${e && e.stack || e}`); if (!res.headersSent) ctx.sendJson(res, 500, { ok: false, message: 'server error' }); };
   if (pathname === '/preview/urls' && req.method === 'GET') {
-    return urls(new URL(req.url, 'http://x'), ctx, ownPort).then((r) => ctx.sendJson(res, 200, r), fail);
+    return urls(new URL(req.url, 'http://x'), ctx, ownPort, rem).then((r) => ctx.sendJson(res, 200, r), fail);
   }
-  if ((pathname === '/preview/start' || pathname === '/preview/stop') && req.method === 'POST') {
+  if ((pathname === '/preview/start' || pathname === '/preview/stop' || pathname === '/preview/shot') && req.method === 'POST') {
     return ctx.readBody(req, res, (b) => {
       if (!b || typeof b !== 'object') return ctx.sendJson(res, 400, { ok: false, message: 'bad json' });
+      if (pathname === '/preview/shot') {
+        return shot(ctx, b, ownPort, rem).then(([code, out]) => {
+          if (!Buffer.isBuffer(out)) return ctx.sendJson(res, code, out);
+          res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': out.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+          res.end(out);
+        }, fail);
+      }
       (pathname === '/preview/start' ? start(ctx, b, ownPort) : stop(ctx, b)).then(([code, out]) => ctx.sendJson(res, code, out), fail);
     });
   }
   return ctx.sendJson(res, 404, { ok: false, message: 'not found' });
 }
 
-module.exports = { handle, _test: { localUrl, scanLines, framable, stripComments, readLaunch, inside, quoteArg } };
+module.exports = { handle, _test: { localUrl, scanLines, framable, stripComments, readLaunch, inside, quoteArg, forwardHeaders, backHeaders, dropOurCookies, shares, proxyPort, share, unshare, shoot, edgeExe, setGate: (g) => { gate = g; } } };

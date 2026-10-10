@@ -8,7 +8,8 @@
 //   ui.open(id)            desktop window: open the live session in the panel's Session tab, kept (Enter,
 //                          double-click). Edge: open it in Windows Terminal; asks first unless it is DONE,
 //                          then shows the server's reply as a toast
-//   ui.openTerminal(id)    always a terminal window (the panel's "Open in terminal" button)
+//   ui.openTerminal(id)    always a terminal window (the panel's "Open in terminal" button); on a page from another
+//                          computer (remotePage) the live session here instead, since a terminal would open on the PC
 //   ui.saveSettings(obj)   save any of { view, zoom, query, repo, compact, steady, webBounds, notify, mapLens,
 //                          mapViews, mapCamera } (POST /settings)
 //   ui.keys                {}: a view may set ui.keys[viewName] = (KeyboardEvent) => boolean. While that view
@@ -24,7 +25,9 @@
 //                          ui.setSelected(id) opens it as well, and setSelected(null) closes it.
 //   ui.detailId            read only: the conversation the panel shows, or null
 //   ui.reveal({ kind: 'file'|'folder', path, line? })   POST /reveal: a file opens in VS Code, a folder in
-//                          Explorer (the server only allows paths that are in /state); the reply shows as a toast
+//                          Explorer (the server only allows paths that are in /state); the reply shows as a toast.
+//                          On a page from another computer those open on the PC's screen: the menus and the toast
+//                          say "on the PC" there (onPc)
 //   ui.openUrl(url)        opens an https:// URL (PR, branch, deploy) in the browser; anything else is ignored
 //   ui.isHosted(id)        true while that conversation runs live in this window (desktop only, term.js); cards
 //                          and the map mark it. The list is polled every 2 s and redraws the page when it changes.
@@ -85,7 +88,8 @@
 // Adding a repo ("Add workspace" at the bottom of the repo menu, or on empty space's right-click) offers three
 // ways: "Paste path" (a path box; quotes around a pasted path are dropped, forward slashes are fine), "New
 // scratchpad" (POST /repos/scratch: the server makes an empty scratch-YYYY-MM-DD folder under ~/Scratchpads and
-// adds it) and "Browse" (the system folder picker, fleetDesktop.pickFolder; desktop window only). POST
+// adds it) and "Browse" (the Windows folder dialog in the desktop window, elsewhere pcfiles.js's in-page one over
+// GET /folders: the PC's folders, the same on this PC's Edge and on the Mac). POST
 // /repos/add checks the folder and stores its git root in settings.addedRepos, and /state lists it in repos[]
 // (added: true) even with no conversations. Removing an added repo also drops it from addedRepos (POST /repos/remove; Undo adds it back).
 // Hidden conversations (settings.hidden, [{ id, at }], POST /settings) are left out of every view and the
@@ -115,7 +119,8 @@ import { renderWall } from './wall.js';
 import { renderProjects } from './projects.js';
 import { renderDetail, openPeek, SPLIT_MAX } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
-import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady } from './term.js';
+import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote } from './term.js';
+import { pickFolder, canPickFolder, uploads, upload, sizeText, droppedFolders } from './pcfiles.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued, onTeamJoin, setServerQueued, sendWhenUp } from './orders.js';
 import { mountSince, sinceFromState } from './since.js';
@@ -262,12 +267,20 @@ const ui = {
   openUrl: (url) => openUrl(url),
   // in the desktop window: the live session in the panel (started and kept); elsewhere: Windows Terminal
   open: (id) => {
-    if (!termApi()) { openSession(id); return; }
+    if (!termApi()) {
+      // another computer: a terminal window would open on the PC's screen, not here
+      if (remotePage()) { toast(noTermMsg('Opening its live session'), C.red); return; }
+      openSession(id);
+      return;
+    }
     const s = state?.sessions?.find((x) => x.id === id) || view?.allSessions?.find((x) => x.id === id && x.continued);
     if (!s) return;
     if (s.state === 'DONE') { ui.selectedId = null; ui.showDetail(s.id, 'explicit'); } else ui.setSelected(s.id, 'explicit');
   },
-  openTerminal: (id) => openSession(id),
+  openTerminal: (id) => {
+    if (!remotePage()) { openSession(id); return; }
+    if (termApi()) ui.open(id); else toast(noTermMsg('Opening its live session'), C.red);
+  },
   saveSettings,
   keys: {},
   get compact() { return local.compact; },
@@ -327,13 +340,21 @@ function rebase(st) {
 }
 
 let usageUi = null; // usage.js: the plan-usage card and the "used somewhere else" heads-up (mounted below)
+// /state comes with an ETag; the next poll sends it back and gets 304 with no body while nothing changed (nothing to
+// read or draw then). A browser on another device that is no longer approved gets 401: back to the pairing page.
+let stateTag = null;
+const UNCHANGED = {};
 async function poll() {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 4000);
+  let same = false;
   try {
-    const r = await fetch(FIXTURE ? './fixtures/state-sample.json' : '/state', { cache: 'no-store', signal: ctl.signal });
+    const r = await fetch(FIXTURE ? './fixtures/state-sample.json' : '/state', { cache: 'no-store', signal: ctl.signal, headers: stateTag && state && !FIXTURE ? { 'If-None-Match': stateTag } : {} });
+    if (r.status === 304 && state) throw UNCHANGED;
+    if (r.status === 401 && !FIXTURE) { location.replace('/pair'); return; }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     let st = await r.json();
+    stateTag = r.headers.get('ETag');
     if (FIXTURE) st = rebase(st);
     // new page code on the server (a merge changed web/ or fleet-view.js): load it, settings saved first
     if (st.build) {
@@ -369,12 +390,13 @@ async function poll() {
     if (pendingSelect) { const id = pendingSelect; pendingSelect = null; queueMicrotask(() => fvSelect(id)); }
     try { notifyAlerts(st); } catch (e) { console.warn(e); }
     try { usageUi?.update(st); } catch (e) { console.warn(e); }
-  } catch {
-    online = false;
+  } catch (e) {
+    // unchanged: drawn already, unless the page was showing "reconnecting…"
+    if (e === UNCHANGED) { same = online; online = true; } else online = false;
   } finally {
     clearTimeout(timer);
   }
-  render();
+  if (!same) render();
   setTimeout(poll, 1000);
 }
 
@@ -563,7 +585,9 @@ async function addScratchRepo(at = null) {
 // Files dropped anywhere on #main (the chat pane keeps its own drops: an attachment) go into a new scratchpad (the
 // server copies them in; a folder stays where it is), a new conversation starts there on the lead account, and its
 // first message asks it to analyze them (orders.js sendWhenUp: it goes in once the session is up). On the map the
-// scratchpad's hub goes where they were dropped. Needs the desktop window: only it knows a dropped file's path.
+// scratchpad's hub goes where they were dropped. The desktop window knows a dropped file's path; a browser (Edge, the
+// Mac) sends each file to the PC first (POST /upload, pcfiles.js) and the server copies it in from where it landed.
+// A browser can't drop a folder this way (it has no path for one): those are left out, with a word.
 const dropPath = (f) => { try { return String(window.fleetDesktop?.pathForFile?.(f) || ''); } catch { return ''; } };
 const hasDropFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
 function analyzePrompt(copied, dirs) {
@@ -577,12 +601,35 @@ function analyzePrompt(copied, dirs) {
   lines.push('Say what it is, summarize what is in it, and point out anything notable, odd or wrong. Don\'t change the originals.');
   return lines.join('\n');
 }
-async function analyzeDrop(files, at) {
+// a browser's dropped files, sent to the PC one after another, with how far it got on a toast -> [path…]; the
+// names that didn't make it are said on a toast
+async function sendDropToPc(list, dirs) {
+  const files = list.filter((f) => f && !dirs.has(f.name));
+  const skipped = list.length - files.length;
+  const total = files.reduce((n, f) => n + f.size, 0);
+  const paths = [], failed = [];
+  let before = 0, shownAt = 0;
+  const progress = (sent) => {
+    const now = Date.now();
+    if (now - shownAt < 1500 || total < (4 << 20)) return;
+    shownAt = now;
+    toast(`Sending to the PC… ${Math.min(100, Math.floor(((before + sent) / Math.max(1, total)) * 100))}% of ${sizeText(total)}`, C.dim, null, 1600);
+  };
+  for (const f of files) {
+    const r = await upload(f, (sent) => progress(sent)).done;
+    before += f.size;
+    if (r.ok) paths.push(r.path); else failed.push(`${f.name} (${r.message})`);
+  }
+  if (failed.length || skipped) toast([failed.length ? `Couldn't send ${failed.join(', ')}` : '', skipped ? `${skipped === 1 ? 'a folder' : `${skipped} folders`} can't be sent from a browser` : ''].filter(Boolean).join(' · '), C.red, null, 9000);
+  return paths;
+}
+// dirs: the names of the dropped folders (droppedFolders), which a browser can't send
+async function analyzeDrop(files, at, folders = new Set()) {
   const list = [...(files || [])];
-  const paths = [...new Set(list.map(dropPath).filter(Boolean))];
-  if (!paths.length) { toast(window.fleetDesktop ? 'Couldn\'t tell where those files are on disk' : 'Dropping files to analyze them needs the desktop window', C.red); return; }
   const account = leadAccount();
   if (!account) { toast('No Claude account has room for a new conversation', C.red); return; }
+  const paths = uploads() ? await sendDropToPc(list, folders) : [...new Set(list.map(dropPath).filter(Boolean))];
+  if (!paths.length) { if (!uploads()) toast('Couldn\'t tell where those files are on disk', C.red); return; }
   toast(`Copying ${paths.length === 1 ? paths[0].split(/[\\/]/).pop() : `${paths.length} files`} into a new scratchpad…`, C.dim);
   const r = await post('/repos/scratch', { paths });
   if (!r || !r.ok) { toast((r && r.message) || 'could not reach Fleet View to make a scratchpad', C.red); return; }
@@ -623,7 +670,7 @@ async function analyzeDrop(files, at) {
     off();
     if (taken || !termApi()) return;
     e.preventDefault();
-    analyzeDrop(e.dataTransfer.files, { x: e.clientX, y: e.clientY }).catch((err) => { console.error(err); toast('could not start the analysis', C.red); });
+    analyzeDrop(e.dataTransfer.files, { x: e.clientX, y: e.clientY }, uploads() ? droppedFolders(e.dataTransfer) : new Set()).catch((err) => { console.error(err); toast('could not start the analysis', C.red); });
   });
   window.addEventListener('dragend', off);
 })();
@@ -642,19 +689,17 @@ function repoAdded(r, fake = null, scratch = false, at = null) {
   render();
   return null;
 }
-// "Browse" (desktop window only): the system folder picker
+// "Browse": the Windows folder dialog in the desktop window, else the in-page one (pcfiles.js)
 async function pickAndAddRepo(at = null) {
-  const fd = window.fleetDesktop;
-  if (!fd || typeof fd.pickFolder !== 'function') return false;
+  if (!canPickFolder()) return false;
   let r = null;
-  try { r = await fd.pickFolder(); } catch { r = null; }
+  try { r = await pickFolder({ title: 'Add a workspace', button: 'Add this folder' }); } catch { r = null; }
   if (r && r.ok && r.path) { const err = await addRepoPath(r.path, at); if (err) toast(err, C.red); }
   else if (r && r.message) toast(r.message, C.dim);
   return true;
 }
-const canPickFolder = () => !!(window.fleetDesktop && typeof window.fleetDesktop.pickFolder === 'function');
 const ADD_HINT = 'Paste a folder path, e.g. C:\\Users\\you\\projects\\my-app';
-// the right-click menu's item: a submenu of the three ways (Browse is a quiet line outside the desktop window);
+// the right-click menu's item: a submenu of the three ways (Browse is a quiet line only with ?fixture=1);
 // at: where the menu was opened, so the map puts the new repo there
 function addRepoMenuItem(at = null) {
   return {
@@ -662,7 +707,7 @@ function addRepoMenuItem(at = null) {
     children: [
       { label: 'Paste path', icon: 'plus', input: { placeholder: ADD_HINT, hint: 'Enter adds · Esc closes', submit: (text) => addRepoPath(text, at) } },
       { label: 'New scratchpad', icon: 'plus', note: 'an empty folder', run: () => addScratchRepo(at) },
-      canPickFolder() ? { label: 'Browse', icon: 'folder', run: () => pickAndAddRepo(at) } : { label: 'Browse', icon: 'folder', disabled: true, note: 'desktop window only' },
+      canPickFolder() ? { label: 'Browse', icon: 'folder', run: () => pickAndAddRepo(at) } : { label: 'Browse', icon: 'folder', disabled: true, note: 'not with fixture data' },
     ],
   };
 }
@@ -739,6 +784,7 @@ async function continueConversation(r) {
     return;
   }
   render();
+  if (remotePage()) { toast(noTermMsg('Continuing it'), C.red); return; } // a terminal would open on the PC's screen
   const res = await post('/open', { id: r.id });
   if (FIXTURE) return; // fixture data: the POST is only recorded (window.__fvPosts)
   if (!res || !res.ok) toast((res && res.message) || 'could not reach Fleet View to open it', C.red);
@@ -898,6 +944,7 @@ function render() {
   drawAlert(view);
   drawFinished(view);
   drawDetail(view);
+  drawRemote();
   if (menuOpen) drawMenu();
   const el = viewEls[local.view];
   try {
@@ -1182,6 +1229,11 @@ function openUrl(url) {
   window.open(url, '_blank', 'noopener');
   return true;
 }
+// This page came from another computer through Tailscale (remote.js lets only this PC's tailnet name in besides
+// 127.0.0.1 and localhost): what POST /open and /reveal start (a terminal, VS Code, Explorer) opens on the PC's
+// screen, not on this one. onPc(label) says so on a menu item there.
+const remotePage = () => !/^(127\.0\.0\.1|localhost|\[::1\])$/i.test(location.hostname);
+const onPc = (label) => (remotePage() ? `${label} on the PC` : label);
 async function reveal(w) {
   if (!w || (w.kind !== 'file' && w.kind !== 'folder') || !w.path) return;
   const name = String(w.path).split(/[\\/]/).filter(Boolean).pop() || String(w.path);
@@ -1190,7 +1242,7 @@ async function reveal(w) {
   if (Number.isInteger(w.line) && w.line > 0) body.line = w.line;
   const r = await post('/reveal', body);
   if (!r) toast('could not reach Fleet View to open it', C.red);
-  else toast(r.message || (r.ok ? `opened ${name}` : `could not open ${name}`), r.ok ? C.mint : C.red);
+  else toast(onPc(r.message || (r.ok ? `opened ${name}` : `could not open ${name}`)), r.ok ? C.mint : C.red);
 }
 // caught before the card, tile or panel under the link sees the click, so a link never picks a card.
 // A slot can be rewritten between press and release (a "working 45s" timer beside a link). The browser then
@@ -1415,9 +1467,9 @@ function drawMenu() {
       : addChoose
       ? '<div class="mi-ways">' + ADD_WAYS.map((w) => {
         const off = w.way === 'browse' && !canPickFolder();
-        return `<div class="menu-item mi-add mi-way${off ? ' off' : ''}" data-way="${w.way}" role="option" aria-selected="false"${off ? ' aria-disabled="true"' : ''} title="${esc(off ? 'only in the desktop window' : w.title)}">`
+        return `<div class="menu-item mi-add mi-way${off ? ' off' : ''}" data-way="${w.way}" role="option" aria-selected="false"${off ? ' aria-disabled="true"' : ''} title="${esc(off ? 'not with fixture data' : w.title)}">`
           + `<span class="mi-add-ic" aria-hidden="true">${icon(w.icon, 14) || '+'}</span><span></span><span class="mi-name">${esc(w.label)}</span>`
-          + `<span class="mi-key">${off ? 'desktop window only' : w.key}</span></div>`;
+          + `<span class="mi-key">${off ? 'fixture data' : w.key}</span></div>`;
       }).join('') + '</div>'
       : `<div class="menu-item mi-add" data-add="1" role="option" aria-selected="false" title="add a workspace: paste a path, a new scratchpad or browse">`
         + `<span class="mi-add-ic" aria-hidden="true">${icon('plus', 14) || '+'}</span><span></span><span class="mi-name">Add workspace</span></div>`)
@@ -1436,7 +1488,7 @@ function chooseAddInMenu(on = true) {
   addChoose = on; addBox = null;
   drawMenu();
 }
-// one of them: the path box in its place, a new scratchpad, or the system folder picker (desktop window)
+// one of them: the path box in its place, a new scratchpad, or the folder picker (pcfiles.js)
 function addWayInMenu(way) {
   if (way === 'path') {
     addChoose = false;
@@ -1648,7 +1700,7 @@ function pasteRoot(x, y) {
 }
 async function pasteCopied() {
   if (!copied.length) { toast('Ctrl+C a conversation first, then Ctrl+V where its copy should go', C.dim); return; }
-  if (!termApi()) { toast('copies need the Fleet View desktop window', C.red); return; }
+  if (!termApi()) { toast(noTermMsg('Pasting a copy'), C.red); return; }
   const list = copied.slice(), x = mouseAt.x, y = mouseAt.y;
   const root = pasteRoot(x, y);
   let first = null, n = 0;
@@ -1897,7 +1949,7 @@ function openContextMenu(target, x, y) {
       if (!ok.length) items.push({ label: 'New session', icon: 'plus', disabled: true, note: 'every account is out of its limit' });
       items.push({ sep: true });
     }
-    items.push({ label: 'Open folder', icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
+    items.push({ label: onPc('Open folder'), icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
     if (pushHook()) items.push(repoPushItem(folder, repo.push || 'production'));
     if (unpinItem(target)) items.push(unpinItem(target));
     // orders for every conversation in it, idle and new ones too (one team), or the same text to each
@@ -1914,6 +1966,7 @@ function openContextMenu(target, x, y) {
     // empty space on the map, or around the cards or tiles: add a repo (removed conversations are on a repo's menu)
     const extra = [{ sep: true }, notifyMenuItem()];
     if (accountsMenuItem()) extra.push(accountsMenuItem());
+    if (remoteMenuItem()) extra.push(remoteMenuItem());
     if (multi.size) extra.push({ label: `Clear selection (${multi.size})`, icon: 'close', run: () => setMulti([], 'menu') });
     openCtxMenu({ x, y, items: [addRepoMenuItem({ x, y }), recentRepoMenuItem({ x, y }), ...extra] });
     return;
@@ -2256,7 +2309,7 @@ const sessionsOf = (ids) => (ids || []).map((id) => (view?.allSessions || state?
 //      when the order is sent leads it) }
 function orderItem(label, list, o = {}) {
   const ic = o.icon || 'send';
-  if (!termApi()) return { label, icon: ic, disabled: true, note: 'desktop window only' };
+  if (!termApi()) return { label, icon: ic, disabled: true, note: noTermNote() };
   if (!list.length) return { label, icon: ic, disabled: true, note: o.none || 'no conversation to reach' };
   // none of them can be typed into from here: say why now, not after the order is written
   const reachable = list.filter((s) => !unreachable(s));
@@ -2340,7 +2393,7 @@ function repoOrderItems(folder, name) {
   const all = repoSessions(folder);
   const off = (msg) => [{ label: 'Give orders', icon: 'send', disabled: true, note: msg }];
   if (!all.length) return off(`no conversation in ${name}`);
-  if (!termApi()) return off('desktop window only');
+  if (!termApi()) return off(noTermNote());
   const list = all.filter((s) => !unreachable(s));
   const away = all.length - list.length;
   const awayNote = away ? `${away} more ${away === 1 ? 'is' : 'are'} open in another window` : '';
@@ -2396,7 +2449,7 @@ function leadAccount() {
 function newLeadItem(list, o) {
   const label = 'A new conversation leads';
   if (!o.folder) return { label, icon: 'plus', disabled: true, note: 'no workspace to start it in' };
-  if (!termApi()) return { label, icon: 'plus', disabled: true, note: 'desktop window only' };
+  if (!termApi()) return { label, icon: 'plus', disabled: true, note: noTermNote() };
   const acct = leadAccount();
   if (!acct) return { label, icon: 'plus', disabled: true, note: 'no account has room to start one now' };
   const reach = list.filter((s) => !unreachable(s));
@@ -2460,11 +2513,11 @@ function sessionsMenu(list, x, y) {
       orderItem('Send to each', list, { team: false, icon: 'reply', subnote: 'no team: each gets it on its own', placeholder: 'The same message to each of them, each on its own (no team)' }),
       ...(set.length ? [{ sep: true }, ...set] : []),
     ] }
-    : { label: 'Give orders', icon: 'send', disabled: true, note: 'desktop window only' };
+    : { label: 'Give orders', icon: 'send', disabled: true, note: noTermNote() };
   openCtxMenu({ x, y, title: `${list.length} conversations`, dot: C.cyan, sub: list.map((s) => s.name).join(' · '), items: [
     orders, addManyItem(list), { sep: true },
     live.length ? { label: 'Interrupt all', icon: 'stop', note: `${live.length} running here`, run: () => interruptAll(live) } : { label: 'Interrupt all', icon: 'stop', disabled: true, note: 'none of them runs here' },
-    desk ? { label: 'Open all here', icon: 'shell', run: () => openAllHere(list) } : { label: 'Open all here', icon: 'shell', disabled: true, note: 'desktop window only' },
+    desk ? { label: 'Open all here', icon: 'shell', run: () => openAllHere(list) } : { label: 'Open all here', icon: 'shell', disabled: true, note: noTermNote() },
     { sep: true },
     { label: 'Clear selection', icon: 'close', run: () => setMulti([], 'menu') },
     removeAllItem(list),
@@ -2694,7 +2747,7 @@ function conflictMenu(target, x, y) {
   const items = [
     orderItem('Send a note to all', list, { note: true, prefix: '[Fleet View · note]', value: CONFLICT_NOTE[kind](label), placeholder: 'A note to each of them' }),
   ];
-  if (file) items.push({ label: 'Open the file in VS Code', icon: 'file', run: () => ui.reveal({ kind: 'file', path: file }) });
+  if (file) items.push({ label: onPc('Open the file in VS Code'), icon: 'file', run: () => ui.reveal({ kind: 'file', path: file }) });
   items.push({ sep: true });
   for (const s of list) items.push({ label: `Pick ${s.name}`, icon: 'shell', run: () => pickFromAnywhere(s.id) });
   items.push({ sep: true });
@@ -2708,7 +2761,7 @@ function dotMenu(target, x, y) {
   const file = target.kind === 'file';
   const name = file ? String(target.rel || '').split(/[\\/]/).pop() || target.rel : `PR #${target.num}`;
   const items = file
-    ? [target.abs ? { label: 'Open the file in VS Code', icon: 'file', run: () => ui.reveal({ kind: 'file', path: target.abs }) } : { label: 'Open the file in VS Code', icon: 'file', disabled: true, note: 'its full path is not known' },
+    ? [target.abs ? { label: onPc('Open the file in VS Code'), icon: 'file', run: () => ui.reveal({ kind: 'file', path: target.abs }) } : { label: onPc('Open the file in VS Code'), icon: 'file', disabled: true, note: 'its full path is not known' },
       { label: 'Copy path', icon: 'copy', run: () => copyOut(target.abs || target.rel, name) }]
     : [target.url ? { label: 'Open on GitHub', icon: 'external', run: () => openUrl(target.url) } : { label: 'Open on GitHub', icon: 'external', disabled: true, note: 'no GitHub link for it yet' },
       ...(target.url ? [{ label: 'Copy link', icon: 'copy', run: () => copyOut(target.url, `the link to PR #${target.num}`) }] : [])];
@@ -2884,6 +2937,145 @@ function notifyMenuItem() {
     note: on ? 'questions, errors, failed checks and deploys, messages' : null,
     run: () => { saveSettings({ notify: !on }); if (!on) askNotify(); toast(on ? 'Desktop notifications are off' : 'Desktop notifications are on', C.dim); render(); } };
 }
+
+// ---------- remote access (remote.js on the server): Fleet View in a browser on another device, over Tailscale ----------
+// The switch lives on empty space's right-click menu ("Remote access…"), which opens a card like the Usage card: the
+// switch "Use Fleet View from my other devices (Tailscale)" (POST /settings { remote: { enabled } }; only this PC's
+// own page may flip it), the address to open there, how turning it on went (state.remote.status / error), and the
+// approved browsers with Revoke (POST /remote/revoke). A browser asking to be let in (state.remote.pending) shows on
+// every viewer that can approve, at the top: "<label> wants to use Fleet View — code <code>" with Allow and Deny
+// (POST /remote/approve | deny); the code is the one its pairing page shows. Nothing blinks; it stays until answered
+// or its 10 minutes run out.
+let remoteMe = null; // GET /remote/me: { remote (this page came through Tailscale), approved, name, enabled }
+if (!FIXTURE) getJson('/remote/me').then((j) => { if (j && typeof j === 'object') { remoteMe = j; drawRemote(); } });
+const isRemoteViewer = () => !!remoteMe?.remote;
+let remoteCard = null, remoteCardKey = '', remoteAskKey = '';
+const remoteAsks = document.createElement('div');
+remoteAsks.className = 'uw-heads';
+remoteAsks.setAttribute('aria-live', 'polite');
+// at the top in the middle: the toasts are bottom right and the usage heads-up bottom left
+Object.assign(remoteAsks.style, { top: 'calc(var(--top-h) + 10px)', bottom: 'auto', left: '50%', transform: 'translateX(-50%)', alignItems: 'center', zIndex: '47' });
+document.body.appendChild(remoteAsks);
+
+function remoteMenuItem() {
+  const r = state?.remote;
+  if (!r) return null;
+  return { label: 'Remote access…', icon: 'shield', badge: r.enabled ? (r.status === 'error' ? 'problem' : 'on') : null, note: r.enabled && r.url ? r.url.replace(/^https:\/\//, '') : null, run: () => openRemoteCard() };
+}
+async function remoteAct(url, body, done) {
+  const r = await post(url, body);
+  if (!r) toast('could not reach Fleet View', C.red);
+  else if (!r.ok) toast(r.message || 'that did not work', C.red);
+  else if (done) toast(done, C.mint);
+  setTimeout(poll, 150);
+}
+function drawRemote() {
+  const r = state?.remote;
+  // the browsers waiting for approval
+  const asks = r && Array.isArray(r.pending) ? r.pending : [];
+  const askKey = asks.map((p) => p.id).join();
+  if (askKey !== remoteAskKey) {
+    remoteAskKey = askKey;
+    remoteAsks.innerHTML = asks.map((p) => `<div class="uw-card" role="status" data-id="${esc(p.id)}" style="border-color:rgba(63,216,255,0.35)">`
+      + `<span class="uw-ic" style="color:var(--cyan)">${icon('shield', 15)}</span><div class="uw-body"><div class="uw-t">${esc(p.label)} wants to use Fleet View — code <span class="mono">${esc(p.code)}</span></div>`
+      + `<div class="uw-s">${esc(p.login)} · over Tailscale · allow it only if that device shows the same code</div></div>`
+      + `<div class="uw-acts"><button type="button" data-c="allow">Allow</button><button type="button" class="uw-more" data-c="deny">Deny</button></div></div>`).join('');
+  }
+  // with the Remote access card open, the requests show in it instead (the two would overlap at the top right)
+  remoteAsks.hidden = !!remoteCard;
+  if (remoteCard) drawRemoteCard();
+}
+remoteAsks.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-c]'), card = b && b.closest('.uw-card');
+  if (!card) return;
+  const p = (state?.remote?.pending || []).find((x) => x.id === card.dataset.id);
+  card.remove();
+  remoteAskKey = '';
+  if (b.dataset.c === 'allow') remoteAct('/remote/approve', { id: card.dataset.id }, `${p ? p.label : 'That device'} may use Fleet View now`);
+  else remoteAct('/remote/deny', { id: card.dataset.id }, null);
+});
+
+function openRemoteCard() {
+  if (remoteCard) { remoteCard.focus(); return; }
+  remoteCard = document.createElement('div');
+  remoteCard.className = 'uw-pop';
+  remoteCard.tabIndex = -1;
+  remoteCard.setAttribute('role', 'dialog');
+  remoteCard.setAttribute('aria-label', 'Remote access');
+  remoteCardKey = '';
+  document.body.appendChild(remoteCard);
+  remoteAsks.hidden = true;
+  drawRemoteCard();
+  remoteCard.focus();
+  if (!FIXTURE) getJson('/remote/me').then((j) => { if (j && typeof j === 'object') { remoteMe = j; drawRemote(); } });
+}
+function closeRemoteCard() {
+  if (!remoteCard) return;
+  remoteCard.remove();
+  remoteCard = null;
+  remoteAsks.hidden = false;
+}
+const REMOTE_STATUS = { off: 'Off', starting: 'Starting…', 'turning on': 'Turning on…', on: 'On', 'turning off': 'Turning off…', error: 'Not working' };
+function drawRemoteCard() {
+  const r = state?.remote || { enabled: false, status: 'off', pending: [], devices: [] };
+  const here = !isRemoteViewer();
+  const key = JSON.stringify([r, here, Math.floor(Date.now() / 60e3)]);
+  if (key === remoteCardKey) return;
+  remoteCardKey = key;
+  const status = r.enabled ? REMOTE_STATUS[r.status] || r.status : 'Off';
+  const color = r.status === 'error' ? 'var(--rose)' : r.enabled && r.status === 'on' ? 'var(--mint)' : 'var(--dim)';
+  const devices = (r.devices || []).slice().sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  const asks = Array.isArray(r.pending) ? r.pending : [];
+  const row = 'display:flex;align-items:center;gap:10px;padding:8px 0';
+  remoteCard.innerHTML = `<div class="uw-top"><span class="uw-title">${icon('shield', 15)}<b>Remote access</b></span><span class="uw-sub"></span><button type="button" class="uw-x" data-c="x" aria-label="Close">${icon('close', 14)}</button></div>`
+    + `<div class="uw-list">`
+    + `<label style="${row};cursor:${here ? 'pointer' : 'default'}"><input type="checkbox" data-c="switch" ${r.enabled ? 'checked' : ''} ${here ? '' : 'disabled'} style="width:16px;height:16px;accent-color:var(--gold);flex:none">`
+    + `<span style="flex:1 1 auto">Use Fleet View from my other devices (Tailscale)</span><span style="color:${color};font-size:12px;white-space:nowrap">${esc(status)}</span></label>`
+    + (here ? '' : `<div class="uw-none">Remote access is switched on and off on the PC.</div>`)
+    + (r.error ? `<div class="uw-lines"><span class="uw-away">${esc(r.error)}</span></div>` : '')
+    + (r.url ? `<div class="uw-lines"><span>Open on your other device, signed in to Tailscale:</span><span class="mono" style="color:var(--text);user-select:all">${esc(r.url)}</span>`
+      + `<span>Each browser asks once; you allow it here with the code it shows.</span></div>` : r.enabled ? '' : `<div class="uw-lines"><span>${r.name === null ? 'Tailscale is not running on this PC, or not signed in.' : ''}</span></div>`)
+    + (asks.length ? `<div class="uw-acct"><div class="uw-ah"><b>Waiting for approval</b><span class="uw-chip">${asks.length}</span></div>`
+      + asks.map((p) => `<div style="${row};padding:5px 0"><div style="flex:1 1 auto;min-width:0"><div>${esc(p.label)} — code <span class="mono" style="color:var(--gold)">${esc(p.code)}</span></div>`
+        + `<div style="color:var(--dim);font-size:12px">${esc(p.login)} · allow it only if that device shows the same code</div></div>`
+        + `<button type="button" class="btn" data-c="allow" data-id="${esc(p.id)}" style="height:28px;padding:0 12px">Allow</button>`
+        + `<button type="button" class="btn" data-c="deny" data-id="${esc(p.id)}" style="height:28px;padding:0 12px">Deny</button></div>`).join('') + `</div>` : '')
+    + `<div class="uw-acct"><div class="uw-ah"><b>Approved browsers</b><span class="uw-chip">${devices.length}</span></div>`
+    + (devices.length ? devices.map((d) => `<div style="${row};padding:5px 0"><div style="flex:1 1 auto;min-width:0"><div>${esc(d.label)}</div>`
+      + `<div style="color:var(--dim);font-size:12px">${esc(d.login)} · last used ${d.lastSeen ? esc(ago(Date.now() - d.lastSeen)) + ' ago' : 'never'}</div></div>`
+      + `<button type="button" class="btn" data-c="revoke" data-id="${esc(d.id)}" style="height:28px;padding:0 12px">Revoke</button></div>`).join('')
+      : `<div class="uw-none">None yet.</div>`)
+    + `</div></div>`
+    + `<div class="uw-foot">An approved browser can do anything Fleet View does on this PC, sessions included. Revoke one you no longer use.</div>`;
+}
+document.addEventListener('pointerdown', (e) => { if (remoteCard && !remoteCard.contains(e.target) && !e.target.closest?.('.ctx-menu, .menu')) closeRemoteCard(); }, true);
+document.addEventListener('keydown', (e) => {
+  if (!remoteCard) return;
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeRemoteCard(); }
+  else if (remoteCard.contains(e.target)) e.stopPropagation(); // the card's own keys (Space on the switch) are not shortcuts
+}, true);
+document.addEventListener('click', (e) => {
+  if (!remoteCard || !remoteCard.contains(e.target)) return;
+  const c = e.target.closest('[data-c]');
+  if (!c) return;
+  if (c.dataset.c === 'x') closeRemoteCard();
+  else if (c.dataset.c === 'allow' || c.dataset.c === 'deny') {
+    const p = (state?.remote?.pending || []).find((x) => x.id === c.dataset.id);
+    if (c.dataset.c === 'allow') remoteAct('/remote/approve', { id: c.dataset.id }, `${p ? p.label : 'That device'} may use Fleet View now`);
+    else remoteAct('/remote/deny', { id: c.dataset.id }, null);
+  } else if (c.dataset.c === 'revoke') {
+    const d = (state?.remote?.devices || []).find((x) => x.id === c.dataset.id);
+    remoteAct('/remote/revoke', { id: c.dataset.id }, `${d ? d.label : 'That browser'} can no longer use Fleet View`);
+  }
+});
+document.addEventListener('change', (e) => {
+  if (!remoteCard || !remoteCard.contains(e.target) || e.target.dataset.c !== 'switch') return;
+  const on = e.target.checked;
+  if (state?.remote) state.remote = { ...state.remote, enabled: on, status: on ? 'turning on' : 'turning off', error: null };
+  remoteCardKey = '';
+  drawRemoteCard();
+  remoteAct('/settings', { remote: { enabled: on } }, on ? 'Remote access is turning on' : 'Remote access is off');
+});
 
 if (DEBUG) {
   window.__fv = {

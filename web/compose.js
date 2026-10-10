@@ -23,7 +23,10 @@
 // open, then wait until Claude is idle). Images go to the server first (POST /chat/image saves them under
 // %LOCALAPPDATA%\fleet-view\chat-images and answers the path); the message then carries their paths after the
 // text, and Claude Code turns a pasted image path into [Image #N]. Any other file (dropped, picked with the clip,
-// or pasted from Explorer) goes in as its own path, which the desktop window knows (fleetDesktop.pathForFile).
+// or pasted from Explorer) goes in as its own path, which the desktop window knows (fleetDesktop.pathForFile). A
+// browser (Edge, or the Mac through Tailscale) knows no path for it, so it is sent to the PC at once (POST /upload,
+// pcfiles.js; its chip shows how far it got) and the path the PC saved it at goes in the message instead; Send waits
+// for a file still on its way. The folder button is the desktop's Windows dialog, else pcfiles.js's in-page one.
 //
 // ↑ in an empty box (or with the caret at its start) brings back your last message, and again the one before;
 // ↓ goes forward again, back to what you had typed. The list: your messages in the feed, then the ones sent from
@@ -55,7 +58,8 @@
 import { esc } from './cards.js';
 import { voiceSupported, startVoice, stopVoice, onVoice } from './voice.js';
 import { icon } from './icons.js';
-import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey } from './term.js';
+import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, noTermMsg } from './term.js';
+import { pickFolder, canPickFolder, uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
 
 const POLL_MS = 400;
@@ -482,7 +486,8 @@ function storeText(id, text) {
 function storeQuote(id, quote) {
   try { if (quote) localStorage.setItem(quoteKey(id), quote); else localStorage.removeItem(quoteKey(id)); } catch {}
 }
-const dropAtt = (a) => { try { if (a.url) URL.revokeObjectURL(a.url); } catch {} };
+// an attachment leaves the draft: its thumbnail's object URL goes, and a file still on its way to the PC stops
+const dropAtt = (a) => { try { if (a.url) URL.revokeObjectURL(a.url); if (a.abort) a.abort(); } catch {} };
 // a new conversation (new-<n>) got its id: its draft and any box showing it move along. Registered when this
 // module loads, before app.js's own onRekey, so the box's update() for the id finds the draft already there.
 const boxes = new Set(); // st of each mounted box
@@ -593,8 +598,14 @@ const toBase64 = (blob) => new Promise((resolve, reject) => {
   r.readAsDataURL(blob);
 });
 // POST /chat/image -> the saved file's path (kept on the attachment, so a retry doesn't upload it twice)
+// A file sent to the PC (a browser's attachment): its path once it is there; waits for one still on its way
 async function uploadImage(a) {
   if (a.path) return a.path;
+  if (a.file) {
+    const r = a.wait ? await a.wait : null;
+    if (r && r.ok && a.path) return a.path;
+    throw new Error((r && r.message) || 'it did not reach the PC');
+  }
   const data = await toBase64(a.blob);
   if (isFixture()) {
     // fixture data: nothing reaches a server; recorded like app.js records its POSTs
@@ -769,8 +780,13 @@ export function mountCompose(slot, s) {
   const pathOf = (f) => { try { return String(window.fleetDesktop?.pathForFile?.(f) || ''); } catch { return ''; } };
   // images become thumbnails (uploaded on send, like a pasted screenshot); any other file goes in as its path.
   // quiet: leave out, without a word, what can't go in (a paste carries odd file kinds next to its text)
-  function addFiles(files, quiet = false) {
-    const list = [...(files || [])];
+  // dirs: the names of dropped folders a browser can't send (droppedFolders): said, and left out
+  function addFiles(files, quiet = false, dirs = null) {
+    let list = [...(files || [])];
+    if (dirs && dirs.size) {
+      list = list.filter((f) => !dirs.has(f.name));
+      err(`A folder can't be sent from a browser: attach one that is on the PC with the folder button`);
+    }
     let added = 0;
     for (const f of list) {
       if (!f) continue;
@@ -781,6 +797,8 @@ export function mountCompose(slot, s) {
         continue;
       }
       const p = pathOf(f);
+      // a browser: no path for it here, so it goes to the PC and the path it gets there goes in the message
+      if (!p && uploads() && !quiet) { if (sendToPc(f)) added++; continue; }
       if (!p) {
         if (quiet) continue;
         if (/^image\//.test(f.type || '')) err(f.size > IMG_MAX ? `${f.name || 'the image'} is over 15 MB` : `Only PNG, JPEG, GIF and WebP images (${f.name || f.type} is ${f.type})`);
@@ -803,18 +821,46 @@ export function mountCompose(slot, s) {
     }
     return true;
   }
+  // a file from a browser, sent to the PC now (pcfiles.js upload): its chip shows how far it got, and the path
+  // the PC saved it at becomes its path; a failure takes it out of the draft and says why. -> added
+  function sendToPc(f) {
+    if (st.d.atts.length >= ATT_MAX) { err(`At most ${ATT_MAX} attachments in one message`); return false; }
+    const name = f.name || 'pasted file';
+    if (f.size > UPLOAD_MAX) { err(`${name} is ${sizeText(f.size)}: at most ${sizeText(UPLOAD_MAX)} goes to the PC at once`); return false; }
+    const d = st.d, a = { key: `a${++attSeq}`, file: true, dir: false, name, size: f.size, path: '', up: { sent: 0, total: f.size } };
+    d.atts.push(a);
+    const job = upload(f, (sent, total) => { if (a.up) { a.up.sent = sent; a.up.total = total || f.size; upDrawSoon(); } });
+    a.abort = job.abort;
+    a.wait = job.done.then((r) => {
+      a.abort = null; a.up = null;
+      if (r.ok) a.path = r.path;
+      else {
+        const i = d.atts.indexOf(a);
+        if (i >= 0) d.atts.splice(i, 1);
+        if (!r.aborted && st.d === d) err(`Couldn't send ${name} to the PC: ${r.message}`);
+      }
+      if (st.d === d) { drawAtts(); drawSend(); }
+      return r;
+    });
+    return true;
+  }
+  // progress redraws, at most a few a second
+  let upTimer = 0;
+  const upDrawSoon = () => { if (!upTimer) upTimer = setTimeout(() => { upTimer = 0; drawAtts(); }, 200); };
   async function attachFolder() {
-    const fd = window.fleetDesktop;
-    if (typeof fd?.pickFolder !== 'function') return;
     let r = null;
-    try { r = await fd.pickFolder(); } catch { r = null; }
+    try { r = await pickFolder({ title: 'Attach a folder', button: 'Attach this folder' }); } catch { r = null; }
     if (r && r.ok && r.path && addPath(r.path, null, 0, true)) { drawAtts(); drawSend(); }
+    else if (r && r.message) err(r.message);
     ta.focus();
   }
   function drawAtts() {
     const list = st.d.atts;
     atts.hidden = !list.length;
-    const html = list.map((a) => (a.file
+    const pct = (u) => Math.min(100, Math.floor((u.sent / Math.max(1, u.total)) * 100));
+    const html = list.map((a) => (a.file && a.up
+      ? `<span class="cmp-att cmp-attf up" title="sending ${esc(a.name)} to the PC">${icon('up', 14)}<span class="cmp-attf-t"><span class="cmp-attf-n">${esc(a.name)}</span><span class="cmp-attf-p">${pct(a.up)}% of ${esc(sizeText(a.up.total))}</span></span><span class="cmp-attf-bar" style="width:${pct(a.up)}%"></span>`
+      : a.file
       ? `<span class="cmp-att cmp-attf${a.dir ? ' dir' : ''}" title="${a.dir ? 'folder: ' : ''}${esc(a.path)}">${icon(a.dir ? 'folder' : 'file', 14)}<span class="cmp-attf-n">${esc(a.name)}${a.dir ? '/' : ''}</span>`
       : `<span class="cmp-att"><button type="button" class="cmp-thumb" data-a="${a.key}" title="${esc(a.name)}"><img src="${esc(a.url)}" alt="${esc(a.name)}"></button>`)
       + `<button type="button" class="cmp-x" data-x="${a.key}" title="Remove" aria-label="remove ${esc(a.name)}">${icon('close', 11)}</button></span>`).join('');
@@ -852,7 +898,7 @@ export function mountCompose(slot, s) {
     const t = termApi();
     const h = hosts.get(st.id);
     const bits = [];
-    if (!t) bits.push(`<span class="cmp-chip">${icon('info', 13)}<span>Sending needs the desktop window</span></span>`);
+    if (!t) bits.push(`<span class="cmp-chip">${icon('info', 13)}<span>${esc(noTermMsg('Sending'))}</span></span>`);
     else if (st.step || isStarting(st.id)) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>${esc(st.step || 'Starting session…')}</span></span>`);
     else if (st.switching) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>Switching mode…</span></span>`);
     else if (h && !h.alive) bits.push(`<span class="cmp-chip">${icon('info', 13)}<span>The session ended${h.exitCode != null ? ` (code ${esc(h.exitCode)})` : ''}; sending starts it again</span></span>`);
@@ -965,7 +1011,7 @@ export function mountCompose(slot, s) {
   // edit: the text to send in the message's place once Claude Code has restored (Edit in the feed)
   async function rewindTo(id, text, nth, edit = null) {
     if (id !== st.id || working) return;
-    if (!termApi()) { err('Rewinding needs the desktop window'); return; }
+    if (!termApi()) { err(noTermMsg('Rewinding')); return; }
     if (st.menu) { err('Answer the question above first'); return; }
     working = true;
     st.step = 'Rewinding…'; drawNotes();
@@ -1206,8 +1252,12 @@ export function mountCompose(slot, s) {
       // the images first: a failed upload keeps the whole draft
       const paths = [];
       for (const a of list) {
-        try { paths.push(await uploadImage(a)); } catch (e) { err(`Couldn't upload ${a.name}: ${e?.message || e}`); return; }
+        // a file still on its way to the PC (a browser's): sending waits for it, and says so
+        if (a.up && st.id === id) { st.step = `Waiting for ${a.name} to reach the PC…`; drawNotes(); }
+        // (a file that didn't reach the PC said why already, and left the draft; so did one taken out meanwhile)
+        try { paths.push(await uploadImage(a)); } catch (e) { if (!a.file) err(`Couldn't upload ${a.name}: ${e?.message || e}`); return; }
       }
+      if (st.id === id && st.step) { st.step = ''; drawNotes(); }
       if (!shell && /(^|\s)\/[^\s/]/.test(text)) text = hoistCommand(text, (await commandsFor(s0.cwd)).map((c) => c.name));
       const msg = messageText(text, paths);
       if (!msg) return;
@@ -1675,7 +1725,7 @@ export function mountCompose(slot, s) {
     st.drawn.model = key;
     modelBtn.querySelector('.cmp-model-t').textContent = label;
     modelBtn.disabled = !t || !!st.menu || !!st.panel || st.sending;
-    modelBtn.title = !t ? 'Changing the model needs the desktop window' : `Model and effort${st.s.model ? ` (now ${st.s.model}${effort ? `, ${effort} effort` : ''})` : ''}`;
+    modelBtn.title = !t ? noTermMsg('Changing the model') : `Model and effort${st.s.model ? ` (now ${st.s.model}${effort ? `, ${effort} effort` : ''})` : ''}`;
     const item = (k, label, on, attr) => `<button type="button" role="menuitemradio" class="cmp-mi${on ? ' on' : ''}" ${attr}="${esc(k)}" aria-checked="${on}">`
       + `<span class="cmp-mi-c">${on ? ic('check', 13) : ''}</span><span>${esc(label)}</span></button>`;
     // the one it runs comes first in the list when it isn't one of the newest (an older version)
@@ -1723,7 +1773,7 @@ export function mountCompose(slot, s) {
     // just the phone icon: off is dim, on lights up mint, connecting gold; the word is in the label and tooltip
     rcBtn.setAttribute('aria-label', st.rcBusy ? 'Remote Control: switching' : cur === 'off' ? 'Remote Control: off' : cur === 'on' ? 'Remote Control: on' : 'Remote Control: connecting');
     rcBtn.disabled = !t || st.rcBusy || st.sending || !!st.menu || !!st.panel;
-    rcBtn.title = !t ? 'Remote Control needs the desktop window'
+    rcBtn.title = !t ? noTermMsg('Remote Control')
       : cur === 'connecting' ? 'Remote Control is connecting. Click to turn it off'
       : on ? 'Remote Control is on: the Claude phone app and claude.ai/code can see and drive this session. Click to turn it off'
         : 'Remote Control is off. Click to let the Claude phone app and claude.ai/code see and drive this session (off again when the session restarts)';
@@ -1853,7 +1903,7 @@ export function mountCompose(slot, s) {
     root.classList.toggle('nodesk', !t);
     $('[data-c="attach"]').disabled = !t;
     const fb = $('[data-c="folder"]');
-    fb.hidden = typeof window.fleetDesktop?.pickFolder !== 'function';
+    fb.hidden = !canPickFolder();
     fb.disabled = !t;
     const mic = $('[data-c="mic"]');
     mic.hidden = !voiceSupported();
@@ -2075,7 +2125,7 @@ export function mountCompose(slot, s) {
     dragDepth = 0;
     root.classList.remove('drop');
     if (!termApi()) return;
-    addFiles(e.dataTransfer.files);
+    addFiles(e.dataTransfer.files, false, uploads() ? droppedFolders(e.dataTransfer) : null);
     ta.focus();
   };
   // a quote from the feed (chat.js): a bubble above the text (another Reply adds to it)

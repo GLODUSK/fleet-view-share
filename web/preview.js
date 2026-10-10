@@ -24,9 +24,19 @@
 // headers (frame=1) and the note says so when it doesn't, with Open in browser.
 //
 // Nothing found: the pane offers the launch.json configurations (Start) or, without any, "Ask Claude to start
-// it", which hands Claude a message (handto.js, sent at once). Screenshot to chat (desktop window only, where
-// fleetDesktop.capture exists) captures the frame's area of the window as a PNG and hands it to the chat box
-// with a line naming the address, unsent, so you can add a question.
+// it", which hands Claude a message (handto.js, sent at once). Screenshot to chat hands a PNG of the page to the
+// chat box with a line naming the address, unsent, so you can add a question: the desktop window captures the
+// frame's area itself (fleetDesktop.capture); any other browser can't read a cross-origin frame, so the server
+// takes it with headless Edge on the PC (POST /preview/shot, at the frame's size: a fresh load of that address,
+// signed out and scrolled to the top, which the line says).
+//
+// From another device (the page opened over Tailscale, https://<pc>.<tailnet>.ts.net; /preview/urls says
+// remote: true): localhost there is that device's own, so the frame never loads the local address. The address
+// box and the list still speak in the PC's local addresses; each poll names the page it shows, and the server
+// shares that dev server at https://<pc>:<port> (preview.js: a gated proxy behind tailscale serve, which also drops
+// the framing headers) and answers current.share = { ok, url, gen } or { ok: false, message }. The frame loads
+// share.url, again when gen changes (the share was made again after it went idle), and Open in browser opens it.
+// Only the dev servers the conversation lists are shared; another address says so in the note.
 import { esc, ago } from './cards.js';
 import { icon } from './icons.js';
 import { handToChat } from './handto.js';
@@ -42,6 +52,8 @@ const ASK_TEXT = "Start this project's dev server in the background (run_in_back
 const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 const desk = () => window.fleetDesktop || null;
 const canCapture = () => typeof desk()?.capture === 'function';
+// opened over Tailscale from another device: the server's answer says so; until the first one, the address does
+const REMOTE_GUESS = location.protocol === 'https:';
 const panes = new Set();
 
 // a reload arrow in icons.js's style (icons.js has none)
@@ -93,6 +105,7 @@ function build(pane) {
   const st = pane._pv = {
     id: null, cwd: '', url: '', hist: [], fwd: [], list: [], loaded: false, cur: null, loadAt: 0, moved: false,
     lastRender: 0, lastPoll: 0, polling: false, timer: null, starting: null, err: '', menu: false, busy: '',
+    remote: REMOTE_GUESS, share: null, shown: '',
     el: {
       back: q('[data-pv="back"]'), fwd: q('[data-pv="fwd"]'), reload: q('[data-pv="reload"]'), pick: q('[data-pv="pick"]'),
       open: q('[data-pv="open"]'), shot: q('[data-pv="shot"]'), addr: q('.pv-addr'), input: q('.pv-url'), dot: q('.pv-dot'),
@@ -126,7 +139,7 @@ function build(pane) {
     else if (what === 'fwd' && st.fwd.length) { st.hist.push(st.url); step(pane, st.fwd.pop()); }
     else if (what === 'reload' && st.url) load(pane, st.url);
     else if (what === 'pick') { if (st.menu) closeMenu(pane); else openMenu(pane); }
-    else if (what === 'open' && st.url) window.open(st.url, '_blank', 'noopener');
+    else if (what === 'open' && openUrl(st)) window.open(openUrl(st), '_blank', 'noopener');
     else if (what === 'shot') screenshot(pane);
     else if (what === 'go' && b.dataset.url) { closeMenu(pane); go(pane, b.dataset.url); }
     else if (what === 'start') start(pane, b.dataset.name);
@@ -157,6 +170,7 @@ function switchTo(pane, s) {
   const prev = st.id, prevUrl = st.url;
   st.id = s.id;
   st.hist = []; st.fwd = []; st.list = []; st.loaded = false; st.cur = null; st.starting = null; st.err = ''; st.lastPoll = 0;
+  st.share = null; st.shown = '';
   closeMenu(pane);
   let url = recall(s.id);
   // a new session that just got its conversation id keeps what it showed
@@ -188,14 +202,20 @@ async function poll(pane) {
   if (!j || st.id !== id) return;
   st.list = Array.isArray(j.urls) ? j.urls : [];
   st.loaded = true;
+  st.remote = !!j.remote;
   if (st.url !== url) return draw(pane); // the address changed meanwhile: its own poll comes
   const was = st.cur;
   st.cur = j.current && same(j.current.url, url) ? j.current : null;
+  let shown = false;
+  if (st.remote && st.cur) {
+    st.share = st.cur.share || null;
+    if (st.share && st.share.ok) shown = showShare(pane); // the first share of this page, or one made again
+  }
   if (!st.url) {
     // nothing picked yet: the newest address that answers
     const pick = st.list.find((x) => x.up && x.url && !x.launch) || st.list.find((x) => x.up && x.url);
     if (pick) go(pane, pick.url, { push: false });
-  } else if (st.cur && st.cur.up && was && !was.up) {
+  } else if (st.cur && st.cur.up && was && !was.up && !shown) {
     load(pane, st.url); // it just came up: the frame still shows the error page
   }
   if (st.starting && st.cur && st.cur.up) st.starting = null;
@@ -232,7 +252,27 @@ function load(pane, url) {
   st.loadAt = Date.now();
   st.moved = false;
   st.el.frame.hidden = false;
-  st.el.frame.src = url; // setting it again reloads, even when it is the same address
+  if (!st.remote) { st.el.frame.src = url; return; } // setting it again reloads, even when it is the same address
+  // another device: the shared address, once the server has made it (the next poll does, for a new address)
+  if (st.share && st.share.ok && st.shown === `${st.share.gen}|${url}`) { st.el.frame.src = st.share.url; return; }
+  st.share = null; st.shown = '';
+  if (st.el.frame.getAttribute('src') !== 'about:blank') st.el.frame.src = 'about:blank';
+}
+// another device: the frame shows the share of the current address, loaded again when the share was made again
+function showShare(pane) {
+  const st = pane._pv, key = `${st.share.gen}|${st.url}`;
+  if (st.shown === key) return false;
+  st.shown = key;
+  st.loadAt = Date.now();
+  st.el.frame.hidden = false;
+  st.el.frame.src = st.share.url;
+  return true;
+}
+// what Open in browser opens: the address itself here, the shared one on another device
+function openUrl(st) {
+  if (!st.url) return '';
+  if (!st.remote) return st.url;
+  return st.share && st.share.ok ? st.share.url : '';
 }
 function unload(pane) {
   const f = pane._pv.el.frame;
@@ -299,12 +339,21 @@ function ask(pane) {
 async function screenshot(pane) {
   const st = pane._pv, id = st.id, url = st.url;
   const f = st.el.frame;
-  if (!canCapture() || !url || f.hidden || st.capturing) return;
+  if (!url || f.hidden || st.capturing) return;
   closeMenu(pane);
   const r = f.getBoundingClientRect();
   if (r.width < 4 || r.height < 4) return;
   st.capturing = true;
   draw(pane);
+  if (!canCapture()) {
+    // any other browser: taken on the PC (headless Edge), a fresh load of the address at the frame's size
+    const got = await shotOnPc(st, url, r);
+    st.capturing = false;
+    if (got.blob) handToChat(id, { images: [{ blob: got.blob, name: 'preview.png' }], text: `Screenshot of the preview at ${url} (a fresh load of the page, taken on the PC):` });
+    else if (st.id === id) st.err = got.message;
+    draw(pane);
+    return;
+  }
   let bytes = null;
   try { bytes = await desk().capture({ x: r.left, y: r.top, width: r.width, height: r.height }); } catch {}
   st.capturing = false;
@@ -312,6 +361,16 @@ async function screenshot(pane) {
   if (!bytes || !bytes.byteLength) { st.err = 'Could not take the screenshot.'; draw(pane); return; }
   const blob = bytes instanceof Blob ? bytes : new Blob([bytes], { type: 'image/png' });
   handToChat(id, { images: [{ blob, name: 'preview.png' }], text: `Screenshot of the preview at ${url}:` });
+}
+// POST /preview/shot: { blob } or { message }
+async function shotOnPc(st, url, r) {
+  const body = { id: st.id, cwd: st.cwd, url, width: Math.round(r.width), height: Math.round(r.height), scale: window.devicePixelRatio || 1 };
+  try {
+    const res = await fetch('/preview/shot', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (res.ok && (res.headers.get('Content-Type') || '').startsWith('image/png')) return { blob: await res.blob() };
+    const j = await res.json().catch(() => null);
+    return { message: j && j.message ? `Could not take the screenshot: ${j.message}.` : `Could not take the screenshot (the server answered ${res.status}).` };
+  } catch { return { message: "Could not take the screenshot: Fleet View's server did not answer." }; }
 }
 
 // ---------- the list ----------
@@ -385,6 +444,11 @@ function noteHtml(st) {
       + (c && !c.running ? `<button type="button" class="pv-small go" data-pv="start" data-name="${esc(c.name)}"${st.busy ? ' disabled' : ''}>${icon('live', 13)}<span>Start ${esc(c.name)}</span></button>`
         : c ? '' : `<button type="button" class="pv-small" data-pv="ask">${icon('ask', 13)}<span>Ask Claude to start it</span></button>`);
   }
+  if (st.remote && st.cur && st.cur.up) {
+    const sh = st.cur.share;
+    if (sh && !sh.ok && sh.message) return `<span class="dim">${esc(sh.message)}</span>`;
+    if (!sh || !sh.ok) return '<span class="spin"></span><span>Opening it over Tailscale…</span>';
+  }
   if (!desk() && st.cur && st.cur.frame === false) {
     return `<span class="dim">This page doesn't allow being shown inside another page, so it stays blank here. The desktop window shows it.</span>`
       + `<button type="button" class="pv-small" data-pv="open">${icon('external', 13)}<span>Open in browser</span></button>`;
@@ -420,9 +484,10 @@ function draw(pane) {
   E.back.disabled = !st.hist.length;
   E.fwd.disabled = !st.fwd.length;
   E.reload.disabled = !st.url;
-  E.open.disabled = !st.url;
-  E.shot.hidden = !canCapture();
-  E.shot.disabled = !st.url || st.capturing;
+  E.open.disabled = !openUrl(st);
+  E.shot.hidden = false;
+  E.shot.title = canCapture() ? 'Screenshot to chat' : 'Screenshot to chat (taken on the PC: a fresh load of the page)';
+  E.shot.disabled = !st.url || !!st.capturing || !!(st.cur && st.cur.up === false);
   if (document.activeElement !== E.input && E.input.value !== st.url) E.input.value = st.url;
   const state = !st.url ? '' : st.starting ? 'wait' : st.cur ? (st.cur.up ? 'up' : 'down') : '';
   if (E.dot.dataset.s !== state) { E.dot.dataset.s = state; E.dot.className = `pv-dot${state ? ` ${state}` : ''}`; }

@@ -218,6 +218,12 @@ html.glass .cmp-box { background: rgba(14, 17, 27, 0.66); -webkit-backdrop-filte
 .cmp-attf svg { flex: none; }
 .cmp-attf.dir svg { color: var(--gold); }
 .cmp-attf-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 12.5px; }
+/* a browser's file on its way to the PC (POST /upload): how far it got, and a thin bar along the bottom */
+.cmp-attf.up { color: var(--cyan); }
+.cmp-attf-t { display: flex; flex-direction: column; min-width: 0; }
+.cmp-attf-p { color: var(--dim); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cmp-attf-bar { position: absolute; left: 10px; bottom: 7px; height: 3px; max-width: calc(100% - 20px); border-radius: 2px; background: var(--cyan); opacity: 0.75; transition: width 200ms linear; }
+@media (prefers-reduced-motion: reduce) { .cmp-attf-bar { transition: none; } }
 
 /* notes: starting, ended, open elsewhere, errors */
 .cmp-notes { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 12px 2px; }
