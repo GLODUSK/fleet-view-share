@@ -1721,9 +1721,11 @@ function openContextMenu(target, x, y) {
     const color = target.color || repo.color || C.dim;
     const items = [];
     if (desk) {
-      // every account that is on, however little of its weekly or 5-hour limit is left (Henry, 2026-10-10)
-      const all = allAccounts();
-      for (const a of onAccounts()) items.push({ label: all.length === 1 ? 'New session' : `New session · ${a}`, icon: 'plus', run: () => newSession(folder, a) });
+      // every account that is on, however little of its weekly or 5-hour limit is left (Henry, 2026-10-10),
+      // less those with none left at all (Henry, 2026-10-10); all of them out: one greyed line saying so
+      const all = allAccounts(), ok = onAccounts().filter((a) => !acctOut(a));
+      for (const a of ok) items.push({ label: all.length === 1 ? 'New session' : `New session · ${a}`, icon: 'plus', run: () => newSession(folder, a) });
+      if (!ok.length) items.push({ label: 'New session', icon: 'plus', disabled: true, note: 'every account is out of its limit' });
       items.push({ sep: true });
     }
     items.push({ label: 'Open folder', icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
