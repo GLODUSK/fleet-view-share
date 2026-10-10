@@ -4790,7 +4790,7 @@ function requestFailed(req, res, e) {
   try { if (!res.headersSent) sendJson(res, 500, { ok: false, message: 'server error' }); else res.end(); } catch {}
 }
 
-// ---------- POST /reveal: open a file in VS Code, or a folder in Explorer ----------
+// ---------- POST /reveal: open a file in VS Code (a document or image in its default app), or a folder in Explorer ----------
 // Only a path the page was given may be opened: a file some conversation touched (files[].abs, calls[].file),
 // or a repo root or checkout (repo.root, links.repoFolder), or a handoff summary in HO.dir(). Nothing goes
 // through a shell with unchecked input: Explorer gets the path as an argument, and VS Code's code.cmd (a batch
@@ -4838,14 +4838,20 @@ function vscodeCmd() {
   const onPath = String(process.env.PATH || '').split(path.delimiter).filter(Boolean).map((d) => path.join(d.replace(/"/g, ''), 'code.cmd'));
   return [...known, ...onPath].find((f) => !UNSAFE_PATH.test(f) && fs.existsSync(f)) || null;
 }
+// documents and media that open in their Windows default app (Photos, a PDF reader, Office, a player): none of
+// them runs anything when opened. Everything else (code, text, scripts, programs) goes to VS Code.
+const DEFAULT_APP_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tif', '.tiff', '.heic', '.avif',
+  '.pdf', '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.odt', '.ods', '.odp',
+  '.mp4', '.mov', '.webm', '.mkv', '.avi', '.mp3', '.wav', '.m4a', '.ogg', '.flac']);
 async function revealFile(p, line) {
   const target = line ? `${p}:${line}` : p;
   if (process.platform === 'win32') {
+    if (DEFAULT_APP_EXT.has(path.extname(p).toLowerCase()) && await run('explorer.exe', [`"${p}"`], { anyExit: true, windowsVerbatimArguments: true }, 3000)) return { ok: true, message: `opened ${path.basename(p)}` };
     const code = vscodeCmd();
     const cmd = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
     // /s strips the outer quotes, leaving: "<code.cmd>" -g "<path>:<line>"
     if (code && await run(cmd, ['/d', '/v:off', '/s', '/c', `""${code}" -g "${target}""`], { windowsVerbatimArguments: true })) return { ok: true, message: `opened ${path.basename(p)} in VS Code` };
-    // Without VS Code the file is only shown, selected, in Explorer. Its default app is never used: for a
+    // Without VS Code the file is only shown, selected, in Explorer. Its default app is not used: for a
     // .js, .bat, .cmd, .vbs or .exe a session touched, the default app would run it.
     if (await run('explorer.exe', [`/select,"${p}"`], { anyExit: true, windowsVerbatimArguments: true }, 3000)) return { ok: true, message: `VS Code was not found: showing ${path.basename(p)} in Explorer` };
     return { ok: false, message: `could not open ${path.basename(p)}` };

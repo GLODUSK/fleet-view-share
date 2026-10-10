@@ -2825,7 +2825,7 @@ function hitTest(sx, sy) {
   for (const n of I.nodes) {
     if (n.sx === undefined) continue;
     const d = Math.hypot(n.sx - sx, n.sy - sy);
-    const reach = (n.RG || n.R || 4) + (n.kind === 'recent' ? 4 : 6);
+    const reach = (n.RG || n.R || 4) + (n.kind === 'recent' ? 7 : 6);
     if (d > reach) continue;
     const score = d + rank[n.kind] * 6;
     if (score < bd) { bd = score; best = n; }
@@ -3030,6 +3030,8 @@ function wireMouse(cv) {
     if (n && n.id === I.sel && e.detail === 1 && n.kind !== 'session' && n.kind !== 'agent' && act(n)) return;
     if (e.detail >= 2 && n && n.id === I.sel) return; // already picked: don't re-pick (no extra redraw)
     select(n, false);
+    // a file dot opens on its first click (it has nothing else to show)
+    if (n && n.kind === 'recent' && e.detail === 1) act(n);
   });
   cv.addEventListener('mouseleave', () => { if (I.hover || I.hoverX) { I.hover = null; I.hoverX = null; I.dirty = true; } hideTip(); });
   // right-click: the shell's menu for a conversation (or an agent's conversation) or a repo
@@ -3166,7 +3168,7 @@ function nodeAction(n) {
   }
   if (n.kind === 'recent' || n.kind === 'clash') {
     const abs = n.kind === 'recent' ? fileAbs(n.f.key, n.f) : fileAbs(n.c.key, null);
-    return abs ? { hint: 'open the file in VS Code', run: () => reveal({ kind: 'file', path: abs }) } : null;
+    return abs ? { hint: 'open the file', run: () => reveal({ kind: 'file', path: abs }) } : null;
   }
   if (n.kind === 'conflict') {
     const f = Array.isArray(n.k.files) && n.k.files.find((x) => x && x.abs);
@@ -3370,7 +3372,7 @@ function fillTip(n) {
   const a = nodeAction(n);
   let hint = null;
   if (n.kind === 'session') hint = 'click: details · double-click / Enter: open the conversation · Ctrl+click: select several';
-  else if (a) hint = `double-click / Enter: ${a.hint}`;
+  else if (a) hint = n.kind === 'recent' ? `click: ${a.hint}` : `double-click / Enter: ${a.hint}`;
   else if (n.kind === 'pr') hint = 'no GitHub link for this PR yet';
   if (n.kind === 'clash' || n.kind === 'conflict') hint = (hint ? hint + ' · ' : '') + 'right-click: actions';
   if (hint) {
@@ -3582,7 +3584,7 @@ function buildLegend() {
   const act = (text) => { const d = document.createElement('div'); d.textContent = text; d.style.cssText = 'margin:1px 0 1px 40px'; wrapEl.appendChild(d); };
   act('conversation: open it (one click shows details)');
   act('PR: open it on GitHub');
-  act('file: open it in VS Code');
+  act('file: click to open it (VS Code, or its own app for images and documents)');
   act('repo: open the folder in Explorer');
   act('right-click a conversation, a repo, a team or a conflict: its menu');
   sec('Accounts');
