@@ -11,6 +11,10 @@
 //   - a failed build is retried after an hour; the log is %LOCALAPPDATA%\fleet-view\codegraph.log.
 //   - a build cut short (Fleet View restarted, the PC went down) leaves an index CodeGraph itself marks "indexing";
 //     once it has sat like that for longer than a build may take, it is built again from scratch.
+//   - a newer CodeGraph can extract more than the one that built an index (its "extraction version" goes up), and
+//     only a rebuild adds that. When the installed version changes, a tiny index built in codegraph-probe tells the
+//     extraction version it stamps, and every index stamped lower is rebuilt. Updating CodeGraph itself, and what
+//     to do when a new one needs this file changed: docs\codegraph-update.md.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -38,25 +42,78 @@ const dbOf = (top) => path.join(top, DIR, 'codegraph.db');
 const complete = new Set(); // checkout keys whose index was found complete: not opened again
 const checking = new Set(); // checkout keys being checked now
 
-// check(top, cb): is the checkout's index finished? CodeGraph's own project_metadata.index_state reads "complete"
-// once a build is done. cb gets 'done' (complete, or a state it can't read: an older CodeGraph, no node:sqlite, a
-// file it is better to leave alone), 'busy' (a build may be running now) or 'partial' (a build stopped part way).
+// check(top, cb): is the checkout's index finished and current? CodeGraph's own project_metadata says it:
+// index_state reads "complete" once a build is done, and indexed_with_extraction_version is the extraction version
+// of the CodeGraph that built it. cb(state, { extraction }) gets 'done' (complete, or a state it can't read: an older
+// CodeGraph, no node:sqlite, a file it is better to leave alone), 'busy' (a build may be running now), 'partial' (a
+// build stopped part way) or 'stale' (built by a CodeGraph that extracted less than the installed one).
 // A child process opens the database: one a daemon let go of can take half a minute to open (its write-ahead log
 // is played back), which the server must never wait on. Electron's node runs it as plain node.
+// scripts\codegraph-contract.js checks each new CodeGraph still writes what this reads.
 const CHECK = `let d, r;
 try {
   d = new (require('node:sqlite').DatabaseSync)(process.argv[1]);
-  r = d.prepare("select value, updated_at from project_metadata where key = 'index_state'").get() || {};
+  const get = (k) => d.prepare('select value, updated_at from project_metadata where key = ?').get(k);
+  const s = get('index_state') || {}, x = get('indexed_with_extraction_version');
+  r = { value: s.value, updated_at: s.updated_at, extraction: x && /^\\d+$/.test(x.value) ? Number(x.value) : null };
 } catch (e) { r = { error: String(e.message) }; } finally { try { if (d) d.close(); } catch {} }
 process.stdout.write(JSON.stringify(r));`;
 function check(top, cb) {
   execFile(process.execPath, ['--no-warnings', '-e', CHECK, dbOf(top)], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, windowsHide: true, timeout: 120e3 }, (err, out) => {
     let r = null;
     try { r = JSON.parse(out); } catch {}
-    if (!r) return cb(err && err.killed ? 'busy' : 'done');
-    if (r.error) return cb(/locked|busy/i.test(r.error) ? 'busy' : 'done');
-    if (!r.value || r.value === 'complete') return cb('done');
-    cb(Date.now() - Number(r.updated_at) < BUILD_MAX_MS ? 'busy' : 'partial');
+    if (!r) return cb(err && err.killed ? 'busy' : 'done', {});
+    if (r.error) return cb(/locked|busy/i.test(r.error) ? 'busy' : 'done', {});
+    const info = { extraction: r.extraction };
+    if (r.value && r.value !== 'complete') return cb(Date.now() - Number(r.updated_at) < BUILD_MAX_MS ? 'busy' : 'partial', info);
+    // an index with no stamp is left alone: rebuilding it would not add one if CodeGraph stopped writing it
+    cb(engine && r.extraction !== null && r.extraction < engine.extraction ? 'stale' : 'done', info);
+  });
+}
+
+// the installed CodeGraph: { version, extraction }, kept in codegraph-engine.json across restarts
+const ENGINE_FILE = path.join(path.dirname(LOG), 'codegraph-engine.json');
+const PROBE = path.join(path.dirname(LOG), 'codegraph-probe');
+let engine = null, probing = false;
+try { const e = JSON.parse(fs.readFileSync(ENGINE_FILE, 'utf8')); if (e && e.version && Number.isInteger(e.extraction)) engine = e; } catch {}
+
+// codegraph(args, cwd): runs the command with the paths quoted. On Windows the npm command is a .cmd, so cmd.exe runs
+// it, named in full: a bare `codegraph` can find a .js file of that name first (PATHEXT). Paths were checked for
+// characters cmd treats specially
+function codegraph(args, cwd, stdio) {
+  if (process.platform !== 'win32') return spawn('codegraph', args, { cwd, stdio });
+  const line = ['codegraph.cmd', ...args].map((a) => (/^[\w.-]+$/.test(a) ? a : `"${a}"`)).join(' ');
+  return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], { cwd, windowsHide: true, windowsVerbatimArguments: true, stdio });
+}
+
+// is the installed CodeGraph new? Then build a one-file index in PROBE and read the extraction version it stamps.
+// When that went up, every index is checked again, and the ones an older CodeGraph built are rebuilt.
+function probeEngine() {
+  if (probing) return;
+  probing = true;
+  let out = '';
+  const v = codegraph(['--version'], os.tmpdir(), ['ignore', 'pipe', 'ignore']);
+  v.stdout.on('data', (d) => { out += d; });
+  v.on('error', () => { probing = false; });
+  v.on('exit', () => {
+    const version = (out.match(/\d+\.\d+\.\d+[\w.-]*/) || [])[0];
+    if (!version || (engine && engine.version === version)) { probing = false; return; }
+    try {
+      fs.rmSync(PROBE, { recursive: true, force: true });
+      fs.mkdirSync(PROBE, { recursive: true });
+      fs.writeFileSync(path.join(PROBE, 'probe.js'), 'function probe() { return 1; }\nmodule.exports = { probe };\n');
+    } catch (e) { probing = false; return log(`could not make ${PROBE}: ${e.code || e.message}`); }
+    const p = codegraph(['init', '--yes', PROBE], PROBE, 'ignore');
+    p.on('error', () => { probing = false; });
+    p.on('exit', () => check(PROBE, (s, { extraction }) => {
+      probing = false;
+      if (!Number.isInteger(extraction)) return log(`CodeGraph ${version}: could not read the extraction version it stamps (probe: ${s})`);
+      const was = engine;
+      engine = { version, extraction };
+      try { fs.writeFileSync(ENGINE_FILE, JSON.stringify(engine)); } catch {}
+      log(`CodeGraph ${version}, extraction ${extraction}${was ? ` (was ${was.version}, extraction ${was.extraction})` : ''}`);
+      if (!was || was.extraction !== extraction) complete.clear();
+    }));
   });
 }
 
@@ -81,6 +138,7 @@ function findCodegraph() {
     const was = found;
     found = !err; foundAt = Date.now();
     if (found !== was) log(found ? 'codegraph found on PATH: indexing checkouts' : 'codegraph is not on PATH: no indexes are built');
+    if (found) probeEngine();
     next();
   });
 }
@@ -100,11 +158,12 @@ function want(top, root) {
   }
   if (complete.has(k) || checking.has(k)) return;
   checking.add(k);
-  check(top, (s) => {
+  check(top, (s, { extraction }) => {
     checking.delete(k);
     if (s === 'done') complete.add(k);
-    else if (s === 'partial' && !(building && key(building) === k) && !queue.some((q) => key(q.top) === k)) {
-      queue.push({ top, root: root || top, rebuild: true });
+    else if ((s === 'partial' || s === 'stale') && !(building && key(building) === k) && !queue.some((q) => key(q.top) === k)) {
+      const why = s === 'stale' ? `built by an older CodeGraph: extraction ${extraction}, now ${engine.extraction}` : 'the last build stopped part way';
+      queue.push({ top, root: root || top, rebuild: why });
       next();
     }
   });
@@ -119,15 +178,9 @@ function next() {
   building = job.top;
   exclude(job.root);
   const t0 = Date.now();
-  // `init` makes a new index; one a build left part way is made again from scratch by `index`
-  const args = job.rebuild ? ['index', '--quiet'] : ['init', '--yes'];
-  log(`${job.top}: ${job.rebuild ? 'rebuilding (the last build stopped part way)' : 'building'}`);
-  const win = process.platform === 'win32';
-  // the npm command is a .cmd on Windows, so cmd.exe runs it, named in full: a bare `codegraph` can find a .js file of
-  // that name first (PATHEXT). The path was checked for characters cmd treats specially
-  const p = win
-    ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"codegraph.cmd ${args.join(' ')} "${job.top}""`], { cwd: job.top, windowsHide: true, windowsVerbatimArguments: true, stdio: ['ignore', 'ignore', 'pipe'] })
-    : spawn('codegraph', [...args, job.top], { cwd: job.top, stdio: ['ignore', 'ignore', 'pipe'] });
+  // `init` makes a new index; one a build left part way, or an older CodeGraph built, is made again by `index`
+  log(`${job.top}: ${job.rebuild ? `rebuilding (${job.rebuild})` : 'building'}`);
+  const p = codegraph([...(job.rebuild ? ['index', '--quiet'] : ['init', '--yes']), job.top], job.top, ['ignore', 'ignore', 'pipe']);
   try { os.setPriority(p.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch {}
   let err = '';
   p.stderr.on('data', (d) => { if (err.length < 4000) err += d; });
@@ -149,4 +202,4 @@ function kill(p) {
   else try { p.kill(); } catch {}
 }
 
-module.exports = { want, status: () => ({ found, building, queued: queue.map((q) => q.top) }) };
+module.exports = { want, check, status: () => ({ found, engine, building, queued: queue.map((q) => q.top) }) };
