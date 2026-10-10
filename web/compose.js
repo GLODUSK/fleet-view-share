@@ -1022,7 +1022,11 @@ export function mountCompose(slot, s) {
     }
     return !panelNow(id);
   }
-  const typesText = (m) => { const on = m && m.options.find((o) => o.on); return !!on && /^(type something|other\b|chat about this)/i.test(on.label); };
+  // the option that takes typed text: "Type something." until text goes in, then its label is that text, so it is
+  // also known as the one right above "Chat about this"
+  const isFree = (m, o) => !!o && (/^(type something|other\b|chat about this)/i.test(o.label)
+    || /^chat about this/i.test(m.options.find((x) => x.n === o.n + 1)?.label || ''));
+  const typesText = (m) => !!m && isFree(m, m.options.find((o) => o.on));
 
   // what the box holds, or (cmd) a command the model picker sends; the draft stays as it is then. In bash mode the
   // box holds a shell command: a typed "!" goes first (see the top), and only the command goes.
@@ -1049,8 +1053,7 @@ export function mountCompose(slot, s) {
     const id = st.id, s0 = st.s;
     // a menu is up: typed text would land in it (a digit picks an option); "Type something" takes text, though
     if (st.menu && hosts.get(id)?.alive) {
-      const on = st.menu.options.find((o) => o.on);
-      if (!on || !/^(type something|other\b|chat about this)/i.test(on.label)) { err('Answer the question above first (or press Esc)'); return; }
+      if (!typesText(st.menu)) { err('Answer the question above first (or press Esc)'); return; }
     }
     // a terminal elsewhere has it open: a second copy runs only when asked twice
     if (!hosts.has(id) && openElsewhere(s0) && Date.now() - st.elsewhereAt > ELSEWHERE_CONFIRM_MS) {
@@ -1260,7 +1263,13 @@ export function mountCompose(slot, s) {
     // the same question still on screen (a new prompt may have replaced it since the last poll)
     const now = menuNow(st.id);
     if (!now || now.sig !== m.sig) { st.menu = now; drawCard(); return; }
-    if (!writeKey(String(n))) return;
+    // the text option already picked: a digit would be typed into it. Empty, its text comes from the box; with
+    // text in it, the click sends that answer
+    const o = now.options.find((x) => x.n === n);
+    if (o.on && isFree(now, o) && !/^chat about this/i.test(o.label)) {
+      if (/^(type something|other\b)/i.test(o.label)) { ta.focus(); return; }
+      if (!writeKey('\r')) return;
+    } else if (!writeKey(String(n))) return;
     st.answeredSig = m.sig; st.answeredAt = Date.now();
     drawCard();
   }
