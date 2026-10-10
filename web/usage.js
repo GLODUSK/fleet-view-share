@@ -135,7 +135,7 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
     const html = `<div class="uw-top"><span class="uw-title">${icon('cost', 14)}<b>Plan usage</b></span><span class="uw-sub">this PC vs. elsewhere</span>`
       + `<button type="button" class="uw-x" aria-label="close" title="close (Esc)">${icon('close', 13)}</button></div>`
       + `<div class="uw-list">${body}</div>`
-      + '<div class="uw-foot">Elsewhere: the plan\'s meter rose more than the sessions on this PC explain, so another computer, claude.ai, the phone app, the desktop app's Cowork or someone else signed in used it. The heads-up comes at 10 points of the 5-hour limit in 30 minutes (usageAlertPct in ~/.fleet-view.json).</div>';
+      + '<div class="uw-foot">Elsewhere: the plan’s meter rose more than the sessions on this PC explain, so another computer, claude.ai, the phone app, the desktop app’s Cowork or someone else signed in used it. The heads-up comes at 10 points of the 5-hour limit in 30 minutes (usageAlertPct in ~/.fleet-view.json).</div>';
     if (card._html !== html) { card.innerHTML = html; card._html = html; }
   }
   function open() {
