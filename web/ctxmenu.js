@@ -18,6 +18,8 @@
 //       Enter sends, Shift+Enter starts a new line; for orders and notes), empty (what it says when Enter
 //       finds the box empty), busy (what it says while submit runs, e.g. "sending…"), allowEmpty (Enter on an
 //       empty box calls submit('') instead: Rename, where empty goes back to Claude Code's own title)
+//       stay (a submenu item): picking it runs it and keeps the menu open; the parent item's refresh() returns
+//       the parent item anew (label, badge, children) to redraw both menus with (toggles: Accounts ▸ ✓ A)
 //   closeCtxMenu()   ctxMenuOpen()
 //
 // Frosted like the repo menu (same .menu surface and tokens). Keys while it is open: ↑↓ (and Home / End)
@@ -254,6 +256,25 @@ function pickSub(j) {
     return;
   }
   if (it.input) { startInput(it); return; }
+  // stay: a toggle (Accounts ▸ ✓ A): it runs and the menu stays open, redrawn from the parent's refresh()
+  if (it.stay) {
+    keepUntil = Date.now() + 2500; // the page redraws (cards come and go) and may scroll: not a reason to close
+    try { it.run && it.run(); } catch (e) { console.error(e); }
+    const p = items[subOf];
+    if (p && typeof p.refresh === 'function' && !subStack.length) {
+      const next = p.refresh();
+      if (next && Array.isArray(next.children)) {
+        items[subOf] = next;
+        draw();
+        mark();
+        subItems = next.children.filter(Boolean);
+        subSel = j;
+        level = 'sub';
+        drawSub();
+      }
+    }
+    return;
+  }
   closeCtxMenu();
   try { it.run && it.run(); } catch (e) { console.error(e); }
 }
@@ -261,6 +282,7 @@ function pickSub(j) {
 export function openCtxMenu(o) {
   ensure();
   if (open) closeCtxMenu(false);
+  openSize = winSize();
   spec = { ...o };
   items = (o.items || []).filter(Boolean);
   confirmFor = null; inputFor = null; inputBusy = false;
@@ -407,7 +429,11 @@ document.addEventListener('keydown', (e) => {
 const inside = (t) => t instanceof Node && (el.contains(t) || (subEl && subEl.contains(t)));
 document.addEventListener('pointerdown', (e) => { if (open && !inside(e.target)) closeCtxMenu(false); }, true);
 document.addEventListener('wheel', (e) => { if (open && !inside(e.target)) closeCtxMenu(false); }, { capture: true, passive: true });
-document.addEventListener('scroll', (e) => { if (open && !inside(e.target)) closeCtxMenu(false); }, true);
-window.addEventListener('resize', () => closeCtxMenu(false));
+let keepUntil = 0; // until then a scroll outside the menu (the page redrawing after a stay item) leaves it open
+document.addEventListener('scroll', (e) => { if (open && !inside(e.target) && Date.now() > keepUntil) closeCtxMenu(false); }, true);
+// a resize that leaves the window its size (the page redrawing after a stay item fires these) leaves it open
+let openSize = '';
+const winSize = () => `${window.innerWidth}x${window.innerHeight}`;
+window.addEventListener('resize', () => { if (open && (winSize() !== openSize && Date.now() > keepUntil)) closeCtxMenu(false); });
 // (not while it is a text box: copying a path from another window takes the focus away and back)
 window.addEventListener('blur', () => { if (!inputFor) closeCtxMenu(false); });

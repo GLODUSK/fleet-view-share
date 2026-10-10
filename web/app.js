@@ -2378,8 +2378,9 @@ function accountsMenuItem() {
   const all = allAccounts();
   if (all.length < 2) return null;
   const off = all.filter((a) => offAccts.includes(a));
-  return { label: 'Accounts', icon: 'agent', badge: off.length ? `${off.join(' ')} off` : null,
-    children: all.map((a) => ({ label: `Claude ${a}`, tag: a, icon: offAccts.includes(a) ? null : 'check', run: () => setAccountOn(a, offAccts.includes(a)) })) };
+  // stay: the menu stays open after a click, so several can be switched in a row; it closes on a click away
+  return { label: 'Accounts', icon: 'agent', badge: off.length ? `${off.join(' ')} off` : null, refresh: accountsMenuItem,
+    children: all.map((a) => ({ label: `Claude ${a}`, tag: a, icon: offAccts.includes(a) ? null : 'check', stay: true, run: () => setAccountOn(a, offAccts.includes(a)) })) };
 }
 
 function notifyMenuItem() {
