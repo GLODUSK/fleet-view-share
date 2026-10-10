@@ -518,54 +518,58 @@ function removeRepo(it) {
 // added here and not yet in /state's repos[] (with ?fixture=1, where nothing reaches a server: for good)
 const addedLocal = new Map(); // normRoot -> { root, name, at }
 // the path checked by the server (POST /repos/add); resolves to null when it worked, else the reason
-async function addRepoPath(p) {
+// at: { x, y } in client coordinates when added from the map's empty-space menu: its hub goes there
+async function addRepoPath(p, at = null) {
   // quotes around a pasted path ("Copy as path") are dropped; forward slashes are fine (the server turns them)
   const text = String(p || '').trim().replace(/^(["'])(.*)\1$/, '$2').trim();
   if (!text) return 'paste or type a folder path first';
   const r = await post('/repos/add', { path: text });
-  return repoAdded(r, FIXTURE ? { root: text.replace(/[\\/]+$/, '') || text, name: repoName(text) } : null);
+  return repoAdded(r, FIXTURE ? { root: text.replace(/[\\/]+$/, '') || text, name: repoName(text) } : null, false, at);
 }
 // "New scratchpad": the server makes a new empty folder (scratch-YYYY-MM-DD under ~/Scratchpads) and adds it;
 // resolves like addRepoPath, and shows a failure itself
-async function addScratchRepo() {
+async function addScratchRepo(at = null) {
   const r = await post('/repos/scratch', {});
-  const err = repoAdded(r, FIXTURE ? { root: 'C:\\Users\\you\\Scratchpads\\scratch-fixture', name: 'scratch-fixture' } : null, true);
+  const err = repoAdded(r, FIXTURE ? { root: 'C:\\Users\\you\\Scratchpads\\scratch-fixture', name: 'scratch-fixture' } : null, true, at);
   if (err) toast(err, C.red);
   return err;
 }
 // the server's reply to an add (fake: what ?fixture=1 pretends it got); null when it worked, else the reason
-function repoAdded(r, fake = null, scratch = false) {
+function repoAdded(r, fake = null, scratch = false, at = null) {
   const repo = fake || (r && r.ok ? r.repo : null);
   if (!repo) return (r && r.message) || 'could not reach Fleet View to add it';
   const k = normRoot(repo.root);
   addedLocal.set(k, { root: repo.root, name: repo.name || repoName(repo.root), color: repo.color || null, at: Date.now() });
   // a repo that was removed comes back (the server takes it off its list too)
   unhideRepo(repo.root);
+  // added from the map's empty space: the hub goes where the menu was opened, not the nearest free spot
+  if (at && !(r && r.already) && local.view === 'map' && mapMod && typeof mapMod.mapPlaceRepo === 'function') mapMod.mapPlaceRepo(repo.root, at.x, at.y);
   toast(r && r.already ? `${repo.name} is already listed` : scratch ? `Added ${repo.name} · ${repo.root}` : `Added ${repo.name}`, C.mint);
   if (menuOpen) drawMenu();
   render();
   return null;
 }
 // "Browse" (desktop window only): the system folder picker
-async function pickAndAddRepo() {
+async function pickAndAddRepo(at = null) {
   const fd = window.fleetDesktop;
   if (!fd || typeof fd.pickFolder !== 'function') return false;
   let r = null;
   try { r = await fd.pickFolder(); } catch { r = null; }
-  if (r && r.ok && r.path) { const err = await addRepoPath(r.path); if (err) toast(err, C.red); }
+  if (r && r.ok && r.path) { const err = await addRepoPath(r.path, at); if (err) toast(err, C.red); }
   else if (r && r.message) toast(r.message, C.dim);
   return true;
 }
 const canPickFolder = () => !!(window.fleetDesktop && typeof window.fleetDesktop.pickFolder === 'function');
 const ADD_HINT = 'Paste a folder path, e.g. Z:\\Github\\my-project';
-// the right-click menu's item: a submenu of the three ways (Browse is a quiet line outside the desktop window)
-function addRepoMenuItem() {
+// the right-click menu's item: a submenu of the three ways (Browse is a quiet line outside the desktop window);
+// at: where the menu was opened, so the map puts the new repo there
+function addRepoMenuItem(at = null) {
   return {
     label: 'Add workspace', icon: 'plus',
     children: [
-      { label: 'Paste path', icon: 'plus', input: { placeholder: ADD_HINT, hint: 'Enter adds · Esc closes', submit: (text) => addRepoPath(text) } },
-      { label: 'New scratchpad', icon: 'plus', note: 'an empty folder', run: () => addScratchRepo() },
-      canPickFolder() ? { label: 'Browse', icon: 'folder', run: () => pickAndAddRepo() } : { label: 'Browse', icon: 'folder', disabled: true, note: 'desktop window only' },
+      { label: 'Paste path', icon: 'plus', input: { placeholder: ADD_HINT, hint: 'Enter adds · Esc closes', submit: (text) => addRepoPath(text, at) } },
+      { label: 'New scratchpad', icon: 'plus', note: 'an empty folder', run: () => addScratchRepo(at) },
+      canPickFolder() ? { label: 'Browse', icon: 'folder', run: () => pickAndAddRepo(at) } : { label: 'Browse', icon: 'folder', disabled: true, note: 'desktop window only' },
     ],
   };
 }
@@ -587,7 +591,7 @@ function shortMenu(kids, timeOf) {
 
 // "Add recent workspace ▸" (empty space's right-click): the removed repos (hiddenRepos), newest first, up to 20; picking
 // one adds it back like "Add workspace" (POST /repos/add takes it off the server's hidden list too)
-function recentRepoMenuItem() {
+function recentRepoMenuItem(at = null) {
   const now = Date.now();
   const keys = hiddenRepoKeys();
   const list = [...hiddenRepos].filter(([k]) => keys.has(k)).map(([, h]) => h).sort((a, b) => b.at - a.at).slice(0, 20);
@@ -596,7 +600,7 @@ function recentRepoMenuItem() {
     label: 'Add recent workspace', icon: 'folder',
     children: shortMenu(list.map((h) => ({
       label: repoName(h.root), icon: 'folder', note: `removed ${removedAgo(now - h.at)}`, at: h.at,
-      run: async () => { const err = await addRepoPath(h.root); if (err) toast(err, C.red); },
+      run: async () => { const err = await addRepoPath(h.root, at); if (err) toast(err, C.red); },
     })), (k) => k.at),
   };
 }
@@ -1653,7 +1657,7 @@ function openContextMenu(target, x, y) {
     // empty space on the map, or around the cards or tiles: add a repo (removed conversations are on a repo's menu)
     const extra = [{ sep: true }, notifyMenuItem()];
     if (multi.size) extra.push({ label: `Clear selection (${multi.size})`, icon: 'close', run: () => setMulti([], 'menu') });
-    openCtxMenu({ x, y, items: [addRepoMenuItem(), recentRepoMenuItem(), ...extra] });
+    openCtxMenu({ x, y, items: [addRepoMenuItem({ x, y }), recentRepoMenuItem({ x, y }), ...extra] });
     return;
   }
   const s = (view?.allSessions || state.sessions || []).find((x) => x.id === target.id);

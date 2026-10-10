@@ -33,7 +33,8 @@
 // around the others, and one that leaves keeps its spot for when it comes back, so nothing else moves. The
 // spacing rule may still nudge a group a little (and its spot moves with it). Dragging a repo's hub moves its
 // whole group and pins it there: a pinned repo never moves by itself, and others make way for it. Spots and
-// pins are saved (settings.mapSpots), so they survive reloads. A conversation can be dragged too: it stays
+// pins are saved (settings.mapSpots), so they survive reloads. A repo added from the map's empty-space menu
+// takes the spot where that menu was opened, pinned (mapPlaceRepo). A conversation can be dragged too: it stays
 // where it was dropped, as an offset from its repo's hub (saved under its node id, 's:<id>'), so it moves along
 // with its repo, and the others make way for it. Dropping a conversation on another repo's group (a dashed ring
 // marks it while dragging) moves it there (ui.moveSession, the same as the menu's "Move to workspace"). A repo's or
@@ -564,6 +565,23 @@ export function mapUnpin(t) {
   I.alpha = Math.max(I.alpha, 0.3);
   I.dirty = true;
   saveSpotsSoon(300, true);
+}
+
+// "Add workspace" from the map's empty-space menu: the new repo's hub takes the spot where the menu was opened
+// (client coordinates), pinned there like a drop, instead of the nearest free spot. false when the map isn't showing.
+export function mapPlaceRepo(root, clientX, clientY) {
+  if (!active() || !I.cam || !I.canvas || !root || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+  const r = I.canvas.getBoundingClientRect();
+  const [x, y] = toWorld(clientX - r.left, clientY - r.top);
+  const id = repoId(root);
+  I.homeXY.set(id, { x, y, pin: true });
+  // a repo that was on the map before (removed, then added back) goes there too
+  const p = I.pos.get(id);
+  if (p) { p.x = x; p.y = y; p.vx = 0; p.vy = 0; }
+  I.alpha = Math.max(I.alpha, 0.3);
+  I.dirty = true;
+  saveSpotsSoon(300, true);
+  return true;
 }
 
 // for tests: the map's inner numbers
