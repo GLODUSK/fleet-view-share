@@ -1027,11 +1027,12 @@ let detailLast = null; // the panel's last copy of its conversation, shown (mark
 function drawDetail(v) {
   const shut = local.view === 'projects' && !projPanel && !pinned;
   let s = ui.detailId && !shut ? v.allSessions.find((x) => x.id === ui.detailId) : null;
-  // 2+ selected: their chats share the panel (detail.js drawSplits, SPLIT_MAX at most); with none shown, the first opens it
+  // 2+ selected: their chats share the panel (detail.js drawSplits, SPLIT_MAX at most); with none shown, or one shown
+  // that isn't in the selection (a pinned panel keeps its last chat; Ctrl+click took the shown one out), the first leads it
   const sel = multi.size >= 2 ? [...multi].map((id) => v.allSessions.find((x) => x.id === id)).filter(Boolean) : [];
   // (once per selection: a panel closed by hand stays closed until the selection changes)
   const key = sel.map((x) => x.id).join(',');
-  if (!s && !shut && sel.length >= 2 && key !== splitKey) { s = sel[0]; ui.detailId = s.id; }
+  if (!shut && sel.length >= 2 && key !== splitKey && !(s && sel.some((x) => x.id === s.id))) { s = sel[0]; ui.detailId = s.id; }
   splitKey = key;
   const extras = s ? sel.filter((x) => x.id !== s.id) : [];
   let gone = false;
