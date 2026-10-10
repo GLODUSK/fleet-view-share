@@ -1181,26 +1181,47 @@ const USAGE = UW.createWatch({
   file: DEMO ? null : path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view', 'usage-watch.json'),
   alertPct: () => saved.usageAlertPct, alertUsd: () => saved.usageAlertUsd,
 });
+// A restart starts from each account's last saved read (usage-watch.json), so the header keeps every account while
+// the first read after a start fails (it often does: "fetch failed", or HTTP 429 after a few quick restarts).
+for (const [a, v] of Object.entries(DEMO ? {} : USAGE.view())) {
+  const left = (x) => (x && x.pct != null ? { left: Math.max(0, Math.round(100 - x.pct)), resets: x.resets } : null);
+  if (v.week && v.week.resets) weekLeft[a] = { ...left(v.week), five: v.five && v.five.resets ? left(v.five) : null };
+}
+// Each account on its own clock: a miss retries that account in 30 s, an HTTP 429 backs off (Retry-After, else 1, 2,
+// 4 ... 15 minutes), so one failing account neither re-reads the others every 30 s nor keeps the limit tripped.
+const weekDue = {}, week429 = {};
 async function readWeekLeft() {
-  let missed = false;
   for (const a of accountsHere()) {
+    if (weekDue[a] > Date.now()) continue;
+    let next = null;
     try {
       // no .credentials.json: an API key login, or not logged in yet. Nothing to read, and nothing wrong
       const cred = path.join(acctDir(a), '.credentials.json');
-      if (!fs.existsSync(cred)) continue;
+      if (!fs.existsSync(cred)) { weekDue[a] = Date.now() + 5 * 60e3; continue; }
       const o = JSON.parse(fs.readFileSync(cred, 'utf8')).claudeAiOauth;
-      if (!o || !o.accessToken || (o.expiresAt && o.expiresAt < Date.now())) { missed = true; continue; }
+      if (!o || !o.accessToken || (o.expiresAt && o.expiresAt < Date.now())) { weekDue[a] = Date.now() + 30e3; continue; }
       const r = await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { Authorization: 'Bearer ' + o.accessToken, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(20e3) });
+      if (r.status === 429) {
+        const n = (week429[a] = (week429[a] || 0) + 1), after = Number(r.headers.get('retry-after'));
+        next = Math.max(after > 0 ? after * 1e3 : 0, Math.min(15 * 60e3, 60e3 * 2 ** (n - 1)));
+      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      delete week429[a];
       const j = await r.json(), w = j.seven_day, f = j.five_hour;
       const left = (x) => ({ left: Math.max(0, Math.round(100 - x.utilization)), resets: Date.parse(x.resets_at) || null });
       // five: the 5-hour session limit, which can run out with week left
       if (w && typeof w.utilization === 'number') weekLeft[a] = { ...left(w), five: f && typeof f.utilization === 'number' ? left(f) : null };
       const u = UW.fromEndpoint(j, Date.now());
       if (u) USAGE.read(a, u, { pending: [...sessions.values()].some((x) => x.usagePending) });
-    } catch (e) { missed = true; logOnce('week:' + a + ':' + (e && e.message), `weekly limit read for account ${a} failed: ${e && e.message}`); }
+      weekDue[a] = Date.now() + (USAGE.suspicious() ? 2 * 60e3 : 5 * 60e3);
+    } catch (e) {
+      weekDue[a] = Date.now() + (next || 30e3);
+      logOnce('week:' + a + ':' + (e && e.message), `weekly limit read for account ${a} failed: ${e && e.message}`);
+    }
   }
-  setTimeout(readWeekLeft, missed ? 30e3 : USAGE.suspicious() ? 2 * 60e3 : 5 * 60e3).unref();
+  // wake for the soonest account due, at least every 5 minutes (an account added meanwhile is read then)
+  const soonest = Math.min(30e3 * 10, ...accountsHere().map((a) => (weekDue[a] || 0) - Date.now()));
+  setTimeout(readWeekLeft, Math.max(30e3, soonest)).unref();
 }
 const onlyListed = (o) => Object.fromEntries(Object.entries(o || {}).filter(([a]) => accountsHere().includes(a)));
 const weekNow = (now) =>Object.fromEntries(Object.entries(weekLeft).filter(([, w]) => w && !(w.resets && w.resets < now)));
