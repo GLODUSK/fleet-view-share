@@ -55,7 +55,7 @@
 import { esc } from './cards.js';
 import { voiceSupported, startVoice, stopVoice, onVoice } from './voice.js';
 import { icon } from './icons.js';
-import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, keepSession, openElsewhere, quoteSelection, onRekey } from './term.js';
+import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey } from './term.js';
 import { takeHandoff } from './handto.js';
 
 const POLL_MS = 400;
@@ -70,6 +70,7 @@ const HIST_MAX = 100; // messages ↑ goes back through, per conversation
 const IMG_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
 const ELSEWHERE_CONFIRM_MS = 15000;
 const PANEL_LINES = 80; // a command's panel can fill a tall screen
+const REWIND_ROWS = 24; // /rewind's list needs about this many rows to show its entries and ❯
 const PANEL_STEP_MS = 300; // Esc, then look again
 const PANEL_OWN_MS = 15000; // a panel that comes up this soon after a "/command" sent from here is that command's
 // a panel's keys, as the terminal sends them
@@ -607,6 +608,8 @@ export function mountCompose(slot, s) {
   const boxEl = $('.cmp-box'), ghost = $('.cmp-ghost'), ghostPad = $('.cmp-ghost-pad'), ghostT = $('.cmp-ghost-t');
   // the chat pane around us: drops anywhere on it land here, and chat.js sends its quotes to it
   const pane = slot.closest('.chat-pane') || slot.parentElement || slot;
+  // a new pty takes the whole Chat tab's size, not a split slice's (a few rows: Claude Code's lists don't fit)
+  const sizeEl = () => pane.closest('.d-chat') || pane;
 
   const st = {
     s, id: s.id, d: draftOf(s.id),
@@ -916,7 +919,7 @@ export function mountCompose(slot, s) {
     try {
       if (!hosts.get(id)?.alive) {
         if (openElsewhere(st.s)) { err('It is open in another window: end it there, then rewind here'); return; }
-        const r = await ensureLive(st.s, { sizeEl: pane, onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
+        const r = await ensureLive(st.s, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
         if (st.id !== id) return;
         st.step = 'Rewinding…'; drawNotes();
         if (!r || !r.ok) { err((r && r.message) || 'Could not start the session to rewind it'); return; }
@@ -936,6 +939,7 @@ export function mountCompose(slot, s) {
       if (screenReady(id) && !(await closePanel(id))) { err('A panel is open in the session: close it (Esc) first'); return; }
       const b = boxNow(id);
       if (!b || b.text) { err('Something is typed in the session\'s prompt: clear it first'); return; }
+      if (growRows(id, REWIND_ROWS)) await sleep(600); // the pty takes the new size and Claude Code redraws
       await pasteKeys(id, '/rewind');
       await sleep(ENTER_DELAY_MS);
       writeKey('\r');
@@ -1055,7 +1059,7 @@ export function mountCompose(slot, s) {
       if (!shell && /(^|\s)\/[^\s/]/.test(text)) text = hoistCommand(text, (await commandsFor(s0.cwd)).map((c) => c.name));
       const msg = messageText(text, paths);
       if (!msg) return;
-      const r = await ensureLive(s0, { sizeEl: pane, onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
+      const r = await ensureLive(s0, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
       if (st.id === id) { st.step = ''; drawNotes(); }
       if (!r.ok) { err(r.message || 'could not start the session'); return; }
       // a permission prompt may have come up since: the text would land in it and Enter would pick an option
@@ -1588,7 +1592,7 @@ export function mountCompose(slot, s) {
     const h = hosts.get(st.id);
     const alive = !!(termApi() && h?.alive);
     let lines = [];
-    if (alive && shown()) lines = screenText(st.id, PANEL_LINES, { sizeEl: pane });
+    if (alive && shown()) lines = screenText(st.id, PANEL_LINES, { sizeEl: sizeEl() });
     // a command's panel (only when its top edge is on screen: reading the colours costs more)
     const loose = !!st.panel || Date.now() - st.cmdAt < PANEL_OWN_MS;
     let panel = alive && lines.some((l) => /▔{12}/.test(l)) ? parsePanel(screenMarked(st.id, PANEL_LINES), { loose }) : null;

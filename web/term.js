@@ -777,6 +777,14 @@ export function screenReady(id) {
   const v = id ? views.get(id) : null;
   return !!(v && v.term && v.fed && !v.replaying && v.parsed && hosts.get(id)?.alive);
 }
+// a pty shorter than rows gets that many (its view resizes, and the pty follows it): a list such as /rewind's
+// has no room for its ❯ on a screen started from a small split slice. -> true when it grew
+export function growRows(id, rows) {
+  const v = id ? views.get(id) : null;
+  if (!v || !v.term || !hosts.get(id)?.alive || v.term.rows >= rows) return false;
+  v.term.resize(v.term.cols, rows);
+  return true;
+}
 
 async function prepareView(id, sizeEl) {
   if (preparing.has(id)) return;

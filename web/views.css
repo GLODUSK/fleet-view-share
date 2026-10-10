@@ -728,3 +728,7 @@ html.glass .work.detail-float .detail, html.glass .work.detail-float .detail:has
 /* split: a chat's toolbar row (attach, mode, model, mic, send) shows only in the one being typed in; Enter still sends */
 .d-chat.d-split .d-cell:not(:focus-within) .cmp-foot { display: none; }
 .d-chat.d-split .chat-top { display: none !important; }
+/* a slice keeps to its share: its contents never spill over the next one, and a question card scrolls inside it */
+.d-chat.d-split .d-cell { overflow: hidden; }
+.d-chat.d-split .d-cell:has(.cmp-card) { flex-grow: 3; }
+.d-chat.d-split .cmp-card { max-height: 34vh; overflow-y: auto; }
