@@ -63,8 +63,8 @@
 // window.__fv exposes the shell's state for tests (with ?fixture=1, POSTs are recorded in window.__fvPosts).
 //
 // Right-click (ctxmenu.js): a repo (map anchor, repo chip) offers New session · A / B (desktop window) and
-// Open folder; a conversation offers Open session, Open in terminal and Remove (ends it if hosted here and takes it off the map; was End session / Hide from map) (DONE and
-// QUESTION), Open in terminal, Rename (renameMenuItem) and Move to workspace (moveMenuItem). A repo also offers "Removed conversations"
+// Open folder; a conversation offers Remove (ends it if hosted here and takes it off the map; was End session / Hide from map),
+// Send elsewhere ▸ (the other accounts), Rename (renameMenuItem) and Move to workspace (moveMenuItem). A repo also offers "Removed conversations"
 // (a submenu of state.removed) to continue one (see continueConversation). A repo also offers "Remove repo", and
 // empty space "Add workspace" and "Add recent workspace ▸" (removed repos, to add one back). The browser's own menu
 // is kept only in text inputs and the live terminal (and in Edge outside those targets).
@@ -1717,16 +1717,11 @@ function openContextMenu(target, x, y) {
   if (!s) return;
   const hosted = isHosted(s.id);
   const items = [];
-  if (desk) {
-    if (openElsewhere(s) && !hosted) items.push({ label: 'Open in another window — end it there', icon: 'shell', disabled: true });
-    else items.push({ label: 'Open session', icon: 'shell', run: () => openHereFromMenu(s.id) });
-  }
-  if (!s.pending) items.push({ label: 'Open in terminal', icon: 'open', run: () => ui.openTerminal(s.id) });
   if (previousMenuItem(s)) items.push(previousMenuItem(s));
   items.push(renameMenuItem(s));
   if (desk && !s.pending && !s.demo) items.push(forkMenuItem(s));
   if (!s.pending && !s.demo) { const mv = moveMenuItem(s); if (mv) items.push(mv); }
-  if (desk && !s.pending && !s.demo && !singleAccount()) items.push(...sendToMenuItems(s, hosted));
+  if (desk && !s.pending && !s.demo && !singleAccount()) { const se = sendElsewhereItem(s, hosted); if (se) items.push(se); }
   if (!s.pending && !s.demo && pushHook()) items.push(sessionPushItem(s));
   items.push(...teamItems(s));
   if (waitingOrderItem(s)) items.push(waitingOrderItem(s));
@@ -1801,7 +1796,7 @@ function moveConversation(s, root) {
     return true;
   });
 }
-// "Send to Claude A / B / C ...", one for each other account here: it writes a handoff summary and a fresh conversation
+// "Send to Claude A / B / C ...", one for each other account here (under Send elsewhere): it writes a handoff summary and a fresh conversation
 // picks it up under that account, in a panel here (term.js sendToAccount). One running here is ended first; one open
 // in another window has to be ended there. Only accounts it can work on are offered (state.tools.sendTo, the same
 // rule the session host checks): the account has the /handoff and /pickup commands, and its projects folder is the
@@ -1812,15 +1807,17 @@ function canSendTo(s, to) {
   const x = t[to], own = t[s.account || 'B'];
   return !!(x && x.commands && own && x.folder === own.folder);
 }
-function sendToMenuItems(s, hosted) {
-  return onAccounts().filter((a) => a !== (s.account || 'B') && canSendTo(s, a)).map((to) => sendToMenuItem(s, hosted, to));
-}
-function sendToMenuItem(s, hosted, to) {
-  const label = `Send to Claude ${to}`;
+// "Send elsewhere ▸ Claude A / C ...": one submenu of the accounts that are on (Henry, 2026-10-10)
+function sendElsewhereItem(s, hosted) {
+  const label = 'Send elsewhere';
+  const to = onAccounts().filter((a) => a !== (s.account || 'B') && canSendTo(s, a));
+  if (!to.length) return null;
   if (openElsewhere(s) && !hosted) return { label, icon: 'push', disabled: true, note: 'open in another window; end it there' };
   const st = hosted ? hostStatus(s.id) : null;
   const busy = hosted && (st ? st === 'busy' : s.state === 'WORKING' || s.state === 'AGENTS');
-  return { label, icon: 'push', confirm: busy ? { text: `Claude is mid-turn. Stop it and send it to account ${to}?`, yes: 'Send anyway' } : null, run: () => sendToFromMenu(s, to) };
+  const children = to.map((a) => ({ label: `Claude ${a}`, tag: a,
+    confirm: busy ? { text: `Claude is mid-turn. Stop it and send it to account ${a}?`, yes: 'Send anyway' } : null, run: () => sendToFromMenu(s, a) }));
+  return { label, icon: 'push', children };
 }
 async function sendToFromMenu(s, to) {
   toast(`Sending ${s.name} to Claude ${to}: it writes a summary, then a fresh conversation picks it up`, C.text);
@@ -1928,11 +1925,6 @@ async function tellClaudeName(s, name) {
   if (box.text) return 'its prompt has text in it';
   const w = await sendText(id, `/rename ${name}`, { beforeEnter: () => { const l = screenText(id, 40); return !l.length || !!parseMenu(l); } });
   return w.ok ? null : w.menu ? 'a question came up' : w.message || 'it could not be typed';
-}
-function openHereFromMenu(id) {
-  const s = view?.allSessions.find((x) => x.id === id);
-  if (!s) return;
-  if (s.state === 'DONE') { ui.selectedId = null; ui.showDetail(id, 'explicit'); } else ui.setSelected(id, 'explicit');
 }
 function removeFromMenu(id) {
   const s = view?.allSessions.find((x) => x.id === id);

@@ -5,7 +5,7 @@
 //     items: [{ label, icon?, run(), disabled?, note?, tag?, danger?, confirm?: { text, yes }, children? } | { sep: true }]
 //       disabled items are a quiet line that can't be picked (note: why); confirm turns the menu into a small
 //       question ("yes" runs it, Cancel goes back) before run() is called; tag: 'A' or 'B', the account tag
-//       on the right; children: the items of a submenu (same shape, no confirm or children of their own),
+//       on the right; children: the items of a submenu (same shape; a confirm there turns the main menu into the question),
 //       shown with a ▸ and opened to the side as a second frosted menu (an input item works there too, and
 //       turns the main menu into its box; a submenu item with children of its own opens them in the submenu's
 //       place, under a back row: ← or Esc or the back row returns); load(): instead of children, a function
@@ -256,6 +256,8 @@ function pickSub(j) {
     return;
   }
   if (it.input) { startInput(it); return; }
+  // confirm: like a main-menu item, the menu becomes the question (Send elsewhere ▸ Claude C, mid-turn)
+  if (it.confirm) { pick(-1, it); return; }
   // stay: a toggle (Accounts ▸ ✓ A): it runs and the menu stays open, redrawn from the parent's refresh()
   if (it.stay) {
     keepUntil = Date.now() + 2500; // the page redraws (cards come and go) and may scroll: not a reason to close
@@ -316,9 +318,9 @@ export function closeCtxMenu(restore = true) {
 
 export const ctxMenuOpen = () => open;
 
-function pick(i) {
-  if (!pickable(i)) return;
-  const it = items[i];
+function pick(i, sub = null) {
+  if (!sub && !pickable(i)) return;
+  const it = sub || items[i];
   if (hasKids(it)) { sel = i; openSub(i, true); return; }
   if (it.confirm && !confirmFor) {
     // a question first: the menu becomes "<text>" with the action and Cancel (Cancel picked)
