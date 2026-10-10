@@ -484,6 +484,30 @@ function addScratchRepo() {
   }
   return [500, { ok: false, message: `${SCRATCH_DIR} already has 999 scratchpads for today` }];
 }
+// Files dropped on the page's main view (POST /repos/scratch { paths }): a new scratchpad as above, with each file
+// copied into it (a name taken already gets " (2)", " (3)"…). A folder is not copied: it stays where it is and comes
+// back in dirs. -> [code, json] with copied: [{ name, from }], dirs: [path], failed: [{ path, message }]
+const DROP_MAX = 20;
+async function addScratchWith(paths) {
+  if (!Array.isArray(paths) || !paths.length || paths.length > DROP_MAX) return [400, { ok: false, message: `paths must be 1 to ${DROP_MAX} file paths` }];
+  if (!paths.every((p) => typeof p === 'string' && p.length <= 1024 && path.isAbsolute(p))) return [400, { ok: false, message: 'every path must be an absolute path' }];
+  const kinds = paths.map((p) => { try { return fs.statSync(p); } catch { return null; } });
+  if (!kinds.some(Boolean)) return [404, { ok: false, message: paths.length === 1 ? `not found: ${paths[0]}` : 'none of those files is there' }];
+  const [code, out] = addScratchRepo();
+  if (!out.ok) return [code, out];
+  const dir = out.repo.root, copied = [], dirs = [], failed = [], taken = new Set();
+  for (let i = 0; i < paths.length; i++) {
+    const p = paths[i], st = kinds[i];
+    if (!st) { failed.push({ path: p, message: 'not found' }); continue; }
+    if (st.isDirectory()) { dirs.push(p); continue; }
+    const ext = path.extname(p), stem = path.basename(p, ext);
+    let name = path.basename(p);
+    for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${stem} (${n})${ext}`;
+    taken.add(name.toLowerCase());
+    try { await fs.promises.copyFile(p, path.join(dir, name)); copied.push({ name, from: p }); } catch (e) { failed.push({ path: p, message: e.code || e.message }); }
+  }
+  return [200, { ...out, copied, dirs, failed }];
+}
 // Marks a folder Fleet View just made as trusted in each account's Claude Code config (~/.claude.json, and
 // ~/.claude-<x>/.claude.json for the others), as answering "Do you trust the files in this folder?" with Yes does.
 // Without it a new scratchpad opens on that question (unless a parent folder, like the home folder, is trusted),
@@ -5610,7 +5634,10 @@ function handleRequest(req, res) {
       });
     }
     if (pathname === '/repos/scratch') {
-      return readBody(req, res, () => { const [code, out] = addScratchRepo(); sendJson(res, code, out); });
+      return readBody(req, res, (b) => {
+        if (b && b.paths != null) return void addScratchWith(b.paths).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
+        const [code, out] = addScratchRepo(); sendJson(res, code, out);
+      });
     }
     if (pathname === '/repos/add' || pathname === '/repos/remove') {
       return readBody(req, res, (b) => {

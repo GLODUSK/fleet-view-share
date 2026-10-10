@@ -555,6 +555,74 @@ async function addScratchRepo(at = null) {
   if (err) toast(err, C.red);
   return err;
 }
+// ---------- drop files on the main view: a scratch conversation that analyzes them ----------
+// Files dropped anywhere on #main (the chat pane keeps its own drops: an attachment) go into a new scratchpad (the
+// server copies them in; a folder stays where it is), a new conversation starts there on the lead account, and its
+// first message asks it to analyze them (orders.js sendWhenUp: it goes in once the session is up). On the map the
+// scratchpad's hub goes where they were dropped. Needs the desktop window: only it knows a dropped file's path.
+const dropPath = (f) => { try { return String(window.fleetDesktop?.pathForFile?.(f) || ''); } catch { return ''; } };
+const hasDropFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+function analyzePrompt(copied, dirs) {
+  const names = copied.map((c) => c.name);
+  const what = names.length === 1 ? `the file ${names[0]}` : names.length ? `these files: ${names.join(', ')}` : '';
+  const lines = [];
+  if (names.length) {
+    lines.push(`Analyze ${what}. ${names.length === 1 ? 'It was' : 'They were'} dropped into Fleet View and copied into this folder from ${copied.map((c) => c.from).join(', ')}.`);
+  }
+  if (dirs.length) lines.push(`${names.length ? 'Also look at' : 'Analyze'} ${dirs.length === 1 ? 'this folder' : 'these folders'} (left where ${dirs.length === 1 ? 'it is' : 'they are'}, not copied): ${dirs.join(', ')}.`);
+  lines.push('Say what it is, summarize what is in it, and point out anything notable, odd or wrong. Don\'t change the originals.');
+  return lines.join('\n');
+}
+async function analyzeDrop(files, at) {
+  const list = [...(files || [])];
+  const paths = [...new Set(list.map(dropPath).filter(Boolean))];
+  if (!paths.length) { toast(window.fleetDesktop ? 'Couldn\'t tell where those files are on disk' : 'Dropping files to analyze them needs the desktop window', C.red); return; }
+  const account = leadAccount();
+  if (!account) { toast('No Claude account has room for a new conversation', C.red); return; }
+  toast(`Copying ${paths.length === 1 ? paths[0].split(/[\\/]/).pop() : `${paths.length} files`} into a new scratchpad…`, C.dim);
+  const r = await post('/repos/scratch', { paths });
+  if (!r || !r.ok) { toast((r && r.message) || 'could not reach Fleet View to make a scratchpad', C.red); return; }
+  const copied = r.copied || [], dirs = r.dirs || [], failed = r.failed || [];
+  if (!copied.length && !dirs.length) { toast(`Could not copy ${failed.map((x) => `${x.path.split(/[\\/]/).pop()} (${x.message})`).join(', ') || 'them'}`, C.red); return; }
+  repoAdded(r, null, true, at && local.view === 'map' ? at : null);
+  const s = await createSession({ cwd: r.repo.root, account, ...newSize() });
+  if (!s || !s.ok) { toast(`${(s && s.message) || 'could not start a new session'} · the files are in ${r.repo.root}`, C.red, null, 9000); return; }
+  sendWhenUp({ id: s.key, name: `the analysis in ${r.repo.name}` }, analyzePrompt(copied, dirs));
+  ui.setSelected(s.key, 'explicit');
+  const n = copied.length + dirs.length;
+  toast(`New conversation in ${r.repo.name}: it analyzes ${n === 1 ? (copied[0]?.name || dirs[0].split(/[\\/]/).pop()) : `${n} items`} once it is up`
+    + (failed.length ? ` (couldn't copy ${failed.map((x) => x.path.split(/[\\/]/).pop()).join(', ')})` : ''), failed.length ? C.gold : C.text);
+}
+(function wireDrop() {
+  const main = $('main');
+  if (!main) return;
+  const veil = document.createElement('div');
+  veil.className = 'drop-veil';
+  veil.hidden = true;
+  veil.innerHTML = '<div class="drop-veil-t">Drop to analyze in a new scratch conversation</div>';
+  main.appendChild(veil);
+  let depth = 0;
+  const off = () => { depth = 0; veil.hidden = true; };
+  main.addEventListener('dragenter', (e) => { if (!hasDropFiles(e) || !termApi()) return; depth++; veil.hidden = false; });
+  main.addEventListener('dragleave', (e) => { if (!hasDropFiles(e)) return; if (--depth <= 0) off(); });
+  main.addEventListener('dragover', (e) => {
+    if (!hasDropFiles(e) || !termApi()) return;
+    // the chat pane took it (an attachment): no veil here
+    if (e.defaultPrevented) { veil.hidden = true; return; }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    veil.hidden = false;
+  });
+  main.addEventListener('drop', (e) => {
+    if (!hasDropFiles(e)) return;
+    const taken = e.defaultPrevented;
+    off();
+    if (taken || !termApi()) return;
+    e.preventDefault();
+    analyzeDrop(e.dataTransfer.files, { x: e.clientX, y: e.clientY }).catch((err) => { console.error(err); toast('could not start the analysis', C.red); });
+  });
+  window.addEventListener('dragend', off);
+})();
 // the server's reply to an add (fake: what ?fixture=1 pretends it got); null when it worked, else the reason
 function repoAdded(r, fake = null, scratch = false, at = null) {
   const repo = fake || (r && r.ok ? r.repo : null);
