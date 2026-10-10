@@ -84,7 +84,9 @@
 //     with the team's name on a pill; hover shows the order and the last messages, right-click calls
 //     ui.contextMenu({ kind: 'team', id }). A team message (a feed entry with `to`) travels as a comet from
 //     one member to the other along that link, and a new order (a team's `at` changes) sends one comet from
-//     the pill to each member.
+//     the pill to each member. A team with a lead (team.lead: chain of command) is drawn as spokes from the lead
+//     to each member instead of a link between every two, the lead's node wears a small ★ badge in the team's
+//     colour, and the pill reads "★ <lead> · <team>".
 //   Conflicts (state.conflicts): nodes like the shared-file ones, tied to their conversations by dashed
 //     lines: a branch glyph (two on one branch, gold), a folder glyph (two live in one worktree, red) or a
 //     '#nnn' tag (two migrations with one number, red). Right-click on one, or on a shared-file node, calls
@@ -876,7 +878,8 @@ function rebuild() {
     if (!t || !t.id || !Array.isArray(t.members)) continue;
     const ms = t.members.filter((id) => byId.has('s:' + id));
     if (ms.length < 2) continue;
-    teams.push({ t, members: ms, pairs: [] });
+    // its lead (★), when it leads and is on the map: the links become spokes from it
+    teams.push({ t, members: ms, pairs: [], lead: t.lead && ms.includes(t.lead) ? t.lead : null });
   }
   // parity partners (one line per pair, from the web side to the app side) and one-sided changes
   const parity = [], seenPair = new Set();
@@ -1888,6 +1891,7 @@ function draw() {
     }
   }
   for (const n of I.nodes) if (n.kind === 'session') drawSession(ctx, n, ks, n.id === I.sel, n.id === I.hover);
+  drawLeadBadges(ctx, ks);
   drawParityGhosts(ctx, k, ks);
   drawGhosts(ctx, ks);
   // comets into a repo ride over its hub and fade out inside the core
@@ -1973,7 +1977,9 @@ const onScreen = (n) => n && n.sx !== undefined && n.sy !== undefined;
 // Teams: every pair of members (a ring around their middle past 4 members) tied by two strands that braid
 // around the shared curve, in the team's colour at a fixed alpha. The crossings slide slowly along the link
 // (motion only). The pill with the team's name sits at the link's middle (the members' middle for 3+); comets
-// of a new order start there (a virtual comet end, 'T:<team id>').
+// of a new order start there (a virtual comet end, 'T:<team id>'). A team with a lead: one spoke from the lead to
+// each member instead (chain of command: they report to it, not to each other); its ★ badge is drawn over the
+// nodes (drawLeadBadges).
 function drawTeams(ctx, ks) {
   const N = 28, ph = I.still ? 0 : I.time / 2600;
   for (const tm of I.teams) {
@@ -1983,7 +1989,9 @@ function drawTeams(ctx, ks) {
     let mx = 0, my = 0;
     for (const n of ns) { mx += n.sx; my += n.sy; }
     mx /= ns.length; my /= ns.length;
-    if (ns.length <= 4) { for (let i = 0; i < ns.length; i++) for (let j = i + 1; j < ns.length; j++) tm.pairs.push([ns[i], ns[j]]); }
+    const hub = tm.lead ? ns.find((n) => n.sid === tm.lead) : null;
+    if (hub) { for (const n of ns) if (n !== hub) tm.pairs.push([hub, n]); }
+    else if (ns.length <= 4) { for (let i = 0; i < ns.length; i++) for (let j = i + 1; j < ns.length; j++) tm.pairs.push([ns[i], ns[j]]); }
     else {
       const ring = ns.slice().sort((a, b) => Math.atan2(a.sy - my, a.sx - mx) - Math.atan2(b.sy - my, b.sx - mx));
       ring.forEach((n, i) => tm.pairs.push([n, ring[(i + 1) % ring.length]]));
@@ -2013,6 +2021,29 @@ function drawTeams(ctx, ks) {
     tm.pill = { x: pill[0], y: pill[1], color: col };
     I.virt.set('T:' + tm.t.id, { id: 'T:' + tm.t.id, kind: 'team', sx: pill[0], sy: pill[1], h: hashNum(tm.t.id), R: 0, RG: 0 });
   }
+}
+
+// A team's lead: a small ★ badge on its node's upper right, in the team's colour on a dark disc (steady: no motion)
+function drawLeadBadges(ctx, ks) {
+  for (const tm of I.teams) {
+    if (!tm.lead) continue;
+    const n = I.byId.get('s:' + tm.lead);
+    if (!onScreen(n)) continue;
+    const col = /^#[0-9a-f]{6}$/i.test(tm.t.color || '') ? tm.t.color : COL.violet;
+    const r = 5.2 * ks, d = (n.RG || n.R) * (n.bs || 1) + r * 0.35, a = -Math.PI / 4;
+    const x = n.sx + Math.cos(a) * d, y = n.sy + Math.sin(a) * d;
+    ctx.fillStyle = HOLE; circle(ctx, x, y, r); ctx.fill();
+    ctx.strokeStyle = rgba(col, 0.75); ctx.lineWidth = 1; ctx.stroke();
+    starPath(ctx, x, y + 0.2 * ks, r * 0.72, r * 0.3); ctx.fillStyle = col; ctx.fill();
+  }
+}
+function starPath(ctx, x, y, ro, ri) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? ri : ro;
+    if (i) ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); else ctx.moveTo(x + Math.cos(a) * r, y + Math.sin(a) * r);
+  }
+  ctx.closePath();
 }
 
 // Parity partners: a thin dotted line from the web side (cyan) to the app side (mint), fixed alpha. It bends to
@@ -2732,7 +2763,11 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
   for (const tm of I.teams) {
     if (!tm.pill) continue;
     const p = tm.pill, hov = I.hoverX && I.hoverX.kind === 'team' && I.hoverX.id === tm.t.id;
-    jobs.push({ prio: hov ? 1650 : 860, must: hov, soft: true, owner: 'T:' + tm.t.id, lines: [[{ t: tm.t.name || 'team', f: font(10.5, 600), c: p.color }]], lh: 13, pill: true,
+    // "★ lead · team" for a team with a lead (the lead's name cut short unless hovered)
+    const ln = tm.lead ? String(nameOf(tm.lead) || '') : '', lns = !hov && ln.length > 22 ? ln.slice(0, 21) + '…' : ln;
+    const segs = tm.lead ? [{ t: `★ ${lns}`, f: font(10.5, 600), c: p.color }, { t: ' · ', f: font(10.5, 400), c: COL.dim }, { t: tm.t.name || 'team', f: font(10.5, 600), c: p.color }]
+      : [{ t: tm.t.name || 'team', f: font(10.5, 600), c: p.color }];
+    jobs.push({ prio: hov ? 1650 : 860, must: hov, soft: true, owner: 'T:' + tm.t.id, lines: [segs], lh: 13, pill: true,
       // on the link's middle, else beside it, a little farther out each time
       anchors: [[0, 0], [0, -1], [0, 1], [1, 0], [-1, 0], [0, -2], [0, 2], [1.4, -1], [-1.4, 1], [1.4, 1], [-1.4, -1], [0, -3], [0, 3]]
         .map(([ax, ay]) => (w, h) => [p.x - w / 2 + ax * (w / 2 + 8), p.y - h / 2 + ay * (h + 4)]) });
@@ -3333,7 +3368,9 @@ function fillTip(n) {
     const tm = s.team && I.teams.find((x) => x.t.id === s.team);
     if (tm) {
       const others = tm.t.members.filter((id) => id !== s.id).map(nameOf);
-      row(tip, 'team', `${tm.t.name || 'team'} · with ${others.join(', ')}`, tm.t.color || COL.violet);
+      const lead = tm.t.lead && tm.t.members.includes(tm.t.lead) ? tm.t.lead : null;
+      row(tip, 'team', lead === s.id ? `★ leads ${tm.t.name || 'team'} · ${others.join(', ')} report to it`
+        : lead ? `${tm.t.name || 'team'} · reports to ★ ${nameOf(lead)}` : `${tm.t.name || 'team'} · with ${others.join(', ')}`, tm.t.color || COL.violet);
     }
     if (s.parity && s.parity.partner) {
       const web = s.side && s.side.web, app = s.side && s.side.app;
@@ -3444,7 +3481,11 @@ function fillTipX(x) {
     if (!tm) return false;
     const t = tm.t;
     head.textContent = t.name || 'team'; head.style.color = t.color || COL.violet; tip.appendChild(head);
-    row(tip, 'members', t.members.map(nameOf).join(', '));
+    const lead = t.lead && t.members.includes(t.lead) ? t.lead : null;
+    if (lead) {
+      row(tip, 'lead', `★ ${nameOf(lead)}: directs the others; they report to it`, t.color || COL.violet);
+      row(tip, 'members', t.members.filter((id) => id !== lead).map(nameOf).join(', '));
+    } else row(tip, 'members', `${t.members.map(nameOf).join(', ')} (peers: no lead)`);
     if (t.order) {
       const o = row(tip, 'order', t.order.length > 360 ? t.order.slice(0, 359) + '…' : t.order);
       if (t.at) o.append(Object.assign(document.createElement('span'), { textContent: `  · ${ago(nowC - t.at)}`, style: `color:${COL.faint}` }));
@@ -3458,7 +3499,7 @@ function fillTipX(x) {
         r.append(Object.assign(document.createElement('span'), { textContent: `  · ${ago(nowC - m.t)}`, style: `color:${COL.faint}` }));
       }
     }
-    hint('right-click: message the team, add, disband');
+    hint('right-click: message the team, choose its lead, add, disband');
     return true;
   }
   if (x.kind === 'parity' && x.l) {
@@ -3586,6 +3627,9 @@ function buildLegend() {
   const braid = (c) => `<path d="M2 10 C6 6 9 6 12 10 S18 14 21 10 S26 6 28 10" fill="none" stroke="${rgba(c, 0.6)}" stroke-width="1.1"/>` +
     `<path d="M2 10 C6 14 9 14 12 10 S18 6 21 10 S26 14 28 10" fill="none" stroke="${rgba(c, 0.6)}" stroke-width="1.1"/>`;
   item(braid('#ff9f43'), 'a team: members braided in its colour, its name on a pill (hover: the order and messages)');
+  const star = (x, y, ro, c) => `<path d="${Array.from({ length: 10 }, (_, i) => { const a = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? ro * 0.42 : ro; return `${i ? 'L' : 'M'}${(x + Math.cos(a) * r).toFixed(2)} ${(y + Math.sin(a) * r).toFixed(2)}`; }).join(' ')}Z" fill="${c}"/>`;
+  item(`<path d="M8 10 L27 4 M8 10 L27 16" stroke="${rgba('#ff9f43', 0.6)}" stroke-width="1.1"/>` + orbSvg(8, 10, 3.6, '#ff9f43') + star(12, 6, 3, '#ff9f43'),
+    'a team with a lead (★): spokes from the lead to each member; they report to it, not to each other');
   item(`<path d="M2 10 H28" stroke="${COL.dim}" stroke-width="1" opacity="0.6"/>` + orbSvg(15, 10, 2.4, '#ff9f43'), 'a message between teammates travels along the link');
   item(`<defs><linearGradient id="fvpar" gradientUnits="userSpaceOnUse" x1="3" y1="10" x2="27" y2="10"><stop offset="0" stop-color="${COL.cyan}"/><stop offset="1" stop-color="${COL.mint}"/></linearGradient></defs>` +
     `<path d="M3 10 H27" stroke="url(#fvpar)" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="0.1 4"/>`, 'web ↔ app partners (website side cyan, app side mint)');

@@ -3,7 +3,7 @@
 import {
   C, esc, setHTML, setIcon, badge, acctTag, ctxGauge, usage, shipTrack, planSteps, prTag, progressBar, pctText,
   agentDots, runningAgents, runningList, lastAction, turnText, needsYou, isBusy, gradHex, ago, repoChip, clashNotes, linksOf,
-  wirePick, setText, statusColor, waitNote, syncGrid,
+  wirePick, setText, statusColor, waitNote, syncGrid, leadTag,
 } from './cards.js';
 import { icon } from './icons.js';
 
@@ -35,7 +35,7 @@ function fillTile(el, s, state, ui, now) {
   el.style.setProperty('--status', statusColor(s));
   el.style.setProperty('--hue', s.hue || C.cyan);
   setIcon(sl.icon, s);
-  setHTML(sl.title, `<span class="name">${esc(s.name)}</span>${acctTag(s.account)}`);
+  setHTML(sl.title, `<span class="name">${esc(s.name)}</span>${acctTag(s.account)}${leadTag(s, state)}`);
   setHTML(sl.state, badge(s));
   setHTML(sl.big, `<span style="color:${p.done ? C.mint : gradHex([C.ember, C.gold, C.mint], pct)}">${pctText(s)}</span>`);
   const shipAt = (s.ship?.steps || []).find(([, v]) => v !== 'ok' && v !== 'na');

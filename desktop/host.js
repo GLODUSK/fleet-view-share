@@ -265,10 +265,13 @@ const DROP_EXACT = new Set([
 ]);
 const DROP_PREFIX = ['FLEET_VIEW_', 'FV_'];
 const FV_DIR = path.resolve(__dirname, '..');
-// Teammates talk with `fv send <id> "…" --from <me>`: every claude started here may run that one command without
-// asking, so a message between conversations never waits on an approval click. Nothing broader. It is one word,
-// "--allowedTools=…": the flag takes a list, and as two words it would take a prompt after it as one more tool.
-const ALLOW_FV = '"--allowedTools=Bash(fv send:*)"';
+// Teammates talk through fv: every claude started here may run these fv commands without asking, so a message
+// between conversations, a lead's status check or question, or a change to its team never waits on an approval
+// click. Only these, nothing broader: send, status, ask, read, ls, teams, team, transcript. It is one argument,
+// "--allowedTools=a,b,…" in quotes (the commas split the list; a comma inside parentheses would be kept): as two
+// words the flag would take every word after it as one more tool, a prompt after it too.
+const FV_ALLOWED = ['send', 'status', 'ask', 'read', 'ls', 'teams', 'team', 'transcript'];
+const ALLOW_FV = `"--allowedTools=${FV_ALLOWED.map((c) => `Bash(fv ${c}:*)`).join(',')}"`;
 
 function childEnv(account, launchKey) {
   const env = {};

@@ -5,7 +5,7 @@
 // the text is typed into its prompt with term.js sendText (a bracketed paste, 300 ms, then Enter on its own).
 // They are sent three at a time, so a conversation that has to start first does not hold up all the others.
 //
-//   sendOrder(sessions, text, { team, state, post, name, prefix })  -> Promise<{ ok, team, results, skipped }>
+//   sendOrder(sessions, text, { team, lead, state, post, name, prefix })  -> Promise<{ ok, team, results, skipped }>
 //     sessions: the conversations (/state session objects) to reach
 //     team:     true makes exactly them one team (POST /teams { members, order, name?, send: true }), and the server
 //               types each one its brief: the order, the list of its teammates and the command to talk to them
@@ -14,6 +14,13 @@
 //               /teams/add, which sends it the brief). With fewer than two ids there is no team: each gets a plain
 //               message. A member whose order could not be sent (not queued either) is taken out of the team again,
 //               quietly (POST /teams/leave { quiet }).
+//     lead:     with team, the member that leads it (a session from the list, or a new session still keyed new-<n>,
+//               which is waited on for its id before the team is posted: the team needs its lead's id). The lead
+//               gets the order with the members it directs and the fv commands to check on them, ask them and
+//               direct them; the others get the order for context and report to it (POST /teams { lead }). A lead
+//               that still has no id is named in the toast, the team is made without a lead, and it joins as the
+//               lead once it has its id (POST /teams/add { lead: true }). leadName / noLead in the reply say how
+//               that went.
 //     state:    the last /state (for the teammates' repos and branches, when the server gave no briefs)
 //     post:     the shell's POST helper (app.js post: with ?fixture=1 it only records the call in window.__fvPosts)
 //     name:     the team's name (the server's default is the first words of the order)
@@ -27,12 +34,18 @@
 //   teamBrief(team, me, members, state, text)  the text one team member gets: the order, its teammates, how to
 //                                             talk to them (the server's teamBrief gives the same; this one is the
 //                                             fallback for ?fixture=1)
+//   leadBrief(team, me, members, state, text)  the lead's: the order, the members it leads, how to check on them,
+//                                             ask them and direct them (fv status, fv ask, fv send, fv team say)
+//   memberBrief(team, me, lead, members, state, text)  a member's under a lead: the order for context, who leads
+//                                             and how to report to it (both kept in step with the server's
+//                                             leadBrief / memberBrief; fallbacks for ?fixture=1)
 //   sendEach(sessions, text)                  the same text to each (no team, no prefix) -> results
 //   sendNote(sessions, text, state, prefix)   a note to each, with the others' names, ids and the fv send command
 //                                             (a conflict's "Send a note to all") -> results
 //   contactLines(me, others, state)           those lines for one recipient
 //   unreachable(s)                            why this window can't type into it, or null
-//   onTeamJoin(cb)                            cb(name, team name, reply of POST /teams/add) when a late one joins
+//   onTeamJoin(cb)                            cb(name, team name, reply of POST /teams/add, lead) when a late one
+//                                             joins (lead: it joined as the team's lead)
 //   summary(res)                              one line for a toast: "Sent to 3 · 1 failed: x (why)"
 //
 // A conversation is skipped when another window has it open (term.js openElsewhere: typing there would start a
@@ -76,10 +89,36 @@ const talkLine = (me) => `Talk to them directly: fv send <their id> "message" --
 export function teamBrief(team, me, members, state, text) {
   const others = members.filter((m) => m.id !== me.id);
   const lines = [`[Fleet View order · team "${team.name}"]`, String(text).trim(), '', 'You are working together with:'];
-  for (const o of others) lines.push(`- ${o.name} (id ${o.id}, repo ${repoOf(o)}, branch ${o.branch || 'none'})`);
+  for (const o of others) lines.push(memberLine(o));
   lines.push(`${talkLine(me)} Their messages reach you starting with [Message from teammate]. Agree who changes which files before `
     + 'editing, tell them when you push or merge, and reply to their messages.');
   return lines.join('\n');
+}
+const memberLine = (o) => `- ${o.name} (id ${o.id}, repo ${repoOf(o)}, branch ${o.branch || 'none'})`;
+// The lead's text (a team with a lead): the order, the members it leads, and how to check on them, ask them and
+// direct them. Kept in step with the server's leadBrief (fleet-view.js), whose text the page sends when it gives it.
+export function leadBrief(team, me, members, state, text) {
+  const others = members.filter((m) => m.id !== me.id), tid = team.id;
+  return [`[Fleet View order · you lead team "${team.name}"]`, String(text).trim(), '', 'You lead:', ...others.map(memberLine), '',
+    'They report to you and don\'t coordinate with each other unless you tell them to. Split the work so no two of them edit '
+      + 'the same files. The user talks to you; you talk to them.',
+    `- fv status ${tid}: what each is doing, its last reply, branch, PR and context. Free (it costs them nothing): use it first.`,
+    `- fv ask ${tid} "question" --from ${me.id} (or fv ask <id> <id>… "question" --from ${me.id}): each answers in its own turn; `
+      + 'the answers come back to you together as one message, slow ones later one by one. Add --wait to get them printed '
+      + 'right here if they answer within 100 seconds (a Bash call stops at 2 minutes).',
+    `- fv send <id> "instruction" --from ${me.id}: direct one of them.`,
+    `- fv team say ${tid} "text" --from ${me.id}: tell all of them.`,
+    `- fv team add ${tid} <id> / fv team rm ${tid} <id>: bring one in or let one go. fv ls lists every conversation.`].join('\n');
+}
+// A member's text under a lead: the order for context, who leads and how to report to it. lead: the lead's session.
+export function memberBrief(team, me, lead, members, state, text) {
+  const others = members.filter((m) => m.id !== me.id && m.id !== lead.id);
+  return [`[Fleet View order · team "${team.name}"]`, 'The order, for context:', String(text).trim(), '',
+    `Your lead is ${lead.name} (id ${lead.id}): it gives you your part. Carry on with what you're doing until it does.`,
+    `Report to it with fv send ${lead.id} "…" --from ${me.id} when you finish, when you are blocked, and before you merge.`,
+    'Its questions arrive as [Question from your lead …]: just answer in your reply, Fleet View passes it back; don\'t fv send the answer too.',
+    ...(others.length ? ['', 'Also in the team (so you know who is who; don\'t message them unless your lead says so):', ...others.map(memberLine)] : []),
+  ].join('\n');
 }
 
 // Is Claude showing a menu (a permission prompt, a question, the plan approval) that typed text would land in?
@@ -293,8 +332,8 @@ async function joinLater(key, id) {
   saveJoins();
   for (const j of mine) {
     if (Date.now() - j.at > JOIN_MAX_MS) continue;
-    const r = await joinPost('/teams/add', { id: j.team, member: id });
-    for (const f of joinL) { try { f(j.name, j.teamName, r); } catch (e) { console.error(e); } }
+    const r = await joinPost('/teams/add', { id: j.team, member: id, ...(j.lead ? { lead: true } : {}) });
+    for (const f of joinL) { try { f(j.name, j.teamName, r, !!j.lead); } catch (e) { console.error(e); } }
   }
 }
 
@@ -310,33 +349,45 @@ export async function sendOrder(sessions, text, o = {}) {
   let ids = live.filter((s) => ID_RE.test(s.id)), keyed = live.filter((s) => !ID_RE.test(s.id));
   if (o.team && body.length > ORDER_MAX) return { ok: false, team: null, results: [], skipped, message: `an order is at most ${ORDER_MAX} characters` };
   if (o.team && live.length > TEAM_MAX) return { ok: false, team: null, results: [], skipped, message: `a team has at most ${TEAM_MAX} conversations; pick fewer` };
-  // new sessions still keyed new-<n>: wait a while for their ids (see idOf)
+  // the lead (by its key): one that can't be reached here is named in the toast, and the team has no lead
+  const leadKey = o.team && o.lead && o.lead.id ? o.lead.id : null;
+  const leadName = leadKey ? o.lead.name || 'the new session' : null;
+  let noLead = leadKey && !live.some((s) => s.id === leadKey) ? `no lead: ${leadName} can't be reached here` : null;
+  // new sessions still keyed new-<n>: wait a while for their ids (see idOf). A new lead is one of them: the team
+  // needs its lead's id, so it is waited on before the team is posted
   if (o.team && keyed.length && live.length >= 2) {
     const got = await Promise.all(keyed.map((s) => idOf(s.id, ID_WAIT_MS)));
-    ids = [...ids, ...keyed.flatMap((s, i) => (got[i] ? [{ ...s, id: got[i], pending: false }] : []))];
+    ids = [...ids, ...keyed.flatMap((s, i) => (got[i] ? [{ ...s, id: got[i], key: s.id, pending: false }] : []))];
     keyed = keyed.filter((s, i) => !got[i]);
   }
   if (o.team && ids.length >= 2) {
+    const leadS = leadKey ? ids.find((s) => s.id === leadKey || s.key === leadKey) || null : null;
+    // a new lead still without an id: the team starts without a lead, and it takes the lead when it joins (joinLater)
+    if (leadKey && !leadS && keyed.some((s) => s.id === leadKey)) noLead = `no lead yet: ${leadName} had not started, so it takes the lead once it has`;
     // send: the server types each brief itself (it types the team's notes and the teammates' messages too, one at a
     // time per conversation, so they never mix in one prompt), following one that handed off to its successor
-    const want = { members: ids.map((s) => s.id), order: body, send: true };
+    // lead null for peers: a set that is a led team already becomes peers, as Work together asks
+    const want = { members: ids.map((s) => s.id), order: body, send: true, lead: leadS ? leadS.id : null };
     if (o.name) want.name = String(o.name).slice(0, 80);
     const r = await post('/teams', want);
     // with ?fixture=1 nothing answers: a team as the server would make it
-    team = r && r.ok && r.team ? r.team : r == null && o.fixture ? { id: 'fixture-team', name: want.name || firstWords(body), members: want.members, order: body } : null;
+    team = r && r.ok && r.team ? r.team
+      : r == null && o.fixture ? { id: 'fixture-team', name: want.name || firstWords(body), members: want.members, order: body, lead: want.lead || null } : null;
     if (!team) return { ok: false, team: null, results: [], skipped, message: (r && r.message) || 'could not make the team' };
     if (r && Array.isArray(r.sent)) {
       results = r.sent.map((x) => ({ id: x.id, name: x.name, ok: !!x.ok, ...(x.queued ? { queued: true } : {}),
         message: x.queued ? 'waits on its question: it goes in once you answer' : x.ok ? 'sent' : x.message || 'not sent' }));
     } else {
-      // ?fixture=1: the page types its own briefs
-      const briefOf = (s) => (r && r.briefs && typeof r.briefs[s.id] === 'string' ? r.briefs[s.id] : teamBrief(team, s, ids, o.state, body));
+      // ?fixture=1: the page types its own briefs (the lead's, a member's under it, or a peer's)
+      const own = (s) => (!leadS ? teamBrief(team, s, ids, o.state, body)
+        : s.id === leadS.id ? leadBrief(team, s, ids, o.state, body) : memberBrief(team, s, leadS, ids, o.state, body));
+      const briefOf = (s) => (r && r.briefs && typeof r.briefs[s.id] === 'string' ? r.briefs[s.id] : own(s));
       results = await eachLimited(ids, SEND_AT_ONCE, (s) => deliver(s, briefOf(s)).catch((e) => failed(s, e)));
     }
-    // still keyed: it joins once it has its id (joinLater), and gets the brief then
+    // still keyed: it joins once it has its id (joinLater), and gets the brief then; the lead joins as the lead
     if (keyed.length) {
       joinPost = post;
-      joins.push(...keyed.map((s) => ({ key: s.id, name: s.name || 'new session', team: team.id, teamName: team.name, at: Date.now() })));
+      joins.push(...keyed.map((s) => ({ key: s.id, name: s.name || 'new session', team: team.id, teamName: team.name, at: Date.now(), ...(s.id === leadKey ? { lead: true } : {}) })));
       saveJoins();
       for (const s of keyed) { const id = rekeyed.get(s.id); if (id) joinLater(s.id, id); }
     }
@@ -344,8 +395,11 @@ export async function sendOrder(sessions, text, o = {}) {
     const lost = results.filter((x) => !x.ok && !x.queued);
     for (const x of lost) await post('/teams/leave', { id: team.id, member: x.id, quiet: true });
     team = { ...team, members: team.members.filter((m) => !lost.some((x) => x.id === m)) };
-    results = [...results, ...keyed.map((s) => ({ id: s.id, name: s.name, ok: true, queued: true, joins: true, message: 'joins the team once it has started' }))];
-    return { ok: results.some((x) => x.ok), team, results: [...results, ...skipped], skipped, dropped: lost.map((x) => x.name) };
+    if (leadS && lost.some((x) => x.id === leadS.id)) { team.lead = null; noLead = `no lead: ${leadS.name} did not get the order`; }
+    results = [...results, ...keyed.map((s) => ({ id: s.id, name: s.name, ok: true, queued: true, joins: true,
+      ...(s.id === leadKey ? { lead: true } : {}), message: s.id === leadKey ? 'takes the lead once it has started' : 'joins the team once it has started' }))];
+    return { ok: results.some((x) => x.ok), team, leadName: team.lead && leadS ? leadS.name : null, noLead,
+      results: [...results, ...skipped], skipped, dropped: lost.map((x) => x.name) };
   }
   if (o.team && live.length >= 2) noTeam = `no team: ${keyed.map((s) => s.name).join(', ')} had not started yet`;
   results = await sendEach(live, o.prefix ? `${o.prefix}\n${body}` : body);
@@ -376,11 +430,14 @@ export async function sendNote(sessions, text, state, prefix = '[Fleet View · n
 // "Sent to 3 · not sent: parity-wave-4 (open in another window…)"
 export function summary(res, what = 'Sent') {
   const rs = (res && res.results) || [];
-  const sent = rs.filter((x) => x.ok && !x.queued), wait = rs.filter((x) => x.queued && !x.joins), late = rs.filter((x) => x.joins), bad = rs.filter((x) => !x.ok);
+  const sent = rs.filter((x) => x.ok && !x.queued), wait = rs.filter((x) => x.queued && !x.joins), late = rs.filter((x) => x.joins && !x.lead), bad = rs.filter((x) => !x.ok);
   const team = res && res.team ? `team "${res.team.name}"` : '';
   const parts = [];
   if (sent.length) parts.push(`${what} to ${sent.length === 1 ? sent[0].name : `${sent.length} conversations`}${team ? ` · ${team}` : ''}`);
-  else if (team && (wait.length || late.length)) parts.push(`Made ${team}`);
+  else if (team && (wait.length || rs.some((x) => x.joins))) parts.push(`Made ${team}`);
+  // "★ x leads": the team's lead, or why it has none (yet)
+  if (res && res.team && res.team.lead && res.leadName) parts.push(`★ ${res.leadName} leads`);
+  if (res && res.noLead) parts.push(res.noLead);
   // "x waits on its question: it goes in once you answer"
   if (wait.length === 1) parts.push(`${wait[0].name} ${wait[0].message}`);
   else if (wait.length) parts.push(`${wait.length} wait on a question or their folder's trust prompt: each gets it once answered`);

@@ -1,6 +1,7 @@
 // Fleet View automation API: lets a local script (or a Claude Code session, through scripts/fv.js) start Claude
 // Code sessions, send them messages, wait for them, read and answer their menus, read any conversation's
-// transcript, stop and clear away what it started, and make teams of conversations that message each other, through
+// transcript, stop and clear away what it started, make teams of conversations that message each other (led by one
+// of them, or as peers), read what each is doing for free (status) and ask several one question (ask), through
 // the live sessions the desktop app's session host (desktop/host.js) already runs. fleet-view.js hands every /api
 // request here (see handle()), and types its teams' briefs and notes through deliverText. GET /api lists the
 // endpoints (ENDPOINTS below).
@@ -378,8 +379,9 @@ async function need(host, key, alive) {
 }
 
 // Send text into a hosted, live session as message does: a "/" panel closed first, never into a menu, then wait
-// as asked. note(id): called once it went in. q: { from, original } to keep it in the queue (see below) instead of
-// refusing it while a menu or a panel is up; it goes in later. -> [code, json]
+// as asked. note(id, sentAt, status): called once it went in (status: the session's before it, 'busy' or 'idle').
+// q: { from, original, onSent?, onDrop? } to keep it in the queue (see below) instead of refusing it while a menu or a
+// panel is up; it goes in later. -> [code, json]
 async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null) {
   const later = (more, why = 'is showing a question or a prompt; it goes in once that is answered') => {
     enqueue(p.id, text, q);
@@ -406,7 +408,7 @@ async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null)
   });
   if (typed.r) return typed.r;
   const { sentAt, status } = typed;
-  if (note) note(p.id);
+  if (note) note(p.id, sentAt, status);
   const w = await afterSend(host, p.id, sentAt, status, ms, ctx, gone);
   return [200, { ok: true, id: p.id, ...extra, status, ...w, message: doneText(w, ms, status === 'busy' ? 'sent while Claude was busy (queued)' : 'sent') }];
 }
@@ -436,21 +438,35 @@ function loadQueue() {
     const j = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8'));
     if (Array.isArray(j)) queue = j.filter((q) => q && typeof q.id === 'string' && typeof q.text === 'string' && Number.isFinite(q.at)).slice(-500);
   } catch {}
+  // an ask's question from before a restart: the ask is gone, so nobody would collect its answer
+  const n = queue.length;
+  queue = queue.filter((q) => q.kind !== 'question');
+  if (queue.length < n && qCtx) qCtx.log(`api: dropped ${n - queue.length} queued question(s) whose ask a restart ended`);
   return queue;
 }
 function saveQueue() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(QUEUE_FILE + '.tmp', JSON.stringify(queue.map(({ id, text, at, from, original }) => ({ id, text, at, ...(from ? { from, original } : {}) }))));
+    fs.writeFileSync(QUEUE_FILE + '.tmp', JSON.stringify(queue.map(({ id, text, at, from, original, kind }) => ({ id, text, at, ...(from ? { from, original } : {}), ...(kind ? { kind } : {}) }))));
     fs.renameSync(QUEUE_FILE + '.tmp', QUEUE_FILE);
   } catch (e) { if (qCtx) qCtx.log(`api: could not save the message queue: ${e.message}`); }
 }
-// q: { from, original } of a message between conversations (recorded once it goes in), or {}
+// q: { from, original, kind? } of a message between conversations (recorded once it goes in; kind 'question' for an
+// ask's), or {}. q.onSent(id, sentAt, status) and q.onDrop(why), an ask's, are kept in memory only (hooks: a restart
+// loses the asks anyway): called when it goes in, or is dropped.
 function enqueue(id, text, q) {
   loadQueue();
-  if (!queue.some((x) => x.id === id && x.text === text)) queue.push({ id, text, at: Date.now(), ...(q && q.from ? { from: q.from, original: q.original } : {}) });
+  let x = queue.find((y) => y.id === id && y.text === text);
+  if (!x) queue.push((x = { id, text, at: Date.now(), ...(q && q.from ? { from: q.from, original: q.original } : {}), ...(q && q.kind ? { kind: q.kind } : {}) }));
+  if (q && (q.onSent || q.onDrop)) (x.hooks = x.hooks || []).push({ onSent: q.onSent, onDrop: q.onDrop });
   saveQueue();
   wakeQueue();
+}
+// runs a queued entry's hooks (an ask watching for it): 'onSent' or 'onDrop', with args
+function runHooks(q, which, ...args) {
+  for (const h of q.hooks || []) {
+    try { if (h[which]) h[which](...args); } catch (e) { if (qCtx) qCtx.log(`api: a queued message's ${which} failed: ${e.message}`); }
+  }
 }
 function wakeQueue() {
   if (qTimer || !loadQueue().length) return;
@@ -465,6 +481,7 @@ function unqueue(q, why) {
   queue = queue.filter((x) => x !== q);
   saveQueue();
   if (why && qCtx) qCtx.log(`api: a message waiting for ${q.id} was dropped: ${why}`);
+  if (why) runHooks(q, 'onDrop', why);
 }
 async function tickQueue() {
   if (qTicking) return;
@@ -492,10 +509,12 @@ async function tickQueue() {
         if (now - q.clearAt < Q_CLEAR_MS) continue;
         // something is typing into it now (a note, a message): next tick
         if (typingInto(p.id)) continue;
-        const sent = await typeOne(p.id, () => sendText(host, p.id, q.text, () => menuNow(host, p)));
+        let sentAt = 0;
+        const sent = await typeOne(p.id, () => { sentAt = Date.now(); return sendText(host, p.id, q.text, () => menuNow(host, p)); });
         if (!sent.entered) { unqueue(q, 'a menu came up just before Enter (the text is in its prompt box, not sent)'); continue; }
         unqueue(q);
-        if (q.from && qCtx && qCtx.noteMessage) qCtx.noteMessage(q.from, convId(p.id) || p.id, q.original || q.text);
+        if (q.from && qCtx && qCtx.noteMessage) qCtx.noteMessage(q.from, convId(p.id) || p.id, q.original || q.text, q.kind ? { kind: q.kind } : undefined);
+        runHooks(q, 'onSent', convId(p.id) || p.id, sentAt, p.status || null);
       }
     });
   } catch (e) {
@@ -548,7 +567,8 @@ async function resumeIn(host, id, where, account, ctx, gone) {
 // ---------- text for a conversation: teams and messages between conversations ----------
 // deliverText(key, text, o, ctx, gone) -> [code, json], the one way the server types text into a conversation for
 // a team (briefs, notes) or from another conversation (sendMessage with from). o: { kind, from?, original?, wait?,
-// open?, queue? }.
+// open?, queue?, ask?, onSent?, onDrop? }: ask marks an ask's question (the feed says so); onSent(id, sentAt, status)
+// is called once the text went in (now, or later from the queue), onDrop(why) when the queue drops it.
 // - The handoff chain is followed first (ctx.successorOf): text for a conversation that handed off or ran /clear
 //   goes to the one that carries on, and the reply says so (redirected: { from, to }).
 // - One running in the session host gets it as message does; one showing a menu gets it later, through the queue
@@ -589,9 +609,13 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
       extra.resumed = !r.alreadyRunning;
       if (extra.resumed) await sleep(SETTLE_MS);
     }
-    const from = o.from || null;
-    const note = from && ctx.noteMessage ? (to) => ctx.noteMessage(from, convId(to) || to, o.original || body) : null;
-    return deliver(host, p, body, o.wait || 0, ctx, gone, note, extra, o.queue === false ? null : { from, original: o.original || body });
+    const from = o.from || null, kind = o.ask ? 'question' : null;
+    const note = (to, at, status) => {
+      if (from && ctx.noteMessage) ctx.noteMessage(from, convId(to) || to, o.original || body, kind ? { kind } : undefined);
+      if (o.onSent) o.onSent(convId(to) || to, at, status);
+    };
+    return deliver(host, p, body, o.wait || 0, ctx, gone, note, extra,
+      o.queue === false ? null : { from, original: o.original || body, ...(kind ? { kind } : {}), onSent: o.onSent, onDrop: o.onDrop });
   });
 }
 
@@ -612,12 +636,17 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/sessions/:id/transcript', query: 'since?, limit? (default the last 50, at most 500)', does: 'any conversation\'s transcript, compact: user, assistant, tool (name, input, result), note, thinking' },
   { method: 'POST', path: '/api/sessions/:id/stop', body: '{ remove? }', does: 'end the session (remove: also hide it from the map)' },
   { method: 'POST', path: '/api/sessions/:id/remove', does: 'hide a conversation from the map (not one still running: stop it first); logs are kept' },
-  { method: 'GET', path: '/api/teams', does: 'the teams: id, name, members, order, roster (each member\'s name, repo, branch, state), messages' },
-  { method: 'POST', path: '/api/teams', body: '{ members: [ids], order, name? }', does: 'make a team of exactly these 2..12 conversations (they leave other teams) and send each its brief: the order, its teammates and how to message them' },
-  { method: 'POST', path: '/api/teams/:id/add', body: '{ member }', does: 'add a conversation: it gets the brief, the others a note with its id' },
-  { method: 'POST', path: '/api/teams/:id/remove', body: '{ member }', does: 'take a conversation out; it and the others get a note (a team left with one is disbanded)' },
+  { method: 'GET', path: '/api/teams', does: 'the teams: id, name, members, lead, order, roster (each member\'s name, repo, branch, state, lead), messages' },
+  { method: 'POST', path: '/api/teams', body: '{ members: [ids], order, name?, lead? }', does: 'make a team of exactly these 2..12 conversations (they leave other teams) and send each its brief: the order, its teammates and how to message them. lead: one of them directs the rest (they report to it); without, they are peers' },
+  { method: 'POST', path: '/api/teams/:id/add', body: '{ member, lead? }', does: 'add a conversation: it gets the brief, the others a note with its id (lead: true: it joins as the lead)' },
+  { method: 'POST', path: '/api/teams/:id/remove', body: '{ member }', does: 'take a conversation out; it and the others get a note (a team left with one is disbanded; one that loses its lead has none)' },
+  { method: 'POST', path: '/api/teams/:id/lead', body: '{ member: id | null }', does: 'make a member the team\'s lead (it gets the lead\'s brief, the others a note), or null: no lead, peers again' },
   { method: 'POST', path: '/api/teams/:id/disband', does: 'end the team; every member gets a note (they keep working)' },
   { method: 'POST', path: '/api/teams/:id/message', body: '{ text, from? }', does: 'the text to every member but from (queued behind a menu, resumed when not running)' },
+  { method: 'GET', path: '/api/status', query: 'team? | ids? (comma-separated) | from?', does: 'free (nothing is typed into them): what each member of a team (or these ids, or from\'s team; none: every unfinished conversation) is doing, its last reply, branch, PR, context, cost, lead, queued' },
+  { method: 'POST', path: '/api/ask', body: '{ from, to?: [ids], team?, question, within? (s, 30..3600, default 600) }', does: 'ask several conversations one question: each answers in its own turn, and the answers are typed into from as one message once all answered or within passed (later ones one by one). Replies { ask: id, asked }' },
+  { method: 'GET', path: '/api/ask/:id', query: 'wait? (s, up to 600)', does: 'an ask and its answers (status waiting | answered | asking | failed, reply); wait: until all answered or failed, or wait passes' },
+  { method: 'POST', path: '/api/ask/:id/collected', body: '{ ids? }', does: 'the asker has these answers already (no ids: every one in now), so they are not typed into it' },
 ];
 function describeApi() {
   return [200, { ok: true, version: 2, fleetView: VERSION.current().version, auth: 'Authorization: Bearer <%LOCALAPPDATA%\\fleet-view\\api-token>', endpoints: ENDPOINTS,
@@ -752,20 +781,26 @@ async function sendMessage(key, b, ctx, gone) {
   }
   const queue = 'queue' in b ? b.queue : !!from, open = 'open' in b ? b.open : !!from;
   if (!from) return deliverText(key, text, { kind: 'message', wait: ms, queue, open }, ctx, gone);
-  // the name with no control characters (an ESC in a title could end the paste early and type the rest as
-  // keys), quotes or line breaks, so the first line stays one line of plain text
-  const name = String(nameFor(from, ctx)).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim().slice(0, 80) || from.slice(0, 8);
+  const name = headName(from, ctx);
+  // "your lead" when from leads a team the receiver is in, "teammate" when they share one without that
   const head = (to) => {
     const t = ctx.teamOf ? ctx.teamOf(from) : null;
     const mate = !!t && !!convId(to) && t.members.includes(convId(to));
-    return `[Message from ${mate ? 'teammate ' : ''}"${name}" (${from}). Reply with: fv send ${from} "message" --from ${convId(to) || to}]\n${text}`;
+    const who = mate && t.lead === from ? 'your lead ' : mate ? 'teammate ' : '';
+    return `[Message from ${who}"${name}" (${from}). Reply with: fv send ${from} "message" --from ${convId(to) || to}]\n${text}`;
   };
   return deliverText(key, head, { kind: 'message', from, original: text, wait: ms, queue, open }, ctx, gone);
 }
+// a sender's name for the first line of what it sends: no control characters (an ESC in a title could end the
+// paste early and type the rest as keys), quotes or line breaks, so the line stays one line of plain text
+function headName(from, ctx) {
+  return String(nameFor(from, ctx)).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim().slice(0, 80) || from.slice(0, 8);
+}
 
 // ---------- teams ----------
-// GET /api/teams, POST /api/teams { members, order, name? }, POST /api/teams/:id/add { member },
-// POST /api/teams/:id/remove { member }, POST /api/teams/:id/disband, POST /api/teams/:id/message { text, from? }.
+// GET /api/teams, POST /api/teams { members, order, name?, lead? }, POST /api/teams/:id/add { member, lead? },
+// POST /api/teams/:id/remove { member }, POST /api/teams/:id/lead { member | null }, POST /api/teams/:id/disband,
+// POST /api/teams/:id/message { text, from? }.
 // The teams are fleet-view.js's (ctx.teams), the same the page's "Work together" makes; each call sends the notes
 // the page's do (who joined or left: only to members running now). Making a team sends each member its brief as an
 // order, and adding one sends the newcomer its brief: both may resume a conversation that is not running.
@@ -775,12 +810,22 @@ async function makeTeam(b, ctx) {
   if (!Array.isArray(b.members)) return [400, { ok: false, message: 'members must be a list of conversation ids' }];
   const members = b.members.map(memberId);
   if (members.some((m) => !m)) return [400, { ok: false, message: 'members must be conversation ids (a new session has one once it has started)' }];
-  return ctx.teams.make({ members, order: b.order, name: b.name });
+  const lead = b.lead == null ? b.lead : memberId(b.lead);
+  if (b.lead != null && !lead) return [400, { ok: false, message: 'lead must be a conversation id (one of the members)' }];
+  return ctx.teams.make({ members, order: b.order, name: b.name, ...('lead' in b ? { lead } : {}) });
 }
 async function addToTeam(tid, b, ctx) {
   const m = memberId(b && b.member);
   if (!m) return [400, { ok: false, message: 'member must be a conversation id' }];
-  return ctx.teams.add(tid, m);
+  if ('lead' in b && typeof b.lead !== 'boolean') return [400, { ok: false, message: 'lead must be true or false' }];
+  return ctx.teams.add(tid, m, b.lead === true);
+}
+// POST /api/teams/:id/lead { member: <id> | null }: makes member the team's lead, or (null) leaves it with none
+async function leadTeam(tid, b, ctx) {
+  if (!b || typeof b !== 'object' || !('member' in b)) return [400, { ok: false, message: 'give member: a conversation id, or null for no lead' }];
+  const m = b.member === null ? null : memberId(b.member);
+  if (b.member !== null && !m) return [400, { ok: false, message: 'member must be a conversation id, or null for no lead' }];
+  return ctx.teams.lead(tid, m);
 }
 async function removeFromTeam(tid, b, ctx) {
   const m = memberId(b && b.member);
@@ -816,6 +861,305 @@ async function messageTeam(tid, b, ctx, gone) {
   const message = [sent ? `sent to ${sent}` : '', waiting ? `queued for ${waiting}` : '',
     bad.length ? `not sent: ${bad.map((x) => `${x.name} (${x.message})`).join(', ')}` : ''].filter(Boolean).join(' · ');
   return [200, { ok: results.some((x) => x.ok), team: tid, results, message }];
+}
+
+// ---------- status: what conversations are doing, free ----------
+// GET /api/status?team=<id> | ids=<id>,<id> | from=<id>: a team's members, these conversations, or from's team (none
+// of them: every unfinished conversation not removed from the map), each as fleet-view.js's statusOf shows it, plus
+// queued (text waits here for it, behind a menu). Nothing is typed into them: it costs them no turn.
+async function readStatus(query, ctx) {
+  const q = {};
+  const team = query.get('team'), ids = query.get('ids'), from = query.get('from');
+  if (team) {
+    if (!/^t[0-9a-f]{6,16}$/.test(team)) return [400, { ok: false, message: 'not a team id (GET /api/teams lists them)' }];
+    q.team = team;
+  }
+  if (ids) {
+    q.ids = ids.split(',').map((s) => s.trim()).filter(Boolean).map(memberId);
+    if (!q.ids.length || q.ids.length > 50 || q.ids.some((m) => !m)) return [400, { ok: false, message: 'ids must be 1 to 50 conversation ids, separated by commas' }];
+  }
+  if (from) {
+    q.from = memberId(from);
+    if (!q.from) return [400, { ok: false, message: 'from must be a conversation id' }];
+  }
+  const [code, out] = ctx.status(q);
+  if (code !== 200) return [code, out];
+  const waiting = new Set(queuedIds());
+  return [200, { ...out, members: out.members.map((m) => ({ ...m, queued: waiting.has(m.id) })) }];
+}
+
+// ---------- asks: one question to several conversations, the answers collected for the asker ----------
+// POST /api/ask { from, to?: [ids], team?, question, within? } types the question into each target as a message from
+// `from` (queued behind a menu, resuming one not running, as deliverText does), then watches each one's turn after it
+// landed, in the background (afterSend's reply collection; a queued one from when it goes in). When every target has
+// answered or failed, or `within` seconds pass, ONE message with the answers is typed into `from`; an answer that
+// comes after that is typed in on its own. GET /api/ask/:id?wait=s long-polls for the answers (fv ask --wait), and
+// POST /api/ask/:id/collected says the asker has some already, so they are not typed in too. A target that could not
+// be reached at all is in the POST's reply (asked), so it is not typed in again either.
+// Asks live in this process's memory only: at most ASKS_MAX, each dropped ASK_KEEP_MS after it was asked (its
+// watching stops then), and all lost when the server restarts (an update). That is fine: an asker that misses
+// answers still has fv status and fv transcript.
+const ASKS_MAX = 50, ASK_KEEP_MS = 2 * 3600e3, ASK_WITHIN_S = 600, ASK_REPLY_MAX = 3000, ASK_POLL_MAX_S = 600;
+const ASK_GRACE_MS = 8000; // after a long poll ends: time for the asker to say it collected the answers, before any is typed
+const ASK_MENU_MS = 2000; // while a target shows a question or a permission prompt: how often its screen is read
+const asks = new Map(); // id -> ask (oldest first)
+const settled = (x) => x.status === 'answered' || x.status === 'failed';
+// text from a reply as it can be typed: \r\n made \n, no control characters but new line and tab
+const typeable = (s) => String(s == null ? '' : s).replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ' ');
+const askClip = (q) => { const s = String(q).replace(/\s+/g, ' ').trim(); return s.length > 80 ? s.slice(0, 79).trimEnd() + '…' : s; };
+// what a GET shows of an ask
+function askJson(a) {
+  return { id: a.id, from: a.from, question: a.question, at: a.at, within: a.within, typed: a.typed,
+    answers: a.targets.map((x) => ({ id: x.id, name: x.name, status: x.status, ...(x.at ? { at: x.at } : {}), ...(x.reply != null ? { reply: x.reply } : {}), ...(x.message ? { message: x.message } : {}) })) };
+}
+// one target's answer for the asker: its reply, clipped to ASK_REPLY_MAX with a pointer to the rest
+function answerBody(x) {
+  const r = typeable(x.reply).trim() || `(it replied with no text; fv transcript ${x.id} shows what it did)`;
+  return r.length > ASK_REPLY_MAX ? `${r.slice(0, ASK_REPLY_MAX)}\n… (clipped: fv transcript ${x.id} for the rest)` : r;
+}
+// the lines for one target in the answers message -> [lines]
+function answerLines(a, x) {
+  const head = `── ${x.name} (${x.id}) · `;
+  if (x.status === 'answered') {
+    const ms = (x.at || Date.now()) - a.at;
+    return [head + (ms < 60e3 ? 'answered within a minute' : `answered after ${Math.round(ms / 60e3)} min`), answerBody(x)];
+  }
+  if (x.status === 'failed') return [head + (x.reached ? `no answer: ${x.message}` : `not reached: ${x.message}`)];
+  if (x.status === 'asking') return [head + `showing a question/permission prompt: ${x.message || 'a menu'}; it answers after the user does`];
+  return [head + "not answered yet (still working); its answer comes by itself when it's done"];
+}
+// the one message with the answers (list: the targets it reports)
+const summaryText = (a, list) => [`[Fleet View · answers to your question "${askClip(a.question)}"]`, ...list.flatMap((x) => answerLines(a, x))].join('\n');
+// one answer that came after that message
+function laterText(a, x) {
+  if (x.status === 'answered') return `[Fleet View · ${x.name} (${x.id}) answered your question "${askClip(a.question)}"]\n${answerBody(x)}`;
+  return `[Fleet View · ${x.name} (${x.id}) did not answer your question "${askClip(a.question)}": ${x.message}]`;
+}
+// wakes the long polls waiting on this ask
+function wakeAsk(a) { const ws = [...a.waiters]; a.waiters.clear(); for (const f of ws) f(); }
+function dropAsk(a) {
+  a.dead = true;
+  for (const t of [a.withinTimer, a.keepTimer, a.flushTimer]) clearTimeout(t);
+  wakeAsk(a);
+  asks.delete(a.id);
+}
+// types text into the asker (as Fleet View's, not a conversation's: queued behind a menu, resumed when not running);
+// a.typeInto(text), when a test set one, takes it instead
+function typeIntoAsker(a, text) {
+  if (a.typeInto) return a.typeInto(text);
+  // one open in a terminal outside Fleet View can't be typed into, and one removed from the map isn't brought back
+  // for it: the answers stay in GET /api/ask/<id> (fv ask --wait prints them)
+  const why = a.ctx.openElsewhere && a.ctx.openElsewhere(a.from) ? 'it is open in a terminal outside Fleet View'
+    : a.ctx.isRemoved && a.ctx.isRemoved(a.from) ? 'it was removed from the map' : null;
+  if (why) return a.ctx.log(`api: ask ${a.id}: the answers were not typed into ${a.from}: ${why}`);
+  deliverText(a.from, text, { kind: 'message', queue: true, open: true }, a.ctx).then(([, r]) => {
+    if (!r.ok) a.ctx.log(`api: ask ${a.id}: the answers could not be typed into ${a.from}: ${r.message}`);
+  }, (e) => a.ctx.log(`api: ask ${a.id}: the answers could not be typed into ${a.from}: ${e.message}`));
+}
+// Types what is due into the asker: the answers message once every target has answered or failed (or within has
+// passed), then each later answer on its own; never while a long poll waits on it (fv ask --wait prints them), nor
+// in the ASK_GRACE_MS after one ended (the asker posts /collected then). With collected answers (an fv ask --wait
+// that printed some), the message holds only the answers not collected, and no "not answered yet" lines: fv said
+// those come later.
+function flushAsk(a) {
+  if (a.dead) return;
+  clearTimeout(a.flushTimer);
+  a.flushTimer = null;
+  if (a.polling > 0) return; // the poll's end flushes again
+  const wait = a.pollEnd + ASK_GRACE_MS - Date.now();
+  if (wait > 0) { a.flushTimer = setTimeout(() => flushAsk(a), wait); return; }
+  if (!a.typed) {
+    if (!a.targets.every(settled) && Date.now() < a.at + a.within * 1000 - 50) return;
+    a.typed = true;
+    const list = a.targets.filter((x) => !x.collected && (!a.collectedAny || settled(x)));
+    for (const x of list) if (settled(x)) x.told = true;
+    if (list.length) typeIntoAsker(a, summaryText(a, list));
+    return;
+  }
+  for (const x of a.targets) if (settled(x) && !x.collected && !x.told) { x.told = true; typeIntoAsker(a, laterText(a, x)); }
+}
+// a target answered (reply) or failed (message; reached: the question went in): recorded, and passed on when due
+function settleAnswer(a, x, status, more) {
+  if (a.dead || settled(x)) return;
+  Object.assign(x, more, { status, at: Date.now() });
+  if (status === 'answered' && a.ctx.noteMessage) a.ctx.noteMessage(x.id, a.from, typeable(x.reply), { kind: 'answer' });
+  wakeAsk(a);
+  flushAsk(a);
+}
+// what a menu that holds a target up is about, in a few words
+const menuWhat = (m) => (m && m.title ? String(m.title).replace(/\s+/g, ' ').trim().slice(0, 120) : 'a menu');
+// Watches one target's turn after its question went in (sentAt; before: its status then) until it replied: the
+// same reply collection as a message's wait (afterSend). A question or a permission prompt mid-turn marks it
+// 'asking' and is watched on the screen until the user answers it; then the turn goes on and is watched again.
+async function watchAnswer(a, x, sentAt, before) {
+  const gone = () => a.dead;
+  x.status = 'waiting'; x.message = undefined; x.reached = true;
+  wakeAsk(a);
+  let cont = false;
+  try {
+    while (!a.dead) {
+      const end = a.at + ASK_KEEP_MS;
+      if (Date.now() >= end) return settleAnswer(a, x, 'failed', { message: 'it was still working 2 hours later, when Fleet View stopped watching it' });
+      const w = await withHost((host) => afterSend(host, x.id, sentAt, before, end - sentAt, a.ctx, gone, { cont }));
+      if (a.dead) return;
+      if (!w.done) continue;
+      if (w.endedBy === 'reply') return settleAnswer(a, x, 'answered', { reply: w.reply || '' });
+      if (w.endedBy === 'apiError') return settleAnswer(a, x, 'failed', { message: 'its turn ended on an API error', ...(w.reply ? { reply: w.reply } : {}) });
+      if (w.endedBy !== 'question' && w.endedBy !== 'menu') return settleAnswer(a, x, 'failed', { message: 'its session ended before it answered' });
+      x.status = 'asking';
+      x.message = w.menu ? menuWhat(w.menu) : askClip(w.question || 'a question');
+      wakeAsk(a);
+      for (;;) {
+        await sleep(ASK_MENU_MS);
+        if (a.dead || Date.now() >= end) break;
+        const m = await withHost(async (host) => {
+          const p = hosted(await host.call('list'), x.id);
+          return !p || !p.alive ? 'gone' : menuNow(host, p);
+        });
+        if (m === 'gone') return settleAnswer(a, x, 'failed', { message: 'its session ended before it answered' });
+        if (!m) break;
+      }
+      x.status = 'waiting'; x.message = undefined;
+      wakeAsk(a);
+      cont = true;
+    }
+  } catch (e) {
+    settleAnswer(a, x, 'failed', { message: e instanceof HostDown ? e.message : `watching it failed: ${e.message}` });
+  }
+}
+// Types the question into one target (deliverText) and starts watching it once it went in. -> { id, name, ok, queued?, message }
+async function askOne(a, x, text) {
+  let r;
+  try {
+    [, r] = await deliverText(x.id, text, {
+      kind: 'message', from: a.from, original: a.question, ask: true, queue: true, open: true,
+      onSent: (to, at, status) => {
+        if (convId(to)) x.id = convId(to);
+        watchAnswer(a, x, at, status).catch(() => {});
+      },
+      onDrop: (why) => settleAnswer(a, x, 'failed', { message: why }),
+    }, a.ctx);
+  } catch (e) { r = { ok: false, message: e instanceof HostDown ? e.message : String((e && e.message) || e) }; }
+  if (!r.ok) {
+    // the reply to the ask says so: not typed into the asker again
+    x.collected = true;
+    settleAnswer(a, x, 'failed', { message: r.message || 'not reached' });
+  } else if (r.queued && !x.reached) {
+    x.status = r.menu ? 'asking' : 'waiting';
+    x.message = r.menu && typeof r.menu === 'object' ? menuWhat(r.menu) : undefined;
+    wakeAsk(a);
+  }
+  return { id: r.id || x.id, name: x.name, ok: !!r.ok, ...(r.queued ? { queued: true } : {}), message: r.message || '' };
+}
+// POST /api/ask { from, to?: [ids], team?, question, within? (s, 30..3600, default 600) }
+// -> { ok, ask: <id>, asked: [{ id, name, ok, queued?, message }], message }
+async function postAsk(b, ctx) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  let from = typeof b.from === 'string' ? convId(b.from) : null;
+  if (!from) return [400, { ok: false, message: 'from must be your conversation id' }];
+  if (!ctx.whereIs(from).known && !ctx.sessionInfo(from)) return [400, { ok: false, message: 'from is not a conversation Fleet View knows' }];
+  from = (ctx.successorOf && ctx.successorOf(from)) || from;
+  const question = cleanText(b.question);
+  if (!question) return [400, { ok: false, message: 'question must be text, without control characters other than new lines and tabs' }];
+  let within = ASK_WITHIN_S;
+  if (b.within != null) {
+    if (!Number.isInteger(b.within) || b.within < 30 || b.within > 3600) return [400, { ok: false, message: 'within must be a number of seconds from 30 to 3600' }];
+    within = b.within;
+  }
+  if (b.team == null && b.to == null) return [400, { ok: false, message: 'give to (conversation ids) or team' }];
+  const ids = [];
+  if (b.team != null) {
+    if (typeof b.team !== 'string' || !/^t[0-9a-f]{6,16}$/.test(b.team)) return [400, { ok: false, message: 'not a team id (GET /api/teams lists them)' }];
+    const t = ctx.teams.get(b.team);
+    if (!t) return [404, { ok: false, message: 'no such team' }];
+    ids.push(...t.members);
+  }
+  if (b.to != null) {
+    const to = Array.isArray(b.to) ? b.to.map(memberId) : null;
+    if (!to || !to.length || to.length > 20 || to.some((m) => !m)) return [400, { ok: false, message: 'to must be 1 to 20 conversation ids' }];
+    ids.push(...to);
+  }
+  // one that handed off or ran /clear: the one that carries on; never the asker itself
+  const targets = [...new Set(ids.map((m) => (ctx.successorOf && ctx.successorOf(m)) || m))].filter((m) => m !== from);
+  if (!targets.length) return [409, { ok: false, message: 'nobody to ask (you cannot ask yourself)' }];
+  const a = {
+    id: 'a' + crypto.randomBytes(5).toString('hex'), from, question, at: Date.now(), within, ctx, typed: false, dead: false,
+    collectedAny: false, polling: 0, pollEnd: 0, waiters: new Set(), withinTimer: null, keepTimer: null, flushTimer: null,
+    targets: targets.map((id) => ({ id, name: headName(id, ctx), status: 'waiting', collected: false, told: false, reached: false })),
+  };
+  asks.set(a.id, a);
+  while (asks.size > ASKS_MAX) dropAsk(asks.values().next().value);
+  a.withinTimer = setTimeout(() => flushAsk(a), within * 1000);
+  a.keepTimer = setTimeout(() => dropAsk(a), ASK_KEEP_MS);
+  for (const t of [a.withinTimer, a.keepTimer]) if (t.unref) t.unref();
+  // "your lead" for a target in a team the asker leads
+  const name = headName(from, ctx);
+  const text = (to) => {
+    const t = ctx.teamOf ? ctx.teamOf(convId(to) || to) : null;
+    const who = t && t.lead === from ? 'your lead ' : '';
+    return `[Question from ${who}"${name}" (${from}) · answer it in your reply: Fleet View passes your reply back. Don't fv send it.]\n${question}`;
+  };
+  // this request counts as a poll while it types the questions (each waits up to TAKE_MS): an answer that comes
+  // meanwhile waits for the asker's GET with wait (fv ask --wait starts it right after), or the grace after it
+  a.polling++;
+  let asked;
+  try { asked = await Promise.all(a.targets.map((x) => askOne(a, x, text))); } finally {
+    a.polling--;
+    a.pollEnd = Date.now();
+    flushAsk(a);
+  }
+  // the answers can't be typed into an asker open outside Fleet View (typeIntoAsker): fv ask --wait collects them
+  const typedIn = !(ctx.openElsewhere && ctx.openElsewhere(from));
+  const sent = asked.filter((x) => x.ok && !x.queued).length, waiting = asked.filter((x) => x.queued).length, bad = asked.filter((x) => !x.ok);
+  const message = [sent ? `asked ${sent}` : '', waiting ? `queued for ${waiting}` : '',
+    bad.length ? `not reached: ${bad.map((x) => `${x.name} (${x.message})`).join(', ')}` : ''].filter(Boolean).join(' · ');
+  return [200, { ok: true, ask: a.id, asked, typedIn, message }];
+}
+// GET /api/ask/:id?wait=<s, up to 600>: the ask and its answers; with wait, once every target answered or failed,
+// or wait passed. A wait running holds back typing the answers into the asker (flushAsk).
+async function getAsk(aid, query, gone) {
+  const a = asks.get(aid);
+  if (!a) return [404, { ok: false, message: 'no such ask (asks are kept for 2 hours, and not across a Fleet View restart)' }];
+  let wait = 0;
+  if (query.has('wait')) {
+    wait = Number(query.get('wait'));
+    if (!Number.isInteger(wait) || wait < 0 || wait > ASK_POLL_MAX_S) return [400, { ok: false, message: `wait must be a number of seconds from 0 to ${ASK_POLL_MAX_S}` }];
+  }
+  if (wait && !a.targets.every(settled)) {
+    a.polling++;
+    try {
+      for (const until = Date.now() + wait * 1000; !a.dead && !gone() && !a.targets.every(settled) && Date.now() < until;) {
+        await new Promise((r) => {
+          const done = () => { clearTimeout(t); r(); };
+          const t = setTimeout(() => { a.waiters.delete(done); r(); }, Math.min(1000, Math.max(1, until - Date.now())));
+          a.waiters.add(done);
+        });
+      }
+    } finally {
+      a.polling--;
+      a.pollEnd = Date.now();
+      if (!a.polling) flushAsk(a);
+    }
+  }
+  return [200, { ok: true, ask: askJson(a) }];
+}
+// POST /api/ask/:id/collected { ids? }: the asker has these answers already (fv ask --wait printed them; no ids: every
+// one answered or failed now), so they are not typed into it. Answers still to come are typed in as usual.
+async function collectedAsk(aid, b) {
+  const a = asks.get(aid);
+  if (!a) return [404, { ok: false, message: 'no such ask (asks are kept for 2 hours, and not across a Fleet View restart)' }];
+  let ids = null;
+  if (b && b.ids != null) {
+    if (!Array.isArray(b.ids) || b.ids.some((m) => !memberId(m))) return [400, { ok: false, message: 'ids must be conversation ids' }];
+    ids = new Set(b.ids.map(memberId));
+  }
+  for (const x of a.targets) {
+    if (ids ? !ids.has(x.id) : !settled(x)) continue;
+    x.collected = true;
+    a.collectedAny = true;
+  }
+  flushAsk(a);
+  return [200, { ok: true, ask: askJson(a) }];
 }
 
 // GET /api/sessions/:id[?tail=N]
@@ -1109,17 +1453,19 @@ async function listConversations(query, ctx) {
 // ctx: { sendJson, readBody, log, UNSAFE_PATH, allowedFolders() -> the folder paths a new session may start in,
 //        sessionInfo(id) -> the conversation as /state shows it, or null,
 //        turnInfo(id) -> { promptAt, turnEndT, turnOpen, asking, askAt, askText, apiError, errAt, lastReply }, or null,
-//        nameOf(id) -> a conversation's name or null, noteMessage(from, to, text) -> records a message between two,
-//        rename(id, name) -> [code, json], hide(id) -> off the map, markTemp(id), isTemp(id),
+//        nameOf(id) -> a conversation's name or null, noteMessage(from, to, text, { kind }?) -> records a message
+//        between two, rename(id, name) -> [code, json], hide(id) -> off the map, markTemp(id), isTemp(id),
 //        conversations({ state, repo, all, limit }) -> [row], transcript(id, { since, limit }) -> Promise,
 //        whereIs(id) -> { known, cwd, account }, successorOf(id) -> the one that carries on or null,
-//        openElsewhere(id) -> open in a claude outside Fleet View, teamOf(id) -> { id, name, members } or null,
-//        teams: { list(), get(id) -> { id, name, members } or null, make(b), add(id, member), remove(id, member),
-//        disband(id) } each -> [code, json] or a Promise of one }
+//        openElsewhere(id) -> open in a claude outside Fleet View, isRemoved(id) -> removed from the map, teamOf(id) -> { id, name, lead, members } or null,
+//        teams: { list(), get(id) -> { id, name, lead, members } or null, make(b), add(id, member, lead),
+//        remove(id, member), lead(id, member | null), disband(id) } each -> [code, json] or a Promise of one,
+//        status({ team, ids, from }) -> [code, json] }
 const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript';
 const GET_VERBS = new Set(['menu', 'transcript']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
-const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|disband|message))?\/?$/;
+const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|lead|disband|message))?\/?$/;
+const ASK_ROUTE = /^\/api\/ask(?:\/([^/]+))?(?:\/(collected))?\/?$/;
 function handle(req, res, pathname, ctx) {
   const what = `${req.method} ${pathname}`;
   const answer = ([code, out]) => {
@@ -1152,8 +1498,21 @@ function handle(req, res, pathname, ctx) {
     if (!tid) return body((b) => makeTeam(b, ctx));
     if (tverb === 'add') return body((b) => addToTeam(tid, b, ctx));
     if (tverb === 'remove') return body((b) => removeFromTeam(tid, b, ctx));
+    if (tverb === 'lead') return body((b) => leadTeam(tid, b, ctx));
     if (tverb === 'disband') return run(Promise.resolve(ctx.teams.disband(tid)));
     return body((b) => messageTeam(tid, b, ctx, gone));
+  }
+  if (pathname === '/api/status' || pathname === '/api/status/') {
+    return req.method === 'GET' ? run(readStatus(query(), ctx)) : answer([405, { ok: false, message: 'method not allowed' }]);
+  }
+  const am = ASK_ROUTE.exec(pathname);
+  if (am) {
+    const [, aid, averb] = am;
+    if (aid && !/^a[0-9a-f]{10}$/.test(aid)) return answer([400, { ok: false, message: 'not an ask id' }]);
+    if (!aid && req.method === 'POST') return body((b) => postAsk(b, ctx));
+    if (aid && !averb && req.method === 'GET') return run(getAsk(aid, query(), gone));
+    if (aid && averb && req.method === 'POST') return body((b) => collectedAsk(aid, b));
+    return answer([405, { ok: false, message: 'method not allowed' }]);
   }
   const m = ROUTE.exec(pathname);
   if (!m) return answer([404, { ok: false, message: 'not found (GET /api lists the endpoints)' }]);
@@ -1183,4 +1542,6 @@ function handle(req, res, pathname, ctx) {
   return answer([405, { ok: false, message: 'method not allowed' }]);
 }
 
-module.exports = { ensureToken, handle, hostList, plainText, cleanText, pasteWrites, deliverText, startQueue, queuedIds, TOKEN_FILE, ENDPOINTS };
+// askParts: the ask's text builders and collection steps, for a test to drive without a session host
+module.exports = { ensureToken, handle, hostList, plainText, cleanText, pasteWrites, deliverText, startQueue, queuedIds, TOKEN_FILE, ENDPOINTS,
+  askParts: { asks, summaryText, laterText, answerLines, flushAsk, settleAnswer, askJson } };

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // fv: Fleet View's automation API from the command line (README: "Automation API"), for a person or a Claude
 // Code session that orchestrates other sessions: start one, send it a message, wait for it, read its menu and
-// answer it, read its transcript, stop and remove it, and make teams of them. `fv help` lists the commands; `fv api`
-// asks the server.
+// answer it, read its transcript, stop and remove it, make teams of them (led by one, or peers), see what they are
+// doing for free (fv status) and ask several one question (fv ask). `fv help` lists the commands; `fv api` asks the
+// server.
 //
 // Node only, no dependencies. The token comes from %LOCALAPPDATA%\fleet-view\api-token (made by the server's first
 // start), the port from --port, FLEET_VIEW_PORT or 4777. Nothing else is read (but the folder's version.json and git
@@ -35,13 +36,26 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   fv stop <id> [--remove]
   fv rm <id>                                hide a conversation from the map (never deletes its log)
 
-  fv teams                                  teams and their members
-  fv team new <id> <id>… --order T [--name N]   make a team; each gets the order and its teammates
-  fv team add <team> <id>                   add a conversation (it gets the order, the others its id)
+  fv teams                                  teams and their members (★ the lead)
+  fv team new <id> <id>… --order T [--name N] [--lead <id>]
+                                            make a team; each gets the order and its teammates.
+                                            --lead: that one directs the rest, and they report to it
+  fv team add <team> <id> [--lead]          add a conversation (it gets the order, the others its id);
+                                            --lead: it joins as the team's lead
+  fv team lead <team> <id>|none             make a member the lead, or none: no lead, peers again
   fv team rm <team> <id>                    take one out (it and the others are told)
   fv team disband <team>                    end the team (every member is told)
   fv team say <team> <text> [--from <your id>]   a message to every member (but you)
   <team> is a team's id, the start of it, or its name.
+
+  fv status [<team>|<id>…] [--from <your id>]
+                                            free (costs them nothing): what each is doing, its last
+                                            reply, branch, PR, context (★ the lead). No target: your
+                                            team with --from, else every unfinished conversation
+  fv ask <team>|<id>… <question> --from <your id> [--within s] [--wait [s]]
+                                            each answers in its own turn; the answers are typed into
+                                            your chat as one message (later ones one by one). --wait:
+                                            print here the ones in within s (default 100, at most 540; a Bash call stops at 2 minutes)
 
   --json         the raw JSON reply          --port <n>   Fleet View's port (default 4777)
   --wait         without a number: the API's default (30 minutes); with one: 1..3600 seconds
@@ -53,9 +67,10 @@ class Refused extends Error {}
 
 // ---------- arguments ----------
 const VALUE_FLAGS = new Set(['account', 'name', 'model', 'effort', 'fork', 'from', 'timeout', 'tail', 'text', 'sig',
-  'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order']);
+  'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order', 'within']);
 const BOOL_FLAGS = new Set(['temp', 'chrome', 'no-chrome', 'all', 'remove', 'allow-permission', 'json', 'help', 'version', 'no-open']);
-// -> { pos: [...], flags: { name: value | true } }; --wait takes the next argument only when it is a number
+// -> { pos: [...], flags: { name: value | true } }; --wait takes the next argument only when it is a number, --lead
+// only when it is not an option (fv team new … --lead <id>; fv team add … --lead stands alone)
 function parseArgs(argv) {
   const pos = [], flags = {};
   for (let i = 0; i < argv.length; i++) {
@@ -69,6 +84,9 @@ function parseArgs(argv) {
     if (name === 'wait') {
       if (val === undefined && i + 1 < argv.length && /^\d+$/.test(argv[i + 1])) val = argv[++i];
       flags.wait = val === undefined ? true : val;
+    } else if (name === 'lead') {
+      if (val === undefined && i + 1 < argv.length && !argv[i + 1].startsWith('--')) val = argv[++i];
+      flags.lead = val === undefined ? true : val;
     } else if (VALUE_FLAGS.has(name)) {
       if (val === undefined) {
         if (i + 1 >= argv.length) throw new Usage(`--${name} needs a value`);
@@ -185,6 +203,25 @@ async function resolveTeam(call, given) {
   if (!hits.length) throw new Refused(`no team is called or starts with "${given}" (fv teams lists them)`);
   throw new Refused(`"${given}" matches ${hits.length} teams: ${hits.map((t) => `${t.id} "${t.name}"`).join(', ')}; give its id`);
 }
+// The targets of fv status and fv ask: each one a team when it matches one (its id or the start of it, or its name
+// or the start of it, any case; a team id starts with t, which no conversation id does), else a conversation id as
+// resolveId takes it. -> { teams: [team as GET /api/teams lists it], ids: [conversation id] }
+async function resolveTargets(call, list) {
+  const r = await call('GET', '/teams');
+  const ts = r.code === 200 && r.j.ok ? r.j.teams || [] : [];
+  const out = { teams: [], ids: [] };
+  for (const given of list) {
+    const g = String(given).toLowerCase();
+    let hits = ts.filter((t) => t.id === g || String(t.name || '').toLowerCase() === g);
+    if (!hits.length) hits = ts.filter((t) => t.id.startsWith(g) || (!/^[0-9a-f-]{8,}$/.test(g) && String(t.name || '').toLowerCase().startsWith(g)));
+    if (hits.length > 1) throw new Refused(`"${given}" matches ${hits.length} teams: ${hits.map((t) => `${t.id} "${t.name}"`).join(', ')}; give its id`);
+    if (hits.length) { if (!out.teams.some((t) => t.id === hits[0].id)) out.teams.push(hits[0]); continue; }
+    if (!/^[0-9a-f-]{8,}$/i.test(given) && !/^new-\d+$/.test(given)) throw new Refused(`no team is called or starts with "${given}", and it is not a conversation id (fv teams and fv ls list them)`);
+    const id = await resolveId(call, given);
+    if (!out.ids.includes(id)) out.ids.push(id);
+  }
+  return out;
+}
 
 // ---------- output ----------
 const short = (id) => (id && FULL_ID.test(id) ? id.slice(0, 8) : id || '?');
@@ -237,9 +274,42 @@ function toldLines(list) {
   return (list || []).map((x) => `  ${x.name || short(x.id)} (${short(x.id)}): ${x.ok ? (x.queued ? 'queued, it goes in once its question or prompt is answered' : 'sent') : `not told: ${x.message || 'failed'}`}`);
 }
 function teamLines(t) {
-  const out = [`${t.id}  "${t.name}"  ${(t.members || []).length} members · ${clip(t.order, 70)}`];
-  for (const m of t.roster || []) out.push(`  ${short(m.id)}  ${pad(clip(m.name || '', 32), 32)}  ${pad(m.state || 'gone', 8)}  ${m.repo || ''}${m.branch ? ` · ${m.branch}` : ''}${m.removed ? '  (removed from the map)' : ''}`.replace(/\s+$/, ''));
+  const lead = t.lead ? (t.roster || []).find((m) => m.id === t.lead) : null;
+  const out = [`${t.id}  "${t.name}"  ${(t.members || []).length} members${t.lead ? ` · led by ${lead ? lead.name : short(t.lead)}` : ''} · ${clip(t.order, 70)}`];
+  for (const m of t.roster || []) out.push(`${m.id === t.lead ? '★ ' : '  '}${short(m.id)}  ${pad(clip(m.name || '', 32), 32)}  ${pad(m.state || 'gone', 8)}  ${m.repo || ''}${m.branch ? ` · ${m.branch}` : ''}${m.removed ? '  (removed from the map)' : ''}`.replace(/\s+$/, ''));
   return out;
+}
+// "5 min ago", "2 h ago" for a time in ms
+function ago(t) {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  return s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`;
+}
+// fv status: a few lines per member (★ the lead): state and what it does, where its work is, its last reply's first line
+function statusLines(j) {
+  const out = [];
+  if (j.team) out.push(`team ${j.team.id} "${j.team.name}"${j.team.lead ? '' : ' (no lead: peers)'}`);
+  for (const m of j.members || []) {
+    out.push(`${m.lead ? '★ ' : '  '}${short(m.id)}  ${clip(m.name || '', 40)}  ${m.state || 'gone'}${m.doing && m.doing !== m.state ? ` · ${clip(m.doing, 80)}` : ''}${m.queued ? ' · text waiting for it' : ''}${m.removed ? ' · removed from the map' : ''}`);
+    const where = [m.repo, m.branch ? `branch ${m.branch}` : '', m.pr ? `PR #${m.pr.number}${m.pr.state ? ` (${m.pr.state})` : ''}` : '',
+      m.ctx != null ? `ctx ${Math.round(m.ctx * 100)}%` : '', m.cost ? `$${Number(m.cost).toFixed(2)}` : ''].filter(Boolean).join(' · ');
+    if (where) out.push(`      ${where}`);
+    if (m.lastReply) out.push(`      last reply${m.lastReplyAt ? ` ${ago(m.lastReplyAt)}` : ''}: ${clip(String(m.lastReply).split('\n').find((l) => l.trim()) || '', 110)}`);
+  }
+  if (!(j.members || []).length) out.push('(nobody)');
+  return out;
+}
+// one answer of an ask as fv ask --wait prints it (the reply clipped to 3000 characters) -> [lines]
+function answerLines(x, at) {
+  const head = `── ${x.name || short(x.id)} (${x.id})`;
+  if (x.status === 'answered') {
+    const r = String(x.reply || '').trim() || `(no text; fv transcript ${x.id} shows what it did)`;
+    const ms = (x.at || Date.now()) - at;
+    return [`${head} · ${ms < 60e3 ? 'answered within a minute' : `answered after ${Math.round(ms / 60e3)} min`}`,
+      r.length > 3000 ? `${r.slice(0, 3000)}\n… (clipped: fv transcript ${x.id} for the rest)` : r];
+  }
+  if (x.status === 'failed') return [`${head} · no answer: ${x.message || 'failed'}`];
+  if (x.status === 'asking') return [`${head} · showing a question/permission prompt${x.message ? `: ${x.message}` : ''}; its answer will be typed into your chat after the user answers that`];
+  return [`${head} · still working; its answer will be typed into your chat when it's done`];
 }
 // the teams other teams' members were pulled out of (a new team, an add)
 function leftLines(left) {
@@ -484,16 +554,30 @@ async function run(argv, env) {
         for (const g of pos) members.push(await resolveId(call, g));
         const body = { members, order };
         if (flags.name !== undefined) body.name = flags.name;
+        if (flags.lead === true) throw new Usage('--lead needs the id of the member that leads');
+        if (flags.lead !== undefined) body.lead = await resolveId(call, flags.lead);
         const j = await need('POST', '/teams', body, long);
-        return { j, lines: [`made team ${j.team.id} "${j.team.name}" of ${j.team.members.length}; the brief:`, ...toldLines(j.sent), ...leftLines(j.left)] };
+        const led = j.team.lead ? `, led by ${short(j.team.lead)}` : '';
+        return { j, lines: [`made team ${j.team.id} "${j.team.name}" of ${j.team.members.length}${led}; the brief:`, ...toldLines(j.sent), ...leftLines(j.left)] };
+      }
+      if (sub === 'lead') {
+        const t = await resolveTeam(call, pos[0]);
+        if (pos[1] === undefined) throw new Usage('give the member that leads, or none: fv team lead <team> <id>|none');
+        const m = /^none$/i.test(pos[1]) ? null : await resolveId(call, pos[1]);
+        noMore(2);
+        const j = await need('POST', `/teams/${t.id}/lead`, { member: m }, long);
+        if (j.message && !j.brief && !(j.told || []).length) return { j, lines: [j.message] };
+        return { j, lines: [m ? `${short(m)} leads "${t.name}" now; its brief:` : `"${t.name}" has no lead now (peers)`, ...(j.brief ? toldLines([j.brief]) : []), 'the others:', ...toldLines(j.told)] };
       }
       if (sub === 'add' || sub === 'rm' || sub === 'remove') {
+        // fv team add <team> --lead <id>: the id was read as --lead's value
+        if (sub === 'add' && typeof flags.lead === 'string') { pos.push(flags.lead); flags.lead = true; }
         const t = await resolveTeam(call, pos[0]);
         const m = await resolveId(call, pos[1]);
         noMore(2);
         if (sub === 'add') {
-          const j = await need('POST', `/teams/${t.id}/add`, { member: m }, long);
-          return { j, lines: [`added ${short(m)} to "${t.name}"; the brief:`, ...toldLines([j.brief]), 'the others:', ...toldLines(j.told), ...leftLines(j.left)] };
+          const j = await need('POST', `/teams/${t.id}/add`, { member: m, ...(flags.lead ? { lead: true } : {}) }, long);
+          return { j, lines: [`added ${short(m)} to "${t.name}"${flags.lead ? ' as its lead' : ''}; the brief:`, ...toldLines([j.brief]), 'the others:', ...toldLines(j.told), ...leftLines(j.left)] };
         }
         const j = await need('POST', `/teams/${t.id}/remove`, { member: m });
         return { j, lines: [`took ${short(m)} out of "${t.name}"${j.disbanded ? '; the team is disbanded (one member left)' : ''}`, ...toldLines(j.told)] };
@@ -513,7 +597,53 @@ async function run(argv, env) {
         const j = await need('POST', `/teams/${t.id}/message`, body, long);
         return { j, lines: [`"${t.name}": ${j.message}`, ...toldLines(j.results)] };
       }
-      throw new Usage(sub ? `unknown team command "${sub}" (fv help)` : 'fv team new | add | rm | disband | say (fv help)');
+      throw new Usage(sub ? `unknown team command "${sub}" (fv help)` : 'fv team new | add | lead | rm | disband | say (fv help)');
+    }
+    case 'status': {
+      const q = new URLSearchParams();
+      if (pos.length) {
+        const tg = await resolveTargets(call, pos);
+        if (tg.teams.length === 1 && !tg.ids.length) q.set('team', tg.teams[0].id);
+        else q.set('ids', [...new Set([...tg.teams.flatMap((t) => t.members || []), ...tg.ids])].join(','));
+      } else if (flags.from !== undefined) q.set('from', await resolveId(call, flags.from));
+      const j = await need('GET', '/status' + (q.toString() ? '?' + q : ''));
+      return { j, lines: statusLines(j) };
+    }
+    case 'ask': {
+      if (pos.length < 2) throw new Usage('give the team or the conversations, then the question: fv ask <team>|<id>… "question" --from <your id>');
+      if (flags.from === undefined) throw new Usage('give --from <your conversation id>: the answers are typed into it');
+      const question = await textArg(pos.pop(), 'question');
+      const from = await resolveId(call, flags.from);
+      const tg = await resolveTargets(call, pos);
+      const body = { from, question };
+      // one team: the server's own member list (the ones removed from the map left out); more: their members as ids
+      if (tg.teams.length === 1) body.team = tg.teams[0].id;
+      const to = [...new Set([...(tg.teams.length > 1 ? tg.teams.flatMap((t) => (t.roster || []).filter((m) => !m.removed).map((m) => m.id)) : []), ...tg.ids])].filter((m) => m !== from);
+      if (to.length) body.to = to;
+      if (flags.within !== undefined) body.within = count(flags.within, '--within', 30, 3600);
+      let wait;
+      if (flags.wait !== undefined) wait = flags.wait === true ? 100 : count(flags.wait, '--wait', 1, 540);
+      const j = await need('POST', '/ask', body, 240000);
+      const lines = [`ask ${j.ask}: ${j.message || 'asked'}`, ...toldLines(j.asked)];
+      // open in a terminal outside Fleet View: nothing can be typed into it, so the answers are only printed here
+      if (j.typedIn === false && !wait) wait = 100;
+      if (j.typedIn === false) lines.push('You are open in a terminal outside Fleet View, so the answers cannot be typed into your chat: they are printed here.');
+      if (!wait) {
+        if ((j.asked || []).some((x) => x.ok)) lines.push('Their answers will be typed into your chat as one message once all have answered'
+          + ` (or after ${body.within || 600} s), and any later one on its own. Nothing to wait for: carry on.`);
+        return { j, lines };
+      }
+      const r = await need('GET', `/ask/${j.ask}?wait=${wait}`, null, (wait + 30) * 1000);
+      const a = r.ask;
+      // the ones not reached are in the lines above already
+      const shown = a.answers.filter((x) => (j.asked || []).some((y) => y.ok && y.id === x.id) || !(j.asked || []).some((y) => y.id === x.id));
+      const done = shown.filter((x) => x.status === 'answered' || x.status === 'failed');
+      if (done.length) await need('POST', `/ask/${j.ask}/collected`, { ids: done.map((x) => x.id) }).catch(() => {});
+      if (shown.length) lines.push('', ...shown.flatMap((x) => answerLines(x, a.at)));
+      const later = shown.length - done.length;
+      if (later) lines.push('', j.typedIn === false ? `${later} still to answer: see ${later === 1 ? 'its reply' : 'their replies'} later with fv transcript <id>.`
+        : `${later} still to answer: ${later === 1 ? 'its answer' : 'their answers'} will be typed into your chat by itself; nothing to wait for.`);
+      return { j: { ...j, answers: a.answers }, lines };
     }
     default: throw new Usage(`unknown command "${cmd}" (fv help)`);
   }

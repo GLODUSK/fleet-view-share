@@ -272,8 +272,10 @@ function cleanParity(list) {
 }
 let parityRules = cleanParity(saved.parity) || [];
 // Teams: conversations told to work together (the page's "Work together", POST /teams). Each is
-// { id, name, color, members: [ids], order, at, messages: [{ t, from, to, text }], successors: [{ from, to, at }],
-// seenAt }: messages are the last 50 between members (through `fv send --from` and the API's `from`), successors the
+// { id, name, color, members: [ids], lead, order, at, messages: [{ t, from, to, text }], successors: [{ from, to, at }],
+// seenAt }: lead is the member that directs the others (null: they are peers; the conversation that carries on
+// for a lead that hands off leads in its place), messages are the last 50 between members (through `fv send --from`
+// and the API's `from`; an ask's questions and answers too), successors the
 // last 10 members that handed off (or ran /clear) and were swapped for the conversation that carries on, seenAt the
 // last time a member was in the session list. At most 50 teams of up to 12 members, saved with the rest; a team
 // whose members have all been gone for 24 hours is dropped (pruneTeams).
@@ -293,8 +295,9 @@ function cleanTeams(list, now = Date.now()) {
       .slice(-TEAM_MSGS_MAX).map((m) => ({ t: Math.round(m.t), from: m.from.slice(0, 80), to: m.to.slice(0, 80), text: m.text.slice(0, 300) }));
     const succ = (Array.isArray(x.successors) ? x.successors : []).filter((m) => m && typeof m.from === 'string' && typeof m.to === 'string' && Number.isFinite(m.at))
       .slice(-10).map((m) => ({ from: m.from.slice(0, 80), to: m.to.slice(0, 80), at: Math.round(m.at) }));
+    const lead = typeof x.lead === 'string' && members.includes(x.lead.toLowerCase()) ? x.lead.toLowerCase() : null;
     out.push({ id: x.id, name: plainText(x.name, 80) || 'team', color: /^#[0-9a-f]{6}$/i.test(x.color || '') ? x.color : TEAM_COLORS[out.length % TEAM_COLORS.length],
-      members, order: typeof x.order === 'string' ? x.order.slice(0, 4000) : '', at, messages: msgs, successors: succ, seenAt: Number.isFinite(x.seenAt) ? Math.round(x.seenAt) : now });
+      members, lead, order: typeof x.order === 'string' ? x.order.slice(0, 4000) : '', at, messages: msgs, successors: succ, seenAt: Number.isFinite(x.seenAt) ? Math.round(x.seenAt) : now });
   }
   return out;
 }
@@ -1153,6 +1156,17 @@ function ingestMain(s, recs) {
       for (const m of raw.matchAll(/<task-id>(\w+)<\/task-id>[\s\S]*?<status>(\w+)<\/status>/g)) { s.finished.set(m[1], m[2]); if (m[2] !== 'running') s.bg.delete(m[1]); }
     }
     noteBackground(s, d);
+    // a message typed while it was mid-turn: Claude Code logs it only as this attachment, when it reads it, so this
+    // is when it landed (an ask's question to a busy member, api.js). Not a task's notice or another session's message.
+    if (d.type === 'attachment' && !d.isSidechain) {
+      const a = d.attachment;
+      if (a && a.type === 'queued_command' && (!a.commandMode || a.commandMode === 'prompt') && typeof a.prompt === 'string' && a.prompt.trim() && !a.prompt.startsWith('<')) {
+        const t = Date.parse(d.timestamp) || Date.now();
+        s.prompt = a.prompt; s.promptAt = t; s.turnOpen = true;
+        if (t > (s.actT || 0)) s.actT = t;
+      }
+      continue;
+    }
     if (d.isSidechain || (d.type !== 'assistant' && d.type !== 'user')) continue;
     const t = Date.parse(d.timestamp) || Date.now();
     if (t > (s.actT || 0)) s.actT = t; // the last prompt, tool result or reply: real activity, unlike cost records
@@ -4043,7 +4057,7 @@ function worktreesOf(roots, list, now) {
 
 // ---------- teams (see TEAMS_MAX) ----------
 const teamOf = (id) => (id ? teams.find((t) => t.members.includes(String(id).toLowerCase())) || null : null);
-const teamJson = (t) => ({ id: t.id, name: t.name, color: t.color, members: [...t.members], order: t.order, at: t.at, messages: t.messages.slice(-TEAM_MSGS_MAX).map((m) => ({ ...m })),
+const teamJson = (t) => ({ id: t.id, name: t.name, color: t.color, members: [...t.members], lead: t.lead || null, order: t.order, at: t.at, messages: t.messages.slice(-TEAM_MSGS_MAX).map((m) => ({ ...m })),
   successors: (t.successors || []).map((x) => ({ ...x })) });
 // a member as briefs and notes name it: its name, repo and branch, as /state shows them
 function memberOf(id) {
@@ -4064,10 +4078,55 @@ function teamBrief(t, me) {
     `${talkLine(me)} Their messages reach you starting with [Message from teammate]. Agree who changes which files before `
     + 'editing, tell them when you push or merge, and reply to their messages.'].join('\n');
 }
-// the lines that tell one member who the others in ids are and how to reach them (the notes below)
-function contactLines(me, ids) {
+// the fv commands a lead works with (its brief, and the note that makes it the lead) -> [lines]
+function leadCommands(t, me) {
+  return [
+    `- fv status ${t.id}: what each is doing now, its last reply, branch, PR and context. Free: it costs them nothing, so use it first.`,
+    `- fv ask ${t.id} "question" --from ${me}: each answers in its own turn, and the answers come back to you together as one message (slow ones later, one by one). Add --wait to get them printed right here if they answer within 100 seconds (a Bash call stops at 2 minutes). To ask one or a few: fv ask <id> <id> "question" --from ${me}.`,
+    `- fv send <id> "instruction" --from ${me}: direct one of them.`,
+    `- fv team say ${t.id} "text" --from ${me}: tell them all.`,
+    `- fv team add ${t.id} <id> / fv team rm ${t.id} <id>: bring one in, or let one go.`,
+    '- fv ls: every conversation.',
+  ];
+}
+// The brief of a team's lead: the order, the members it leads and how to direct them and get information from them
+function leadBrief(t, me) {
+  const others = t.members.filter((m) => m !== me).map(memberOf);
+  return [`[Fleet View order · you lead team "${t.name}"]`, t.order, '', 'You lead:', ...others.map(memberLine), '',
+    'How this works: they report to you, and they don\'t coordinate with each other unless you tell them to. Split the work so no '
+    + 'two of them edit the same files. The user talks to you; you talk to them. They carry on with what they were doing until '
+    + 'you give them their part, so start by giving each its part.',
+    ...leadCommands(t, me),
+    'Their reports reach you starting with [Message from teammate].'].join('\n');
+}
+// the lines that tell a member of a team with a lead who leads it and how to report to it -> [lines]
+function leadLines(t, me) {
+  const lead = memberOf(t.lead);
+  return [`Your lead is ${lead.name} (id ${lead.id}, repo ${lead.repo}, branch ${lead.branch || 'none'}): it gives you your part.`,
+    `Report to it with fv send ${lead.id} "…" --from ${me} when you finish, when you are blocked, and before you merge.`,
+    'Its questions arrive as [Question from your lead …]: just answer in your reply, and Fleet View passes it back; don\'t fv send '
+    + 'the answer too. Its instructions arrive as [Message from your lead …].'];
+}
+// The brief of a member of a team with a lead: the order for context, its lead, how to report, and the others
+function memberBrief(t, me) {
+  const others = t.members.filter((m) => m !== me && m !== t.lead).map(memberOf);
+  return [`[Fleet View order · team "${t.name}"]`, 'The team\'s order, for context:', t.order, '',
+    ...leadLines(t, me).map((l, i) => (i ? l : `${l} Carry on with what you're doing until it does.`)),
+    ...(others.length ? ['', 'The others in the team (so you know who is who; don\'t message them unless your lead says so):', ...others.map(memberLine)] : []),
+  ].join('\n');
+}
+// the brief a member gets: the lead's, a led member's, or the peers' teamBrief
+const briefFor = (t, me) => (!t.lead ? teamBrief(t, me) : me === t.lead ? leadBrief(t, me) : memberBrief(t, me));
+// the lines that tell one member who the others in ids are and how to reach them (the notes below). With a lead:
+// the lead gets its members and its commands, a member its lead and how to report to it
+function contactLines(me, ids, t) {
   const list = ids.filter((m) => m !== me).map(memberOf);
   if (!list.length) return '';
+  if (t && t.lead && ids.includes(t.lead)) {
+    if (me === t.lead) return ['You lead:', ...list.map(memberLine), ...leadCommands(t, me)].join('\n');
+    const rest = list.filter((m) => m.id !== t.lead);
+    return [...leadLines(t, me), ...(rest.length ? ['The others (don\'t message them unless your lead says so):', ...rest.map(memberLine)] : [])].join('\n');
+  }
   return [list.length === 1 ? 'The other conversation:' : 'The others:', ...list.map(memberLine),
     `${talkLine(me)} Their messages reach you starting with [Message from teammate].`].join('\n');
 }
@@ -4087,13 +4146,15 @@ async function tell(id, text, kind) {
 }
 // a note to each of ids: the team's prefix, the text and, with contacts, that member's contact lines over those ids
 function noteEach(t, ids, text, contacts) {
-  return Promise.all(ids.map((id) => tell(id, [`[Fleet View · team "${t.name}"]`, text, ...(contacts ? ['', contactLines(id, contacts)] : [])].join('\n').trim(), 'note')));
+  return Promise.all(ids.map((id) => tell(id, [`[Fleet View · team "${t.name}"]`, typeof text === 'function' ? text(id) : text,
+    ...(contacts ? ['', contactLines(id, contacts, t)] : [])].join('\n').trim(), 'note')));
 }
 // what a reply says it told: { id, name, ok, queued?, message } each
 const toldJson = (rs) => rs.map((r) => ({ id: r.id, name: r.name, ok: r.ok, ...(r.queued ? { queued: true } : {}), message: r.message }));
 
 // Members taken out of the teams they were in (into a new team, or added to another): the teams that lost some,
-// with a team left with one member dropped. -> [{ team, gone: [ids], disbanded }]
+// with a team left with one member dropped; one that loses its lead has none now (leadGone).
+// -> [{ team, gone: [ids], disbanded, leadGone }]
 function pullOut(ids, into) {
   const out = [];
   for (const x of teams) {
@@ -4101,23 +4162,29 @@ function pullOut(ids, into) {
     const gone = x.members.filter((m) => ids.includes(m));
     if (!gone.length) continue;
     x.members = x.members.filter((m) => !ids.includes(m));
-    out.push({ team: x, gone, disbanded: x.members.length < 2 });
+    const leadGone = !!x.lead && gone.includes(x.lead);
+    if (leadGone) x.lead = null;
+    out.push({ team: x, gone, disbanded: x.members.length < 2, leadGone });
   }
   teams = teams.filter((x) => x === into || x.members.length >= 2);
   return out;
 }
+// what the rest of a team are told when its lead goes: no lead any more, peers again (with contact lines after it)
+const NO_LEAD = 'The team has no lead now: carry on with your parts as peers, agree who changes which files before editing, and tell each other when you push or merge.';
 // tells the rest of each team pullOut took members from -> Promise of [{ id, name, members, disbanded, told }]
 function tellPulled(pulled, into) {
-  return Promise.all(pulled.map(async ({ team: x, gone, disbanded }) => {
+  return Promise.all(pulled.map(async ({ team: x, gone, disbanded, leadGone }) => {
     const text = `${joinNames(gone.map((m) => memberOf(m).name))} left this team to join "${into.name}".`
-      + (disbanded ? ` The team "${x.name}" is disbanded: carry on with your own part.` : '');
+      + (disbanded ? ` The team "${x.name}" is disbanded: carry on with your own part.` : leadGone ? ` It was your lead. ${NO_LEAD}` : '');
     const told = await noteEach(x, x.members, text, disbanded ? null : x.members);
     return { id: x.id, name: x.name, members: [...x.members], disbanded, told: toldJson(told) };
   }));
 }
 
-// POST /teams { members: [ids] (2..12), order, name? }: a team of exactly those members. The same set as a team
-// that is there already gives that team the new order (and name); any other set is a new team, and members pulled
+// POST /teams { members: [ids] (2..12), order, name?, lead? }: a team of exactly those members, led by lead (one of
+// them) or of peers (lead null or left out). Each member's brief is briefFor's: the lead's, a led member's, or the
+// peers'. The same set as a team that is there already gives that team the new order (and name, and lead when
+// lead is given); any other set is a new team, and members pulled
 // out of other teams leave them (those teams are told; one left with one member is disbanded). The reply carries
 // briefs ({ id: the text that member gets }) and left: the teams pulled from.
 // o.send (the API's POST /api/teams, and the page's with send: true): the server sends each member its brief itself,
@@ -4133,6 +4200,13 @@ async function postTeam(b, o = {}) {
   if (members.some((m) => !sessions.has(m) && !UUID_RE.test(m))) return [400, { ok: false, message: 'not a conversation Fleet View knows' }];
   if (typeof b.order !== 'string' || !b.order.trim() || b.order.length > 4000) return [400, { ok: false, message: 'order must be text of at most 4000 characters' }];
   if (b.name != null && (typeof b.name !== 'string' || b.name.length > 200)) return [400, { ok: false, message: 'name must be text' }];
+  // lead: one of the members (after the same successor mapping), or null for peers; left out keeps a same set's lead
+  let lead;
+  if (b.lead != null) {
+    if (typeof b.lead !== 'string' || !MEMBER_RE.test(b.lead)) return [400, { ok: false, message: 'lead must be a conversation id' }];
+    lead = successorOf(b.lead) || b.lead.toLowerCase();
+    if (!members.includes(lead)) return [400, { ok: false, message: 'the lead must be one of the members' }];
+  } else if ('lead' in b) lead = null;
   const now = Date.now(), order = b.order.replace(/\r\n?/g, '\n').trim();
   const name = plain(b.name, 80) || clipWords(order.split(/\s+/).slice(0, 5).join(' '), 40) || 'team';
   const same = teamOf(members[0]);
@@ -4141,23 +4215,26 @@ async function postTeam(b, o = {}) {
     t = same;
     t.order = order; t.at = now; t.seenAt = now;
     if (b.name) t.name = name;
+    if (lead !== undefined) t.lead = lead;
   } else {
     pulled = pullOut(members, null);
     const used = new Set(teams.map((x) => x.color));
     t = { id: 't' + require('crypto').randomBytes(5).toString('hex'), name, color: TEAM_COLORS.find((c) => !used.has(c)) || TEAM_COLORS[teams.length % TEAM_COLORS.length],
-      members, order, at: now, messages: [], successors: [], seenAt: now };
+      members, lead: lead || null, order, at: now, messages: [], successors: [], seenAt: now };
     teams.push(t);
     if (teams.length > TEAMS_MAX) teams.splice(0, teams.length - TEAMS_MAX);
   }
   saveSettings();
-  const briefs = Object.fromEntries(t.members.map((m) => [m, teamBrief(t, m)]));
+  const briefs = Object.fromEntries(t.members.map((m) => [m, briefFor(t, m)]));
   const [left, sent] = await Promise.all([tellPulled(pulled, t), o.send ? Promise.all(t.members.map((m) => tell(m, briefs[m], 'order'))) : null]);
   return [200, { ok: true, team: teamJson(t), briefs, ...(left.length ? { left } : {}), ...(sent ? { sent: toldJson(sent) } : {}) }];
 }
-// POST /teams/add { id, member }: one more member. The team keeps its id, colour, order and messages; the member
-// leaves the team it was in (told as above). The newcomer gets the brief as an order, the others a note with every
-// member's id, the newcomer's too. -> { ok, team, brief: what the newcomer got, told: the notes, left? }
+// POST /teams/add { id, member, lead? }: one more member. The team keeps its id, colour, order and messages; the member
+// leaves the team it was in (told as above). The newcomer gets its brief as an order, the others a note with every
+// member's id, the newcomer's too. lead true: the newcomer joins as the team's lead (in place of the lead it had),
+// and the others' note says so. -> { ok, team, brief: what the newcomer got, told: the notes, left? }
 async function addMember(b) {
+  if (b && 'lead' in b && typeof b.lead !== 'boolean') return [400, { ok: false, message: 'lead must be true or false' }];
   if (!b || typeof b.id !== 'string' || typeof b.member !== 'string') return [400, { ok: false, message: 'give the team and the member' }];
   const t = teams.find((x) => x.id === b.id);
   if (!t) return [404, { ok: false, message: 'no such team' }];
@@ -4168,13 +4245,17 @@ async function addMember(b) {
   if (t.members.includes(m)) return [409, { ok: false, message: m === b.member.toLowerCase() ? 'it is in that team already' : `${memberOf(m).name} carries on for it, and is in that team already` }];
   if (t.members.length >= TEAM_MEMBERS_MAX) return [409, { ok: false, message: `a team has at most ${TEAM_MEMBERS_MAX} conversations` }];
   const pulled = pullOut([m], t);
-  const old = [...t.members];
+  const old = [...t.members], was = t.lead || null;
   t.members.push(m);
+  if (b.lead === true) t.lead = m;
   t.seenAt = Date.now();
   saveSettings();
+  const who = memberOf(m).name;
+  const note = b.lead !== true ? `${who} joined the team.`
+    : (id) => (id === was ? `${who} joined the team and leads it now, in your place: you are a member and report to it.` : `${who} joined the team and leads it now.`);
   const [brief, told, left] = await Promise.all([
-    tell(m, teamBrief(t, m), 'order'),
-    noteEach(t, old, `${memberOf(m).name} joined the team.`, t.members),
+    tell(m, briefFor(t, m), 'order'),
+    noteEach(t, old, note, t.members),
     tellPulled(pulled, t),
   ]);
   return [200, { ok: true, team: teamJson(t), brief: toldJson([brief])[0], told: toldJson(told), ...(left.length ? { left } : {}) }];
@@ -4190,9 +4271,11 @@ async function removeTeam(b) {
   return [200, { ok: true, team: teamJson(t), told: toldJson(told) }];
 }
 // POST /teams/leave { id, member, why?: 'left' | 'removed', hidden?, quiet? }: one member out. The rest are told
-// (with the others' ids; a team left with one member is disbanded, and that one is told so), and so is the member,
+// (with the others' ids; a team left with one member is disbanded, and that one is told so; when the lead goes the
+// team has no lead, and they are told to carry on as peers), and so is the member,
 // that it left (why 'left') or was taken out ('removed'), unless it was removed from the map (hidden: it is
-// ending). quiet: nobody is told (an order that never reached it, orders.js). -> { ok, disbanded, team (the
+// ending). quiet: nobody is told (an order that never reached it, orders.js), except that a lead going leaves the
+// rest, who were told to wait for it, a note that there is none. -> { ok, disbanded, team (the
 // members left), told }
 async function leaveTeam(b) {
   if (!b || typeof b.id !== 'string' || typeof b.member !== 'string') return [400, { ok: false, message: 'give the team and the member' }];
@@ -4204,22 +4287,57 @@ async function leaveTeam(b) {
   const m = t.members.includes(lc) || b.quiet === true ? lc : successorOf(b.member) || lc;
   if (!t.members.includes(m)) return [404, { ok: false, message: 'not in that team' }];
   t.members = t.members.filter((x) => x !== m);
+  // the lead going leaves the team with none: the rest are peers again
+  const wasLead = t.lead === m;
+  if (wasLead) t.lead = null;
   // a team of one is no team
   const disbanded = t.members.length < 2;
   if (disbanded) teams = teams.filter((x) => x !== t);
   saveSettings();
   const out = { ok: true, disbanded, team: teamJson(t), told: [] };
+  // quiet, but it was the lead the rest were told to wait for: they hear there is none
+  if (b.quiet === true && wasLead) {
+    const lost = `${memberOf(m).name} didn't get the order, so it doesn't lead the team.`;
+    out.told = toldJson(await (disbanded ? noteEach(t, t.members, `${lost} The team "${t.name}" is disbanded: carry on with the order on your own.`)
+      : noteEach(t, t.members, `${lost} ${NO_LEAD}`, t.members)));
+  }
   if (b.quiet === true) return [200, out];
   const removed = b.why === 'removed', who = memberOf(m).name;
   const rest = disbanded
     ? noteEach(t, t.members, `${who} ${removed ? 'was taken out' : 'left'}, so the team "${t.name}" is disbanded. Carry on with your own part.`)
-    : noteEach(t, t.members, removed ? `${who} was taken out of the team.` : `${who} left the team.`, t.members);
+    : noteEach(t, t.members, `${who} ${removed ? 'was taken out of the team' : 'left the team'}.${wasLead ? ` It was your lead. ${NO_LEAD}` : ''}`, t.members);
   const self = b.hidden === true ? Promise.resolve([])
     : noteEach(t, [m], removed ? `You were taken out of the team "${t.name}". Carry on with your own part; don't message its members about it.`
       : `You left the team "${t.name}". Carry on with your own part; don't message its members about it unless they message you.`);
   const [a, c] = await Promise.all([self, rest]);
   out.told = toldJson([...a, ...c]);
   return [200, out];
+}
+// POST /teams/lead { id, member: <id> | null } (and the API's POST /api/teams/:id/lead): sets the team's lead, or
+// clears it (null). A new lead gets its brief as an order; the rest a note naming it and how to report to it. Clearing:
+// each a note that the team has no lead now, peers again, with their contact lines. -> { ok, team, brief?, told }
+async function setLead(b) {
+  if (!b || typeof b.id !== 'string') return [400, { ok: false, message: 'give the team' }];
+  const t = teams.find((x) => x.id === b.id);
+  if (!t) return [404, { ok: false, message: 'no such team' }];
+  if (b.member != null && (typeof b.member !== 'string' || !MEMBER_RE.test(b.member))) return [400, { ok: false, message: 'member must be a conversation id, or null for no lead' }];
+  // one that handed off or ran /clear: the conversation that carries on for it
+  const m = b.member == null ? null : t.members.includes(b.member.toLowerCase()) ? b.member.toLowerCase() : successorOf(b.member) || b.member.toLowerCase();
+  if (m && !t.members.includes(m)) return [409, { ok: false, message: 'not a member of that team' }];
+  if (m === (t.lead || null)) return [200, { ok: true, team: teamJson(t), told: [], message: m ? `${memberOf(m).name} leads it already` : 'the team has no lead already' }];
+  const was = t.lead || null;
+  t.lead = m;
+  t.seenAt = Date.now();
+  saveSettings();
+  if (!m) {
+    const told = await noteEach(t, t.members, `${memberOf(was).name} doesn't lead the team any more. ${NO_LEAD}`, t.members);
+    return [200, { ok: true, team: teamJson(t), told: toldJson(told) }];
+  }
+  const who = memberOf(m).name;
+  const note = (id) => (id === was ? `${who} (id ${m}) leads the team now, in your place: you are a member, it gives you your part, and you report to it.`
+    : `${who} (id ${m}) leads the team now: it gives you your part, and you report to it.`);
+  const [brief, told] = await Promise.all([tell(m, leadBrief(t, m), 'order'), noteEach(t, t.members.filter((x) => x !== m), note, t.members)]);
+  return [200, { ok: true, team: teamJson(t), brief: toldJson([brief])[0], told: toldJson(told) }];
 }
 // a conversation removed from the map (the page's Remove, the API's remove, a temp session that ended) leaves its
 // team; it is ending, so only the rest are told
@@ -4239,11 +4357,52 @@ function hiddenNow(id) {
 // for the API (api.js): a team by id with the members that can be told (not removed from the map), or null
 function teamFor(id) {
   const t = teams.find((x) => x.id === id);
-  return t ? { id: t.id, name: t.name, members: t.members.filter((m) => !hiddenNow(m)) } : null;
+  return t ? { id: t.id, name: t.name, lead: t.lead || null, members: t.members.filter((m) => !hiddenNow(m)) } : null;
 }
-// GET /api/teams: every team, with its members' names, repos, branches and states
+// GET /api/teams: every team, with its members' names, repos, branches, states and which one leads
 function teamsList() {
-  return teams.map((t) => ({ ...teamJson(t), roster: t.members.map((m) => ({ ...memberOf(m), state: sessions.get(m)?.state || null, removed: hiddenNow(m) })) }));
+  return teams.map((t) => ({ ...teamJson(t), roster: t.members.map((m) => ({ ...memberOf(m), state: sessions.get(m)?.state || null, removed: hiddenNow(m), lead: t.lead === m })) }));
+}
+// GET /api/status: what members are doing, free (nothing is typed into them). q: { team, ids, from }: a team's
+// members, these conversations, or from's team; none of them: every unfinished conversation not removed from the
+// map. Each row: { id, name, repo, branch, state, label, doing, lastReply (≤ 600), lastReplyAt, pr, ctx (0..1), cost,
+// removed, lead } (api.js adds queued). -> [code, { ok, team?, members }]
+function statusOf(q) {
+  let t = null, ids;
+  if (q.team) {
+    t = teams.find((x) => x.id === q.team);
+    if (!t) return [404, { ok: false, message: 'no such team' }];
+    ids = [...t.members];
+  } else if (q.ids && q.ids.length) {
+    ids = [...new Set(q.ids.map((m) => successorOf(m) || m.toLowerCase()))];
+  } else if (q.from) {
+    t = teamOf(successorOf(q.from) || q.from.toLowerCase());
+    if (!t) return [404, { ok: false, message: 'that conversation is in no team: give a team or ids' }];
+    ids = [...t.members];
+  }
+  const st = buildState();
+  const byId = new Map(st.sessions.map((s) => [s.id, s]));
+  if (!ids) ids = st.sessions.filter((s) => s.state !== 'DONE' && !hiddenNow(s.id)).map((s) => s.id);
+  const members = ids.map((id) => {
+    const s = byId.get(id), raw = sessions.get(id), m = memberOf(id);
+    const lead = t ? t.lead === id : !!(teamOf(id) && teamOf(id).lead === id);
+    if (!s) return { id, name: m.name, repo: m.repo, branch: m.branch, state: raw ? raw.state || null : null, label: null, doing: null, lastReply: null, lastReplyAt: null, pr: null, ctx: null, cost: 0, removed: hiddenNow(id), lead };
+    const run = s.running && s.running[0];
+    const act = s.lastAction;
+    const doing = run ? plain(`${run.tool}${run.what ? ' ' + run.what : ''}`, 200)
+      : s.state === 'ASKING' && s.waitingOn ? plain(`asking: ${s.waitingOn}`, 200)
+        : s.state === 'STALLED' && s.waitingOn ? plain(s.waitingOn, 200)
+          : (s.state === 'WORKING' || s.state === 'AGENTS') && act ? plain(`${act.verb} ${act.what || ''}`, 200) : s.label || null;
+    const shp = raw && raw.lastPr ? ships.get(`${raw.repo}#${raw.lastPr}`) : null;
+    return {
+      id, name: s.name, repo: s.repo ? s.repo.name : m.repo, branch: s.branch || null, state: s.state, label: s.label || null, doing,
+      lastReply: s.lastReply ? plain(s.lastReply, 600) : null, lastReplyAt: raw && raw.replyAt ? Math.round(raw.replyAt) : null,
+      pr: s.ship && s.ship.pr ? { number: s.ship.pr, state: shp ? String(shp.state || '').toLowerCase() || null : null, url: s.links ? s.links.pr : null } : null,
+      ctx: s.context && s.context.limit ? Math.round((s.context.used / s.context.limit) * 1000) / 1000 : null,
+      cost: Math.round((s.cost || 0) * 100) / 100, removed: hiddenNow(id), lead,
+    };
+  });
+  return [200, { ok: true, ...(t ? { team: { id: t.id, name: t.name, lead: t.lead || null } } : {}), members }];
 }
 
 // The conversation that carries on for id: following its handoff (the summary's next session, or the one that
@@ -4264,14 +4423,15 @@ function successorOf(id) {
   }
   return found;
 }
-// a member handed off (or ran /clear): its successor gets the brief (as an order: it runs, it just started), the
-// others a note
+// a member handed off (or ran /clear): its successor gets the brief (as an order: it runs, it just started; the
+// lead's when it took over the lead), the others a note
 function handedOn(t, from, to) {
   const was = memberOf(from).name, now = memberOf(to).name;
   const how = cleared.get(from)?.to === to ? `${was} ran /clear and goes on as ${now} (id ${to}).` : `${was} handed off; ${now} (id ${to}) carries on its part.`;
+  const note = t.lead === to ? (id) => `${how} It leads the team now: report to it with fv send ${to} "…" --from ${id} from now on.` : `${how} Message that id from now on.`;
   Promise.all([
-    tell(to, teamBrief(t, to), 'order'),
-    noteEach(t, t.members.filter((x) => x !== to), `${how} Message that id from now on.`),
+    tell(to, briefFor(t, to), 'order'),
+    noteEach(t, t.members.filter((x) => x !== to), note),
   ]).then(([a, rest]) => logLine(`teams: ${from} handed off to ${to} in "${t.name}": brief ${a.ok ? (a.queued ? 'queued' : 'sent') : `not sent (${a.message})`}, ${rest.filter((x) => x.ok).length} told`),
     (e) => logOnce('team-handoff:' + (e && e.message), `teams: telling a handoff failed\n${errorText(e)}`));
 }
@@ -4291,6 +4451,8 @@ function pruneTeams(now) {
       if (other && other !== t) continue;
       // in this team already (added by hand): the old one just goes
       t.members = other === t ? t.members.filter((x) => x !== m) : t.members.map((x) => (x === m ? to : x));
+      // the successor of the lead is the lead
+      if (t.lead === m) t.lead = to;
       t.successors = [...(t.successors || []), { from: m, to, at: now }].slice(-10);
       changed = true;
       if (other !== t) swaps.push([t, m, to]);
@@ -4306,10 +4468,12 @@ function pruneTeams(now) {
 }
 // a message one conversation sent another (the API's `from`, scripts/fleet-msg.js): kept in their team's messages
 // when both are in one, a feed entry with `to` (the map's comet), and a 'message' alert when they share no team:
-// one per sender and receiver every MSG_ALERT_MS, so a back-and-forth outside a team raises one, not one a message
+// one per sender and receiver every MSG_ALERT_MS, so a back-and-forth outside a team raises one, not one a message.
+// o.kind 'question' | 'answer' (api.js's asks) says so in the feed; an answer raises no alert (it is typed into the
+// asker anyway)
 const MSG_ALERT_MS = 10 * 60e3;
 const msgAlertAt = new Map(); // 'from>to' -> when the last 'message' alert for them was raised
-function noteMessage(from, to, text) {
+function noteMessage(from, to, text, o = {}) {
   if (typeof from !== 'string' || typeof to !== 'string' || !from || !to) return;
   from = UUID_RE.test(from) ? from.toLowerCase() : from;
   to = UUID_RE.test(to) ? to.toLowerCase() : to;
@@ -4322,11 +4486,12 @@ function noteMessage(from, to, text) {
     if (shared.messages.length > TEAM_MSGS_MAX) shared.messages.splice(0, shared.messages.length - TEAM_MSGS_MAX);
     saveSettings();
   }
-  const e = { t: now, sid: from, who: 'main', verb: 'message', what: plain(`→ ${nameOf(to)}`, 120), to };
+  const kind = o.kind === 'question' ? ' (question)' : o.kind === 'answer' ? ' (answer)' : '';
+  const e = { t: now, sid: from, who: 'main', verb: 'message', what: plain(`→ ${nameOf(to)}${kind}`, 120), to };
   feed.push(e);
   if (feed.length > 400) feed.splice(0, feed.length - 400);
   tlEvent(e);
-  if (shared) return;
+  if (shared || o.kind === 'answer') return;
   const pair = `${from}>${to}`;
   if (now - (msgAlertAt.get(pair) || 0) < MSG_ALERT_MS) return;
   msgAlertAt.set(pair, now);
@@ -5334,8 +5499,9 @@ const apiCtx = {
     const s = sessions.get(id);
     return s ? plain(String(baseName(s) || s.name || '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' '), 80) || null : null;
   },
-  // a message one conversation sent another went in: team messages, the feed, maybe an alert
-  noteMessage(from, to, text) { try { noteMessage(from, to, text); } catch (e) { logOnce('note-message:' + (e && e.message), `noting a message failed\n${errorText(e)}`); } },
+  // a message one conversation sent another went in: team messages, the feed, maybe an alert (o.kind: an ask's
+  // 'question' or 'answer')
+  noteMessage(from, to, text, o) { try { noteMessage(from, to, text, o); } catch (e) { logOnce('note-message:' + (e && e.message), `noting a message failed\n${errorText(e)}`); } },
   // its Fleet View name (the page's Rename) -> [code, json]
   rename: (id, name) => renameSession(id, name),
   // off the map (settings.hidden), and off the temp list -> true when it was a conversation id
@@ -5348,17 +5514,22 @@ const apiCtx = {
   successorOf,
   // open in a claude outside Fleet View (a terminal): resuming it here would run it twice
   openElsewhere: (id) => !DEMO && liveProcs.has(String(id || '').toLowerCase()),
-  // the team a conversation is in: { id, name, members } or null
-  teamOf: (id) => { const t = teamOf(id); return t ? { id: t.id, name: t.name, members: [...t.members] } : null; },
+  // removed from the map (the page's Remove), unless it worked again since: an ask's answers aren't typed into it
+  isRemoved: (id) => hiddenNow(String(id || '').toLowerCase()),
+  // the team a conversation is in: { id, name, lead, members } or null
+  teamOf: (id) => { const t = teamOf(id); return t ? { id: t.id, name: t.name, lead: t.lead || null, members: [...t.members] } : null; },
   // the API's /api/teams: each answers [code, json] or a Promise of one
   teams: {
     list: () => [200, { ok: true, teams: teamsList() }],
     get: teamFor,
     make: (b) => postTeam(b, { send: true }),
-    add: (id, member) => addMember({ id, member }),
+    add: (id, member, lead) => addMember({ id, member, ...(lead === true ? { lead: true } : {}) }),
     remove: (id, member) => leaveTeam({ id, member, why: 'removed' }),
     disband: (id) => removeTeam({ id }),
+    lead: (id, member) => setLead({ id, member }),
   },
+  // GET /api/status: what members are doing, free -> [code, json] (statusOf)
+  status: statusOf,
   // its transcript, compact (conversation.js transcriptOf) -> Promise of { total, from, items } or null (no log)
   transcript(id, q) {
     const where = conversationLog(id);
@@ -5471,7 +5642,7 @@ function handleRequest(req, res) {
     }
     // the page's teams; each sends its own notes, so the reply comes once they went in (or were queued)
     // (the page's Work together asks for send: the server types the briefs, as it types every other team text)
-    const teamRoute = { '/teams': (b) => postTeam(b, { send: !!(b && b.send === true) }), '/teams/add': addMember, '/teams/remove': removeTeam, '/teams/leave': leaveTeam }[pathname];
+    const teamRoute = { '/teams': (b) => postTeam(b, { send: !!(b && b.send === true) }), '/teams/add': addMember, '/teams/remove': removeTeam, '/teams/leave': leaveTeam, '/teams/lead': setLead }[pathname];
     if (teamRoute) {
       return readBody(req, res, (b) => {
         if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });

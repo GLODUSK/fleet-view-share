@@ -86,6 +86,14 @@ export const badge = (s) => `<span class="state" style="color:${esc(statusColor(
 export const stateLabel = badge;
 // a conversation that runs live in Fleet View's own window (its Session tab)
 export const hereTag = () => `<span class="here-tag" title="running here, in Fleet View" aria-label="running here, in Fleet View">${icon('shell', 12)}<span>here</span></span>`;
+// "★ leads" in its team's colour, for the lead of a team (state.teams[].lead): the others report to it
+export function leadTag(s, state) {
+  const t = (state && Array.isArray(state.teams) ? state.teams : []).find((x) => x && x.lead === s.id && (x.members || []).includes(s.id));
+  if (!t) return '';
+  const n = t.members.length - 1, tip = `leads team "${t.name}": ${n === 1 ? 'the other one reports' : `${n} report`} to it`;
+  const col = /^#[0-9a-f]{6}$/i.test(t.color || '') ? t.color : C.violet;
+  return `<span class="lead-tag" style="--tc:${col}" title="${esc(tip)}" aria-label="${esc(tip)}">★<span>leads</span></span>`;
+}
 // with one Claude account on this machine (state.accounts), no conversation shows a letter
 let oneAccount = false;
 export const setAccounts = (list) => { oneAccount = Array.isArray(list) && list.length === 1; };
@@ -438,7 +446,7 @@ function fillCard(el, s, state, ui, now) {
   el.style.setProperty('--status', statusColor(s));
   el.style.setProperty('--hue', s.hue || C.cyan);
   setIcon(sl.icon, s);
-  setHTML(sl.title, `<span class="name">${esc(s.name)}</span>${acctTag(s.account)}${ui.isHosted?.(s.id) ? hereTag() : ''}`);
+  setHTML(sl.title, `<span class="name">${esc(s.name)}</span>${acctTag(s.account)}${leadTag(s, state)}${ui.isHosted?.(s.id) ? hereTag() : ''}`);
   setHTML(sl.right, `${badge(s)}${sparkSvg(s.spark, statusColor(s))}<span class="ago" title="last activity"></span>`);
   setText(sl.right, '.ago', ago(now - s.last));
   setHTML(sl.goal, compact ? '' : esc(s.goal || '—'));

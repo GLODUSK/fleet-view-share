@@ -94,15 +94,18 @@
 //
 // Map command center (the shell's side; map.js, map-overlay.js and replay.js draw the rest):
 // - Orders (orders.js, through the live sessions of term.js, never a headless claude): a repo's right-click menu
-//   (map hub, repo chips, the repo menu's rows) has "Give orders ▸" (Prompt, Model, Effort, Fast mode): one text to every
-//   conversation in it, made one team (POST /teams) when there are 2+, so each gets its teammates' ids and the
-//   fv send command. A multi-selection's menu has "Give orders ▸" (Work together: exactly those as a team, Send to
-//   each, Model, Effort, Fast mode), "Add to team ▸", "Interrupt all", "Open all here", "Clear selection" and
-//   "Remove N conversations"; a team's has "Message the team", "Add <picked>", "Remove member ▸", "Pick <member>"
-//   and "Disband team"; a conflict's or clash's has "Send a note to all" (prefilled by kind), "Open the file in VS
-//   Code", "Pick" and "Interrupt" per conversation; one conversation's gains "Add to team ▸" and, in a team,
-//   'Team "<name>" ▸' (Message the team, Leave team, Disband team). The server tells the members what changed
-//   (see the teams section); Remove takes a conversation out of its team.
+//   (map hub, repo chips, the repo menu's rows) has "Give orders ▸": Send to each (one text to every conversation in
+//   it, no team), Work together (one team of peers, POST /teams, so each gets its teammates' ids and the fv send
+//   command), Under a lead ▸ ("<name> leads" per conversation, "A new conversation leads": one team whose lead
+//   gets the order and directs the others, who report to it; POST /teams { lead }), then Model, Effort, Fast mode.
+//   A multi-selection's menu has "Give orders ▸" (Work together, Under a lead ▸, Send to each, Model, Effort, Fast
+//   mode), "Add to team ▸", "Interrupt all", "Open all here", "Clear selection" and "Remove N conversations"; a
+//   team's has "Message the team", "Lead ▸" (who leads, or No lead: POST /teams/lead), "Add <picked>", "Remove
+//   member ▸", "Pick <member>" and "Disband team"; a conflict's or clash's has "Send a note to all" (prefilled by
+//   kind), "Open the file in VS Code", "Pick" and "Interrupt" per conversation; one conversation's gains "Add to
+//   team ▸", "Lead team ▸" (lead its own team, or join another as its lead) and, in a team, 'Team "<name>" ▸'
+//   (Message the team, Lead ▸, Leave team, Disband team). The server tells the members what changed (see the teams
+//   section); Remove takes a conversation out of its team.
 // - Replay: window 'fv-replay' { on, state } from the map overlay (see the replay section below).
 // - "Since you looked" (since.js): key w, the header's clock button, and by itself after 30+ min away.
 // - Desktop notifications for new state.alerts (settings.notify; see notifyAlerts).
@@ -2064,7 +2067,9 @@ const sessionsOf = (ids) => (ids || []).map((id) => (view?.allSessions || state?
 // ---------- orders (orders.js): one text to several conversations, as a team or to each ----------
 // item: an input item for the right-click menu; the menu closes at once and the sending goes on behind it
 // (starting a conversation can take a while), with a toast when it starts and one with the outcome.
-// o: { team, name(text), prefix, placeholder, value, note: true (sendNote: each gets the others' ids) }
+// o: { team, name(text), prefix, placeholder, value, note: true (sendNote: each gets the others' ids),
+//      lead: the session that leads the team, newLead: { folder, account, repo } (a new conversation started there
+//      when the order is sent leads it) }
 function orderItem(label, list, o = {}) {
   const ic = o.icon || 'send';
   if (!termApi()) return { label, icon: ic, disabled: true, note: 'desktop window only' };
@@ -2088,15 +2093,25 @@ function orderItem(label, list, o = {}) {
   };
 }
 async function runOrder(list, text, o) {
+  let lead = o.lead || null;
+  // a new conversation leads: it starts first (as the repo menu's New session), then joins as the lead once it has
+  // its id (orders.js waits for it before the team is made)
+  if (o.newLead) {
+    toast(`Starting a new conversation in ${o.newLead.repo} to lead…`, C.dim);
+    const r = await startLead(o.newLead);
+    if (!r.ok) { toast(`Nothing sent: the new lead did not start (${r.message})`, C.red, null, 9000); return { ok: false, results: [] }; }
+    lead = r.session;
+    list = [lead, ...list.filter((s) => s.id !== lead.id)];
+  }
   const n = list.filter((s) => !unreachable(s)).length;
-  toast(`Sending to ${n === 1 ? list.find((s) => !unreachable(s)).name : `${n} conversations`}…`, C.dim);
+  toast(`Sending to ${n === 1 ? list.find((s) => !unreachable(s)).name : `${n} conversations`}${lead ? ` · ★ ${lead.name} leads` : ''}…`, C.dim);
   let res;
   try {
     if (o.note) {
       const results = await sendNote(list, text, state, o.prefix);
       res = { ok: results.some((x) => x.ok), team: null, results };
     } else {
-      res = await sendOrder(list, text, { team: !!o.team, state, post, fixture: FIXTURE, prefix: o.prefix || null, name: o.name ? o.name(text) : null });
+      res = await sendOrder(list, text, { team: !!o.team, lead, state, post, fixture: FIXTURE, prefix: o.prefix || null, name: o.name ? o.name(text) : null });
     }
   } catch (e) { res = { ok: false, results: [], message: String(e?.message || e) }; }
   toast(orderSummary(res), res.ok ? C.mint : C.red, null, res.results?.some((x) => !x.ok || x.queued) ? 9000 : 0);
@@ -2132,9 +2147,11 @@ function repoSessions(folder) {
   const listed = (st.sessions || []).filter(inIt);
   return [...listed.filter((s) => s.state !== 'DONE'), ...listed.filter((s) => s.state === 'DONE'), ...pendingSessions(st).filter(inIt)];
 }
-// "Give orders ▸" (4 conversations): Prompt (one text to each, made one team when 2+), then Model ▸, Effort ▸ and
-// Fast mode ▸ for all of them, folded into one row to keep the menu short. The count is the conversations it will reach: one open in another window can't be typed into from here
-// (it is named in the item's note and left out of the team).
+// "Give orders ▸" (4 conversations): Send to each (the same text to each, no team), Work together (one team of
+// peers), Under a lead ▸ (one of them, or a new conversation, leads: the others report to it), then Model ▸,
+// Effort ▸ and Fast mode ▸ for all of them, folded into one row to keep the menu short. Making a team is a choice,
+// never the default. The count is the conversations it will reach: one open in another window can't be typed into
+// from here (it is named in the item's note and left out).
 function repoOrderItems(folder, name) {
   const all = repoSessions(folder);
   const off = (msg) => [{ label: 'Give orders', icon: 'send', disabled: true, note: msg }];
@@ -2146,15 +2163,76 @@ function repoOrderItems(folder, name) {
   if (!list.length) return off(`${away === 1 ? 'its one conversation is' : `all ${away} are`} open in another window`);
   const n = list.length;
   const count = `${n} conversation${n === 1 ? '' : 's'}`;
-  // a team has at most 12: more than that get it one by one
-  const team = n >= 2 && n <= 12;
-  const prompt = orderItem('Prompt', list, {
-    team, name: (text) => `${name} · ${firstWords(text, 4, 34)}`,
-    subnote: team ? 'as one team: they get each other\'s ids and can talk' : n > 12 ? 'to each (a team has at most 12)' : null,
-    placeholder: team ? `The order for every conversation in ${name}. They become one team.` : n > 12 ? `The order for every conversation in ${name}` : `The order for ${list[0].name}`,
-  });
+  const teamName = (text) => `${name} · ${firstWords(text, 4, 34)}`;
+  const kids = [orderItem('Send to each', list, {
+    team: false, icon: 'reply', subnote: n === 1 ? null : 'no team: each gets it on its own',
+    placeholder: n === 1 ? `The order for ${list[0].name}` : `The same order for each conversation in ${name}, each on its own (no team)`,
+  })];
+  // a team has at most 12
+  if (n >= 2) kids.push(teamItem(list, { name: teamName, placeholder: `The order for every conversation in ${name}. They become one team of peers and sort it out between them.` }));
+  kids.push(underLeadItem(list, { name: teamName, folder, repo: name }));
   const set = setItems(list);
-  return [{ label: 'Give orders', icon: 'send', note: [count, awayNote].filter(Boolean).join(' · '), children: [prompt, ...(set.length ? [{ sep: true }, ...set] : [])] }];
+  return [{ label: 'Give orders', icon: 'send', note: [count, awayNote].filter(Boolean).join(' · '), children: [...kids, ...(set.length ? [{ sep: true }, ...set] : [])] }];
+}
+// "Work together": exactly these as one team of peers (they get each other's ids and talk directly)
+function teamItem(list, o = {}) {
+  if (list.length > TEAM_MAX) return { label: 'Work together', icon: 'merge', disabled: true, note: `a team has at most ${TEAM_MAX}; use Send to each` };
+  return orderItem('Work together', list, { team: true, icon: 'merge', name: o.name, subnote: 'one team of peers: they get each other\'s ids and talk',
+    placeholder: o.placeholder || 'The order for all of them. They become a team of peers and can message each other.' });
+}
+// "Under a lead ▸": one team with a lead (★). The lead gets the order and directs the others; they report to it and
+// don't coordinate with each other unless it says so. A row per conversation ("<name> leads"), and "A new
+// conversation leads" (started in o.folder when the order is sent, on the default account).
+// o: { name(text) for the team, folder, repo (its name) }
+function underLeadItem(list, o = {}) {
+  const n = list.length;
+  // the ones it would lead: those this window can type into (one open in another window is left out of the team)
+  const others = (s) => list.filter((x) => x.id !== s.id && !unreachable(x));
+  const who = (l) => (l.length === 1 ? l[0].name : `the ${l.length} others`);
+  const rows = [];
+  if (n >= 2) {
+    for (const s of list) {
+      const why = unreachable(s), k = others(s).length;
+      if (why) { rows.push({ label: `${s.name} leads`, icon: 'star', disabled: true, note: why }); continue; }
+      rows.push(n > TEAM_MAX ? { label: `${s.name} leads`, icon: 'star', disabled: true, note: `a team has at most ${TEAM_MAX}` }
+        : !k ? { label: `${s.name} leads`, icon: 'star', disabled: true, note: 'none of the others can be reached here' }
+        : orderItem(`${s.name} leads`, list, { team: true, lead: s, icon: 'star', name: o.name, subnote: `${k} report to it`,
+          placeholder: `${s.name} gets the order and directs ${who(others(s))}; they report to it. The order:` }));
+    }
+    rows.push({ sep: true });
+  }
+  rows.push(newLeadItem(list, o));
+  return { label: 'Under a lead', icon: 'star', note: 'one directs, the rest report to it', children: rows };
+}
+// the account a new lead starts on: B when it can (fv start's default), else the first one with room
+function leadAccount() {
+  const ok = onAccounts().filter((a) => !acctOut(a));
+  return ok.includes('B') ? 'B' : ok[0] || null;
+}
+function newLeadItem(list, o) {
+  const label = 'A new conversation leads';
+  if (!o.folder) return { label, icon: 'plus', disabled: true, note: 'no workspace to start it in' };
+  if (!termApi()) return { label, icon: 'plus', disabled: true, note: 'desktop window only' };
+  const acct = leadAccount();
+  if (!acct) return { label, icon: 'plus', disabled: true, note: 'no account has room to start one now' };
+  const reach = list.filter((s) => !unreachable(s));
+  if (reach.length + 1 > TEAM_MAX) return { label, icon: 'plus', disabled: true, note: `a team has at most ${TEAM_MAX}` };
+  const who = reach.length === 1 ? reach[0].name : `the ${reach.length} of them`;
+  return orderItem(label, list, {
+    team: true, icon: 'plus', name: o.name, newLead: { folder: o.folder, account: acct, repo: o.repo || repoName(o.folder) },
+    subnote: `new in ${o.repo || repoName(o.folder)}${singleAccount() ? '' : ` · account ${acct}`} · ${reach.length} report to it`,
+    placeholder: `A new conversation in ${o.repo || repoName(o.folder)} gets the order and directs ${who}; they report to it. The order:`,
+  });
+}
+// a new conversation to lead: started like the repo menu's New session (its panel opens), its stand-in returned
+// (keyed new-<n> until its claude names its id; sendOrder waits for that)
+async function startLead({ folder, account }) {
+  unhideRepo(repoForFolder(state || {}, folder).root || folder);
+  const r = await createSession({ cwd: folder, account, ...newSize() });
+  if (!r || !r.ok) return { ok: false, message: (r && r.message) || 'could not start a new session' };
+  ui.setSelected(r.key, 'explicit');
+  const stand = pendingSessions(state || {}).find((s) => s.id === r.key);
+  return { ok: true, session: { ...(stand || { id: r.key, pending: true, account, cwd: folder, repo: repoForFolder(state || {}, folder) }), name: 'new session' } };
 }
 // "Model ▸", "Effort ▸", "Fast mode ▸": one setting for each of them, typed in as /model <id>, /effort <level> or
 // /fast on|off. Claude Code runs these at once, even mid-turn. A tick: every one of them has it already; "2 of 5":
@@ -2182,16 +2260,20 @@ async function runSet(list, cmd) {
   toast(`${cmd} · ${orderSummary(res)}`, res.ok ? C.mint : C.red, null, res.results.some((x) => !x.ok || x.queued) ? 9000 : 0);
   render();
 }
-// the "N conversations" menu (a multi-selection). "Give orders ▸" as on a workspace: Work together (one team),
-// Send to each, then Model ▸, Effort ▸ and Fast mode ▸ for all of them
+// the "N conversations" menu (a multi-selection). "Give orders ▸" as on a workspace: Work together (one team of
+// peers), Under a lead ▸ (one of them, or a new conversation in the first one's workspace, leads), Send to each,
+// then Model ▸, Effort ▸ and Fast mode ▸ for all of them
 function sessionsMenu(list, x, y) {
   const desk = !!termApi();
   const live = list.filter((s) => isHosted(s.id));
   const set = setItems(list);
+  const first = list.find((s) => s.repo && s.repo.root) || null;
+  const folder = first ? first.repo.root : null;
   const orders = desk
     ? { label: 'Give orders', icon: 'send', note: `${list.length} conversations`, children: [
-      orderItem('Work together', list, { team: true, icon: 'merge', subnote: 'as one team: they get each other\'s ids and can talk', placeholder: 'The order for all of them. They become a team and can message each other.' }),
-      orderItem('Send to each', list, { team: false, icon: 'reply', placeholder: 'The same message to each of them' }),
+      teamItem(list),
+      underLeadItem(list, { folder, repo: first ? first.repo.name || repoName(folder) : null }),
+      orderItem('Send to each', list, { team: false, icon: 'reply', subnote: 'no team: each gets it on its own', placeholder: 'The same message to each of them, each on its own (no team)' }),
       ...(set.length ? [{ sep: true }, ...set] : []),
     ] }
     : { label: 'Give orders', icon: 'send', disabled: true, note: 'desktop window only' };
@@ -2255,15 +2337,38 @@ const isConvId = (id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 const teamById = (id) => (id && (state?.teams || []).find((t) => t.id === id)) || null;
 // "told 2" from a team call's reply: the notes that went in or wait behind a question
 const toldN = (list) => `told ${(list || []).filter((x) => x.ok).length}`;
+// a team's lead (★): its conversation id, or null (a team of peers)
+const leadOf = (t) => (t && t.lead && (t.members || []).includes(t.lead) ? t.lead : null);
+const nameOfId = (id) => sessionsOf([id])[0]?.name || String(id || '').slice(0, 8);
 // a team (right-click its link or pill on the map, or a member's 'Team "x" ▸')
 function teamMenu(t, x, y) {
-  openCtxMenu({ x, y, title: t.name, dot: t.color || C.cyan, sub: `${t.members.length} conversations · ${firstWords(t.order, 10, 70)}`, items: teamMenuItems(t, true) });
+  const lead = leadOf(t);
+  openCtxMenu({ x, y, title: lead ? `★ ${nameOfId(lead)} · ${t.name}` : t.name, dot: t.color || C.cyan,
+    sub: `${t.members.length} conversations${lead ? `, led by ${nameOfId(lead)}` : ', peers'} · ${firstWords(t.order, 10, 70)}`, items: teamMenuItems(t, true) });
+}
+// "Lead ▸": who leads the team (they report to it), or no lead (peers again). POST /teams/lead
+function leadItem(t) {
+  const cur = leadOf(t);
+  const kids = sessionsOf(t.members).map((s) => (s.id === cur
+    ? { label: `${s.name} leads`, icon: 'check', disabled: true, note: 'it leads now' }
+    : { label: `${s.name} leads`, icon: 'star', note: cur ? 'takes over the lead' : 'the others report to it', run: () => setLead(t, s) }));
+  if (cur) kids.push({ sep: true }, { label: 'No lead (peers)', icon: 'merge', note: 'they work it out between them', run: () => setLead(t, null) });
+  return { label: 'Lead', icon: 'star', note: cur ? `★ ${nameOfId(cur)}` : 'none: peers', children: kids };
+}
+async function setLead(t, s) {
+  toast(s ? `Making ${s.name} the lead of "${t.name}"…` : `"${t.name}" goes back to peers…`, C.dim);
+  const r = await post('/teams/lead', { id: t.id, member: s ? s.id : null });
+  if (FIXTURE && r == null) return;
+  if (!r || !r.ok) { toast((r && r.message) || 'could not change the lead', C.red); return; }
+  const b = r.brief || null, bad = !!(s && b && !b.ok);
+  const got = bad ? `${s.name} did not get its brief (${b.message || 'not sent'})` : s && b && b.queued ? `${s.name} gets its brief once its question is answered` : null;
+  toast([s ? `★ ${s.name} leads "${t.name}"` : `"${t.name}" has no lead: peers again`, toldN(r.told), got].filter(Boolean).join(' · '), bad ? C.red : C.mint, null, bad ? 9000 : 0);
 }
 function teamMenuItems(t, full) {
   // members removed from the map are left out of what goes to them
   const all = sessionsOf(t.members), members = all.filter((s) => !isHidden(s));
   const sel = ui.selectedId && !t.members.includes(ui.selectedId) ? sessionsOf([ui.selectedId])[0] : null;
-  const items = [orderItem('Message the team', members, { team: false, prefix: `[Fleet View · team "${t.name}"]`, placeholder: `A message to every conversation in "${t.name}"` })];
+  const items = [orderItem('Message the team', members, { team: false, prefix: `[Fleet View · team "${t.name}"]`, placeholder: `A message to every conversation in "${t.name}"` }), leadItem(t)];
   if (full) {
     const why = !sel ? (ui.selectedId ? 'it is in this team already' : 'pick one first') : joinWhy(sel, t);
     items.push(why ? { label: 'Add picked conversation', icon: 'plus', disabled: true, note: why }
@@ -2279,19 +2384,37 @@ function joinWhy(s, t) {
   if (t.members.length >= TEAM_MAX) return `a team has at most ${TEAM_MAX} conversations`;
   return unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
 }
-// a conversation's menu: "Add to team ▸" (one row per team it isn't in) and, when it is in one, 'Team "x" ▸'
-// (Message the team, Leave team, Disband team: a second step asks first)
+// a conversation's menu: "Add to team ▸" (one row per team it isn't in), "Lead team ▸" (make it the lead of its
+// own team, or join another team as its lead) and, when it is in one, 'Team "x" ▸' (Message the team, Lead ▸,
+// Leave team, Disband team: a second step asks first)
 function teamItems(s) {
   if (s.pending || s.demo) return [];
   const mine = teamById(s.team), others = (state?.teams || []).filter((t) => t !== mine);
   const out = [];
+  const why = unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
   if (others.length) {
-    const why = unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
     out.push(why ? { label: 'Add to team', icon: 'plus', disabled: true, note: why }
       : { label: 'Add to team', icon: 'plus', children: others.map((t) => {
         const full = t.members.length >= TEAM_MAX;
         return { label: t.name, icon: 'merge', disabled: full, note: full ? `full (${TEAM_MAX})` : `${t.members.length} conversations${mine ? ` · it leaves "${mine.name}"` : ''}`, run: () => addToTeam(t, s) };
       }) });
+  }
+  // it can only join another team when this window can reach it (as Add to team)
+  if (!mine && others.length && why) out.push({ label: 'Lead team', icon: 'star', disabled: true, note: why });
+  else if (mine || others.length) {
+    const kids = [];
+    if (mine) {
+      kids.push(leadOf(mine) === s.id ? { label: `It leads "${mine.name}"`, icon: 'check', disabled: true, note: 'its team' }
+        : { label: 'Make it the lead', icon: 'star', note: `of "${mine.name}", its team${leadOf(mine) ? `: takes over from ${nameOfId(leadOf(mine))}` : ''}`, run: () => setLead(mine, s) });
+      if (others.length) kids.push({ sep: true });
+    }
+    for (const t of others) {
+      const full = t.members.length >= TEAM_MAX, cur = leadOf(t);
+      kids.push({ label: t.name, icon: 'star', disabled: !!why || full, note: why || (full ? `full (${TEAM_MAX})`
+        : `joins it as the lead · ${t.members.length} report to it${cur ? ` · takes over from ${nameOfId(cur)}` : ''}${mine ? ` · it leaves "${mine.name}"` : ''}`),
+      run: () => addToTeam(t, s, true) });
+    }
+    out.push({ label: 'Lead team', icon: 'star', children: kids });
   }
   if (mine) {
     out.push({ label: `Team "${mine.name}"`, icon: 'merge', children: [
@@ -2315,15 +2438,16 @@ function addManyItem(list) {
     return { label: t.name, icon: 'merge', disabled: !!why, note: why || `${t.members.length} + ${go.length}`, run: () => addManyToTeam(t, go) };
   }) };
 }
-async function addToTeam(t, s) {
+// lead: it joins as the team's lead (the others are told it leads now)
+async function addToTeam(t, s, lead = false) {
   if (t.members.length >= TEAM_MAX) { toast(`a team has at most ${TEAM_MAX} conversations`, C.red); return; }
-  toast(`Adding ${s.name} to "${t.name}"…`, C.dim);
-  const r = await post('/teams/add', { id: t.id, member: s.id });
+  toast(`Adding ${s.name} to "${t.name}"${lead ? ' as its lead' : ''}…`, C.dim);
+  const r = await post('/teams/add', { id: t.id, member: s.id, ...(lead ? { lead: true } : {}) });
   if (FIXTURE && r == null) return;
   if (!r || !r.ok) { toast((r && r.message) || 'could not add it to the team', C.red); return; }
   const b = r.brief || {};
   const got = b.ok ? (b.queued ? `${s.name} gets the order once its question is answered` : null) : `${s.name} did not get the order (${b.message || 'not sent'})`;
-  toast([`Added ${s.name} to "${t.name}"`, toldN(r.told), got, leftText(r.left)].filter(Boolean).join(' · '), b.ok ? C.mint : C.red, null, b.ok ? 0 : 9000);
+  toast([lead ? `★ ${s.name} joined "${t.name}" as its lead` : `Added ${s.name} to "${t.name}"`, toldN(r.told), got, leftText(r.left)].filter(Boolean).join(' · '), b.ok ? C.mint : C.red, null, b.ok ? 0 : 9000);
 }
 async function addManyToTeam(t, list) {
   toast(`Adding ${list.length} to "${t.name}"…`, C.dim);
@@ -2358,8 +2482,8 @@ function leaveOnRemove(s) {
   if (t && isConvId(s.id)) leaveTeam(t, s, 'removed', true);
 }
 // a new session that had no id yet when its team was made joined it once it had one (orders.js)
-onTeamJoin((name, teamName, r) => {
-  if (r && r.ok) toast(`${name} joined "${teamName}" · ${toldN(r.told)}`, C.mint);
+onTeamJoin((name, teamName, r, lead) => {
+  if (r && r.ok) toast(`${lead ? '★ ' : ''}${name} joined "${teamName}"${lead ? ' as its lead' : ''} · ${toldN(r.told)}`, C.mint);
   else if (r) toast(`${name} could not join "${teamName}": ${r.message || 'failed'}`, C.red, null, 9000);
 });
 // a conflict or a clash (right-click its node on the map): kind2 'branch' | 'worktree' | 'migration', else a file
