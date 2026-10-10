@@ -100,8 +100,11 @@ function accountsHere() {
 }
 // every account folder, aliases too: where conversation logs and live processes are looked for
 const acctFolders = () => (accountsHere(), acctFolderList);
-// the account a config folder (or a folder in it) belongs to: ~/.claude-<x> is X (or the account X is an alias of), anything else B
-const accountOf = (dir) => { const m = /[\\/]\.claude-([a-z])(?:[\\/]|$)/i.exec(dir || ''); const a = m ? m[1].toUpperCase() : 'B'; return acctAlias[a] || a; };
+// the account a config folder (or a folder in it) is: ~/.claude-<x> is X, anything else B; accountOf is the account
+// it counts as now (the one X is an alias of, else X)
+const folderAccount = (dir) => { const m = /[\\/]\.claude-([a-z])(?:[\\/]|$)/i.exec(dir || ''); return m ? m[1].toUpperCase() : 'B'; };
+const asListed = (a) => acctAlias[a] || a;
+const accountOf = (dir) => asListed(folderAccount(dir));
 // Session logs live under every account's config dir; --root picks one folder (its account comes from the folder name).
 // B's folder comes first, so a junction shared by several accounts is read once, as B's.
 // on some machines ~/.claude-<x>/projects is a junction to ~/.claude/projects: read a folder once
@@ -3681,6 +3684,9 @@ function topOf(s, root) {
 // <pid>.json in <config>/sessions naming its conversation, and its environment says the account
 // (CLAUDE_SWAP_PAYER from the claude-a loop, else a B token, else CLAUDE_CONFIG_DIR ~/.claude-<x> = X, else B).
 // The answer is kept per conversation for the rest of the run; one without a live process keeps its folder's.
+// It is kept as the letter the process named and made the listed account each time it is read, so a folder that
+// becomes an alias while its sessions run (C signed in to B's login) counts as B at once: their replies' cost goes
+// to B's usage, not to a C nobody reads any more, and B's climb isn't taken for use from elsewhere.
 const procAccount = new Map(); // "pid:sessionId" -> account letter | null (unreadable)
 const liveAccount = new Map(); // sessionId -> account letter
 let procBusy = false;
@@ -3716,7 +3722,8 @@ foreach ($id in $env:FV_PIDS.Split(',')) {
     if ($kv -like 'CLAUDE_CONFIG_DIR=*') { $cfg = $kv.Substring(18) } elseif ($kv -like 'CLAUDE_SWAP_PAYER=*') { $payer = $kv.Substring(18) } elseif ($kv -like 'CLAUDE_CODE_OAUTH_TOKEN=*') { $tok = 1 } } }
   "$id|$(if ($e) { 1 } else { 0 })|$cfg|$payer|$tok"
 }`;
-const accountFor = (s) => liveAccount.get(s.id) || acctId(s.account);
+const liveAcct = (id, folder) => asListed(liveAccount.get(id) || acctId(folder));
+const accountFor = (s) => liveAcct(s.id, s.account);
 // The live claude processes, from the same <config>/sessions/<pid>.json files: sessionId -> { pid, at, status,
 // waitingFor, statusAt }, the newest file per conversation (a conversation open twice: the one that spoke last).
 // A file whose pid is gone (claude was killed before it could remove it) does not count. Read on every poll: a few small files and a
@@ -3799,7 +3806,7 @@ function accountsFromProcesses() {
     for (const line of String(out || '').split(/\r?\n/)) {
       const [pid, ok, cfg, payer, tok] = line.trim().split('|');
       if (!pid) continue;
-      got.set(+pid, ok !== '1' ? null : /^[a-z]$/i.test(payer || '') ? payer.toUpperCase() : tok === '1' ? 'B' : accountOf((cfg || '').replace(/[\\/]+$/, '') + '/'));
+      got.set(+pid, ok !== '1' ? null : /^[a-z]$/i.test(payer || '') ? payer.toUpperCase() : tok === '1' ? 'B' : folderAccount((cfg || '').replace(/[\\/]+$/, '') + '/'));
     }
     for (const [sid, p] of ask) {
       if (!got.has(p.pid) && err) continue; // the helper failed: try again next round
@@ -5009,7 +5016,7 @@ function removedOne(h, now, budget) {
   const { title, prompt, cwd } = c.info;
   const g = cwd ? gitInfo(path.join(cwd, '_')) : null;
   const root = g ? g.root : cwd || null;
-  const acct = liveAccount.get(h.id) || acctId(c.account);
+  const acct = liveAcct(h.id, c.account);
   return {
     id: h.id, name: plain(names.get(h.id) || title || plain(prompt, 60) || h.id.slice(0, 8), 80), account: acct,
     repo: root ? { name: repoName(root), root, color: toHex(familyColor(root)) } : null,
@@ -5155,7 +5162,7 @@ function repoHistory(root) {
     const s = sessions.get(e.id);
     return {
       id: e.id, name: s && s.name && !s.demo ? plain(baseName(s) || s.name, 80) : historyName(e),
-      account: liveAccount.get(e.id) || e.account, cwd: e.cwd || null,
+      account: liveAcct(e.id, e.account), cwd: e.cwd || null,
       repo: { name: repoName(e.repoRoot), root: e.repoRoot, color: toHex(familyColor(e.repoRoot)) },
       lastActive: Math.round(s && s.last > e.m ? s.last : e.m), removed: hidden.some((h) => h.id === e.id),
     };
@@ -5525,10 +5532,10 @@ function whereIs(id) {
   const s = sessions.get(id);
   if (s && !s.demo) return { known: true, cwd: s.cwd || null, account: accountFor(s) };
   const r = removedSession(id);
-  if (r) return { known: true, cwd: r.cwd || null, account: liveAccount.get(id) || acctId(r.account) };
+  if (r) return { known: true, cwd: r.cwd || null, account: liveAcct(id, r.account) };
   const f = findLog(id);
   const info = f && readLogInfo(f.file, f.pdir, id);
-  return { known: true, cwd: (info && info.cwd) || null, account: liveAccount.get(id) || acctId(f && f.account) };
+  return { known: true, cwd: (info && info.cwd) || null, account: liveAcct(id, f && f.account) };
 }
 // GET /api/conversations: every conversation /state lists, compact. q: { state, repo (a piece of its root or name),
 // all (hidden ones too: removed, or in a removed repo), limit }. hosted and alive are filled in by api.js.
