@@ -1812,12 +1812,12 @@ function sendElsewhereItem(s, hosted) {
   const label = 'Send elsewhere';
   const to = onAccounts().filter((a) => a !== (s.account || 'B') && canSendTo(s, a));
   if (!to.length) return null;
-  if (openElsewhere(s) && !hosted) return { label, icon: 'push', disabled: true, note: 'open in another window; end it there' };
+  if (openElsewhere(s) && !hosted) return { label, icon: 'send', disabled: true, note: 'open in another window; end it there' };
   const st = hosted ? hostStatus(s.id) : null;
   const busy = hosted && (st ? st === 'busy' : s.state === 'WORKING' || s.state === 'AGENTS');
   const children = to.map((a) => ({ label: `Claude ${a}`, tag: a,
     confirm: busy ? { text: `Claude is mid-turn. Stop it and send it to account ${a}?`, yes: 'Send anyway' } : null, run: () => sendToFromMenu(s, a) }));
-  return { label, icon: 'push', children };
+  return { label, icon: 'send', children };
 }
 async function sendToFromMenu(s, to) {
   toast(`Sending ${s.name} to Claude ${to}: it writes a summary, then a fresh conversation picks it up`, C.text);
