@@ -19,10 +19,12 @@
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const H = require('./host');
 
 const REQ_TIMEOUT = 15000;
+const CONNECT_MS = 25000; // a first start on a slow PC (an antivirus scanning electron.exe) can take a while
+const STUCK_MS = 4000; // a host on the pipe that won't let this window in this long is stuck: it is replaced
 
 function createHost(opts = {}) {
   const send = opts.send || (() => {});
@@ -34,6 +36,22 @@ function createHost(opts = {}) {
   let cache = []; // the host's last list()
   const waits = new Map(); // n -> { cb, timer }
   let connecting = null, reconnectTimer = null;
+  let why = ''; // why the last connect() failed, for the message the page shows
+  // the window's own log (%LOCALAPPDATA%\fleet-view\window.log): what happens while there is no host to log to
+  const wlog = (m) => {
+    log(m);
+    try {
+      const f = path.join(H.dataDir(), 'window.log');
+      try { if (fs.statSync(f).size > 1 << 20) fs.renameSync(f, `${f}.1`); } catch {}
+      fs.appendFileSync(f, `${new Date().toISOString()} [window ${process.pid}] ${m}\n`);
+    } catch {}
+  };
+  const lastLine = (f) => {
+    let lines = [];
+    try { lines = fs.readFileSync(f, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^Node\.js v/.test(l)); } catch {}
+    return (lines.find((l) => /^\w*Error\b/.test(l)) || lines.pop() || '').slice(0, 300);
+  };
+  let exited = false; // the host this window started has exited before it was reached
 
   // ---------- the connection ----------
   function startHost() {
@@ -41,12 +59,45 @@ function createHost(opts = {}) {
       const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
       const dir = H.dataDir();
       try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-      const child = spawn(process.execPath, [H.HOST_JS], { detached: true, windowsHide: true, stdio: 'ignore', env, cwd: dir });
-      child.on('error', (e) => log(`could not start the session host: ${e.message}`));
+      // what it prints before its own log is open (a file that does not load) lands in host-start.log
+      let out = 'ignore';
+      try { out = fs.openSync(path.join(dir, 'host-start.log'), 'w'); } catch {}
+      const child = spawn(process.execPath, [H.HOST_JS], { detached: true, windowsHide: true, stdio: ['ignore', out, out], env, cwd: dir });
+      if (typeof out === 'number') try { fs.closeSync(out); } catch {}
+      child.on('error', (e) => { why = `it could not be started: ${e.message}`; wlog(`could not start the session host: ${e.message}`); });
+      exited = false;
+      child.on('exit', (code) => {
+        if (ready) return;
+        exited = true;
+        const said = lastLine(path.join(dir, 'host-start.log')) || lastLine(H.logFile());
+        why = `it stopped right after starting (exit ${code})${said ? `: ${said}` : ''}`;
+        wlog(`the session host (pid ${child.pid}) exited with ${code} before this window reached it${said ? `: ${said}` : ''}`);
+      });
       child.unref();
-      log(`started the session host (pid ${child.pid})`);
+      wlog(`started the session host (pid ${child.pid})`);
       return true;
-    } catch (e) { log(`could not start the session host: ${e.message}`); return false; }
+    } catch (e) { why = `it could not be started: ${e.message}`; wlog(`could not start the session host: ${e.message}`); return false; }
+  }
+
+  // a host holds the pipe but won't let this window in (host.json gone or another host's, or it hangs): end
+  // it, so a new one can start; the new one resumes its sessions from the restore list
+  function endStuckHost() {
+    const hf = H.readJson(H.hostFile());
+    let pid = hf && Number.isInteger(hf.pid) ? hf.pid : 0;
+    if (!pid && !process.env.FV_HOST_PIPE) {
+      // no host.json: look for electron.exe / node.exe running this host.js
+      try {
+        const ps = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+          "Get-CimInstance Win32_Process -Filter \"Name='electron.exe' or Name='node.exe'\" | Where-Object { $_.CommandLine -like '*desktop*host.js*' -and $_.CommandLine -notlike '*--selfcheck*' -and $_.CommandLine -notlike '*restart-host*' } | ForEach-Object { $_.ProcessId }"],
+        { encoding: 'utf8', windowsHide: true, timeout: 8000 });
+        const pids = String(ps.stdout || '').split(/\s+/).map(Number).filter((n) => n > 0 && n !== process.pid);
+        if (pids.length === 1) pid = pids[0];
+      } catch {}
+    }
+    if (!pid || pid === process.pid) { wlog('a session host holds the pipe but will not answer, and its pid is unknown'); return false; }
+    try { process.kill(pid); wlog(`ended a stuck session host (pid ${pid}) that held the pipe but would not let this window in`); return true; } catch (e) {
+      wlog(`could not end the stuck session host (pid ${pid}): ${e.message}`); return false;
+    }
   }
 
   // one attempt: connect, say hello with host.json's token; resolves true once the host answered
@@ -86,18 +137,30 @@ function createHost(opts = {}) {
     if (connecting) return connecting;
     connecting = (async () => {
       const end = Date.now() + ms;
-      let started = false;
+      let started = false, replaced = false, stuckSince = 0;
+      why = '';
       while (!closed && Date.now() < end) {
         const r = await attempt();
-        if (r === true) return true;
+        if (r === true) { why = ''; return true; }
+        let listening = r !== 'nopipe';
+        if (r === 'nofile') listening = await new Promise((res) => { const p = net.connect(PIPE); p.on('connect', () => { p.destroy(); res(true); }); p.on('error', () => res(false)); });
         // nothing listens on the pipe: start a host (once per connect; it may take a moment to come up)
-        if (!started && (r === 'nopipe' || r === 'nofile')) {
-          let listening = false;
-          if (r === 'nofile') listening = await new Promise((res) => { const p = net.connect(PIPE); p.on('connect', () => { p.destroy(); res(true); }); p.on('error', () => res(false)); });
-          if (!listening) started = startHost();
+        if (!listening) { stuckSince = 0; if (!started) started = startHost(); else if (exited) break; }
+        else if (!replaced) {
+          // something listens but won't let this window in: give a host that is just starting a moment, then end
+          // it and start a new one (once per connect)
+          if (!stuckSince) stuckSince = Date.now();
+          else if (Date.now() - stuckSince >= STUCK_MS) {
+            replaced = true;
+            wlog(`the session host on the pipe does not let this window in (${r}); replacing it`);
+            if (endStuckHost()) { await new Promise((res) => setTimeout(res, 800)); started = startHost(); stuckSince = 0; }
+            else why = 'one is running but will not let this window in; choose "Quit everything" from the tray icon and open Fleet View again';
+          }
         }
         await new Promise((res) => setTimeout(res, 200));
       }
+      if (!why) why = started ? 'it was started but did not answer in time' : 'it could not be reached';
+      wlog(`could not reach the session host: ${why}`);
       return false;
     })().finally(() => { connecting = null; });
     return connecting;
@@ -164,9 +227,10 @@ function createHost(opts = {}) {
     try { sock.write(`${JSON.stringify(msg)}\n`); } catch (e) { if (cb && msg.n && waits.delete(msg.n)) cb(e); }
   }
   const ask = (op, args, timeoutMs) => new Promise((resolve, reject) => call(op, args, (err, v) => (err ? reject(err) : resolve(v)), timeoutMs));
+  const notRunning = () => `the session host is not running: ${why || 'it could not be reached'}. Details in %LOCALAPPDATA%\\fleet-view\\window.log`;
   // open and create answer { ok: false, message } instead of failing when the host is not there
   const askOk = async (op, o) => {
-    if (!ready && !(await connect(8000))) return { ok: false, message: 'the session host is not running; try again' };
+    if (!ready && !(await connect(CONNECT_MS))) return { ok: false, message: notRunning() };
     try { return await ask(op, [o]); } catch (e) { return { ok: false, message: e.message }; }
   };
 
@@ -179,7 +243,7 @@ function createHost(opts = {}) {
     // "Send to Claude A/B/C..." (host.js sendTo): ends it here, then resumes it under o.account with /handoff
     sendTo: async (o) => {
       if (!o || typeof o.id !== 'string' || !H.ID_RE.test(o.id)) throw new Error('bad conversation id');
-      if (!ready && !(await connect(8000))) return { ok: false, message: 'the session host is not running; try again' };
+      if (!ready && !(await connect(CONNECT_MS))) return { ok: false, message: notRunning() };
       try { return await ask('sendTo', [o], 20000); } catch (e) { return { ok: false, message: e.message }; }
     },
     create: (o) => askOk('create', o),
