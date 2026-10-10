@@ -236,7 +236,9 @@ function placeFloat(el, work, id, byMouse, wasOpen = false) {
   el.style.setProperty('--fh', `${Math.round(h)}px`);
   el._placed = id;
 }
-const focusCompose = (el) => requestAnimationFrame(() => el._chatMain.querySelector('.chat-compose textarea')?.focus());
+// preventScroll: the panel is still sliding in from its edge, and a focus that scrolls the clipped .work
+// sideways pushes the open context menu and the card the pick came from
+const focusCompose = (el) => requestAnimationFrame(() => el._chatMain.querySelector('.chat-compose textarea')?.focus({ preventScroll: true }));
 
 // ---------- the Chat tab's splits ----------
 // Under the main chat: (1) the other selected conversations (a Ctrl+click or Shift+drag selection), up to
@@ -298,7 +300,7 @@ function drawSplits(el, s, extras, on) {
     el._peekMd.scrollTop = 0;
   }).catch(() => { if (el._peekMd._file === p.file) { el._peekMd._file = null; el._peekMd.innerHTML = '<p class="dim">The summary could not be read</p>'; } });
 }
-const focusTerm = (el) => requestAnimationFrame(() => el._session.querySelector('.term-host textarea')?.focus());
+const focusTerm = (el) => requestAnimationFrame(() => el._session.querySelector('.term-host textarea')?.focus({ preventScroll: true }));
 
 const head = (ic, text, extra = '') => `<h4>${icon(ic, 13)}<span>${text}</span>${extra ? ` <span class="h-extra">${extra}</span>` : ''}</h4>`;
 const STATE_WORD = { done: ['ad-done', 'done', 'mint'], fail: ['ad-fail', 'failed', 'red'], run: ['ad-run', 'running', 'violet'] };

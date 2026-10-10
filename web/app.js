@@ -1594,7 +1594,7 @@ function openContextMenu(target, x, y) {
   }
   if (target.kind === 'space') {
     // empty space on the map, or around the cards or tiles: add a repo (removed conversations are on a repo's menu)
-    const extra = [{ sep: true }, { label: 'Since you looked', icon: 'clock', note: 'w', run: () => since.open() }, notifyMenuItem()];
+    const extra = [{ sep: true }, notifyMenuItem()];
     if (multi.size) extra.push({ label: `Clear selection (${multi.size})`, icon: 'close', run: () => setMulti([], 'menu') });
     openCtxMenu({ x, y, items: [addRepoMenuItem(), recentRepoMenuItem(), ...extra] });
     return;

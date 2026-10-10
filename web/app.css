@@ -69,10 +69,6 @@ button { font: inherit; color: inherit; }
 }
 .brand-caret { flex: none; color: var(--dim); transition: transform 220ms var(--ease); }
 .brand[aria-expanded="true"] .brand-caret { transform: rotate(180deg); }
-.brand-tail {
-  font: 500 13px/1.2 var(--font-ui); color: var(--dim); white-space: nowrap;
-  padding-left: 12px; border-left: 1px solid var(--line); line-height: 16px;
-}
 
 /* view switch: a segmented control whose selection glides between the tabs */
 .tabs {
@@ -623,13 +619,12 @@ html.titlebar .top {
 }
 html.titlebar .top button, html.titlebar .top input, html.titlebar .filter, html.titlebar .menu,
 html.titlebar .top a, html.titlebar .top [data-act], html.titlebar .count { -webkit-app-region: no-drag; app-region: no-drag; }
-html.titlebar .brand-tail, html.titlebar .counts, html.titlebar .clock { flex: none; }
+html.titlebar .counts, html.titlebar .clock { flex: none; }
 html.titlebar .counts { flex-wrap: nowrap; }
 /* narrower windows (or the filter open): the header keeps one row. app.js steps through fit-1..fit-6 until
    everything fits: labels go first (each pill keeps its tooltip), then the name tail, the clock, pills, tighter tabs */
 html.titlebar .top.fit-1 .count-k { display: none; }
 html.titlebar .top.fit-1 .count { padding: 0 9px; }
-html.titlebar .top.fit-2 .brand-tail { display: none; }
 html.titlebar .top.fit-3 .clock { display: none; }
 html.titlebar .top.fit-4 .count:nth-child(n+3) { display: none; }
 html.titlebar .top.fit-5 .counts { display: none; }
