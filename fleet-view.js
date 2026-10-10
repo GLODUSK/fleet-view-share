@@ -67,7 +67,16 @@ const DEMO = !!opt('demo', false);
 // A new ~/.claude-<letter> folder is a new account here with no code change (the list is read again every minute).
 const acctId = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
 const acctDir = (a) => path.join(os.homedir(), acctId(a) === 'B' ? '.claude' : '.claude-' + acctId(a).toLowerCase());
-let acctList = null, acctListAt = 0;
+// Two folders signed in to the same login are one account (Henry, 2026-10-10: "b and c are the same account"): the
+// later letter is an alias of the first (B first, then A, C, ...). It is not listed, its limits are not read twice,
+// and its conversations count as the first's. Its projects folder is still read (acctFolders), so none go missing.
+let acctList = null, acctFolderList = ['B'], acctAlias = {}, acctListAt = 0;
+const loginOf = (a) => {
+  try {
+    const o = JSON.parse(fs.readFileSync(a === 'B' ? path.join(os.homedir(), '.claude.json') : path.join(acctDir(a), '.claude.json'), 'utf8')).oauthAccount;
+    return (o && (o.accountUuid || o.emailAddress)) || null;
+  } catch { return null; }
+};
 function accountsHere() {
   if (acctList && Date.now() - acctListAt < 60e3) return acctList;
   const out = new Set(['B']);
@@ -78,12 +87,21 @@ function accountsHere() {
       try { if (fs.statSync(path.join(os.homedir(), e.name)).isDirectory()) out.add(m[1].toUpperCase()); } catch {}
     }
   } catch {}
-  acctList = [...out].sort();
+  acctFolderList = [...out].sort();
+  const byLogin = {}, alias = {};
+  for (const a of [...acctFolderList].sort((x, y) => (x === 'B' ? -1 : y === 'B' ? 1 : x < y ? -1 : 1))) {
+    const login = loginOf(a);
+    if (login && byLogin[login]) alias[a] = byLogin[login]; else if (login) byLogin[login] = a;
+  }
+  acctAlias = alias;
+  acctList = acctFolderList.filter((a) => !alias[a]);
   acctListAt = Date.now();
   return acctList;
 }
-// the account a config folder (or a folder in it) belongs to: ~/.claude-<x> is X, anything else B
-const accountOf = (dir) => { const m = /[\\/]\.claude-([a-z])(?:[\\/]|$)/i.exec(dir || ''); return m ? m[1].toUpperCase() : 'B'; };
+// every account folder, aliases too: where conversation logs and live processes are looked for
+const acctFolders = () => (accountsHere(), acctFolderList);
+// the account a config folder (or a folder in it) belongs to: ~/.claude-<x> is X (or the account X is an alias of), anything else B
+const accountOf = (dir) => { const m = /[\\/]\.claude-([a-z])(?:[\\/]|$)/i.exec(dir || ''); const a = m ? m[1].toUpperCase() : 'B'; return acctAlias[a] || a; };
 // Session logs live under every account's config dir; --root picks one folder (its account comes from the folder name).
 // B's folder comes first, so a junction shared by several accounts is read once, as B's.
 // on some machines ~/.claude-<x>/projects is a junction to ~/.claude/projects: read a folder once
@@ -93,15 +111,15 @@ const ROOT_OPT = typeof opt('root', null) === 'string' ? path.resolve(opt('root'
 let rootsFor = null, rootsList = [];
 function roots() {
   if (ROOT_OPT) return rootsList.length ? rootsList : (rootsList = [{ dir: ROOT_OPT, account: accountOf(ROOT_OPT) }]);
-  const accts = accountsHere();
-  if (accts.join() === rootsFor) return rootsList;
+  const accts = acctFolders(), key = accts.map((a) => a + (acctAlias[a] || '')).join();
+  if (key === rootsFor) return rootsList;
   const seen = new Set(), out = [];
-  for (const r of accts.map((a) => ({ dir: path.join(acctDir(a), 'projects'), account: a })).sort((x, y) => (x.account === 'B' ? -1 : y.account === 'B' ? 1 : 0))) {
+  for (const r of [...accts].sort((x, y) => (x === 'B' ? -1 : y === 'B' ? 1 : 0)).map((a) => ({ dir: path.join(acctDir(a), 'projects'), account: acctAlias[a] || a }))) {
     let real = r.dir;
     try { real = fs.realpathSync(real); } catch {}
     if (!seen.has(real.toLowerCase())) { seen.add(real.toLowerCase()); out.push(r); }
   }
-  rootsFor = accts.join();
+  rootsFor = key;
   return (rootsList = out);
 }
 const rootLabel = () => roots().map((r) => r.dir).join(' + ');
@@ -3717,7 +3735,7 @@ const pidAlive = (pid) => {
 function scanLiveProcs() {
   if (DEMO) return;
   const byId = new Map(), seenDirs = new Set();
-  for (const r of roots().concat(ROOT_OPT ? [] : accountsHere().map((a) => ({ dir: path.join(acctDir(a), 'projects') })))) {
+  for (const r of roots().concat(ROOT_OPT ? [] : acctFolders().map((a) => ({ dir: path.join(acctDir(a), 'projects') })))) {
     const dir = path.join(path.dirname(r.dir), 'sessions');
     let real = dir;
     try { real = fs.realpathSync(dir).toLowerCase(); } catch { continue; }
