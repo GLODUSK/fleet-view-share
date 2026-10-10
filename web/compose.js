@@ -140,6 +140,14 @@ const isBoxEdge = (l) => /^\s*[╭╰┌└][─━═]/.test(l);
 // a line of an older boxed dialog: "│ text │" -> "  text"
 const unbox = (l) => String(l ?? '').replace(/^(\s*)[│┃](\s?)/, '$1 $2').replace(/\s*[│┃]\s*$/, '');
 const OPT_RE = /^(\s*)([❯›])?\s*(\d{1,2})[.)]\s+(.*\S)\s*$/;
+// AskUserQuestion's parts: a multiple-choice option's box ("[ ] Small", "[✔] Small"), the Submit row under its options
+// (no number: the ❯ on it points at no option), the text option ("Type something." until text goes in, then that
+// text, so it is also known as the one right above "Chat about this"), and an option's preview drawn beside it
+const CHECK_RE = /^\[([ ✔✓xX×])\]\s+/;
+const SUBMIT_RE = /^\s*(❯)?\s*Submit\s*$/;
+const FREE_RE = /^(?:type something\.?|other)$/i;
+const PREVIEW_RE = /\s{3,}[┌└│╭╰┃].*$/;
+const isPreview = (l) => /^\s*[┌└│╭╰┃]/.test(l) || /^\s*Notes: press n\b/.test(l);
 // The prompt box: a "❯" row right under a rule, closed by another rule below it. A past message on the screen
 // ("❯ 4. text" in the scrollback) and the text typed in the box look like a pointed-at option, so a reply ending
 // in "3. …" over a box holding "4. … 5. …" would read as a menu. AskUserQuestion's "❯ 4. Chat about this" sits
@@ -203,23 +211,27 @@ export function parseMode(lines) {
 // the folder trust question. Only when at least two options numbered one after another sit in the last ~30
 // non-empty lines and one of them carries the ❯ pointer; the prompt box (❯ under a rule, where a typed
 // "1. … 2. …" list would look the same) and a menu with the prompt drawn under it are not menus.
-// -> { title, context: [lines], more, options: [{ n, label, desc, on }], sig } or null
+// -> { title, context: [lines], more, options: [{ n, label, desc, on, check?, free? }], submit, sig } or null.
+// check: a multiple-choice option's box (true ticked); free: the option that takes typed text; submit: { on } for
+// a multiple-choice question's Submit row, else null
 export function parseMenu(lines) {
   const raw = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
   const L = raw.map(unbox);
   let start = L.length, seen = 0;
-  while (start > 0 && seen < 30) { start--; if (L[start].trim()) seen++; }
+  while (start > 0 && seen < 40) { start--; if (L[start].trim()) seen++; }
   const opts = [];
   for (let i = start; i < L.length; i++) {
     const m = OPT_RE.exec(L[i]);
     if (m) opts.push({ i, n: +m[3], on: !!m[2], label: m[4], col: L[i].indexOf(m[3]), boxed: /^\s*[│┃]/.test(raw[i]) });
   }
-  // runs of options numbered one after another, at most 8 lines (descriptions, wrapped in a narrow panel) between two
+  // runs of options numbered one after another, at most 13 lines (descriptions, wrapped in a narrow panel) between
+  // two; the one Claude waits on has the ❯ on an option, or on a multiple-choice question's Submit row among them
   let run = null, cur = [];
-  const close = () => { if (cur.length >= 2 && cur.some((o) => o.on)) run = cur; };
+  const pointed = (c) => c.some((o) => o.on) || L.slice(c[0].i, c[c.length - 1].i).some((l) => /^\s*❯\s*Submit\s*$/.test(l));
+  const close = () => { if (cur.length >= 2 && pointed(cur)) run = cur; };
   for (const o of opts) {
     const last = cur[cur.length - 1];
-    if (last && o.n === last.n + 1 && o.i - last.i <= 9) cur.push(o);
+    if (last && o.n === last.n + 1 && o.i - last.i <= 14) cur.push(o);
     else { close(); cur = [o]; }
   }
   close();
@@ -233,25 +245,34 @@ export function parseMenu(lines) {
   // the prompt box among its options or under them (a typed "4. …" continuing a reply's "3. …"): no menu is up,
   // since Claude Code hides the box while one is
   for (let j = first.i; j < L.length; j++) if (promptBoxAt(L, j)) return null;
-  // descriptions: the lines under an option indented past its number
+  // descriptions: the lines under an option indented past its number (not a preview's box beside them)
+  let submit = null;
   const options = run.map((o, x) => {
     const end = x + 1 < run.length ? run[x + 1].i : Math.min(L.length, o.i + 3);
+    const label = o.label.replace(PREVIEW_RE, '').replace(/\s+/g, ' ');
+    const box = CHECK_RE.exec(label);
     const desc = [];
     for (let j = o.i + 1; j < end; j++) {
       const l = L[j];
-      if (!l.trim() || isRule(l)) continue;
-      if (l.search(/\S/) > o.col) desc.push(l.trim());
+      if (!l.trim() || isRule(l) || isPreview(l)) continue;
+      const sm = box && SUBMIT_RE.exec(l);
+      if (sm) { submit = { on: !!sm[1] }; continue; }
+      if (l.search(/\S/) > o.col) desc.push(l.replace(PREVIEW_RE, '').trim());
       else break;
     }
-    return { n: o.n, label: o.label.replace(/\s+/g, ' '), desc: desc.join(' ').slice(0, 200), on: o.on };
+    const opt = { n: o.n, label: box ? label.slice(box[0].length) : label, desc: desc.join(' ').slice(0, 200), on: o.on };
+    if (box) opt.check = box[1] !== ' ';
+    return opt;
   });
+  options.forEach((o, x) => { if (FREE_RE.test(o.label) || /^chat about this$/i.test(options[x + 1]?.label || '')) o.free = true; });
   // the title: the line above the first option; the context: what's above it, up to the dialog's top
   let title = '';
   if (k >= 0 && !isRule(L[k]) && !isBoxEdge(L[k]) && !OPT_RE.test(L[k])) { title = L[k].trim(); k--; }
   const ctx = [];
   for (; k >= 0 && ctx.length < 30; k--) {
     const l = L[k];
-    if (isRule(l) || /^\s*[●⎿]/.test(l) || (isBoxEdge(l) && /^\s*[╭┌]/.test(l) && first.boxed)) break;
+    // (Claude's own "● …" lines start at the edge; the answers listed before a question's submit step are indented)
+    if (isRule(l) || /^●|^\s*⎿/.test(l) || (isBoxEdge(l) && /^\s*[╭┌]/.test(l) && first.boxed)) break;
     if (isBoxEdge(l)) continue;
     ctx.unshift(l.replace(/\s+$/, ''));
   }
@@ -269,8 +290,8 @@ export function parseMenu(lines) {
   const ind = Math.min(...squeezed.filter((l) => l.trim()).map((l) => l.search(/\S/)), 99);
   const context = squeezed.map((l) => l.slice(Math.min(ind, l.match(/^\s*/)[0].length)));
   const more = context.length > 8;
-  const sig = JSON.stringify([title, options.map((o) => [o.n, o.label, o.on])]);
-  return { title, context: context.slice(0, 8), more, options, sig };
+  const sig = JSON.stringify([title, options.map((o) => [o.n, o.label, o.on, o.check ?? null]), submit && submit.on]);
+  return { title, context: context.slice(0, 8), more, options, submit, sig };
 }
 
 // A command's panel: what /usage, /status, /config, /help, /mcp, /permissions, /theme, /resume and the like draw
@@ -653,6 +674,7 @@ export function mountCompose(slot, s) {
     bgHint: false, // the screen offers "ctrl+b to run in background" (a shell command Claude runs)
     errs: [], // [{ key, text }] until dismissed or the next send works
     elsewhereAt: 0, answeredSig: null, answeredAt: 0,
+    answering: false, freeDraft: null, // keys going into a question now; { title, text } typed in its "Type something" box
     dict: null, drain: null, // the mic: listening, and stopped but still writing out its last words: { token, ready, note, busy, live }
     sendAfter: false, // Send was pressed while the mic still had words to write out: it sends once they are in
     // (live: { text, stretch }, the preview of what is being said, drawn after the text until its final comes)
@@ -717,7 +739,8 @@ export function mountCompose(slot, s) {
     const on = !!st.d.shell;
     boxEl.classList.toggle('shell', on);
     shTag.hidden = !on;
-    ta.placeholder = on ? 'Run a shell command: its output goes into the conversation' : 'Message Claude…';
+    ta.placeholder = on ? 'Run a shell command: its output goes into the conversation'
+      : st.menu?.options.some((o) => o.free) ? 'Or type your own answer to the question here…' : 'Message Claude…';
     ta.setAttribute('aria-label', on ? 'shell command to run in the session (bash mode)' : 'message to Claude');
     ta.spellcheck = !on;
   }
@@ -965,7 +988,7 @@ export function mountCompose(slot, s) {
         await sleep(500); // let the prompt come back before /rewind is typed (two quick Escs open Claude Code's own rewind)
         st.step = 'Rewinding…'; drawNotes();
       }
-      if (menuNow(id) && !typesText(menuNow(id))) { err('Claude is asking something: answer it first, then rewind'); return; }
+      if (menuNow(id)) { err('Claude is asking something: answer it first, then rewind'); return; }
       if (screenReady(id) && !(await closePanel(id))) { err('A panel is open in the session: close it (Esc) first'); return; }
       const b = boxNow(id);
       if (!b || b.text) { err('Something is typed in the session\'s prompt: clear it first'); return; }
@@ -1041,11 +1064,100 @@ export function mountCompose(slot, s) {
     }
     return !panelNow(id);
   }
-  // the option that takes typed text: "Type something." until text goes in, then its label is that text, so it is
-  // also known as the one right above "Chat about this"
-  const isFree = (m, o) => !!o && (/^(type something|other\b|chat about this)/i.test(o.label)
-    || /^chat about this/i.test(m.options.find((x) => x.n === o.n + 1)?.label || ''));
-  const typesText = (m) => !!m && isFree(m, m.options.find((o) => o.on));
+  // ----- answering a question (see the menu card below) -----
+  // How Claude Code's AskUserQuestion takes keys (2.1.296): in a one-answer question a digit picks that option at
+  // once (the next question, or the end), except on "Type something." where it only moves the ❯ there; in a
+  // multiple-choice one a digit or Enter only ticks or unticks, and the Submit row under the options (↑/↓ only)
+  // takes Enter. Text typed or pasted while the ❯ is on "Type something" goes into it (ticking it, in a
+  // multiple-choice one), Ctrl+U clears it, and Enter on it sends it, but Enter on it empty declines the question.
+  // the same question: its title and options, whatever the ❯, the ticks and the typed text say
+  const sameQuestion = (a, b) => !!a && !!b && JSON.stringify([a.title, a.options.map((o) => (o.free ? '' : o.label))])
+    === JSON.stringify([b.title, b.options.map((o) => (o.free ? '' : o.label))]);
+  const hasText = (o) => !!o && o.free && !FREE_RE.test(o.label);
+  // the screen read again until ok(menu) holds for the same question -> that menu, or null after ms
+  async function settle(id, m0, ok, ms = 1500) {
+    for (const end = Date.now() + ms; ;) {
+      const m = menuNow(id);
+      if (m && sameQuestion(m, m0) && ok(m)) return m;
+      if (Date.now() > end) return null;
+      await sleep(80);
+    }
+  }
+  // the ❯ to option n, or to the Submit row ('submit'), with ↑/↓ -> the menu once it is there, or null
+  async function pointTo(id, want) {
+    const m = menuNow(id);
+    if (!m) return null;
+    const rows = [];
+    const lastBox = m.submit ? m.options.filter((o) => o.check != null).pop() : null;
+    for (const o of m.options) { rows.push(o.n); if (o === lastBox) rows.push('submit'); }
+    const from = m.submit && m.submit.on ? rows.indexOf('submit') : rows.indexOf(m.options.find((o) => o.on)?.n);
+    const to = rows.indexOf(want);
+    if (from < 0 || to < 0) return null;
+    const d = to - from;
+    const at = (x) => (want === 'submit' ? !!(x.submit && x.submit.on) : x.options.some((o) => o.n === want && o.on));
+    if (!d) return m;
+    if (!writeKey((d > 0 ? '\x1b[B' : '\x1b[A').repeat(Math.abs(d)))) return null;
+    return settle(id, m, at);
+  }
+  // the question's own answer, typed: onto "Type something" (its digit in a one-answer question, ↑/↓ in a
+  // multiple-choice one, where a digit would tick it), what is there already cleared, the text pasted (one line),
+  // then Enter in a one-answer question; in a multiple-choice one it is ticked and Submit sends it. -> true when in
+  async function answerFree(text) {
+    const id = st.id, t = termApi();
+    const v = cleanText(text).split(/\s*\n\s*/).filter(Boolean).join(' ').trim();
+    if (!v) { focusFree(); return false; }
+    if (!t || !hosts.get(id)?.alive || st.answering) return false;
+    st.answering = true;
+    drawCard();
+    try {
+      let m = menuNow(id);
+      const free = m && m.options.find((o) => o.free);
+      if (!free) { err(m ? 'This question takes no typed answer: pick an option' : 'The question is gone'); return false; }
+      const multi = free.check != null;
+      if (!free.on) {
+        if (!multi && free.n <= 9) m = writeKey(String(free.n)) ? await settle(id, m, (x) => x.options.some((o) => o.free && o.on)) : null;
+        else m = await pointTo(id, free.n);
+        if (!m) { err('Couldn\'t get to "Type something" in the question: try again, or answer it in the Session tab'); return false; }
+      }
+      if (hasText(m.options.find((o) => o.free))) {
+        if (!writeKey('\x15')) return false; // Ctrl+U: what was typed there before goes
+        m = await settle(id, m, (x) => !hasText(x.options.find((o) => o.free)));
+        if (!m) { err('Couldn\'t clear what is typed in the question: answer it in the Session tab'); return false; }
+      }
+      await typeInto((w) => t.write(id, w), v);
+      keepSession(id);
+      m = await settle(id, m, (x) => { const f = x.options.find((o) => o.free); return f.on && hasText(f); });
+      if (!m) { err('The answer didn\'t show up in the question: check it in the Session tab'); return false; }
+      if (!multi) {
+        if (!writeKey('\r')) return false;
+        st.answeredSig = m.sig; st.answeredAt = Date.now();
+      }
+      st.freeDraft = null;
+      return true;
+    } finally {
+      st.answering = false;
+      st.drawn.card = null;
+      drawCard();
+    }
+  }
+  // a multiple-choice question's Submit: the ❯ to its Submit row, then Enter. A click while a typed answer is still
+  // going in (its button stays live then) waits for it, so a quick Submit is never lost
+  async function submitMulti() {
+    const id = st.id;
+    for (const end = Date.now() + 3000; st.answering && Date.now() < end;) await sleep(50);
+    if (st.answering || id !== st.id || !st.menu?.submit) return;
+    st.answering = true;
+    drawCard();
+    try {
+      const m = await pointTo(id, 'submit');
+      if (!m || !m.submit?.on) { err('Couldn\'t get to Submit in the question: try again, or press it in the Session tab'); return; }
+      if (writeKey('\r')) { st.answeredSig = m.sig; st.answeredAt = Date.now(); }
+    } finally {
+      st.answering = false;
+      st.drawn.card = null;
+      drawCard();
+    }
+  }
 
   // what the box holds, or (cmd) a command the model picker sends; the draft stays as it is then. In bash mode the
   // box holds a shell command: a typed "!" goes first (see the top), and only the command goes.
@@ -1070,9 +1182,16 @@ export function mountCompose(slot, s) {
     if (fromBox) stopDictation(false);
     shutSlash();
     const id = st.id, s0 = st.s;
-    // a menu is up: typed text would land in it (a digit picks an option); "Type something" takes text, though
+    // a menu is up: text never goes in as a message (a digit would pick an option). A question with a "Type
+    // something" option takes what the box holds as that answer; any other menu is answered first
     if (st.menu && hosts.get(id)?.alive) {
-      if (!typesText(st.menu)) { err('Answer the question above first (or press Esc)'); return; }
+      if (!fromBox || shell || list.length || !st.menu.options.some((o) => o.free)) { err('Answer the question above first (or press Esc)'); return; }
+      if (!(await answerFree(raw)) || st.id !== id) return;
+      const d = drafts.get(id) || st.d;
+      d.text = d.text.startsWith(raw) ? d.text.slice(raw.length).replace(/^\s+/, '') : d.text;
+      storeText(id, d.text);
+      ta.value = d.text; grow(); drawSend();
+      return true;
     }
     // a terminal elsewhere has it open: a second copy runs only when asked twice
     if (!hosts.has(id) && openElsewhere(s0) && Date.now() - st.elsewhereAt > ELSEWHERE_CONFIRM_MS) {
@@ -1095,8 +1214,8 @@ export function mountCompose(slot, s) {
       const r = await ensureLive(s0, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
       if (st.id === id) { st.step = ''; drawNotes(); }
       if (!r.ok) { err(r.message || 'could not start the session'); return; }
-      // a permission prompt may have come up since: the text would land in it and Enter would pick an option
-      const blocked = () => { const m = menuNow(id); return m && !typesText(m); };
+      // a permission prompt or a question may have come up since: the text would land in it and Enter would pick
+      const blocked = () => !!menuNow(id);
       if (blocked()) { err('Claude is asking something: answer it first, then send'); return; }
       // a command's panel is up: the text would land in it, so it closes first. Read from the screen; while the
       // screen can't be read yet, from the host's list (then only a panel a "/" command opened). Never both: two
@@ -1257,39 +1376,85 @@ export function mountCompose(slot, s) {
   hsList.addEventListener('click', (e) => { const b = e.target.closest('[data-hs]'); if (b) pickSearch(+b.dataset.hs); });
 
   // ----- the menu card -----
+  // Each option is a button (its digit, as in the terminal); a multiple-choice question's options are boxes to tick,
+  // with a Submit button; "Type something" is a text box of its own (Enter or its arrow sends what it holds as the
+  // answer; the chat box below does the same while the question is up). What is typed there survives redraws.
   function drawCard() {
     const m = st.menu;
     card.hidden = !m;
     if (!m) { st.drawn.card = ''; return; }
     const sent = st.answeredSig === m.sig && Date.now() - st.answeredAt < 1500;
-    const key = `${m.sig}|${m.context.join('\n')}|${sent}`;
+    const busy = !!st.answering;
+    const key = `${m.sig}|${m.context.join('\n')}|${sent}|${busy}`;
     if (st.drawn.card === key) return;
     st.drawn.card = key;
+    const old = card.querySelector('.cmp-free-in');
+    const had = old && document.activeElement === old ? { a: old.selectionStart, b: old.selectionEnd } : null;
+    if (st.freeDraft && st.freeDraft.title !== m.title) st.freeDraft = null; // another question
+    const dis = sent || busy ? ' disabled' : '';
+    const multi = m.options.some((o) => o.check != null);
     const ctx = m.context.length ? `<pre class="cmp-ctx">${esc(m.context.join('\n'))}${m.more ? '\n…' : ''}</pre>` : '';
     const opts = m.options.map((o) => {
+      const box = o.check == null ? '' : `<span class="cmp-cb${o.check ? ' on' : ''}" aria-hidden="true">${o.check ? ic('check', 11) : ''}</span>`;
+      if (o.free) {
+        return `<div class="cmp-opt cmp-free${o.on ? ' on' : ''}" data-free="${o.n}"><span class="cmp-n">${o.n}</span>${box}`
+          + `<input type="text" class="cmp-free-in" placeholder="Type something…" spellcheck="true" autocomplete="off" aria-label="your own answer"${busy ? ' disabled' : ''}>`
+          + `<button type="button" class="cmp-free-go" data-c="free" title="${multi ? 'Put it in (it gets ticked)' : 'Send this answer'}" aria-label="send this answer"${dis}>${ic('send', 13)}</button></div>`;
+      }
       const label = esc(o.label).replace(/\s*\((esc|shift\+tab)\)$/i, ' <span class="cmp-k">($1)</span>');
-      return `<button type="button" class="cmp-opt${o.on ? ' on' : ''}" data-n="${o.n}"${sent ? ' disabled' : ''}${o.on ? ' aria-current="true"' : ''}>`
-        + `<span class="cmp-n">${o.n}</span><span class="cmp-l">${label}${o.desc ? `<small>${esc(o.desc)}</small>` : ''}</span></button>`;
+      return `<button type="button" class="cmp-opt${o.on ? ' on' : ''}" data-n="${o.n}"${dis}${o.on ? ' aria-current="true"' : ''}${o.check != null ? ` role="checkbox" aria-checked="${o.check}"` : ''}>`
+        + `<span class="cmp-n">${o.n}</span>${box}<span class="cmp-l">${label}${o.desc ? `<small>${esc(o.desc)}</small>` : ''}</span></button>`;
     }).join('');
+    const last = m.options[m.options.length - 1].n;
+    const hint = multi ? 'tick any, then Submit' : `or press 1–${Math.min(9, last)} here`;
     card.innerHTML = `<div class="cmp-card-h"><span class="cmp-shield">${ic('shield', 16)}</span><span class="cmp-card-t">${esc(m.title || 'Claude is asking')}</span></div>`
       + ctx + `<div class="cmp-opts">${opts}</div>`
-      + `<div class="cmp-card-f"><button type="button" class="cmp-esc" data-c="esc"${sent ? ' disabled' : ''}>Esc</button><span class="cmp-card-hint">or press 1–${Math.min(9, m.options[m.options.length - 1].n)} here</span></div>`;
+      + `<div class="cmp-card-f">${m.submit ? `<button type="button" class="cmp-submit" data-c="msubmit"${sent ? ' disabled' : ''}>Submit</button>` : ''}`
+      + `<button type="button" class="cmp-esc" data-c="esc"${sent ? ' disabled' : ''}>Esc</button><span class="cmp-card-hint">${hint}</span></div>`;
+    // the text box: what you typed (kept per question), else what the session's "Type something" holds already
+    const fi = card.querySelector('.cmp-free-in');
+    if (fi) {
+      const f = m.options.find((o) => o.free);
+      fi.value = st.freeDraft ? st.freeDraft.text : hasText(f) ? f.label : '';
+      if (had) { fi.focus({ preventScroll: true }); try { fi.setSelectionRange(had.a, had.b); } catch { /* gone */ } }
+    }
   }
-  function answer(n) {
+  function focusFree() {
+    const fi = card.querySelector('.cmp-free-in');
+    if (!fi) { ta.focus(); return; }
+    fi.focus();
+    fi.setSelectionRange(fi.value.length, fi.value.length);
+  }
+  async function answer(n) {
     const m = st.menu;
-    if (!m || !m.options.some((o) => o.n === n)) return;
+    if (!m || st.answering || !m.options.some((o) => o.n === n)) return;
     if (st.answeredSig === m.sig && Date.now() - st.answeredAt < 1500) return; // one click, one answer
-    // the same question still on screen (a new prompt may have replaced it since the last poll)
+    // the same question still on screen (a new one may have replaced it since the last poll; the ❯ may have moved)
     const now = menuNow(st.id);
-    if (!now || now.sig !== m.sig) { st.menu = now; drawCard(); return; }
-    // the text option already picked: a digit would be typed into it. Empty, its text comes from the box; with
-    // text in it, the click sends that answer
+    if (!sameQuestion(now, m)) { st.menu = now; st.drawn.card = null; drawCard(); return; }
     const o = now.options.find((x) => x.n === n);
-    if (o.on && isFree(now, o) && !/^chat about this/i.test(o.label)) {
-      if (/^(type something|other\b)/i.test(o.label)) { ta.focus(); return; }
-      if (!writeKey('\r')) return;
-    } else if (!writeKey(String(n))) return;
-    st.answeredSig = m.sig; st.answeredAt = Date.now();
+    if (o.free) { focusFree(); return; } // its text comes from its box
+    const tick = o.check != null;
+    // a digit, as the terminal takes it; but with the ❯ on "Type something" a digit would be typed into it, and
+    // past 9 there is none: ↑/↓ to it, then Enter
+    if (n <= 9 && !now.options.find((x) => x.on)?.free) {
+      if (!writeKey(String(n))) return;
+    } else {
+      st.answering = true;
+      drawCard();
+      try {
+        const at = await pointTo(st.id, n);
+        if (!at) { err('Couldn\'t get to that option: try again, or answer in the Session tab'); return; }
+        if (!writeKey('\r')) return;
+      } finally {
+        st.answering = false;
+        st.drawn.card = null;
+        drawCard();
+      }
+    }
+    // a tick can be undone at once (several in a row); a pick is one answer
+    if (!tick) { st.answeredSig = m.sig; st.answeredAt = Date.now(); }
+    st.drawn.card = null;
     drawCard();
   }
 
@@ -1664,8 +1829,10 @@ export function mountCompose(slot, s) {
     st.bgHint = st.busy && lines.some((l) => /ctrl\+b\b/i.test(l) && /\bbackground\b/i.test(l));
     if (st.rewound && menu) { st.rewound.sawMenu = true; st.rewound.emptyAt = 0; }
     if (st.rewound && alive && !menu && !panel) takeRewound();
+    const freeWas = !!st.menu?.options.some((o) => o.free);
     if ((st.menu && st.menu.sig) !== (menu && menu.sig)) { st.menu = menu; st.drawn.card = null; }
     else st.menu = menu;
+    if (freeWas !== !!menu?.options.some((o) => o.free)) drawShell(); // the box's hint: a question's own answer goes there
     root.classList.toggle('busy', st.busy);
     root.classList.toggle('asking', !!menu);
     drawAct(spin);
@@ -1842,6 +2009,8 @@ export function mountCompose(slot, s) {
     else if (c === 'bg') runInBackground();
     else if (c === 'mic') dictate();
     else if (c === 'stop') stop();
+    else if (c === 'free') answerFree(card.querySelector('.cmp-free-in')?.value || '');
+    else if (c === 'msubmit') submitMulti();
     else if (c === 'esc') { if (writeKey('\x1b')) { st.answeredSig = st.menu?.sig || null; st.answeredAt = Date.now(); drawCard(); } }
     else if (c === 'panel-esc') writeKey('\x1b');
     else if (c === 'attach') fileIn.click();
@@ -1858,7 +2027,20 @@ export function mountCompose(slot, s) {
     panelEl.focus({ preventScroll: true });
   });
   panelEl.addEventListener('keydown', panelKeydown);
+  card.addEventListener('input', (e) => {
+    if (e.target.closest?.('.cmp-free-in') && st.menu) st.freeDraft = { title: st.menu.title, text: e.target.value };
+  });
+  // a click on the "Type something" row, beside its box: into the box
+  card.addEventListener('click', (e) => { if (e.target.closest('[data-free]') && !e.target.closest('input, button')) focusFree(); });
   card.addEventListener('keydown', (e) => {
+    // the "Type something" box: its own keys (a digit is text there); Enter sends it, Esc leaves it
+    if (e.target.closest?.('.cmp-free-in')) {
+      e.stopPropagation();
+      if (e.isComposing) return;
+      if (e.key === 'Enter') { e.preventDefault(); answerFree(e.target.value); }
+      else if (e.key === 'Escape') { e.preventDefault(); card.focus({ preventScroll: true }); }
+      return;
+    }
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     if (/^[1-9]$/.test(e.key)) { e.preventDefault(); e.stopPropagation(); answer(+e.key); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (writeKey('\x1b')) { st.answeredSig = st.menu?.sig || null; st.answeredAt = Date.now(); drawCard(); } }
@@ -1976,6 +2158,7 @@ export function mountCompose(slot, s) {
         shutSlash(); st.slash.shut = null; st.hist = null; shutSearch(false); st.bgHint = false;
         st.panel = null; st.panelOwned = false; st.cmdAt = 0; st.cmd = '';
         st.menu = null; st.mode = null; st.effort = null; st.want = null; st.busy = false; st.errs = []; st.step = ''; st.elsewhereAt = 0;
+        st.freeDraft = null;
         st.rcSeen = null; st.rcConnecting = false;
         st.drawn = {};
         loadDraft();

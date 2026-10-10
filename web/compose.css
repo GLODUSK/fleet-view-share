@@ -65,7 +65,36 @@ html.glass .cmp-card { background: rgba(26, 23, 30, 0.82); -webkit-backdrop-filt
 .cmp-l { min-width: 0; overflow-wrap: anywhere; padding-top: 1px; }
 .cmp-l small { display: block; margin-top: 2px; color: var(--dim); font: 12px/1.4 var(--font-ui); }
 .cmp-k { color: var(--faint); }
+/* a multiple-choice question's box */
+.cmp-cb {
+  flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; margin-top: 2px; border-radius: 4px;
+  border: 1.5px solid var(--dim); color: #061018;
+}
+.cmp-cb.on { background: var(--cyan); border-color: var(--cyan); }
+/* "Type something": a text box in the card */
+.cmp-free { align-items: center; padding-top: 4px; padding-bottom: 4px; cursor: text; }
+.cmp-free:focus-within { border-color: rgba(63, 216, 255, 0.55); background: rgba(63, 216, 255, 0.07); }
+.cmp-free .cmp-cb { margin-top: 0; }
+.cmp-free-in {
+  flex: 1; min-width: 0; height: 26px; padding: 0 2px; border: 0; outline: none; background: transparent;
+  color: var(--text); font: 13px/1.4 var(--font-ui);
+}
+.cmp-free-in::placeholder { color: var(--faint); }
+.cmp-free-go {
+  flex: none; display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--glass-edge); background: rgba(255, 255, 255, 0.05); color: var(--dim);
+}
+.cmp-free-go:hover { background: rgba(63, 216, 255, 0.16); color: var(--cyan); }
+.cmp-free-go:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.cmp-free-go:disabled { opacity: 0.5; cursor: default; }
 .cmp-card-f { display: flex; align-items: center; gap: 10px; }
+.cmp-submit {
+  height: 26px; padding: 0 14px; border-radius: var(--radius-sm); cursor: pointer;
+  border: 1px solid rgba(63, 216, 255, 0.5); background: rgba(63, 216, 255, 0.14); color: var(--cyan); font: 600 12px/1 var(--font-ui);
+}
+.cmp-submit:hover { background: rgba(63, 216, 255, 0.24); }
+.cmp-submit:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.cmp-submit:disabled { opacity: 0.5; cursor: default; }
 .cmp-esc {
   height: 26px; padding: 0 12px; border-radius: var(--radius-sm); cursor: pointer;
   border: 1px solid var(--glass-edge); background: rgba(255, 255, 255, 0.05); color: var(--dim); font: 600 12px/1 var(--font-ui);

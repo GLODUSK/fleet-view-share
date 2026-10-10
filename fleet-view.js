@@ -245,6 +245,12 @@ function cleanMapViews(v) {
   return out;
 }
 let mapViews = cleanMapViews(saved.mapViews) || {};
+// where the map was looking when it last moved: the world point at its top-left corner and its scale ({ x, y, k })
+function cleanMapCamera(c) {
+  if (!c || typeof c !== 'object' || ![c.x, c.y, c.k].every(Number.isFinite) || Math.abs(c.x) > 1e6 || Math.abs(c.y) > 1e6 || c.k <= 0 || c.k > 64) return null;
+  return { x: Math.round(c.x * 10) / 10, y: Math.round(c.y * 10) / 10, k: Math.round(c.k * 1000) / 1000 };
+}
+let mapCamera = DEMO ? null : cleanMapCamera(saved.mapCamera);
 // desktop notifications for new alerts (the page asks; on unless turned off)
 let notify = saved.notify !== false;
 // accounts turned off (right-click on empty space · Accounts): their conversations, and workspaces only they use,
@@ -545,7 +551,7 @@ function flushSettings() {
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, compact, finishedOpen, steady, miniOpen, hidden, hiddenRepos, addedRepos, mapSpots,
-    mapLens, mapViews, notify, offAccounts, teams, apiTemp,
+    mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp,
     moved: [...moved.values()],
     names: Object.fromEntries(names),
     pushTargets: { sessions: [...pushTargets.sessions.values()], repos: [...pushTargets.repos.values()] },
@@ -5183,7 +5189,7 @@ function buildState() {
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
     settings: { view, zoom: map.zoom, query, repo: repoSel, compact, finishedOpen, steady, miniBounds, miniOpen, hidden, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
-      mapLens, mapViews, notify, parity: parityRules, offAccounts },
+      mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts },
     repos: [...repos.values()].sort((a, b) => b.live - a.live || a.name.localeCompare(b.name)),
     counts: { live: c.live, agents: c.agents, waiting: c.waiting, mergedToday: c.merged, cost: c.spent },
     week: DEMO ? { A: { left: 64 }, B: { left: 91 } } : weekNow(now),
@@ -5248,7 +5254,7 @@ function toolsHere() {
 // hidden (an array of up to 500 conversation ids, or { id, at } with the time it was hidden; replaces the list),
 // hiddenRepos (an array of up to 200 { root, at }, root a string of at most 1024 characters; replaces the list),
 // mapSpots (the map's repo spots, up to 300 { id, x, y, pin }; replaces the list), mapLens (one of MAP_LENSES),
-// mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), notify (bool), offAccounts (account letters turned off), parity (rules, see PARITY_BUILTIN)
+// mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), mapCamera ({ x, y, k }: the map's view), notify (bool), offAccounts (account letters turned off), parity (rules, see PARITY_BUILTIN)
 function applySettings(b) {
   if (!b || typeof b !== 'object') return;
   if (VIEWS.includes(b.view) || (WEB && b.view === WEB_ONLY_VIEW)) view = b.view;
@@ -5282,6 +5288,7 @@ function applySettings(b) {
   if ('mapSpots' in b) { const m = cleanMapSpots(b.mapSpots); if (m) mapSpots = m; }
   if (MAP_LENSES.includes(b.mapLens)) mapLens = b.mapLens;
   if ('mapViews' in b) { const v = cleanMapViews(b.mapViews); if (v) mapViews = v; }
+  if ('mapCamera' in b) { const c = cleanMapCamera(b.mapCamera); if (c) mapCamera = c; }
   if (typeof b.notify === 'boolean') notify = b.notify;
   if ('offAccounts' in b) { const o = cleanOffAccounts(b.offAccounts); if (o) offAccounts = o; }
   if ('parity' in b) { const p = cleanParity(b.parity); if (p) { parityRules = p; saved.parity = p; } }

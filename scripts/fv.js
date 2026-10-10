@@ -29,7 +29,7 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   fv wait <id> [--timeout s]                until it is ready for you (reply, question, menu, exit)
   fv read <id> [--tail n]                   status and latest reply (and the screen's last n chars)
   fv menu <id>                              the select menu it shows, if any
-  fv answer <id> <n|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
+  fv answer <id> <n|submit|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
   fv interrupt <id>                         Esc: stop Claude mid-turn
   fv open <id> [--account A|B|C…] [--prompt P] [--wait [s]]   resume a conversation in the desktop app
   fv transcript <id> [--since n] [--limit m]
@@ -234,13 +234,15 @@ function menuLines(menu, id) {
   out.push(`${menu.title || '(menu)'}   [${menu.kind || 'other'}]`);
   for (const l of menu.context || []) out.push(`  | ${l}`);
   for (const o of menu.options || []) {
-    out.push(`  ${o.on ? '>' : ' '} ${o.n}. ${o.label}`);
+    out.push(`  ${o.on ? '>' : ' '} ${o.n}. ${o.check == null ? '' : o.check ? '[x] ' : '[ ] '}${o.label}`);
     if (o.desc) out.push(`       ${o.desc}`);
   }
   const perm = menu.kind !== 'question';
   const sig = menu.sig ? ` --sig ${menu.sig}` : '';
-  const free = (menu.options || []).find((o) => /^Type something/i.test(o.label || ''));
+  if (menu.submit) out.push(`  ${menu.submit.on ? '>' : ' '}    Submit`);
+  const free = (menu.options || []).find((o) => o.free || /^Type something/i.test(o.label || ''));
   out.push(`answer: fv answer ${id} <n>${sig}${perm ? ' --allow-permission' : ''}   (or: fv answer ${id} esc)`);
+  if (menu.submit) out.push(`  (multiple choice: each <n> ticks or unticks one; then: fv answer ${id} submit)`);
   if (free) out.push(`free answer: fv answer ${id} ${free.n} --text "..."${sig}`);
   if (perm) out.push('  (not a question: answer it only when the user asked you to; esc is always allowed)');
   return out;
@@ -468,13 +470,13 @@ async function run(argv, env) {
       const sid = await id();
       const opt = pos[1];
       noMore(2);
-      if (opt === undefined) throw new Usage('give the option number or esc');
+      if (opt === undefined) throw new Usage('give the option number, submit or esc');
       const body = {};
-      if (/^esc$/i.test(opt)) body.option = 'esc';
+      if (/^(esc|submit)$/i.test(opt)) body.option = opt.toLowerCase();
       else if (/^\d{1,2}$/.test(opt)) body.option = Number(opt);
-      else throw new Usage('the option is a number or esc');
+      else throw new Usage('the option is a number, submit or esc');
       if (flags.text !== undefined) {
-        if (body.option === 'esc') throw new Usage('--text goes with a "Type something" option, not esc');
+        if (typeof body.option !== 'number') throw new Usage('--text goes with a "Type something" option');
         body.text = await textArg(flags.text, '--text');
       }
       if (flags.sig !== undefined) body.sig = flags.sig;
@@ -491,7 +493,7 @@ async function run(argv, env) {
         throw e;
       }
       const j = r.j;
-      const a = j.answered === 'esc' ? 'pressed Esc' : j.answered ? `answered ${j.answered.n}. ${j.answered.label}` : 'answered';
+      const a = j.answered === 'esc' ? 'pressed Esc' : j.answered === 'submit' ? 'pressed Submit' : j.answered ? `answered ${j.answered.n}. ${j.answered.label}` : 'answered';
       const lines = [a];
       if (j.next && !j.done) lines.push('', 'next menu:', ...menuLines(j.next, me));
       lines.push(...waitLines(j, me));

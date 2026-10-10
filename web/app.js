@@ -10,7 +10,7 @@
 //                          then shows the server's reply as a toast
 //   ui.openTerminal(id)    always a terminal window (the panel's "Open in terminal" button)
 //   ui.saveSettings(obj)   save any of { view, zoom, query, repo, compact, steady, webBounds, notify, mapLens,
-//                          mapViews } (POST /settings)
+//                          mapViews, mapCamera } (POST /settings)
 //   ui.keys                {}: a view may set ui.keys[viewName] = (KeyboardEvent) => boolean. While that view
 //                          is shown, every key not taken by the shell goes to it first; return true when handled.
 //                          The shell always handles: v / Tab (next view), / (filter), r (repo menu),

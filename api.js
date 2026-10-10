@@ -55,6 +55,8 @@ const WAIT_DEFAULT_S = 1800, WAIT_MAX_S = 3600; // "wait": true, and the most a 
 const MENU_EVERY_MS = 2000; // while waiting on a turn: how often the screen is read for a menu
 const ANSWER_MS = 3000; // after an answer: how long to wait for the menu to change
 const TYPE_DELAY_MS = 300; // after pressing "Type something.", before its text goes in
+const POINT_MS = 1500; // how long a moved pointer (or a typed answer) may take to show on the screen
+const FREE_EMPTY = /^(?:type something\.?|other)$/i; // "Type something" with nothing typed in it
 const IDLE_ENDS_MS = 5000; // /wait: idle this long ends it even when the transcript still says the turn is open
 const BAD_CHARS = /[\x00-\x08\x0b-\x1f\x7f]/; // after \r\n became \n: everything but \n and \t
 const NAME_BAD = /[\x00-\x1f\x7f-\x9f]/;
@@ -630,7 +632,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
   { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|other), title, context, options, sig; or null' },
-  { method: 'POST', path: '/api/sessions/:id/answer', body: '{ option: n | "esc", sig?, text?, allowPermission?, wait? }', does: 'answer the menu (text: for a "Type something." option); any menu but a question needs allowPermission (esc never does)' },
+  { method: 'POST', path: '/api/sessions/:id/answer', body: '{ option: n | "submit" | "esc", sig?, text?, allowPermission?, wait? }', does: 'answer the menu (text: for a "Type something." option; "submit": a multiple-choice question\'s Submit); any menu but a question needs allowPermission (esc never does)' },
   { method: 'POST', path: '/api/sessions/:id/interrupt', does: 'press Esc once to stop Claude mid-turn (not while a menu is up)' },
   { method: 'POST', path: '/api/sessions/:id/open', body: '{ account?, prompt?, wait? }', does: 'resume a conversation Fleet View knows as a hosted session; prompt: then send it' },
   { method: 'GET', path: '/api/sessions/:id/transcript', query: 'since?, limit? (default the last 50, at most 500)', does: 'any conversation\'s transcript, compact: user, assistant, tool (name, input, result), note, thinking' },
@@ -1228,24 +1230,27 @@ async function readMenu(key) {
   });
 }
 
-// POST /api/sessions/:id/answer { option: n | "esc", sig?, text?, allowPermission?, wait? }
+// POST /api/sessions/:id/answer { option: n | "submit" | "esc", sig?, text?, allowPermission?, wait? }
 // The menu is read again first: none is 409, one whose sig differs from the caller's is 409 { stale, menu }. A
 // menu other than a question (a tool's permission prompt, the folder trust question, the plan approval, one not
 // recognised) is answered only with allowPermission: an orchestrator must never approve a tool call by accident. option "esc" presses Esc once (it cancels the menu). text goes with
-// an AskUserQuestion's "Type something." option: its number, then the text pasted, then Enter. Any other option
-// is its digit (Claude Code picks it at once), or ↑/↓ to it and Enter past 9. Then up to ANSWER_MS for the menu to
+// an AskUserQuestion's "Type something." option (o.free): the pointer onto it, what it holds cleared, the text pasted,
+// then Enter (in a multiple-choice question no Enter: that would untick it). Any other option is its digit (Claude
+// Code picks it at once; in a multiple-choice question it ticks or unticks it), or ↑/↓ to it and Enter past 9 or
+// while the pointer is on "Type something" (a digit would be typed into it). "submit": a multiple-choice question's
+// Submit row. Then up to ANSWER_MS for the menu to
 // change; with wait, once no menu is left, the turn is waited on like a message's.
 async function answerMenu(key, b, ctx, gone) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
   const esc = b.option === 'esc';
-  if (!esc && !(Number.isInteger(b.option) && b.option >= 1 && b.option <= 99)) return [400, { ok: false, message: 'option must be an option\'s number or "esc"' }];
+  if (!esc && b.option !== 'submit' && !(Number.isInteger(b.option) && b.option >= 1 && b.option <= 99)) return [400, { ok: false, message: 'option must be an option\'s number, "submit" or "esc"' }];
   if (b.sig != null && typeof b.sig !== 'string') return [400, { ok: false, message: 'sig must be the menu\'s sig, as GET .../menu gave it' }];
   if ('allowPermission' in b && typeof b.allowPermission !== 'boolean') return [400, { ok: false, message: 'allowPermission must be true or false' }];
   let text = null;
   if (b.text != null) {
     text = cleanText(b.text);
     if (!text) return [400, { ok: false, message: 'text must be text, without control characters other than new lines and tabs' }];
-    if (esc) return [400, { ok: false, message: 'text goes with a "Type something." option, not esc' }];
+    if (typeof b.option !== 'number') return [400, { ok: false, message: 'text goes with a "Type something." option' }];
     // a new line there would go in as Alt+Enter, inside the question's one-line answer: join the lines
     text = text.split(/\s*\n\s*/).filter(Boolean).join(' ');
   }
@@ -1264,35 +1269,79 @@ async function answerMenu(key, b, ctx, gone) {
       const what = { permission: 'a permission prompt', trust: 'the folder trust question', plan: 'the plan approval' }[m.kind] || 'not a question';
       return [403, { ok: false, id: p.id, menu: m, message: `that is ${what}: only a question may be answered without allowPermission (Esc is always allowed)` }];
     }
+    // the same question as m: its title and options, whatever the pointer, the ticks and the typed text say
+    const sameQ = (x) => !!x && JSON.stringify([x.title, x.options.map((o) => (o.free ? '' : o.label))])
+      === JSON.stringify([m.title, m.options.map((o) => (o.free ? '' : o.label))]);
+    // the screen read again until ok(menu) holds for the same question -> that menu, or null
+    const settle = async (ok) => {
+      for (const end = Date.now() + POINT_MS; Date.now() < end;) {
+        await sleep(POLL_MS / 4);
+        const x = await menuNow(host, p);
+        if (sameQ(x) && ok(x)) return x;
+      }
+      return null;
+    };
+    // the pointer to option n, or to a multiple-choice question's Submit row ('submit'), with ↑/↓
+    const pointTo = async (want) => {
+      const cur = await menuNow(host, p);
+      if (!sameQ(cur)) return null;
+      const rows = [], lastBox = cur.submit ? cur.options.filter((o) => o.check != null).pop() : null;
+      for (const o of cur.options) { rows.push(o.n); if (o === lastBox) rows.push('submit'); }
+      const from = cur.submit && cur.submit.on ? rows.indexOf('submit') : rows.indexOf(cur.options.find((o) => o.on)?.n);
+      const to = rows.indexOf(want);
+      if (from < 0 || to < 0) return null;
+      const at = (x) => (want === 'submit' ? !!(x.submit && x.submit.on) : x.options.some((o) => o.n === want && o.on));
+      if (from === to) return cur;
+      await host.call('write', p.id, (to > from ? '\x1b[B' : '\x1b[A').repeat(Math.abs(to - from)));
+      return settle(at);
+    };
     let answered;
     if (esc) {
       await host.call('write', p.id, '\x1b');
       answered = 'esc';
+    } else if (b.option === 'submit') {
+      if (!m.submit) return [400, { ok: false, id: p.id, menu: m, message: 'this menu has no Submit row (only a multiple-choice question has one)' }];
+      if (!(await pointTo('submit'))) return [409, { ok: false, id: p.id, menu: await menuNow(host, p), message: 'the pointer did not reach Submit: nothing was sent' }];
+      await host.call('write', p.id, '\r');
+      answered = 'submit';
     } else {
       const opt = m.options.find((o) => o.n === b.option);
       if (!opt) return [400, { ok: false, id: p.id, menu: m, message: `no option ${b.option}: the menu has ${m.options.map((o) => o.n).join(', ')}` }];
-      const typed = /^Type something/i.test(opt.label);
+      const typed = !!opt.free, multi = opt.check != null;
       if (text && !typed) return [400, { ok: false, id: p.id, menu: m, message: 'text goes only with a "Type something." option' }];
       if (typed && !text) return [400, { ok: false, id: p.id, menu: m, message: 'that option takes text: pass text' }];
-      if (opt.n <= 9) await host.call('write', p.id, String(opt.n));
-      else {
-        // two digits would pick the first at once: move the pointer instead, then Enter
-        const on = m.options.find((o) => o.on) || m.options[0];
-        const d = opt.n - on.n;
-        if (d) await host.call('write', p.id, (d > 0 ? '\x1b[B' : '\x1b[A').repeat(Math.abs(d)));
-        await sleep(ENTER_DELAY_MS);
-        const again = await menuNow(host, p);
-        if (!again || again.title !== m.title || again.options.map((o) => o.label).join('\n') !== m.options.map((o) => o.label).join('\n') || !again.options.some((o) => o.n === opt.n && o.on)) return [409, { ok: false, id: p.id, menu: again, message: 'the pointer did not reach that option: nothing was picked' }];
-        await host.call('write', p.id, '\r');
-      }
+      // with the pointer on "Type something" a digit would be typed into it
+      const onFree = !!m.options.find((o) => o.on)?.free;
       if (typed) {
-        // the free answer: its box opened on the number. Only into the question still up: with no menu there the
-        // paste would land in the prompt box and the Enter would send it as a message (fail closed)
-        await sleep(TYPE_DELAY_MS);
+        // onto it: its digit in a one-answer question (a digit there only moves the pointer), ↑/↓ in a
+        // multiple-choice one (a digit there ticks it)
+        let at = opt.on ? m : null;
+        if (!at && !multi && opt.n <= 9 && !onFree) {
+          await host.call('write', p.id, String(opt.n));
+          at = await settle((x) => x.options.some((o) => o.free && o.on));
+        } else if (!at) at = await pointTo(opt.n);
+        if (!at) return [409, { ok: false, id: p.id, menu: await menuNow(host, p), message: 'the pointer did not reach that option: nothing was typed' }];
+        // what is typed there already goes first (Ctrl+U)
+        if (!FREE_EMPTY.test(at.options.find((o) => o.free).label)) {
+          await host.call('write', p.id, '\x15');
+          await sleep(TYPE_DELAY_MS);
+        }
+        // only into the question still up: with no menu there the paste would land in the prompt box and the Enter
+        // would send it as a message (fail closed)
         const notQuestion = async () => { const x = await menuNow(host, p); return !x || x.kind !== 'question'; };
         if (await notQuestion()) return [409, { ok: false, id: p.id, menu: await menuNow(host, p), message: 'the question is no longer up after picking that option: the text was not typed' }];
-        const sent = await sendText(host, p.id, text, notQuestion);
-        if (!sent.entered) return [409, { ok: false, id: p.id, message: 'the question went away before Enter: the text was pasted (it may sit in its prompt box) but not sent' }];
+        if (multi) {
+          // a multiple-choice question: the text ticks it, and Enter would untick it (Submit sends the answers)
+          for (const [x, w] of pasteWrites(text).entries()) { if (x) await sleep(PASTE_GAP_MS); await host.call('write', p.id, w); }
+        } else {
+          const sent = await sendText(host, p.id, text, notQuestion);
+          if (!sent.entered) return [409, { ok: false, id: p.id, message: 'the question went away before Enter: the text was pasted (it may sit in its prompt box) but not sent' }];
+        }
+      } else if (opt.n <= 9 && !onFree) await host.call('write', p.id, String(opt.n));
+      else {
+        // two digits would pick the first at once: move the pointer instead, then Enter
+        if (!(await pointTo(opt.n))) return [409, { ok: false, id: p.id, menu: await menuNow(host, p), message: 'the pointer did not reach that option: nothing was picked' }];
+        await host.call('write', p.id, '\r');
       }
       answered = { n: opt.n, label: opt.label };
     }

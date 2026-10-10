@@ -109,6 +109,9 @@
 //     morphs like a change of state.
 //   Saved views: Shift+1..9 keeps the view (its centre in world units and its scale), 1..9 glides back to it;
 //     settings.mapViews (localStorage fv.mapViews when the server doesn't keep them).
+//   The view itself: where you were looking (the world point at the map's top-left corner, and the scale) is kept
+//     as settings.mapCamera whenever it changes, and the map opens there again after a reload or a restart instead
+//     of fitting everything (unless nothing would be on screen there; 0 recenters).
 //   `n` / `N`: the next / previous conversation that needs you, picked and glided to the middle.
 //   Overlay: ./map-overlay.js, when present, is mounted on the map's container with mountMapOverlay(el, API)
 //     (see overlayApi) and gets frame(now) every frame, the keys the map doesn't take, and destroy().
@@ -425,7 +428,7 @@ function glideTo(x, y, z) {
   if (!I.cam || !Number.isFinite(x) || !Number.isFinite(y)) return;
   const tz = clamp(Number.isFinite(z) && z > 0 ? z : I.zoom, ZMIN, ZMAX);
   const to = { x: x - I.cam.cx, y: y - I.cam.cy, z: tz };
-  I.camUntil = 0; // the camera holds still: the glide decides
+  I.camUntil = -1; // the camera holds still: the glide decides (not 0: the next poll's rebuild would start a fit)
   if (I.still) { I.pan = { x: to.x, y: to.y }; I.zoom = to.z; I.glide = null; saveZoomSoon(); I.dirty = true; return; }
   I.glide = { from: { x: I.pan.x, y: I.pan.y, z: I.zoom }, to, at: performance.now() };
   I.dirty = true;
@@ -711,6 +714,7 @@ function createInstance(state) {
     multiRepos: new Set(), // repo hub ids in it (the map's own: Ctrl+drag's band or Ctrl+click on a hub)
     lens: LENSES.includes(state && state.settings && state.settings.mapLens) ? state.settings.mapLens : 'state', lensSeen: undefined,
     views: {}, viewsSeen: null, viewsLocal: false, glide: null,
+    savedCam: cleanCam(state && state.settings && state.settings.mapCamera), camSig: '', // the last view (restoreCam)
     teams: [], teamAt: new Map(), teamInit: false, virt: new Map(), // team pills as comet ends ('T:<id>')
     conflicts: [], parity: [], trails: [],
     linkHits: [], wtHits: [], parGhosts: [], hoverX: null, band: null,
@@ -1449,6 +1453,41 @@ function recenter(ms) {
   I.pan = { x: 0, y: 0 }; I.zoom = 1; I.camUntil = performance.now() + ms;
   zoomAt(I.W / 2, I.H / 2, 1);
 }
+
+// Where you were looking, kept across reloads and restarts: the world point at the top-left corner (a resize holds
+// that corner, see frame) and the drawn scale, as settings.mapCamera { x, y, k }
+function cleanCam(c) {
+  return c && [c.x, c.y, c.k].every(Number.isFinite) && c.k > 0 ? { x: c.x, y: c.y, k: c.k } : null;
+}
+// the first frame with something on the map opens on the saved view, and the camera's fit holds still from then
+// on; unless nothing at all would be on screen there (then the fit stays)
+function restoreCam() {
+  const c = I.savedCam;
+  I.savedCam = null;
+  const zoom = clamp(c.k / I.cam.fit, ZMIN, ZMAX), k = I.cam.fit * zoom;
+  const pan = { x: c.x - I.cam.cx + I.W / (2 * k), y: c.y - I.cam.cy + I.H / (2 * k) };
+  const seen = I.sim.some((n) => {
+    const sx = (n.p.x - I.cam.cx - pan.x) * k + I.W / 2, sy = (n.p.y - I.cam.cy - pan.y) * k + I.H / 2;
+    return sx > 0 && sx < I.W && sy > 0 && sy < I.H;
+  });
+  if (!seen) return;
+  I.pan = pan; I.zoom = zoom; I.glide = null;
+  I.camUntil = -1;
+  I.dirty = true;
+}
+// saved whenever it changes (the shell batches saves, and sends what waits when the window closes)
+function keepCam() {
+  if (I.replay || !I.W || !I.H) return;
+  const [x, y] = toWorld(0, 0);
+  const c = { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, k: Math.round(K() * 1000) / 1000 };
+  const sig = `${c.x},${c.y},${c.k}`;
+  if (sig === I.camSig) return;
+  const first = !I.camSig;
+  I.camSig = sig;
+  if (first) return; // the view it opened on: nothing moved yet
+  try { I.ui.saveSettings && I.ui.saveSettings({ mapCamera: c }); } catch { /* shell gone */ }
+}
+
 function zoomAt(sx, sy, factor) {
   if (!I.cam) return;
   I.glide = null; // the hand wins over a glide
@@ -1505,6 +1544,8 @@ function frame() {
   // or zoom the view by themselves
   if (!(I.drag && I.drag.node) && performance.now() < (I.camUntil || Infinity) && updateCamera(false)) I.dirty = true;
   if (stepGlide(t0)) I.dirty = true;
+  if (I.savedCam && I.camInit && I.sim && I.sim.length) restoreCam();
+  if (I.camInit && !I.savedCam) keepCam();
   // continuous motion while anything moves; otherwise only on change (and a slow tick for age fades)
   const moving = (!I.still && I.nodes.length > 0) || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0;
   if (I.dirty || moving || t0 - I.lastDraw > 250) {

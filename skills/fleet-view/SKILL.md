@@ -30,7 +30,7 @@ fv wait <id> [--timeout s]               until its turn ends, it asks something,
 fv read <id> [--tail n]                  status and latest reply (--tail: its screen)
 fv transcript <id> [--since n] [--limit m]
 fv menu <id>                             the question or prompt on its screen, numbered
-fv answer <id> <n|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
+fv answer <id> <n|submit|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
 fv interrupt <id>                        Esc mid-turn
 fv open <id> [--account A|B|C…] [--prompt P] [--wait [s]]   resume an old conversation
 fv stop <id> [--remove]
@@ -86,6 +86,7 @@ fv menu 3f2a9c1e                  # title, options 1..n with descriptions, kind,
 fv answer 3f2a9c1e 2 --wait       # pick option 2, then wait for the turn
 fv answer 3f2a9c1e 4 --text "Use the existing helper in lib/money.ts" --wait   # a "Type something" option
 fv answer 3f2a9c1e esc            # dismiss it
+fv answer 3f2a9c1e 1; fv answer 3f2a9c1e 3; fv answer 3f2a9c1e submit   # multiple choice: tick 1 and 3, then Submit
 ```
 
 Pass `--sig <sig>` from `fv menu` so the answer is refused if the menu changed meanwhile.

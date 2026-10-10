@@ -189,6 +189,14 @@ const isBoxEdge = (l) => /^\s*[╭╰┌└][─━═]/.test(l);
 // a line of an older boxed dialog: "│ text │" -> "  text"
 const unbox = (l) => String(l ?? '').replace(/^(\s*)[│┃](\s?)/, '$1 $2').replace(/\s*[│┃]\s*$/, '');
 const OPT_RE = /^(\s*)([❯›])?\s*(\d{1,2})[.)]\s+(.*\S)\s*$/;
+// AskUserQuestion's parts: a multiple-choice option's box ("[ ] Small", "[✔] Small"), the Submit row under its options
+// (no number: the ❯ on it points at no option), the text option ("Type something." until text goes in, then that
+// text, so it is also known as the one right above "Chat about this"), and an option's preview drawn beside it
+const CHECK_RE = /^\[([ ✔✓xX×])\]\s+/;
+const SUBMIT_RE = /^\s*(❯)?\s*Submit\s*$/;
+const FREE_RE = /^(?:type something\.?|other)$/i;
+const PREVIEW_RE = /\s{3,}[┌└│╭╰┃].*$/;
+const isPreview = (l) => /^\s*[┌└│╭╰┃]/.test(l) || /^\s*Notes: press n\b/.test(l);
 // The prompt box: a "❯" row right under a rule, closed by another rule below it. A past message on the screen
 // ("❯ 4. text" in the scrollback) and the text typed in the box look like a pointed-at option, so a reply ending
 // in "3. …" over a box holding "4. … 5. …" would read as a menu. AskUserQuestion's "❯ 4. Chat about this" sits
@@ -225,7 +233,9 @@ function kindOf(title, context, options, above) {
   if (/^Do you want to (?:proceed|make this edit|create|allow|run|write|delete|overwrite|fetch|use)\b/i.test(title)
     || labels.some((l) => /^Yes, (?:and don't ask again|allow)\b/i.test(l))) return 'permission';
   if (/^Ready to submit your answers\?/i.test(title) || labels.some((l) => /^(?:Type something\.?|Chat about this)$/i.test(l))
-    || above.some((l) => /^\s*(?:←\s*)?[☐☒✔]/.test(l) && /[☐☒]\s*\S/.test(l) && /✔\s*Submit\s*(?:→\s*)?$/.test(l))) return 'question';
+    || above.some((l) => /^\s*(?:←\s*)?[☐☒✔]/.test(l) && /[☐☒]\s*\S/.test(l) && /✔\s*Submit\s*(?:→\s*)?$/.test(l))
+    // one question's header alone ("☐ Layout"), as one with option previews shows it (no "Type something" there)
+    || above.some((l) => /^\s*[☐☒]\s+\S.{0,40}$/.test(l) && !/[│┃]/.test(l))) return 'question';
   return 'other';
 }
 
@@ -234,24 +244,26 @@ function kindOf(title, context, options, above) {
 // ~30 non-empty lines and one of them carries the ❯ pointer; the prompt box (❯ under a rule, where a typed
 // "1. … 2. …" list would look the same) and a menu with the prompt drawn under it are not menus. Read it over the
 // rows as drawn (render(..., join = false)): joined soft-wrapped rows hide a narrow panel's menu.
-// -> { kind, title, context: [lines], more, options: [{ n, label, desc, on }], sig } or null; everything but kind
-// is exactly what parseMenu gives for the same lines
+// -> { kind, title, context: [lines], more, options: [{ n, label, desc, on, check?, free? }], submit, sig } or null;
+// everything but kind is exactly what parseMenu gives for the same lines
 function menuDetails(lines) {
   const raw = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
   const L = raw.map(unbox);
   let start = L.length, seen = 0;
-  while (start > 0 && seen < 30) { start--; if (L[start].trim()) seen++; }
+  while (start > 0 && seen < 40) { start--; if (L[start].trim()) seen++; }
   const opts = [];
   for (let i = start; i < L.length; i++) {
     const m = OPT_RE.exec(L[i]);
     if (m) opts.push({ i, n: +m[3], on: !!m[2], label: m[4], col: L[i].indexOf(m[3]), boxed: /^\s*[│┃]/.test(raw[i]) });
   }
-  // runs of options numbered one after another, at most 8 lines (descriptions, wrapped in a narrow panel) between two
+  // runs of options numbered one after another, at most 13 lines (descriptions, wrapped in a narrow panel) between
+  // two; the one Claude waits on has the ❯ on an option, or on a multiple-choice question's Submit row among them
   let run = null, cur = [];
-  const close = () => { if (cur.length >= 2 && cur.some((o) => o.on)) run = cur; };
+  const pointed = (c) => c.some((o) => o.on) || L.slice(c[0].i, c[c.length - 1].i).some((l) => /^\s*❯\s*Submit\s*$/.test(l));
+  const close = () => { if (cur.length >= 2 && pointed(cur)) run = cur; };
   for (const o of opts) {
     const last = cur[cur.length - 1];
-    if (last && o.n === last.n + 1 && o.i - last.i <= 9) cur.push(o);
+    if (last && o.n === last.n + 1 && o.i - last.i <= 14) cur.push(o);
     else { close(); cur = [o]; }
   }
   close();
@@ -265,18 +277,26 @@ function menuDetails(lines) {
   // the prompt box among its options or under them (a typed "4. …" continuing a reply's "3. …"): no menu is up,
   // since Claude Code hides the box while one is
   for (let j = first.i; j < L.length; j++) if (promptBoxAt(L, j)) return null;
-  // descriptions: the lines under an option indented past its number
+  // descriptions: the lines under an option indented past its number (not a preview's box beside them)
+  let submit = null;
   const options = run.map((o, x) => {
     const end = x + 1 < run.length ? run[x + 1].i : Math.min(L.length, o.i + 3);
+    const label = o.label.replace(PREVIEW_RE, '').replace(/\s+/g, ' ');
+    const box = CHECK_RE.exec(label);
     const desc = [];
     for (let j = o.i + 1; j < end; j++) {
       const l = L[j];
-      if (!l.trim() || isRule(l)) continue;
-      if (l.search(/\S/) > o.col) desc.push(l.trim());
+      if (!l.trim() || isRule(l) || isPreview(l)) continue;
+      const sm = box && SUBMIT_RE.exec(l);
+      if (sm) { submit = { on: !!sm[1] }; continue; }
+      if (l.search(/\S/) > o.col) desc.push(l.replace(PREVIEW_RE, '').trim());
       else break;
     }
-    return { n: o.n, label: o.label.replace(/\s+/g, ' '), desc: desc.join(' ').slice(0, 200), on: o.on };
+    const opt = { n: o.n, label: box ? label.slice(box[0].length) : label, desc: desc.join(' ').slice(0, 200), on: o.on };
+    if (box) opt.check = box[1] !== ' ';
+    return opt;
   });
+  options.forEach((o, x) => { if (FREE_RE.test(o.label) || /^chat about this$/i.test(options[x + 1]?.label || '')) o.free = true; });
   // the title: the line above the first option; the context: what's above it, up to the dialog's top
   let title = '';
   if (k >= 0 && !isRule(L[k]) && !isBoxEdge(L[k]) && !OPT_RE.test(L[k])) { title = L[k].trim(); k--; }
@@ -285,7 +305,8 @@ function menuDetails(lines) {
   for (; k >= 0 && ctx.length < 30; k--) {
     const l = L[k];
     top = k;
-    if (isRule(l) || /^\s*[●⎿]/.test(l) || (isBoxEdge(l) && /^\s*[╭┌]/.test(l) && first.boxed)) break;
+    // (Claude's own "● …" lines start at the edge; the answers listed before a question's submit step are indented)
+    if (isRule(l) || /^●|^\s*⎿/.test(l) || (isBoxEdge(l) && /^\s*[╭┌]/.test(l) && first.boxed)) break;
     if (isBoxEdge(l)) continue;
     ctx.unshift(l.replace(/\s+$/, ''));
   }
@@ -303,9 +324,9 @@ function menuDetails(lines) {
   const ind = Math.min(...squeezed.filter((l) => l.trim()).map((l) => l.search(/\S/)), 99);
   const context = squeezed.map((l) => l.slice(Math.min(ind, l.match(/^\s*/)[0].length)));
   const more = context.length > 8;
-  const sig = JSON.stringify([title, options.map((o) => [o.n, o.label, o.on])]);
+  const sig = JSON.stringify([title, options.map((o) => [o.n, o.label, o.on, o.check ?? null]), submit && submit.on]);
   const kind = kindOf(title, context, options, L.slice(Math.max(0, top - 3), Math.min(first.i, top + 3)));
-  return { kind, title, context: context.slice(0, 8), more, options, sig };
+  return { kind, title, context: context.slice(0, 8), more, options, submit, sig };
 }
 
 // the test for "a menu is up" (api.js before typing, the host before its auto-continue note): menuDetails, cut down
