@@ -1,6 +1,8 @@
 // Fleet View web: the "Update available" pill (updater.js on the server). GET /update every minute; when the
 // folder's git upstream has something new, a pill in the header says how much, and a click opens a card with what
 // changed (the commit messages), "Update now", "Check again" and the "update automatically" switch.
+// Its controls use data-uact, not data-act: app.js takes every click on a [data-act] for itself (preventDefault,
+// which un-ticks a checkbox, and stopPropagation, so this card never hears it).
 //
 //   mountUpdate({ pill, getJson })  -> { refresh() }
 //
@@ -56,14 +58,14 @@ export function mountUpdate({ pill, getJson }) {
     card.innerHTML = `
       <div class="update-head"><b>${st.behind ? 'Update available' : 'Fleet View is up to date'}</b>
         <span class="update-ver">${esc(st.current || '')}${st.behind ? ` → ${esc(st.upstream || '')}` : ''}</span>
-        <button type="button" class="update-x" data-act="close" aria-label="Close">×</button></div>
+        <button type="button" class="update-x" data-uact="close" aria-label="Close">×</button></div>
       ${st.notes && st.notes.length ? `<div class="update-k">What changed</div><ul class="update-notes">${st.notes.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
       ${warn.map((w) => `<div class="update-warn">${esc(w)}</div>`).join('')}
       ${note ? `<div class="update-note">${esc(note)}</div>` : ''}
-      <label class="update-auto"><input type="checkbox" data-act="auto"${st.auto ? ' checked' : ''}> Update automatically when no conversation is working</label>
+      <label class="update-auto"><input type="checkbox" data-uact="auto"${st.auto ? ' checked' : ''}> Update automatically when no conversation is working</label>
       <div class="update-acts">
-        <button type="button" class="update-btn" data-act="check"${working ? ' disabled' : ''}>Check again</button>
-        <button type="button" class="update-btn primary" data-act="apply"${working || blocked ? ' disabled' : ''}>${working ? 'Updating…' : 'Update now'}</button>
+        <button type="button" class="update-btn" data-uact="check"${working ? ' disabled' : ''}>Check again</button>
+        <button type="button" class="update-btn primary" data-uact="apply"${working || blocked ? ' disabled' : ''}>${working ? 'Updating…' : 'Update now'}</button>
       </div>`;
   }
 
@@ -88,12 +90,12 @@ export function mountUpdate({ pill, getJson }) {
   const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
 
   async function onChange(e) {
-    if (e.target?.dataset?.act !== 'auto') return;
+    if (e.target?.dataset?.uact !== 'auto') return;
     const r = await post('/update/auto', { on: e.target.checked });
     if (r && r.ok) { st = r; drawCard(); }
   }
   async function onClick(e) {
-    const act = e.target?.closest?.('[data-act]')?.dataset.act;
+    const act = e.target?.closest?.('[data-uact]')?.dataset.uact;
     if (act === 'close') return close();
     if (act === 'check') {
       working = true; note = ''; drawCard();

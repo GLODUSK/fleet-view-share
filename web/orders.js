@@ -40,11 +40,15 @@ const ORDER_MAX = 4000; // the server's limit for a team's order
 const TEAM_MAX = 12; // members of one team
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // a conversation's id (the server's teams take only these)
 
+// a conversation that handed off (/state's handoff: { next, nextName, at }) and is done
+export const handedOff = (s) => !!(s && s.handoff && (s.handoff.next || s.state === 'DONE'));
 // can this window type into it at all? null when yes, else why not
 export function unreachable(s) {
   if (!s || !s.id) return 'not a conversation';
   if (!termApi()) return 'sending needs the desktop window';
   if (s.pending && !isHosted(s.id)) return 'it has not started yet';
+  // handed off: its pickup carries on, and resuming the old one would run the long conversation it left
+  if (handedOff(s)) return `it handed off${s.handoff.nextName ? ` to ${s.handoff.nextName}` : ''}: give it to that one`;
   if (openElsewhere(s) && !isHosted(s.id)) return 'open in another window: end it there or open it here';
   return null;
 }

@@ -111,7 +111,7 @@ import { renderDetail, openPeek } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady } from './term.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
-import { sendOrder, sendEach, sendNote, summary as orderSummary, teamBrief, firstWords, unreachable } from './orders.js';
+import { sendOrder, sendEach, sendNote, summary as orderSummary, teamBrief, firstWords, unreachable, handedOff } from './orders.js';
 import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner } from './compose.js';
@@ -2035,11 +2035,11 @@ async function runOrder(list, text, o) {
   return res;
 }
 // a repo's conversations (the repo's root or one of its checkouts), not removed: working ones first, then idle
-// ones (DONE: resumed to take the order), then new sessions with nothing in them yet (pending stand-ins)
+// ones (DONE: resumed to take the order; not ones that handed off), then new sessions with nothing in them yet (pending stand-ins)
 function repoSessions(folder) {
   const st = state || {};
   const k = normRoot(repoForFolder(st, folder).root || folder);
-  const inIt = (s) => s.repo && normRoot(s.repo.root) === k && !isHidden(s);
+  const inIt = (s) => s.repo && normRoot(s.repo.root) === k && !isHidden(s) && !handedOff(s);
   const listed = (st.sessions || []).filter(inIt);
   return [...listed.filter((s) => s.state !== 'DONE'), ...listed.filter((s) => s.state === 'DONE'), ...pendingSessions(st).filter(inIt)];
 }
