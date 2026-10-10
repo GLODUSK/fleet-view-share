@@ -314,6 +314,11 @@ function setMulti(set) {
 }
 function clearMulti() { if (I.multi.size) setMulti(new Set()); }
 
+// the picked node, for the shell's Delete key: { kind, sid?, root?, name? } or null
+export function mapPicked() {
+  const n = I && I.sel ? I.byId.get(I.sel) : null;
+  return n ? { kind: n.kind, sid: n.sid || null, root: n.root || null, name: n.name || null } : null;
+}
 export function mapLens() { return I ? I.lens : 'state'; }
 export function setMapLens(name) {
   if (!I || !LENSES.includes(name) || name === I.lens) return;

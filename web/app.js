@@ -15,7 +15,7 @@
 //                          is shown, every key not taken by the shell goes to it first; return true when handled.
 //                          The shell always handles: v / Tab (next view), / (filter), r (repo menu),
 //                          Esc (close menu, filter, pick), Enter / o (open ui.selectedId), s (steady / live
-//                          order), m (mini window, desktop only), and, in Cards and
+//                          order), m (mini window, desktop only), Delete (remove the pick: see deleteKey), and, in Cards and
 //                          Wall only, arrows/hjkl (pick) and c (compact). In the Map, arrows, + / -, 0, l
 //                          and the mouse belong to map.js.
 //   ui.compact             read only: compact cards on/off
@@ -1392,11 +1392,20 @@ function openSession(id) {
 function showConfirm(s) {
   confirmFor = s;
   $('confirm-text').innerHTML = `<b>${esc(s.name)}</b> may still be open in another window. Open a second copy?`;
+  $('confirm-yes').textContent = 'Open a second copy';
+  $('confirm').hidden = false;
+  $('confirm-yes').focus();
+}
+// the same box for any yes/no: html is the question, run happens on yes
+function askConfirm(html, yes, run) {
+  confirmFor = { run };
+  $('confirm-text').innerHTML = html;
+  $('confirm-yes').textContent = yes;
   $('confirm').hidden = false;
   $('confirm-yes').focus();
 }
 function hideConfirm() { confirmFor = null; $('confirm').hidden = true; }
-$('confirm-yes').addEventListener('click', () => { const s = confirmFor; hideConfirm(); if (s) doOpen(s); });
+$('confirm-yes').addEventListener('click', () => { const s = confirmFor; hideConfirm(); if (s && s.run) s.run(); else if (s) doOpen(s); });
 $('confirm-no').addEventListener('click', hideConfirm);
 async function doOpen(s) {
   if (FIXTURE) { toast(`fixture data: ${s.name} is not a real conversation`, C.dim); return; }
@@ -1507,6 +1516,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (k === 'm') { e.preventDefault(); toggleMini(); return; }
+  if (k === 'Delete' && deleteKey(e)) { e.preventDefault(); return; }
   const handler = ui.keys[local.view];
   if (handler && handler(e)) { e.preventDefault(); return; }
   if (k === 's') { e.preventDefault(); toggleSteady(); return; }
@@ -1515,6 +1525,28 @@ document.addEventListener('keydown', (e) => {
   if (moves[k]) { e.preventDefault(); movePick(...moves[k]); return; }
   if (k === 'c' && local.view === 'cards') { saveSettings({ compact: !local.compact }); render(); }
 });
+
+// Delete: removes what is picked. A multi-selection of 2+ asks first; one conversation asks only when Claude is
+// mid-turn in it; a repo picked on the map goes at once (Undo on the toast), like Delete in the repo menu
+function deleteKey(e) {
+  if (e.target.closest?.('input, textarea, select, [contenteditable], #detail')) return false;
+  const list = sessionsOf([...multi]);
+  if (list.length >= 2) {
+    const it = removeAllItem(list);
+    askConfirm(esc(it.confirm.text), it.confirm.yes, it.run);
+    return true;
+  }
+  const p = local.view === 'map' ? mapMod?.mapPicked?.() : null;
+  if (p && p.kind === 'repo' && p.root) { removeRepo({ root: p.root, name: p.name }); return true; }
+  const id = list.length === 1 ? list[0].id : ui.selectedId;
+  const s = id && view?.allSessions.find((x) => x.id === id);
+  if (!s) return false;
+  const st = isHosted(id) ? hostStatus(id) : null;
+  const busy = isHosted(id) && (st ? st === 'busy' : s.state === 'WORKING' || s.state === 'AGENTS');
+  if (busy) askConfirm(`<b>${esc(s.name)}</b>: ${BUSY_Q}`, 'Remove anyway', () => removeFromMenu(id));
+  else removeFromMenu(id);
+  return true;
+}
 
 // ---------- window position and size, kept for the next launch ----------
 // (the desktop window saves its own: in Electron, screenX/outerWidth are not the window's frame bounds)
