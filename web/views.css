@@ -345,6 +345,11 @@ html.glass .card.multi.picked, html.glass .tile.multi.picked {
 }
 .d-close:hover { background: rgba(255, 255, 255, 0.07); color: var(--text); border-color: transparent; }
 .d-close:focus-visible { outline: 2px solid var(--cyan); outline-offset: 0; }
+.d-close[hidden] { display: none; }
+.d-pin svg { transform: rotate(45deg); transition: transform 180ms var(--ease); }
+.pinned .d-pin { color: var(--hue, var(--cyan)); }
+.pinned .d-pin svg { transform: none; }
+.pinned .d-pin svg path { fill: currentColor; fill-opacity: 0.25; }
 .d-body { padding: 16px 20px 24px; gap: 18px; }
 .d-meta { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 9px 18px; align-items: center; }
 .d-k { display: inline-flex; align-items: center; gap: 7px; color: var(--faint); font: 12.5px var(--font-ui); }

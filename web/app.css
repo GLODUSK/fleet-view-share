@@ -454,6 +454,7 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; transiti
 }
 .d-close:hover { color: var(--text); border-color: var(--line); }
 .d-close:focus-visible { outline: 2px solid var(--cyan); }
+.d-close[hidden] { display: none; }
 .d-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 12px 14px 18px; display: flex; flex-direction: column; gap: 14px; }
 .d-meta { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; align-items: center; }
 .d-k { color: var(--faint); font: 12px var(--mono); }

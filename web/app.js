@@ -171,6 +171,14 @@ let pickIntent = null; // { id, kind }
 let tabWant = null; // { id, tab }: the panel tab to show once (the Projects view's Session / Details buttons)
 // the Projects view shows the chat itself, so the panel opens there only when asked (ui.panel)
 let projPanel = false;
+// the panel pinned to one conversation (its pin button, detail.js): no pick, Esc or view switch closes or swaps it;
+// only its pin again (or that conversation leaving the list) lets go. Kept in this browser's storage across reloads.
+let pinnedId = null;
+try { pinnedId = localStorage.getItem('fv.pin') || null; } catch {}
+function setPin(id) {
+  pinnedId = id || null;
+  try { if (pinnedId) localStorage.setItem('fv.pin', pinnedId); else localStorage.removeItem('fv.pin'); } catch {}
+}
 const intentOf = (how) => (how === 'keys' ? 'keys' : how === 'explicit' ? 'explicit' : how ? 'preview' : null);
 const ui = {
   selectedId: null,
@@ -178,13 +186,17 @@ const ui = {
   // how: 'click' (the default: cards, tiles, map nodes), 'keys' (arrow-key moves), 'explicit'
   setSelected(id, how = 'click') {
     ui.selectedId = id || null;
-    ui.detailId = id || null;
+    ui.detailId = pinnedId || id || null;
     pickIntent = id ? { id, kind: intentOf(how) } : null;
     render();
     if (id && local.view !== 'map') document.querySelector(`#view-${local.view} [data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
   },
   // how: none for a redraw of the panel (its own tab buttons), 'click' when a conversation is picked
   showDetail(id, how = null) {
+    if (pinnedId && id !== pinnedId) {
+      if (id && how) toast('the panel is pinned: unpin it to open another conversation', C.dim);
+      id = pinnedId;
+    }
     ui.detailId = id || null;
     if (!id) projPanel = false;
     pickIntent = id && how ? { id, kind: intentOf(how) } : null;
@@ -195,6 +207,13 @@ const ui = {
     tabWant = { id, tab };
     projPanel = true;
     ui.showDetail(id);
+  },
+  pinned: () => pinnedId,
+  // the panel's pin button: pins the panel to that conversation, or (the same one again) lets go
+  togglePin(id) {
+    setPin(pinnedId === id ? null : id);
+    if (pinnedId) ui.detailId = pinnedId;
+    render();
   },
   takeIntent(id) {
     const p = pickIntent;
@@ -410,6 +429,7 @@ function mergeServerHidden(list) {
     continued.delete(id);
     if (ui.selectedId === id) ui.selectedId = null;
     if (ui.detailId === id) ui.detailId = null;
+    if (pinnedId === id) setPin(null);
     added = true;
   }
   return added;
@@ -420,6 +440,7 @@ function hideConversation(s, how = 'hidden') {
   saveHidden();
   if (ui.selectedId === s.id) ui.selectedId = null;
   if (ui.detailId === s.id) ui.detailId = null;
+  if (pinnedId === s.id) setPin(null);
   toast(how === 'removed' ? `Removed ${s.name}. It comes back if it works again` : `${s.name} is hidden until it works again`, C.dim);
   render();
 }
@@ -477,6 +498,7 @@ function removeRepo(it) {
   const inIt = (id) => { const s = id && view?.allSessions?.find((x) => x.id === id); return !!(s && s.repo && normRoot(s.repo.root) === k); };
   if (inIt(ui.selectedId)) ui.selectedId = null;
   if (inIt(ui.detailId)) ui.detailId = null;
+  if (inIt(pinnedId)) setPin(null);
   const undo = () => {
     if (lastRemoved?.undo === undo) lastRemoved = null;
     if (before) hiddenRepos.set(k, before); else hiddenRepos.delete(k);
@@ -1000,7 +1022,10 @@ $('finished-list').addEventListener('keydown', (e) => {
 let splitKey = ''; // the selection the panel last opened for by itself (drawDetail)
 let detailLast = null; // the panel's last copy of its conversation, shown (marked) if it leaves the list
 function drawDetail(v) {
-  const shut = local.view === 'projects' && !projPanel;
+  // a pinned conversation that left the list (removed, hidden) lets go of the pin; otherwise it holds the panel
+  if (pinnedId && state && !v.allSessions.some((x) => x.id === pinnedId)) setPin(null);
+  if (pinnedId) ui.detailId = pinnedId;
+  const shut = local.view === 'projects' && !projPanel && !pinnedId;
   let s = ui.detailId && !shut ? v.allSessions.find((x) => x.id === ui.detailId) : null;
   // 2+ selected: their chats share the panel (detail.js drawSplits, SPLIT_MAX at most); with none shown, the first opens it
   const sel = multi.size >= 2 ? [...multi].map((id) => v.allSessions.find((x) => x.id === id)).filter(Boolean) : [];
@@ -1138,7 +1163,7 @@ function drawFooter() {
   // while the live terminal has the keyboard, every key goes to Claude; say how to get the shortcuts back
   const keys = (termFocused() ? [['click', 'outside the terminal or chat box for the shortcuts'], ['ctrl+c', 'copy a selection']]
     : KEYS[local.view].map(([k, l]) => [k, l === 'ORDER' ? order : l])
-      .concat(isDesktop() ? [['m', 'mini']] : [], ui.detailId ? [['esc', 'close panel']] : [])).map(keyHtml).join('');
+      .concat(isDesktop() ? [['m', 'mini']] : [], ui.detailId && !pinnedId ? [['esc', 'close panel']] : [])).map(keyHtml).join('');
   if (keys !== footKeys) { $('keys').innerHTML = keys; footKeys = keys; }
   const bits = [];
   if (local.query) bits.push(`<span class="note">filter: ${esc(local.query)} (esc clears)</span>`);
@@ -1492,7 +1517,7 @@ document.addEventListener('keydown', (e) => {
   if (k === 'Escape' && since.isOpen()) { e.preventDefault(); since.close(); return; }
   if (k === 'Escape' && local.view === 'map' && ui.keys.map && ui.keys.map(e)) return;
   if (k === 'Escape' && multi.size) { e.preventDefault(); setMulti([], 'keys'); return; }
-  if (k === 'Escape' && ui.detailId) { e.preventDefault(); ui.showDetail(null); return; }
+  if (k === 'Escape' && ui.detailId && !pinnedId) { e.preventDefault(); ui.showDetail(null); return; }
   // arrows and paging inside the panel scroll it instead of moving the pick
   if (e.target.closest?.('#detail') && /^(Arrow|Page|Home|End)/.test(k)) return;
   if (k === 'v' || k === 'Tab') { e.preventDefault(); setView(VIEWS[(VIEWS.indexOf(local.view) + (e.shiftKey && k === 'Tab' ? VIEWS.length - 1 : 1)) % VIEWS.length]); return; }
@@ -1826,7 +1851,7 @@ function removeFromMenu(id) {
   if (!s) return;
   if (isHosted(id)) endSession(id);
   continued.delete(id);
-  if (s.pending) { if (ui.selectedId === id) ui.selectedId = null; if (ui.detailId === id) ui.detailId = null; render(); return; }
+  if (s.pending) { if (ui.selectedId === id) ui.selectedId = null; if (ui.detailId === id) ui.detailId = null; if (pinnedId === id) setPin(null); render(); return; }
   hideConversation(s, 'removed');
 }
 // cols and rows for the new pty, from the room the panel will give it (the terminal fits itself once shown)
@@ -1844,6 +1869,7 @@ async function newSession(folder, account) {
 onRekey((oldKey, id) => {
   if (ui.selectedId === oldKey) ui.selectedId = id;
   if (ui.detailId === oldKey) ui.detailId = id;
+  if (pinnedId === oldKey) setPin(id);
   if (pickIntent?.id === oldKey) pickIntent.id = id;
   if (tabWant?.id === oldKey) tabWant.id = id;
   if (mapRekey) { try { mapRekey(oldKey, id); } catch (e) { console.error(e); } }
@@ -2038,6 +2064,7 @@ function removeMany(ids) {
     if (!s.pending) hidden.set(id, Date.now());
     if (ui.selectedId === id) ui.selectedId = null;
     if (ui.detailId === id) ui.detailId = null;
+    if (pinnedId === id) setPin(null);
     n++; first = first || s;
   }
   if (!n) return;

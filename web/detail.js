@@ -31,6 +31,7 @@ onRekey((oldKey, id) => { for (const el of built) if (el._id === oldKey) el._id 
 
 function build(el, ui) {
   el.innerHTML = `<div class="d-top"><span data-slot="icon" class="c-icon"></span><div data-slot="head" class="d-head"></div>
+<button type="button" class="d-close d-pin" data-pin aria-pressed="false">${icon('pin', 15)}</button>
 <button type="button" class="d-close" data-close title="close (Esc)" aria-label="close the panel">${icon('close', 16)}</button></div>
 <div class="d-tabs" role="tablist" aria-label="panel">
   <button type="button" role="tab" class="d-tab" data-tab="chat"><span class="d-tab-t">Chat</span></button>
@@ -98,6 +99,7 @@ function build(el, ui) {
     else if (e.target.closest('[data-peek-x]')) { peek = null; ui.showDetail(el._id); }
     else if (peekK) { if (peek) peek.kind = peekK.dataset.peekKind; ui.showDetail(el._id); }
     else if (cellX) ui.dropMulti?.(cellX.dataset.cellX);
+    else if (e.target.closest('[data-pin]')) ui.togglePin?.(el._id);
     else if (e.target.closest('[data-close]')) { if (el._cells.size) ui.clearMulti?.(); ui.showDetail(null); }
     else if (e.target.closest('[data-open]') && el._id) (ui.openTerminal || ui.open)(el._id);
     else if (tab) { el._tab = tab.dataset.tab; el._tabPicked = true; ui.showDetail(el._id); if (el._tab === 'session') focusTerm(el); else if (el._tab === 'chat') focusCompose(el); }
@@ -542,6 +544,13 @@ export function renderDetail(el, s, ui, gone = false, extras = []) {
   // a click, Enter or a double-click (and a new session or Fork) puts the keyboard straight in the chat box;
   // arrow keys leave it on the list
   if ((intent === 'preview' || intent === 'explicit') && el._tab === 'chat') focusCompose(el);
+  // pinned: no pick, Esc or view switch closes or swaps the panel, so its ✕ goes until the pin is let go (app.js)
+  const pinned = !!ui.pinned && ui.pinned() === s.id, pin = el.querySelector('[data-pin]');
+  el.classList.toggle('pinned', pinned);
+  pin.setAttribute('aria-pressed', String(pinned));
+  pin.title = pinned ? 'unpin: the panel follows your picks and closes again' : 'pin: keep this chat open whatever you pick or press';
+  pin.setAttribute('aria-label', pinned ? 'unpin the panel' : 'pin the panel open');
+  el.querySelector('[data-close]').hidden = pinned;
   el.style.setProperty('--hue', s.hue || C.cyan);
   el.style.setProperty('--status', statusColor(s));
   setIcon(sl.icon, s);
