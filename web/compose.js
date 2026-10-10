@@ -580,7 +580,7 @@ export function mountCompose(slot, s) {
   <div class="cmp-quote" hidden></div>
   <div class="cmp-atts" hidden></div>
   <div class="cmp-slash" role="listbox" aria-label="slash commands" hidden></div>
-  <div class="cmp-hs" hidden><div class="cmp-hs-h">${ic('search', 13)}<input type="text" class="cmp-hs-in" spellcheck="false" autocomplete="off" placeholder="Search your messages" aria-label="search your past messages"><span class="cmp-hs-n"></span><kbd>Esc</kbd></div><div class="cmp-hs-l" role="listbox" aria-label="past messages"></div></div>
+  <div class="cmp-hs" hidden><div class="cmp-hs-h">${ic('search', 13)}<input type="text" class="cmp-hs-in" spellcheck="false" autocomplete="off" placeholder="Search your messages" aria-label="search your past messages"><span class="cmp-hs-n"></span><kbd>Esc</kbd><button type="button" class="cmp-pnl-x cmp-hs-x" title="Close (Esc)" aria-label="close the search" tabindex="-1">${ic('close', 12)}</button></div><div class="cmp-hs-l" role="listbox" aria-label="past messages"></div></div>
   <div class="cmp-shtag" hidden title="Bash mode: the command runs in the session's shell and its output goes into the conversation. Backspace or Esc in the empty box leaves it"><b>!</b> bash</div>
   <div class="cmp-taw"><textarea class="cmp-ta" rows="1" spellcheck="true" placeholder="Message Claude…" aria-label="message to Claude"></textarea><div class="cmp-ghost" aria-hidden="true" hidden><span class="cmp-ghost-pad"></span><span class="cmp-ghost-t"></span></div></div>
   <div class="cmp-notes" hidden></div>
@@ -781,7 +781,8 @@ export function mountCompose(slot, s) {
     const lb = document.createElement('div');
     lb.className = 'cmp-lightbox';
     lb.tabIndex = -1;
-    lb.innerHTML = `<img src="${esc(a.url)}" alt="${esc(a.name)}"><div class="cmp-lb-t">${esc(a.name)} · ${Math.max(1, Math.round(a.size / 1024))} KB</div>`;
+    lb.innerHTML = `<button type="button" class="cmp-lb-x" aria-label="close" title="close (Esc)">${ic('close', 18) || '×'}</button>`
+      + `<img src="${esc(a.url)}" alt="${esc(a.name)}"><div class="cmp-lb-t">${esc(a.name)} · ${Math.max(1, Math.round(a.size / 1024))} KB</div>`;
     const shut = () => { lb.remove(); ta.focus(); };
     lb.addEventListener('click', shut);
     lb.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') { e.preventDefault(); shut(); } });
@@ -1218,6 +1219,9 @@ export function mountCompose(slot, s) {
   });
   hsIn.addEventListener('blur', () => setTimeout(() => { if (st.hs && !hsEl.contains(document.activeElement)) shutSearch(false); }, 150));
   hsList.addEventListener('pointerdown', (e) => e.preventDefault()); // the search box keeps the focus
+  const hsX = hsEl.querySelector('.cmp-hs-x');
+  hsX.addEventListener('pointerdown', (e) => e.preventDefault());
+  hsX.addEventListener('click', (e) => { e.stopPropagation(); shutSearch(); });
   hsList.addEventListener('click', (e) => { const b = e.target.closest('[data-hs]'); if (b) pickSearch(+b.dataset.hs); });
 
   // ----- the menu card -----

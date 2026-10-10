@@ -364,7 +364,10 @@ export function mountMapOverlay(el, api) {
   readout.append(rTime, rSum);
   const liveBtn = button(`<span style="width:7px;height:7px;border-radius:50%;background:${COL.mint};display:inline-block"></span>Live`, 'Back to live (Esc)', () => closeBar());
   liveBtn.style.cssText = `color:${COL.text};background:rgba(255,255,255,0.07);padding:6px 10px;margin-left:auto`;
-  barEl.append(head, rangeSeg, playBtn, speedSeg, track, readout, liveBtn);
+  const closeBtn = button(icon('close', 14) || '×', 'Close the replay (Esc)', () => closeBar());
+  closeBtn.setAttribute('aria-label', 'close the replay');
+  closeBtn.style.cssText = 'width:26px;height:26px;padding:0';
+  barEl.append(head, rangeSeg, playBtn, speedSeg, track, readout, liveBtn, closeBtn);
   root.appendChild(barEl);
   // keys while the slider has the focus (the map ignores keys typed into inputs)
   barEl.addEventListener('keydown', (e) => { if (barKey(e)) { e.preventDefault(); e.stopPropagation(); } });

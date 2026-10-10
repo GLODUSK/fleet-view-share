@@ -3467,8 +3467,20 @@ function buildLegend() {
   const wrapEl = document.createElement('div');
   const title = document.createElement('div');
   title.textContent = 'Map legend';
-  title.style.cssText = `font:600 13px var(--font-display, ${DISPLAY});color:${COL.text};margin-bottom:4px`;
-  wrapEl.appendChild(title);
+  title.style.cssText = `flex:1 1 auto;font:600 13px var(--font-display, ${DISPLAY});color:${COL.text}`;
+  // a × beside the title closes it (as l and Esc do)
+  const head = document.createElement('div');
+  head.style.cssText = 'display:flex;align-items:center;gap:8px;margin:-4px -6px 4px 0';
+  const x = document.createElement('button');
+  x.type = 'button'; x.title = 'close (l or Esc)'; x.setAttribute('aria-label', 'close the legend');
+  x.style.cssText = `flex:none;display:grid;place-items:center;width:26px;height:26px;padding:0;border:0;border-radius:7px;background:transparent;color:${COL.dim};cursor:pointer`;
+  x.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+  x.addEventListener('mouseenter', () => { x.style.background = 'rgba(255,255,255,0.07)'; x.style.color = COL.text; });
+  x.addEventListener('mouseleave', () => { x.style.background = 'transparent'; x.style.color = COL.dim; });
+  x.addEventListener('pointerdown', (e) => e.stopPropagation());
+  x.addEventListener('click', (e) => { e.stopPropagation(); setLegend(false); });
+  head.append(title, x);
+  wrapEl.appendChild(head);
   let gid = 0;
   // an orb like the map's: lighter top left, the hue, a darker rim
   const orbSvg = (cx, cy, r, color, op = 1) => {
