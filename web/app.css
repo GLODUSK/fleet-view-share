@@ -184,6 +184,25 @@ button { font: inherit; color: inherit; }
 .mi-x:hover { background: var(--press); color: var(--text); }
 .mi-x:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 @media (hover: none) { .mi-x { opacity: 1; } }
+/* ticking rows to remove several at once: the number turns into a box on hover, and stays one while any row is ticked */
+.mi-tick { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; cursor: pointer; }
+.mi-box {
+  display: none; width: 14px; height: 14px; border: 1px solid var(--dim); border-radius: 4px;
+  align-items: center; justify-content: center; color: var(--bg, #0b0e16); font: 700 10px/1 var(--font-ui);
+}
+.menu-item:hover .mi-tick .mi-num, .mi-list.picking .mi-num { display: none; }
+.menu-item:hover .mi-box, .mi-list.picking .mi-box { display: inline-flex; }
+.menu-item.ticked { background: color-mix(in srgb, var(--cyan) 14%, transparent); }
+.menu-item.ticked .mi-box { background: var(--cyan); border-color: var(--cyan); }
+.mi-bulk { display: flex; gap: 6px; align-items: center; padding: 6px 4px 2px; margin-top: 4px; border-top: 1px solid var(--line); }
+.mi-bulk button {
+  padding: 5px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: none; cursor: pointer;
+  color: var(--dim); font: 12.5px/1.2 var(--font-ui);
+}
+.mi-bulk button:hover { background: var(--hover); color: var(--text); }
+.mi-bulk .mi-bulk-rm { color: var(--red, #ff6b6b); border-color: color-mix(in srgb, var(--red, #ff6b6b) 45%, transparent); }
+.mi-bulk .mi-bulk-rm:hover { background: color-mix(in srgb, var(--red, #ff6b6b) 16%, transparent); color: var(--red, #ff6b6b); }
+.mi-bulk .mi-bulk-all { margin-left: auto; }
 .menu-hint { color: var(--faint); padding: 8px 10px 4px; margin-top: 4px; border-top: 1px solid var(--line); font-size: 11.5px; }
 /* the repo menu's last row, "Add repo", and the three ways it opens into (paste a path, new scratchpad, browse) */
 .menu-item.mi-add { grid-template-columns: 16px 10px minmax(0, 1fr); color: var(--dim); margin-top: 4px; }

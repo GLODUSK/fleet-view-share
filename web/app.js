@@ -83,7 +83,8 @@
 // Removing a repo (the menu's ×, Delete on the picked row, "Remove from list" on a row's right-click, or "Remove
 // repo" on a repo's right-click in any view; settings.hiddenRepos, [{ root, at }], POST /settings) takes it and its
 // conversations out of every view: the menu, its map anchor, territory and nodes, the cards, wall tiles and the
-// finished strip. "Undo" stays on a toast for 6 s. One comes back by itself when a conversation in it works after
+// finished strip. In the menu, Ctrl+click, Shift+click, Space or a row's box ticks several; "Remove N workspaces" (or
+// Delete) removes them together, with one Undo. "Undo" stays on a toast for 6 s. One comes back by itself when a conversation in it works after
 // `at` (the server drops it from the list; the page follows). Removing the picked repo switches to All workspaces.
 // Adding a repo ("Add workspace" at the bottom of the repo menu, or on empty space's right-click) offers three
 // ways: "Paste path" (a path box; quotes around a pasted path are dropped, forward slashes are fine), "New
@@ -530,37 +531,51 @@ const undoStack = [];
 const UNDO_MS = 10 * 60e3;
 let lastRemoved = null; // { undo, until }: what "Undo" (or u in the menu) puts back
 // it: { root, name } from the repo menu, a map anchor or a repo chip (a checkout folder maps to its repo)
-function removeRepo(it) {
-  if (!it || !it.root) return;
-  const listed = (state?.repos || []).find((r) => normRoot(r.root) === normRoot(it.root));
-  const root = listed ? listed.root : repoForFolder(state || {}, it.root).root || it.root;
-  const name = it.name && it.name !== 'All workspaces' ? it.name : repoName(root);
-  const k = normRoot(root), before = hiddenRepos.get(k);
-  const wasPicked = isCurrent({ root, name }), prevRepo = local.repo;
-  // an added repo leaves addedRepos for good (Undo adds it back)
-  const wasAdded = !!(addedLocal.has(k) || (state?.repos || []).some((r) => r.added && normRoot(r.root) === k));
-  const localAdd = addedLocal.get(k) || null;
-  hiddenRepos.set(k, { root, at: Date.now() });
+function removeRepo(it) { removeRepos([it]); }
+// several at once (the repo menu's multi-selection): one toast, one Undo for all of them
+function removeRepos(list) {
+  const done = [], seen = new Set(), prevRepo = local.repo;
+  let anyPicked = false;
+  for (const it of list || []) {
+    if (!it || !it.root) continue;
+    const listed = (state?.repos || []).find((r) => normRoot(r.root) === normRoot(it.root));
+    const root = listed ? listed.root : repoForFolder(state || {}, it.root).root || it.root;
+    const k = normRoot(root);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const name = it.name && it.name !== 'All workspaces' ? it.name : repoName(root);
+    const before = hiddenRepos.get(k);
+    if (isCurrent({ root, name })) anyPicked = true;
+    // an added repo leaves addedRepos for good (Undo adds it back)
+    const wasAdded = !!(addedLocal.has(k) || (state?.repos || []).some((r) => r.added && normRoot(r.root) === k));
+    const localAdd = addedLocal.get(k) || null;
+    hiddenRepos.set(k, { root, at: Date.now() });
+    if (wasAdded) { addedLocal.delete(k); post('/repos/remove', { root }); }
+    done.push({ root, name, k, before, wasAdded, localAdd });
+  }
+  if (!done.length) return;
   saveHiddenRepos();
-  if (wasAdded) { addedLocal.delete(k); post('/repos/remove', { root }); }
-  if (wasPicked) { ui.selectedId = null; saveSettings({ repo: null }); }
-  // its conversations leave every view, the panel too
-  const inIt = (id) => { const s = id && view?.allSessions?.find((x) => x.id === id); return !!(s && s.repo && normRoot(s.repo.root) === k); };
+  if (anyPicked) { ui.selectedId = null; saveSettings({ repo: null }); }
+  // their conversations leave every view, the panel too
+  const inIt = (id) => { const s = id && view?.allSessions?.find((x) => x.id === id); return !!(s && s.repo && seen.has(normRoot(s.repo.root))); };
   if (inIt(ui.selectedId)) ui.selectedId = null;
   if (inIt(ui.detailId)) ui.detailId = null;
   const undo = () => {
     if (lastRemoved?.undo === undo) lastRemoved = null;
-    if (before) hiddenRepos.set(k, before); else hiddenRepos.delete(k);
+    for (const d of done) {
+      if (d.before) hiddenRepos.set(d.k, d.before); else hiddenRepos.delete(d.k);
+      if (d.wasAdded) { addedLocal.set(d.k, d.localAdd || { root: d.root, name: d.name, at: Date.now() }); post('/repos/add', { path: d.root }); }
+    }
     saveHiddenRepos();
-    if (wasAdded) { addedLocal.set(k, localAdd || { root, name, at: Date.now() }); post('/repos/add', { path: root }); }
-    if (wasPicked && !local.repo) saveSettings({ repo: prevRepo });
+    if (anyPicked && !local.repo) saveSettings({ repo: prevRepo });
     if (menuOpen) drawMenu();
     render();
   };
   lastRemoved = { undo, until: Date.now() + 6000 };
   if (menuOpen) drawMenu();
   render();
-  toast(`Removed ${name}${wasPicked ? ' · showing every workspace' : ''}. It comes back if it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
+  const what = done.length === 1 ? done[0].name : `${done.length} workspaces`;
+  toast(`Removed ${what}${anyPicked ? ' · showing every workspace' : ''}. ${done.length === 1 ? 'It comes' : 'Each comes'} back if it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
 }
 
 // ---------- adding a repo ----------
@@ -1404,6 +1419,30 @@ for (const b of document.querySelectorAll('.tabs button')) b.addEventListener('c
 
 // ---------- repo menu ----------
 let menuOpen = false, menuSel = 0, menuItems = [];
+// the rows ticked for removing together (Ctrl+click, Shift+click a range, Space, or the row's box): normRoots;
+// emptied when the menu closes
+const menuPicked = new Set();
+let menuAnchor = -1;
+const menuPickedItems = () => menuItems.filter((it) => it.root && menuPicked.has(normRoot(it.root)));
+function togglePicked(i, range) {
+  const it = menuItems[i];
+  if (!it || !it.root) return;
+  if (range && menuAnchor >= 0) {
+    const [a, b] = [Math.min(menuAnchor, i), Math.max(menuAnchor, i)];
+    for (let j = a; j <= b; j++) if (menuItems[j]?.root) menuPicked.add(normRoot(menuItems[j].root));
+  } else {
+    const k = normRoot(it.root);
+    if (menuPicked.has(k)) menuPicked.delete(k); else menuPicked.add(k);
+    menuAnchor = i;
+  }
+  menuSel = i;
+  drawMenu();
+}
+function removePickedRepos() {
+  const list = menuPickedItems();
+  menuPicked.clear(); menuAnchor = -1;
+  removeRepos(list);
+}
 // the repo list every view shares: /state's repos[] (and the ones added here that it doesn't list yet), less the
 // removed ones; each with its colour (the server's, else its conversations', else dim)
 function repoList(st) {
@@ -1443,6 +1482,7 @@ function openMenu() {
 function closeMenu() {
   menuOpen = false;
   addBox = null; addChoose = false;
+  menuPicked.clear(); menuAnchor = -1;
   $('repo-menu').hidden = true;
   $('brand').setAttribute('aria-expanded', 'false');
   render();
@@ -1458,14 +1498,25 @@ const ADD_WAYS = [
 function drawMenu() {
   menuItems = buildMenuItems();
   menuSel = Math.min(menuSel, menuItems.length - 1);
+  // a ticked row that left the list (removed, or gone from /state) is no longer ticked
+  const listed = new Set(menuItems.filter((it) => it.root).map((it) => normRoot(it.root)));
+  for (const k of menuPicked) if (!listed.has(k)) menuPicked.delete(k);
+  const nPicked = menuPicked.size;
   const colorOf = (root) => menuItems.find((r) => r.root && normRoot(r.root) === normRoot(root))?.color || C.dim;
   // written only when it changed: the open menu is redrawn on every poll, and rewriting it would drop the
   // row under the pointer and repaint the frosted box for nothing
-  const html = menuItems.map((it, i) => `<div class="menu-item${i === menuSel ? ' sel' : ''}" data-i="${i}" role="option" aria-selected="${isCurrent(it)}">
-    <span class="mi-n">${i < 9 ? i + 1 : ''}</span><span class="dot" style="background:${it.root ? colorOf(it.root) : C.text}"></span>
+  const html = `<div class="mi-list${nPicked ? ' picking' : ''}">` + menuItems.map((it, i) => {
+    const ticked = !!it.root && menuPicked.has(normRoot(it.root));
+    return `<div class="menu-item${i === menuSel ? ' sel' : ''}${ticked ? ' ticked' : ''}" data-i="${i}" role="option" aria-selected="${isCurrent(it)}">
+    ${it.root ? `<span class="mi-n mi-tick" data-tick="${i}" role="checkbox" aria-checked="${ticked}" aria-label="Select ${esc(it.name)}" title="Select (Ctrl+click, Shift+click, Space)"><span class="mi-num">${i < 9 ? i + 1 : ''}</span><span class="mi-box" aria-hidden="true">${ticked ? '✓' : ''}</span></span>` : `<span class="mi-n">${i < 9 ? i + 1 : ''}</span>`}<span class="dot" style="background:${it.root ? colorOf(it.root) : C.text}"></span>
     <span class="mi-name">${esc(it.name)}</span><span class="mi-live">${it.live} live</span><span class="mi-cur">${isCurrent(it) ? '✓' : ''}</span>`
     + (it.root ? `<button type="button" class="mi-x" data-rm="${i}" tabindex="-1" aria-label="Remove ${esc(it.name)} from the list" title="Remove from the list">×</button>` : '<span></span>')
-    + '</div>').join('')
+    + '</div>';
+  }).join('') + '</div>'
+    + (nPicked
+      ? `<div class="mi-bulk"><button type="button" class="mi-bulk-rm" data-bulk="rm">Remove ${nPicked === 1 ? '1 workspace' : `${nPicked} workspaces`}</button>`
+        + `<button type="button" class="mi-bulk-all" data-bulk="all">Select all</button><button type="button" class="mi-bulk-clear" data-bulk="clear">Clear</button></div>`
+      : '')
     + (addBox
       ? `<div class="mi-add-box"><input class="mi-add-input path-input" type="text" spellcheck="false" autocomplete="off" placeholder="${esc(ADD_HINT)}" aria-label="Add workspace: folder path">`
         + `<div class="mi-add-msg${addBox.err ? ' err' : ''}" aria-live="polite">${esc(addBox.msg || 'Enter adds · Esc goes back')}</div></div>`
@@ -1478,7 +1529,7 @@ function drawMenu() {
       }).join('') + '</div>'
       : `<div class="menu-item mi-add" data-add="1" role="option" aria-selected="false" title="add a workspace: paste a path, a new scratchpad or browse">`
         + `<span class="mi-add-ic" aria-hidden="true">${icon('plus', 14) || '+'}</span><span></span><span class="mi-name">Add workspace</span></div>`)
-    + `<div class="menu-hint">${addChoose ? 'p path · s scratchpad · b browse · esc back' : '↑↓ pick · enter show · 1-9 jump · del remove · a add · esc close'}</div>`;
+    + `<div class="menu-hint">${addChoose ? 'p path · s scratchpad · b browse · esc back' : nPicked ? `space tick · del removes ${nPicked} · esc clears` : '↑↓ pick · enter show · 1-9 jump · space/ctrl+click select · del remove · a add · esc close'}</div>`;
   const menu = $('repo-menu');
   if (menu._html !== html) {
     // a rewrite keeps the path box's text, caret and focus
@@ -1529,10 +1580,22 @@ $('repo-menu').addEventListener('click', (e) => {
   const way = e.target.closest('[data-way]');
   if (way) { addWayInMenu(way.dataset.way); return; }
   if (e.target.closest('[data-add]')) { chooseAddInMenu(); return; }
+  const bulk = e.target.closest('[data-bulk]');
+  if (bulk) {
+    if (bulk.dataset.bulk === 'rm') removePickedRepos();
+    else if (bulk.dataset.bulk === 'all') { for (const it of menuItems) if (it.root) menuPicked.add(normRoot(it.root)); drawMenu(); }
+    else { menuPicked.clear(); menuAnchor = -1; drawMenu(); }
+    return;
+  }
   const x = e.target.closest('.mi-x');
   if (x) { removeRepo(menuItems[+x.dataset.rm]); return; }
+  const tick = e.target.closest('[data-tick]');
+  if (tick) { togglePicked(+tick.dataset.tick, e.shiftKey); return; }
   const row = e.target.closest('.menu-item');
-  if (row) pickRepo(menuItems[+row.dataset.i]);
+  if (!row) return;
+  // Ctrl/Cmd+click ticks a row, Shift+click ticks a range; while any are ticked a plain click ticks too
+  if (row.dataset.i && (e.ctrlKey || e.metaKey || e.shiftKey || menuPicked.size) && menuItems[+row.dataset.i]?.root) { togglePicked(+row.dataset.i, e.shiftKey); return; }
+  pickRepo(menuItems[+row.dataset.i]);
 });
 // the path box's keys: typing is its own; Enter adds, Esc goes back to the three ways (nothing reaches the shortcuts)
 $('repo-menu').addEventListener('input', (e) => { if (addBox && e.target.closest('.mi-add-input')) addBox.value = e.target.value; });
@@ -1816,7 +1879,10 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (addChoose && (k === 'Escape' || k === 'a')) chooseAddInMenu(false);
     else if (addChoose && ADD_WAYS.some((w) => w.key === k)) addWayInMenu(ADD_WAYS.find((w) => w.key === k).way);
+    else if (k === 'Escape' && menuPicked.size) { menuPicked.clear(); menuAnchor = -1; drawMenu(); }
     else if (k === 'Escape') closeMenu();
+    else if (k === ' ') togglePicked(menuSel, e.shiftKey);
+    else if (k === 'Delete' && menuPicked.size) removePickedRepos();
     else if (k === 'ArrowDown' || k === 'j') { menuSel = (menuSel + 1) % menuItems.length; drawMenu(); }
     else if (k === 'ArrowUp' || k === 'k') { menuSel = (menuSel - 1 + menuItems.length) % menuItems.length; drawMenu(); }
     else if (k === 'Enter') pickRepo(menuItems[menuSel]);
