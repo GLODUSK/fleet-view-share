@@ -98,10 +98,10 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     }
     if (!st.signedIn) {
       if (remote()) return '<div class="sy-line">Not signed in.</div><div class="sy-line sy-dim">Sign-in is done on the PC, in its Sync card.</div>';
-      return '<div class="sy-line">Not signed in.</div>'
+      return `<div class="sy-line">Not signed in.</div>${st.refused ? `<div class="sy-line sy-bad">${esc(st.refused)} was turned away: only ${esc(st.onlyEmail || '')} can sync.</div>` : ''}`
         + `<div class="sy-btns"><button type="button" data-c="signin" class="sy-go"${busy || waiting ? ' disabled' : ''}>${waiting ? 'Waiting for the browser…' : 'Sign in with Google'}</button>`
         + `${waiting ? '<button type="button" data-c="signin">Open it again</button>' : ''}</div>`
-        + `<div class="sy-line sy-dim">${waiting ? 'Finish the sign-in in your browser; this card updates by itself.' : 'It opens in your default browser. Use a Google account on the sync members list.'}</div>`;
+        + `<div class="sy-line sy-dim">${waiting ? 'Finish the sign-in in your browser; this card updates by itself.' : `It opens in your default browser. ${st.onlyEmail ? `Sign in as ${esc(st.onlyEmail)}: no other account can sync here.` : 'Use a Google account on the sync members list.'}`}</div>`;
     }
     const member = st.member === true ? '<span class="uw-chip here">on the members list</span>'
       : st.member === false ? '<span class="uw-chip away">not on the members list</span>' : '<span class="uw-chip">membership not checked yet</span>';

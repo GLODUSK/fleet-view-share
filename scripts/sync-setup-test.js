@@ -96,6 +96,40 @@ const SECRET = 'sb_sec' + `ret_${'x'.repeat(22)}`;
     ok(setup.current().mode === 'sync' && setup.current().done && (await call(srv, 'GET', '/sync/setup')).body.ask === false, 'synced before: not asked');
     srv.close();
 
+    // private.json with Blackbox's address, key and the one account: read and checked
+    const pdir = path.join(tmp, 'priv');
+    fs.mkdirSync(pdir, { recursive: true });
+    fs.writeFileSync(path.join(pdir, 'private.json'), JSON.stringify({ syncName: 'Blackbox', syncEmail: ' Henry@Example.com ', syncUrl: `${PROJECT}/`, syncKey: PUB }));
+    let pv = readPrivate(pdir);
+    ok(pv && pv.syncEmail === 'henry@example.com' && pv.connect && pv.connect.url === PROJECT && pv.connect.key === PUB, `private.json: email, address and key read: ${JSON.stringify(pv && { ...pv, connect: !!pv.connect })}`);
+    fs.writeFileSync(path.join(pdir, 'private.json'), JSON.stringify({ syncName: 'Blackbox', syncEmail: 'nope', syncUrl: PROJECT, syncKey: SECRET }));
+    pv = readPrivate(pdir);
+    ok(pv && pv.syncEmail === null && pv.connect === null, 'private.json: a bad email and a secret key are not taken');
+    const mine = readPrivate(path.join(__dirname, '..'));
+    ok(/@/.test(mine.syncEmail || '') && !!mine.connect, 'private.json: this checkout has the one account and Blackbox\'s address and key');
+
+    // choosing sync with them connects by itself: no address or key asked
+    const adir = path.join(tmp, 'auto');
+    const autoSync = { enabled: () => !!S.readConfig(adir).config, status: async () => (S.readConfig(adir).config ? { configured: true, signedIn: false } : { configured: false }) };
+    const auto = createSyncSetup({ dataDir: adir, sync: autoSync, runner, private: { syncName: 'Blackbox', syncEmail: 'henry@example.com', connect: { url: PROJECT, key: PUB } } });
+    const srv3 = await serve(auto, remote);
+    r = await call(srv3, 'GET', '/sync/setup');
+    ok(r.body.ask === true && r.body.autoConnect === true && r.body.onlyEmail === 'henry@example.com' && !fs.existsSync(S.configPath(adir)), 'auto: nothing written before sync is chosen');
+    r = await call(srv3, 'POST', '/sync/mode', { mode: 'sync' });
+    const auto1 = S.readConfig(adir).config;
+    ok(r.code === 200 && auto1 && auto1.url === PROJECT && auto1.key === PUB, 'auto: choosing sync writes the config');
+    r = await call(srv3, 'GET', '/sync/setup');
+    ok(r.body.configured === true && !JSON.stringify(r.body).includes(PUB), 'auto: configured, and the key never comes back');
+    fs.rmSync(S.configPath(adir));
+    r = await call(srv3, 'GET', '/sync/setup');
+    ok(r.body.configured === true && !!S.readConfig(adir).config, 'auto: a config gone while syncing is written again on the next look');
+    remote.on = true;
+    fs.rmSync(S.configPath(adir));
+    await call(srv3, 'GET', '/sync/setup');
+    ok(!fs.existsSync(S.configPath(adir)), 'auto: a remote browser\'s look writes nothing');
+    remote.on = false;
+    srv3.close();
+
     // a friend's install (no private.json): never asked, and it can't set anything up
     sync.on = false;
     const friend = createSyncSetup({ dataDir: path.join(tmp, 'friend'), sync, runner, private: null });

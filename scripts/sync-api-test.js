@@ -476,6 +476,41 @@ async function main() {
   ok(events.length === nEv, 'unsubscribed: no more events');
   ok(!logs.some((l) => [...fake.access.keys(), ...fake.refresh.keys(), KEY].some((t) => l.includes(t))), 'no token or key in the log');
 
+  // ---------- onlyEmail: one Google account may sync (Henry's machines, private.json's syncEmail) ----------
+  {
+    const dir = path.join(T, 'only');
+    fs.mkdirSync(path.join(dir, 'sync'), { recursive: true });
+    fs.writeFileSync(S.configPath(dir), JSON.stringify({ url: fakeUrl, publishableKey: KEY }));
+    const onlyStore = memStore(), onlyLogs = [];
+    const only = S.createSync({ dataDir: dir, port: 4777, fetch: realFetch, store: onlyStore, allowLoopbackUrl: true, onlyEmail: 'Henry@Example.com', log: (t) => onlyLogs.push(t) });
+    fake.member = true;
+    const tryAs = async (api, email) => {
+      const r1 = await route(api, 'GET', '/sync/signin');
+      const loc = new URL(r1.headers.Location), back = new URL(loc.searchParams.get('redirect_to'));
+      const c = crypto.randomUUID();
+      fake.codes.set(c, { challenge: loc.searchParams.get('code_challenge'), uid: UID, email });
+      return { loc, res: await route(api, 'GET', `/sync/callback?state=${back.searchParams.get('state')}&code=${c}`) };
+    };
+    let t = await tryAs(only, 'other@example.com');
+    eq([t.loc.searchParams.get('login_hint'), t.loc.searchParams.get('prompt')], ['henry@example.com', null], 'only: Google is sent straight to the one account (login_hint, no picker)');
+    ok(t.res.statusCode === 400 && /Only henry@example\.com can sync/.test(t.res.body) && /other@example\.com/.test(t.res.body), `only: another account is turned away (${t.res.statusCode})`);
+    let st = await only.status();
+    ok(!st.signedIn && st.refused === 'other@example.com' && st.onlyEmail === 'henry@example.com' && onlyStore.peek() == null, `only: nothing kept, and status says who was turned away: ${JSON.stringify(st)}`);
+    ok(onlyLogs.some((l) => /turned away/.test(l)), 'only: the refusal is logged');
+    t = await tryAs(only, 'Henry@Example.com');
+    st = await only.status();
+    ok(t.res.statusCode === 200 && st.signedIn && st.email === 'henry@example.com' && !st.refused, `only: the one account signs in: ${JSON.stringify(st)}`);
+    // a kept sign-in for another account (made before the rule, or by the CLI) counts as signed out
+    const other = S.createSync({ dataDir: dir, port: 4777, fetch: realFetch, store: onlyStore, allowLoopbackUrl: true, onlyEmail: 'someone@example.com' });
+    st = await other.status();
+    ok(!st.signedIn && (await other.uid().catch(() => null)) == null, 'only: a kept sign-in for another account is not used');
+    // without onlyEmail (a friend's install): the account picker, as before
+    const free = S.createSync({ dataDir: dir, port: 4777, fetch: realFetch, store: memStore(), allowLoopbackUrl: true });
+    const r1 = await route(free, 'GET', '/sync/signin');
+    const loc = new URL(r1.headers.Location);
+    eq([loc.searchParams.get('login_hint'), loc.searchParams.get('prompt')], [null, 'select_account'], 'no onlyEmail: the account picker, no hint');
+  }
+
   // ---------- the Sync card's routes ----------
   {
     const C = require(path.join(ROOT, 'sync-crypto.js'));

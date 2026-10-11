@@ -6050,7 +6050,10 @@ const HK = HOUSEKEEPING.createHousekeeping({
 });
 // sync-api.js: the link to Supabase for conversation sync. Off (no network, no timers, /sync/* 404 but GET
 // /sync/status) unless this machine has <dataDir>/sync/config.json; the sign-in comes back to this port
-const SYNC = SYNC_API.createSync({ port: PORT, demo: DEMO, dataDir: LOG_DIR, log: (t) => logOnce(t, t) });
+// private.json (Henry's checkouts only): Blackbox's name, address and key, and the one Google account that may sync
+const SYNC_PRIVATE = DEMO ? null : SYNC_SETUP_JS.readPrivate(__dirname);
+const SYNC = SYNC_API.createSync({ port: PORT, demo: DEMO, dataDir: LOG_DIR, log: (t) => logOnce(t, t),
+  onlyEmail: SYNC_PRIVATE ? SYNC_PRIVATE.syncEmail : null });
 // relay.js: the phone relay (docs/phone.md). Off (no socket, no key read) unless sync is set up and signed in and a
 // phone is paired; it answers the phone through this server's own routes over loopback, and marks what Henry sent
 // from it with api.js's in-memory relay key (viaOf)
@@ -6069,7 +6072,7 @@ const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, lo
   mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC });
 // the start screen on Henry's machines (private.json): work locally or sync with Blackbox, then the steps of sync
 const SYNC_SETUP = SYNC_SETUP_JS.createSyncSetup({ dataDir: LOG_DIR, sync: DEMO ? null : SYNC, runner: SYNC_RUNNER, accountSync: ACCOUNT_SYNC,
-  accountsView: () => ACCTS.view(), private: DEMO ? null : undefined, log: (t) => logOnce(t, t) });
+  accountsView: () => ACCTS.view(), private: SYNC_PRIVATE, log: (t) => logOnce(t, t) });
 // /sync/move: "Continue here" brings a conversation another device has to this one (sync-run.js move, moveStatus,
 // cancelMove; sync-move.js does the work). This PC's page and approved remote browsers, as /sync/activity, and
 // never a request another site's page sent.

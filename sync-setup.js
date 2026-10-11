@@ -1,10 +1,11 @@
 // sync-setup.js: the first start on Henry's machines. Before the page shows anything it asks once: work locally, or
 // sync with Blackbox (Henry's sync project, docs/sync.md). Sync then walks through, in order: the project's address
-// and publishable key (once per machine), the Google sign-in, the sync passphrase, the Claude accounts (each letter
+// and publishable key (written by itself from private.json's syncUrl and syncKey; asked only when it has none), the
+// Google sign-in (only private.json's syncEmail, sync-api.js onlyEmail), the sync passphrase, the Claude accounts (each letter
 // signed in as the login Blackbox has for it; sync-accounts.js moves a login that is here under another letter by
 // itself), and the first pass of sync. Only then does the page open (web/setup.js draws it).
 //
-// Only Henry's own checkouts ask: they have private.json ({ "syncName": "Blackbox" }), which
+// Only Henry's own checkouts ask: they have private.json ({ syncName, syncEmail, syncUrl, syncKey }), which
 // scripts/publish-share.js leaves out of the public share repo. A friend's install has none, never asks, and its sync
 // stays off as before (no config, no network).
 //
@@ -33,11 +34,20 @@ const C = require(path.join(__dirname, 'sync-crypto.js'));
 const BODY_MAX = 4096;
 const MODES = ['sync', 'local'];
 
+// -> { syncName, syncEmail, connect: { url, key } | null } or null (no private.json: a friend's install)
+// syncEmail: the only Google account that may sync (sync-api.js onlyEmail); connect: Blackbox's address and its
+// publishable key, so the start screen connects by itself instead of asking for them
 function readPrivate(appDir) {
-  try {
-    const j = JSON.parse(fs.readFileSync(path.join(appDir, 'private.json'), 'utf8'));
-    return { syncName: typeof j.syncName === 'string' && j.syncName.trim() ? j.syncName.trim().slice(0, 40) : 'Blackbox' };
-  } catch { return null; }
+  let j;
+  try { j = JSON.parse(fs.readFileSync(path.join(appDir, 'private.json'), 'utf8')); } catch { return null; }
+  if (!j || typeof j !== 'object') return null;
+  const email = typeof j.syncEmail === 'string' ? j.syncEmail.trim().toLowerCase() : '';
+  const u = S.checkUrl(j.syncUrl), k = S.checkKey(j.syncKey);
+  return {
+    syncName: typeof j.syncName === 'string' && j.syncName.trim() ? j.syncName.trim().slice(0, 40) : 'Blackbox',
+    syncEmail: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null,
+    connect: u.ok && k.ok ? { url: u.url, key: k.key } : null,
+  };
 }
 
 function createSyncSetup(o = {}) {
@@ -72,15 +82,28 @@ function createSyncSetup(o = {}) {
     return { mode: null, done: false };
   }
 
+  // sync chosen on a machine with no config yet: write it from private.json (what /sync/connect does), so the start
+  // screen goes straight to the Google sign-in
+  function autoConnect() {
+    if (!priv || !priv.connect || !sync || sync.enabled() || current().mode !== 'sync') return false;
+    S.writeConfig(dataDir, priv.connect.url, priv.connect.key);
+    log(`sync: connected to ${priv.syncName} by itself (private.json)`);
+    if (runner) runner.check();
+    return true;
+  }
+
   async function view(remote) {
+    if (!remote) { try { autoConnect(); } catch (e) { log(`sync: could not connect by itself: ${e && e.message}`); } }
     const m = current();
     const ask = !!priv && !remote && (m.mode === null || (m.mode === 'sync' && !m.done));
     if (remote) return { ask: false, private: !!priv, mode: m.mode };
-    const out = { private: !!priv, name: priv ? priv.syncName : 'Blackbox', mode: m.mode, done: m.done, ask };
+    const out = { private: !!priv, name: priv ? priv.syncName : 'Blackbox', mode: m.mode, done: m.done, ask,
+      onlyEmail: priv ? priv.syncEmail : null, autoConnect: !!(priv && priv.connect) };
     if (!sync) return out;
     const st = await sync.status().catch(() => ({ configured: false }));
     Object.assign(out, {
       configured: !!st.configured, problem: st.problem || null, signedIn: !!st.signedIn, email: st.email || null,
+      refused: st.refused || null,
       member: st.member === undefined ? null : st.member, hasKey: st.configured ? C.hasKey(dir) : false,
     });
     out.accounts = accountSync ? accountSync.last() : null;
@@ -131,7 +154,7 @@ function createSyncSetup(o = {}) {
         if (!MODES.includes(mode)) return send(400, { ok: false, message: 'mode is sync or local' });
         writeMode(mode, mode === 'local');
         log(`sync: this machine ${mode === 'local' ? 'works locally' : `syncs with ${priv.syncName}`}`);
-        if (runner) runner.check();
+        if (!autoConnect() && runner) runner.check();
         return send(200, { ok: true, mode });
       }
       // /sync/connect

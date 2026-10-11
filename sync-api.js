@@ -8,6 +8,7 @@
 //
 // Routes (fleet-view.js sends /sync and /sync/* here):
 //   GET  /sync/status    { configured, signedIn, email, member, expiresAt }: nothing secret; remote browsers may read it
+//                        with onlyEmail set also { onlyEmail, refused? } (refused: the account just turned away)
 //   GET  /sync/signin    this PC only: a 302 to Supabase's Google sign-in (PKCE)
 //   GET  /sync/callback  this PC only: where Supabase sends the browser back (?state=&code=); a small page says how it went
 //   POST /sync/signout   this PC only
@@ -325,6 +326,11 @@ function createSync(opts = {}) {
   // sync-crypto.js needs this file, so it is loaded when first used, not at the top
   const crypt = () => require(path.join(__dirname, 'sync-crypto.js'));
   let settingKey = false; // one POST /sync/passphrase at a time
+  // onlyEmail (Henry's machines, private.json's syncEmail): the one Google account that may sign in here. Another one
+  // is refused at the callback and never kept, and a kept sign-in for another account counts as signed out.
+  const onlyEmail = typeof opts.onlyEmail === 'string' && opts.onlyEmail ? opts.onlyEmail.toLowerCase() : null;
+  const allowed = (s) => !onlyEmail || String(s.email || '').toLowerCase() === onlyEmail;
+  let refused = null; // { email, at }: the last sign-in turned away, for the start screen (10 minutes)
 
   // config.json is read again when it changes (stat only), so `setup` works without a restart
   let cfgSeen = null, cfg = null, cfgProblem = '';
@@ -354,7 +360,7 @@ function createSync(opts = {}) {
   // ---------- the session ----------
   // { url, uid, email, member, accessToken, refreshToken, expiresAt (ms) }; one for another project URL is ignored
   let session = null, sessionSeen, loading = null;
-  const forThis = (s, c) => (s && c && s.url === c.url ? s : null);
+  const forThis = (s, c) => (s && c && s.url === c.url && allowed(s) ? s : null);
   function parseSession(text) {
     if (!text) return null;
     let j;
@@ -598,8 +604,10 @@ function createSync(opts = {}) {
       redirect_to: `http://127.0.0.1:${port}/sync/callback?state=${state}`,
       code_challenge: pkceChallenge(verifier),
       code_challenge_method: 's256',
-      prompt: 'select_account',
     });
+    // Supabase passes these on to Google: straight to the one account allowed here, else the account picker
+    if (onlyEmail) q.set('login_hint', onlyEmail);
+    else q.set('prompt', 'select_account');
     return { location: `${c.url}/auth/v1/authorize?${q}`, state };
   }
   // q: the callback's query -> { ok, email, member } or { ok: false, message }
@@ -623,6 +631,13 @@ function createSync(opts = {}) {
     try { s = sessionFrom(await tokenCall(c, 'pkce', { auth_code: code, code_verifier: verifier }), c.url, null); } catch (err) {
       return no(`The sign-in was refused: ${err.message}`);
     }
+    if (!allowed(s)) {
+      refused = { email: s.email || '', at: now() };
+      try { await request(`${c.url}/auth/v1/logout?scope=local`, { method: 'POST', headers: authHeaders(c, s.accessToken), timeoutMs: 10e3 }); } catch {}
+      log(`sync: a sign-in as ${s.email || s.uid} was turned away (only ${onlyEmail} syncs here)`);
+      return no(`Only ${onlyEmail} can sync here, and this was ${s.email || 'another account'}. Go back to Fleet View and sign in again with ${onlyEmail}.`);
+    }
+    refused = null;
     s.member = await memberCheck(c, s.accessToken);
     try { await save(s); } catch (err) { return no(`Signed in, but the sign-in could not be saved: ${err.message}`); }
     emit('signed-in', s);
@@ -643,8 +658,10 @@ function createSync(opts = {}) {
     const c = config();
     if (!c) return cfgProblem ? { configured: false, problem: cfgProblem } : { configured: false };
     const s = await load().catch(() => null);
+    const turnedAway = !s && refused && now() - refused.at < STATE_MS ? refused.email || 'another account' : null;
     return {
       configured: true, signedIn: !!s, email: s ? s.email || null : null, member: s ? s.member : null,
+      ...(onlyEmail ? { onlyEmail } : {}), ...(turnedAway ? { refused: turnedAway } : {}),
       expiresAt: s && s.accessToken && s.expiresAt ? new Date(s.expiresAt).toISOString() : null,
     };
   }

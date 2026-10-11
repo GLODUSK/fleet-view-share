@@ -30,22 +30,33 @@ download side (S3) and the page's sync card (S5) are built on it. Its test is `n
 
 ## The start screen: work locally, or sync with Blackbox (Henry's machines)
 
-Henry's own checkouts have `private.json` (`{ "syncName": "Blackbox" }`; `scripts/publish-share.js` leaves it out of
-the share repo, so a friend's install never asks and its sync stays off). On them, before the page shows anything, a
-start screen (`web/setup.js`, `sync-setup.js`) asks once: **Work locally** or **Sync with Blackbox**. Sync then goes
-step by step, each one done before the next opens:
+Henry's own checkouts have `private.json` (`scripts/publish-share.js` leaves it out of the share repo, so a friend's
+install never asks and its sync stays off):
 
-1. **Connect**: Blackbox's address and its publishable key, once per machine (`POST /sync/connect`, the same checks
-   as `node sync-api.js setup`; a secret or `service_role` key is refused and the key never comes back to the page).
-2. **Google**: Sign in with Google, on the members list.
-3. **Passphrase**: chosen (twice) on the first machine, the same one on every other.
-4. **Claude accounts**: each letter Blackbox has (A and B, the only ones a conversations row knows) signed in here as
+```
+{ "syncName": "Blackbox", "syncEmail": "<the one Google account>", "syncUrl": "https://<project>.supabase.co",
+  "syncKey": "<the publishable key>" }
+```
+
+On them, before the page shows anything, a full-window start screen (`web/setup.js`, `sync-setup.js`) asks once, with
+two big cards: **Sync with Blackbox** or **Work locally**. Choosing sync writes `config.json` from `syncUrl` and
+`syncKey` by itself (the checks of `node sync-api.js setup`; a secret key in `private.json` is not taken), so no
+address or key is asked. Sync then goes step by step, each one done before the next opens (**Back** shows the two
+cards again):
+
+1. **Sign in**: **Continue with Google**, sent straight to `syncEmail` (Supabase passes `login_hint` on to Google).
+   Only that account may sign in on these machines (`sync-api.js` `onlyEmail`): another one is turned away at the
+   callback, nothing of it is kept, and the screen says which account it was. A sign-in kept from before for another
+   account counts as signed out. Without `syncEmail` (a friend's install) Google shows its account picker as before.
+   A `private.json` without `syncUrl`/`syncKey` still shows the old **Connect** step first (`POST /sync/connect`).
+2. **Passphrase**: chosen (twice) on the first machine, the same one on every other.
+3. **Claude accounts**: each letter Blackbox has (A and B, the only ones a conversations row knows) signed in here as
    the same login. A login that is here under another letter (the C an old bug handed out instead of A) is moved to
    its letter by itself; a letter holding a login Blackbox does not want there is moved aside to a free letter first,
    so no login is lost. A missing one has a **Sign in as ...** button (the claude.ai link and a field for its code
    too, for a browser signed in to another claude.ai account). Claude B's folder (`~/.claude`) is never renamed: when
    B is in the way the screen says what to do by hand.
-5. **First sync**: what is on Blackbox comes here and what is here goes up; the screen closes by itself when both
+4. **First sync**: what is on Blackbox comes here and what is here goes up; the screen closes by itself when both
    sides have looked once (**Open now** skips the wait).
 
 **Work locally instead** closes it at any step. The choice is kept in `<dataDir>/sync/mode.json`
@@ -122,7 +133,8 @@ The page tells it so.
 People who install Fleet View from the public share repo get no sync at all, and nothing they do can reach
 Henry's project:
 
-- The repo holds no project URL, no key and no project ref. The config lives outside the repo, in each
+- The share repo holds no project URL, no key and no project ref (Henry's own repo keeps them in `private.json`,
+  which never goes to the share repo). The config lives outside the repo, in each
   machine's own data folder, and only `setup` writes it. A friend's install has no config, so sync stays off.
   It makes no network call, starts no process or timer, and every `/sync` route except the status answers 404.
 - `scripts/publish-share.js` reads every outgoing file before a publish, and before a dry run too. It refuses
