@@ -32,9 +32,13 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
 - **conversations** `{ id, account, repo_id, rel_cwd, branch, title_enc, state, owner_device, lease_until, size,
   sha256, generation, updated_at }`:
   - `account`: `a` or `b` (the Claude account whose projects folder holds it).
-  - `rel_cwd`: the conversation's last `cwd` relative to its repo root, with `/`, `''` for the root. A conversation
-    in a worktree (`<root>/.claude/worktrees/<name>`) keeps that path as its `rel_cwd`; S3 lays it down in the main
-    checkout's slug folder for that path only if that folder exists on the device, else in the root's.
+  - `rel_cwd`: the folder the log lives in, relative to its repo root, with `/`, `''` for the root. That is the
+    folder the session started in (its slug folder's), which it resumes from: a session started in the root that
+    later moved into a worktree has `''`, not the worktree's path. The uploader takes the log's last `cwd`, or its
+    first, whichever has the slug folder's name; when neither does, or that folder is in no repo, the last `cwd`.
+    A conversation started in a worktree (`<root>/.claude/worktrees/<name>`) keeps that path as its `rel_cwd`; S3
+    lays it down in the main checkout's slug folder for that path only if that folder exists on the device, else in
+    the root's.
   - `branch`: the last `gitBranch` in the log, plain text.
   - `title_enc`: `sealText(title, key, 'title:<id>')`, the last `custom-title` (or `summary`) line's title.
   - `size`, `sha256`, `generation`: the `main` file's uploaded length, the hex sha256 of those bytes, its generation.
@@ -76,7 +80,9 @@ chunks.
 1. For every conversation row owned by another device (and `state = 'active'`; with `size` 0 the row has no `main`
    yet, and no `main` is laid down): find this device's root for its
    `repo_id` (repo_paths, or a scan of the repos Fleet View knows); none: skip it. Folder `X` = root + `rel_cwd`
-   (see above), slug of `X`, projects folder of `account`.
+   (see above), slug of `X`, projects folder of `account`. A conversation already on this device stays where its
+   log is: the slug folder it was laid down in, or any slug folder of that projects folder holding `<id>.jsonl`
+   (one this device started, that another one took over). It never gets a second copy.
 2. Read its chunk rows for the current generation, ordered by `seq`; check they cover `[0, size)` with no gap; fetch
    and open each, check each `sha256`, then the whole file's against the conversation row.
 3. Lay it down per the recipe: write `<id>.jsonl.part`, rename. If a local copy exists, replace it only when it is a

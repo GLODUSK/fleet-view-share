@@ -120,7 +120,7 @@ function hashRange(fd, end, fn) {
 }
 
 // ---------- where a conversation belongs ----------
-// A log's last cwd -> { origin, mainRoot, relCwd } | null. rel_cwd is relative to the main checkout (a worktree under
+// A log's cwd -> { origin, mainRoot, relCwd } | null. rel_cwd is relative to the main checkout (a worktree under
 // <root>/.claude/worktrees keeps that path), or to the worktree's own top when it lives outside the main checkout.
 function inside(base, p) {
   const rel = path.relative(base, p);
@@ -467,9 +467,11 @@ function createUploader(opts = {}) {
       return;
     }
 
-    // where it belongs
+    // where it belongs: the folder its log lives in (it resumes there), else its last cwd when that folder is in no repo
     const meta = C.lastMeta(c.mainPath);
-    const repo = meta.cwd ? await repoFor(meta.cwd) : null;
+    const home = C.homeCwd(c.mainPath, meta.cwd);
+    let repo = home ? await repoFor(home) : null;
+    if (!repo && meta.cwd && meta.cwd !== home) repo = await repoFor(meta.cwd);
     if (!repo) { pendingOf.delete(id); return skip(c, mem, 'noRepo', SKIP_RECHECK_MS); }
     const rid = await repoId(repo.origin);
     await repoPath(device, rid, repo.mainRoot);

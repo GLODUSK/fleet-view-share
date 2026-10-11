@@ -5,6 +5,7 @@
 // (sync-api.js createSync()), opens what it fetches with sync-crypto.js, and names things with sync-common.js.
 //
 //   createMaterializer({ api, dataDir, key, log, now, projects, roots, home, isOpen })
+//     (projects: [{ account, dir }], or a function giving it; ~/.claude for B and ~/.claude-a for A when not given)
 //     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), conflicts() }
 //
 // One scan:
@@ -15,8 +16,9 @@
 //      repos Fleet View knows (the roots option; ~/.fleet-view.json's added and remembered repos when it is not
 //      given) matched by origin, and then this device's repo_paths row is written. No checkout here: skipped.
 //   4. Folder X = that main checkout + rel_cwd ('..', an absolute path or a drive is refused). A rel_cwd whose folder
-//      is not on this machine (a worktree the other machine made) falls back to the root. Once laid down somewhere,
-//      a conversation stays in that slug folder while its file is there, so it never ends up in two.
+//      is not on this machine (a worktree the other machine made) falls back to the root. A conversation already on
+//      this machine (laid down before, or its log in any slug folder of the account's projects folder: one this
+//      machine started) stays in that slug folder while its file is there, so it never ends up in two.
 //   5. Skipped while a Claude Code process on this machine has it open (sessions/<pid>.json), or isOpen(id) says so.
 //   6. main: the chunk rows of the row's generation, ordered by seq, must cover [0, size) with no gap; each object's
 //      path must be the one objectPath() names for its row, it is opened with that path as the label (so an object
@@ -190,7 +192,8 @@ function createMaterializer(opts = {}) {
 
   // ---------- projects folders ----------
   function projectsFor(account) {
-    const raw = Array.isArray(opts.projects) ? opts.projects : [
+    const given = typeof opts.projects === 'function' ? opts.projects() : opts.projects;
+    const raw = Array.isArray(given) ? given : [
       { account: 'b', dir: path.join(home, '.claude', 'projects') },
       { account: 'a', dir: path.join(home, '.claude-a', 'projects') },
     ];
@@ -212,7 +215,27 @@ function createMaterializer(opts = {}) {
     return list.filter((r) => typeof r === 'string' && r && path.isAbsolute(r));
   }
   function newCtx(me) {
-    const ctx = { me, repos: null, repoPaths: null, local: null, roots: new Map() };
+    const ctx = { me, repos: null, repoPaths: null, local: null, roots: new Map(), logs: new Map() };
+    // projects folder + id -> the slug folder already holding <id>.jsonl, or null (each folder listed once a scan)
+    ctx.localDir = (projects, id) => {
+      const k = fold(projects);
+      if (!ctx.logs.has(k)) {
+        const ids = new Map();
+        let slugs = [];
+        try { slugs = fs.readdirSync(projects, { withFileTypes: true }); } catch {}
+        for (const s of slugs) {
+          if (!s.isDirectory()) continue;
+          let names = [];
+          try { names = fs.readdirSync(path.join(projects, s.name)); } catch { continue; }
+          for (const n of names) {
+            const m = /^([0-9a-f-]{36})\.jsonl$/i.exec(n);
+            if (m && !ids.has(m[1].toLowerCase())) ids.set(m[1].toLowerCase(), path.join(projects, s.name));
+          }
+        }
+        ctx.logs.set(k, ids);
+      }
+      return ctx.logs.get(k).get(id) || null;
+    };
     ctx.loadRepos = async () => {
       if (ctx.repos) return;
       const rows = await api.rest('GET', 'repos', { query: { select: 'id,origin' } });
@@ -365,9 +388,11 @@ function createMaterializer(opts = {}) {
     const projects = projectsFor(row.account);
     if (!projects) return { outcome: 'skip', reason: `no projects folder for account ${row.account}` };
     let slugDir = path.join(projects, C.slugOf(folder));
-    // once laid down, it stays where it is while its file is there (never two copies on one machine)
+    // once on this machine, it stays where it is while its file is there (never two copies on one machine): where it
+    // was laid down, else wherever its log already is (one this machine started, that another one took over)
     if (prev && typeof prev.dir === 'string' && inside(projects, prev.dir) && fold(path.dirname(prev.dir)) === fold(projects)
       && lstatOr(path.join(prev.dir, `${id}.jsonl`))) slugDir = path.resolve(prev.dir);
+    else if (!lstatOr(path.join(slugDir, `${id}.jsonl`))) slugDir = ctx.localDir(projects, id) || slugDir;
     if (!inside(projects, slugDir) || fold(path.dirname(slugDir)) !== fold(projects) || !noLinks(projects, [path.basename(slugDir), id])) {
       return { outcome: 'skip', reason: 'its folder would be outside the projects folder' };
     }

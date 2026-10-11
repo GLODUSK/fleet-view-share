@@ -11,6 +11,7 @@
 //                                      file keys and the 't/<id>/<b64>/<gen>/<seq>' object paths
 //   conversationFiles(slugDir, id, o)  [{ fileKey, path, appendOnly, size, mtimeMs }]: what of a conversation syncs
 //   lastMeta(mainPath, o)              { cwd, branch, title } from the end of a log
+//   homeCwd(mainPath, lastCwd, o)      the cwd of the folder a log lives in (where it resumes), or null
 //   ensureDevice(api, dataDir), touchDevice(api, id, o)   this machine's devices row
 //   isLive(id, o)                      true while a Claude Code process on this machine has that conversation open
 //   readState(file, fallback), writeState(file, obj)      the JSON state files under <dataDir>/sync
@@ -35,6 +36,7 @@ const GIT_TIMEOUT_MS = 10e3;
 const REPO_CACHE_MS = 10 * 60e3; // a folder's repo is asked again after this (a clone can appear, an origin change)
 const TAIL_START = 64 * 1024; // lastMeta reads this much of a log's end first, then four times as much, up to TAIL_CAP
 const TAIL_CAP = 4 * 1024 * 1024;
+const SLUG_MAX = 200; // Claude Code cuts a longer slug to this and adds a hash
 const TOUCH_MS = 5 * 60e3; // devices.last_seen_at at most this often
 const LIVE_CACHE_MS = 2e3; // isLive reads the pid files at most this often (the uploader asks per conversation)
 
@@ -273,6 +275,50 @@ function lastMeta(mainPath, o = {}) {
   return res;
 }
 
+// ---------- the folder a log lives in ----------
+// Claude Code keeps a conversation in the slug folder of the folder it started in. A later cd or worktree switch
+// changes the cwd its lines carry, not where the log is: a session started in a repo root that moved into
+// .claude/worktrees/x stays in the root's slug folder, and resumes from the root. -> of the log's last cwd (lastCwd,
+// lastMeta's) and its first one, the one whose slug is the name of the folder the log is in (ignoring case where
+// paths do; a slug past SLUG_MAX by its first SLUG_MAX characters), else null.
+function homeCwd(mainPath, lastCwd, o = {}) {
+  const want = P.foldCase(path.basename(path.dirname(path.resolve(mainPath))));
+  const fits = (cwd) => {
+    if (typeof cwd !== 'string' || !cwd) return false;
+    const s = P.foldCase(slugOf(cwd));
+    return s === want || (s.length > SLUG_MAX && want.startsWith(s.slice(0, SLUG_MAX)));
+  };
+  if (fits(lastCwd)) return lastCwd;
+  const first = firstCwd(mainPath, o);
+  return fits(first) ? first : null;
+}
+// The first line's cwd in a log: from its first 64 KiB, four times as much again while there is none, up to o.cap
+// (4 MiB) or the whole file. null when none was found or the file can't be read.
+function firstCwd(mainPath, o = {}) {
+  const cap = Number.isSafeInteger(o.cap) && o.cap > 0 ? o.cap : TAIL_CAP;
+  let fd;
+  try { fd = fs.openSync(mainPath, 'r'); } catch { return null; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    let want = Math.min(o.start || TAIL_START, cap);
+    for (;;) {
+      const len = Math.min(want, size), buf = Buffer.alloc(len);
+      let got = 0;
+      while (got < len) { const n = fs.readSync(fd, buf, got, len - got, got); if (!n) break; got += n; }
+      const lines = buf.subarray(0, got).toString('utf8').split('\n');
+      if (got < size) lines.pop(); // the last line is probably cut
+      for (const line of lines) {
+        if (!line || line.charCodeAt(0) !== 123 || !line.includes('"cwd"')) continue; // '{'
+        let d;
+        try { d = JSON.parse(line); } catch { continue; }
+        if (d && typeof d.cwd === 'string' && d.cwd) return d.cwd;
+      }
+      if (len >= size || len >= cap) return null;
+      want = Math.min(want * 4, cap);
+    }
+  } catch { return null; } finally { try { fs.closeSync(fd); } catch {} }
+}
+
 // ---------- state files ----------
 // A JSON state file -> its value, or fallback when it is missing or not valid JSON (never throws)
 function readState(file, fallback = null) {
@@ -376,6 +422,6 @@ const isLive = (id, o = {}) => typeof id === 'string' && !!id && liveIds(o).has(
 
 module.exports = {
   slugOf, projectsDirs, normalizeOrigin, repoOf, forgetRepos, checkFileKey, fileKeyB64, fileKeyFromB64, objectPath,
-  conversationFiles, lastMeta, ensureDevice, touchDevice, devicePath, isLive, pidAlive, readState, writeState,
+  conversationFiles, lastMeta, homeCwd, ensureDevice, touchDevice, devicePath, isLive, pidAlive, readState, writeState,
   SIDE_DIRS, TOUCH_MS,
 };

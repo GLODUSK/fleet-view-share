@@ -6,7 +6,8 @@
 // .claude/worktrees (root is the worktree, mainRoot the main checkout), a repo with no origin, and a plain folder.
 // File keys and object paths round-trip, and anything checkRel would refuse throws. conversationFiles lays out a
 // conversation's files per docs/sync-format.md and skips what it must. lastMeta finds the cwd, branch and title at
-// the end of a log, grows past a long tail, and falls back to custom-title.json. ensureDevice and touchDevice
+// the end of a log, grows past a long tail, and falls back to custom-title.json. homeCwd picks the first or last cwd
+// whose slug is the log's folder (a session that moved into a worktree resumes from where it started). ensureDevice and touchDevice
 // against a fake api object. isLive with a live pid, a dead one and a shared sessions folder. readState/writeState.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders or the network. Exit 0 = all pass.
@@ -154,6 +155,24 @@ async function main() {
   fs.writeFileSync(log, L({ type: 'user', cwd: '/x' }));
   eq(C.lastMeta(log), { cwd: '/x', branch: null, title: 't' }, 'lastMeta: title from custom-title.json');
   eq(C.lastMeta(path.join(T, 'missing.jsonl')), { cwd: null, branch: null, title: null }, 'lastMeta: no file');
+
+  // ---------- homeCwd ----------
+  const hlog = (cwd) => path.join(T, 'hc', C.slugOf(cwd), `${ID}.jsonl`);
+  const hwt = 'C:\\r\\.claude\\worktrees\\x';
+  write(hlog('C:\\r'), L({ type: 'summary', summary: 's' }) + L({ type: 'user', cwd: 'C:\\r' }) + L({ type: 'user', cwd: hwt }));
+  eq(C.homeCwd(hlog('C:\\r'), hwt), 'C:\\r', 'homeCwd: started in the root, moved into a worktree: the root (the first cwd)');
+  eq(C.homeCwd(hlog('C:\\r'), 'C:\\r'), 'C:\\r', 'homeCwd: the last cwd when it fits');
+  if (P.isWin) eq(C.homeCwd(hlog('C:\\r'), 'c:\\R'), 'c:\\R', 'homeCwd: case does not matter on Windows');
+  write(hlog('C:\\other'), L({ type: 'user', cwd: 'C:\\r' }) + L({ type: 'user', cwd: hwt }));
+  eq(C.homeCwd(hlog('C:\\other'), hwt), null, 'homeCwd: neither the first nor the last cwd fits: null');
+  write(hlog('/far'), pad + L({ type: 'user', cwd: '/far' }) + L({ type: 'user', cwd: '/far/x' }));
+  eq(C.homeCwd(hlog('/far'), '/far/x'), '/far', 'homeCwd: grows past a long head');
+  eq(C.homeCwd(hlog('/far'), '/far/x', { cap: 128 * 1024 }), null, 'homeCwd: stops at the cap');
+  const longCwd = `C:\\${'d'.repeat(250)}`;
+  const cutLog = path.join(T, 'hc', `${C.slugOf(longCwd).slice(0, 200)}-1a2b3c`, `${ID}.jsonl`); // Claude Code's cut + hash
+  write(cutLog, L({ type: 'user', cwd: longCwd }));
+  eq(C.homeCwd(cutLog, longCwd), longCwd, 'homeCwd: a long slug by its first 200 characters');
+  eq(C.homeCwd(path.join(T, 'hc', 'none', `${ID}.jsonl`), 'C:\\none'), null, 'homeCwd: no file, and the last cwd does not fit');
 
   // ---------- readState / writeState ----------
   const sf = path.join(T, 'data', 'sync', 'x-state.json');

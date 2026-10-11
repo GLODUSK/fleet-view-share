@@ -11,14 +11,14 @@
 //
 //   createSyncRunner({ sync, dataDir, log, projects, roots, intervalMs, checkMs, makeUploader, makeMaterializer })
 //     -> { start(), stop(), check(), status() }
-//   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }]; roots: () => [repo folders] (the
+//   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
+//   are one (by default each side's own: ~/.claude and ~/.claude-a); roots: () => [repo folders] (the
 //   repos Fleet View lists; the materializer matches a synced repo's origin against them). makeUploader and
 //   makeMaterializer are for tests; by default sync-up.js createUploader and sync-down.js createMaterializer.
 'use strict';
 const path = require('path');
 const S = require(path.join(__dirname, 'sync-api.js'));
 const C = require(path.join(__dirname, 'sync-crypto.js'));
-const COMMON = require(path.join(__dirname, 'sync-common.js'));
 
 const CHECK_MS = 60e3;
 const INTERVAL_MS = 5e3;
@@ -28,7 +28,8 @@ function createSyncRunner(o = {}) {
   if (!sync || typeof sync.enabled !== 'function') throw new Error('createSyncRunner needs the sync-api object');
   const dataDir = o.dataDir;
   const log = typeof o.log === 'function' ? o.log : () => {};
-  const projects = typeof o.projects === 'function' ? o.projects : () => COMMON.projectsDirs();
+  // never projectsDirs()'s list: it gives a folder two accounts share once, and the materializer then finds none for A
+  const projects = typeof o.projects === 'function' ? o.projects : null;
   const roots = typeof o.roots === 'function' ? o.roots : () => [];
   const intervalMs = o.intervalMs || INTERVAL_MS;
   const checkMs = o.checkMs || CHECK_MS;
@@ -72,7 +73,8 @@ function createSyncRunner(o = {}) {
     if (run && run.uid === uid && run.keyId === kid) return;
     if (run) await halt(run.uid !== uid ? 'another account signed in' : 'the sync key changed');
     if (stopped) return;
-    const args = { api: sync, dataDir, key, log, projects: () => projects() };
+    const args = { api: sync, dataDir, key, log };
+    if (projects) args.projects = () => projects();
     const up = makeUploader(args);
     const down = makeMaterializer({ ...args, roots: () => roots() });
     run = { uid, keyId: kid, up, down };

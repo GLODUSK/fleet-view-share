@@ -5,7 +5,8 @@
 // throwaway git repo with a GitHub origin, one with no origin and a plain folder:
 //   a first upload of several conversations with subagents/, tool-results/ and workflows/ (custom-title.json stays
 //   home); rows for the device, the repo, this device's path to it and each conversation (owner, rel_cwd, branch,
-//   size, sha256, generation; the title sealed); every object opens with openChunk(blob, key, object_path) and the
+//   size, sha256, generation; the title sealed; rel_cwd is the folder the log lives in, so a session that moved into a
+//   worktree is the root's, and one started outside any repo is its last cwd's); every object opens with openChunk(blob, key, object_path) and the
 //   chunks put every file back together byte for byte; appends become new chunks of the same generation; a
 //   half-written last line is held back until it ends; a rewrite (and a whole file that changed) becomes generation+1
 //   and the old generation's rows and objects are gone; a conversation another device owns is left alone, one with
@@ -229,10 +230,10 @@ async function main() {
   const slugDir = (proj, cwd) => path.join(proj, C.slugOf(cwd));
   const mainOf = (proj, cwd, id) => path.join(slugDir(proj, cwd), `${id}.jsonl`);
 
-  // A: repo root, account B, with side files and a title
+  // A: repo root, account B, with side files and a title; it ends in a worktree, and still resumes from the root
   const A = newId('A');
   const aMain = mainOf(projB, repo1, A), aSide = path.join(slugDir(projB, repo1), A);
-  write(aMain, lines(repo1, 20) + titleLine(A, 'Title A secret') + lines(repo1, 5));
+  write(aMain, lines(repo1, 20) + titleLine(A, 'Title A secret') + lines(path.join(repo1, '.claude', 'worktrees', 'wt'), 5));
   write(path.join(aSide, 'subagents', 'agent-a1.jsonl'), lines(repo1, 12));
   write(path.join(aSide, 'subagents', 'agent-a1.meta.json'), JSON.stringify({ agentType: 'general', note: MARK }));
   write(path.join(aSide, 'tool-results', 'tr1.txt'), `${MARK} a big tool output\n`.repeat(300));
@@ -247,6 +248,10 @@ async function main() {
   const Ac = newId('Ac');
   const acMain = mainOf(projA, gone, Ac);
   write(acMain, lines(gone, 8));
+  // Gm: started in a folder that is no repo, then moved into the repo's subfolder: the subfolder
+  const Gm = newId('Gm');
+  const gmMain = mainOf(projB, plain, Gm);
+  write(gmMain, lines(plain, 2) + lines(path.join(repo1, 'sub'), 3));
   // not synced: no origin, not a repo, no whole line yet
   const D = newId('D'), E = newId('E'), Em = newId('Em');
   write(mainOf(projB, repo2, D), lines(repo2, 3));
@@ -259,8 +264,9 @@ async function main() {
   const otherDev = crypto.randomUUID();
   db.devices.push({ id: otherDev, user_id: UID, name: 'mac', platform: 'darwin', created_at: '', last_seen_at: null });
   db.conversations.push({ ...DEFAULTS.conversations(), id: F, user_id: UID, account: 'b', owner_device: otherDev, size: 5, generation: 0 });
-  // make the mtimes tell the order: newest first is B, A, Ac
+  // make the mtimes tell the order: newest first is B, A, Ac, Gm
   const tNow = Date.now() / 1000;
+  fs.utimesSync(gmMain, tNow - 40, tNow - 40);
   fs.utimesSync(acMain, tNow - 30, tNow - 30);
   fs.utimesSync(aMain, tNow - 20, tNow - 20);
   fs.utimesSync(bMain, tNow - 10, tNow - 10);
@@ -323,8 +329,8 @@ async function main() {
   ok(db.devices.some((d) => d.id === dev && d.platform === process.platform), 'the device row is this machine');
   eq(db.repos.map((r) => r.origin), ['https://github.com/test/repo1'], 'one repos row, the origin normalized (no-origin and plain folders made none)');
   ok(db.repo_paths.length === 1 && db.repo_paths[0].device_id === dev && same(db.repo_paths[0].root, repo1), 'repo_paths: this device has the repo at its main checkout');
-  eq(db.conversations.map((r) => r.id).sort(), [A, Ac, B, F].map((x) => x.toLowerCase()).sort(), 'conversations rows: A, B, Ac (and F, already there); none for no origin, no repo or no whole line');
-  for (const [id, rel, acct] of [[A, '', 'b'], [B, 'sub', 'b'], [Ac, '.claude/worktrees/gone', 'a']]) {
+  eq(db.conversations.map((r) => r.id).sort(), [A, Ac, B, F, Gm].map((x) => x.toLowerCase()).sort(), 'conversations rows: A, B, Ac, Gm (and F, already there); none for no origin, no repo or no whole line');
+  for (const [id, rel, acct] of [[A, '', 'b'], [B, 'sub', 'b'], [Ac, '.claude/worktrees/gone', 'a'], [Gm, 'sub', 'b']]) {
     const c = conv(id);
     ok(c && c.owner_device === dev && c.rel_cwd === rel && c.account === acct && c.branch === 'feat/x' && c.state === 'active', `row ${short(id)}: owner, rel_cwd '${rel}', account ${acct}, branch (${JSON.stringify(c && { o: c.owner_device === dev, rel: c.rel_cwd, a: c.account, b: c.branch })})`);
   }
@@ -353,8 +359,8 @@ async function main() {
     const rel = k.slice(UID.length + 1);
     ok(db.chunks.some((r) => r.object_path === rel), `every object has its chunk row (${rel})`);
   }
-  eq(st.conversations, 7, 'status: seven conversations found');
-  eq([st.synced, st.skipped.foreign, st.skipped.noRepo, st.skipped.empty], [3, 1, 2, 1], 'status: 3 synced, 1 another device\'s, 2 with no repo, 1 with no whole line');
+  eq(st.conversations, 8, 'status: eight conversations found');
+  eq([st.synced, st.skipped.foreign, st.skipped.noRepo, st.skipped.empty], [4, 1, 2, 1], 'status: 4 synced, 1 another device\'s, 2 with no repo, 1 with no whole line');
   let s = upState();
   ok(s && s.v === 1 && s.device === dev && s.conversations[A.toLowerCase()] && s.conversations[A.toLowerCase()].files.main.offset === wholeLines(aMain).length, 'up-state.json remembers each file\'s uploaded end');
 

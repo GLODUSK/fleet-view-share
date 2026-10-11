@@ -10,7 +10,8 @@
 // down after the back-off); a conversation open on this machine is skipped; rows owned by this device or by nobody
 // are ignored; a rel_cwd with '..', a drive or an absolute path is refused; a subfolder rel_cwd gets its own slug and
 // a missing worktree falls back to the root; account A goes to ~/.claude-a; a repo with no checkout here is skipped;
-// a whole side file this side wrote is replaced by a new generation, a side file mid-upload waits; no .part file is
+// a log already on this machine in another slug folder grows there; a whole side file this side wrote is replaced
+// by a new generation, a side file mid-upload waits; no .part file is
 // ever left behind; status() holds no key or token; start/stop.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders or the real Supabase. Exit 0 = all pass.
@@ -386,6 +387,15 @@ async function main() {
   r = await m.scanOnce();
   ok(same(mainOf(inWt.id), Buffer.concat([inWt.main, wtMore])), 'sticky: the copy where it was laid down grew');
   ok(!fs.existsSync(mainOf(inWt.id, path.join(rootDir, '.claude', 'worktrees', 'not-here'))), 'sticky: no second copy in the worktree\'s slug folder');
+
+  // ---------- a log this machine already has, in another slug folder, stays there ----------
+  // (one this machine started in a folder above the repo, that another machine took over and carried on)
+  const p1 = Buffer.concat(logOf('t', 3)), p2 = Buffer.concat(logOf('t', 2, 'u'));
+  const mine = putConvo({ pieces: [p1, p2] });
+  write(mainOf(mine.id, plain), p1);
+  r = await m.scanOnce();
+  ok(same(mainOf(mine.id, plain), mine.main), 'already here: the local log grew where it is');
+  ok(!fs.existsSync(mainOf(mine.id)), 'already here: no second copy in the repo root\'s slug folder');
 
   eq(parts(), [], 'no .part file anywhere at the end');
   ok(!walk(T).some((f) => !inside(T, f)), 'nothing outside the temp folder');

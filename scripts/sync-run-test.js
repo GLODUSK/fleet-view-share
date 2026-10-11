@@ -37,7 +37,7 @@ function fakeLoop(kind, made) {
     const sync = fakeSync(), made = [], logs = [];
     const runner = createSyncRunner({
       sync, dataDir: dir, log: (t) => logs.push(t), projects: () => [], roots: () => ['X'], checkMs: 1e6,
-      makeUploader: (a) => { ok(a.key && a.key.length === 32 && a.api === sync, 'the uploader gets the key and the api'); return fakeLoop('up', made); },
+      makeUploader: (a) => { ok(a.key && a.key.length === 32 && a.api === sync && Array.isArray(a.projects()), 'the uploader gets the key, the api and the projects'); return fakeLoop('up', made); },
       makeMaterializer: (a) => { ok(a.roots()[0] === 'X', 'the materializer gets the roots'); return fakeLoop('down', made); },
     });
     await runner.start();
@@ -81,6 +81,16 @@ function fakeLoop(kind, made) {
     await runner.check();
     ok(made.length === 8, 'nothing starts after stop()');
     ok(!logs.some((t) => t.includes(key.toString('base64')) || t.includes(key.toString('hex'))), 'the key never reaches the log');
+    // no projects given: neither side gets one, so each keeps its own A and B folders (one shared folder stays both)
+    const seen = [];
+    const r2 = createSyncRunner({
+      sync, dataDir: dir, checkMs: 1e6,
+      makeUploader: (a) => { seen.push('projects' in a); return fakeLoop('up', []); },
+      makeMaterializer: (a) => { seen.push('projects' in a); return fakeLoop('down', []); },
+    });
+    await r2.start();
+    ok(seen.length === 2 && seen.every((x) => x === false), 'no projects given: neither side gets a projects option');
+    await r2.stop();
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
