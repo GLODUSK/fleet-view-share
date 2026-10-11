@@ -26,9 +26,17 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
   updates `last_seen_at` at most every 5 minutes, and S4's mover every 30 s (see [Moving a conversation](#moving-a-conversation-s4)).
 - **repos** `{ id, origin }`: one per GitHub repo, `origin` normalized: `https://github.com/<owner>/<repo>` in lower
   case, from `git remote get-url origin` (ssh `git@github.com:o/r.git`, `https://user@github.com/o/r.git` and
-  `.../o/r/` all become the same string). Other hosts: `https://<host>/<path>` the same way. No origin: not synced.
+  `.../o/r/` all become the same string). Other hosts: `https://<host>/<path>` the same way.
+  One more row, **the home row**, has the origin `home:` exactly (`sync-common.js` `HOME_ORIGIN`; no git remote
+  normalizes to it, and both sides read origins through `rowOrigin`). It stands for the user's home folder: a
+  conversation whose folder is under the home folder but in no repo with an origin (a bot's folder, a scratchpad, a
+  git repo with no origin, the home folder itself) syncs under it. Outside the home folder, or under its `AppData`,
+  `Library` or `.claude-<letter>` folder (`homeSkipped`), and in no repo with an origin: not synced. Nor while a
+  `.git` above the folder is one git could not read (a time-out, no git): it waits for git, never the home row. Down
+  here, a folder `homeSkipped` names, or one where a file sits, is never made: the home folder itself stands in.
 - **repo_paths** `{ device_id, repo_id, root }`: where this device has a checkout of that repo (the main checkout's
-  top-level folder, `git rev-parse --show-toplevel`). Written by whichever side finds it.
+  top-level folder, `git rev-parse --show-toplevel`). Written by whichever side finds it. For the home row, `root` is
+  that device's home folder (`os.homedir()`: `C:\Users\henry` on one, `/Users/henry` on another).
 - **conversations** `{ id, account, repo_id, rel_cwd, branch, title_enc, state, owner_device, lease_until, size,
   sha256, generation, updated_at }`:
   - `account`: `a` or `b` (the Claude account whose projects folder holds it).
@@ -39,6 +47,10 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
     A conversation started in a worktree (`<root>/.claude/worktrees/<name>`) keeps that path as its `rel_cwd`; S3
     lays it down in the main checkout's slug folder for that path only if that folder exists on the device, else in
     the root's.
+    A repo with an origin always wins: the home row is only the fallback when no repo with an origin holds the slug
+    folder's `cwd` or the last `cwd` (a checkout under home, `/Users/henry/code/fleet-view`, keeps its repo row).
+    Then `rel_cwd` is the slug folder's `cwd` (else the last `cwd`) relative to the home folder: `Bots/panchito`,
+    `Scratchpads/scratch-2026-10-11`, `''` for home itself. That folder need not exist when it goes up.
   - `branch`: the last `gitBranch` in the log, plain text.
   - `title_enc`: `sealText(title, key, 'title:<id>')`, the last `custom-title` (or `summary`) line's title.
   - `size`, `sha256`, `generation`: the `main` file's uploaded length, the hex sha256 of those bytes, its generation.
@@ -81,8 +93,11 @@ chunks.
 
 1. For every conversation row owned by another device (and `state = 'active'`; with `size` 0 the row has no `main`
    yet, and no `main` is laid down): find this device's root for its
-   `repo_id` (repo_paths, or a scan of the repos Fleet View knows); none: skip it. Folder `X` = root + `rel_cwd`
-   (see above), slug of `X`, projects folder of `account`. A conversation already on this device stays where its
+   `repo_id` (repo_paths, or a scan of the repos Fleet View knows; for the home row, this device's home folder);
+   none: skip it. Folder `X` = root + `rel_cwd` (see above; `..`, an absolute path or a drive is refused), slug of
+   `X`, projects folder of `account`. Under the home row, an `X` this device does not have is made (an empty folder,
+   logged once) once the log is laid down, so the conversation shows and resumes there; nothing is ever made outside
+   the home folder or through a link on the way. A conversation already on this device stays where its
    log is: the slug folder it was laid down in, or any slug folder of that projects folder holding `<id>.jsonl`
    (one this device started, that another one took over). It never gets a second copy.
 2. Read its chunk rows for the current generation, ordered by `seq`; check they cover `[0, size)` with no gap; fetch

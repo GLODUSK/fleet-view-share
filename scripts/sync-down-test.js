@@ -13,7 +13,9 @@
 // a log already on this machine in another slug folder grows there; a whole side file this side wrote is replaced
 // by a new generation, a side file mid-upload waits; a local log whose last line was cut off counts by its whole lines
 // (the row's bytes replace the cut line, with or without new lines after it; a whole line the row lacks is still a
-// conflict); no .part file is ever left behind; status() holds no key or token; start/stop.
+// conflict); the home row ('home:') lays a conversation down under this machine's home folder + rel_cwd, making a
+// folder it lacks (empty, logged once; also on pull), never through a link and never for a rel_cwd with '..' or an
+// absolute path, and writes this device's repo_paths row for it with the home folder; no .part file is ever left behind; status() holds no key or token; start/stop.
 // S4: pull(id) -> missing (no row, or not active) / mine (this device's) / done with dir and folder / same / conflict
 // (left alone, still saying where) / skip when open here; a back-off does not hold a pull up; a pull asked for while a
 // scan is mid-way runs right after that row, never at the same time; owners() with leaseUntil (a copy, empty before
@@ -59,12 +61,12 @@ const UID = crypto.randomUUID();
 const ACCESS = `at-${crypto.randomBytes(12).toString('hex')}`;
 const KEY = crypto.randomBytes(32);
 const OTHER = crypto.randomUUID(); // the machine that uploaded
-const REPO_ID = crypto.randomUUID(), REPO2_ID = crypto.randomUUID();
+const REPO_ID = crypto.randomUUID(), REPO2_ID = crypto.randomUUID(), HOME_ID = crypto.randomUUID();
 const ORIGIN = 'https://github.com/glodusk/proj';
 
 // ---------- the fake Supabase ----------
 const fake = {
-  tables: { devices: [{ id: OTHER, name: 'mac', platform: 'darwin' }], repos: [{ id: REPO_ID, origin: ORIGIN }, { id: REPO2_ID, origin: 'https://github.com/glodusk/elsewhere' }], repo_paths: [], conversations: [], chunks: [] },
+  tables: { devices: [{ id: OTHER, name: 'mac', platform: 'darwin' }], repos: [{ id: REPO_ID, origin: ORIGIN }, { id: REPO2_ID, origin: 'https://github.com/glodusk/elsewhere' }, { id: HOME_ID, origin: C.HOME_ORIGIN }], repo_paths: [], conversations: [], chunks: [] },
   objects: new Map(), calls: [], onGet: null,
 };
 const json = (res, code, o) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
@@ -438,6 +440,51 @@ async function main() {
   r = await m.scanOnce();
   ok(same(mainOf(mine.id, plain), mine.main), 'already here: the local log grew where it is');
   ok(!fs.existsSync(mainOf(mine.id)), 'already here: no second copy in the repo root\'s slug folder');
+
+  // ---------- the home row: under this machine's home folder ----------
+  const botDir = path.join(home, 'Bots', 'panchito'), scratch = path.join(home, 'Scratchpads', 'scratch-2026-10-11');
+  fs.mkdirSync(scratch, { recursive: true });
+  const atHome = putConvo({ pieces: [Buffer.concat(logOf('h0', 2))], repo_id: HOME_ID, rel_cwd: '' });
+  const inBot = putConvo({ pieces: [Buffer.concat(logOf('h1', 3))], repo_id: HOME_ID, rel_cwd: 'Bots/panchito' }); // no such folder here yet
+  const inScratch = putConvo({ pieces: [Buffer.concat(logOf('h2', 2))], repo_id: HOME_ID, rel_cwd: 'Scratchpads/scratch-2026-10-11' });
+  const outsideDir = path.join(T, 'outside'), elsewhere = path.join(T, 'elsewhere');
+  fs.mkdirSync(elsewhere, { recursive: true });
+  const link = path.join(home, 'linked');
+  fs.symlinkSync(elsewhere, link, 'junction'); // a link under home to a folder outside it
+  const viaLink = putConvo({ pieces: [Buffer.concat(logOf('h3', 2))], repo_id: HOME_ID, rel_cwd: 'linked/made-here' });
+  const homeRefused = ['..', '../outside', 'Bots/../../outside', '/etc', 'C:/Windows'].map((rel) => putConvo({ pieces: [Buffer.concat(logOf('h4', 2))], repo_id: HOME_ID, rel_cwd: rel }));
+  // an account's folder is never made (it would show as an account here), nor a folder where a file sits: home itself
+  const inAcct = putConvo({ pieces: [Buffer.concat(logOf('h6', 2))], repo_id: HOME_ID, rel_cwd: '.claude-c/x' });
+  fs.writeFileSync(path.join(home, 'a-file'), 'x');
+  const inFile = putConvo({ pieces: [Buffer.concat(logOf('h7', 2))], repo_id: HOME_ID, rel_cwd: 'a-file' });
+  r = await m.scanOnce();
+  ok(!fs.existsSync(path.join(home, '.claude-c')) && same(mainOf(inAcct.id, home), inAcct.main), 'home row: ~/.claude-<letter> is never made; laid down in the home folder\'s slug folder');
+  ok(fs.statSync(path.join(home, 'a-file')).isFile() && same(mainOf(inFile.id, home), inFile.main), 'home row: a file where its folder would be: laid down in the home folder\'s slug folder');
+  ok(same(mainOf(atHome.id, home), atHome.main), 'home row: rel_cwd \'\' is laid down in the home folder\'s slug folder');
+  ok(fs.statSync(botDir).isDirectory() && fs.readdirSync(botDir).length === 0, 'home row: a folder this machine lacks is made under home, empty');
+  ok(same(mainOf(inBot.id, botDir), inBot.main), 'home row: and the log is laid down in that folder\'s slug folder');
+  eq(logs.filter((t) => t.includes(inBot.id) && /made the folder it began in/.test(t)).length, 1, 'home row: making the folder is logged');
+  ok(same(mainOf(inScratch.id, scratch), inScratch.main), 'home row: a folder that is here is used as it is');
+  const hrp = fake.tables.repo_paths.find((x) => x.device_id === me && x.repo_id === HOME_ID);
+  ok(hrp && P_same(hrp.root, home), `home row: this device's repo_paths root for it is its home folder (${hrp && hrp.root})`);
+  ok(!fs.existsSync(path.join(elsewhere, 'made-here')) && !walk(T).some((f) => path.basename(f).startsWith(viaLink.id)), 'home row: no folder made through a link, nothing laid down');
+  ok(r.reasons['its folder would be made through a link'] === 1, 'home row: the link counted as a skip');
+  for (const c of homeRefused) ok(!walk(T).some((f) => path.basename(f).startsWith(c.id)), `home row: rel_cwd ${JSON.stringify(c.row.rel_cwd)} refused, nothing written`);
+  ok(!fs.existsSync(outsideDir), 'home row: nothing made outside the home folder');
+  eq(r.reasons['its rel_cwd is not a plain relative path'], refused.length + homeRefused.length, 'home row: every bad rel_cwd counted (the repo ones above still are)');
+  // more lines: it grows where it is, and the folder is not made (or logged) again
+  const botMore = Buffer.concat(logOf('h1', 2, 'more'));
+  putFile(inBot.id, 'main', 0, [botMore], 1, inBot.main.length);
+  Object.assign(inBot.row, { size: inBot.main.length + botMore.length, sha256: X.sha256(Buffer.concat([inBot.main, botMore])), updated_at: stamp() });
+  r = await m.scanOnce();
+  ok(same(mainOf(inBot.id, botDir), Buffer.concat([inBot.main, botMore])), 'home row: it grew where it was laid down');
+  eq(logs.filter((t) => t.includes(inBot.id) && /made the folder/.test(t)).length, 1, 'home row: the folder is made once');
+  // pull: the folder it resumes in, made
+  const pHome = putConvo({ pieces: [Buffer.concat(logOf('h5', 2))], repo_id: HOME_ID, rel_cwd: 'Bots/pulled' });
+  const pulledDir = path.join(home, 'Bots', 'pulled');
+  const ph = await m.pull(pHome.id);
+  ok(ph.outcome === 'done' && P_same(ph.folder, pulledDir) && fs.statSync(pulledDir).isDirectory() && same(mainOf(pHome.id, pulledDir), pHome.main), `home row: pull makes the folder and says it (${ph.outcome}, ${ph.folder})`);
+  fs.unlinkSync(link); // the link goes before the temp folder does
 
   // ---------- S4: pull, owners, only ----------
   const lower = (x) => String(x).toLowerCase();

@@ -2,7 +2,7 @@
 // The slug rule (the recipe's own example). projectsDirs in a made-up home: B and A, A's projects a link to B's
 // (returned once, as B's), a missing folder left out, other letters left out. normalizeOrigin: ssh, ssh://, https
 // with a user, .git and a trailing slash all give one GitHub string; another host keeps its path; local paths,
-// file:// and Windows drives give null. repoOf against a throwaway git repo with a fake origin and a worktree under
+// file:// and Windows drives give null; rowOrigin takes the home row's 'home:' exactly. repoOf against a throwaway git repo with a fake origin and a worktree under
 // .claude/worktrees (root is the worktree, mainRoot the main checkout), a repo with no origin, and a plain folder.
 // File keys and object paths round-trip, and anything checkRel would refuse throws. conversationFiles lays out a
 // conversation's files per docs/sync-format.md and skips what it must. lastMeta finds the cwd, branch and title at
@@ -68,6 +68,13 @@ async function main() {
   eq(C.normalizeOrigin('https://user@git.example.org:8443/a/b.git/'), 'https://git.example.org/a/b', 'origin: another host, user and port gone');
   for (const u of ['C:\\Github\\x', 'C:/Github/x', '/home/h/repo', '../repo', 'file:///C:/x', 'file:///home/x', '', null, 'https://github.com/', 'https://github.com/onlyowner', 'git@github.com:../x', 'ftp://h/x'])
     eq(C.normalizeOrigin(u), null, `origin: not a remote: ${u}`);
+  // the home row's pseudo origin: rowOrigin takes exactly it, and no git remote normalizes to it
+  eq(C.HOME_ORIGIN, 'home:', 'home origin: the marker');
+  eq(C.rowOrigin('home:'), 'home:', 'rowOrigin: the home marker as it is');
+  eq(C.normalizeOrigin('home:'), null, 'normalizeOrigin: the home marker is no remote');
+  eq(C.rowOrigin('git@github.com:GLODUSK/fleet-view.git'), GH, 'rowOrigin: a remote normalized');
+  for (const u of ['HOME:', ' home:', 'home', null]) eq(C.rowOrigin(u), null, `rowOrigin: not the marker: ${u}`);
+  ok(C.rowOrigin('home:/x') !== C.HOME_ORIGIN, 'rowOrigin: only the marker exactly is the home row');
 
   // ---------- repoOf ----------
   const g = (cwd, ...args) => cp.execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'init.defaultBranch=main', ...args], { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).toString();

@@ -2,7 +2,7 @@
 // Supabase, sealed, so the materializer (sync-down.js, S3) on another machine can lay them down again byte for byte.
 // docs/sync-format.md is the contract, and "The uploader's rules" there are what this file does:
 //
-//   createUploader({ api, dataDir, key, log, now, projects, chunkBytes, rateBytesPerSec, only })
+//   createUploader({ api, dataDir, key, log, now, projects, home, chunkBytes, rateBytesPerSec, only })
 //     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), flush(id), forget(id), hold(id), unhold(id), held() }
 //
 //   api              sync-api.js createSync()'s object (rest() and storage are all it uses)
@@ -10,6 +10,7 @@
 //   dataDir          Fleet View's data folder; this keeps <dataDir>/sync/up-state.json and device.json there
 //   projects         [{ account, dir }] (or a function giving them) to look in; sync-common.js projectsDirs() by
 //                    default, which reads ~/.claude and ~/.claude-a. Tests hand it a temp folder.
+//   home             the user's home folder (os.homedir() by default): what the home row stands for (step 1 below)
 //   log(text)        one line per thing worth knowing (no title, no transcript text, no token)
 //   now()            the clock for back-offs and row times (Date.now by default; tests move it)
 //   chunkBytes       plain bytes per chunk, at most 8 MiB (the default)
@@ -22,7 +23,8 @@
 //     so one conversation is never sent twice at once. Its back-off and skip are cleared, it is synced, the row is read
 //     again (size, sha256 and generation of 'main' as the row now says; owner_device lower-case), and while the log
 //     grew meanwhile it goes again (at most 3 more passes). Throws a SyncError when there is no log here ('missing'),
-//     no row, another device owns it ('foreign'), it is in no repo ('noRepo'), or the upload failed.
+//     no row, another device owns it ('foreign'), it is in no repo and not under the home folder ('noRepo'), or the
+//     upload failed.
 //   forget(id): its up-state.json entry, back-off, running sha256 and pending count go, so the next pass takes over
 //     what the server has (adopt); a pass of it under way stops before its next write ('forgotten').
 //   hold(id) / unhold(id) / held() -> ids: a held conversation is never uploaded by a scan (counted 'held'); a scan
@@ -32,11 +34,13 @@
 //
 // One scan (scanOnce): this machine's devices row (sync-common.js ensureDevice); every conversation in every projects
 // folder, newest log first, one at a time. For each one whose files changed since the last scan:
-//   1. Its last cwd (from the log's end) must be inside a git checkout with an origin on a host. A cwd that is gone
-//      (a removed worktree) counts by the nearest folder above it that is still there, as long as the checkout found
-//      holds the cwd. No origin, no checkout: not synced.
-//   2. The repos row for that origin and this device's repo_paths row (the main checkout's folder) are made when
-//      missing.
+//   1. The folder its log lives in (else its last cwd) must be inside a git checkout with an origin on a host. A cwd
+//      that is gone (a removed worktree) counts by the nearest folder above it that is still there, as long as the
+//      checkout found holds the cwd. When no checkout with an origin holds it (no repo, or a repo with no origin) but
+//      the folder is under the home folder, it goes under the home row (sync-common.js HOME_ORIGIN) with rel_cwd
+//      relative to home. Outside home and in no repo with an origin: not synced.
+//   2. The repos row for that origin and this device's repo_paths row (the main checkout's folder, or the home
+//      folder for the home row) are made when missing.
 //   3. The conversations row: made with owner_device = this device when there is none; one with no owner is claimed;
 //      one another device owns is left alone (S4 moves owners), and so is one that is not 'active'.
 //   4. Each file (sync-common.js conversationFiles: main, subagents/, tool-results/, workflows/):
@@ -62,6 +66,7 @@
 // scan goes on; a signed-out account ends the scan. Nothing here starts a process; the only timer is start()'s.
 'use strict';
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const P = require(path.join(__dirname, 'platform.js'));
@@ -92,7 +97,7 @@ const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // what a pass that sent nothing ends with -> the SyncError flush throws
 const NOT_SYNCED = {
   foreign: 'another device owns this conversation',
-  noRepo: 'this conversation is in no git checkout with an origin',
+  noRepo: 'this conversation is in no git checkout with an origin and not under the home folder',
   inactive: 'this conversation is not active on the server',
   empty: 'this conversation has no whole line yet',
   held: 'this conversation is held',
@@ -154,13 +159,13 @@ function hashRange(fd, end, fn) {
 function inside(base, p) {
   const rel = path.relative(base, p);
   if (rel === '') return '';
-  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  if (rel.split(path.sep)[0] === '..' || path.isAbsolute(rel)) return null; // a folder named '..x' is still inside
   return rel.split(path.sep).join('/');
 }
+// a path from another platform (a Mac log on Windows, or the other way) is not a folder here
+const ownPath = (cwd) => typeof cwd === 'string' && !!cwd && (P.isWin ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(cwd) : cwd.startsWith('/'));
 async function repoFor(cwd) {
-  if (typeof cwd !== 'string' || !cwd) return null;
-  // a path from another platform (a Mac log on Windows, or the other way) is not a folder here
-  if (P.isWin ? !/^(?:[A-Za-z]:[\\/]|\\\\)/.test(cwd) : !cwd.startsWith('/')) return null;
+  if (!ownPath(cwd)) return null;
   const want = path.resolve(cwd);
   let dir = want;
   while (!isDir(dir)) {
@@ -175,6 +180,31 @@ async function repoFor(cwd) {
   if (relCwd === null) return null;
   return { origin: r.origin, mainRoot: r.mainRoot, relCwd };
 }
+// The fallback when no repo with an origin holds a cwd: under the home folder -> the home row's { origin, mainRoot:
+// home, relCwd } (relative to home, '' for home itself); outside it -> null. The folder need not still be there: the
+// other machine makes it when it lays the conversation down. Not under the app data folders or a Claude account's
+// folder (sync-common.js homeSkipped): a chat a tool started there would only make that folder on the other machine.
+function homeFor(cwd, home) {
+  if (!ownPath(cwd) || typeof home !== 'string' || !home) return null;
+  const root = path.resolve(home);
+  const relCwd = inside(root, path.resolve(cwd));
+  if (relCwd === null || C.homeSkipped(relCwd)) return null;
+  return { origin: C.HOME_ORIGIN, mainRoot: root, relCwd };
+}
+// A git checkout git could not read (a time-out, no git on PATH, a refused folder) holds cwd: a .git in the nearest
+// folder still there or one above it, up to home, with repoOf giving nothing for it. Such a conversation is a repo's,
+// not home's: it waits for git rather than go under the home row (a repo with no origin, which git did read, is home's)
+async function gitUnread(cwd, home) {
+  let dir = path.resolve(cwd);
+  while (!isDir(dir)) { const up = path.dirname(dir); if (up === dir) return false; dir = up; }
+  for (;;) {
+    if (inside(home, dir) === null) return false;
+    if (fs.existsSync(path.join(dir, '.git'))) return !(await C.repoOf(dir));
+    const up = path.dirname(dir);
+    if (up === dir) return false;
+    dir = up;
+  }
+}
 
 function createUploader(opts = {}) {
   const api = opts.api;
@@ -188,11 +218,12 @@ function createUploader(opts = {}) {
   const chunkBytes = Number.isSafeInteger(opts.chunkBytes) && opts.chunkBytes > 0 ? Math.min(opts.chunkBytes, MAX_CHUNK) : MAX_CHUNK;
   const rate = Number(opts.rateBytesPerSec) > 0 ? Number(opts.rateBytesPerSec) : RATE;
   const statePath = path.join(S.syncDir(dataDir), 'up-state.json');
+  const userHome = typeof opts.home === 'string' && opts.home ? opts.home : os.homedir();
   const projectsList = () => {
     const p = opts.projects;
     if (typeof p === 'function') return C.projectsDirs({ dirs: p() });
     if (Array.isArray(p)) return C.projectsDirs({ dirs: p });
-    return C.projectsDirs(p && typeof p === 'object' ? p : {});
+    return C.projectsDirs(p && typeof p === 'object' ? p : { home: userHome });
   };
 
   // ---------- memory ----------
@@ -542,9 +573,15 @@ function createUploader(opts = {}) {
 
     // where it belongs: the folder its log lives in (it resumes there), else its last cwd when that folder is in no repo
     const meta = C.lastMeta(c.mainPath);
-    const home = C.homeCwd(c.mainPath, meta.cwd);
-    let repo = home ? await repoFor(home) : null;
-    if (!repo && meta.cwd && meta.cwd !== home) repo = await repoFor(meta.cwd);
+    const startCwd = C.homeCwd(c.mainPath, meta.cwd);
+    let repo = startCwd ? await repoFor(startCwd) : null;
+    if (!repo && meta.cwd && meta.cwd !== startCwd) repo = await repoFor(meta.cwd);
+    // no repo with an origin holds either: the home row, by the folder it started in, when that is under home (a
+    // repo checkout under home has its own row and was found above)
+    if (!repo) {
+      const h = homeFor(startCwd || meta.cwd, userHome);
+      if (h && !(await gitUnread(startCwd || meta.cwd, h.mainRoot))) repo = h;
+    }
     if (!repo) { pendingOf.delete(id); return skip(c, mem, 'noRepo', SKIP_RECHECK_MS, tally); }
     const rid = await repoId(repo.origin);
 
@@ -824,4 +861,4 @@ function createUploader(opts = {}) {
   return { scanOnce, start, stop, status, flush, forget, hold, unhold, held };
 }
 
-module.exports = { createUploader, repoFor, lastLineEnd, MAX_CHUNK, TAIL_BYTES };
+module.exports = { createUploader, repoFor, homeFor, lastLineEnd, MAX_CHUNK, TAIL_BYTES };

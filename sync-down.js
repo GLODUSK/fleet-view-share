@@ -28,9 +28,12 @@
 //      and sha256 are what down-state.json says was laid down costs nothing more.
 //   3. Its repo: this device's repo_paths row for the repo when that folder still has the repo's origin, else the
 //      repos Fleet View knows (the roots option; ~/.fleet-view.json's added and remembered repos when it is not
-//      given) matched by origin, and then this device's repo_paths row is written. No checkout here: skipped.
+//      given) matched by origin, and then this device's repo_paths row is written. No checkout here: skipped. The home
+//      row (sync-common.js HOME_ORIGIN) is this machine's home folder (the home option), always there.
 //   4. Folder X = that main checkout + rel_cwd ('..', an absolute path or a drive is refused). A rel_cwd whose folder
-//      is not on this machine (a worktree the other machine made) falls back to the root. A conversation already on
+//      is not on this machine (a worktree the other machine made) falls back to the root. Under the home row a missing
+//      folder is made instead (empty, logged once), so the conversation shows and resumes where it began; never
+//      through a link, never outside home. A conversation already on
 //      this machine (laid down before, or its log in any slug folder of the account's projects folder: one this
 //      machine started) stays in that slug folder while its file is there, so it never ends up in two.
 //   5. Skipped while a Claude Code process on this machine has it open (sessions/<pid>.json), or isOpen(id) says so.
@@ -294,7 +297,7 @@ function createMaterializer(opts = {}) {
     ctx.loadRepos = async () => {
       if (ctx.repos) return;
       const rows = await api.rest('GET', 'repos', { query: { select: 'id,origin' } });
-      ctx.repos = new Map((Array.isArray(rows) ? rows : []).filter((r) => r && typeof r.id === 'string').map((r) => [r.id.toLowerCase(), C.normalizeOrigin(r.origin) || null]));
+      ctx.repos = new Map((Array.isArray(rows) ? rows : []).filter((r) => r && typeof r.id === 'string').map((r) => [r.id.toLowerCase(), C.rowOrigin(r.origin) || null]));
       const paths = await api.rest('GET', 'repo_paths', { query: { select: 'repo_id,root', device_id: `eq.${me}` } });
       ctx.repoPaths = new Map((Array.isArray(paths) ? paths : []).filter((r) => r && typeof r.repo_id === 'string' && typeof r.root === 'string').map((r) => [r.repo_id.toLowerCase(), r.root]));
     };
@@ -309,7 +312,7 @@ function createMaterializer(opts = {}) {
     };
     return ctx;
   }
-  // repo id -> this device's main checkout of it, or null
+  // repo id -> this device's main checkout of it (this machine's home folder for the home row), or null
   async function rootFor(repoId, ctx) {
     if (typeof repoId !== 'string' || !UUID_RE.test(repoId)) return null;
     const id = repoId.toLowerCase();
@@ -317,25 +320,31 @@ function createMaterializer(opts = {}) {
     await ctx.loadRepos();
     const origin = ctx.repos.get(id);
     let found = null;
-    if (origin) {
-      const saved = ctx.repoPaths.get(id);
+    const saved = ctx.repoPaths.get(id);
+    const remember = async () => {
+      if (!found || (saved && fold(saved) === fold(found))) return;
+      try {
+        await api.rest('POST', 'repo_paths', { body: { device_id: ctx.me, repo_id: id, root: found }, prefer: 'resolution=merge-duplicates,return=minimal' });
+        ctx.repoPaths.set(id, found);
+      } catch (e) { log(`sync-down: this device's repo_paths row could not be written: ${e.message}`); }
+    };
+    if (origin === C.HOME_ORIGIN) {
+      found = isDir(home) ? path.resolve(home) : null;
+      await remember();
+    } else if (origin) {
       if (saved && path.isAbsolute(saved) && isDir(saved)) {
         const r = await C.repoOf(saved);
         if (r && r.origin === origin) found = r.mainRoot;
       }
       if (!found) {
         found = (await ctx.localOrigins()).get(origin) || null;
-        if (found && (!saved || fold(saved) !== fold(found))) {
-          try {
-            await api.rest('POST', 'repo_paths', { body: { device_id: ctx.me, repo_id: id, root: found }, prefer: 'resolution=merge-duplicates,return=minimal' });
-            ctx.repoPaths.set(id, found);
-          } catch (e) { log(`sync-down: this device's repo_paths row could not be written: ${e.message}`); }
-        }
+        await remember();
       }
     }
     ctx.roots.set(id, found);
     return found;
   }
+  const isHomeRow = (repoId, ctx) => typeof repoId === 'string' && !!ctx.repos && ctx.repos.get(repoId.toLowerCase()) === C.HOME_ORIGIN;
 
   // ---------- laying one file down ----------
   // job: { id, file, target, chunks, size, sha256 (whole file, or null), whole, known ({ size, sha256 } this side laid
@@ -448,7 +457,19 @@ function createMaterializer(opts = {}) {
     const parts = relParts(row.rel_cwd);
     if (!parts) return { outcome: 'skip', reason: 'its rel_cwd is not a plain relative path' };
     let folder = parts.length ? path.resolve(root, ...parts) : path.resolve(root);
-    if (parts.length && (!inside(root, folder) || !isDir(folder))) folder = path.resolve(root);
+    let makeFolder = false;
+    if (isHomeRow(row.repo_id, ctx)) {
+      // under home: the folder it began in, made when this machine has none (never through a link, never outside home)
+      if (parts.length && !inside(root, folder)) return { outcome: 'skip', reason: 'its rel_cwd is not a plain relative path' };
+      // a folder never made here (an app data or Claude account folder, sync-common.js homeSkipped), or something not
+      // a folder in its place: the home folder itself, as a repo row falls back to its root
+      const inWay = () => { try { fs.lstatSync(folder); return true; } catch { return false; } };
+      if (!isDir(folder) && (C.homeSkipped(row.rel_cwd) || inWay())) folder = path.resolve(root);
+      else if (!isDir(folder)) {
+        if (!noLinks(root, parts)) return { outcome: 'skip', reason: 'its folder would be made through a link', folder };
+        makeFolder = true;
+      }
+    } else if (parts.length && (!inside(root, folder) || !isDir(folder))) folder = path.resolve(root);
     const projects = projectsFor(row.account);
     if (!projects) return { outcome: 'skip', reason: `no projects folder for account ${row.account}`, folder };
     let slugDir = path.join(projects, C.slugOf(folder));
@@ -498,6 +519,12 @@ function createMaterializer(opts = {}) {
       if (r.result === 'conflict') return conflict('main', mainTarget, r);
       if (r.result === 'written') { wroteAny = true; stampLastEntry(mainTarget); }
       files.main = { generation: gen, size, sha256: row.sha256 };
+      // its log is here now: the folder it resumes in too (the links looked at again right before)
+      if (makeFolder && !isDir(folder)) {
+        if (!noLinks(root, parts)) fail('its folder would be made through a link', 'bad_path');
+        fs.mkdirSync(folder, { recursive: true });
+        log(`sync-down: ${id}: made the folder it began in (${folder}), which this machine did not have`);
+      }
     }
     // side files, from their newest generation
     for (const [file, gens] of byFile) {

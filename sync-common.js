@@ -6,6 +6,8 @@
 //   slugOf(folder)                     Claude Code's slug folder name for a folder (docs/sync-move-recipe.md)
 //   projectsDirs(o)                    [{ account: 'a' | 'b', dir }]: the Claude projects folders on this machine
 //   normalizeOrigin(url)               a git remote as the repos row keeps it, or null
+//   HOME_ORIGIN, rowOrigin(s)          the home folder's pseudo origin; a repos row's origin as both sides read it
+//   homeSkipped(relCwd)                a home-row rel_cwd that is never synced (AppData, Library, ~/.claude-<letter>)
 //   repoOf(folder)                     -> Promise<{ root, mainRoot, origin } | null>, from git, cached per folder
 //   checkFileKey(k), fileKeyB64(k), fileKeyFromB64(s), objectPath(id, fileKey, generation, seq)
 //                                      file keys and the 't/<id>/<b64>/<gen>/<seq>' object paths
@@ -112,6 +114,17 @@ function normalizeOrigin(url) {
   }
   return `https://${host}/${parts.join('/')}`;
 }
+
+// The repos row that stands for the user's home folder: a conversation under the home folder that is in no repo with
+// an origin (a bot, a scratchpad, the home folder itself) syncs under it, and each device's repo_paths root for it is
+// its own home (docs/sync-format.md). It is not a URL, so no git remote ever normalizes to it.
+const HOME_ORIGIN = 'home:';
+// A repos row's origin as both sides read it: the home marker exactly, else normalizeOrigin's string, else null
+const rowOrigin = (s) => (s === HOME_ORIGIN ? HOME_ORIGIN : normalizeOrigin(s));
+// A rel_cwd under the home row that is never synced, nor made on another machine: the app data folders (Windows'
+// AppData, the Mac's Library), and a Claude account's own folder (~/.claude-<letter>: one made on the other machine
+// would show there as an account)
+const homeSkipped = (relCwd) => /^(?:appdata|library|\.claude-[a-z])$/i.test(String(relCwd || '').split(/[\\/]/)[0]);
 
 // git in a folder (no shell, no window, a time limit) -> its trimmed stdout, or null when it fails
 function git(cwd, args) {
@@ -432,7 +445,7 @@ function liveIds(o = {}) {
 const isLive = (id, o = {}) => typeof id === 'string' && !!id && liveIds(o).has(id.toLowerCase());
 
 module.exports = {
-  slugOf, projectsDirs, normalizeOrigin, repoOf, forgetRepos, checkFileKey, fileKeyB64, fileKeyFromB64, objectPath,
+  slugOf, projectsDirs, normalizeOrigin, HOME_ORIGIN, rowOrigin, homeSkipped, repoOf, forgetRepos, checkFileKey, fileKeyB64, fileKeyFromB64, objectPath,
   conversationFiles, lastMeta, homeCwd, ensureDevice, touchDevice, devicePath, isLive, pidAlive, readState, writeState,
   SIDE_DIRS, TOUCH_MS,
 };

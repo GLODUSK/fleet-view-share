@@ -18,6 +18,10 @@
 //   and a hold that comes mid-pass stops it before its next write; forget(id) makes the next pass take over what the
 //   server has (and stops a pass under way); only(id); a row whose owner changes mid-upload ends the pass ('lost')
 //   with no chunk written after.
+// The home row: in a made-up home folder, a chat in the home folder itself, one in a bot's folder with no git, one in
+//   a git repo with no origin and one in a folder that is gone all go up under the 'home:' repos row with rel_cwd
+//   relative to home (and this device's repo_paths root for it is the home folder); a checkout with an origin under
+//   home, and a chat that began under home and went into it, keep the repo's row; a chat outside home stays unsynced.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders, the real Supabase or claude.
 // Exit 0 = all pass.
@@ -281,7 +285,7 @@ async function main() {
   let clock = Date.now();
   const logs = [];
   const make = (o = {}) => U.createUploader({
-    api, dataDir, key: SYNC_KEY, log: (t) => logs.push(t), now: () => clock,
+    api, dataDir, key: SYNC_KEY, log: (t) => logs.push(t), now: () => clock, home, // the repos and plain folders are outside it
     projects: [{ account: 'b', dir: projB }, { account: 'a', dir: projA }], chunkBytes: 4096, rateBytesPerSec: 50 * 1024 * 1024, ...o,
   });
   let threw = null;
@@ -525,6 +529,64 @@ async function main() {
   ok(took >= ((total - first) / rate) * 1000 - 30, `it kept to rateBytesPerSec (${took} ms for ${total} sealed bytes at ${rate}/s)`);
   sameAsLocal(H, 'main', hMain, true, 'H');
   void sentBefore;
+
+  // ---------- the home row: under the home folder, in no repo with an origin ----------
+  const uh = path.join(T, 'uhome'); // a made-up home folder, with its own projects folder
+  const projH = path.join(uh, '.claude', 'projects');
+  fs.mkdirSync(projH, { recursive: true });
+  const bots = path.join(uh, 'Bots', 'panchito'); // a bot's folder: no git at all
+  fs.mkdirSync(bots, { recursive: true });
+  const local = path.join(uh, 'code', 'local'); // a git repo with no origin
+  fs.mkdirSync(local, { recursive: true });
+  g(local, 'init', '-q');
+  const hRepo = path.join(uh, 'code', 'home-repo'); // a checkout with an origin, under home: keeps its repo row
+  fs.mkdirSync(hRepo, { recursive: true });
+  g(hRepo, 'init', '-q');
+  g(hRepo, 'remote', 'add', 'origin', 'https://github.com/Test/Home-Repo.git');
+  const scratchGone = path.join(uh, 'Scratchpads', 'scratch-gone'); // not on disk any more
+  const outside = path.join(T, 'outside'); // not under home, no repo: stays unsynced
+  const broken = path.join(uh, 'code', 'broken', 'sub'); // under a .git that git cannot read: a repo's, it waits for git
+  fs.mkdirSync(broken, { recursive: true });
+  fs.writeFileSync(path.join(uh, 'code', 'broken', '.git'), 'gitdir: ' + path.join(T, 'no-such-gitdir'));
+  fs.mkdirSync(outside, { recursive: true });
+  const hHome = newId('hHome'), hBot = newId('hBot'), hLocal = newId('hLocal'), hGone = newId('hGone'), hRep = newId('hRep'), hOut = newId('hOut'), hMoved = newId('hMoved'), hBroken = newId('hBroken');
+  write(mainOf(projH, broken, hBroken), lines(broken, 3));
+  write(mainOf(projH, uh, hHome), lines(uh, 3));
+  write(mainOf(projH, bots, hBot), lines(bots, 4));
+  write(mainOf(projH, local, hLocal), lines(local, 3));
+  write(mainOf(projH, scratchGone, hGone), lines(scratchGone, 3));
+  write(mainOf(projH, hRepo, hRep), lines(hRepo, 3));
+  write(mainOf(projH, outside, hOut), lines(outside, 3));
+  write(mainOf(projH, bots, hMoved), lines(bots, 2) + lines(hRepo, 2)); // began in the bot's folder, went into the repo
+  eq(U.homeFor(uh, uh), { origin: C.HOME_ORIGIN, mainRoot: path.resolve(uh), relCwd: '' }, 'homeFor: the home folder itself is rel_cwd \'\'');
+  eq(U.homeFor(path.join(uh, '..x', 'y'), uh) && U.homeFor(path.join(uh, '..x', 'y'), uh).relCwd, '..x/y', 'homeFor: a folder named ..x is still under home');
+  eq([U.homeFor(outside, uh), U.homeFor(T, uh), U.homeFor(P.isWin ? '/Users/henry/x' : 'C:\\Users\\henry\\x', uh)], [null, null, null], 'homeFor: outside home, above it, or another platform\'s path: none');
+  eq([U.homeFor(path.join(uh, 'AppData', 'Local', 'Temp', 'x'), uh), U.homeFor(path.join(uh, 'Library', 'Caches'), uh)], [null, null], 'homeFor: not under AppData or Library');
+  eq(U.homeFor(path.join(uh, 'AppDataX'), uh) && U.homeFor(path.join(uh, 'AppDataX'), uh).relCwd, 'AppDataX', 'homeFor: a folder merely starting with AppData is synced');
+  eq([U.homeFor(path.join(uh, '.claude-a'), uh), U.homeFor(path.join(uh, '.claude-c', 'projects'), uh)], [null, null], 'homeFor: not in a Claude account\'s folder');
+  ok(U.homeFor(path.join(uh, '.claude-handoffs'), uh) && U.homeFor(path.join(uh, '.claude'), uh), 'homeFor: .claude and .claude-handoffs are synced');
+  const upH = U.createUploader({ api, dataDir, key: SYNC_KEY, home: uh, projects: [{ account: 'b', dir: projH }], chunkBytes: 4096, rateBytesPerSec: 50 * 1024 * 1024 });
+  await upH.scanOnce();
+  const hst = upH.status();
+  eq(hst.lastError, null, 'home: no error');
+  eq([hst.synced, hst.skipped.noRepo], [6, 2], 'home: six synced; the one outside home, and the one under a .git git could not read, skipped as noRepo');
+  const homeRow = db.repos.find((r) => r.origin === C.HOME_ORIGIN);
+  const hRepoRow = db.repos.find((r) => r.origin === 'https://github.com/test/home-repo');
+  ok(!!homeRow && db.repos.filter((r) => r.origin === C.HOME_ORIGIN).length === 1, 'home: one repos row with the home origin');
+  ok(!!hRepoRow, 'home: the checkout under home got its own repos row');
+  const hp = homeRow && db.repo_paths.find((r) => r.device_id === dev && r.repo_id === homeRow.id);
+  ok(hp && same(hp.root, uh), `home: this device's repo_paths root for the home row is its home folder (${hp && hp.root})`);
+  for (const [id, rid, rel, what] of [[hHome, homeRow, '', 'the home folder itself'], [hBot, homeRow, 'Bots/panchito', 'a bot\'s folder with no git'],
+    [hLocal, homeRow, 'code/local', 'a git repo with no origin'], [hGone, homeRow, 'Scratchpads/scratch-gone', 'a folder that is gone'],
+    [hRep, hRepoRow, '', 'a repo with an origin under home'], [hMoved, hRepoRow, '', 'one that began under home and went into a repo']]) {
+    const c = conv(id);
+    ok(c && rid && c.repo_id === rid.id && c.rel_cwd === rel && c.owner_device === dev, `home: ${what}: ${rid === homeRow ? 'the home row' : 'its repo row'}, rel_cwd '${rel}' (${JSON.stringify(c && { home: c.repo_id === (homeRow && homeRow.id), rel: c.rel_cwd })})`);
+  }
+  ok(!conv(hOut), 'home: a chat outside home in no repo has no row');
+  ok(!conv(hBroken), 'home: a chat under a .git git could not read has no row (never the home row)');
+  sameAsLocal(hBot, 'main', mainOf(projH, bots, hBot), true, 'home: the bot\'s chat');
+  rowMatchesMain(hBot, mainOf(projH, bots, hBot), 'home: the bot\'s chat');
+  await upH.stop();
 }
 
 function short(id) { return String(id).slice(0, 8); }
