@@ -34,12 +34,23 @@
 // Preview tab (web/preview.js): a local dev server's page in a frame of the main window. Only for such frames,
 // X-Frame-Options and CSP frame-ancestors are dropped (previewFrames), where they go is sent to the page, and
 // fleetDesktop.capture takes a PNG of the frame's area for "Screenshot to chat".
+//
+// macOS: vibrancy instead of acrylic, under the usual title bar (the page's header makes room for buttons on the
+// right only, not for the traffic lights on the left); the application menu (app, Edit, View, Window: without it
+// Cmd+C, Cmd+V and Cmd+Q do nothing); a menu bar icon (a template image) with the tray's menu; the dock icon.
+// Closing the window hides it there, as remote access does on Windows: the dock icon, the menu bar icon or
+// opening Fleet View again brings it back, and Cmd+Q quits the window app (the host and its sessions keep running).
+// "Quit everything" moves sessions to Terminal windows (iTerm2 with FV_TERMINAL=iterm).
 'use strict';
 const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, powerSaveBlocker, screen, shell, webFrameMain } = require('electron');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const P = require('../platform');
+// macOS: an app started from Finder or the dock gets a bare PATH; the server, the session host and their sessions
+// need the login shell's (claude, node, git, gh)
+P.applyLoginPath();
 const backdrop = require('./backdrop');
 const { iconPng } = require('./icon');
 const termHost = require('./terms');
@@ -67,7 +78,8 @@ if (!START.searchParams.has('glass')) START.searchParams.set('glass', '1');
 // maximize and close buttons float over its right end. titlebar=overlay tells the page to make room for them
 // (a window started by an older main.js keeps its frame, and the page then keeps its usual header).
 const TITLEBAR_H = 44;
-START.searchParams.set('titlebar', 'overlay');
+// macOS keeps its own title bar (see the top of this file)
+if (!P.isMac) START.searchParams.set('titlebar', 'overlay');
 const ORIGIN = START.origin;
 const PORT = Number(START.port);
 const MINI_URL = `${ORIGIN}/mini.html?glass=1`;
@@ -76,7 +88,7 @@ const PRELOAD = path.join(__dirname, 'preload.js');
 // one window per port: its own profile folder, which is also what the single-instance lock is keyed on,
 // so a test server on another port never takes over the real window
 app.setName('Fleet View');
-app.setPath('userData', path.join(process.env.LOCALAPPDATA || app.getPath('appData'), 'fleet-view', `electron-${PORT}`));
+app.setPath('userData', path.join(P.dataDir(), `electron-${PORT}`));
 if (process.platform === 'win32') app.setAppUserModelId('FleetView');
 // The taskbar names and draws a window from its app details, else from the exe it runs (electron.exe:
 // "Electron" and Electron's logo on hover and on right-click). These give it Fleet View's name and icon,
@@ -143,11 +155,14 @@ if (!app.requestSingleInstanceLock()) {
       const parent = win && !win.isDestroyed() ? win : null;
       const s = n === 1 ? '' : 's';
       const wt = hasWt();
-      const move = wt ? 'Move to Terminal tabs' : 'Move to console windows';
+      // macOS and Linux: a terminal window each (Terminal.app, or iTerm2 with FV_TERMINAL=iterm)
+      const term = P.isMac ? (String(process.env.FV_TERMINAL || '').toLowerCase() === 'iterm' ? 'iTerm2' : 'Terminal') : 'a terminal';
+      const move = !P.isWin ? `Move to ${P.isMac ? term : 'terminal'} windows` : wt ? 'Move to Terminal tabs' : 'Move to console windows';
       const box = {
         type: busy ? 'warning' : 'question', title: 'Fleet View', noLink: true,
-        message: `${n} Claude session${s} ${n === 1 ? 'is' : 'are'} open. Keep working in ${wt ? 'Windows Terminal' : 'console windows'}, or close ${n === 1 ? 'it' : 'them'}?`,
-        detail: (wt ? `${move}: ${n === 1 ? 'it opens' : 'they open'} again in one Terminal window, a tab each in its account's colour.\n`
+        message: `${n} Claude session${s} ${n === 1 ? 'is' : 'are'} open. Keep working in ${!P.isWin ? term : wt ? 'Windows Terminal' : 'console windows'}, or close ${n === 1 ? 'it' : 'them'}?`,
+        detail: (!P.isWin ? `${move}: ${n === 1 ? 'it opens' : 'each opens'} again in a window of its own.\n`
+          : wt ? `${move}: ${n === 1 ? 'it opens' : 'they open'} again in one Terminal window, a tab each in its account's colour.\n`
           : `${move}: ${n === 1 ? 'it opens' : 'each opens'} again in a console window of its own.\n`)
           + `Close them: ${n === 1 ? 'it opens' : 'they open'} again the next time Fleet View starts.`
           + (busy ? `\n\n${busy} ${busy === 1 ? 'is' : 'are'} mid-turn and will say ${busy === 1 ? 'it was' : 'they were'} interrupted.` : ''),
@@ -186,6 +201,7 @@ if (!app.requestSingleInstanceLock()) {
   // Windows Terminal is there: wt on PATH (Windows 11 has it; Windows 10 only once it was installed)
   let wtFound = null;
   function hasWt() {
+    if (!P.isWin) return false;
     if (wtFound === null) {
       try { wtFound = require('child_process').spawnSync('where.exe', ['wt'], { windowsHide: true, stdio: 'ignore', timeout: 5000 }).status === 0; } catch { wtFound = false; }
     }
@@ -236,7 +252,21 @@ if (!app.requestSingleInstanceLock()) {
       c.on('error', (e) => { hlog(`move to Terminal: ${e.message}; console windows instead`); resolve(consoles(xs)); });
       c.unref();
     });
-    return (hasWt() ? tabs(items) : consoles(items)).then((moved) => {
+    // macOS and Linux: one terminal window each, one after another (platform.js openTerminal)
+    const windows = async (xs) => {
+      const ok = [];
+      for (const x of xs) {
+        // the folder as the host had it (any characters are fine in sh quotes), when it is still there
+        const raw = (list.find((y) => y.id === x.id) || {}).cwd;
+        let cwd = os.homedir();
+        try { if (typeof raw === 'string' && raw && fs.statSync(raw).isDirectory()) cwd = raw; } catch {}
+        const r = await P.openTerminal({ cwd, cmd: P.resumeCommand(x.id, x.L, null), title: `Claude ${x.L}` });
+        if (r.ok) ok.push(x); else hlog(`move to a terminal: ${x.id.slice(0, 8)}: ${r.message}`);
+      }
+      if (ok.length) hlog(`move to terminal windows: ${ok.length} window(s): ${short(ok)}`);
+      return ok;
+    };
+    return (!P.isWin ? windows(items) : hasWt() ? tabs(items) : consoles(items)).then((moved) => {
       if (!moved.length) return;
       const f = path.join(termHost.dataDir(), 'sessions.json');
       try {
@@ -470,19 +500,24 @@ if (!app.requestSingleInstanceLock()) {
 
   function create() {
     nativeTheme.themeSource = 'dark'; // dark title bar and scrollbars
-    Menu.setApplicationMenu(null);
+    Menu.setApplicationMenu(P.isMac ? macMenu() : null);
     const want = startBounds();
     win = new BrowserWindow({
       ...(want || { width: 1400, height: 900 }),
       minWidth: 480, minHeight: 320,
       title: 'Fleet View',
-      icon: ICON,
       backgroundColor: '#00000000',
-      backgroundMaterial: 'acrylic', // Windows 11 22H2 and later; older Windows shows the page's own dark tint
-      autoHideMenuBar: true,
-      // frameless look, native buttons: the page's header is the drag region (-webkit-app-region: drag)
-      titleBarStyle: 'hidden',
-      titleBarOverlay: { color: '#00000000', symbolColor: '#c9cee6', height: TITLEBAR_H },
+      ...(P.isMac ? {
+        // the usual title bar; vibrancy behind the page, kept while the window is inactive
+        vibrancy: 'under-window', visualEffectState: 'active',
+      } : {
+        icon: ICON,
+        backgroundMaterial: 'acrylic', // Windows 11 22H2 and later; older Windows shows the page's own dark tint
+        autoHideMenuBar: true,
+        // frameless look, native buttons: the page's header is the drag region (-webkit-app-region: drag)
+        titleBarStyle: 'hidden',
+        titleBarOverlay: { color: '#00000000', symbolColor: '#c9cee6', height: TITLEBAR_H },
+      }),
       show: false,
       webPreferences,
     });
@@ -531,13 +566,14 @@ if (!app.requestSingleInstanceLock()) {
     let closing = false;
     win.on('close', (e) => {
       if (closing) return;
-      if (remoteOn && !quitting && !quittingAll && !HIDDEN) {
+      // macOS: closing a window never quits an app there; Cmd+Q (before-quit) does
+      if ((remoteOn || P.isMac) && !quitting && !quittingAll && !HIDDEN) {
         e.preventDefault();
         clearTimeout(saveTimer);
         if (!placing) saveMain();
         if (local.miniOpen || miniIsOpen()) closeMini();
         win.hide();
-        hlog('window closed while remote access is on: hidden to the tray, Fleet View keeps running');
+        hlog(remoteOn ? 'window closed while remote access is on: hidden to the tray, Fleet View keeps running' : 'window closed: hidden, Fleet View keeps running (the dock or menu bar icon brings it back)');
         return;
       }
       closing = true;
@@ -622,13 +658,12 @@ if (!app.requestSingleInstanceLock()) {
       ...want,
       minWidth: MINI_MIN_W, minHeight: MINI_MIN_H,
       title: 'Fleet View mini',
-      icon: ICON,
       frame: false,
       resizable: true, maximizable: false, minimizable: false, fullscreenable: false,
       skipTaskbar: true,
       alwaysOnTop: true,
       backgroundColor: '#00000000',
-      backgroundMaterial: 'acrylic',
+      ...(P.isMac ? { vibrancy: 'hud', visualEffectState: 'active', roundedCorners: true } : { icon: ICON, backgroundMaterial: 'acrylic' }),
       show: false,
       webPreferences,
     });
@@ -719,9 +754,11 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.on('fv:hide-mini', (e) => { if (senderOk(e)) hideMini(); });
   // an update changed desktop/ (updater.js): start the window again the way the Start menu does, after this one
   // quits (the server goes with it and comes back with the new one; the sessions live in the host and stay)
+  // (macOS and Linux: the same binary with the same arguments)
   ipcMain.on('fv:relaunch', (e) => {
     if (!senderOk(e)) return;
-    app.relaunch({ execPath: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe'), args: ['//nologo', FV_VBS] });
+    if (P.isWin) app.relaunch({ execPath: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe'), args: ['//nologo', FV_VBS] });
+    else app.relaunch();
     app.quit();
   });
   ipcMain.on('fv:show-main', (e, id) => { if (senderOk(e)) showMain(typeof id === 'string' ? id : null); });
@@ -832,23 +869,54 @@ if (!app.requestSingleInstanceLock()) {
 
   // ---------- tray ----------
   // the app icon (icon.js) without its tile, at 16 px and the larger sizes scaled screens use
+  // macOS: a template image (black and alpha, 16 px and 32 px for Retina), which the menu bar tints itself
   function trayImage() {
+    if (P.isMac) {
+      const t = nativeImage.createFromBuffer(iconPng(16, { tile: false, template: true }), { scaleFactor: 1 });
+      t.addRepresentation({ scaleFactor: 2, dataURL: `data:image/png;base64,${iconPng(32, { tile: false, template: true }).toString('base64')}` });
+      t.setTemplateImage(true);
+      return t;
+    }
     const img = nativeImage.createFromBuffer(iconPng(16, { tile: false }), { scaleFactor: 1 });
     for (const [scale, size] of [[1.25, 20], [1.5, 24], [2, 32]]) {
       img.addRepresentation({ scaleFactor: scale, dataURL: `data:image/png;base64,${iconPng(size, { tile: false }).toString('base64')}` });
     }
     return img;
   }
-  function updateTrayMenu() {
-    if (!tray || tray.isDestroyed()) return;
-    tray.setContextMenu(Menu.buildFromTemplate([
+  // the tray's items; macOS: also the Fleet View menu's (macMenu), where closing only hides the window
+  function trayItems() {
+    return [
       { label: 'Show Fleet View', click: () => showMain(null) },
       { label: 'Mini view', type: 'checkbox', checked: !!local.miniOpen && miniIsOpen(), click: (item) => (item.checked ? openMini() : hideMini()) },
       { type: 'separator' },
       ...(remoteOn ? [{ label: 'Remote access is on (closing hides the window)', enabled: false }, { type: 'separator' }] : []),
-      { label: remoteOn ? 'Hide window (Fleet View keeps running)' : 'Close window (sessions keep running)', click: () => { if (win && !win.isDestroyed()) win.close(); else app.quit(); } },
+      { label: remoteOn || P.isMac ? 'Hide window (Fleet View keeps running)' : 'Close window (sessions keep running)', click: () => { if (win && !win.isDestroyed()) win.close(); else app.quit(); } },
+      ...(P.isMac ? [{ label: 'Quit the window (sessions keep running)', click: () => app.quit() }] : []),
       { label: 'Quit everything', click: () => { quitEverything(); } },
-    ]));
+    ];
+  }
+  function updateTrayMenu() {
+    if (P.isMac && !HIDDEN) Menu.setApplicationMenu(macMenu());
+    if (!tray || tray.isDestroyed()) return;
+    tray.setContextMenu(Menu.buildFromTemplate(trayItems()));
+  }
+  // macOS: the application menu. The standard roles give Cmd+C / Cmd+V / Cmd+A in the page, Cmd+W, Cmd+M and
+  // Cmd+Q; reload is Cmd+Shift+R as Ctrl+Shift+R on Windows (the page keeps Ctrl+R)
+  function macMenu() {
+    return Menu.buildFromTemplate([
+      { label: 'Fleet View', submenu: [
+        { role: 'about' }, { type: 'separator' },
+        ...trayItems().filter((x) => x.type !== 'separator' && x.enabled !== false && !/^Show |^Quit the window/.test(x.label)),
+        { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' },
+        { role: 'quit', label: 'Quit Fleet View (sessions keep running)' },
+      ] },
+      { role: 'editMenu' },
+      { label: 'View', submenu: [
+        { role: 'reload', accelerator: 'CmdOrCtrl+Shift+R' }, { role: 'toggleDevTools', accelerator: 'Alt+CmdOrCtrl+I' }, { type: 'separator' },
+        { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' },
+      ] },
+      { role: 'windowMenu' },
+    ]);
   }
   let tipTimer = null, lastCounts = null;
   // the tooltip: the server's live and waiting counts, and the sessions the host runs for this window
@@ -920,7 +988,7 @@ if (!app.requestSingleInstanceLock()) {
       win, terms, mode: SELFTEST, log,
       quit: () => app.quit(),
       dialogAbort: () => dialogAbort,
-      children: (pid) => { try { const v = JSON.parse(ps(`@(Get-CimInstance Win32_Process -Filter 'ParentProcessId=${Number(pid)}' | Select-Object @{n='pid';e={$_.ProcessId}},@{n='name';e={$_.Name}}) | ConvertTo-Json -Compress`) || '[]'); return Array.isArray(v) ? v : [v]; } catch { return []; } },
+      children: (pid) => { if (!P.isWin) return (P.processesSync() || []).filter((x) => x.ppid === Number(pid)).map((x) => ({ pid: x.pid, name: path.basename(x.command.split(' ')[0] || '') })); try { const v = JSON.parse(ps(`@(Get-CimInstance Win32_Process -Filter 'ParentProcessId=${Number(pid)}' | Select-Object @{n='pid';e={$_.ProcessId}},@{n='name';e={$_.Name}}) | ConvertTo-Json -Compress`) || '[]'); return Array.isArray(v) ? v : [v]; } catch { return []; } },
       hidden: HIDDEN,
       miniPage: async () => {
         openMini();
@@ -963,6 +1031,15 @@ if (!app.requestSingleInstanceLock()) {
     // the session host first, so the page finds its sessions on its first list()
     const ok = await terms.connect(10000);
     if (!ok) hlog('could not reach the session host; live sessions are off until it answers');
+    // macOS: Fleet View's icon in the dock (an unpackaged Electron shows Electron's); a click on it brings the
+    // window back
+    if (P.isMac && app.dock) {
+      if (HIDDEN) { try { app.dock.hide(); } catch {} } else {
+        try { app.dock.setIcon(nativeImage.createFromBuffer(iconPng(256))); } catch {}
+      }
+      // (not before its first show, which places it first)
+      app.on('activate', () => { if (!HIDDEN && !placing && win && !win.isDestroyed() && !win.isVisible()) showMain(null); });
+    }
     create();
     win.webContents.once('did-finish-load', () => setTimeout(restoreSelection, 1500));
     if (HIDDEN) global.__fvTest = { quitEverything, closeWindow: () => { if (win && !win.isDestroyed()) win.close(); }, terms };
@@ -983,5 +1060,6 @@ if (!app.requestSingleInstanceLock()) {
     });
     ask();
   });
+  // (macOS: the main window only hides until the app quits, so this comes only while it quits)
   app.on('window-all-closed', () => app.quit());
 }

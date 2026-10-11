@@ -42,6 +42,42 @@ It works with one Claude account (`~/.claude`); every other login in a `~/.claud
 
 For the maintainer: the share repo is published from the main repo with `node scripts/publish-share.js` (below: **Update available**).
 
+## Install on a Mac
+
+macOS 12 or newer, on Apple Silicon or Intel, with [Node.js 18+](https://nodejs.org) (`brew install node`, or the installer from nodejs.org), git (`xcode-select --install` gives it, or `brew install git`) and [Claude Code](https://docs.claude.com/en/docs/claude-code) logged in with your own Claude account (`npm i -g @anthropic-ai/claude-code`, then run `claude` once and log in). In Terminal:
+
+```
+curl -fsSL https://raw.githubusercontent.com/GLODUSK/fleet-view-share/main/install.sh | bash
+```
+
+`install.sh` clones the share repo into `~/fleet-view` (another folder: `FLEET_VIEW_DIR=~/somewhere` before `bash`), then:
+
+- checks Node 18+, git and Claude Code (a missing Node or git stops it with how to get them; a missing Claude Code is only a warning);
+- installs the desktop window's packages (`npm ci` in `desktop/`: Electron and node-pty). node-pty comes ready-built for Apple Silicon and Intel; if it ever has to compile, it needs Apple's command line tools, and the installer says `xcode-select --install`;
+- builds **Fleet View.app** in `~/Applications` (`scripts/mac-app.sh`): Electron renamed and given Fleet View's name, icon and id (`com.glodusk.fleetview`), signed ad hoc on this Mac. It is made here, not downloaded, so macOS never quarantines it or asks about an unidentified developer. It runs the code in `~/fleet-view` as it is, so an update needs no new app; only a new Electron does, and the installer and **Update now** build it again by themselves;
+- links `fleet-view` and `fv` into `~/.local/bin` and adds that folder to your PATH in `~/.zprofile` (and `~/.bash_profile` when you have one), once, under a `# Fleet View` line;
+- installs the `fleet-view` skill and the `fleet-view-feed` mod into every Claude login (`~/.claude` and each `~/.claude-<letter>`), as on Windows;
+- opens Fleet View.
+
+Add `--start-at-login` to open it at login (a LaunchAgent, `~/Library/LaunchAgents/com.glodusk.fleetview.plist`; `--remove-start-at-login` undoes it), `--no-launch` to not open it, `--no-desktop` to skip Electron and use a Chrome or Edge app window. Pass them through the pipe with `| bash -s -- --start-at-login`, or run `bash ~/fleet-view/install.sh --start-at-login` later. It needs no sudo and sends nothing anywhere: Fleet View reads your own `~/.claude` and serves its page on `127.0.0.1` only. It has no cloud account or sync of its own, so nothing of the person who shared it with you is reachable from your install.
+
+Open it from Applications, Spotlight or the dock, or type `fleet-view` in a new terminal (`fleet-view --tui` runs the terminal view in place; with options, such as `fleet-view --port 4800`, it runs the server in that terminal, restarting it after an update or a crash the way `fleet-view.cmd` does). On a Mac:
+
+- The window has vibrancy behind the page and the usual title bar; the menu bar has Fleet View, Edit, View and Window menus, and a menu bar icon (a diamond that follows light and dark mode) has the tray's menu.
+- Closing the window (Cmd+W, the red button) only hides it; the dock icon, the menu bar icon or opening Fleet View again brings it back. Cmd+Q quits the window; the session host and its sessions keep running, and the next start picks them up. **Quit everything** in the menu bar icon's menu moves the sessions to Terminal windows, or ends them.
+- **Open in terminal** and **Quit everything** use Terminal; with `FV_TERMINAL=iterm` (in the environment Fleet View starts from) they use iTerm2. The first time, macOS asks whether Fleet View may control Terminal.
+- Fleet View's own files live in `~/Library/Application Support/fleet-view` (there, not `%LOCALAPPDATA%\fleet-view`: `server.log`, `update.json`, the `api-token` that `fv` reads, and the session host's socket `host-<user>.sock`).
+- An app started from Finder or the dock gets a bare PATH, so Fleet View asks your login shell for its PATH once (Homebrew, npm, `~/.local/bin`) and starts claude, git and gh with it.
+- Claude Code keeps a Mac's sign-in in the Keychain; Fleet View reads it there for the Usage card's weekly limit.
+
+**To update**, use **Update now** in Fleet View, or run `bash ~/fleet-view/install.sh` again. As on Windows, the server and page reload by themselves and a changed `desktop/` restarts the window. When the update changes the desktop packages, **Update now** does it all from the button: it pulls, then a background `install.sh --after-update` quits Fleet View (the open sessions are saved), runs `npm ci`, builds Fleet View.app again and opens it, with the sessions resumed (its output: `update-install.log` in the folder above). Run by hand, `install.sh` asks **Quit Fleet View now? [y/N]** first. "Update automatically" never does that one by itself.
+
+**To remove it:** `bash ~/fleet-view/scripts/mac-app.sh --remove-start-at-login`, quit Fleet View (**Quit everything**), then delete `~/Applications/Fleet View.app`, `~/fleet-view`, `~/.local/bin/fleet-view`, `~/.local/bin/fv` and `~/Library/Application Support/fleet-view`, the `# Fleet View` lines in `~/.zprofile`, `~/.claude/skills/fleet-view`, and the mod (`claude plugin uninstall fleet-view-feed@fleet-view`).
+
+Linux: `install.sh` and `fleet-view` run there too, best effort (no app bundle; the desktop window from `desktop/` or a Chrome window; untested).
+
+For the maintainer: `.github/workflows/mac.yml` runs on the share repo only (its macOS minutes are free there; in this private repo every job is skipped). On every publish, and on each `mac-test/<name>` branch, it runs `install.sh` on a macOS runner and checks the server, the session host's socket and pty, the hidden window (its page over CDP and the live-session self-test), Fleet View.app (signature, Info.plist, `open -a`) and a fresh `curl | bash` install. A `v*` tag also makes a GitHub release titled "Fleet View 1.0.N". To try a change on the Mac runner before merging: `git add` it, then `node scripts/publish-share.js --test <name>` (a commit of this checkout's index on the share repo's branch `mac-test/<name>`, never main or a tag; `--ref <rev>` for a commit instead, `--dry-run` to see what would go), watch it with `gh run list -R GLODUSK/fleet-view-share -b mac-test/<name>`, and remove the branch with `node scripts/publish-share.js --delete-test <name>`. Pushing `.github/workflows/` needs gh's `workflow` scope (`gh auth refresh -h github.com -s workflow`, once). Every publish and dry run also reads each outgoing file and refuses when one holds a Supabase project ref, URL or key, a JWT, a private key, an Anthropic or GitHub token, or is a `.env`, credentials or sync config file: the share repo is public, and friends' installs must stay local.
+
 ## Run
 
 Type `fleet-view` in any cmd window. The folder is on the user PATH, so the command works from anywhere.

@@ -2,10 +2,11 @@
 // nothing serves the port yet, restarted after an update (exit 75) or a crash, and stopped when the app quits.
 // There is no console window to close by accident. A server some other way started (a test, `--tui`'s neighbour,
 // an older launcher) is used as it is and left running.
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const P = require('../platform');
 
 const EXIT_UPDATE = 75;
 const SCRIPT = path.join(__dirname, '..', 'fleet-view.js');
@@ -30,8 +31,9 @@ function create({ port, log = () => {} }) {
     const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', FLEET_VIEW_LOOP: '1', FV_SERVER_OWNER: 'electron' };
     if (reason) env.FV_RESTART_REASON = reason; else delete env.FV_RESTART_REASON;
     for (const k of ['FLEET_VIEW_CHILD', 'FV_NO_OPEN', 'FV_TEST_HIDDEN', 'FV_TERM_SELFTEST', 'FV_TERM_CMD']) delete env[k];
+    // macOS and Linux: in a process group of its own (P.detachGroup), so stop() ends it with its children
     child = spawn(process.execPath, [SCRIPT, '--web', '--no-open', '--port', String(port)], {
-      cwd: path.dirname(SCRIPT), env, stdio: 'ignore', windowsHide: true,
+      cwd: path.dirname(SCRIPT), env, stdio: 'ignore', windowsHide: true, ...P.detachGroup,
     });
     owned = true;
     log(`server: started pid ${child.pid}${reason ? ` (${reason})` : ''}`);
@@ -61,16 +63,14 @@ function create({ port, log = () => {} }) {
     return false;
   }
 
-  // the app is quitting: stop the server it started (with its gh / PowerShell children)
+  // the app is quitting: stop the server it started (with its gh / PowerShell children; taskkill /T on Windows,
+  // its process group on macOS and Linux)
   function stop() {
     stopping = true;
     if (!child || !owned) return;
     const pid = child.pid;
     child = null;
-    try {
-      if (process.platform === 'win32') spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
-      else process.kill(pid);
-    } catch {}
+    P.killTree(pid, { sync: true });
     log(`server: stopped pid ${pid} with the app`);
   }
 

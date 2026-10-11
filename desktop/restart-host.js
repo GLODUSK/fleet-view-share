@@ -23,7 +23,8 @@ if (!hf || typeof hf.pipe !== 'string' || typeof hf.token !== 'string') {
   const timer = setTimeout(() => finish('The session host did not answer within 40 s.', 1), 40000);
   s.setEncoding('utf8');
   s.on('error', (e) => {
-    if (e && e.code === 'ENOENT') finish(`No session host is running (nothing on ${hf.pipe}); the next Fleet View window starts one with the current host.js.`, 0);
+    // macOS and Linux: a socket file a crashed host left behind refuses the connection
+    if (e && (e.code === 'ENOENT' || (process.platform !== 'win32' && e.code === 'ECONNREFUSED'))) finish(`No session host is running (nothing on ${hf.pipe}); the next Fleet View window starts one with the current host.js.`, 0);
     else finish(`Could not reach the session host: ${e && e.message ? e.message : e}`, 1);
   });
   s.on('close', () => finish('The session host closed the connection without an answer.', 1));

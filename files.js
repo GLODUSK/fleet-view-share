@@ -114,8 +114,10 @@ function langOf(f) {
   const b = path.basename(f).toLowerCase(), ext = path.extname(b).slice(1);
   return LANGS[ext] || (b === 'dockerfile' || b.startsWith('.env') ? 'bash' : ext);
 }
-const WIN = process.platform === 'win32';
-const fold = (p) => (WIN ? p.toLowerCase() : p);
+const P = require('./platform');
+const WIN = P.isWin;
+// lowercased where paths ignore case (Windows, macOS)
+const fold = (p) => P.foldCase(p);
 // the real path (links and short names resolved), or the plain one when it can't be resolved (a missing file)
 const real = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
 function inside(file, folders) {
@@ -300,7 +302,7 @@ function serveFolders(req, res, ctx) {
 const UPLOAD_MAX = 200 << 20;
 const UPLOAD_KEEP_DAYS = 7;
 const NAME_MAX = 120;
-const uploadDir = () => path.join(process.env.LOCALAPPDATA || path.join(require('os').homedir(), 'AppData', 'Local'), 'fleet-view', 'uploads');
+const uploadDir = () => path.join(P.dataDir(), 'uploads');
 const RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)$/i;
 // a name Windows takes as it is: the last part of what was given, no control characters or <>:"/\|?*, no trailing dots
 // or spaces, not a device name (CON, NUL, COM1… with any extension), at most NAME_MAX characters (the extension kept)

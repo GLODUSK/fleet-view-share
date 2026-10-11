@@ -15,6 +15,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const P = require(path.join(__dirname, 'platform.js'));
 
 const ID_RE = /^[0-9a-f-]{36}$/i;
 const KEY_RE = /^[\w.-]{1,80}$/;
@@ -94,7 +95,7 @@ function safeFile(file) {
   if (!/^[\p{L}\p{N}_ .:\\/()+,=@~-]+\.md$/iu.test(file)) return null;
   let abs;
   try { abs = path.resolve(file); } catch { return null; }
-  if (path.dirname(abs).toLowerCase() !== path.resolve(dir()).toLowerCase()) return null;
+  if (P.foldCase(path.dirname(abs)) !== P.foldCase(path.resolve(dir()))) return null;
   try { if (!fs.statSync(abs).isFile()) return null; } catch { return null; }
   return abs;
 }

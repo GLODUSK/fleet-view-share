@@ -21,6 +21,7 @@ const net = require('net');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const H = require('./host');
+const P = require('../platform');
 
 const REQ_TIMEOUT = 15000;
 const CONNECT_MS = 25000; // a first start on a slow PC (an antivirus scanning electron.exe) can take a while
@@ -84,7 +85,12 @@ function createHost(opts = {}) {
   function endStuckHost() {
     const hf = H.readJson(H.hostFile());
     let pid = hf && Number.isInteger(hf.pid) ? hf.pid : 0;
-    if (!pid && !process.env.FV_HOST_PIPE) {
+    if (!pid && !process.env.FV_HOST_PIPE && !P.isWin) {
+      // no host.json: look for a process running this host.js (ps; the Electron binary or node)
+      const pids = (P.processesSync() || []).filter((x) => /desktop[\\/]host\.js(\s|$)/.test(x.command) && !/--selfcheck|restart-host/.test(x.command)
+        && x.pid !== process.pid).map((x) => x.pid);
+      if (pids.length === 1) pid = pids[0];
+    } else if (!pid && !process.env.FV_HOST_PIPE) {
       // no host.json: look for electron.exe / node.exe running this host.js
       try {
         const ps = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
@@ -110,7 +116,8 @@ function createHost(opts = {}) {
       const finish = (v) => { if (done) return; done = true; clearTimeout(timer); if (v !== true) s.destroy(); resolve(v); };
       const timer = setTimeout(() => finish('timeout'), 3000);
       s.setEncoding('utf8');
-      s.on('error', (e) => finish(e && e.code === 'ENOENT' ? 'nopipe' : 'error'));
+      // macOS and Linux: a socket file left by a host that crashed refuses the connection; nothing listens there
+      s.on('error', (e) => finish(e && (e.code === 'ENOENT' || (!P.isWin && e.code === 'ECONNREFUSED')) ? 'nopipe' : 'error'));
       s.on('close', () => finish('closed'));
       s.on('connect', () => s.write(`${JSON.stringify({ t: 'hello', token: hf.token, pid: process.pid })}\n`));
       const first = (chunk) => {
@@ -227,7 +234,7 @@ function createHost(opts = {}) {
     try { sock.write(`${JSON.stringify(msg)}\n`); } catch (e) { if (cb && msg.n && waits.delete(msg.n)) cb(e); }
   }
   const ask = (op, args, timeoutMs) => new Promise((resolve, reject) => call(op, args, (err, v) => (err ? reject(err) : resolve(v)), timeoutMs));
-  const notRunning = () => `the session host is not running: ${why || 'it could not be reached'}. Details in %LOCALAPPDATA%\\fleet-view\\window.log`;
+  const notRunning = () => `the session host is not running: ${why || 'it could not be reached'}. Details in ${P.isWin ? '%LOCALAPPDATA%\\fleet-view\\window.log' : path.join(H.dataDir(), 'window.log')}`;
   // open and create answer { ok: false, message } instead of failing when the host is not there
   const askOk = async (op, o) => {
     if (!ready && !(await connect(CONNECT_MS))) return { ok: false, message: notRunning() };

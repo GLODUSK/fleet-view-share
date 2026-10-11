@@ -1,7 +1,9 @@
 'use strict';
 // Fleet View's icon, drawn in code (no image tools needed): the ember diamond that has always been the tray
 // mark, on a dark rounded tile, with an orbit ring and three small dots, the sessions around it.
-//   iconPng(size, { tile })  PNG buffer; tile: false draws it on transparent (the tray), no tile behind it
+//   iconPng(size, { tile, template, inset })  PNG buffer; tile: false draws it on transparent (the tray), no tile behind it;
+//                            template: black with alpha only (the macOS menu bar tints a template image itself);
+//                            inset: the share of each side left clear (a macOS app icon keeps a margin round its tile)
 //   icoBuffer(sizes)         a Windows .ico holding a PNG per size (make-icon.js writes desktop/fleet-view.ico)
 // Small sizes drop what would turn to mush: under 24 px no ring, just the diamond and the dots.
 const zlib = require('zlib');
@@ -78,8 +80,9 @@ function chunk(type, data) {
   return Buffer.concat([len, td, crc]);
 }
 
-function iconPng(size, { tile = true } = {}) {
-  const s = shapes(size, tile);
+function iconPng(size, { tile = true, template = false, inset = 0 } = {}) {
+  const pad = size * Math.min(0.4, Math.max(0, Number(inset) || 0)), inner = size - 2 * pad;
+  const s = shapes(Math.max(1, Math.round(inner)), tile);
   const N = size <= 32 ? 8 : 4; // samples per side of a pixel: smooth edges at every size
   const raw = Buffer.alloc((size * 4 + 1) * size);
   for (let y = 0; y < size; y++) {
@@ -87,11 +90,12 @@ function iconPng(size, { tile = true } = {}) {
     for (let x = 0; x < size; x++) {
       let r = 0, g = 0, b = 0, a = 0;
       for (let sy = 0; sy < N; sy++) for (let sx = 0; sx < N; sx++) {
-        const c = sample((x + (sx + 0.5) / N) / size, (y + (sy + 0.5) / N) / size, s, tile);
+        const u = (x + (sx + 0.5) / N - pad) / inner, v = (y + (sy + 0.5) / N - pad) / inner;
+        const c = u < 0 || u > 1 || v < 0 || v > 1 ? [0, 0, 0, 0] : sample(u, v, s, tile);
         r += c[0] * c[3]; g += c[1] * c[3]; b += c[2] * c[3]; a += c[3];
       }
       const o = y * (size * 4 + 1) + 1 + x * 4;
-      if (a > 0) { raw[o] = Math.round(r / a); raw[o + 1] = Math.round(g / a); raw[o + 2] = Math.round(b / a); }
+      if (a > 0 && !template) { raw[o] = Math.round(r / a); raw[o + 1] = Math.round(g / a); raw[o + 2] = Math.round(b / a); }
       raw[o + 3] = Math.round((255 * a) / (N * N));
     }
   }

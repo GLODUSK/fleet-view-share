@@ -30,7 +30,6 @@
 // purpose (POST .../answer), and any menu but a question (a permission prompt, the plan approval) only with allowPermission.
 'use strict';
 const fs = require('fs');
-const os = require('os');
 const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
@@ -40,7 +39,8 @@ const H = require(path.join(__dirname, 'desktop', 'host.js'));
 const SCREEN = require(path.join(__dirname, 'screen.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 
-const DATA_DIR = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view');
+const P = require(path.join(__dirname, 'platform.js'));
+const DATA_DIR = P.dataDir();
 const TOKEN_FILE = path.join(DATA_DIR, 'api-token');
 const CALL_MS = 8000; // one host request
 const START_MS = 60000; // a new session reporting its conversation id and going idle (and a resumed one going idle)
@@ -74,7 +74,8 @@ function ensureToken() {
   } catch {}
   const t = crypto.randomBytes(32).toString('hex');
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(TOKEN_FILE, t + '\n');
+  // (macOS and Linux: readable by the user alone)
+  fs.writeFileSync(TOKEN_FILE, t + '\n', P.isWin ? undefined : { mode: 0o600 });
   token = t;
 }
 function authorized(req) {
@@ -651,7 +652,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/ask/:id/collected', body: '{ ids? }', does: 'the asker has these answers already (no ids: every one in now), so they are not typed into it' },
 ];
 function describeApi() {
-  return [200, { ok: true, version: 2, fleetView: VERSION.current().version, auth: 'Authorization: Bearer <%LOCALAPPDATA%\\fleet-view\\api-token>', endpoints: ENDPOINTS,
+  return [200, { ok: true, version: 2, fleetView: VERSION.current().version, auth: `Authorization: Bearer <${P.isWin ? '%LOCALAPPDATA%\\fleet-view\\api-token' : TOKEN_FILE}>`, endpoints: ENDPOINTS,
     notes: 'ids: a conversation id, or the new-<n> key POST /api/sessions gave. wait: true (30 min), false, or seconds 1..3600. A reply is { ok, message?, ... }; 400 bad input, 401 token, 403 refused, 404 no such session, 409 state conflict, 503 the desktop app is not running.' }];
 }
 

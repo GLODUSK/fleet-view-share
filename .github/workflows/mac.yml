@@ -1,0 +1,284 @@
+# Fleet View on a Mac: install.sh from this checkout on a macOS runner, then the server, the session host, the window
+# and Fleet View.app. It runs in the public share repo only (GLODUSK/fleet-view-share, where Actions minutes are
+# free); in the private main repo every job is skipped (a macOS minute there costs ten).
+# Runs on: every publish (main, and its tag v1.0.N, which also makes the GitHub release), the pre-merge test branches
+# mac-test/<name> that `node scripts/publish-share.js --test <name>` pushes, and by hand (workflow_dispatch).
+name: Mac
+
+on:
+  push:
+    branches: [main, 'mac-test/**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: github.repository == 'GLODUSK/fleet-view-share'
+    runs-on: macos-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        # -eo pipefail: a step fails when any command in a pipe fails (install.sh | tee)
+        shell: bash
+    env:
+      LOGS: /Users/runner/fv-logs
+      APP: /Users/runner/Applications/Fleet View.app
+      # no prompts and no telemetry from the tools below
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      DISABLE_AUTOUPDATER: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Tools
+        run: |
+          mkdir -p "$LOGS"
+          sw_vers
+          uname -m
+          node -v
+          xcode-select -p || true
+          # Claude Code is only checked for, never signed in
+          npm i -g @anthropic-ai/claude-code --no-audit --no-fund --loglevel=error
+          command -v claude
+          # a login folder for the skill (install.sh copies it into each ~/.claude*)
+          mkdir -p "$HOME/.claude"
+
+      - name: install.sh (from this checkout)
+        run: bash install.sh --no-launch --no-pull 2>&1 | tee "$LOGS/install.txt"
+
+      - name: What install.sh made
+        run: |
+          set -x
+          test -L "$HOME/.local/bin/fleet-view"
+          test -L "$HOME/.local/bin/fv"
+          grep -q '^# Fleet View' "$HOME/.zprofile"
+          test -f "$HOME/.claude/skills/fleet-view/SKILL.md"
+          test -f desktop/node_modules/.fleet-view-lock
+          "$HOME/.local/bin/fleet-view" --version
+          test -d "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleName' "$APP/Contents/Info.plist")" = 'Fleet View'
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")" = com.glodusk.fleetview
+          test -f "$APP/Contents/Resources/fleet-view.icns"
+          # the bundle's main.js loads this checkout's desktop/main.js (path.join("<checkout>", "desktop", "main.js"))
+          grep -qF "path.join(\"$GITHUB_WORKSPACE\", \"desktop\"" "$APP/Contents/Resources/app/main.js"
+          # node-pty loads in the bundle's Electron (as node), and spawn-helper can run
+          ELECTRON_RUN_AS_NODE=1 "$APP/Contents/MacOS/Electron" -e 'require(process.argv[1]); console.log("node-pty ok")' "$PWD/desktop/node_modules/node-pty"
+          test -n "$(find desktop/node_modules/node-pty -name spawn-helper -perm -u+x)"
+          # a second run changes nothing and keeps the app
+          bash install.sh --no-launch --no-pull | tee "$LOGS/install-again.txt"
+          grep -q 'Fleet View.app is up to date' "$LOGS/install-again.txt"
+          bash scripts/mac-app.sh --check
+          # FLEET_VIEW_APP at a folder, or at an app that is not Fleet View's: refused, and nothing there is touched
+          D="$RUNNER_TEMP/not-an-app"
+          mkdir -p "$D/Some.app"
+          if FLEET_VIEW_APP="$D" bash scripts/mac-app.sh --force; then echo 'mac-app.sh replaced a folder'; exit 1; fi
+          test -d "$D/Some.app"
+          if FLEET_VIEW_APP="$D" bash install.sh --no-launch --no-pull; then echo 'install.sh took a folder as the app'; exit 1; fi
+          O="$RUNNER_TEMP/Other.app"
+          mkdir -p "$O/Contents"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.example.other' "$O/Contents/Info.plist"
+          if FLEET_VIEW_APP="$O" bash scripts/mac-app.sh --force; then echo "mac-app.sh replaced another app"; exit 1; fi
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$O/Contents/Info.plist")" = com.example.other
+          bash scripts/mac-app.sh --check
+
+      - name: Server (demo, and real mode on an empty ~/.claude)
+        run: |
+          node fleet-view.js --web --no-open --demo --port 4790 > "$LOGS/demo.txt" 2>&1 &
+          echo $! > "$RUNNER_TEMP/demo.pid"
+          EMPTY="$RUNNER_TEMP/home-empty"
+          mkdir -p "$EMPTY/.claude"
+          HOME="$EMPTY" node fleet-view.js --web --no-open --port 4791 > "$LOGS/real.txt" 2>&1 &
+          echo $! > "$RUNNER_TEMP/real.pid"
+          for port in 4790 4791; do
+            ok=''
+            for i in $(seq 1 60); do
+              code=$(curl -s -o "$LOGS/state-$port.json" -w '%{http_code}' "http://127.0.0.1:$port/state" || true)
+              if [ "$code" = 200 ]; then ok=1; break; fi
+              sleep 1
+            done
+            test -n "$ok" || { echo "port $port: /state never answered 200"; exit 1; }
+            node -e 'const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (!Array.isArray(j.sessions)) process.exit(1); console.log(process.argv[2], "sessions:", j.sessions.length)' "$LOGS/state-$port.json" "$port"
+          done
+          kill "$(cat "$RUNNER_TEMP/real.pid")"
+          cp "$EMPTY/Library/Application Support/fleet-view/server.log" "$LOGS/real-server.log" 2>/dev/null || true
+
+      - name: Session host (unix socket, pty)
+        run: node desktop/host-test.js 2>&1 | tee "$LOGS/host-test.txt"
+
+      - name: Window, hidden (the bundle's Electron, page DOM over CDP)
+        env:
+          FV_TEST_HIDDEN: '1'
+          FV_HOST_PIPE: ${{ runner.temp }}/fleet-view-host-win.sock
+          FV_HOST_DIR: ${{ runner.temp }}/fvh-win
+        run: |
+          "$APP/Contents/MacOS/Electron" --url=http://127.0.0.1:4790/ --remote-debugging-port=9333 > "$LOGS/window.txt" 2>&1 &
+          echo $! > "$RUNNER_TEMP/window.pid"
+          cat > "$RUNNER_TEMP/cdp.js" <<'EOF'
+          // the main window's page over the DevTools protocol: its DOM is there and the desktop bridge too
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const until = Date.now() + 90e3;
+          (async () => {
+            let target = null;
+            while (!target && Date.now() < until) {
+              try {
+                const list = await (await fetch('http://127.0.0.1:9333/json/list')).json();
+                target = list.find((t) => t.type === 'page' && t.url.startsWith('http://127.0.0.1:4790/') && !t.url.includes('mini.html')) || null;
+              } catch {}
+              if (!target) await sleep(1000);
+            }
+            if (!target) throw new Error('no page of 127.0.0.1:4790 in the window');
+            const ws = new WebSocket(target.webSocketDebuggerUrl);
+            await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+            let n = 0;
+            const waiting = new Map();
+            ws.onmessage = (e) => { const m = JSON.parse(e.data); if (waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); } };
+            const call = (method, params) => new Promise((r) => { const id = ++n; waiting.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
+            const js = "JSON.stringify({ url: location.href, brand: !!document.getElementById('brand'), nodes: document.querySelectorAll('*').length, desktop: typeof window.fleetDesktop })";
+            let last = null;
+            while (Date.now() < until) {
+              const r = await call('Runtime.evaluate', { expression: js, returnByValue: true });
+              last = JSON.parse((r.result && r.result.result && r.result.result.value) || '{}');
+              if (last.brand && last.nodes > 50 && last.desktop === 'object') { console.log('page DOM:', JSON.stringify(last)); process.exit(0); }
+              await sleep(1000);
+            }
+            throw new Error(`the page never showed its DOM: ${JSON.stringify(last)}`);
+          })().catch((e) => { console.error(e.message || e); process.exit(1); });
+          EOF
+          node "$RUNNER_TEMP/cdp.js"
+          kill -TERM "$(cat "$RUNNER_TEMP/window.pid")" || true
+          sleep 3
+          node desktop/quit-all.js || true
+
+      - name: Window self-test (live sessions through the page, hidden)
+        env:
+          FV_TEST_HIDDEN: '1'
+          FV_TERM_SELFTEST: '1'
+          FV_TERM_SELFTEST_OUT: ${{ runner.temp }}/selftest.json
+          FV_HOST_PIPE: ${{ runner.temp }}/fleet-view-host-st.sock
+          FV_HOST_DIR: ${{ runner.temp }}/fvh-st
+          FV_TERM_CMD: >-
+            printf 'Columns: %s\n' "$(tput cols)"; echo "CFG=$CLAUDE_CONFIG_DIR FVX=${FV_TERM_SELFTEST:-%FV_TERM_SELFTEST%} CT=$COLORTERM"; sleep 4; printf 'Columns: %s\n' "$(tput cols)"; sleep 600
+        run: |
+          # it quits by itself when done; 4 minutes at most
+          perl -e 'alarm shift; exec @ARGV' 240 "$APP/Contents/MacOS/Electron" --url=http://127.0.0.1:4790/ 2>&1 | tee "$LOGS/selftest.txt" || true
+          cp "$FV_TERM_SELFTEST_OUT" "$LOGS/" 2>/dev/null || true
+          node desktop/quit-all.js || true
+          node -e 'const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const r = j.results || []; const bad = r.filter((x) => !x.pass); console.log(`${r.length - bad.length}/${r.length} passed`); if (j.error || !r.length || bad.length) { console.log(JSON.stringify(bad.length ? bad : j, null, 2)); process.exit(1); }' "$FV_TERM_SELFTEST_OUT"
+
+      - name: open -a Fleet View.app
+        run: |
+          kill "$(cat "$RUNNER_TEMP/demo.pid")" || true
+          open -a "$APP"
+          ok=''
+          for i in $(seq 1 90); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4777/state || true)" = 200 ]; then ok=1; break; fi
+            sleep 1
+          done
+          ps -A -o pid=,command= | grep -F "$APP/Contents/MacOS/Electron" | grep -v grep || true
+          test -n "$ok" || { echo 'Fleet View.app did not serve 127.0.0.1:4777 within 90 s'; exit 1; }
+          echo 'Fleet View.app is up and serving'
+          # quit it the way Cmd+Q does (Electron takes SIGTERM as a quit), then end its session host
+          # (install.sh's stop_window counts on this: the window and the server it started are gone within 20 s)
+          for p in $(pgrep -f "$APP/Contents/MacOS/Electron\$" || true); do kill -TERM "$p" || true; done
+          gone=''
+          for i in $(seq 1 20); do
+            if ! curl -s -o /dev/null http://127.0.0.1:4777/state && [ -z "$(pgrep -f "$APP/Contents/MacOS/Electron\$" || true)" ]; then gone=1; break; fi
+            sleep 1
+          done
+          ps -A -o pid=,command= | grep -F "$APP/Contents/" | grep -v grep || true
+          test -n "$gone" || { echo 'SIGTERM did not quit the window and its server within 20 s'; exit 1; }
+          echo 'SIGTERM quit the window and its server'
+          node desktop/quit-all.js || true
+          # the window, the server and the session host all run the bundle's Electron binary
+          for i in $(seq 1 20); do [ -z "$(pgrep -f "$APP/Contents/MacOS/Electron" || true)" ] && break; sleep 1; done
+          ps -A -o pid=,command= | grep -F "$APP/Contents/" | grep -v grep || true
+          test -z "$(pgrep -f "$APP/Contents/MacOS/Electron" || true)" || { echo 'quit-all.js left Fleet View.app processes running'; exit 1; }
+          echo 'quit-all.js ended the session host; nothing of Fleet View.app runs'
+
+      - name: curl | bash (the README's line, into an empty home)
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          # the install.sh GitHub serves for this branch or tag, piped into bash as a friend does: it clones the share
+          # repo at that ref into ~/fleet-view, installs the desktop packages there and builds the app
+          H="$RUNNER_TEMP/home-curl"
+          mkdir -p "$H"
+          curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REF}/install.sh" -o "$RUNNER_TEMP/curl-install.sh"
+          cmp -s "$RUNNER_TEMP/curl-install.sh" install.sh || echo "note: raw.githubusercontent.com served an older install.sh (its cache); the clone's own install.sh runs anyway"
+          curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REF}/install.sh" \
+            | HOME="$H" FLEET_VIEW_BRANCH="$REF" bash -s -- --no-launch 2>&1 | tee "$LOGS/curl-install.txt"
+          set -x
+          test -f "$H/fleet-view/fleet-view.js"
+          test "$(git -C "$H/fleet-view" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C "$H/fleet-view" remote get-url origin)" = "https://github.com/${GITHUB_REPOSITORY}.git"
+          test "$(readlink "$H/.local/bin/fleet-view")" = "$H/fleet-view/fleet-view.sh"
+          grep -q '^# Fleet View' "$H/.zprofile"
+          CAPP="$H/Applications/Fleet View.app"
+          test -d "$CAPP"
+          codesign --verify --deep --strict "$CAPP"
+          grep -qF "path.join(\"$H/fleet-view\", \"desktop\"" "$CAPP/Contents/Resources/app/main.js"
+          echo 'curl | bash cloned the share repo and built Fleet View.app'
+          # piped again on that clone, a commit behind (this checkout's install.sh, so no stale cache): the pull is
+          # passed on as --from, so the install.sh in the clone knows what changed
+          if git -C "$H/fleet-view" symbolic-ref -q HEAD >/dev/null && git -C "$H/fleet-view" rev-parse -q --verify HEAD~1 >/dev/null; then
+            git -C "$H/fleet-view" reset -q --hard HEAD~1
+            HOME="$H" FLEET_VIEW_BRANCH="$REF" bash -s -- --no-launch < install.sh 2>&1 | tee "$LOGS/curl-again.txt"
+            test "$(git -C "$H/fleet-view" rev-parse HEAD)" = "$GITHUB_SHA"
+            grep -q "Updated from .* to ${GITHUB_SHA:0:7}" "$LOGS/curl-again.txt"
+            echo 'curl | bash again pulled and passed on what changed'
+          fi
+
+      - name: Logs
+        if: always()
+        run: |
+          cp "$HOME/Library/Application Support/fleet-view/"*.log "$LOGS/" 2>/dev/null || true
+          for d in "$RUNNER_TEMP"/fvh-*; do [ -d "$d" ] && cp "$d/host.log" "$LOGS/$(basename "$d")-host.log" 2>/dev/null; done
+          ls -la "$LOGS"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fleet-view-mac-logs
+          path: /Users/runner/fv-logs
+          if-no-files-found: ignore
+
+  release:
+    needs: smoke
+    if: github.repository == 'GLODUSK/fleet-view-share' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # the annotated tag itself (checkout fetched only the commit)
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "release $TAG is there already"; exit 0; fi
+          {
+            git tag -l --format='%(contents)' "$TAG"
+            git log -1 --format=%b "$TAG^{commit}"
+            echo
+            echo '**Mac:** in Terminal'
+            echo
+            echo '```'
+            echo 'curl -fsSL https://raw.githubusercontent.com/GLODUSK/fleet-view-share/main/install.sh | bash'
+            echo '```'
+            echo
+            echo '**Windows:** see the README.'
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --verify-tag --title "Fleet View ${TAG#v}" --notes-file "$RUNNER_TEMP/notes.md"

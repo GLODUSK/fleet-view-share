@@ -150,7 +150,8 @@ function makeClient(port, token) {
 }
 
 function readToken() {
-  const file = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view', 'api-token');
+  // (macOS: ~/Library/Application Support/fleet-view/api-token)
+  const file = path.join(require(path.join(__dirname, '..', 'platform.js')).dataDir(), 'api-token');
   try { return fs.readFileSync(file, 'utf8').trim(); } catch { throw new Refused(`no API token at ${file}; start Fleet View once to make it`); }
 }
 

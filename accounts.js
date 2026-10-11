@@ -33,6 +33,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const P = require('./platform');
 
 const LETTERS = 'ACDEFGHIJKLMNOPQRSTUVWXYZ';
 const SHARE_DIRS = ['agents', 'commands', 'file-history', 'hooks', 'paste-cache', 'plugins', 'projects', 'session-env', 'sessions', 'shell-snapshots', 'skills', 'tasks'];
@@ -53,7 +54,7 @@ const stamp = (t = new Date()) => t.toISOString().slice(0, 19).replace(/[-:]/g, 
 
 function createAccounts(o = {}) {
   const home = o.home || os.homedir();
-  const backupDir = o.backupDir || path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'fleet-view', 'accounts');
+  const backupDir = o.backupDir || path.join(P.dataDir(), 'accounts');
   const log = o.log || (() => {});
   const changed = o.changed || (() => {});
   const liveOn = o.liveOn || (() => []);
@@ -79,9 +80,10 @@ function createAccounts(o = {}) {
     } catch {}
     return [...new Set(out)].sort((x, y) => (x === 'B' ? -1 : y === 'B' ? 1 : x < y ? -1 : 1));
   }
+  // (macOS: Claude Code keeps the token in the Keychain, so there is no .credentials.json; .claude.json's account says it)
   function loginOf(a) {
     const acc = (readJson(fileOf(a)) || {}).oauthAccount;
-    if (!acc || !exists(credOf(a))) return null;
+    if (!acc || !(P.isMac || exists(credOf(a)))) return null;
     return { id: acc.accountUuid || acc.emailAddress || null, email: acc.emailAddress || null, org: acc.organizationName || null };
   }
   // the letter (other than a) already signed in to login id, or null
@@ -114,7 +116,7 @@ function createAccounts(o = {}) {
     const link = dirOf(a), bHome = dirOf('B');
     let bReal = bHome;
     try { bReal = fs.realpathSync(bHome); } catch {}
-    const linked = path.resolve(bReal).toLowerCase() !== path.resolve(bHome).toLowerCase();
+    const linked = P.foldCase(path.resolve(bReal)) !== P.foldCase(path.resolve(bHome));
     let real = linked ? path.join(path.dirname(bReal), path.basename(bReal) + '-' + a.toLowerCase()) : link;
     // an old folder of that name (one moved aside keeps its own) is left as it is
     if (linked && exists(real)) real = `${real}-${stamp()}`;
@@ -141,7 +143,7 @@ function createAccounts(o = {}) {
     const st = fs.lstatSync(link);
     if (st.isSymbolicLink()) {
       const real = fs.realpathSync(link);
-      try { fs.unlinkSync(link); } catch { spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'rmdir', link], { windowsHide: true, timeout: 10e3 }); }
+      try { fs.unlinkSync(link); } catch { if (P.isWin) spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'rmdir', link], { windowsHide: true, timeout: 10e3 }); }
       if (exists(link)) throw new Error(`could not remove the link ${link}`);
       try { fs.renameSync(real, `${real}.removed-${t}`); } catch (e) { log(`accounts: ${real} stays where it is: ${e.message}`); }
     } else fs.renameSync(link, `${link}.removed-${t}`);
@@ -160,11 +162,20 @@ function createAccounts(o = {}) {
     const env = {};
     for (const [k, v] of Object.entries(process.env)) if (!DROP_ENV.test(k)) env[k] = v;
     if (a !== 'B') env.CLAUDE_CONFIG_DIR = dirOf(a);
+    // macOS: the login shell's PATH, where claude is (an app started from Finder has a bare one)
+    if (!P.isWin) env.PATH = P.loginShellPath();
     return env;
   }
+  // claude and what it started: taskkill /T /F on Windows, its process group on macOS and Linux
   function treeKill(pid) {
-    if (!Number.isInteger(pid) || pid <= 0) return;
-    try { spawn('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, stdio: 'ignore' }).on('error', () => {}); } catch {}
+    P.killTree(pid);
+  }
+  // `claude <args>` as one command line: through cmd on Windows (it finds claude.cmd or claude.exe on PATH, as the
+  // session host's panels do), through sh elsewhere, in a process group of its own. The words are checked
+  // (EMAIL_RE, fixed flags): nothing either shell reads as special
+  function claudeLine(line, a, opts) {
+    if (P.isWin) return [process.env.ComSpec || 'cmd.exe', [`/d /s /c "${line}"`], { env: childEnv(a), cwd: home, windowsHide: true, windowsVerbatimArguments: true, ...opts }];
+    return ['/bin/sh', ['-c', line], { env: childEnv(a), cwd: home, ...opts }];
   }
   function startLogin(a, { email, fresh }) {
     const before = { cred: readBuf(credOf(a)), file: readBuf(fileOf(a)), login: loginOf(a) };
@@ -173,8 +184,7 @@ function createAccounts(o = {}) {
     jobs.set(a, j);
     let child;
     try {
-      // cmd finds claude.cmd or claude.exe on PATH, as the session host's panels do
-      child = spawn(process.env.ComSpec || 'cmd.exe', [`/d /s /c "${claudeCmd} ${args.join(' ')}"`], { env: childEnv(a), cwd: home, windowsHide: true, windowsVerbatimArguments: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawn(...claudeLine(`${claudeCmd} ${args.join(' ')}`, a, { stdio: ['pipe', 'pipe', 'pipe'], ...P.detachGroup }));
     } catch (e) { return finish(a, j, false, `could not start claude: ${e.message}`); }
     j.child = child;
     const take = (d) => {
@@ -274,7 +284,7 @@ function createAccounts(o = {}) {
     const saved = backup(a, 'removed');
     try {
       if (a === 'B') {
-        const r = spawnSync(process.env.ComSpec || 'cmd.exe', [`/d /s /c "${claudeCmd} auth logout"`], { env: childEnv('B'), cwd: home, windowsHide: true, windowsVerbatimArguments: true, encoding: 'utf8', timeout: 30e3 });
+        const r = spawnSync(...claudeLine(`${claudeCmd} auth logout`, 'B', { encoding: 'utf8', timeout: 30e3 }));
         if (r.status !== 0 && loginOf('B')) throw new Error(String(r.stderr || r.stdout || 'claude auth logout failed').trim().slice(0, 300));
       } else moveAside(a);
     } catch (e) {

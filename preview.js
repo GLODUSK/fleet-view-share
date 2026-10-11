@@ -103,8 +103,9 @@ const FRAME_MS = 4000; // the frame check's GET, until its headers
 const MISS_MS = 15000; // a transcript not found isn't looked for again for this long
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
-const WIN = process.platform === 'win32';
-const DATA = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'fleet-view');
+const P = require(path.join(__dirname, 'platform.js'));
+const WIN = P.isWin;
+const DATA = P.dataDir();
 const PROCS_FILE = path.join(DATA, 'preview-procs.json');
 const LOG_DIR = path.join(DATA, 'preview-logs');
 const SHARE_IDLE_MS = 10 * 60e3; // a share nobody used for this long is turned off
@@ -272,7 +273,7 @@ function frameCheck(u) {
 }
 
 // ---------- folders and launch.json ----------
-const norm = (p) => { const r = path.resolve(p).replace(/[\\/]+$/, '') || path.resolve(p); return WIN ? r.toLowerCase() : r; };
+const norm = (p) => { const r = path.resolve(p).replace(/[\\/]+$/, '') || path.resolve(p); return P.foldCase(r); };
 const real = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
 // links resolved first (a junction inside a known folder may point anywhere)
 function inside(p, dir) { const a = norm(real(p)), b = norm(real(dir)); return a === b || a.startsWith(b.endsWith(path.sep) ? b : b + path.sep); }
@@ -365,9 +366,16 @@ function running(k) {
 }
 // still the process this server (or an earlier one) started? Its own child surely; one from before a restart only
 // when that pid's command line is still the one it was started with
+// (macOS: the marker is in its environment, which `ps -E` shows; Linux: /proc/<pid>/environ)
 function ours(e) {
   if (e.child) return Promise.resolve(e.child.exitCode === null);
-  if (!WIN) return Promise.resolve(alive(e.pid));
+  if (!WIN && !P.isMac) {
+    try { return Promise.resolve(fs.readFileSync(`/proc/${Number(e.pid)}/environ`, 'utf8').includes(e.marker)); } catch { return Promise.resolve(alive(e.pid)); }
+  }
+  if (P.isMac) {
+    return new Promise((resolve) => execFile('ps', ['-E', '-ww', '-o', 'command=', '-p', String(Number(e.pid))], { timeout: 10000, maxBuffer: 4 << 20 },
+      (err, out) => resolve(!err && String(out).includes(e.marker))));
+  }
   return new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(e.pid)}').CommandLine`], { windowsHide: true, timeout: 10000 },
   (err, out) => resolve(!err && String(out).includes(e.marker))));
@@ -407,8 +415,10 @@ function startConfig(cwd, cfg) {
       child = spawn(process.execPath, ['-e', HELPER, comspec, Buffer.from(line, 'utf8').toString('base64'), marker],
         { cwd: cfg.dir, env: helperEnv, detached: true, windowsHide: true, stdio: 'ignore' });
     } else {
+      // macOS and Linux: started straight, in a process group of its own (detached), with the login shell's PATH
+      // (npm, node and the rest; an app started from Finder has a bare one)
       const fd = fs.openSync(log, 'a');
-      try { child = spawn(cfg.exe, [...cfg.args], { cwd: cfg.dir, env: { ...env, FV_PREVIEW: marker }, detached: true, stdio: ['ignore', fd, fd] }); } finally { fs.closeSync(fd); }
+      try { child = spawn(cfg.exe, [...cfg.args], { cwd: cfg.dir, env: { ...env, PATH: P.loginShellPath(), FV_PREVIEW: marker }, detached: true, stdio: ['ignore', fd, fd] }); } finally { fs.closeSync(fd); }
     }
   } catch (e) { return { ok: false, message: `could not start it: ${e.message}` }; }
   if (!child.pid) return { ok: false, message: `could not start ${cfg.exe}` };
@@ -424,7 +434,7 @@ function startConfig(cwd, cfg) {
 
 function killTree(pid) {
   return new Promise((resolve) => {
-    if (!WIN) { try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch {} } return resolve(true); }
+    if (!WIN) { P.killTree(pid); return resolve(true); }
     execFile('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, timeout: 15000 }, (err) => resolve(!err || !alive(pid)));
   });
 }
@@ -627,8 +637,10 @@ function unshare(ctx, p, why) {
 }
 
 // ---------- screenshots on this PC (see "Screenshots" at the top) ----------
+// (macOS: Chrome or Edge from /Applications; Linux: google-chrome, chromium or microsoft-edge on PATH)
 function edgeExe() {
-  if (!WIN) return null;
+  if (P.isMac) return ['Google Chrome', 'Microsoft Edge'].map((a) => `/Applications/${a}.app/Contents/MacOS/${a}`).find((f) => fs.existsSync(f)) || null;
+  if (!WIN) return ['google-chrome', 'chromium', 'chromium-browser', 'microsoft-edge'].map((n) => P.which(n)).find(Boolean) || null;
   const roots = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(Boolean);
   for (const r of roots) { const f = path.join(r, 'Microsoft', 'Edge', 'Application', 'msedge.exe'); if (fs.existsSync(f)) return f; }
   return null;
@@ -637,7 +649,7 @@ let shooting = false;
 // -> { ok: true, png } or { ok: false, code, message }
 function shoot(url, width, height, scale) {
   const exe = edgeExe();
-  if (!exe) return Promise.resolve({ ok: false, code: 501, message: 'Microsoft Edge was not found on the PC, so it can\'t take the screenshot' });
+  if (!exe) return Promise.resolve({ ok: false, code: 501, message: WIN ? 'Microsoft Edge was not found on the PC, so it can\'t take the screenshot' : 'neither Chrome nor Edge was found here, so it can\'t take the screenshot' });
   if (shooting) return Promise.resolve({ ok: false, code: 429, message: 'a screenshot is being taken; try again in a moment' });
   shooting = true;
   let dir;

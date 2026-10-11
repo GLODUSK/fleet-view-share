@@ -21,6 +21,11 @@
 // whose claude moved to another conversation (/clear starts a new one, /resume opens another): when its
 // process's file names another sessionId, the pty is re-keyed to it the same way.
 //
+// macOS and Linux: the same, with /bin/sh in a node-pty pty instead of cmd in ConPTY, the Unix socket
+// <data dir>/host-<username>.sock (mode 600) instead of the pipe, ps instead of Win32_Process, and process-group
+// kills instead of taskkill (../platform.js). Paths below say %LOCALAPPDATA%\fleet-view: on macOS that is
+// ~/Library/Application Support/fleet-view.
+//
 // Talking to it: the named pipe \\.\pipe\fleet-view-host-<username>, newline-delimited JSON. A client's first
 // line is { t: 'hello', token }, with the random token from %LOCALAPPDATA%\fleet-view\host.json
 // ({ pid, pipe, token, startedAt, version }); anything else, or a wrong token, closes the connection. Then:
@@ -94,8 +99,9 @@ const os = require('os');
 const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn, spawnSync, execFile } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const HO = require(path.join(__dirname, '..', 'handoff.js'));
+const P = require(path.join(__dirname, '..', 'platform.js'));
 
 const ID_RE = /^[0-9a-f-]{36}$/i;
 const NEW_RE = /^new-\d{1,9}$/; // a new session's key until Claude Code reports its id
@@ -116,17 +122,21 @@ const NUDGE_IDLE_MS = 2500, NUDGE_QUIET_MS = 1500, NUDGE_TASKS_MS = 20000;
 
 // ---------- where things live ----------
 const userTag = () => { let u = ''; try { u = os.userInfo().username; } catch {} return (u || process.env.USERNAME || 'user').replace(/[^\w.-]/g, '_').slice(0, 60); };
-const REAL_PIPE = `\\\\.\\pipe\\fleet-view-host-${userTag()}`;
-const TEST_PIPE_RE = /^\\\\\.\\pipe\\fleet-view-host-[\w.-]{1,60}$/;
+// Windows: the named pipe \\.\pipe\fleet-view-host-<user>. macOS and Linux: the Unix socket
+// <data dir>/host-<user>.sock (platform.js hostSocketPath). A test pipe is \\.\pipe\fleet-view-host-<name> on
+// Windows, else a socket file anywhere named fleet-view-host-<name>.sock (at most 100 bytes of path)
+const REAL_PIPE = P.hostSocketPath(userTag());
+const TEST_PIPE_RE = P.isWin ? /^\\\\\.\\pipe\\fleet-view-host-[\w.-]{1,60}$/ : /^\/(?:.*\/)?fleet-view-host-[\w.-]{1,60}\.sock$/;
 function pipeName() {
   const p = process.env.FV_HOST_PIPE;
-  return p && TEST_PIPE_RE.test(p) ? p : REAL_PIPE;
+  return p && TEST_PIPE_RE.test(p) && (P.isWin || Buffer.byteLength(p) <= 100) ? p : REAL_PIPE;
 }
 const isTestPipe = () => pipeName() !== REAL_PIPE;
 function dataDir() {
-  const base = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view');
+  const base = P.dataDir();
   if (!isTestPipe()) return base;
-  return process.env.FV_HOST_DIR || path.join(base, `test-${pipeName().split('\\').pop()}`);
+  const name = P.isWin ? pipeName().split('\\').pop() : path.basename(pipeName(), '.sock');
+  return process.env.FV_HOST_DIR || path.join(base, `test-${name}`);
 }
 const hostFile = () => path.join(dataDir(), 'host.json');
 const sessionsFile = () => path.join(dataDir(), 'sessions.json');
@@ -134,10 +144,11 @@ const logFile = () => path.join(dataDir(), 'host.log');
 const HOST_JS = __filename;
 
 function readJson(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } }
+// (macOS and Linux: readable by the user alone, like the folder %LOCALAPPDATA% is on Windows: host.json holds the token)
 function writeJsonAtomic(file, obj) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true, ...(P.isWin ? {} : { mode: 0o700 }) });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), P.isWin ? undefined : { mode: 0o600 });
   fs.renameSync(tmp, file);
 }
 function fileHash(file) { try { return crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex').slice(0, 12); } catch { return null; } }
@@ -283,12 +294,16 @@ function childEnv(account, launchKey) {
   // account X: ~/.claude-x (A: ~/.claude-a, C: ~/.claude-c, ...); B (or anything else): the default ~/.claude, no CLAUDE_CONFIG_DIR
   if (acctId(account) !== 'B') env.CLAUDE_CONFIG_DIR = acctDir(account);
   // Fleet View's folder first on PATH, so `fv` runs in every session started here, also when this host was
-  // started from an environment older than the PATH install.ps1 set (the key is Path, whatever its case)
-  const pk = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'Path';
-  const rest = String(env[pk] || '').split(';').filter((p) => p && normDir(p) !== normDir(FV_DIR));
-  env[pk] = [FV_DIR, ...rest].join(';');
+  // started from an environment older than the PATH install.ps1 set (the key is Path, whatever its case).
+  // macOS: the login shell's PATH (an app started from Finder has a bare one, without claude or node on it)
+  const pk = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || (P.isWin ? 'Path' : 'PATH');
+  const base = P.isWin ? String(env[pk] || '') : P.loginShellPath();
+  const rest = base.split(path.delimiter).filter((p) => p && normDir(p) !== normDir(FV_DIR));
+  env[pk] = [FV_DIR, ...rest].join(path.delimiter);
   env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = '1';
   if (launchKey) env.CLAUDE_LAUNCH_KEY = launchKey;
+  // macOS and Linux: the terminal type the pty speaks (one started by launchd or Finder may have none, or "dumb")
+  if (!P.isWin) env.TERM = 'xterm-256color';
   env.COLORTERM = 'truecolor';
   env.TERM = 'xterm-256color';
   return env;
@@ -301,14 +316,10 @@ function dirOr(cwd) {
 
 const intIn = (v, lo, hi, dflt) => (Number.isInteger(v) && v >= lo && v <= hi ? v : dflt);
 
-// the whole process tree: claude and whatever it started (shells, MCP servers)
+// the whole process tree: claude and whatever it started (shells, MCP servers). Windows: taskkill /T /F; macOS
+// and Linux: the pty's process group and every descendant, SIGTERM then SIGKILL (platform.js killTree)
 function treeKill(pid, sync) {
-  if (!Number.isInteger(pid) || pid <= 0) return;
-  const args = ['/T', '/F', '/PID', String(pid)];
-  try {
-    if (sync) spawnSync('taskkill', args, { windowsHide: true, stdio: 'ignore', timeout: 5000 });
-    else spawn('taskkill', args, { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
-  } catch {}
+  P.killTree(pid, { sync: !!sync });
 }
 
 // the folders Claude Code writes its sessions/<pid>.json into, one per real folder
@@ -317,7 +328,7 @@ function sessionDirs(extra) {
   const out = [], seen = new Set();
   for (const d of [...(extra || []), path.join(home, '.claude', 'sessions'), ...acctHomes().map((h) => path.join(h, 'sessions'))]) {
     let real;
-    try { real = fs.realpathSync(d).toLowerCase(); } catch { continue; }
+    try { real = P.foldCase(fs.realpathSync(d)); } catch { continue; }
     if (seen.has(real)) continue;
     seen.add(real);
     out.push(d);
@@ -352,11 +363,23 @@ function readPidFiles(dirs) {
   }
   return out;
 }
-const normDir = (p) => { try { return path.resolve(String(p)).replace(/[\\/]+$/, '').toLowerCase(); } catch { return ''; } };
+// a folder as a key: resolved, no slash at its end, lowercased where paths ignore case (Windows, macOS)
+const normDir = (p) => {
+  try {
+    const r = path.resolve(String(p));
+    return P.foldCase(P.isWin ? r.replace(/[\\/]+$/, '') : r.length > 1 ? r.replace(/\/+$/, '') : r);
+  } catch { return ''; }
+};
 
-// pid -> parent pid for every process, one PowerShell call (about a second); null when it fails
+// pid -> parent pid for every process, one PowerShell call (about a second; ps on macOS and Linux); null when it fails
 function parentMap(cb) {
-  if (process.platform !== 'win32') return cb(null);
+  if (!P.isWin) {
+    return P.processes((list) => {
+      const m = new Map();
+      for (const x of list || []) if (x.pid > 0 && x.ppid >= 0) m.set(x.pid, x.ppid);
+      cb(m.size ? m : null);
+    });
+  }
   const ps = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.ParentProcessId }";
   execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true, timeout: 20000, maxBuffer: 4 << 20 }, (err, out) => {
     if (err) return cb(null);
@@ -365,22 +388,33 @@ function parentMap(cb) {
     cb(m.size ? m : null);
   });
 }
-// does pid descend from root (at most 8 levels up)?
+// does pid descend from root (at most 8 levels up)? Or is it root: sh -c runs a lone command in its own process
+// (macOS, Linux), so claude can be the pty's process itself
 function descends(map, pid, root) {
+  if (pid === root) return true;
   for (let i = 0, p = pid; i < 8 && p > 0; i++) { p = map.get(p); if (p === root) return true; if (p === undefined) return false; }
   return false;
 }
 
-// node-pty ships N-API prebuilds for win32 that load as they are (in Electron and in electron.exe run as
+// node-pty ships N-API prebuilds for win32 and darwin that load as they are (in Electron and in electron.exe run as
 // Node); @lydell/node-pty is the fallback. Loaded on first use, so requiring this file costs nothing.
 let ptyLib = null, ptyName = null, ptyError = null, ptyTried = false;
 function loadPty() {
   if (ptyTried) return ptyLib;
   ptyTried = true;
   for (const name of ['node-pty', '@lydell/node-pty']) {
-    try { ptyLib = require(name); ptyName = name; break; } catch (e) { ptyError = e; }
+    try { ptyLib = require(name); ptyName = name; if (!P.isWin) spawnHelperExecutable(name); break; } catch (e) { ptyError = e; }
   }
   return ptyLib;
+}
+// macOS: node-pty starts each pty through its spawn-helper program, and an install that lost the file's execute
+// bit fails every spawn ("posix_spawnp failed"): put the bit back
+function spawnHelperExecutable(name) {
+  let dir;
+  try { dir = path.dirname(require.resolve(`${name}/package.json`)); } catch { return; }
+  for (const f of [path.join(dir, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper'), path.join(dir, 'build', 'Release', 'spawn-helper')]) {
+    try { const st = fs.statSync(f); if (st.isFile() && !(st.mode & 0o100)) fs.chmodSync(f, st.mode | 0o755); } catch {}
+  }
 }
 
 // opts: { send(event, ...args): to every client, changed(): the set or a status changed, command(id) -> command
@@ -438,7 +472,6 @@ function createPtys(opts = {}) {
   function spawnPty(key, command, o, extra) {
     if (aliveCount() >= MAX_PTYS) return { ok: false, message: `At most ${MAX_PTYS} sessions at once` };
     const cols = intIn(o.cols, 20, 1000, 120), rows = intIn(o.rows, 5, 500, 32);
-    const shell = process.env.ComSpec || 'cmd.exe';
     const cwd = dirOr(o.cwd);
     const launchKey = HO.newLaunchKey();
     let p;
@@ -446,10 +479,16 @@ function createPtys(opts = {}) {
       // the command line is built from checked parts only (an id of hex and dashes, the fixed new command and
       // ALLOW_FV, or a handoff file path HO.safeFile checked: no quotes, % or cmd metacharacters). It goes to cmd as one string,
       // `/c "<command>"`, which /s strips to the command itself: node-pty would escape a quote in it as \" (which
-      // cmd does not read), and it already quoted a command with spaces the same way before
-      p = ptyLib.spawn(shell, `/d /s /c "${command}"`, {
-        name: 'xterm-256color', cols, rows, cwd, env: childEnv(o.account, launchKey), useConpty: true,
-      });
+      // cmd does not read), and it already quoted a command with spaces the same way before.
+      // macOS and Linux: /bin/sh -c '<command>'. The same parts read the same way in sh (double quotes keep each
+      // quoted word whole, and none holds a $ or a backquote); the pty's child leads its own process group
+      if (P.isWin) {
+        p = ptyLib.spawn(process.env.ComSpec || 'cmd.exe', `/d /s /c "${command}"`, {
+          name: 'xterm-256color', cols, rows, cwd, env: childEnv(o.account, launchKey), useConpty: true,
+        });
+      } else {
+        p = ptyLib.spawn('/bin/sh', ['-c', command], { name: 'xterm-256color', cols, rows, cwd, env: childEnv(o.account, launchKey) });
+      }
     } catch (e) {
       return { ok: false, message: `Could not start: ${e.message}` };
     }
@@ -573,7 +612,7 @@ function createPtys(opts = {}) {
     const model = typeof o.model === 'string' && MODEL_RE.test(o.model) ? o.model : null;
     const asked = EFFORT_LEVELS.has(o.effort) ? o.effort : null;
     const effort = asked || (fork ? '' : newEffort(getSettings().newSessionEffort));
-    const cmd = (fork ? `${commandFor(fork)} --fork-session` : newCommand) + (model ? ` --model ${model}` : '') + (effort ? ` --effort ${effort}` : '');
+    const cmd = (fork ? `${commandFor(fork)} --fork-session` : newCommand) + (model ? ` --model ${P.isWin ? model : `'${model}'`}` : '') + (effort ? ` --effort ${effort}` : '');
     const r = spawnPty(key, cmd + flag, o, { isNew: true, created: true, known, forkFrom: fork });
     if (r.ok && flag) r.chrome = o.chrome;
     if (r.ok && fork) r.forkFrom = fork;
@@ -773,7 +812,7 @@ function createPtys(opts = {}) {
   // The note a resumed session gets once it has loaded (t.nudge = { kind, cause, file?, offset? }, from restore):
   // typed as a bracketed paste, checked again 300 ms later, then Enter.
   function noteFor(n) {
-    if (n.kind === 'restart') return '[Fleet View] The session host restarted as you asked. Check that the newest "started:" line in %LOCALAPPDATA%\\fleet-view\\host.log shows the new version, then carry on.';
+    if (n.kind === 'restart') return `[Fleet View] The session host restarted as you asked. Check that the newest "started:" line in ${P.isWin ? '%LOCALAPPDATA%\\fleet-view\\host.log' : logFile()} shows the new version, then carry on.`;
     if (n.kind === 'tasks') return `[Fleet View] Your background tasks stopped when ${n.cause}; the notes above say which. Check what they finished, start again what still needs to run, then carry on.`;
     return `[Fleet View] You were cut off mid-turn: ${n.cause}. Check what finished, then carry on.`;
   }
@@ -931,7 +970,9 @@ function runHost() {
   const PIPE = pipeName();
   const TEST = isTestPipe();
   const DIR = dataDir();
-  try { fs.mkdirSync(DIR, { recursive: true }); } catch {}
+  try { fs.mkdirSync(DIR, { recursive: true, ...(P.isWin ? {} : { mode: 0o700 }) }); } catch {}
+  // macOS and Linux: the socket's folder (a test socket may sit anywhere)
+  if (!P.isWin) { try { fs.mkdirSync(path.dirname(PIPE), { recursive: true, mode: 0o700 }); } catch {} }
   const VERSION = fileHash(HOST_JS);
   const startedAt = Date.now();
   const token = crypto.randomBytes(32).toString('hex');
@@ -1252,16 +1293,37 @@ function runHost() {
   // a successor waits for the host before it to let go of the pipe (it is ending its sessions); if the window
   // started a host of its own meanwhile, that one keeps it and this one exits, as usual
   const retryUntil = SUCCESSOR ? Date.now() + 15000 : 0;
+  // macOS and Linux: a socket file outlives a host that crashed, and listen then says EADDRINUSE too. Only a
+  // socket that answers is another host; one that doesn't is removed and listen tries again (twice at most)
+  let staleTries = 0;
+  const staleSocket = (cb) => {
+    if (P.isWin || staleTries >= 2) return cb(false);
+    const probe = net.connect(PIPE);
+    const done = (alive) => { probe.removeAllListeners(); probe.destroy(); cb(alive); };
+    probe.setTimeout(1500, () => done(true));
+    probe.on('connect', () => done(true));
+    probe.on('error', (err) => {
+      if (!err || !['ECONNREFUSED', 'ENOTSOCK', 'ENOENT'].includes(err.code)) return done(true);
+      staleTries++;
+      try { if (!fs.lstatSync(PIPE).isSocket()) return done(true); fs.unlinkSync(PIPE); log(`removed a stale socket file ${PIPE}`); } catch {}
+      probe.removeAllListeners(); probe.destroy(); cb(false, true);
+    });
+  };
   server.on('error', (e) => {
-    if (e && e.code === 'EADDRINUSE' && Date.now() < retryUntil) {
-      setTimeout(() => { try { server.close(); } catch {} server.listen(PIPE); }, 250);
-      return;
+    if (e && e.code === 'EADDRINUSE') {
+      return staleSocket((alive, removed) => {
+        if (removed) { try { server.close(); } catch {} server.listen(PIPE); return; }
+        if (Date.now() < retryUntil) { setTimeout(() => { try { server.close(); } catch {} server.listen(PIPE); }, 250); return; }
+        log('another host already serves this pipe; exiting');
+        process.exit(0);
+      });
     }
-    if (e && e.code === 'EADDRINUSE') { log('another host already serves this pipe; exiting'); process.exit(0); }
     log(`pipe error: ${e && e.stack ? e.stack : e}`);
     process.exit(1);
   });
   server.listen(PIPE, () => {
+    // the socket file is the user's alone (the token still guards it, as on Windows)
+    if (!P.isWin) { try { fs.chmodSync(PIPE, 0o600); } catch (e) { log(`could not chmod the socket: ${e.message}`); } }
     try {
       writeJsonAtomic(hostFile(), { pid: process.pid, pipe: PIPE, token, startedAt, version: VERSION });
     } catch (e) { log(`could not write host.json: ${e.message}`); process.exit(1); }

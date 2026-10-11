@@ -29,11 +29,10 @@
 // is not JSON, or trips the reader, is skipped.
 'use strict';
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
-const DATA_DIR = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view');
+const DATA_DIR = require(path.join(__dirname, 'platform.js')).dataDir();
 const IMG_DIR = path.join(DATA_DIR, 'chat-images');
 const FIXTURE = path.join(__dirname, 'web', 'fixtures', 'conversation-sample.json');
 

@@ -12,6 +12,9 @@
 // a change in desktop/ restarts the window (fleetDesktop.relaunch); a changed host.js restarts the session host,
 // which waits until no session is mid-turn. An automatic update that changed desktop/ is left for the page to
 // finish (relaunchWanted), once nothing is working. "Updated to <version>" shows on the pill for a while after.
+// macOS and Linux: an update with new desktop packages quits Fleet View and opens it again (restartsAll). The card
+// says so, and "Update now" asks first: the server's question, with how many conversations are working, then
+// "Quit and update" or "Not now".
 import { esc } from './cards.js';
 
 const POLL_MS = 60e3;
@@ -31,6 +34,8 @@ const toOf = (st) => (numbered(st) ? st.upstreamVersion : st.upstream) || '';
 export function mountUpdate({ pill, verBtn, getJson }) {
   if (!pill) return { refresh() {} };
   let st = null, card = null, note = '', working = false; // working: false, 'check' or 'apply'
+  // ask: the server's question for an update that quits Fleet View (restartsAll); "Quit and update" says yes
+  let ask = '';
   const desk = () => window.fleetDesktop && typeof window.fleetDesktop.relaunch === 'function' ? window.fleetDesktop : null;
   const remember = (to) => { try { localStorage.setItem(DONE_KEY, JSON.stringify({ to, at: Date.now() })); } catch {} };
   const justDone = (() => { try { const j = JSON.parse(localStorage.getItem(DONE_KEY) || 'null'); return j && Date.now() - j.at < 10 * 60e3 ? j : null; } catch { return null; } })();
@@ -73,6 +78,8 @@ export function mountUpdate({ pill, verBtn, getJson }) {
     if (st.dirtyLock) warn.push('desktop\\package-lock.json was changed on this computer (npm install does that), and this update changes it too. Put it back with: git checkout -- desktop/package-lock.json, in the Fleet View folder.');
     else if (st.dirty) warn.push('Files in the Fleet View folder were changed on this computer, so it can\'t update itself. Undo those changes, or update by hand.');
     if (st.needsInstall) warn.push(`This update changes the desktop window's packages, so it goes in with install.ps1: it quits Fleet View (it asks first), updates it and starts it again, and the sessions open again. In PowerShell or Command Prompt: ${st.install || 'install.ps1 in the Fleet View folder'}`);
+    // macOS and Linux: Update now puts new desktop packages in itself, and Fleet View quits for that (it asks first)
+    if (st.restartsAll && !ask) warn.push(`This update changes the desktop window's packages: Fleet View quits to put them in and opens again in a minute or two, and its sessions resume.${st.busy ? ` ${st.busy} conversation${st.busy === 1 ? ' is' : 's are'} working right now.` : ''}`);
     const blocked = st.dirty || st.needsInstall || !st.behind;
     // "1.0.10 → 1.0.12" when behind, else "Fleet View 1.0.12 · up to date"; the commits in the tooltip
     const from = fromOf(st), to = toOf(st);
@@ -86,10 +93,15 @@ export function mountUpdate({ pill, verBtn, getJson }) {
       ${st.notes && st.notes.length ? `<div class="update-k">What changed</div><ul class="update-notes">${st.notes.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
       ${warn.map((w) => `<div class="update-warn">${esc(w)}</div>`).join('')}
       ${note ? `<div class="update-note">${esc(note)}</div>` : ''}
+      ${ask ? `<div class="update-warn">${esc(ask)}</div>` : ''}
       <label class="update-auto"><input type="checkbox" data-uact="auto"${st.auto ? ' checked' : ''}> Update automatically when no conversation is working</label>
-      <div class="update-acts">
+      <div class="update-acts">${ask
+    ? `
+        <button type="button" class="update-btn" data-uact="no"${working ? ' disabled' : ''}>Not now</button>
+        <button type="button" class="update-btn primary" data-uact="yes"${working ? ' disabled' : ''}>${working === 'apply' ? 'Updating…' : 'Quit and update'}</button>`
+    : `
         <button type="button" class="update-btn" data-uact="check"${working ? ' disabled' : ''}>${working === 'check' ? 'Checking…' : 'Check again'}</button>
-        ${st.behind || working === 'apply' ? `<button type="button" class="update-btn primary" data-uact="apply"${working || blocked ? ' disabled' : ''}>${working === 'apply' ? 'Updating…' : 'Update now'}</button>` : ''}
+        ${st.behind || working === 'apply' ? `<button type="button" class="update-btn primary" data-uact="apply"${working || blocked ? ' disabled' : ''}>${working === 'apply' ? 'Updating…' : 'Update now'}</button>` : ''}`}
       </div>`;
   }
 
@@ -109,7 +121,7 @@ export function mountUpdate({ pill, verBtn, getJson }) {
   }
   function close() {
     if (!card) return;
-    card.remove(); card = null; note = '';
+    card.remove(); card = null; note = ''; ask = '';
     document.removeEventListener('mousedown', outside);
     document.removeEventListener('keydown', onKey, true);
   }
@@ -132,14 +144,18 @@ export function mountUpdate({ pill, verBtn, getJson }) {
       drawPill(); drawCard();
       return;
     }
-    if (act === 'apply') {
+    if (act === 'no') { ask = ''; drawCard(); return; }
+    // "Update now" goes without confirm: an update that quits Fleet View comes back as a question (ask), and
+    // "Quit and update" sends it again with confirm
+    if (act === 'apply' || act === 'yes') {
       working = 'apply'; note = ''; drawCard();
-      const r = await post('/update/apply');
-      working = false;
+      const r = await post('/update/apply', act === 'yes' ? { confirm: true } : {});
+      working = false; ask = '';
+      if (r && !r.ok && r.confirm) { ask = r.message || 'Fleet View quits and opens again for this update. Go on?'; drawCard(); return; }
       if (!r || !r.ok) { note = r?.message || 'the update failed'; drawCard(); return; }
       remember(r.toVersion || r.to);
       note = r.relaunch && !desk() ? `${r.message}. Restart Fleet View to finish.` : `${r.message}. Reloading…`;
-      st = { ...st, behind: 0, current: r.to, currentVersion: r.toVersion || '', version: r.toVersion || st.version, notes: [] };
+      st = { ...st, behind: 0, current: r.to, currentVersion: r.toVersion || '', version: r.toVersion || st.version, notes: [], restartsAll: false };
       drawPill(); drawCard();
       if (r.relaunch && desk()) setTimeout(() => desk().relaunch(), 1200);
       // a web/ or server change reloads the page by itself; this makes sure of it

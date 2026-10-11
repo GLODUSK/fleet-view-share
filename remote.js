@@ -51,6 +51,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+const P = require(path.join(__dirname, 'platform.js'));
 
 const STATUS_EVERY_MS = 60e3;
 const PENDING_MS = 10 * 60e3;
@@ -81,11 +82,16 @@ function cookiesOf(req, name) {
 }
 // a label a browser gave itself ("Mac · Safari"): one short line of plain text
 const cleanLabel = (s) => (typeof s === 'string' ? s.replace(/[\x00-\x1f\x7f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60) : '') || 'A browser';
-// tailscale.exe: its usual place on Windows, else whatever PATH finds
+// tailscale.exe: its usual place on Windows, else whatever PATH finds. macOS: tailscale on the login shell's PATH
+// (Homebrew, or the CLI the app installs), else the one inside the App Store / standalone app
 function tailscaleExe() {
-  if (process.platform === 'win32') {
+  if (P.isWin) {
     const f = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Tailscale', 'tailscale.exe');
     if (fs.existsSync(f)) return f;
+  }
+  if (P.isMac) {
+    const f = P.which('tailscale') || ['/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/Applications/Tailscale.localized/Tailscale.app/Contents/MacOS/Tailscale'].find((x) => fs.existsSync(x));
+    if (f) return f;
   }
   return 'tailscale';
 }

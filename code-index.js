@@ -20,8 +20,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, execFile } = require('child_process');
+const P = require('./platform');
 
-const LOG = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view', 'codegraph.log');
+const LOG = path.join(P.dataDir(), 'codegraph.log');
 const DIR = '.codegraph';
 const RETRY_MS = 3600e3, BUILD_MAX_MS = 30 * 60e3, FIND_EVERY_MS = 10 * 60e3;
 const UNSAFE = /["%^&|<>\x00-\x1f]/;
@@ -31,7 +32,7 @@ const queue = []; // { top, root } checkouts waiting, in order
 const failed = new Map(); // checkout key -> when its build failed
 let building = null; // the checkout being built now
 
-const key = (p) => path.resolve(p).toLowerCase();
+const key = (p) => P.foldCase(path.resolve(p));
 function log(text) {
   try {
     fs.mkdirSync(path.dirname(LOG), { recursive: true });
@@ -79,9 +80,10 @@ try { const e = JSON.parse(fs.readFileSync(ENGINE_FILE, 'utf8')); if (e && e.ver
 
 // codegraph(args, cwd): runs the command with the paths quoted. On Windows the npm command is a .cmd, so cmd.exe runs
 // it, named in full: a bare `codegraph` can find a .js file of that name first (PATHEXT). Paths were checked for
-// characters cmd treats specially
+// characters cmd treats specially. macOS and Linux: found on the login shell's PATH (with node, which it runs on),
+// in a process group of its own, so kill() ends it with its workers
 function codegraph(args, cwd, stdio) {
-  if (process.platform !== 'win32') return spawn('codegraph', args, { cwd, stdio });
+  if (!P.isWin) return spawn(P.which('codegraph') || 'codegraph', args, { cwd, stdio, env: { ...process.env, PATH: P.loginShellPath() }, ...P.detachGroup });
   const line = ['codegraph.cmd', ...args].map((a) => (/^[\w.-]+$/.test(a) ? a : `"${a}"`)).join(' ');
   return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], { cwd, windowsHide: true, windowsVerbatimArguments: true, stdio });
 }
@@ -133,7 +135,8 @@ function exclude(root) {
 function findCodegraph() {
   if (finding || (found !== null && Date.now() - foundAt < FIND_EVERY_MS)) return;
   finding = true;
-  execFile(process.platform === 'win32' ? 'where' : 'which', [process.platform === 'win32' ? 'codegraph.cmd' : 'codegraph'], { windowsHide: true, timeout: 10e3 }, (err) => {
+  const look = P.isWin ? (cb) => execFile('where', ['codegraph.cmd'], { windowsHide: true, timeout: 10e3 }, cb) : (cb) => setImmediate(() => cb(P.which('codegraph') ? null : new Error('not found')));
+  look((err) => {
     finding = false;
     const was = found;
     found = !err; foundAt = Date.now();
@@ -199,7 +202,7 @@ function next() {
 }
 function kill(p) {
   if (process.platform === 'win32') execFile('taskkill', ['/pid', String(p.pid), '/t', '/f'], { windowsHide: true }, () => {});
-  else try { p.kill(); } catch {}
+  else P.killTree(p.pid);
 }
 
 module.exports = { want, check, status: () => ({ found, engine, building, queued: queue.map((q) => q.top) }) };

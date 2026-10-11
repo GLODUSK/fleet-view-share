@@ -8,6 +8,9 @@ const path = require('path');
 const os = require('os');
 const { execFile, spawn, spawnSync } = require('child_process');
 const HO = require(path.join(__dirname, 'handoff.js'));
+const P = require(path.join(__dirname, 'platform.js'));
+// macOS: started from the window, launchd or Finder, PATH is a bare one; the login shell's has git, gh, claude, node
+P.applyLoginPath();
 const API = require(path.join(__dirname, 'api.js'));
 const CONV = require(path.join(__dirname, 'conversation.js'));
 const CMDS = require(path.join(__dirname, 'commands.js'));
@@ -66,7 +69,8 @@ if (opt('version', false)) {
 }
 const DEMO = !!opt('demo', false);
 // Claude accounts: one letter each. B is the default login in ~/.claude; every other is a folder ~/.claude-<letter>
-// (~/.claude-a is A, ~/.claude-c is C, and so on), each with its launcher %APPDATA%\npm\claude-<letter>.cmd.
+// (~/.claude-a is A, ~/.claude-c is C, and so on), each with its launcher %APPDATA%\npm\claude-<letter>.cmd
+// (macOS: claude-<letter> on PATH).
 // A new ~/.claude-<letter> folder is a new account here with no code change (the list is read again every minute).
 const acctId = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
 const acctDir = (a) => path.join(os.homedir(), acctId(a) === 'B' ? '.claude' : '.claude-' + acctId(a).toLowerCase());
@@ -158,7 +162,7 @@ const REMOTE = require(path.join(__dirname, 'remote.js')).createRemote({
   port: PORT, demo: DEMO, serve: PORT === 4777 || !!opt('remote-serve', false),
   enabled: !DEMO && !!(saved.remote && saved.remote.enabled === true),
   logins: (!DEMO && saved.remote && saved.remote.logins) || [],
-  file: DEMO ? null : path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view', 'remote-devices.json'),
+  file: DEMO ? null : path.join(P.dataDir(), 'remote-devices.json'),
   log: (t) => logLine('remote: ' + t),
   // switched off, or a device's approval taken back: live sockets that are no longer allowed close at once
   onChange: () => { saveSettings(); if (LIVE) LIVE.recheck(); },
@@ -212,7 +216,8 @@ let apiTemp = DEMO ? [] : (Array.isArray(saved.apiTemp) ? saved.apiTemp : []).fi
 // conversations out of every view. A hidden repo comes back by itself, and leaves the list, once a conversation in
 // it has activity after `at` (pruneHiddenRepos).
 const HIDDEN_REPOS_MAX = 200;
-const rootKey = (r) => String(r || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+// (lowercased where paths ignore case: Windows, macOS)
+const rootKey = (r) => P.foldCase(String(r || '').replace(/\//g, '\\').replace(/\\+$/, ''));
 function cleanHiddenRepos(list, now = Date.now()) {
   if (!Array.isArray(list)) return null;
   const out = new Map();
@@ -404,7 +409,7 @@ function cleanPushTargets(o, now = Date.now()) {
   return out;
 }
 const pushTargets = DEMO ? cleanPushTargets(null) : cleanPushTargets(saved.pushTargets);
-const PUSH_FILE = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view', 'push-targets.json');
+const PUSH_FILE = path.join(P.dataDir(), 'push-targets.json');
 let pushFileText = null;
 // the conversation's own choice, or the one the conversation it picked up from had (following handoffs back, like
 // movedRootOf; a pickup keeps its own copy). null: it follows its repo
@@ -604,7 +609,7 @@ function flushSettings() {
 // ---------- server log ----------
 // %LOCALAPPDATA%\fleet-view\server.log: start and stop lines, crashes with their stack, server errors and why it
 // restarted. Small on purpose: nothing per request. At 2 MB it moves to server.log.1 (replacing the older one).
-const LOG_DIR = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view');
+const LOG_DIR = P.dataDir();
 const LOG_FILE = path.join(LOG_DIR, 'server.log');
 const LOG_MAX = 2 << 20;
 const errorText = (e) => (e && e.stack) || String(e);
@@ -849,11 +854,14 @@ function noteFile(s, t, p, wrote) {
   }
 }
 
-// the repos the first three absolute paths in a shell command point into ({ root, top } each)
+// the repos the first three absolute paths in a shell command point into ({ root, top } each). macOS and Linux:
+// paths under the usual top folders (/Users, /home, /Volumes, ...), not every word with a slash in it
+const CMD_PATH_RE = P.isWin ? /(?:\b[A-Za-z]:[\\/]|(?<![\w.~])\/[a-zA-Z]\/)[^\s"'`;|&<>()]*/g
+  : /(?<![\w.~:/$-])\/(?:Users|home|Volumes|private|tmp|opt|srv|mnt|workspaces?)\/[^\s"'`;|&<>()]*/g;
 function commandRepos(cmd) {
   const out = [];
   let n = 0;
-  for (const m of String(cmd || '').matchAll(/(?:\b[A-Za-z]:[\\/]|(?<![\w.~])\/[a-zA-Z]\/)[^\s"'`;|&<>()]*/g)) {
+  for (const m of String(cmd || '').matchAll(CMD_PATH_RE)) {
     const g = gitInfo(path.join(path.resolve(winPath(m[0])), '_'));
     if (g) out.push(g);
     if (++n >= 3) break;
@@ -1200,7 +1208,7 @@ const fmtCost = (c) => '$' + (c >= 100 ? Math.round(c).toLocaleString('en-US') :
 const weekLeft = {}; // account -> { left: 0-100, resets: ms }
 const UW = require(path.join(__dirname, 'usage-watch.js'));
 const USAGE = UW.createWatch({
-  file: DEMO ? null : path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view', 'usage-watch.json'),
+  file: DEMO ? null : path.join(P.dataDir(), 'usage-watch.json'),
   alertPct: () => saved.usageAlertPct, alertUsd: () => saved.usageAlertUsd,
 });
 // A restart starts from each account's last saved read (usage-watch.json), so the header keeps every account while
@@ -1218,9 +1226,11 @@ async function readWeekLeft() {
     let next = null;
     try {
       // no .credentials.json: an API key login, or not logged in yet. Nothing to read, and nothing wrong
+      // (macOS: the Keychain item Claude Code keeps it in instead, platform.js keychainCredentials)
       const cred = path.join(acctDir(a), '.credentials.json');
-      if (!fs.existsSync(cred)) { weekDue[a] = Date.now() + 5 * 60e3; continue; }
-      const o = JSON.parse(fs.readFileSync(cred, 'utf8')).claudeAiOauth;
+      const kc = P.isMac && !fs.existsSync(cred) ? await P.keychainCredentials(acctDir(a), acctId(a) !== 'B') : null;
+      if (!kc && !fs.existsSync(cred)) { weekDue[a] = Date.now() + 5 * 60e3; continue; }
+      const o = (kc || JSON.parse(fs.readFileSync(cred, 'utf8'))).claudeAiOauth;
       if (!o || !o.accessToken || (o.expiresAt && o.expiresAt < Date.now())) { weekDue[a] = Date.now() + 30e3; continue; }
       const r = await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { Authorization: 'Bearer ' + o.accessToken, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(20e3) });
       if (r.status === 429) {
@@ -2197,14 +2207,14 @@ function refreshHue(s, now) {
 // a repo at a drive's root (Z:\ with its own .git) has no folder name: it is called by its drive, Z:
 // the home folder isn't a repo: conversations start there (the launchers' folder) and sit there until their tool
 // calls point at a repo, so it is shown as "no repo" rather than the user's name
-const HOME_KEY = String(os.homedir()).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-const isHomeRoot = (root) => !!root && String(root).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() === HOME_KEY;
+const HOME_KEY = rootKey(os.homedir());
+const isHomeRoot = (root) => !!root && rootKey(root) === HOME_KEY;
 const repoName = (root) => (!root || isHomeRoot(root) ? 'no workspace' : path.basename(root) || String(root).replace(/[\\/]+$/, '') || root);
 // a picked path matches that repo root; a bare folder name (--repo detailforge-web) matches any root with that name
 function inRepo(root) {
   if (!repoSel) return true;
   if (!root) return false;
-  if (/[\\/]/.test(repoSel)) return path.resolve(root).toLowerCase() === path.resolve(repoSel).toLowerCase();
+  if (/[\\/]/.test(repoSel)) return P.foldCase(path.resolve(root)) === P.foldCase(path.resolve(repoSel));
   return repoName(root).toLowerCase() === repoSel.toLowerCase();
 }
 const menu = { open: false, sel: 0, items: [], hits: [], title: null }; // title: { y, x0, x1 } of the clickable name
@@ -2431,6 +2441,20 @@ function launchConversation(s) {
   if (process.env.FV_TEST_NO_LAUNCH === '1') {
     logLine(`test launch: ${s.id} account ${accountFor(s)} cwd ${s.cwd || '-'}`);
     return Promise.resolve({ ok: true, message: `test: would open ${s.name || s.id}` });
+  }
+  // macOS and Linux: a Terminal window (iTerm2 with FV_TERMINAL=iterm; a terminal emulator on Linux) running
+  // `claude --resume <id>` in the conversation's folder, the account set in the command line itself (Terminal starts
+  // its own login shell, so nothing from this environment reaches it; platform.js resumeCommand)
+  if (!P.isWin) {
+    const acct = accountFor(s);
+    const configDir = s.projRoot && accountOf(s.projRoot) === acct ? path.dirname(s.projRoot) : null;
+    let cwd = os.homedir();
+    try { if (s.cwd && fs.statSync(s.cwd).isDirectory()) cwd = s.cwd; } catch {}
+    const name = s.name || s.id.slice(0, 8);
+    return P.openTerminal({ cwd, cmd: P.resumeCommand(s.id, acct, configDir), title: name }).then((r) => {
+      if (!r.ok) logOnce('open:term:' + r.message, `open in a terminal: ${r.message}`);
+      return r.ok ? { ok: true, message: r.message.replace(/^opened/, () => `opened ${name}`) } : { ok: false, message: `could not open a terminal for ${name}` };
+    });
   }
   const env = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: '1' };
   // (FLEET_VIEW_* and FV_NO_OPEN are fleet-view.cmd's own: left in, "fleet-view" typed in that tab would skip its launcher;
@@ -2961,6 +2985,7 @@ function moveSel(dx, dy) {
 // ---------- Windows Terminal profile with acrylic blur ----------
 const PROFILE_GUID = '{6a1c2f3e-7b4d-4e59-9a80-a93e7b015e00}';
 function installProfile() {
+  if (!P.isWin) { console.log('--install-profile writes a Windows Terminal profile: Windows only.'); process.exit(1); }
   const base = path.join(process.env.LOCALAPPDATA || '', 'Packages');
   const files = ['Microsoft.WindowsTerminal_8wekyb3d8bbwe', 'Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe']
     .map((p) => path.join(base, p, 'LocalState', 'settings.json')).filter((f) => fs.existsSync(f));
@@ -3795,7 +3820,7 @@ function scanLiveProcs() {
   for (const r of roots().concat(ROOT_OPT ? [] : acctFolders().map((a) => ({ dir: path.join(acctDir(a), 'projects') })))) {
     const dir = path.join(path.dirname(r.dir), 'sessions');
     let real = dir;
-    try { real = fs.realpathSync(dir).toLowerCase(); } catch { continue; }
+    try { real = P.foldCase(fs.realpathSync(dir)); } catch { continue; }
     if (seenDirs.has(real)) continue;
     seenDirs.add(real);
     for (const f of ls(dir)) {
@@ -3820,15 +3845,39 @@ function scanLiveProcs() {
   for (const [id, c] of cleared) if (now - c.at > 24 * 3600e3) cleared.delete(id);
 }
 let procConv = new Map(); // claude pid -> { id, startedAt } at the last scan
+// macOS: `ps -E` shows a process's environment after its command line (the user's own processes only); Linux:
+// /proc/<pid>/environ. The lines come out as ENV_PS writes them: pid|readable|CLAUDE_CONFIG_DIR|CLAUDE_SWAP_PAYER|token
+function envLinesPosix(pids, cb) {
+  const line = (pid, env) => {
+    if (!env || !env.some((kv) => /^(HOME|PATH|USER)=/.test(kv))) return `${pid}|0|||0`;
+    const get = (k) => (env.find((kv) => kv.startsWith(`${k}=`)) || '').slice(k.length + 1);
+    return `${pid}|1|${get('CLAUDE_CONFIG_DIR')}|${get('CLAUDE_SWAP_PAYER')}|${env.some((kv) => kv.startsWith('CLAUDE_CODE_OAUTH_TOKEN=')) ? 1 : 0}`;
+  };
+  if (!P.isMac) {
+    return cb(null, pids.map((pid) => {
+      let env = null;
+      try { env = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0'); } catch {}
+      return line(pid, env);
+    }).join('\n'));
+  }
+  execFile('ps', ['-E', '-ww', '-o', 'pid=,command=', '-p', pids.join(',')], { timeout: 30000, maxBuffer: 16 << 20 }, (err, out) => {
+    const seen = new Map();
+    for (const l of String(out || '').split('\n')) { const m = /^\s*(\d+)\s(.*)$/.exec(l); if (m) seen.set(Number(m[1]), m[2].split(/\s+/)); }
+    cb(seen.size ? null : err, pids.map((pid) => line(pid, seen.get(pid) || null)).join('\n'));
+  });
+}
 function accountsFromProcesses() {
-  if (DEMO || process.platform !== 'win32' || procBusy) return;
+  if (DEMO || procBusy) return;
   const byId = liveProcs;
   for (const [sid, p] of byId) { const a = procAccount.get(`${p.pid}:${sid}`); if (a) liveAccount.set(sid, a); }
   const ask = [...byId].filter(([sid, p]) => !procAccount.has(`${p.pid}:${sid}`));
   if (!ask.length) return;
   procBusy = true;
-  const enc = Buffer.from(ENV_PS, 'utf16le').toString('base64');
-  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', enc], { timeout: 30000, windowsHide: true, env: { ...process.env, FV_PIDS: ask.map(([, p]) => p.pid).join(',') } }, (err, out) => {
+  const read = P.isWin ? (cb) => {
+    const enc = Buffer.from(ENV_PS, 'utf16le').toString('base64');
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', enc], { timeout: 30000, windowsHide: true, env: { ...process.env, FV_PIDS: ask.map(([, p]) => p.pid).join(',') } }, cb);
+  } : (cb) => envLinesPosix(ask.map(([, p]) => p.pid), cb);
+  read((err, out) => {
     procBusy = false;
     const got = new Map(), folderOf = new Map();
     for (const line of String(out || '').split(/\r?\n/)) {
@@ -3919,7 +3968,7 @@ function sessionJson(s, now) {
   const st = STATE[s.state] || STATE.IDLE;
   const root = s.root || null;
   const top = s.demo ? null : topOf(s, root);
-  const worktree = s.demo ? s.demo.worktree || null : top && root && path.resolve(top).toLowerCase() !== path.resolve(root).toLowerCase() ? path.basename(top) : null;
+  const worktree = s.demo ? s.demo.worktree || null : top && root && P.foldCase(path.resolve(top)) !== P.foldCase(path.resolve(root)) ? path.basename(top) : null;
   const sh = shipOf(s);
   const prog = progressOf(s, now);
   const spark = new Array(20).fill(0);
@@ -5463,7 +5512,8 @@ function requestFailed(req, res, e) {
 // or a repo root or checkout (repo.root, links.repoFolder), or a handoff summary in HO.dir(). Nothing goes
 // through a shell with unchecked input: Explorer gets the path as an argument, and VS Code's code.cmd (a batch
 // file, so it needs cmd.exe) gets it inside quotes, with every character cmd treats specially refused up front (UNSAFE_PATH, defined with the added repos).
-const samePath = (p) => { const r = path.resolve(String(p)); return process.platform === 'win32' ? r.toLowerCase() : r; };
+// (case folded where paths ignore case: Windows, macOS)
+const samePath = (p) => P.foldCase(path.resolve(String(p)));
 function revealAllowed(kind, p) {
   const want = samePath(p);
   // a repo added by hand (it may have no conversations yet)
@@ -5524,7 +5574,11 @@ async function revealFile(p, line) {
     if (await run('explorer.exe', [`/select,"${p}"`], { anyExit: true, windowsVerbatimArguments: true }, 3000)) return { ok: true, message: `VS Code was not found: showing ${path.basename(p)} in Explorer` };
     return { ok: false, message: `could not open ${path.basename(p)}` };
   }
-  if (await run('code', ['-g', target])) return { ok: true, message: `opened ${path.basename(p)} in VS Code` };
+  // macOS: documents and media open in their default app (Preview, ...), as on Windows; VS Code from PATH (the
+  // login shell's) or its app bundle
+  if (P.isMac && DEFAULT_APP_EXT.has(path.extname(p).toLowerCase()) && await run('open', [p])) return { ok: true, message: `opened ${path.basename(p)}` };
+  const codeBin = P.which('code') || (P.isMac ? ['/Applications', path.join(os.homedir(), 'Applications')].map((d) => path.join(d, 'Visual Studio Code.app', 'Contents', 'Resources', 'app', 'bin', 'code')).find((f) => fs.existsSync(f)) : null) || 'code';
+  if (await run(codeBin, ['-g', target])) return { ok: true, message: `opened ${path.basename(p)} in VS Code` };
   if (process.platform === 'darwin' && await run('open', ['-R', p])) return { ok: true, message: `VS Code was not found: showing ${path.basename(p)} in Finder` };
   if (process.platform !== 'darwin' && await run('xdg-open', [path.dirname(p)])) return { ok: true, message: `VS Code was not found: opened the folder of ${path.basename(p)}` };
   return { ok: false, message: `could not open ${path.basename(p)}` };
@@ -5947,8 +6001,10 @@ function electronExe() {
   if (!fs.existsSync(path.join(dir, 'node_modules', 'electron', 'package.json'))) return null;
   try {
     const exe = require(path.join(dir, 'node_modules', 'electron'));
-    return typeof exe === 'string' && fs.existsSync(exe) ? exe : null;
-  } catch { return null; }
+    if (typeof exe === 'string' && fs.existsSync(exe)) return exe;
+  } catch {}
+  const bin = P.electronBinary(dir);
+  return fs.existsSync(bin) ? bin : null;
 }
 
 // the app window: the Electron desktop window if it is installed (and has not failed to start this run), else
@@ -5970,11 +6026,14 @@ function openWindow() {
       return child;
     } catch {} // fall through to Edge
   }
-  const edge = [path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe')].find((f) => fs.existsSync(f));
+  // (macOS: Chrome or Edge from /Applications in app mode; Linux: google-chrome, chromium or microsoft-edge on PATH)
+  const edge = P.isWin ? [path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe')].find((f) => fs.existsSync(f))
+    : P.isMac ? ['Google Chrome', 'Microsoft Edge'].map((a) => `/Applications/${a}.app/Contents/MacOS/${a}`).find((f) => fs.existsSync(f))
+    : ['google-chrome', 'chromium', 'chromium-browser', 'microsoft-edge'].map((n) => P.which(n)).find(Boolean);
   try {
     if (edge) {
-      const args = [`--app=${url}`, `--user-data-dir=${path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fleet-view', 'edge')}`, '--no-first-run', '--no-default-browser-check'];
+      const args = [`--app=${url}`, `--user-data-dir=${path.join(P.dataDir(), 'edge')}`, '--no-first-run', '--no-default-browser-check'];
       if (webBounds) args.push(`--window-position=${webBounds.x},${webBounds.y}`, `--window-size=${webBounds.w},${webBounds.h}`);
       const child = spawn(edge, args, { detached: true, stdio: 'ignore' });
       child.on('error', () => console.log(`could not start Edge; open ${url} in a browser`));
@@ -5983,7 +6042,11 @@ function openWindow() {
       const child = spawn('explorer.exe', [url], { detached: true, stdio: 'ignore' }); // the default browser
       child.on('error', () => console.log(`open ${url} in a browser`));
       child.unref();
-    } else console.log(`open ${url} in a browser`);
+    } else {
+      const child = spawn(P.isMac ? 'open' : 'xdg-open', [url], { detached: true, stdio: 'ignore' }); // the default browser
+      child.on('error', () => console.log(`open ${url} in a browser`));
+      child.unref();
+    }
   } catch { console.log(`open ${url} in a browser`); }
 }
 

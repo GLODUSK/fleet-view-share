@@ -5,6 +5,12 @@
 //   FV_TERM_SELFTEST=1     with FV_TERM_CMD (a harmless command instead of claude, honoured by the test host):
 //                          output, resize, snapshot, page reload, kill, endAll, killAll, the mini view having
 //                          no access (skipped with FV_TEST_HIDDEN, which never opens the mini view)
+//                          The command prints its width as "Columns: <n>" twice (the second after a resize, a few
+//                          seconds later), then a line "CFG=<CLAUDE_CONFIG_DIR> FVX=<FV_TERM_SELFTEST, or the text
+//                          %FV_TERM_SELFTEST% when it is unset> CT=<COLORTERM>", and keeps a child running. Windows (cmd):
+//                            mode con & echo CFG=%CLAUDE_CONFIG_DIR% FVX=%FV_TERM_SELFTEST% CT=%COLORTERM% & ping -n 5 127.0.0.1 >nul & mode con & ping -n 600 127.0.0.1 >nul
+//                          macOS and Linux (sh; more than one command, so sh stays and sleep is its child):
+//                            printf 'Columns: %s\n' "$(tput cols)"; echo "CFG=$CLAUDE_CONFIG_DIR FVX=${FV_TERM_SELFTEST:-%FV_TERM_SELFTEST%} CT=$COLORTERM"; sleep 4; printf 'Columns: %s\n' "$(tput cols)"; sleep 600
 //   FV_TERM_SELFTEST=real  FV_TERM_REAL_ID / _CWD / _ACCOUNT: opens that conversation's real `claude --resume`,
 //                          types nothing, waits for Claude Code's screen in the buffer, then kills it
 'use strict';

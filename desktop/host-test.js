@@ -1,6 +1,7 @@
 // Fleet View desktop: a test of the session host's auto-continue, panel auto-close and restart (host.js), run
 // with the system node:   node desktop/host-test.js
-// It starts a test host (its own pipe \\.\pipe\fleet-view-host-test-<random>, every file under one temp folder,
+// It starts a test host (its own pipe \\.\pipe\fleet-view-host-test-<random>, on macOS and Linux the socket
+// <temp>/fleet-view-host-test-<random>.sock; every file under one temp folder,
 // never the real host's) whose sessions run a fake claude: a node script that reads its terminal in raw mode and
 // appends whatever it receives to received.txt in its folder (each session has its own). The test plays Claude
 // Code's side by writing the sessions/<pid>.json files (with its own pid, so they count as alive) and the
@@ -13,12 +14,14 @@ const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
+const P = require(path.join(__dirname, '..', 'platform.js'));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (fn, ms, step = 200) => { const end = Date.now() + ms; while (Date.now() < end) { const v = await fn(); if (v) return v; await sleep(step); } return null; };
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'fv-host-test-'));
-const PIPE = `\\\\.\\pipe\\fleet-view-host-test-${crypto.randomBytes(4).toString('hex')}`;
+const TEST_TAG = `fleet-view-host-test-${crypto.randomBytes(4).toString('hex')}`;
+const PIPE = P.isWin ? `\\\\.\\pipe\\${TEST_TAG}` : path.join(os.tmpdir(), `${TEST_TAG}.sock`);
 const DATA = path.join(ROOT, 'data'), PIDS = path.join(ROOT, 'sessions'), PROJECTS = path.join(ROOT, 'projects');
 const SETTINGS = path.join(ROOT, 'fleet-view.json'), FAKE = path.join(ROOT, 'fake-claude.js');
 for (const d of [DATA, PIDS, PROJECTS, path.join(ROOT, 'handoffs')]) fs.mkdirSync(d, { recursive: true });
@@ -142,7 +145,7 @@ function cleanup() {
   for (const pid of pids) {
     if (!(pid > 0) || pid === process.pid) continue;
     try { process.kill(pid, 0); } catch { continue; }
-    spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, stdio: 'ignore', timeout: 10000 });
+    P.killTree(pid, { sync: true }); // taskkill /T /F on Windows; the process group on macOS and Linux
   }
 }
 process.on('exit', cleanup);
