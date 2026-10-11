@@ -590,6 +590,31 @@ export function mapUnpin(t) {
   saveSpotsSoon(300, true);
 }
 
+// the empty-space menu's "Layout" (app.js): 'tidy' gives the workspaces that aren't pinned new spots (the `g` key);
+// the others unpin everything and pack the workspaces in rows in that order, each conversation back on its
+// workspace's ring. false when the map isn't showing.
+export function mapLayout(mode) {
+  if (!active() || !I.nodes) return false;
+  if (mode === 'tidy') { rearrange(false); return true; }
+  const repos = I.nodes.filter((n) => n.kind === 'repo');
+  const last = (n) => n.sessions.reduce((t, s) => Math.max(t, s.last || 0), 0);
+  const busy = (n) => n.sessions.filter((s) => s.state === 'WORKING' || s.state === 'AGENTS').length;
+  const open = (n) => n.sessions.filter((s) => s.state !== 'DONE').length;
+  const by = {
+    name: (a, b) => String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base', numeric: true }),
+    busy: (a, b) => busy(b) - busy(a) || open(b) - open(a) || last(b) - last(a),
+    recent: (a, b) => last(b) - last(a),
+    size: (a, b) => b.sessions.length - a.sessions.length || last(b) - last(a),
+  }[mode];
+  if (by) {
+    const order = repos.sort(by).map((n) => n.id);
+    I.homeOrder = [...order, ...I.homeOrder.filter((id) => !order.includes(id))];
+    I.homeSig = '';
+  }
+  rearrange(true);
+  return true;
+}
+
 // "Add workspace" from the map's empty-space menu: the new repo's hub takes the spot where the menu was opened
 // (client coordinates), pinned there like a drop, instead of the nearest free spot. false when the map isn't showing.
 export function mapPlaceRepo(root, clientX, clientY) {

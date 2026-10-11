@@ -2573,8 +2573,11 @@ function openContextMenu(target, x, y) {
     // empty space on the map, or around the cards or tiles: add a repo, and every removed conversation (its
     // workspace in the note; those with no workspace are only here)
     const rmAll = removedMenuItem(removedFor(), true);
-    const extra = [{ sep: true }, notifyMenuItem()];
-    if (accountsMenuItem()) extra.push(accountsMenuItem());
+    // no desktop-notification switch here: the header's bell has it (Henry, 2026-10-10)
+    const extra = [];
+    const lay = layoutMenuItem();
+    if (lay) extra.push({ sep: true }, lay);
+    if (accountsMenuItem()) extra.push(...(lay ? [] : [{ sep: true }]), accountsMenuItem());
     if (multi.size) extra.push({ label: `Clear selection (${multi.size})`, icon: 'close', run: () => setMulti([], 'menu') });
     openCtxMenu({ x, y, items: [addRepoMenuItem({ x, y }), recentRepoMenuItem({ x, y }), ...(rmAll ? [rmAll] : []), ...extra] });
     return;
@@ -3793,6 +3796,19 @@ function accountsMenuItem() {
     children: all.map((a) => ({ label: `Claude ${a}`, tag: a, icon: offAccts.includes(a) ? null : 'check', stay: true, run: () => setAccountOn(a, offAccts.includes(a)) })) };
 }
 
+// "Layout" (the map's empty-space menu): lays every workspace out again in the picked order (map.js mapLayout)
+function layoutMenuItem() {
+  if (local.view !== 'map' || !mapMod || typeof mapMod.mapLayout !== 'function') return null;
+  const pick = (label, mode, note, done) => ({ label, note, run: () => { if (mapMod.mapLayout(mode)) toast(done, C.dim); } });
+  return { label: 'Layout', icon: 'repo', children: [
+    pick('Tidy up', 'tidy', 'pinned ones stay put (g)', "Tidied up the workspaces that aren't pinned"),
+    { sep: true },
+    pick('By name, A to Z', 'name', null, 'Workspaces laid out by name'),
+    pick('Busiest first', 'busy', 'working conversations, then open ones', 'Busiest workspaces first'),
+    pick('Most recent first', 'recent', 'the last conversation to move', 'Most recently active workspaces first'),
+    pick('Most conversations first', 'size', null, 'Workspaces with the most conversations first'),
+  ] };
+}
 function notifyMenuItem() {
   const on = local.notify !== false;
   return { label: on ? 'Turn off desktop notifications' : 'Turn on desktop notifications', icon: 'alert',
