@@ -36,7 +36,7 @@
 // list() gives each session: id, pid, alive, exitCode, startedAt, pending, created, forkFrom, cwd, handoffFrom,
 // pickingUp, account, status, waitingFor (what its pid file says it waits for, while waiting), claudePid,
 // interrupted, restored, autoContinue (a note is due, see below), slashPanel (the "/" command whose panel is
-// open, see Panels), role ('chief' or null, see Roles), cols, rows.
+// open, see Panels), role ('chief', 'bot:<id>' or null, see Roles), cols, rows.
 // The pipe is the lock: a second host finds the name taken and exits. The pipe keeps the default ACL (the
 // user, SYSTEM and administrators), and the token keeps out anything that did not read the user's own folder.
 //
@@ -85,14 +85,16 @@
 // handoff names it (next_session), else runs the pickup again.
 //
 // Roles: create({ role: 'chief' }) starts the Chief (../chief/BRIEF.md), the session that oversees the others for the
-// user. 'chief' is the only role; any other value is ignored. A chief's claude may also run fv start, open, hosted,
+// user; create({ role: 'bot:<id>' }) (id: 12 lowercase hex, which the server makes) starts one of the user's bots
+// (../bots.js), overseers too. Any other value is ignored. A chief's claude may also run fv start, open, hosted,
 // wait and menu without asking (FV_CHIEF below); fv answer, stop, rm (remove) and interrupt are blocked outright
-// (FV_CHIEF_DENIED), since a session with every tool allowed would never ask. One Chief at a time: create() refuses
-// a second (chiefRunning: the running one's id), and anything else that would start one while another runs (open,
-// sendTo, a pickup, a restore) starts it without the role. The role stays with the session: through a re-key, in the
+// (FV_CHIEF_DENIED), since a session with every tool allowed would never ask. A bot gets the usual fv commands. One
+// Chief at a time: create() refuses a second (chiefRunning: the running one's id), and anything else that would start
+// one while another runs (open, sendTo, a pickup, a restore) starts it without the role; the server keeps each bot to
+// one session. The role stays with the session: through a re-key, in the
 // restore list (a host that resumes it gives it back), when it is opened again after it ended, sent to another
 // account, and when it hands off (the pickup gets it). A /clear keeps it; a /resume of an older conversation (one
-// begun more than CHIEF_NEW_MS ago) drops it, so an old conversation never becomes the Chief by being resumed there.
+// begun more than CHIEF_NEW_MS ago) drops it, so an old conversation never takes a role by being resumed there.
 //
 // It logs to %LOCALAPPDATA%\fleet-view\host.log, and exits by itself only after 10 minutes with no session and
 // no client. A changed host.js on disk takes effect when the host next starts; until then it logs that once.
@@ -320,10 +322,12 @@ const FV_CHIEF_DENIED = ['answer', 'stop', 'rm', 'remove', 'interrupt'];
 const toolsArg = (flag, cmds) => `"--${flag}=${cmds.map((c) => `Bash(fv ${c}:*)`).join(',')}"`;
 const allowArg = (cmds) => toolsArg('allowedTools', cmds);
 const ALLOW_FV = allowArg(FV_ALLOWED), ALLOW_CHIEF = `${allowArg(FV_CHIEF)} ${toolsArg('disallowedTools', FV_CHIEF_DENIED)}`;
-// a chief whose claude goes on in a conversation begun longer ago than this resumed an old one: no longer the Chief
+// a session with a role whose claude goes on in a conversation begun longer ago than this resumed an old one: it
+// loses the role
 const CHIEF_NEW_MS = 10 * 60 * 1000;
-// a role as create takes it: 'chief', else none
-const roleOf = (v) => (v === 'chief' ? 'chief' : null);
+// a role as create takes it: 'chief' or 'bot:<id>', else none
+const BOT_ROLE_RE = /^bot:[0-9a-f]{12}$/;
+const roleOf = (v) => (v === 'chief' ? 'chief' : typeof v === 'string' && BOT_ROLE_RE.test(v) ? v : null);
 const allowFor = (role) => (role === 'chief' ? ALLOW_CHIEF : ALLOW_FV);
 
 function childEnv(account, launchKey) {
@@ -504,7 +508,7 @@ function createPtys(opts = {}) {
   //          outAt (its last output), inputAt (its last key), line / inPaste (what is typed into the prompt since
   //          the last Enter), slash (a "/" command sent with Enter, until its panel closes: see panelTick),
   //          nudge (the note due after a restore: see nudgeTick), restartBy (it asked for the host restart),
-  //          role ('chief' or null: see Roles) }
+  //          role ('chief', 'bot:<id>' or null: see Roles) }
   const terms = new Map();
   let newSeq = 0;
   let screenLib = null;
@@ -624,8 +628,8 @@ function createPtys(opts = {}) {
     return spawnPty(k, pickupFor(file, role), o || {}, { isNew: true, known, pickup: file, ...(extra || {}), role });
   }
 
-  // extra: { interrupted, restored, nudge, role } when the host resumes it after a shutdown. o.role 'chief' opens it
-  // as the Chief; one that ended here keeps the role it had
+  // extra: { interrupted, restored, nudge, role } when the host resumes it after a shutdown. o.role ('chief' or
+  // 'bot:<id>') opens it with that role; one that ended here keeps the role it had
   function open(o, extra) {
     const { id } = o || {};
     if (typeof id !== 'string' || !ID_RE.test(id)) throw new Error('bad conversation id');
@@ -678,7 +682,7 @@ function createPtys(opts = {}) {
   // session. The reply echoes both.
   // o.role 'chief' starts the Chief (see Roles): the same command with the Chief's allowed fv commands. The reply
   // echoes role. While another Chief runs it starts nothing: { ok: false, chiefRunning: <its id> }. The check is
-  // here, where nothing else runs between it and the start.
+  // here, where nothing else runs between it and the start. o.role 'bot:<id>' starts a bot: the usual command.
   function create(o) {
     if (!loadPty()) return noPty();
     o = o || {};
@@ -738,11 +742,11 @@ function createPtys(opts = {}) {
       mine.sort((x, y) => y.updatedAt - x.updatedAt);
       // its claude is on another conversation now (/clear, /resume): the pty follows, unless that one is hosted
       if (t.claudePid && !t.isNew && mine.length && mine[0].sessionId !== t.id.toLowerCase() && !terms.has(mine[0].sessionId)) {
-        // a chief carries on as the Chief in a new conversation (/clear), not in an older one it resumed
-        const began = t.role === 'chief' ? transcriptStart(mine[0].sessionId, t.cwd) : null;
+        // a role carries on in a new conversation (/clear), not in an older one it resumed
+        const began = t.role ? transcriptStart(mine[0].sessionId, t.cwd) : null;
         if (began !== null && now - began > CHIEF_NEW_MS) {
+          log(`${t.role === 'chief' ? 'chief' : t.role}: ${t.id} went on in an older conversation (${mine[0].sessionId}), which does not take the role`);
           t.role = null;
-          log(`chief: ${t.id} went on in an older conversation (${mine[0].sessionId}), which is not the Chief`);
         }
         rekey(t, mine[0]);
         continue; // rekey sent the status with the move
@@ -1431,7 +1435,7 @@ function runHost() {
 
 module.exports = {
   createPtys, sessionDirs, readPidFiles, normDir, pipeName, dataDir, hostFile, sessionsFile, logFile, fileHash, readJson,
-  HOST_JS, ID_RE, KEY_RE, NEW_RE, PROTO, FV_ALLOWED, FV_CHIEF, FV_CHIEF_DENIED, ptyName: () => ptyName, ptyError: () => ptyError,
+  HOST_JS, ID_RE, KEY_RE, NEW_RE, PROTO, FV_ALLOWED, FV_CHIEF, FV_CHIEF_DENIED, BOT_ROLE_RE, ptyName: () => ptyName, ptyError: () => ptyError,
 };
 
 // `host.js --selfcheck`: what a restart runs before it ends anything. Getting here means this file and

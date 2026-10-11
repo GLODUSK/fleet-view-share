@@ -1,6 +1,6 @@
-// Fleet View desktop: a test of the session host's auto-continue, panel auto-close, restart and the chief role
+// Fleet View desktop: a test of the session host's auto-continue, panel auto-close, restart and the roles: the chief
 // (its allowed and blocked fv commands, kept through a re-key, a restore and a handoff; one at a time; dropped when it
-// resumes an older conversation) (host.js), run
+// resumes an older conversation) and a bot's (the usual commands; kept and dropped the same ways) (host.js), run
 // with the system node:   node desktop/host-test.js
 // It starts a test host (its own pipe \\.\pipe\fleet-view-host-test-<random>, on macOS and Linux the socket
 // <temp>/fleet-view-host-test-<random>.sock; every file under one temp folder,
@@ -95,6 +95,7 @@ function deniedFv(args) {
 const FV_BASE = ['send', 'status', 'ask', 'read', 'ls', 'teams', 'team', 'transcript'];
 const FV_CHIEF_EXTRA = ['start', 'open', 'hosted', 'wait', 'menu'];
 const FV_CHIEF_DENIED = ['answer', 'stop', 'rm', 'remove', 'interrupt'];
+const BOT1 = `bot:${'a1'.repeat(6)}`, BOT2 = `bot:${'b2'.repeat(6)}`; // two bots' roles (bots.js)
 const sameSet = (a, b) => !!a && a.length === b.length && b.every((x) => a.includes(x));
 const savedList = () => { try { return JSON.parse(fs.readFileSync(path.join(DATA, 'sessions.json'), 'utf8')).sessions || []; } catch { return []; } };
 // the note's words, then Enter (ConPTY may hand a paste to a raw-mode app as plain keys: words, not exact bytes)
@@ -293,6 +294,24 @@ async function main() {
     rz && rz.ok && lz && lz.role === null && sameSet(allowedFv(argsOf(Z)[0]), FV_BASE) && sameSet(deniedFv(argsOf(Z)[0]), [])
     && hostLog().includes(`chief: open ${Z.id} starts without the role: ${G.id} is the Chief`), { rz, lz, args: argsOf(Z), log: hostLog().split('\n').slice(-5) });
 
+  // g. a bot's role ('bot:<12 lowercase hex>'): the usual fv commands, nothing blocked; several bots at once, while the
+  // Chief runs; a malformed one is no role
+  const Y1 = session('y1'), Y2 = session('y2'), Y3 = session('y3');
+  for (const s of [Y1, Y2, Y3]) fs.writeFileSync(path.join(s.cwd, 'want-id.txt'), s.id);
+  const ry1 = await cl.req('create', { cwd: Y1.cwd, account: 'B', role: BOT1, cols: 100, rows: 30 });
+  const ry2 = await cl.req('create', { cwd: Y2.cwd, account: 'B', role: BOT2, cols: 100, rows: 30 });
+  const ry3 = await cl.req('create', { cwd: Y3.cwd, account: 'B', role: 'bot:A1A1A1A1A1A1', cols: 100, rows: 30 });
+  check('g. bot: create echoes each bot\'s role while the Chief runs; a malformed one gets none', ry1 && ry1.ok && ry1.role === BOT1 && ry2 && ry2.ok && ry2.role === BOT2
+    && ry3 && ry3.ok && !('role' in ry3), { ry1, ry2, ry3 });
+  await waitFor(() => [Y1, Y2, Y3].every((s) => argsOf(s).length), 10000);
+  check('g. bot: the usual fv commands, nothing blocked', [Y1, Y2, Y3].every((s) => sameSet(allowedFv(argsOf(s)[0]), FV_BASE) && sameSet(deniedFv(argsOf(s)[0]), [])),
+    [Y1, Y2, Y3].map((s) => argsOf(s)));
+  const keyedY = await waitFor(async () => { const l = await cl.req('list'); return [Y1, Y2, Y3].every((s) => l.some((x) => x.id === s.id && !x.pending)) ? l : null; }, 20000);
+  const roleIn = (l, s) => { const x = (l || []).find((y) => y.id === s.id); return x ? x.role : undefined; };
+  check('g. bot: list() keeps the role after the re-key', roleIn(keyedY, Y1) === BOT1 && roleIn(keyedY, Y2) === BOT2 && roleIn(keyedY, Y3) === null, keyedY);
+  const savedY = await waitFor(() => { const l = savedList(); return l.some((x) => x.id === Y1.id) && l.some((x) => x.id === Y3.id) ? l : null; }, 5000);
+  check('g. bot: sessions.json records the role (none for a malformed one)', savedY && roleIn(savedY, Y1) === BOT1 && savedY.some((x) => x.id === Y3.id && !('role' in x)), savedList());
+
   // ===== f. restart: the host hands over to a successor, which resumes the sessions =====
   const keyA = (starts(A)[0] || '').split(' ')[1];
   for (const s of Object.values(S)) dropPidFile(s); // a live pid file would make the next host skip that conversation
@@ -327,6 +346,9 @@ async function main() {
     && sameSet(allowedFv(gArgs), [...FV_BASE, ...FV_CHIEF_EXTRA]) && gArgs.includes('--resume') && gArgs.includes(G.id) && sameSet(allowedFv(argsOf(O).slice(-1)[0]), FV_BASE), { l2, gArgs });
   const gSaved = await waitFor(() => savedList().find((x) => x.id === G.id && x.role === 'chief'), 5000);
   check('g. restore: the new host\'s sessions.json still records role "chief"', gSaved, savedList());
+  const y1Args = argsOf(Y1).slice(-1)[0] || [];
+  check('g. restore: a resumed bot keeps its role and the usual commands', roleIn(l2, Y1) === BOT1 && roleIn(l2, Y2) === BOT2 && roleIn(l2, Y3) === null
+    && y1Args.includes('--resume') && y1Args.includes(Y1.id) && sameSet(allowedFv(y1Args), FV_BASE), { l2, y1Args });
 
   // ===== h. handoff: the chief checkpoints itself; the pickup that carries on is the chief too =====
   const [gPid, gKey] = (starts(G).slice(-1)[0] || '').split(' ');
@@ -345,6 +367,18 @@ async function main() {
   check('h. handoff: the picked-up conversation is re-keyed to its id and keeps role "chief"', p3 && p3.role === 'chief' && p3.handoffFrom === G.id, l3 || await cl.req('list'));
   const s3 = await waitFor(() => savedList().find((x) => x.id === G2), 5000);
   check('h. handoff: sessions.json records the pickup\'s role', s3 && s3.role === 'chief', savedList());
+  // a bot hands off the same way: its pickup is that bot (bots.js follows it by the role)
+  const [y1Pid, y1Key] = (starts(Y1).slice(-1)[0] || '').split(' ');
+  const yFile = path.join(ROOT, 'handoffs', `2026-10-10_120001_${Y1.id.slice(0, 8)}.md`);
+  fs.writeFileSync(yFile, `---\nsession: ${Y1.id}\ncwd: ${Y1.cwd}\ncreated: ${new Date().toISOString()}\n---\n# Handoff\n`);
+  const Y1b = crypto.randomUUID();
+  fs.writeFileSync(path.join(Y1.cwd, 'want-id.txt'), Y1b);
+  fs.writeFileSync(path.join(ROOT, 'handoffs', '.restart', `${y1Key}.json`), JSON.stringify({ file: yFile, cwd: Y1.cwd, session: Y1.id }));
+  P.killTree(Number(y1Pid), { sync: true });
+  const ly = await waitFor(async () => (await cl.req('list')).find((x) => x.id === Y1b) || null, 20000);
+  const yp = argsOf(Y1).slice(-1)[0] || [];
+  check('h. handoff: a bot\'s pickup runs /pickup with the usual commands, is re-keyed and keeps the bot\'s role', ly && ly.role === BOT1 && ly.handoffFrom === Y1.id
+    && yp.includes(`/pickup ${yFile}`) && sameSet(allowedFv(yp), FV_BASE), { ly, yp });
 
   // ===== i. the chief's claude moves on: /clear (a new conversation) keeps the role, /resume of an older one drops it =====
   // its pid file (the fake's own) names another conversation, as Claude Code's does after /clear or /resume
@@ -366,6 +400,17 @@ async function main() {
     lo2 && lo2.role === null && hostLog().includes(`went on in an older conversation (${OLD})`), { lo2, log: hostLog().split('\n').slice(-5) });
   const oSaved = await waitFor(() => savedList().find((x) => x.id === OLD), 5000);
   check('i. move: sessions.json records the old conversation without the role', oSaved && !('role' in oSaved), savedList());
+  // the same for a bot: a /resume of an older conversation drops its role (once the host tied the resumed one to its claude)
+  await waitFor(async () => (await cl.req('list')).find((x) => x.id === Y2.id && x.claudePid), 15000);
+  const y2File = path.join(PIDS, `${Number((starts(Y2).slice(-1)[0] || '').split(' ')[0])}.json`);
+  const OLD2 = crypto.randomUUID();
+  const y2Dir = path.join(PROJECTS, Y2.cwd.replace(/[^A-Za-z0-9]/g, '-'));
+  fs.mkdirSync(y2Dir, { recursive: true });
+  fs.writeFileSync(path.join(y2Dir, `${OLD2}.jsonl`), jl({ type: 'user', timestamp: new Date(Date.now() - 3600000).toISOString(), message: { role: 'user', content: 'old work' } }));
+  { const f = JSON.parse(fs.readFileSync(y2File, 'utf8')); const now = Date.now(); fs.writeFileSync(y2File, JSON.stringify({ ...f, sessionId: OLD2, statusUpdatedAt: now, updatedAt: now })); }
+  const ly2 = await listed(OLD2);
+  check('i. move: a bot that resumes an older conversation loses its role too (a log line)',
+    ly2 && ly2.role === null && hostLog().includes(`${BOT2}: ${Y2.id} went on in an older conversation (${OLD2})`), { ly2, log: hostLog().split('\n').slice(-5) });
   // with no Chief left, a new one may start
   const W = session('w');
   fs.writeFileSync(path.join(W.cwd, 'want-id.txt'), W.id);

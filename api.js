@@ -89,7 +89,8 @@ function authorized(req) {
 
 // ---------- Henry's phone ----------
 // Text sent to a session with no "from" reads like the user's own words, and every Claude session here can read the
-// token. So for a chief (chief.js frame) such text counts as Henry's only when it comes from the phone relay
+// token. So for an overseer (the Chief or a bot: isOverseer below; chief.js frame) such text counts as Henry's only
+// when it comes from the phone relay
 // (relay.js, inside this server), which marks what Henry sent from his paired phone with "via": "phone" in the body
 // AND the header X-Fleet-View-Relay: <relayKey()>. The key is made when this process starts and kept in memory only
 // (never on disk, logged or served); fleet-view.js hands it to the relay. A caller that only has the token can't
@@ -190,6 +191,10 @@ const keyToId = new Map(); // 'new-<n>' -> id
 const resolveKey = (k) => keyToId.get(k) || k;
 const keyOf = (id) => { for (const [k, v] of keyToId) if (v === id) return k; return null; };
 const convId = (id) => (H.ID_RE.test(String(id || '')) ? String(id).toLowerCase() : null);
+// the roles the session host knows: the Chief ('chief') and the bots ('bot:<id>', bots.js) oversee the others for
+// Henry, so what reaches them is framed by where it came from (chief.js frame) wherever it is typed
+const isBotRole = (role) => typeof role === 'string' && H.BOT_ROLE_RE.test(role);
+const isOverseer = (role) => role === 'chief' || isBotRole(role);
 
 // invisible format characters (zero-width spaces, word joiners, bidi marks, tag characters, a BOM), but not a
 // zero-width joiner inside an emoji sequence: they hide what a line says, and they would let a line slip past a
@@ -394,7 +399,7 @@ function describe(p, info, ctx) {
     endedAt: info ? info.endedAt || null : null,
     cwd: (info && info.cwd) || p.cwd || null, account: /^[A-Z]$/.test(p.account) ? p.account : 'B',
     temp: !!(ctx && ctx.isTemp && ctx.isTemp(p.id)),
-    role: p.role === 'chief' ? 'chief' : null,
+    role: isOverseer(p.role) ? p.role : null,
   };
 }
 const infoOf = (p, ctx) => (convId(p.id) ? ctx.sessionInfo(convId(p.id)) : null);
@@ -554,30 +559,34 @@ async function tickQueue() {
 
 // ---------- resuming a conversation in the desktop app ----------
 // Can it be resumed here? Its log on disk, its folder known, inside a folder a new session could start in (its
-// repo, or a checkout of it), and still there. -> { cwd, account } or { err: [code, json] }
+// repo, or a checkout of it), and still there. A bot's conversation (ctx.botOf, bots.js) in the bot's own folder,
+// which is not a listed repo, may be resumed too, and gets the bot's role back.
+// -> { cwd, account, role? } or { err: [code, json] }
 function resumable(id, ctx) {
   const where = ctx.whereIs(id);
   if (!where.known) return { err: [404, { ok: false, id, message: 'no such conversation (its log is not on disk)' }] };
   const cwd = where.cwd;
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || ctx.UNSAFE_PATH.test(cwd)) return { err: [409, { ok: false, id, message: 'Fleet View does not know which folder that conversation worked in' }] };
   const dir = H.normDir(cwd);
-  const allowed = ctx.allowedFolders().map(H.normDir).some((f) => dir === f || dir.startsWith(f.endsWith(path.sep) ? f : f + path.sep));
+  const bot = ctx.botOf ? ctx.botOf(id) : null;
+  const own = !!bot && typeof bot.folder === 'string' && isBotRole(bot.role) && dir === H.normDir(bot.folder);
+  const allowed = own || ctx.allowedFolders().map(H.normDir).some((f) => dir === f || dir.startsWith(f.endsWith(path.sep) ? f : f + path.sep));
   if (!allowed) return { err: [403, { ok: false, id, message: `its folder is not in a repo Fleet View lists: ${cwd}` }] };
   let isDir = false;
   try { isDir = fs.statSync(cwd).isDirectory(); } catch {}
   if (!isDir) return { err: [409, { ok: false, id, message: `its folder is gone: ${cwd}` }] };
-  return { cwd, account: where.account };
+  return { cwd, account: where.account, ...(own ? { role: bot.role } : {}) };
 }
-// The host's open (claude --resume, in its last folder under its account), as the panel's Open does, unless it runs
-// here already; never one open in a terminal outside Fleet View (it would run twice, writing one transcript). Then
-// up to START_MS for it to be idle (a resumed claude says busy while it loads).
+// The host's open (claude --resume, in its last folder under its account, with where.role), as the panel's Open does,
+// unless it runs here already; never one open in a terminal outside Fleet View (it would run twice, writing one
+// transcript). Then up to START_MS for it to be idle (a resumed claude says busy while it loads).
 // -> { p, alreadyRunning, ready, stopped? } or { err: [code, json] }
 async function resumeIn(host, id, where, account, ctx, gone) {
   let p = hosted(await host.call('list'), id);
   let alreadyRunning = !!(p && p.alive);
   if (!alreadyRunning) {
     if (ctx.openElsewhere && ctx.openElsewhere(id)) return { err: [409, { ok: false, id, elsewhere: true, message: 'it is open in a terminal outside Fleet View: end it there first' }] };
-    const r = await host.call('open', { id, cwd: where.cwd, account: account || where.account || 'B' });
+    const r = await host.call('open', { id, cwd: where.cwd, account: account || where.account || 'B', ...(where.role ? { role: where.role } : {}) });
     if (!r || !r.ok) return { err: [502, { ok: false, id, message: (r && r.message) || 'the session host could not open it' }] };
     if (r.message === 'already running') alreadyRunning = true; // it started meanwhile
   }
@@ -607,9 +616,9 @@ async function resumeIn(host, id, where, account, ctx, gone) {
 //   left a team costs a Claude turn, so it goes only to conversations running now.
 // text may be a function of the receiver's id (a message's reply line names it). from: the sender, refused as the
 // receiver; with original (the text as the sender wrote it), recorded through ctx.noteMessage once it goes in.
-// o.via, for text with no from: 'server' (Fleet View's own) or 'henry' (the phone relay, viaOf); a chief gets any
-// other such text marked unsigned (chief.js frame). Callers never set it from a request body. o.chiefText: the text
-// a chief gets instead (an ask's answers without the question in their header).
+// o.via, for text with no from: 'server' (Fleet View's own) or 'henry' (the phone relay, viaOf); an overseer (the
+// Chief or a bot) gets any other such text marked unsigned (chief.js frame). Callers never set it from a request body.
+// o.chiefText: the text an overseer gets instead (an ask's answers without the question in their header).
 async function deliverText(key, text, o, ctx, gone = () => false) {
   qCtx = qCtx || ctx;
   const asked = resolveKey(key);
@@ -642,9 +651,9 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
       if (extra.resumed) await sleep(SETTLE_MS);
     }
     const from = o.from || null, kind = o.ask ? 'question' : null;
-    // a chief reads text by where it came from (chief.js frame): another conversation's (from), Fleet View's own,
+    // an overseer reads text by where it came from (chief.js frame): another conversation's (from), Fleet View's own,
     // Henry's (the phone relay), or unsigned
-    const typed = p.role === 'chief' ? CHIEF.frame(o.chiefText != null ? o.chiefText : body, from ? 'bot' : o.via === 'server' || o.via === 'henry' ? o.via : 'unsigned') : body;
+    const typed = isOverseer(p.role) ? CHIEF.frame(o.chiefText != null ? o.chiefText : body, from ? 'bot' : o.via === 'server' || o.via === 'henry' ? o.via : 'unsigned') : body;
     const note = (to, at, status) => {
       if (from && ctx.noteMessage) ctx.noteMessage(from, convId(to) || to, o.original || body, kind ? { kind } : undefined);
       if (o.onSent) o.onSent(convId(to) || to, at, status);
@@ -659,9 +668,14 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
 const ENDPOINTS = [
   { method: 'GET', path: '/api', does: 'this list, and fleetView: the Fleet View version (1.0.12; "" when unknown)' },
   { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive' },
-  { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("chief" or null)' },
+  { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("chief", "bot:<bot id>" or null)' },
   { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, role?: "chief", wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends; role "chief": the Chief (one at a time), which may also run fv start, open, hosted, wait and menu without asking' },
   { method: 'POST', path: '/api/chief/start', body: '{ account?: "B", model?: "claude-sonnet-5-5", effort?: "medium" }', does: 'start the Chief in the Fleet View folder, or adopt the one running: { ok, id, key, started }' },
+  { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers like the Chief, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, account, model, effort, folder, createdAt, convId, live' },
+  { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), account?: "B", model?: "claude-sonnet-5-5", effort?: "medium" }', does: 'Henry only (his phone, through the relay; a session gets 403): make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }' },
+  { method: 'POST', path: '/api/bots/:id', body: '{ name?, brief?, account?, model?, effort? }', does: 'Henry only, as POST /api/bots: change a bot: its CLAUDE.md is written again and a running one is told to read it (account, model and effort take effect in its next new conversation)' },
+  { method: 'POST', path: '/api/bots/:id/start', does: 'start a bot: the conversation running already, else its newest one resumed, else a new one: { ok, bot, key, id }' },
+  { method: 'POST', path: '/api/bots/:id/remove', does: 'Henry only, as POST /api/bots: end a bot\'s session and take it off the list (its folder and conversations are kept)' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, role, its turn; tail: the last characters of its screen' },
   { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
@@ -690,14 +704,15 @@ function describeApi() {
 }
 
 // POST /api/sessions { repo, account, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, role?, wait? }
-// role "chief" (the only role; anything else but null is 400) starts the Chief (chief/BRIEF.md): the session host
+// role "chief" (the only role a caller may give, a bot's is startBot's; anything else but null is 400) starts the Chief (chief/BRIEF.md): the session host
 // lets its claude run fv start, open, hosted, wait and menu too without asking. One live Chief at a time (409).
 // the Claude accounts on this machine (ctx.accounts from fleet-view.js: B plus one per ~/.claude-<x>), else A and B
 const acctsOf = (ctx) => { try { const a = typeof ctx.accounts === 'function' ? ctx.accounts() : null; if (Array.isArray(a) && a.length) return a; } catch {} return ['A', 'B']; };
 const acctOk = (a, ctx) => typeof a === 'string' && acctsOf(ctx).includes(a);
-// origin: 'server' (startChief), 'henry' (the phone relay, viaOf) or null: a Chief's prompt from anyone else is
-// marked unsigned (chief.js frame)
-async function startSession(b, ctx, gone, origin = null) {
+// origin: 'server' (startChief, startBot), 'henry' (the phone relay, viaOf) or null: an overseer's prompt from anyone
+// else is marked unsigned (chief.js frame). vouched: the folder startBot vouches for (a bot's own, not a listed repo);
+// only with it may role be a bot's ("bot:<id>", one live session each, 409)
+async function startSession(b, ctx, gone, origin = null, vouched = null) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
   const repo = b.repo, prompt = cleanText(b.prompt);
   if (typeof repo !== 'string' || !repo || repo.length > 1024 || !path.isAbsolute(repo)) return [400, { ok: false, message: 'repo must be an absolute folder path' }];
@@ -709,9 +724,11 @@ async function startSession(b, ctx, gone, origin = null) {
   if (b.model != null && (typeof b.model !== 'string' || !MODEL_RE.test(b.model))) return [400, { ok: false, message: 'model must be a model name like opus, sonnet, haiku or claude-opus-5-5[1m] (letters, digits, . - [ ])' }];
   if (b.effort != null && !EFFORTS.includes(b.effort)) return [400, { ok: false, message: `effort must be one of ${EFFORTS.join(', ')}` }];
   if ('temp' in b && typeof b.temp !== 'boolean') return [400, { ok: false, message: 'temp must be true or false' }];
-  if (b.role != null && b.role !== 'chief') return [400, { ok: false, message: 'role must be "chief" (or left out)' }];
-  const chief = b.role === 'chief';
-  const typedPrompt = chief && origin !== 'server' ? CHIEF.frame(prompt, origin === 'henry' ? 'henry' : 'unsigned') : prompt;
+  const botRole = vouched && isBotRole(b.role) ? b.role : null;
+  if (b.role != null && b.role !== 'chief' && !botRole) return [400, { ok: false, message: 'role must be "chief" (or left out)' }];
+  const role = b.role === 'chief' ? 'chief' : botRole;
+  const chief = role === 'chief';
+  const typedPrompt = role && origin !== 'server' ? CHIEF.frame(prompt, origin === 'henry' ? 'henry' : 'unsigned') : prompt;
   let fork = null;
   if (b.forkFrom != null) {
     fork = convId(b.forkFrom);
@@ -720,33 +737,35 @@ async function startSession(b, ctx, gone, origin = null) {
   }
   const ms = waitMs(b.wait);
   if (ms === null) return [400, { ok: false, message: WAIT_BAD }];
-  // the same rule as the window's "New session": a folder /state lists, that exists
-  if (!new Set(ctx.allowedFolders().map(H.normDir)).has(H.normDir(repo))) return [403, { ok: false, message: 'that folder is not a repo Fleet View lists' }];
+  // the same rule as the window's "New session": a folder /state lists (or the bot's own that startBot vouches for),
+  // that exists
+  const own = !!vouched && H.normDir(vouched) === H.normDir(repo);
+  if (!own && !new Set(ctx.allowedFolders().map(H.normDir)).has(H.normDir(repo))) return [403, { ok: false, message: 'that folder is not a repo Fleet View lists' }];
   let isDir = false;
   try { isDir = fs.statSync(repo).isDirectory(); } catch {}
   if (!isDir) return [400, { ok: false, message: `the folder is gone: ${repo}` }];
 
   return withHost(async (host) => {
-    if (chief) {
-      const live = ((await host.call('list')) || []).find((x) => x && x.alive && x.role === 'chief');
-      if (live) return [409, { ok: false, id: live.id, message: `the Chief is running already (${live.id})` }];
+    if (role) {
+      const live = ((await host.call('list')) || []).find((x) => x && x.alive && x.role === role);
+      if (live) return [409, { ok: false, id: live.id, message: `${chief ? 'the Chief' : 'that bot'} is running already (${live.id})` }];
     }
     const o = { cwd: repo, account: b.account };
     if (typeof b.chrome === 'boolean') o.chrome = b.chrome;
     if (fork) o.forkFrom = fork;
     if (b.model != null) o.model = b.model;
     if (b.effort != null) o.effort = b.effort;
-    if (chief) o.role = 'chief';
+    if (role) o.role = role;
     const r = await host.call('create', o);
     // the host's own check, which nothing can get between: another start may have got in since the list above
     if (r && !r.ok && typeof r.chiefRunning === 'string') return [409, { ok: false, id: r.chiefRunning, message: r.message }];
     if (!r || !r.ok || typeof r.key !== 'string') return [502, { ok: false, message: (r && r.message) || 'the session host could not start it' }];
     const key = r.key;
     // an older host ignores forkFrom, model, effort and role: a fresh conversation without the history, on the default
-    // model, or without the Chief's commands, so it goes again (typing /model or /effort instead would save them as
-    // the default for every session)
+    // model, or without the Chief's commands or a bot's role, so it goes again (typing /model or /effort instead would
+    // save them as the default for every session)
     const missing = [fork && r.forkFrom !== fork && 'fork a conversation', b.model != null && r.model !== b.model && 'set the model',
-      b.effort != null && r.effort !== b.effort && 'set the effort', chief && r.role !== 'chief' && 'start the Chief'].filter(Boolean);
+      b.effort != null && r.effort !== b.effort && 'set the effort', role && r.role !== role && (chief ? 'start the Chief' : 'start a bot')].filter(Boolean);
     if (missing.length) {
       await host.call('kill', key).catch(() => {});
       return [502, { ok: false, key, message: `the session host is too old to ${missing.join(' or ')} (restart it: node desktop/restart-host.js); the session it started was stopped` }];
@@ -754,7 +773,7 @@ async function startSession(b, ctx, gone, origin = null) {
     // an older host ignores chrome and does not echo it back: say so instead of failing
     const chromeApplied = typeof b.chrome === 'boolean' ? r.chrome === b.chrome : null;
     // what every reply from here on carries
-    const out = { key, id: null, chromeApplied, ...(b.model != null ? { model: b.model } : {}), ...(b.effort != null ? { effort: b.effort } : {}), ...(chief ? { role: 'chief' } : {}) };
+    const out = { key, id: null, chromeApplied, ...(b.model != null ? { model: b.model } : {}), ...(b.effort != null ? { effort: b.effort } : {}), ...(role ? { role } : {}) };
     if (fork) out.forkFrom = fork;
     if (b.temp) out.temp = true;
     if (b.name != null) out.nameSet = false;
@@ -813,7 +832,34 @@ async function startSession(b, ctx, gone, origin = null) {
 // gets. -> Promise of [code, json] (503 when the session host is not running; 409 with id when a Chief runs already)
 function startChief(b, ctx) {
   const body = { ...(b && typeof b === 'object' ? b : {}), role: 'chief' };
-  return startSession(body, ctx, () => false, 'server').catch((e) => (e instanceof HostDown ? [503, { ok: false, message: e.message }] : [500, { ok: false, message: String((e && e.message) || e) }]));
+  return startSession(body, ctx, () => false, 'server').catch(serverFail);
+}
+const serverFail = (e) => (e instanceof HostDown ? [503, { ok: false, message: e.message }] : [500, { ok: false, message: String((e && e.message) || e) }]);
+
+// The server's own ways to run a bot (bots.js), without an HTTP request. startBot: POST /api/sessions with the bot's
+// role "bot:<id>" in the bot's own folder, which is not a repo Fleet View lists (the registry vouches for it); the
+// other checks and the reply are the same, and 409 with id while that bot runs. b: { repo, account, prompt, name,
+// model, effort, role }. openBot: its conversation resumed with its role (resumable, through ctx.botOf), then up to
+// START_MS for it to be idle. endHosted: a hosted session ended as the panel's close does (the host drops it from its
+// restore list). Each -> a Promise of [code, json] (503 when the session host is not running).
+function startBot(b, ctx) {
+  const body = b && typeof b === 'object' ? b : {};
+  return startSession(body, ctx, () => false, 'server', typeof body.repo === 'string' ? body.repo : null).catch(serverFail);
+}
+function openBot(id, ctx) {
+  const cid = convId(id);
+  if (!cid) return Promise.resolve([400, { ok: false, message: 'give a conversation id' }]);
+  const where = resumable(cid, ctx);
+  if (where.err) return Promise.resolve(where.err);
+  if (!where.role) return Promise.resolve([409, { ok: false, id: cid, message: 'that is not a bot\'s conversation in its own folder' }]);
+  return withHost(async (host) => {
+    const r = await resumeIn(host, cid, where, null, ctx, () => false);
+    if (r.err) return r.err;
+    return [200, { ok: true, id: cid, alreadyRunning: r.alreadyRunning, ready: r.ready, message: r.alreadyRunning ? 'it was already running' : r.ready ? 'resumed; Claude is idle' : 'resumed, but it is not idle yet' }];
+  }).catch(serverFail);
+}
+function endHosted(key) {
+  return withHost(async (host) => { await host.call('kill', key); return [200, { ok: true, id: key }]; }).catch(serverFail);
 }
 
 // POST /api/sessions/:id/message { text, wait?, from?, queue?, open? }
@@ -894,7 +940,7 @@ async function removeFromTeam(tid, b, ctx) {
 }
 // POST /api/teams/:id/message { text, from? }: to every member but from (one removed from the map left out). With
 // from, as from's message to each (sendMessage); without, after the team's line, as an order. Each one is resumed
-// or queued as deliverText does. via 'henry' (the phone relay): a chief in the team reads the team's line as Fleet
+// or queued as deliverText does. via 'henry' (the phone relay): an overseer in the team reads the team's line as Fleet
 // View's own and the text under it as it is; from anyone else the text is unsigned for it (chief.js frame).
 async function messageTeam(tid, b, ctx, gone, via = null) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
@@ -1322,8 +1368,8 @@ async function answerMenu(key, b, ctx, gone, via = null) {
   return withHost(async (host) => {
     const { p, err } = await need(host, key, true);
     if (err) return err;
-    // a chief's question answered in words by anyone but Henry: marked so (one line, chief.js frame)
-    if (text && p.role === 'chief' && via !== 'henry') text = `${CHIEF.UNSIGNED} ${CHIEF.neutralise(text)}`;
+    // an overseer's question answered in words by anyone but Henry: marked so (one line, chief.js frame)
+    if (text && isOverseer(p.role) && via !== 'henry') text = `${CHIEF.UNSIGNED} ${CHIEF.neutralise(text)}`;
     const m = await menuNow(host, p);
     if (!m) return [409, { ok: false, id: p.id, menu: false, message: 'no menu is up' }];
     if (b.sig != null && b.sig !== m.sig) return [409, { ok: false, id: p.id, stale: true, menu: m, message: 'the menu changed since you read it: read it again' }];
@@ -1515,7 +1561,7 @@ async function openSession(key, b, ctx, gone, via = null) {
     if (!prompt) return [200, { ok: true, id, alreadyRunning, ready, status: p.status || null, message: alreadyRunning ? 'it was already running' : ready ? 'opened; Claude is idle' : 'opened, but it is not idle yet' }];
     if (!ready && !alreadyRunning) return [200, { ok: false, id, alreadyRunning, ready, promptSent: false, message: `opened, but it was not idle within ${START_MS / 1000} s; the prompt was not sent` }];
     if (!alreadyRunning) await sleep(SETTLE_MS);
-    const typed = p.role === 'chief' ? CHIEF.frame(prompt, via === 'henry' ? 'henry' : 'unsigned') : prompt;
+    const typed = isOverseer(p.role) ? CHIEF.frame(prompt, via === 'henry' ? 'henry' : 'unsigned') : prompt;
     const [code, out] = await deliver(host, p, typed, ms, ctx, gone, null, { alreadyRunning, ready });
     return [code, { ...out, promptSent: !!out.ok }];
   });
@@ -1576,12 +1622,15 @@ async function listConversations(query, ctx) {
 //        teams: { list(), get(id) -> { id, name, lead, members } or null, make(b), add(id, member, lead),
 //        remove(id, member), lead(id, member | null), disband(id) } each -> [code, json] or a Promise of one,
 //        status({ team, ids, from }) -> [code, json],
-//        chiefStart(b) -> [code, json] or a Promise of one (POST /api/chief/start, chief.js) }
+//        chiefStart(b) -> [code, json] or a Promise of one (POST /api/chief/start, chief.js),
+//        bots: { list(), create(b), start(id), update(id, b), remove(id) } each -> [code, json] or a Promise of one
+//        (/api/bots, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
 const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript';
 const GET_VERBS = new Set(['menu', 'transcript']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
 const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|lead|disband|message))?\/?$/;
 const ASK_ROUTE = /^\/api\/ask(?:\/([^/]+))?(?:\/(collected))?\/?$/;
+const BOT_ROUTE = /^\/api\/bots(?:\/([^/]+))?(?:\/(start|remove))?\/?$/;
 function handle(req, res, pathname, ctx) {
   const what = `${req.method} ${pathname}`;
   const answer = ([code, out]) => {
@@ -1613,6 +1662,23 @@ function handle(req, res, pathname, ctx) {
     if (req.method !== 'POST') return answer([405, { ok: false, message: 'method not allowed' }]);
     if (!ctx.chiefStart) return answer([404, { ok: false, message: 'not found' }]);
     return body((b) => Promise.resolve(ctx.chiefStart(b || {})));
+  }
+  // the bots (bots.js): GET lists them; POST makes one, /:id changes one, /:id/start starts it, /:id/remove removes it
+  const bm = BOT_ROUTE.exec(pathname);
+  if (bm) {
+    const [, bid, bverb] = bm;
+    if (!ctx.bots) return answer([404, { ok: false, message: 'not found' }]);
+    if (bid && !/^[0-9a-f]{12}$/.test(bid)) return answer([400, { ok: false, message: 'not a bot id (GET /api/bots lists them)' }]);
+    if (req.method === 'GET' && !bid) return answer(ctx.bots.list());
+    if (req.method !== 'POST') return answer([405, { ok: false, message: 'method not allowed' }]);
+    if (bverb === 'start') return run(Promise.resolve(ctx.bots.start(bid)));
+    // a bot's brief is its standing orders, and every session here can read the token: making, changing or removing a
+    // bot is Henry's (the page's /bots, or his phone through the relay: viaOf); anyone may start one
+    return body((b) => {
+      if (!b) return Promise.resolve([400, { ok: false, message: 'bad json' }]);
+      if (via(b) !== 'henry') return Promise.resolve([403, { ok: false, message: 'only Henry makes, changes or removes a bot (the Bots tab, or his phone); POST /api/bots/:id/start starts one' }]);
+      return Promise.resolve(bverb === 'remove' ? ctx.bots.remove(bid) : bid ? ctx.bots.update(bid, b) : ctx.bots.create(b));
+    });
   }
   if (pathname === '/api/conversations') {
     return req.method === 'GET' ? run(listConversations(query(), ctx)) : answer([405, { ok: false, message: 'method not allowed' }]);
@@ -1672,5 +1738,6 @@ function handle(req, res, pathname, ctx) {
 
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
 // relayKey: the phone relay's key (see viaOf), for fleet-view.js to hand the relay
-module.exports = { ensureToken, handle, startChief, hostList, relayKey, viaOf, plainText, cleanText, pasteWrites, deliverText, startQueue, queuedIds, TOKEN_FILE, ENDPOINTS,
+module.exports = { ensureToken, handle, startChief, startBot, openBot, endHosted, hostList, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
+  startQueue, queuedIds, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
   askParts: { asks, summaryText, laterText, chiefAnswers, answerLines, flushAsk, settleAnswer, askJson } };

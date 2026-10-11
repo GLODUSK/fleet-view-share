@@ -226,6 +226,39 @@ function shouldTell(o) {
   if (o.told && o.told.has(convId(o.id))) return false;
   return (o.promptAt || 0) > 0 || (Number.isFinite(o.firstSeen) && o.now - o.firstSeen >= TELL_AFTER_MS);
 }
+// One per overseer (the Chief here, each bot in bots.js): tells each of its conversations its id once. The note counts
+// as told only once it went in: one queued behind a menu waits for onSent, and one the queue drops (onDrop) is tried
+// again. After a restart the queue's hooks are gone; the next try finds the same text queued (api.js keeps one of
+// each) and hooks onto it, so it still goes in once. o: { api (deliverText), ctx, note(id) -> its text, told: [ids]
+// as saved, log(text), save() (told changed) }
+function createTeller(o) {
+  let told = Array.isArray(o.told) ? [...new Set(o.told.map(convId).filter(Boolean))].slice(-TOLD_MAX) : [];
+  let telling = false, tellTry = 0;
+  let tellQueued = null; // the id whose note waits in api.js's queue (behind a menu): told once it goes in
+  const log = (t) => { try { if (o.log) o.log(t); } catch {} };
+  const save = () => { try { if (o.save) o.save(); } catch {} };
+  function markTold(id) {
+    if (tellQueued === id) tellQueued = null;
+    if (told.includes(id)) return;
+    told = [...told, id].slice(-TOLD_MAX);
+    save();
+  }
+  async function tell(id) {
+    telling = true; tellTry = Date.now();
+    try {
+      const [, r] = await o.api.deliverText(id, o.note(id), { kind: 'message', queue: true, open: false, via: 'server',
+        onSent: () => { if (!told.includes(id)) log(`told ${id} its id`); markTold(id); },
+        onDrop: (why) => { if (tellQueued === id) tellQueued = null; log(`the id note for ${id} was dropped (${why}); it goes again`); } }, o.ctx);
+      if (r && r.ok && !r.queued) markTold(id); // onSent ran already
+      else if (r && r.ok) { if (!told.includes(id)) tellQueued = id; log(`the id note for ${id} waits behind a menu`); }
+      else log(`could not tell ${id} its id: ${(r && r.message) || 'no answer'}`);
+    } finally { telling = false; }
+  }
+  // x: shouldTell's o less told. Also not while a note goes in, while this one's waits in the queue, or within
+  // TELL_RETRY_MS of the last try
+  const due = (x) => !telling && tellQueued !== x.id && x.now - tellTry >= TELL_RETRY_MS && shouldTell({ ...x, told: new Set(told) });
+  return { told: () => told, due, tell, markTold };
+}
 
 // the live Chief in the host's list: alive, role 'chief'
 const pickChief = (list) => (Array.isArray(list) ? list : []).find((p) => p && p.alive && p.role === 'chief') || null;
@@ -240,19 +273,17 @@ function createChief(deps) {
   const s0 = d.saved && typeof d.saved === 'object' ? d.saved : {};
   let watch = s0.watch === true;
   let lastId = convId(s0.lastId);
-  let told = Array.isArray(s0.told) ? [...new Set(s0.told.map(convId).filter(Boolean))].slice(-TOLD_MAX) : [];
   let live = null; // { id, key, status, waitingFor, pending } of the live Chief, from the host's list
   let wst = { lastAt: 0, sent: [] }, lookedAt = 0;
   let starting = false, startChain = Promise.resolve();
-  let ticking = false, telling = false, tellTry = 0;
-  let tellQueued = null; // the id whose note waits in api.js's queue (behind a menu): told once it goes in
+  let ticking = false;
   let fileM = -1, fileChief = false, askedAt = 0, askedM = -1, hostDown = false;
   const firstSeen = new Map();
   let existsAt = 0, existsId = null, existsOk = false;
   const log = (t) => { try { if (d.log) d.log(`chief: ${t}`); } catch {} };
   const save = () => { try { if (d.save) d.save(); } catch {} };
-  const toldSet = () => new Set(told);
-  const chiefIds = () => [...new Set([...told, lastId, live && live.id].filter(Boolean))];
+  const teller = createTeller({ api: d.api, ctx: d.ctx, note: idNote, told: s0.told, log, save });
+  const chiefIds = () => [...new Set([...teller.told(), lastId, live && live.id].filter(Boolean))];
 
   function lastExists() {
     if (!lastId) return false;
@@ -269,7 +300,7 @@ function createChief(deps) {
     return { id: (live && live.id) || (lastExists() ? lastId : null), watch };
   }
   // ~/.fleet-view.json's chief
-  const saveShape = () => ({ lastId, watch, told: told.slice(-TOLD_MAX) });
+  const saveShape = () => ({ lastId, watch, told: teller.told().slice(-TOLD_MAX) });
   // POST /settings { chief: { watch } }: off stops it at once (tick looks at it before every note)
   function setWatch(on) {
     if (typeof on !== 'boolean' || on === watch) return;
@@ -365,33 +396,11 @@ function createChief(deps) {
       if (!id) return;
       noteId(id);
       const info = d.turnInfo ? d.turnInfo(id) : null;
-      if (!telling && tellQueued !== id && now - tellTry >= TELL_RETRY_MS && shouldTell({ id, told: toldSet(), pending: live.pending, starting, firstSeen: firstSeen.get(id), promptAt: info && info.promptAt, now })) {
-        await tellId(id);
-      }
-      if (watch && told.includes(id)) await watchTick(id, now);
+      if (teller.due({ id, pending: live.pending, starting, firstSeen: firstSeen.get(id), promptAt: info && info.promptAt, now })) await teller.tell(id);
+      if (watch && teller.told().includes(id)) await watchTick(id, now);
     } catch (e) {
       log(`tick failed: ${(e && e.message) || e}`);
     } finally { ticking = false; }
-  }
-  // the note counts as told only once it went in: one queued behind a menu waits for onSent, and one the queue drops
-  // (onDrop) is tried again. After a restart the queue's hooks are gone; the next try finds the same text queued
-  // (api.js keeps one of each) and hooks onto it, so it still goes in once.
-  function markTold(id) {
-    if (tellQueued === id) tellQueued = null;
-    if (told.includes(id)) return;
-    told = [...told, id].slice(-TOLD_MAX);
-    save();
-  }
-  async function tellId(id) {
-    telling = true; tellTry = Date.now();
-    try {
-      const [, r] = await d.api.deliverText(id, idNote(id), { kind: 'message', queue: true, open: false, via: 'server',
-        onSent: () => { if (!told.includes(id)) log(`told ${id} its id`); markTold(id); },
-        onDrop: (why) => { if (tellQueued === id) tellQueued = null; log(`the id note for ${id} was dropped (${why}); it goes again`); } }, d.ctx);
-      if (r && r.ok && !r.queued) markTold(id); // onSent ran already
-      else if (r && r.ok) { if (!told.includes(id)) tellQueued = id; log(`the id note for ${id} waits behind a menu`); }
-      else log(`could not tell ${id} its id: ${(r && r.message) || 'no answer'}`);
-    } finally { telling = false; }
   }
   async function watchTick(id, now) {
     if (wst.lastAt && now - wst.lastAt < WATCH_EVERY_MS) return; // cheap: nothing is worked out before it is due
@@ -411,8 +420,8 @@ function createChief(deps) {
 
   return { view, saveShape, setWatch, start, briefing, tick, chiefIds,
     // for tests
-    _state: () => ({ watch, lastId, told: [...told], live, wst, starting }) };
+    _state: () => ({ watch, lastId, told: [...teller.told()], live, wst, starting }) };
 }
 
-module.exports = { createChief, frame, neutralise, fold, buildBriefing, briefingText, watchItems, watchStep, watchCommit, shouldTell, idNote, pickChief,
-  DEFAULTS, BRIEF_FILE, WATCH_EVERY_MS, ORDER_STUCK_MS, TELL_AFTER_MS, UNSIGNED, WATCH_MARK };
+module.exports = { createChief, createTeller, frame, neutralise, fold, buildBriefing, briefingText, watchItems, watchStep, watchCommit, shouldTell, idNote, pickChief,
+  convId, DEFAULTS, BRIEF_FILE, WATCH_EVERY_MS, ORDER_STUCK_MS, TELL_AFTER_MS, TELL_RETRY_MS, UNSIGNED, WATCH_MARK };

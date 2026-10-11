@@ -13,6 +13,7 @@ const P = require(path.join(__dirname, 'platform.js'));
 P.applyLoginPath();
 const API = require(path.join(__dirname, 'api.js'));
 const CHIEF_JS = require(path.join(__dirname, 'chief.js'));
+const BOTS_JS = require(path.join(__dirname, 'bots.js'));
 const CONV = require(path.join(__dirname, 'conversation.js'));
 const CMDS = require(path.join(__dirname, 'commands.js'));
 const FILES = require(path.join(__dirname, 'files.js'));
@@ -156,8 +157,10 @@ const OLD_SETTINGS_FILE = path.join(os.homedir(), '.agent-pulse.json'); // from 
 let saved = {};
 try { saved = JSON.parse(fs.readFileSync(fs.existsSync(SETTINGS_FILE) ? SETTINGS_FILE : OLD_SETTINGS_FILE, 'utf8')) || {}; } catch {}
 if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
-// the Chief's part of the server (chief.js), made once the API's ctx is there (below apiCtx)
-let CHIEF = null;
+// the Chief's part of the server (chief.js) and the bots' (bots.js), made once the API's ctx is there (below apiCtx)
+let CHIEF = null, BOTS = null;
+// ~/Bots and the bots' folders in it are never a workspace
+const inBots = (p) => !!BOTS && BOTS.inBots(p);
 // remote access (remote.js): the page in a browser on another device, over Tailscale. settings.remote.enabled is the
 // switch (off unless turned on); settings.remote.logins, by hand only, lets more Tailscale logins than this PC's
 // owner pair a browser. The demo keeps its devices in memory and never changes `tailscale serve`; nor does a server on
@@ -652,6 +655,7 @@ function flushSettings() {
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp,
     chief: CHIEF ? CHIEF.saveShape() : saved.chief,
+    bots: BOTS ? BOTS.saveShape() : saved.bots,
     remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
     moved: [...moved.values()],
     names: Object.fromEntries(names),
@@ -2305,7 +2309,7 @@ function brand() {
 function menuItems(now) {
   const count = new Map();
   pruneHiddenRepos([...sessions.values()]);
-  for (const s of activeSessions(now)) if (s.root && !repoHidden(s.root)) count.set(s.root, (count.get(s.root) || 0) + 1);
+  for (const s of activeSessions(now)) if (s.root && !repoHidden(s.root) && !inBots(s.root)) count.set(s.root, (count.get(s.root) || 0) + 1);
   const ix = new Map(repoOrder.map((r, i) => [rootKey(r), i])), at = (r) => ix.get(rootKey(r)) ?? Infinity;
   const repos = [...count].sort((a, b) => at(a[0]) - at(b[0]) || b[1] - a[1] || repoName(a[0]).localeCompare(repoName(b[0])));
   for (const x of shownSels()) if (!repos.some(([r]) => selMatches(x, r))) repos.push([x, 0]);
@@ -5381,10 +5385,19 @@ function buildState() {
   const all = [...sessions.values()].filter((s) => inState(s) && !acctOff(s));
   all.sort((a, b) => (RANK[a.state] ?? 9) - (RANK[b.state] ?? 9) || b.last - a.last);
   const out = all.map((s) => sessionJson(s, now));
+  // the overseers' conversations, the Chief's and the bots' (bots.js): tagged bot: '<bot id>' or 'chief' in sessions,
+  // finished and removed (below), and never a repo's live count, a clash, a conflict, a header count or the feed
+  const tagOf = BOTS ? BOTS.tagOf(CHIEF ? CHIEF.chiefIds() : []) : () => null;
+  const onMap = all.filter((s) => !tagOf(s.id));
   // the repo menu: every repo in the window, busiest first, less the ones taken off it; the picked one stays listed
   pruneHiddenRepos(all);
   const repos = new Map();
-  for (const s of all) if (s.root && !repoHidden(s.root) && (s.state !== 'DONE' || inWindow(s, now))) { const r = repos.get(s.root) || { root: s.root, name: repoName(s.root), live: 0 }; if (s.state !== 'DONE') r.live++; repos.set(s.root, r); }
+  for (const s of all) {
+    if (!s.root || repoHidden(s.root) || inBots(s.root) || (s.state === 'DONE' && !inWindow(s, now))) continue;
+    const r = repos.get(s.root) || { root: s.root, name: repoName(s.root), live: 0 };
+    if (s.state !== 'DONE' && !tagOf(s.id)) r.live++;
+    repos.set(s.root, r);
+  }
   rememberMap(all, repos, now);
   // repos the map showed before (remembered) stay listed with or without conversations, until removed
   // (or until every conversation in them is on an account turned off)
@@ -5409,11 +5422,11 @@ function buildState() {
   writePushFile();
   dpRoots = [...repos.keys()]; // the deploy watch follows the repos listed
   // header numbers follow the picked repo and the / filter, like the terminal header
-  const c = headerCounts(visibleList(), now);
+  const c = headerCounts(visibleList().filter((s) => !tagOf(s.id)), now);
   const al = alerts.length && now - alerts[alerts.length - 1].t < 120e3 ? alerts[alerts.length - 1] : null;
   // files two or more unfinished conversations touched
   const use = new Map();
-  for (const s of all) {
+  for (const s of onMap) {
     if (s.state === 'DONE') continue;
     for (const f of s.files.values()) {
       let u = use.get(f.key);
@@ -5428,7 +5441,7 @@ function buildState() {
   }
   parityPass(out);
   const listed = new Set(out.map((x) => x.id));
-  return {
+  return BOTS_JS.tagState({
     now, demo: DEMO, title: brand(), build: buildOf(),
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
@@ -5450,7 +5463,7 @@ function buildState() {
     // every account folder with who it is signed in as, and the sign-ins going on (accounts.js), for the Accounts list
     accountList: DEMO ? { list: [{ a: 'A', email: 'a@example.com', signedIn: true }, { a: 'B', email: 'b@example.com', signedIn: true }], jobs: {} } : ACCTS.view(),
     alert: al ? { t: al.t, sid: al.s.id, name: nameNow(al.s.id, al.s.name), text: al.text, color: toHex(al.color) } : null,
-    hiddenDone: all.filter((s) => (s.state === 'DONE' || s.state === 'IDLE') && inWindow(s, now)).length,
+    hiddenDone: onMap.filter((s) => (s.state === 'DONE' || s.state === 'IDLE') && inWindow(s, now)).length,
     sessions: out,
     // the "recently finished" strip: the last 10 conversations that finished their turn in the last 3 hours
     // (one that never said or was asked anything, a conversation opened and left empty, is not listed)
@@ -5460,7 +5473,7 @@ function buildState() {
       .sort((a, b) => b.endedAt - a.endedAt).slice(0, 10)
       .map((x) => ({ id: x.id, name: x.name, account: x.account, repo: x.repo, endedAt: x.endedAt, summary: summaryOf(sessions.get(x.id)?.lastReply) || clipWords(x.goal, 140) || null })),
     clashes,
-    conflicts: conflictsOf(all),
+    conflicts: conflictsOf(onMap),
     worktrees: worktreesOf([...repos.keys()], all, now),
     // teams with at least one member listed (the rest wait in settings until they come back or are dropped)
     teams: teams.filter((t) => t.members.some((m) => listed.has(m))).map(teamJson),
@@ -5473,8 +5486,11 @@ function buildState() {
     tools: { msg: path.join(__dirname, 'scripts', 'fleet-msg.js').replace(/\\/g, '/'), ...toolsHere() },
     // conversations the server has text waiting for (api.js's queue): the page's own waiting orders go in after it
     queuedText: DEMO ? [] : API.queuedIds(),
-    feed: feed.slice(-120).map((e) => { const x = { t: Math.round(e.t), sid: e.sid, who: e.who, verb: e.verb, what: e.what }; if (e.to) x.to = e.to; return x; }),
-  };
+    feed: feed.filter((e) => !tagOf(e.sid) && !(e.to && tagOf(e.to))).slice(-120)
+      .map((e) => { const x = { t: Math.round(e.t), sid: e.sid, who: e.who, verb: e.verb, what: e.what }; if (e.to) x.to = e.to; return x; }),
+    // the bots (bots.js), newest first: { id, name, brief, account, model, effort, folder, createdAt, convId, live }
+    bots: BOTS ? BOTS.view() : [],
+  }, tagOf);
 }
 
 // What some menu items need from this PC, looked at once a minute:
@@ -5816,13 +5832,13 @@ function conversationsFor(q) {
 }
 
 // what the automation API (api.js) needs from the server: the folders a new session may start in (the window's
-// rule for "New session": repos /state lists, and the conversations' repo roots and checkouts) and one
-// conversation as /state shows it
+// rule for "New session": repos /state lists, and the conversations' repo roots and checkouts, never a bot's folder)
+// and one conversation as /state shows it
 const apiCtx = {
   sendJson, readBody, log: (t) => logOnce('api:' + t, t), UNSAFE_PATH, accounts: () => (DEMO ? ['A', 'B'] : accountsHere()),
   allowedFolders() {
     const st = buildState(), out = [];
-    const add = (p) => { if (typeof p === 'string' && p) out.push(p); };
+    const add = (p) => { if (typeof p === 'string' && p && !inBots(p)) out.push(p); };
     for (const r of st.repos) add(r.root);
     for (const s of st.sessions) { add(s.repo && s.repo.root); add(s.links && s.links.repoFolder); }
     return out;
@@ -5887,11 +5903,12 @@ const apiCtx = {
 
 // ---------- the Chief (chief.js) ----------
 // What its briefing and watch mode read, all of it from what /state has already: each conversation /state lists (less
-// the ones removed from the map), the recently finished strip, the production deploys, the conflicts, and the
-// Chief's orders (its messages to other conversations, from the timeline's events). No model call, no GitHub call.
+// the ones removed from the map, and the overseers': its own and the bots'), the recently finished strip, the
+// production deploys, the conflicts, and the Chief's orders (its messages to other conversations, from the timeline's
+// events). No model call, no GitHub call.
 function chiefRows() {
   const now = Date.now(), st = buildState();
-  const rows = st.sessions.filter((s) => !hiddenNow(s.id)).map((s) => {
+  const rows = st.sessions.filter((s) => !hiddenNow(s.id) && !s.bot).map((s) => {
     const raw = sessions.get(s.id);
     return { id: s.id, name: s.name, repo: s.repo ? s.repo.name : null, state: s.state, label: s.label, doing: doingOf(s), waitingOn: s.waitingOn || null,
       since: raw ? waitSince(raw) : s.active || 0, turnStart: s.turnStart || null, active: s.active || null,
@@ -5902,7 +5919,7 @@ function chiefRows() {
 function chiefFacts() {
   const { now, st, rows } = chiefRows();
   return { now, sessions: rows,
-    finished: st.finished.map((x) => ({ id: x.id, name: x.name, repo: x.repo ? x.repo.name : null, summary: x.summary, at: x.endedAt })),
+    finished: st.finished.filter((x) => !x.bot).map((x) => ({ id: x.id, name: x.name, repo: x.repo ? x.repo.name : null, summary: x.summary, at: x.endedAt })),
     deploys: st.deploys.map((x) => ({ repo: x.name || x.repo, state: x.state, title: x.title, at: x.readyAt || x.createdAt })) };
 }
 function chiefWatchFacts(chiefIds) {
@@ -5924,6 +5941,16 @@ function chiefWatchFacts(chiefIds) {
   });
   // POST /api/chief/start from a token caller (the phone relay, a script): api.js routes it here
   apiCtx.chiefStart = (b) => CHIEF.start(b);
+  // the bots (bots.js): /api/bots from a token caller, and a bot's own folder for resuming its conversations
+  BOTS = BOTS_JS.createBots({
+    api: API, ctx: apiCtx, saved: saved.bots, save: saveSettings, demo: DEMO,
+    log: (t) => logOnce(t, t),
+    exists: (id) => !!conversationLog(id),
+    turnInfo: (id) => apiCtx.turnInfo(id),
+    sessionsFile: HOSTJS.sessionsFile(), trustFolder, accounts: () => accountsHere(), rename: (id, name) => renameSession(id, name),
+  });
+  apiCtx.bots = { list: () => BOTS.list(), create: (b) => BOTS.create(b), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id) };
+  apiCtx.botOf = (id) => BOTS.vouch(id);
 }
 
 // the log the Chat tab reads (conversation.js): a conversation in the window, else any log under the projects
@@ -6114,6 +6141,19 @@ function handleRequest(req, res) {
       return readBody(req, res, (b) => {
         if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
         CHIEF.start(b).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
+      });
+    }
+    // the Bots tab (bots.js): POST /bots makes a bot, /bots/:id changes one, /bots/:id/start starts one, /bots/:id/remove
+    // removes one; each answers { ok, bot, key?, id?, message? }. Only the page itself (its Origin, as /live) makes,
+    // changes or removes one: a bot's brief is its standing orders (the API's take only Henry's phone, api.js)
+    const botRoute = /^\/bots(?:\/([0-9a-f]{12})(?:\/(start|remove))?)?$/.exec(pathname);
+    if (botRoute) {
+      return readBody(req, res, (b) => {
+        if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
+        const [, bid, verb] = botRoute;
+        if (verb !== 'start' && !liveCtx.authorize(req)) return sendJson(res, 403, { ok: false, message: 'only the Bots tab makes, changes or removes a bot' });
+        const r = !bid ? BOTS.create(b) : verb === 'start' ? BOTS.start(bid) : verb === 'remove' ? BOTS.remove(bid) : BOTS.update(bid, b);
+        Promise.resolve(r).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
       });
     }
     // "I know, keep using": the heads-up for that episode of usage from elsewhere stays away
@@ -6414,6 +6454,8 @@ function startWeb() {
     every(10000, 'api-temp', sweepTemp);
     // the Chief: follow it through handoffs, tell a new one its id, watch mode (chief.js)
     every(5000, 'chief', () => { CHIEF.tick(); });
+    // the bots: the same following and telling, for each (bots.js)
+    every(5000, 'bots', () => { BOTS.tick(); });
     // messages and orders that waited for a menu before the last restart (api.js's queue)
     API.startQueue(apiCtx);
   });
