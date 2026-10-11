@@ -50,6 +50,7 @@
 import { esc, spinner, C, clockTime, ago, loadModule } from './cards.js';
 import { icon } from './icons.js';
 import { mountCompose } from './compose.js';
+import { handToChat } from './handto.js';
 import { onRekey } from './term.js';
 import { openViewer, openInCode } from './viewer.js';
 
@@ -557,6 +558,7 @@ function renderItem(it, c) {
       md.className = 'chat-md';
       md.appendChild(mdFragment(L, it.text, c));
       el.appendChild(md);
+      if (!c.readOnly) pickList(el, md, it, c);
       el.insertAdjacentHTML('beforeend', `<div class="ci-acts">${copyBtn('msg', 'Copy message (markdown)')}</div>`);
       el._text = String(it.text || '');
       break;
@@ -594,6 +596,55 @@ function renderItem(it, c) {
   }
   return el;
 }
+// ---------- picking options from a reply ----------
+// A reply that offers options as a task list with every box unticked ("- [ ] …", which CLAUDE.md asks for) gets
+// live boxes and a Launch button: it sends the ticked options with the line that otherwise gets typed by hand.
+// A list with a ticked box is progress, not a choice, and stays as it is. c.picks: key -> { on: Set, sent }
+const LAUNCH_LINE = 'Launch subagents accordingly with model and effort.';
+function pickList(el, md, it, c) {
+  const boxes = [...md.querySelectorAll('li > input[type="checkbox"]')];
+  if (!boxes.length || boxes.some((b) => b.checked)) return;
+  const key = String(it.key);
+  let p = c.picks.get(key);
+  if (!p) c.picks.set(key, p = { on: new Set(), sent: false });
+  boxes.forEach((b, n) => {
+    b.disabled = p.sent;
+    b.tabIndex = 0;
+    b.dataset.pick = String(n);
+    b.checked = p.on.has(n);
+    b.setAttribute('aria-label', `pick option ${n + 1}`);
+  });
+  md.classList.add('picking');
+  el.insertAdjacentHTML('beforeend', '<div class="cpk"><button type="button" class="btn primary cpk-go" data-launch></button><span class="cpk-n"></span></div>');
+  drawPick(el, p);
+}
+function drawPick(el, p) {
+  const go = el.querySelector('[data-launch]');
+  if (!go) return;
+  const k = p.on.size;
+  go.disabled = p.sent || !k;
+  go.textContent = p.sent ? 'Launched' : k ? `Launch ${k} selected` : 'Launch selected';
+  el.querySelector('.cpk-n').textContent = p.sent ? '' : k ? `Sends them with "${LAUNCH_LINE}"` : 'Tick the options you want';
+}
+// the ticked options, numbered as they stand in the list, then the launch line
+function pickText(el, p) {
+  const lis = [...el.querySelectorAll('.chat-md li > input[data-pick]')].map((b) => b.parentElement);
+  const lines = [...p.on].sort((a, b) => a - b).map((n) => {
+    const t = (lis[n]?.textContent || '').replace(/\s+/g, ' ').trim();
+    return `${n + 1}. ${t.length > 400 ? `${t.slice(0, 399)}…` : t}`;
+  });
+  return `Go with these:\n${lines.join('\n')}\n\n${LAUNCH_LINE}`;
+}
+function launchPicks(c, el) {
+  const p = c.picks.get(el?.dataset.key);
+  if (!p || p.sent || !p.on.size || !c.id) return;
+  const text = pickText(el, p);
+  p.sent = true;
+  for (const b of el.querySelectorAll('input[data-pick]')) b.disabled = true;
+  drawPick(el, p);
+  handToChat(c.id, { text, send: true });
+}
+
 // "/pickup <handoff file>": a file icon that opens the summary, in Fleet View's own viewer (Ctrl+click: VS Code)
 function pickupOpen(text) {
   const m = /^\/pickup\s+"?([^"\n]+?\.md)"?\s*$/i.exec(text);
@@ -681,6 +732,7 @@ function buildPane(pane) {
     composeEl: pane.querySelector('.chat-compose'), outbox: pane.querySelector('.chat-outbox'),
     bgEl: pane.querySelector('.chat-bg'), bg: [], bgOpen: false, bgHtml: '',
     sent: [], // messages sent from here that the transcript doesn't have yet: [{ at, text, images, el }]
+    picks: new Map(), // options ticked in a reply (pickList)
     cwd: '', // the conversation's folder: relative paths in it are read against it
     expandAll: false, openBefore: null, xall: pane.querySelector('.chat-xall'), // Expand all, and what was open before it
   };
@@ -906,6 +958,15 @@ function wire(c) {
     c.bgOpen = !c.bgOpen;
     drawBg(c);
   });
+  // an option ticked in a reply (pickList)
+  feed.addEventListener('change', (e) => {
+    const b = e.target.closest?.('input[data-pick]');
+    const el = b?.closest('.ci');
+    const p = el && c.picks.get(el.dataset.key);
+    if (!p || p.sent) return;
+    if (b.checked) p.on.add(+b.dataset.pick); else p.on.delete(+b.dataset.pick);
+    drawPick(el, p);
+  });
   pane.addEventListener('fv-chat-sent', (e) => { if (e.detail && e.detail.id === c.id) addSent(c, e.detail); });
   // the command's panel came up under the feed (compose.js): it was sent, and what it shows is down there
   pane.addEventListener('fv-chat-panel', (e) => {
@@ -939,6 +1000,7 @@ function wire(c) {
     if ((b = t.closest('[data-fpath]')) && window.getSelection()?.isCollapsed !== false) { e.preventDefault(); e.stopPropagation(); openPath(c, b, e.ctrlKey || e.metaKey); }
     else if ((b = t.closest('[data-xall]'))) { e.preventDefault(); setExpandAll(c, !c.expandAll); }
     else if ((b = t.closest('[data-cp]'))) { e.preventDefault(); e.stopPropagation(); copyText(copySource(b), b); }
+    else if ((b = t.closest('[data-launch]'))) { e.preventDefault(); launchPicks(c, b.closest('.ci')); }
     else if ((b = t.closest('[data-now]'))) { e.preventDefault(); sendNow(c); }
     else if ((b = t.closest('[data-unsend]'))) { e.preventDefault(); unsend(c, b.closest('.ci')); }
     else if ((b = t.closest('[data-fork]'))) { e.preventDefault(); unsend(c, b.closest('.ci'), b.dataset.fork === 'new' ? 'new' : 'fork'); }
@@ -1268,7 +1330,7 @@ function reset(c, s) {
   c.busy = false;
   c.id = s.id;
   c.items = []; c.from = 0; c.total = 0; c.loaded = false; c.missing = false; c.error = ''; c.queue = []; c.cut = 0;
-  c.els.clear(); c.groups.clear(); c.open.clear();
+  c.els.clear(); c.groups.clear(); c.open.clear(); c.picks.clear();
   c.expandAll = false; c.openBefore = null; drawXall(c);
   c.io?.disconnect(); c.io = null;
   c.list.textContent = '';
