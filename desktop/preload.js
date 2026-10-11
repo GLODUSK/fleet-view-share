@@ -19,6 +19,8 @@
 //                                ('' when it has no file behind it, like a pasted screenshot); the chat box sends it
 //   fleetDesktop.capture({ x, y, width, height }) -> Promise<Uint8Array|null>   main view only: a PNG of that part
 //                                of the window (CSS pixels from getBoundingClientRect); the Preview tab's "Screenshot to chat"
+//   fleetDesktop.backdrop() -> Promise<Uint8Array|null>   main view and Chats window: a quarter-size PNG of the whole
+//                                page, which the right-click menu shows blurred behind it (backdrop-filter does nothing over the acrylic)
 //   fleetDesktop.onPreviewNav(cb(url)) -> unsubscribe   main view only: a preview frame (a local dev server's page
 //                                in a frame of the page, see main.js previewFrames) went to url by itself
 //   fleetDesktop.keepAwake(on)   main view only: true while the chat box's mic listens, so the page keeps full
@@ -127,6 +129,7 @@ const capture = (r) => {
   return ipcRenderer.invoke('fv:capture', { x: Number(x.x), y: Number(x.y), width: Number(x.width), height: Number(x.height) })
     .then((png) => (png && png.byteLength ? new Uint8Array(png) : null), () => null);
 };
+const backdrop = () => ipcRenderer.invoke('fv:backdrop').then((png) => (png && png.byteLength ? new Uint8Array(png) : null), () => null);
 const navListeners = new Set();
 ipcRenderer.on('fv:preview-nav', (_e, url) => { if (typeof url === 'string') for (const cb of navListeners) { try { cb(url); } catch {} } });
 // the mini view never gets it (main.js refuses it anyway)
@@ -154,5 +157,5 @@ contextBridge.exposeInMainWorld('fleetDesktop', {
     if (chatsPopped !== null) { try { cb(chatsPopped); } catch {} }
     return () => { chatsListeners.delete(cb); };
   },
-  ...(isMini ? {} : { term, pickFolder: () => ipcRenderer.invoke('fv:pick-folder'), pathForFile, capture, onPreviewNav: listen(navListeners), keepAwake: (on) => ipcRenderer.send('fv:keep-awake', !!on) }),
+  ...(isMini ? {} : { term, pickFolder: () => ipcRenderer.invoke('fv:pick-folder'), pathForFile, capture, backdrop, onPreviewNav: listen(navListeners), keepAwake: (on) => ipcRenderer.send('fv:keep-awake', !!on) }),
 });

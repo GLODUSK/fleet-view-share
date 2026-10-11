@@ -1023,6 +1023,15 @@ if (!app.requestSingleInstanceLock()) {
     const img = await wc.capturePage({ x, y, width, height });
     return img.isEmpty() ? null : img.toPNG();
   });
+  // the right-click menu's frost (web/ctxmenu.js): over the acrylic, Chromium draws no backdrop-filter, so the menu
+  // blurs a shot of the page instead. The whole page at a quarter size (it is only ever shown blurred), as a PNG.
+  ipcMain.handle('fv:backdrop', async (e) => {
+    if (!pageSenderOk(e)) throw new Error('not allowed');
+    const img = await e.sender.capturePage();
+    if (img.isEmpty()) return null;
+    const { width } = img.getSize();
+    return img.resize({ width: Math.max(1, Math.round(width / 4)), quality: 'good' }).toPNG();
+  });
   ipcMain.handle('fv:term-open', (e, o) => {
     if (!termSenderOk(e)) throw new Error('not allowed');
     if (!o || typeof o !== 'object' || !validId(o.id)) throw new Error('bad conversation id');

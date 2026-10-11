@@ -44,6 +44,13 @@ let subStack = [];
 // an input item's images ({ key, blob, url }), while its box is open; the server's /chat/image limits
 const IMG_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'], IMG_MAX = 15 * 1024 * 1024, IMG_COUNT = 8;
 let atts = [], attSeq = 0, fileIn = null, dragDepth = 0;
+// The frost in the desktop window: over its see-through acrylic Chromium draws no backdrop-filter at all (it
+// needs an opaque page behind it), so what is under the menu would read straight through. There the page is shot
+// once as the menu opens (fleetDesktop.backdrop; the menu stays invisible meanwhile, FROST_WAIT at most, else it
+// opens without one), and each open menu gets a fixed layer just under it with that shot, blurred and lined up
+// with the page beneath. A browser keeps the plain backdrop-filter.
+const FROST_WAIT = 250;
+let frosts = null, shotUrl = '', shotGen = 0;
 
 function ensure() {
   if (el) return el;
@@ -60,6 +67,18 @@ function ensure() {
   subEl.setAttribute('role', 'menu');
   subEl.hidden = true;
   document.body.appendChild(subEl);
+  if (canFrost()) {
+    frosts = [el, subEl].map(() => {
+      const f = document.createElement('div');
+      f.className = 'ctx-frost';
+      f.hidden = true;
+      f.appendChild(document.createElement('div')).className = 'ctx-frost-img';
+      document.body.insertBefore(f, el);
+      return f;
+    });
+    // a menu that grows or shrinks (a question, a text box, a submenu loading) takes its frost along
+    try { const ro = new ResizeObserver(() => syncFrost()); ro.observe(el); ro.observe(subEl); } catch {}
+  }
   for (const box of [el, subEl]) {
     box.addEventListener('pointerdown', (e) => e.stopPropagation());
     // keep focus on the menu (a press in the text box places the caret as usual)
@@ -243,6 +262,55 @@ function place(x, y) {
   top = Math.max(m, Math.min(top, H - h - m));
   el.style.left = `${Math.round(left)}px`;
   el.style.top = `${Math.round(top)}px`;
+  syncFrost();
+}
+
+// ---------- the frost (the desktop window only, see FROST_WAIT) ----------
+function canFrost() {
+  const d = window.fleetDesktop;
+  return !!(d && typeof d.backdrop === 'function') && document.documentElement.classList.contains('glass');
+}
+function dropShot() {
+  if (shotUrl) URL.revokeObjectURL(shotUrl);
+  shotUrl = '';
+}
+// shoot the page with the menu invisible, then show the menu over its frost
+function startFrost() {
+  const gen = ++shotGen;
+  let done = false;
+  dropShot();
+  el.classList.add('ctx-shooting');
+  subEl.classList.add('ctx-shooting');
+  const show = (png) => {
+    if (done || gen !== shotGen) return;
+    done = true;
+    if (!open) return;
+    if (png) shotUrl = URL.createObjectURL(new Blob([png], { type: 'image/png' }));
+    el.classList.remove('ctx-shooting');
+    subEl.classList.remove('ctx-shooting');
+    // its drop-in starts now, together with the frost's
+    el.style.animation = 'none'; void el.offsetWidth; el.style.animation = '';
+    syncFrost();
+  };
+  setTimeout(() => show(null), FROST_WAIT);
+  window.fleetDesktop.backdrop().then(show, () => show(null));
+}
+// each open menu's frost: its place and size (from left/top, not the rect, which the drop-in moves), the shot
+// offset so the page in it lines up with the page around it
+function syncFrost() {
+  if (!frosts) return;
+  [el, subEl].forEach((box, k) => {
+    const f = frosts[k];
+    const on = open && !!shotUrl && !box.hidden && !box.classList.contains('ctx-shooting');
+    if (!on) { f.hidden = true; return; }
+    const x = parseFloat(box.style.left) || 0, y = parseFloat(box.style.top) || 0;
+    Object.assign(f.style, { left: `${x}px`, top: `${y}px`, width: `${box.offsetWidth}px`, height: `${box.offsetHeight}px` });
+    const img = f.firstChild;
+    const bg = `url("${shotUrl}")`;
+    if (img.style.backgroundImage !== bg) img.style.backgroundImage = bg;
+    Object.assign(img.style, { left: `${-x}px`, top: `${-y}px` });
+    f.hidden = false;
+  });
 }
 
 // ---------- the submenu ----------
@@ -289,12 +357,14 @@ function placeSub() {
   top = Math.max(m, Math.min(top, H - h - m));
   subEl.style.left = `${Math.round(left)}px`;
   subEl.style.top = `${Math.round(top)}px`;
+  syncFrost();
 }
 function closeSub() {
   if (!subEl || subOf < 0) return;
   subOf = -1; subItems = []; subSel = -1; level = 'main'; subStack = [];
   subEl.hidden = true;
   subEl.innerHTML = '';
+  syncFrost();
   mark();
 }
 function scrollSubTo(j) {
@@ -403,6 +473,7 @@ export function openCtxMenu(o) {
   draw();
   spec.x = o.x; spec.y = o.y;
   place(o.x, o.y);
+  if (frosts) startFrost();
   try { el.focus({ preventScroll: true }); } catch {}
   return el;
 }
@@ -416,6 +487,13 @@ export function closeCtxMenu(restore = true) {
   closeSub();
   el.hidden = true;
   el.innerHTML = '';
+  if (frosts) {
+    shotGen++;
+    el.classList.remove('ctx-shooting');
+    subEl.classList.remove('ctx-shooting');
+    dropShot();
+    syncFrost();
+  }
   // give the keyboard back to where it was (the terminal, a card), unless something else took it meanwhile
   const back = prevFocus;
   prevFocus = null;

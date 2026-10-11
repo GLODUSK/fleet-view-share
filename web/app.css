@@ -673,6 +673,18 @@ html.titlebar .top.fit-6 .tabs button { padding: 0 9px; }
 .menu.ctx-menu { background: rgba(15, 18, 28, 0.68); -webkit-backdrop-filter: blur(56px) saturate(1.4); backdrop-filter: blur(56px) saturate(1.4); }
 html.glass .menu.ctx-menu { background: rgba(15, 18, 28, 0.73); }
 @media (prefers-reduced-motion: reduce) { .menu.ctx-menu { animation: none; } }
+/* the desktop window's frost (ctxmenu.js, FROST_WAIT): backdrop-filter does nothing over the acrylic, so a shot of the
+   page, blurred, sits in a layer just under each open menu; the menu's own tint goes on top of it. While the page
+   is shot the menu is there (it keeps the keyboard) but not drawn, so it stays out of the shot. */
+.menu.ctx-menu.ctx-shooting { opacity: 0 !important; }
+.ctx-frost {
+  position: fixed; z-index: 59; overflow: hidden; pointer-events: none;
+  border-radius: var(--radius); animation: drop-in 180ms var(--ease);
+  background: rgb(12, 14, 22); /* the shot keeps the page's own see-through, so the live page would show through it */
+}
+.ctx-frost[hidden] { display: none; }
+.ctx-frost-img { position: absolute; width: 100vw; height: 100vh; background: 0 0 / 100% 100% no-repeat; filter: blur(32px) saturate(1.4); }
+@media (prefers-reduced-motion: reduce) { .ctx-frost { animation: none; } }
 
 /* ---------- map command center: orders box, replay pill, "Since you looked" ---------- */
 /* the right-click menu's order box: a few lines tall (Enter sends, Shift+Enter a new line) */
