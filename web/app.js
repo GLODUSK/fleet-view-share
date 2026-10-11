@@ -474,6 +474,7 @@ async function poll() {
     if (st.settings) syncRepoPrefs(st.settings);
     applyRepoNames(st);
     if (st.settings && Array.isArray(st.settings.offAccounts) && !('offAccounts' in pendingSave) && Date.now() - offSentAt > 3000) offAccts = st.settings.offAccounts.filter(isAcct);
+    if (st.settings) adoptSyncedHidden(st.settings);
     if (settingsLoaded && st.settings) mergeServerHidden(st.settings.hidden);
     if (st.settings) syncForgotten(st.settings.forgotten);
     if (!settingsLoaded && st.settings) {
@@ -612,6 +613,20 @@ function mergeServerHidden(list) {
     added = true;
   }
   return added;
+}
+// Another device changed the list (sync-prefs.js: hidden, removed or shown again there): the server bumps
+// settings.hiddenSync, and the page takes the server's list whole, drops included, once no save of its own waits
+let hiddenSyncSeen = null;
+function adoptSyncedHidden(s) {
+  const n = s.hiddenSync;
+  if (!Number.isFinite(n) || !Array.isArray(s.hidden)) return;
+  if (!settingsLoaded || hiddenSyncSeen === null) { hiddenSyncSeen = n; return; } // the first /state loads it whole anyway
+  if (n === hiddenSyncSeen || 'hidden' in pendingSave) return;
+  hiddenSyncSeen = n;
+  hidden.clear();
+  for (const h of s.hidden) if (h && typeof h.id === 'string') hidden.set(h.id, Number(h.at) || Date.now());
+  if (ui.selectedId && hidden.has(ui.selectedId)) ui.selectedId = null;
+  if (ui.detailId && hidden.has(ui.detailId)) ui.detailId = null;
 }
 // removed ones taken off the Removed conversations list for good ("Forget"; settings.forgotten, ids still on hidden).
 // The server's list wins, except while a change of ours may not have reached it yet (as hiddenRepos)

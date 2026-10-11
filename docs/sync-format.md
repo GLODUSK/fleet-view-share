@@ -69,6 +69,44 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
     (after a start, or while its own reads fail), and for a device with no `live:` row (an older Fleet View), the
     copy's own reading stands. A switch between the two readings, or to DONE because the owner went quiet, raises no
     alert; only the owner's own DONE does.
+  - `prefs:<group>` (`sync-prefs.js`): the settings every device holds the same, one row per group that every device
+    writes (last writer wins), sealed with `sealText(json, key, 'setting:prefs:<group>')`, `updated_at` set to its `at`:
+    `{ v: 1, device, at, after, items }`. `after` is `{ by, at }` of the row the writer had agreed on when it wrote
+    (null on its first write), so a reader can tell a row made without its own last write. Groups and their items (a
+    repo root `R` is `{ origin, name }`: its GitHub `owner/name` or null, and its folder's name):
+    - `hidden`: `{ id, at, forgot? }` hidden and removed conversations (`settings.hidden`; `forgot: true` for the ones
+      on `settings.forgotten`). `at` is when it was hidden: it shows again once it works after that.
+    - `names`: `{ id, name }` Fleet View's own conversation names (`settings.names`, POST /rename); `name` null for
+      one cleared by hand.
+    - `moved`: `{ id, root: R | null, at }` "Move to workspace" (`settings.moved`).
+    - `hiddenRepos`: `{ root: R, at }`; `repoNames`: `{ root: R, name }`; `repoOrder`: `R`, in order.
+    - `mapSpots`: pinned spots only (`pin: true`): `{ repo: R, x, y, pin }` for a workspace's spot (`r:<root>` here),
+      `{ id, x, y, pin }` for any other (`s:<conversation id>`) as it is. Unpinned spots stay on each machine (the map's
+      spacing rule moves them to fit that screen) and are kept when the group comes in.
+    - `teams`: as `settings.teams` keeps them, less `seenAt` and `here` (each device its own). A team that came from
+      another device and whose members this machine never listed (`here: false`) is never pruned here: the device
+      that runs its members lets it go, and that reaches the others.
+
+    Never synced (each screen's own): view, zoom, the map's camera and saved views, window bounds, query, the
+    workspace filter (`repo`, `repos`), `offAccounts`, `pushTargets`, bots, compact, finishedOpen, steady, notify.
+    A root goes up as `{ origin, name }` and comes back as the root here with that origin (the one with that folder
+    name first), else one with that folder name and no other origin; root keys compare in lower case, `\` and `/`
+    alike. A path this machine does not list (stale data, another machine's path) goes up as the repo here with its
+    folder name, or is left out when the repo here already has an item. Only folders that exist are roots here, and a
+    root's origin, once seen, holds for the run. An item that does not translate on a machine is not put in there, but
+    rides along in what that machine writes, so the machine that has the repo keeps it; one the machine already has
+    under the same key stays as it is. When that repo turns up on the machine later, the item is put in there (never
+    read as a delete).
+    Each device keeps what it last agreed on per group (`settings.prefsSync`: `{ at, by, base, prev, ride }`, and its
+    device id and key's id: another one means a first join). A change here (the group's items differ from `base`;
+    order counts only for `repoOrder`) lists the rows first and writes the whole group, at most every 3 s a group. A row
+    whose `at` or device differs from `base`'s, written by another device, is taken: it replaces this machine's items,
+    or, when this machine changed the group too, the two are merged item by item (what changed here wins, what was
+    dropped here stays dropped) and written back. When this device wrote last and the row's `after` is not that write
+    (both wrote at once), it is merged the same way against `prev` (the base before that write). First join (no
+    `base`): the row and this machine's items are joined, this machine's winning on the same item, and written. `at` is
+    only ever compared for equality, never with this machine's clock. Every device lists the `prefs:*` keys and
+    `updated_at` every 10 s and fetches a value only when its `updated_at` moved (compared as times).
 - **chunks** `{ conversation_id, file, generation, seq, byte_offset, byte_length, object_path, sha256 }`: one per
   object. `sha256` is the hex sha256 of the chunk's plain bytes. A whole file is `seq` 0..n of one generation (one
   chunk unless it is over 8 MiB; an empty one is a single 0-byte chunk).

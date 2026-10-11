@@ -25,6 +25,7 @@ const SYNC_API = require(path.join(__dirname, 'sync-api.js'));
 const RELAY_JS = require(path.join(__dirname, 'relay.js'));
 const SYNC_RUN = require(path.join(__dirname, 'sync-run.js'));
 const SYNC_LIVE = require(path.join(__dirname, 'sync-live.js'));
+const SYNC_PREFS = require(path.join(__dirname, 'sync-prefs.js'));
 const SYNC_ACCOUNTS = require(path.join(__dirname, 'sync-accounts.js'));
 const SYNC_SETUP_JS = require(path.join(__dirname, 'sync-setup.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
@@ -230,6 +231,11 @@ let forgotten = (cleanForgotten(saved.forgotten) || []).filter((id) => hidden.so
 // save that leaves it out keeps it (applySettings).
 const apiHidAt = new Map();
 const API_HIDE_GUARD_MS = 30e3;
+// The same the other way for another device's hidden list (sync-prefs.js, applyPrefs): one it showed again, id ->
+// { at: its at here then, t: when }, so a page save in that half minute that still has it doesn't hide it again; and
+// hiddenSync, bumped at each such list, so the page takes the server's hidden list whole (it otherwise only adds)
+const syncUnhid = new Map();
+let hiddenSync = 0;
 // the API's throwaway sessions (POST /api/sessions { temp: true }): conversation ids, hidden from the map as soon
 // as they are stopped or end (sweepTemp), at most 200, kept in settings so a restart doesn't forget them
 const API_TEMP_MAX = 200;
@@ -384,7 +390,10 @@ function cleanTeams(list, now = Date.now()) {
       .slice(-10).map((m) => ({ from: m.from.slice(0, 80), to: m.to.slice(0, 80), at: Math.round(m.at) }));
     const lead = typeof x.lead === 'string' && members.includes(x.lead.toLowerCase()) ? x.lead.toLowerCase() : null;
     out.push({ id: x.id, name: plainText(x.name, 80) || 'team', color: /^#[0-9a-f]{6}$/i.test(x.color || '') ? x.color : TEAM_COLORS[out.length % TEAM_COLORS.length],
-      members, lead, order: typeof x.order === 'string' ? x.order.slice(0, 4000) : '', at, messages: msgs, successors: succ, seenAt: Number.isFinite(x.seenAt) ? Math.round(x.seenAt) : now });
+      members, lead, order: typeof x.order === 'string' ? x.order.slice(0, 4000) : '', at, messages: msgs, successors: succ, seenAt: Number.isFinite(x.seenAt) ? Math.round(x.seenAt) : now,
+      // here: a member has been in this machine's session list (false for a team another device's settings brought
+      // whose members this machine never listed: only a machine that saw them lets it go, pruneTeams)
+      here: x.here !== false });
   }
   return out;
 }
@@ -669,6 +678,8 @@ function flushSettings() {
   if (miniBounds) out.miniBounds = miniBounds; else delete out.miniBounds;
   if (chatsBounds) out.chatsBounds = chatsBounds; else delete out.chatsBounds;
   try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(out, null, 2)); } catch (e) { logOnce('settings', `could not save ${SETTINGS_FILE}: ${e.message}`); }
+  // the shared settings (sync-prefs.js) go up soon when one of their groups changed (SYNC_RUNNER is made further down)
+  try { SYNC_RUNNER.prefsChanged(); } catch {}
 }
 
 // ---------- server log ----------
@@ -4897,8 +4908,9 @@ function pruneTeams(now) {
   if (changed) teams = teams.filter((t) => t.members.length >= 2);
   // told once every member is swapped, so each brief and note names (and goes to) the ones that carry on
   for (const [t, m, to] of swaps) if (teams.includes(t)) handedOn(t, m, to);
-  for (const t of teams) if (t.members.some((m) => sessions.has(m))) t.seenAt = now;
-  const keep = teams.filter((t) => now - (t.seenAt || 0) < TEAM_GONE_MS);
+  for (const t of teams) if (t.members.some((m) => sessions.has(m))) { t.seenAt = now; if (!t.here) { t.here = true; changed = true; } }
+  // a team whose members this machine never listed (another device's, sync-prefs.js) is that device's to let go
+  const keep = teams.filter((t) => !t.here || now - (t.seenAt || 0) < TEAM_GONE_MS);
   if (keep.length !== teams.length) { teams = keep; changed = true; }
   if (changed || now - teamsSavedAt > 10 * 60e3) { teamsSavedAt = now; saveSettings(); }
 }
@@ -5648,7 +5660,8 @@ function buildState() {
     now, demo: DEMO, title: brand(), build: buildOf(),
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
-    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
+    // hiddenSync: bumped when another device's hidden list was put in (sync-prefs.js): the page takes hidden whole then
+    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenSync, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
       mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() },
       // the Chief: { id: the live Chief's conversation id, else the last one's while its log is there, else null; watch }
       chief: CHIEF ? CHIEF.view() : { id: null, watch: false } },
@@ -5766,6 +5779,13 @@ function applySettings(b) {
       for (const [id, at] of apiHidAt) {
         if (now - at > API_HIDE_GUARD_MS) { apiHidAt.delete(id); continue; }
         if (!h.some((x) => x.id === id)) { const was = hidden.find((x) => x.id === id); if (was) h.push(was); }
+      }
+      // one another device showed again moments ago (sync-prefs.js), still on the list the page saved: it stays off
+      // (one hidden again here since has a later at)
+      for (const [id, u] of syncUnhid) {
+        if (now - u.t > API_HIDE_GUARD_MS) { syncUnhid.delete(id); continue; }
+        const i = h.findIndex((x) => x.id === id);
+        if (i >= 0 && h[i].at <= u.at) h.splice(i, 1);
       }
       const still = new Set(h.map((x) => x.id)), was = new Set(hidden.map((x) => x.id));
       for (const x of hidden) if (!still.has(x.id)) recentlyContinued.set(x.id, now);
@@ -6233,10 +6253,61 @@ const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, l
 // letter by itself); mode: 'local' (the start screen's "Work locally", sync-setup.js) keeps sync off here
 // snapshot: what runs here, for the other devices (sync-live.js); their snapshots come back through live() (applyRemote)
 const ACCOUNT_SYNC = SYNC_ACCOUNTS.createAccountSync({ accounts: ACCTS, log: (t) => logOnce(t, t) });
+// The shared settings (sync-prefs.js): the groups every device holds the same (hidden and removed conversations,
+// names, moves, hidden / renamed / ordered workspaces, the map's spots, teams), read from and put back into the
+// settings above; per-screen ones (view, zoom, camera, bounds, filters, map views, accounts off, push targets, bots,
+// compact, finishedOpen, steady, notify) never go. settings.prefsSync is what this device last agreed on with the table.
+function prefsGroups() {
+  const fg = new Set(forgotten);
+  return {
+    hidden: hidden.map((h) => ({ id: h.id, at: h.at, forgot: fg.has(h.id) })),
+    names: [...names].map(([id, name]) => ({ id, name })),
+    moved: [...moved.values()],
+    hiddenRepos, repoNames, repoOrder, mapSpots, teams,
+  };
+}
+// another device's group, translated: replaces this one's (each cleaned as a POST /settings would be) and is saved
+function applyPrefs(group, items) {
+  const now = Date.now();
+  if (group === 'hidden') {
+    const h = cleanHidden(items) || [];
+    const still = new Set(h.map((x) => x.id)), was = new Map(hidden.map((x) => [x.id, x.at]));
+    for (const [id, at] of was) if (!still.has(id)) { syncUnhid.set(id, { at, t: now }); recentlyContinued.set(id, now); }
+    for (const x of h) if (!was.has(x.id)) { apiHidAt.set(x.id, now); syncUnhid.delete(x.id); }
+    hidden = h;
+    forgotten = (cleanForgotten(items.filter((x) => x && x.forgot).map((x) => x.id)) || []).filter((id) => still.has(id));
+    hiddenSync++;
+  } else if (group === 'names') {
+    const next = cleanNames(Object.fromEntries(items.map((x) => [x.id, x.name])));
+    const changed = new Set([...names.keys(), ...next.keys()].filter((id) => names.get(id) !== next.get(id)));
+    names.clear();
+    for (const [id, n] of next) names.set(id, n);
+    for (const id of changed) { const s = sessions.get(id); if (s) s.name = clean(baseName(s) || s.id.slice(0, 8), 40); }
+  } else if (group === 'moved') {
+    moved = cleanMoved(items) || new Map();
+    for (const x of sessions.values()) x.hueAt = 0; // work every repo out again now
+  } else if (group === 'hiddenRepos') hiddenRepos = cleanHiddenRepos(items) || [];
+  else if (group === 'repoNames') repoNames = cleanRepoNames(items) || [];
+  else if (group === 'repoOrder') repoOrder = cleanRepoOrder(items) || [];
+  else if (group === 'mapSpots') mapSpots = cleanMapSpots(items) || [];
+  else if (group === 'teams') {
+    const old = new Map(teams.map((t) => [t.id, t]));
+    teams = cleanTeams(items.map((t) => ({ ...t, seenAt: old.has(t.id) ? old.get(t.id).seenAt : now, here: old.has(t.id) ? old.get(t.id).here : false }))) || [];
+  } else return;
+  saveSettings();
+}
+// repo roots to and from { origin, name }: the repos the page lists and the ones conversations work in here
+const PREFS_ROOTS = SYNC_PREFS.makeTranslate({
+  roots: () => [...pageRepos(), ...[...sessions.values()].filter((s) => !s.demo && s.root).map((s) => s.root)],
+  originOf: (root) => { const g = githubOf(root); return g ? g.slug : null; },
+  exists: (root) => { try { return fs.statSync(root).isDirectory(); } catch { return false; } },
+});
 const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, log: (t) => logOnce(t, t), roots: () => pageRepos(),
   host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
   isOpen: (id) => liveProcs.has(String(id).toLowerCase()),
-  mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot() });
+  mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot(),
+  prefs: { read: prefsGroups, apply: applyPrefs, translate: PREFS_ROOTS,
+    load: () => saved.prefsSync, save: (s) => { saved.prefsSync = s; saveSettings(); } } });
 // the start screen on Henry's machines (private.json): work locally or sync with Blackbox, then the steps of sync
 const SYNC_SETUP = SYNC_SETUP_JS.createSyncSetup({ dataDir: LOG_DIR, sync: DEMO ? null : SYNC, runner: SYNC_RUNNER, accountSync: ACCOUNT_SYNC,
   accountsView: () => ACCTS.view(), private: SYNC_PRIVATE, log: (t) => logOnce(t, t) });

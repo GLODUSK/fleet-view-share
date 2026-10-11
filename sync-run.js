@@ -15,9 +15,9 @@
 // sets no timer beyond the minute check and reaches no network.
 //
 //   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, intervalMs, checkMs,
-//                      makeUploader, makeMaterializer, makeMover, makeLive })
+//                      prefs, makeUploader, makeMaterializer, makeMover, makeLive, makePrefs })
 //     -> { start(), stop(), check(), status(), move(id, { force }), moveStatus(id), cancelMove(id), owners(), device(),
-//          live() }
+//          live(), prefsChanged() }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
 //   are one (by default each side's own: ~/.claude and ~/.claude-a); roots: () => [repo folders] (the
 //   repos Fleet View lists; the materializer matches a synced repo's origin against them). host: { list() ->
@@ -38,6 +38,9 @@
 // What runs where (sync-live.js), beside the mover and only with it (it needs the mover's device id): snapshot() ->
 // the conversations this device owns, as fleet-view.js's /state shows them, published for the other devices;
 //   live() -> sync-live.js live(): the other devices' fresh snapshots | null while not running (or no snapshot given)
+// The shared settings (sync-prefs.js), beside the mover and only with it (the same device id): prefs: { read(),
+// apply(group, items), translate, load(), save(state) } (sync-prefs.js createPrefs's options of those names);
+//   prefsChanged() -> a local save: the prefs loop runs a round soon (nothing while not running)
 // <dataDir>/sync/away.json (what the session host refuses to open, sync-move.js) is deleted when sync stops for a
 // gate (not set up, signed out, not a member, no key), and kept when the server stops: the host still needs it.
 'use strict';
@@ -63,14 +66,16 @@ function createSyncRunner(o = {}) {
   const makeMaterializer = o.makeMaterializer || ((a) => require(path.join(__dirname, 'sync-down.js')).createMaterializer(a));
   const makeMover = o.makeMover || ((a) => M.createMover(a));
   const makeLive = o.makeLive || ((a) => require(path.join(__dirname, 'sync-live.js')).createLive(a));
+  const makePrefs = o.makePrefs || ((a) => require(path.join(__dirname, 'sync-prefs.js')).createPrefs(a));
   const snapshot = typeof o.snapshot === 'function' ? o.snapshot : null;
+  const prefsOpt = o.prefs && typeof o.prefs.read === 'function' && typeof o.prefs.apply === 'function' ? o.prefs : null;
   const host = o.host && typeof o.host.list === 'function' ? o.host : null;
   const isOpenOpt = typeof o.isOpen === 'function' ? o.isOpen : null;
   // mode() -> 'local' stops sync here (null / 'sync': the other gates decide); accounts: sync-accounts.js's object
   const modeOf = typeof o.mode === 'function' ? o.mode : () => null;
   const accounts = o.accounts && typeof o.accounts.reconcile === 'function' ? o.accounts : null;
 
-  let run = null; // { uid, keyId, up, down, mover, live }
+  let run = null; // { uid, keyId, up, down, mover, live, prefs }
   let why = 'not started'; // why it is not running, for status()
   let timer = null, offChange = null, checking = null, again = false, stopped = true;
 
@@ -95,7 +100,7 @@ function createSyncRunner(o = {}) {
       const r = run;
       run = null;
       log(`sync: stopped (${reason})`);
-      await Promise.allSettled([r.live ? r.live.stop() : null, r.mover ? r.mover.stop() : null, r.up.stop(), r.down.stop()]);
+      await Promise.allSettled([r.prefs ? r.prefs.stop() : null, r.live ? r.live.stop() : null, r.mover ? r.mover.stop() : null, r.up.stop(), r.down.stop()]);
     }
     if (gate) M.dropAway(dataDir);
   }
@@ -144,17 +149,24 @@ function createSyncRunner(o = {}) {
     let mover = null;
     try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false) }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
     // the device id is the mover's (it makes the device row on its first tick): no mover, no snapshots
+    const deviceId = () => { const d = mover.device(); return d ? d.id : null; };
     let live = null;
     if (mover && snapshot) {
-      try { live = makeLive({ ...args, device: () => { const d = mover.device(); return d ? d.id : null; }, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null), snapshot: () => snapshot() }); } catch (e) { log(`sync: what runs on the other devices can't be shown here: ${e && e.message}`); }
+      try { live = makeLive({ ...args, device: deviceId, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null), snapshot: () => snapshot() }); } catch (e) { log(`sync: what runs on the other devices can't be shown here: ${e && e.message}`); }
     }
-    run = { uid, keyId: kid, up, down, mover, live };
+    let prefs = null;
+    if (mover && prefsOpt) {
+      const p = prefsOpt;
+      try { prefs = makePrefs({ ...args, device: deviceId, read: () => p.read(), apply: (g, items) => p.apply(g, items), translate: p.translate, load: p.load, save: p.save }); } catch (e) { log(`sync: settings can't be shared with the other devices here: ${e && e.message}`); }
+    }
+    run = { uid, keyId: kid, up, down, mover, live, prefs };
     why = '';
     if (hostFor) hostFor.list().catch(() => {});
     up.start(intervalMs);
     down.start(intervalMs);
     if (mover) mover.start();
     if (live) live.start();
+    if (prefs) prefs.start();
     log(`sync: running as ${st.email || 'the signed-in account'}`);
   }
   const notRunning = () => Object.assign(new Error(run ? 'conversations can\'t move between devices on this PC' : why || 'sync is not running'), { code: 'not_running' });
@@ -186,6 +198,7 @@ function createSyncRunner(o = {}) {
         down: safe(() => run.down.status()),
         conflicts: safe(() => (typeof run.down.conflicts === 'function' ? run.down.conflicts() : [])),
         live: run.live ? safe(() => run.live.status()) : null,
+        prefs: run.prefs ? safe(() => run.prefs.status()) : null,
       };
     },
     move(id, opts = {}) {
@@ -203,6 +216,7 @@ function createSyncRunner(o = {}) {
       if (!run || !run.live) return null;
       try { return run.live.live(); } catch { return null; }
     },
+    prefsChanged() { if (run && run.prefs) { try { run.prefs.nudge(); } catch {} } },
   };
 }
 
