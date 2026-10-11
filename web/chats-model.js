@@ -26,6 +26,10 @@
 //   unread(contact, seen) -> boolean  seen: { [contact.key]: ms the user last opened it }
 //   rawToContactsState(st) -> { ...st, sessions, allSessions, finishedSessions, pending, teams }   raw GET /state to
 //       the lists above (buildContacts calls it by itself when state has no allSessions); the tags and state.bots stay
+//   previewOf(session) -> string   a conversation's one-line preview: the question it asks, what it is doing now, or
+//       its last reply (Contact.preview uses it)
+//   replyLine(text) -> string   the first line of a reply that says something: no heading, code fence, table or
+//       rule, list and quote marks and * _ ` stripped; '' for none
 //   Nothing here touches the DOM or window at import time, and it imports nothing, so the phone app (phone/) imports it as it is.
 //
 //   Contact = {
@@ -94,7 +98,7 @@ export function createChainStore(storage) {
 }
 
 // the first line that says something: not a heading, a code fence, a table border or a rule
-function replyLine(text) {
+export function replyLine(text) {
   for (const raw of String(text || '').split('\n')) {
     const l = raw.trim();
     if (!l || /^#{1,6}(\s|$)/.test(l) || /^```/.test(l) || /^\|/.test(l) || /^[\s:|-]+$/.test(l) || /^[-*_=]{3,}$/.test(l)) continue;
@@ -107,7 +111,7 @@ function replyLine(text) {
 // "edit FlameCanvas.tsx", or "build:phone-skia edit FlameCanvas.tsx" for a subagent
 const actionText = (a) => (a ? [a.who && a.who !== 'main' ? a.who + ':' : '', a.verb, a.what].filter(Boolean).join(' ') : '');
 
-function previewOf(s) {
+export function previewOf(s) {
   if (NEEDS.has(s.state)) {
     const q = s.waitingOn || replyLine(s.lastReply);
     if (q) return oneLine(q);

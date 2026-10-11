@@ -3,7 +3,7 @@
 // fallbacks, hidden ones, teams of overseers only, sorting, unread, a storage that throws and raw GET /state (the
 // phone app). Plain asserts, no dependencies: node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, rawToContactsState } from '../web/chats-model.js';
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, rawToContactsState, previewOf, replyLine } from '../web/chats-model.js';
 
 const KEY = 'fv.chats.chains';
 const fake = (init = {}) => {
@@ -211,6 +211,25 @@ test('raw GET /state: overseers get rows (tags and state.bots kept), map ones ne
   assert.equal(rows.find((r) => r.kind === 'team').members.length, 2);
   assert.deepEqual(rawToContactsState(null).sessions, []);
   assert.deepEqual(build(undefined), []);
+});
+
+test('replyLine: the first line that says something, marks stripped', () => {
+  assert.equal(replyLine('## Done\n\n```js\n| a | b |\n|---|---|\n---\n- **Merged** `#248`, live.'), 'Merged #248, live.');
+  assert.equal(replyLine('> 1. quoted step'), '1. quoted step');
+  assert.equal(replyLine('2) second'), 'second');
+  assert.equal(replyLine('# only a heading\n```'), '');
+  assert.equal(replyLine(null), '');
+});
+
+test('previewOf: the question, then the action, then the last reply or the goal', () => {
+  assert.equal(previewOf({ state: 'QUESTION', waitingOn: 'Which branch?', lastReply: 'x' }), 'Which branch?');
+  assert.equal(previewOf({ state: 'ASKING', lastReply: '# Plan\nShall I merge?' }), 'Shall I merge?');
+  assert.equal(previewOf({ state: 'WORKING', lastAction: { verb: 'edit', what: 'a.ts' } }), 'edit a.ts');
+  assert.equal(previewOf({ state: 'AGENTS', lastAction: { who: 'build', verb: 'run', what: 'tests' } }), 'build: run tests');
+  assert.equal(previewOf({ state: 'IDLE', lastReply: '\n\nShipped it.\nMore.' }), 'Shipped it.');
+  assert.equal(previewOf({ state: 'DONE', goal: '  fix   the menu ' }), 'fix the menu');
+  assert.equal(previewOf({ state: 'IDLE', lastReply: 'x'.repeat(200) }).length, 140);
+  assert.equal(previewOf({ state: 'IDLE' }), '');
 });
 
 console.log(`${n} tests passed`);
