@@ -109,8 +109,9 @@ function commandsIn(dir, src, out) {
 }
 
 // <dir>/<name>/SKILL.md as skills; deeper for folders that hold skills: the synced ones
-// (~/.claude/skills/synced/<x>/<name>) are named "anthropic-skills:<name>" in the session
-function skillsIn(dir, src, out, depth = 0, pre = '') {
+// (~/.claude/skills/synced/<x>/<name>) are "anthropic-skills:<name>" in the session, but the bare "/<name>"
+// runs them too, so they are listed by that
+function skillsIn(dir, src, out, depth = 0) {
   let ents;
   try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const e of ents.slice(0, MAX_FILES)) {
@@ -119,8 +120,8 @@ function skillsIn(dir, src, out, depth = 0, pre = '') {
     if (fs.existsSync(file)) {
       const f = front(file);
       if (f['user-invocable'] === 'false') continue;
-      out.push({ name: pre + (f.name || e.name), desc: f.description || '', hint: f['argument-hint'] || '', src });
-    } else if (depth < 2) skillsIn(sub, src, out, depth + 1, depth === 0 && e.name === 'synced' ? 'anthropic-skills:' : pre);
+      out.push({ name: f.name || e.name, desc: f.description || '', hint: f['argument-hint'] || '', src });
+    } else if (depth < 2) skillsIn(sub, src, out, depth + 1);
   }
 }
 
