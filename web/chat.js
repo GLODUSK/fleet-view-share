@@ -644,28 +644,68 @@ function renderItem(it, c) {
 // ---------- picking options from a reply ----------
 // A reply that offers options as a task list with every box unticked ("- [ ] …", which CLAUDE.md asks for) gets
 // live boxes and a Launch button: it sends the ticked options with the line that otherwise gets typed by hand.
-// A list with a ticked box is progress, not a choice, and stays as it is. c.picks: key -> { on: Set, sent }
+// A list with a ticked box is progress, not a choice, and stays as it is. c.picks: key -> { on: Set, mine: Set }
 // An option marked "(recommended)" (CLAUDE.md asks for at least one) shows a Recommended badge on a lit row and
 // starts ticked, so Launch takes the recommendation in one click.
+// An option already launched (in any "Go with these:" message of the conversation, sent from here or typed) is
+// greyed with a Launched tag and can't be ticked again; the rest stay live, so Launch counts only what's left.
+// It is read from the transcript, so it holds after a reload too.
 // The launch line is one line: it opens with the old words, then says how to run, check and ship the picks.
 const LAUNCH_LINE = 'Launch subagents accordingly with model and effort: first check which items touch the same files and run those one after another (the rest in parallel), one subagent per item at its stated model and effort, each in its own worktree; then review every diff yourself, run the checks, and ship.';
+const LAUNCH_HEAD = 'Go with these:';
 function pickList(el, md, it, c) {
   const boxes = [...md.querySelectorAll('li > input[type="checkbox"]')];
   if (!boxes.length || boxes.some((b) => b.checked)) return;
   const key = String(it.key);
   const rec = boxes.map((b) => markRecommended(b.parentElement));
   let p = c.picks.get(key);
-  if (!p) c.picks.set(key, p = { on: new Set(rec.flatMap((r, n) => (r ? [n] : []))), sent: false });
+  if (!p) c.picks.set(key, p = { on: new Set(rec.flatMap((r, n) => (r ? [n] : []))), mine: new Set() });
   boxes.forEach((b, n) => {
-    b.disabled = p.sent;
     b.tabIndex = 0;
     b.dataset.pick = String(n);
-    b.checked = p.on.has(n);
     b.setAttribute('aria-label', `pick option ${n + 1}`);
   });
+  // each option as a launch message gives it, to know it again there
+  el._opts = boxes.map((b) => optionText(b.parentElement));
   md.classList.add('picking');
   el.insertAdjacentHTML('beforeend', '<div class="cpk"><button type="button" class="btn primary cpk-go" data-launch></button><span class="cpk-n"></span></div>');
-  drawPick(el, p);
+  drawPick(el, p, launchedOptions(c));
+}
+// an option's words on one line, without the badges (they are for you, not part of the option)
+function optionText(li) {
+  const x = li.cloneNode(true);
+  for (const b of x.querySelectorAll('.cpk-rec, .cpk-done')) b.remove();
+  const t = (x.textContent || '').replace(/\s+/g, ' ').trim();
+  return t.length > 400 ? `${t.slice(0, 399)}…` : t;
+}
+// the options launched in this conversation: the numbered lines of every "Go with these:" message, in the
+// transcript or still on its way
+function launchedOptions(c) {
+  const out = new Set();
+  const read = (text) => {
+    const s = String(text || '');
+    const at = s.startsWith(LAUNCH_HEAD) ? 0 : s.indexOf(`\n${LAUNCH_HEAD}`) + 1;
+    if (!at && !s.startsWith(LAUNCH_HEAD)) return; // indexOf -1 + 1: no head anywhere
+    for (const line of s.slice(at).split('\n').slice(1)) {
+      const m = /^\s*\d+[.)]\s+(.+)$/.exec(line);
+      if (m) out.add(m[1].replace(/\s+/g, ' ').trim());
+      else if (line.trim()) break; // the launch line after the list
+    }
+  };
+  for (const it of c.items) if (it.kind === 'user') read(it.text);
+  for (const s of c.sent) read(s.raw);
+  return out;
+}
+// after the feed changed: a launch that just came in greys its options in every list above it
+function syncPicks(c) {
+  const gos = c.list.querySelectorAll('.ci-asst [data-launch]');
+  if (!gos.length) return;
+  const launched = launchedOptions(c);
+  for (const go of gos) {
+    const el = go.closest('.ci');
+    const p = el && c.picks.get(el.dataset.key);
+    if (p) drawPick(el, p, launched);
+  }
 }
 // an option's "(recommended)" (any case, in its own text, not in a nested list) becomes a badge and lights its
 // row -> whether it had one
@@ -682,35 +722,46 @@ function markRecommended(li) {
   }
   return false;
 }
-function drawPick(el, p) {
+// launched: launchedOptions(c). p.mine: the ones launched from here, until the transcript has the message
+function drawPick(el, p, launched) {
   const go = el.querySelector('[data-launch]');
   if (!go) return;
+  let left = 0;
+  for (const b of el.querySelectorAll('.chat-md li > input[data-pick]')) {
+    const i = +b.dataset.pick;
+    const done = p.mine.has(i) || launched.has(el._opts?.[i]);
+    if (done) p.on.delete(i); else left++;
+    b.disabled = done;
+    b.checked = !done && p.on.has(i);
+    const li = b.parentElement;
+    if (li.classList.contains('done') === done) continue;
+    li.classList.toggle('done', done);
+    if (!done) { li.querySelector('.cpk-done')?.remove(); continue; }
+    // the tag where the Recommended badge was, else after the box
+    const tag = Object.assign(document.createElement('span'), { className: 'cpk-done', textContent: 'Launched' });
+    const rec = [...li.querySelectorAll('.cpk-rec')].find((r) => r.closest('li') === li);
+    if (rec) rec.after(tag); else b.after(tag);
+  }
   const k = p.on.size;
-  go.disabled = p.sent || !k;
-  go.textContent = p.sent ? 'Launched' : k ? `Launch ${k} selected` : 'Launch selected';
+  go.disabled = !k;
+  go.textContent = !left ? 'All launched' : k ? `Launch ${k} selected` : 'Launch selected';
   // the hint stays short; hovering it shows the whole launch line
   const n = el.querySelector('.cpk-n');
-  n.textContent = p.sent ? '' : k ? 'Sends them with the launch instructions' : 'Tick the options you want';
-  n.title = !p.sent && k ? LAUNCH_LINE : '';
+  n.textContent = !left ? '' : k ? 'Sends them with the launch instructions' : 'Tick the options you want';
+  n.title = k ? LAUNCH_LINE : '';
 }
 // the ticked options, numbered as they stand in the list, then the launch line
 function pickText(el, p) {
-  const lis = [...el.querySelectorAll('.chat-md li > input[data-pick]')].map((b) => b.parentElement);
-  const lines = [...p.on].sort((a, b) => a - b).map((n) => {
-    const li = lis[n]?.cloneNode(true);
-    li?.querySelector('.cpk-rec')?.remove(); // the badge is for you, not part of the option
-    const t = (li?.textContent || '').replace(/\s+/g, ' ').trim();
-    return `${n + 1}. ${t.length > 400 ? `${t.slice(0, 399)}…` : t}`;
-  });
-  return `Go with these:\n${lines.join('\n')}\n\n${LAUNCH_LINE}`;
+  const lines = [...p.on].sort((a, b) => a - b).map((n) => `${n + 1}. ${el._opts?.[n] || ''}`);
+  return `${LAUNCH_HEAD}\n${lines.join('\n')}\n\n${LAUNCH_LINE}`;
 }
 function launchPicks(c, el) {
   const p = c.picks.get(el?.dataset.key);
-  if (!p || p.sent || !p.on.size || !c.id) return;
+  if (!p || !p.on.size || !c.id) return;
   const text = pickText(el, p);
-  p.sent = true;
-  for (const b of el.querySelectorAll('input[data-pick]')) b.disabled = true;
-  drawPick(el, p);
+  for (const n of p.on) p.mine.add(n);
+  p.on.clear();
+  drawPick(el, p, launchedOptions(c));
   handToChat(c.id, { text, send: true, effort: 'high' }); // the session coordinating the launch runs at high or above
 }
 
@@ -835,6 +886,7 @@ function addSent(c, d) {
   const text = norm(d.text), cmd = /^\/[^\s/]+/.exec(text)?.[0] || null;
   c.sent.push({ at: Date.now(), text, raw: String(d.text || ''), cmd, images: d.images || [], el, used });
   c.outbox.appendChild(el);
+  syncPicks(c); // a launch typed by hand greys its options at once
   drawState(c);
   toBottom(c);
 }
@@ -1035,9 +1087,9 @@ function wire(c) {
     const b = e.target.closest?.('input[data-pick]');
     const el = b?.closest('.ci');
     const p = el && c.picks.get(el.dataset.key);
-    if (!p || p.sent) return;
+    if (!p || b.disabled) return;
     if (b.checked) p.on.add(+b.dataset.pick); else p.on.delete(+b.dataset.pick);
-    drawPick(el, p);
+    drawPick(el, p, launchedOptions(c));
   });
   pane.addEventListener('fv-chat-sent', (e) => { if (e.detail && e.detail.id === c.id) addSent(c, e.detail); });
   // the command's panel came up under the feed (compose.js): it was sent, and what it shows is down there
@@ -1331,6 +1383,7 @@ function draw(c, how) {
   for (const [k, el] of c.els) if (!keys.has(k)) { el.remove(); c.els.delete(k); }
   for (const [k, g] of c.groups) if (!used.has(k)) { g.remove(); c.groups.delete(k); }
   settleSent(c);
+  syncPicks(c);
   drawState(c);
   drawTopSoon(c);
   if (how === 'init') toBottom(c);
