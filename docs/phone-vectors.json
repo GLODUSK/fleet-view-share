@@ -1,0 +1,151 @@
+{
+  "about": "Test vectors for the phone relay protocol (docs/phone.md), made by node scripts/phone-vectors.js. Do not edit by hand.",
+  "label": "fleet-view relay v1",
+  "K": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "uid": "00000000-0000-4000-8000-000000000001",
+  "dev": "oKGio6Slpqeoqaqr",
+  "topic": "fleet:00000000-0000-4000-8000-000000000001:oKGio6Slpqeoqaqr",
+  "keys": {
+    "up": "6ac78d9879aa9d8bee7ee5194c1f8eb35618fc8cd249a9e9704e50096260b12e",
+    "down": "08928882b21a246cf749fe74b3f34bf654726343f0e7aa3a51dfd3ff4b418ef7"
+  },
+  "aad": {
+    "up0": "fleet-view relay v1|fleet:00000000-0000-4000-8000-000000000001:oKGio6Slpqeoqaqr|oKGio6Slpqeoqaqr|up|0",
+    "down0": "fleet-view relay v1|fleet:00000000-0000-4000-8000-000000000001:oKGio6Slpqeoqaqr|oKGio6Slpqeoqaqr|down|0",
+    "down1": "fleet-view relay v1|fleet:00000000-0000-4000-8000-000000000001:oKGio6Slpqeoqaqr|oKGio6Slpqeoqaqr|down|1"
+  },
+  "open": [
+    {
+      "name": "up request, z=0 (exact)",
+      "envelope": {
+        "v": 1,
+        "d": "oKGio6Slpqeoqaqr",
+        "dir": "up",
+        "n": "EBESExQVFhcYGRob",
+        "z": 0,
+        "c": "DZCS12yUPbZ1ScGbsblWEYGPnEnw8GjbhpGCbHsVhSl6x0ek22pnhfTRgA26Tzz4WYWkvuKb4LNcWbGdpEueWB4nkMu-3dHCzpnJsEdf1pHsFa-FdixMTbPdgsm2-PvT"
+      },
+      "plaintext": "{\"t\":\"req\",\"id\":\"r1\",\"at\":1760140800000,\"m\":\"GET\",\"p\":\"/state\",\"etag\":\"\\\"abc\\\"\"}"
+    },
+    {
+      "name": "down answer with UTF-8, z=0 (exact)",
+      "envelope": {
+        "v": 1,
+        "d": "oKGio6Slpqeoqaqr",
+        "dir": "down",
+        "n": "ICEiIyQlJicoKSor",
+        "z": 0,
+        "c": "AZWq2wlvueoY0ZIlu0nSgzwp_Yvw8Vg3fxZJ9EpTZhqo-TsA64ANlUbkzjJ2dGUI1EiEvB3Zu7a5ujdAFAiWnOiEdI4ePmdjaRcWT4rhTHDjr-l3UyGRSgFxkRFzsGR0a1ykz16S-O9BHFJJB60r8HYJmwaWxs-13c3EKtR0oOMjR7nygsE_zQ"
+      },
+      "plaintext": "{\"t\":\"res\",\"id\":\"r1\",\"at\":1760140800120,\"s\":200,\"b\":{\"ok\":true,\"name\":\"Café ☕ 🚀\",\"path\":\"Z:\\\\Github\\\\fleet-view\"}}"
+    },
+    {
+      "name": "down answer, z=1 (node raw DEFLATE; open it to this exact plaintext)",
+      "envelope": {
+        "v": 1,
+        "d": "oKGio6Slpqeoqaqr",
+        "dir": "down",
+        "n": "MDEyMzQ1Njc4OTo7",
+        "z": 1,
+        "c": "UVh__hqWmHGZB6arY1Q7U4xRaGjHWu1ZAwzNZkadEdHbenDWC0aRB-FlnqaNY2MK3Zd5yLqdL3rB-Ujzm-DXvQkzRLtN4G-UHom5CQKyp-tHq29xwqsrNV4mgJdDFmrrAyzfmVPJ2BMxAFV-y3YNfMaNuSN3zp4JkzbQ9lIDwtQ7tnYlFFRe0_uzf2ZJWrKx2l6WY-VEQT-CAO3qhKYojeev91AZXLLm1pEXV05GazIihpG3xDShMgASAV7_w9vhbRLvRPUhfTXYUh_iwFlJ9gHbjz5_AtrEEM-q-EA8kJsoefvEQ4hNT6RbImJ-xShac_y7FccUxd4KzthHXm4pg77uFhTnUOeQ2wWHSOdOjFCJE5Pk"
+      },
+      "plaintext": "{\"t\":\"res\",\"id\":\"r2\",\"at\":1760140800250,\"s\":200,\"b\":{\"lines\":[\"line 0: the quick brown fox jumps over the lazy dog\",\"line 1: the quick brown fox jumps over the lazy dog\",\"line 2: the quick brown fox jumps over the lazy dog\",\"line 3: the quick brown fox jumps over the lazy dog\",\"line 4: the quick brown fox jumps over the lazy dog\",\"line 5: the quick brown fox jumps over the lazy dog\",\"line 6: the quick brown fox jumps over the lazy dog\",\"line 7: the quick brown fox jumps over the lazy dog\",\"line 8: the quick brown fox jumps over the lazy dog\",\"line 9: the quick brown fox jumps over the lazy dog\",\"line 10: the quick brown fox jumps over the lazy dog\",\"line 11: the quick brown fox jumps over the lazy dog\",\"line 12: the quick brown fox jumps over the lazy dog\",\"line 13: the quick brown fox jumps over the lazy dog\",\"line 14: the quick brown fox jumps over the lazy dog\",\"line 15: the quick brown fox jumps over the lazy dog\",\"line 16: the quick brown fox jumps over the lazy dog\",\"line 17: the quick brown fox jumps over the lazy dog\",\"line 18: the quick brown fox jumps over the lazy dog\",\"line 19: the quick brown fox jumps over the lazy dog\",\"line 20: the quick brown fox jumps over the lazy dog\",\"line 21: the quick brown fox jumps over the lazy dog\",\"line 22: the quick brown fox jumps over the lazy dog\",\"line 23: the quick brown fox jumps over the lazy dog\",\"line 24: the quick brown fox jumps over the lazy dog\",\"line 25: the quick brown fox jumps over the lazy dog\",\"line 26: the quick brown fox jumps over the lazy dog\",\"line 27: the quick brown fox jumps over the lazy dog\",\"line 28: the quick brown fox jumps over the lazy dog\",\"line 29: the quick brown fox jumps over the lazy dog\",\"line 30: the quick brown fox jumps over the lazy dog\",\"line 31: the quick brown fox jumps over the lazy dog\",\"line 32: the quick brown fox jumps over the lazy dog\",\"line 33: the quick brown fox jumps over the lazy dog\",\"line 34: the quick brown fox jumps over the lazy dog\",\"line 35: the quick brown fox jumps over the lazy dog\",\"line 36: the quick brown fox jumps over the lazy dog\",\"line 37: the quick brown fox jumps over the lazy dog\",\"line 38: the quick brown fox jumps over the lazy dog\",\"line 39: the quick brown fox jumps over the lazy dog\",\"line 40: the quick brown fox jumps over the lazy dog\",\"line 41: the quick brown fox jumps over the lazy dog\",\"line 42: the quick brown fox jumps over the lazy dog\",\"line 43: the quick brown fox jumps over the lazy dog\",\"line 44: the quick brown fox jumps over the lazy dog\",\"line 45: the quick brown fox jumps over the lazy dog\",\"line 46: the quick brown fox jumps over the lazy dog\",\"line 47: the quick brown fox jumps over the lazy dog\",\"line 48: the quick brown fox jumps over the lazy dog\",\"line 49: the quick brown fox jumps over the lazy dog\",\"line 50: the quick brown fox jumps over the lazy dog\",\"line 51: the quick brown fox jumps over the lazy dog\",\"line 52: the quick brown fox jumps over the lazy dog\",\"line 53: the quick brown fox jumps over the lazy dog\",\"line 54: the quick brown fox jumps over the lazy dog\",\"line 55: the quick brown fox jumps over the lazy dog\",\"line 56: the quick brown fox jumps over the lazy dog\",\"line 57: the quick brown fox jumps over the lazy dog\",\"line 58: the quick brown fox jumps over the lazy dog\",\"line 59: the quick brown fox jumps over the lazy dog\"]}}"
+    }
+  ],
+  "refuse": [
+    {
+      "name": "up envelope relabelled as down",
+      "envelope": {
+        "v": 1,
+        "d": "oKGio6Slpqeoqaqr",
+        "dir": "down",
+        "n": "EBESExQVFhcYGRob",
+        "z": 0,
+        "c": "DZCS12yUPbZ1ScGbsblWEYGPnEnw8GjbhpGCbHsVhSl6x0ek22pnhfTRgA26Tzz4WYWkvuKb4LNcWbGdpEueWB4nkMu-3dHCzpnJsEdf1pHsFa-FdixMTbPdgsm2-PvT"
+      }
+    },
+    {
+      "name": "one bit of the ciphertext flipped",
+      "envelope": {
+        "v": 1,
+        "d": "oKGio6Slpqeoqaqr",
+        "dir": "up",
+        "n": "EBESExQVFhcYGRob",
+        "z": 0,
+        "c": "DJCS12yUPbZ1ScGbsblWEYGPnEnw8GjbhpGCbHsVhSl6x0ek22pnhfTRgA26Tzz4WYWkvuKb4LNcWbGdpEueWB4nkMu-3dHCzpnJsEdf1pHsFa-FdixMTbPdgsm2-PvT"
+      }
+    }
+  ],
+  "pairing": {
+    "json": {
+      "v": 2,
+      "url": "https://example-project.supabase.co",
+      "key": "test-publishable-key",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "email": "henry@example.com",
+      "pcName": "TEST-PC",
+      "dev": "oKGio6Slpqeoqaqr",
+      "k": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "exp": 1760141400000
+    },
+    "link": "fleetview://pair?d=eyJ2IjoyLCJ1cmwiOiJodHRwczovL2V4YW1wbGUtcHJvamVjdC5zdXBhYmFzZS5jbyIsImtleSI6InRlc3QtcHVibGlzaGFibGUta2V5IiwidWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAxIiwiZW1haWwiOiJoZW5yeUBleGFtcGxlLmNvbSIsInBjTmFtZSI6IlRFU1QtUEMiLCJkZXYiOiJvS0dpbzZTbHBxZW9xYXFyIiwiayI6IkFBRUNBd1FGQmdjSUNRb0xEQTBPRHhBUkVoTVVGUllYR0JrYUd4d2RIaDgiLCJleHAiOjE3NjAxNDE0MDAwMDB9"
+  },
+  "paired": {
+    "info": "fleet-view relay v2 paired",
+    "phone": {
+      "sk": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "pk": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo"
+    },
+    "pc": {
+      "sk": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "pk": "Z13VdO13iTELPS52gfN5C0ZsdzsVIf7PNld5WDcepS8"
+    },
+    "shared": "d6fb939511b2381bc8599b4b8edc5968829450dfd7a87aebe78a703cd04cd54e",
+    "K": "YSaqPLdgkz6wusz_zx53r2T8s251_uyl9TQZjUK5L7Q",
+    "keys": {
+      "up": "08e4484a7b7dcd050dafe670a73516f7d205bf593b1b57dccdba8b93ad7c3861",
+      "down": "7254f5be35ea07928baab4afd8d148c5aad953d6567a741c95e9cc090c327a8d"
+    },
+    "open": [
+      {
+        "name": "the hello under K, with the phone's epk (exact)",
+        "key": "K",
+        "envelope": {
+          "v": 1,
+          "d": "oKGio6Slpqeoqaqr",
+          "dir": "up",
+          "n": "UFFSU1RVVldYWVpb",
+          "z": 0,
+          "c": "vVKzaz--ujRz3k6bE_-2kJxGXffkWQXDVPYXsTQi9A99pWFl3MeBgLpe2p67IHCobBGpVDDD2CcPnf0dclpJNTHVwHe5k3iTWFgjFBXvVvjClLUfEndHazgrltgQ7ENZRZhvVDZJwI41rc_4SFlI7nfvODVSgRzamqL8yZqZmRWUV3IJvHij6ryylznqyIQTwwYY"
+        },
+        "plaintext": "{\"t\":\"hello\",\"id\":\"h1\",\"at\":1760140800400,\"app\":\"1.0.0\",\"device\":\"Test iPhone\",\"epk\":\"eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo\"}"
+      },
+      {
+        "name": "its answer under K, with the PC's epk (exact)",
+        "key": "K",
+        "envelope": {
+          "v": 1,
+          "d": "oKGio6Slpqeoqaqr",
+          "dir": "down",
+          "n": "WFlaW1xdXl9gYWJj",
+          "z": 0,
+          "c": "WCAxl2-Ggd5QAGcwPY-cYFqIsZt3Pk5o9RS5joD7iAiIlbO6jkbZJJdYZiFnLFTkdpc7RWrd_6Cf5ujy5rK-LiCoHGfBEO1urQ20p3HsPUa0ylF4t8kKeD7csTXu5olV1g9oQkw2nyIJ-HXpsdy8HVhh_Q8bDulHd8M5gz0eoNiApW1neAkAtgvpGjicv54NGMldcM2TZ7vaDc5ts2rHXHrVzg2nGnAu0S0VSx6u"
+        },
+        "plaintext": "{\"t\":\"res\",\"id\":\"h1\",\"at\":1760140800520,\"s\":200,\"b\":{\"paired\":true,\"pcName\":\"TEST-PC\",\"version\":\"1.0.99\",\"epk\":\"Z13VdO13iTELPS52gfN5C0ZsdzsVIf7PNld5WDcepS8\"}}"
+      },
+      {
+        "name": "the first request under K' (exact)",
+        "key": "paired",
+        "envelope": {
+          "v": 1,
+          "d": "oKGio6Slpqeoqaqr",
+          "dir": "up",
+          "n": "cHFyc3R1dnd4eXp7",
+          "z": 0,
+          "c": "g2EJKtkigRJwvQHQ-yCbWkMe9HgC5205CIt6aigAxoPSmV5WbquzN0h5wqq6yuAIu8B_uczcZ2RXcljWhdSLZNNZnV2dY2lyoH5QCM0J45phlo4oWeyQRlMXAmc0oCXyZvQ"
+        },
+        "plaintext": "{\"t\":\"req\",\"id\":\"r3\",\"at\":1760140800640,\"t0\":1760140800640,\"m\":\"GET\",\"p\":\"/state\"}"
+      }
+    ]
+  }
+}

@@ -22,6 +22,7 @@ const PREVIEW = require(path.join(__dirname, 'preview.js'));
 const UPDATER = require(path.join(__dirname, 'updater.js'));
 const HOUSEKEEPING = require(path.join(__dirname, 'housekeeping.js'));
 const SYNC_API = require(path.join(__dirname, 'sync-api.js'));
+const RELAY_JS = require(path.join(__dirname, 'relay.js'));
 const SYNC_RUN = require(path.join(__dirname, 'sync-run.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
@@ -6043,6 +6044,11 @@ const HK = HOUSEKEEPING.createHousekeeping({
 // sync-api.js: the link to Supabase for conversation sync. Off (no network, no timers, /sync/* 404 but GET
 // /sync/status) unless this machine has <dataDir>/sync/config.json; the sign-in comes back to this port
 const SYNC = SYNC_API.createSync({ port: PORT, demo: DEMO, dataDir: LOG_DIR, log: (t) => logOnce(t, t) });
+// relay.js: the phone relay (docs/phone.md). Off (no socket, no key read) unless sync is set up and signed in and a
+// phone is paired; it answers the phone through this server's own routes over loopback, and marks what Henry sent
+// from it with api.js's in-memory relay key (viaOf)
+const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, logDir: LOG_DIR, apiToken: API.TOKEN_FILE,
+  relayKey: () => API.relayKey(), version: () => VERSION.current().version, log: (t) => logOnce(t, t) });
 // sync-run.js: the uploader and the materializer, running only while sync is set up, signed in and has its key;
 // the materializer finds a synced repo here among the repos the page lists
 // host: the session host (api.js), for "Continue here": its list, and kill to end a conversation moving to another
@@ -6162,6 +6168,8 @@ function handleRequest(req, res) {
   }
   if (pathname === '/sync/move') return syncMove(req, res);
   if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
+  // GET /relay/status, POST /relay/pair | revoke (relay.js): this PC only, never a remote device; its POSTs need this page's Origin
+  if (pathname === '/relay' || pathname.startsWith('/relay/')) return RELAY.handle(req, res, pageCtx);
   if (req.method === 'POST') {
     if (pathname === '/open') {
       return readBody(req, res, (b) => {
@@ -6402,6 +6410,8 @@ function exitWith(code, reason) {
   try { flushSettings(); } catch {}
   try { REMOTE.flush(); } catch {}
   try { REMOTE.unserveSync(); } catch {}
+  // every paired phone is told the PC is going (notice pc-closing), then the relay's socket closes
+  try { RELAY.stop('pc-closing'); } catch {}
   try { if (histOn) saveHistory(); } catch {}
   try { tlFlushSync(); } catch {}
   process.exit(code);
@@ -6505,6 +6515,8 @@ function startWeb() {
     const every = (ms, name, fn) => setInterval(() => { try { fn(); } catch (e) { logOnce(name + ':' + (e && e.message), `${name} failed\n${errorText(e)}`); } }, ms);
     // remote access: this PC's tailnet name, read now and every minute; with the switch on, 443 is made to point here
     REMOTE.start();
+    // the phone relay: it opens a socket only once sync is signed in and a phone is paired
+    if (!DEMO) RELAY.start();
     if (!DEMO) SYNC_RUNNER.start();
     if (DEMO) {
       demoInit();
