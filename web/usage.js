@@ -152,7 +152,7 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
         : sameAs ? `<span class="uw-chip">same login as ${esc(sameAs)}</span>` : !signedIn ? '<span class="uw-chip away">not signed in</span>' : '';
       let row = `<div class="ua-row" data-a="${esc(a)}">${letterTag(a)}<span class="ua-who" title="${esc(email || '')}">${esc(email || 'no login')}</span>${chip}`
         + `<span class="ua-btns"><button type="button" data-c="login"${j && j.status === 'waiting' ? ' disabled' : ''}>${signedIn ? 'Switch login' : 'Sign in'}</button>`
-        + `<button type="button" data-c="remove" class="ua-rm">Remove</button></span></div>`;
+        + `<button type="button" data-c="remove" class="ua-rm" title="Remove Claude ${esc(a)}" aria-label="Remove Claude ${esc(a)}">${icon('trash', 14)}</button></span></div>`;
       if (confirmRm && confirmRm.a === a) {
         const live = confirmRm.live || [];
         const hosted = live.filter((s) => isHosted(s.id));

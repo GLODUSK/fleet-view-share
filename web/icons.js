@@ -62,6 +62,7 @@ const P = {
   up: '<path d="M12 19.5v-15"/><path d="m5.5 11 6.5-6.5 6.5 6.5"/>',
   rewind: '<path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3.5 3.5V8H8"/><path d="M12 8v4.5l3 2"/>',
   mic: '<rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5v4"/><path d="M8.5 21.5h7"/>',
+  trash: '<path d="M3.5 6h17"/><path d="M8.5 6V4.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5V6"/><path d="M18.5 6l-.9 13.6a1.5 1.5 0 0 1-1.5 1.4H7.9a1.5 1.5 0 0 1-1.5-1.4L5.5 6"/><path d="M10 10.5v6"/><path d="M14 10.5v6"/>',
 };
 
 export function icon(name, size = 14) {

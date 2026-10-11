@@ -70,7 +70,8 @@ html.glass .uw-pop { background: var(--float-bg); }
 .ua-who { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ua-row .uw-chip { margin-left: 0; flex: none; }
 .ua-btns { display: flex; gap: 6px; flex: none; }
-.ua .ua-rm { color: var(--dim); background: none; }
+.ua .ua-rm { color: var(--dim); background: none; border-color: transparent; padding: 4px 5px; }
+.ua .ua-rm:hover:not(:disabled) { color: var(--rose); }
 .ua .ua-danger, .ua-form .ua-danger { color: var(--rose); border-color: rgba(255, 77, 141, 0.4); }
 .ua-confirm { margin: 2px 0 8px 24px; padding: 8px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); font-size: 12.5px; color: var(--dim); }
 .ua-confirm b { color: var(--text); font-weight: 600; }
