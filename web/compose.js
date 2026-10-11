@@ -620,6 +620,8 @@ async function uploadImage(a) {
   a.path = j.path;
   return a.path;
 }
+// one image (a Blob or File) saved the same way, for the right-click menu's order box -> its path on the PC
+export const saveImage = (blob) => uploadImage({ blob, mime: blob.type, size: blob.size });
 
 // ---------- the modes Shift+Tab cycles through ----------
 const MODES = [

@@ -17,7 +17,11 @@
 //       More input fields: value (the box starts with this text, the caret at its end), multiline (a few lines tall:
 //       Enter sends, Shift+Enter starts a new line; for orders and notes), empty (what it says when Enter
 //       finds the box empty), busy (what it says while submit runs, e.g. "sending…"), allowEmpty (Enter on an
-//       empty box calls submit('') instead: Rename, where empty goes back to Claude Code's own title)
+//       empty box calls submit('') instead: Rename, where empty goes back to Claude Code's own title),
+//       images (orders and notes: a clip button under the box, and images pasted into it or dropped anywhere on
+//       the window while it is open become thumbnails above its foot, each with a ×; PNG, JPEG, GIF or WebP,
+//       15 MB and IMG_COUNT at most, as the compose box takes them). submit is then called as submit(text,
+//       blobs), and Enter with no text but an image sends it.
 //       stay (a submenu item): picking it runs it and keeps the menu open; the parent item's refresh() returns
 //       the parent item anew (label, badge, children) to redraw both menus with (toggles: Accounts ▸ ✓ A); in a
 //       drilled-in level the drilled item's refresh() redraws that level (a checklist: Team ▸ Start team ▸)
@@ -37,6 +41,9 @@ let el = null, items = [], sel = -1, open = false, prevFocus = null, confirmFor 
 let subEl = null, subOf = -1, subItems = [], subSel = -1, level = 'main';
 // a submenu opened inside the submenu (drilled into): the levels above it, each { items, sel }
 let subStack = [];
+// an input item's images ({ key, blob, url }), while its box is open; the server's /chat/image limits
+const IMG_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'], IMG_MAX = 15 * 1024 * 1024, IMG_COUNT = 8;
+let atts = [], attSeq = 0, fileIn = null, dragDepth = 0;
 
 function ensure() {
   if (el) return el;
@@ -67,6 +74,9 @@ function ensure() {
       try { alt && alt.run && alt.run(); } catch (err) { console.error(err); }
       return;
     }
+    if (inputFor && e.target.closest('.ctx-in-att')) { pickImages(); return; }
+    const x = inputFor && e.target.closest('[data-att-x]');
+    if (x) { removeAtt(x.dataset.attX); return; }
     const row = e.target.closest('[data-i]');
     if (row) pick(+row.dataset.i);
   });
@@ -78,6 +88,17 @@ function ensure() {
     // hovering an item with a submenu opens it; any other item closes it
     if (hasKids(items[i])) { if (subOf !== i) openSub(i, false); else markSub(); }
     else if (subOf >= 0) closeSub();
+  });
+  // an image pasted into an order box: a screenshot, or files copied in Explorer, become thumbnails; text copied
+  // with a picture (a web page) still pastes as text, and only its images come along
+  el.addEventListener('paste', (e) => {
+    if (!inputFor || !inputFor.input.images) return;
+    const list = [...(e.clipboardData?.items || [])];
+    const files = list.filter((x) => x.kind === 'file').map((x) => x.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    const withText = list.some((x) => x.kind === 'string' && x.type === 'text/plain');
+    if (!withText) e.preventDefault();
+    addImages(withText ? files.filter((f) => IMG_TYPES.includes(f.type)) : files);
   });
   subEl.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -114,13 +135,17 @@ function draw() {
     const box = inp.multiline
       ? `<textarea class="ctx-input path-input ctx-area" rows="4" spellcheck="true" placeholder="${esc(inp.placeholder || '')}" aria-label="${esc(inputFor.label)}"></textarea>`
       : `<input class="ctx-input path-input" type="text" spellcheck="false" autocomplete="off" placeholder="${esc(inp.placeholder || '')}" aria-label="${esc(inputFor.label)}">`;
+    const clip = inp.images
+      ? `<button type="button" class="ctx-in-att" tabindex="-1" title="Attach images (or paste, or drop them here)" aria-label="attach images">${icon('image', 15)}</button>` : '';
     el.innerHTML = `<div class="ctx-head ctx-q">${esc(inputFor.label)}</div>`
       + `<div class="ctx-in-wrap">${box}</div>`
-      + `<div class="ctx-in-foot"><div class="ctx-in-msg" aria-live="polite">${esc(inp.hint || 'Enter adds · Esc closes')}</div>`
+      + (inp.images ? '<div class="ctx-atts" hidden></div>' : '')
+      + `<div class="ctx-in-foot">${clip}<div class="ctx-in-msg" aria-live="polite">${esc(inp.hint || 'Enter adds · Esc closes')}</div>`
       + `${inp.alt ? `<button type="button" class="ctx-in-alt link-btn" tabindex="-1">${esc(inp.alt.label)}</button>` : ''}</div>`;
     el.classList.remove('confirming');
     el.classList.add('inputting');
     el.classList.toggle('inputting-wide', !!inp.multiline);
+    drawAtts();
     const b = el.querySelector('.ctx-input');
     if (b && inp.value) b.value = String(inp.value);
     return;
@@ -142,6 +167,69 @@ function mark() {
 }
 function markSub() {
   for (const r of subEl.querySelectorAll('[data-j]')) r.classList.toggle('sel', +r.dataset.j === subSel && level === 'sub');
+}
+
+// ---------- an input item's images ----------
+function drawAtts() {
+  const box = el.querySelector('.ctx-atts');
+  if (!box) return;
+  box.hidden = !atts.length;
+  box.innerHTML = atts.map((a) => `<span class="ctx-att"><img src="${esc(a.url)}" alt="${esc(a.name)}" title="${esc(a.name)}">`
+    + `<button type="button" class="ctx-att-x" data-att-x="${a.key}" tabindex="-1" title="Remove" aria-label="remove ${esc(a.name)}">${icon('close', 11)}</button></span>`).join('');
+  keepOnScreen();
+}
+// what goes in, and why the rest doesn't (on the message line, in red)
+function addImages(files) {
+  if (!inputFor || !inputFor.input.images) return;
+  const bad = [];
+  for (const f of [...(files || [])]) {
+    if (!f) continue;
+    if (!IMG_TYPES.includes(f.type)) { bad.push(`only PNG, JPEG, GIF and WebP images (${f.name || f.type || 'that file'} isn't one)`); continue; }
+    if (f.size > IMG_MAX) { bad.push(`${f.name || 'the image'} is over 15 MB`); continue; }
+    if (atts.length >= IMG_COUNT) { bad.push(`at most ${IMG_COUNT} images`); break; }
+    atts.push({ key: `i${++attSeq}`, blob: f, name: f.name || 'pasted image', url: URL.createObjectURL(f) });
+  }
+  drawAtts();
+  const msg = el.querySelector('.ctx-in-msg');
+  if (msg && bad.length) { msg.textContent = [...new Set(bad)].join(' · '); msg.classList.add('err'); }
+  else if (msg && msg.classList.contains('err')) { msg.textContent = inputFor.input.hint || ''; msg.classList.remove('err'); }
+  focusBox();
+}
+function removeAtt(key) {
+  const a = atts.find((x) => x.key === key);
+  if (!a) return;
+  URL.revokeObjectURL(a.url);
+  atts = atts.filter((x) => x !== a);
+  drawAtts();
+  const msg = el.querySelector('.ctx-in-msg');
+  if (msg && msg.classList.contains('err')) { msg.textContent = inputFor.input.hint || ''; msg.classList.remove('err'); }
+  focusBox();
+}
+function clearAtts() {
+  for (const a of atts) URL.revokeObjectURL(a.url);
+  atts = [];
+  dragDepth = 0;
+  el && el.classList.remove('ctx-dropping');
+}
+function pickImages() {
+  if (!fileIn) {
+    fileIn = document.createElement('input');
+    fileIn.type = 'file';
+    fileIn.multiple = true;
+    fileIn.accept = IMG_TYPES.join(',');
+    fileIn.addEventListener('change', () => { addImages(fileIn.files); fileIn.value = ''; });
+  }
+  fileIn.click();
+}
+function focusBox() {
+  const b = el && el.querySelector('.ctx-input');
+  if (b) { try { b.focus({ preventScroll: true }); } catch {} }
+}
+// grown by its thumbnails: moved up as far as it needs to stay on screen (never flipped)
+function keepOnScreen() {
+  if (!open || el.hidden) return;
+  const r = el.getBoundingClientRect(), H = window.innerHeight, m = 8;
+  if (r.bottom > H - m) el.style.top = `${Math.round(Math.max(m, H - m - r.height))}px`;
 }
 
 // keep it on screen: flip left / up when it would leave the window, then clamp
@@ -323,6 +411,7 @@ export function closeCtxMenu(restore = true) {
   if (!open) return;
   open = false;
   confirmFor = null; inputFor = null; inputBusy = false;
+  clearAtts();
   el.classList.remove('inputting', 'inputting-wide');
   closeSub();
   el.hidden = true;
@@ -360,6 +449,7 @@ function pick(i, sub = null) {
 // the menu becomes a text box (an "input" item); the keyboard goes to the box
 function startInput(it) {
   closeSub();
+  clearAtts();
   inputFor = it;
   draw();
   place(spec.x, spec.y);
@@ -370,12 +460,12 @@ async function submitInput() {
   const box = el.querySelector('.ctx-input'), msg = el.querySelector('.ctx-in-msg');
   if (!inputFor || !box || inputBusy) return;
   const text = box.value.trim();
-  const it = inputFor;
-  if (!text && !it.input.allowEmpty) { if (msg) msg.textContent = it.input.empty || 'paste or type a folder path first'; return; }
+  const it = inputFor, imgs = it.input.images ? atts.map((a) => a.blob) : null;
+  if (!text && !it.input.allowEmpty && !(imgs && imgs.length)) { if (msg) msg.textContent = it.input.empty || 'paste or type a folder path first'; return; }
   inputBusy = true;
   if (msg) { msg.textContent = it.input.busy || 'adding…'; msg.classList.remove('err'); }
   let err = null;
-  try { err = await it.input.submit(text); } catch (e) { err = (e && e.message) || 'that did not work'; }
+  try { err = await (imgs ? it.input.submit(text, imgs) : it.input.submit(text)); } catch (e) { err = (e && e.message) || 'that did not work'; }
   inputBusy = false;
   if (!open || inputFor !== it) return;
   if (!err) { closeCtxMenu(); return; }
@@ -456,5 +546,31 @@ document.addEventListener('scroll', (e) => { if (open && !inside(e.target) && Da
 let openSize = '';
 const winSize = () => `${window.innerWidth}x${window.innerHeight}`;
 window.addEventListener('resize', () => { if (open && (winSize() !== openSize && Date.now() > keepUntil)) closeCtxMenu(false); });
+// While an order box with images is open, a file dragged anywhere over the window is for it (captured before
+// the chat pane's attachments or the page's "drop to analyze" see it): the box lights up, and a drop adds the images.
+const takesDrops = (e) => open && inputFor && inputFor.input.images && [...(e.dataTransfer?.types || [])].includes('Files');
+document.addEventListener('dragenter', (e) => {
+  if (!takesDrops(e)) return;
+  e.preventDefault(); e.stopPropagation();
+  dragDepth++;
+  el.classList.add('ctx-dropping');
+}, true);
+document.addEventListener('dragover', (e) => {
+  if (!takesDrops(e)) return;
+  e.preventDefault(); e.stopPropagation();
+  e.dataTransfer.dropEffect = 'copy';
+}, true);
+document.addEventListener('dragleave', (e) => {
+  if (!takesDrops(e)) return;
+  e.stopPropagation();
+  if (--dragDepth <= 0) { dragDepth = 0; el.classList.remove('ctx-dropping'); }
+}, true);
+document.addEventListener('drop', (e) => {
+  if (!takesDrops(e)) return;
+  e.preventDefault(); e.stopPropagation();
+  dragDepth = 0;
+  el.classList.remove('ctx-dropping');
+  addImages(e.dataTransfer.files);
+}, true);
 // (not while it is a text box: copying a path from another window takes the focus away and back)
 window.addEventListener('blur', () => { if (!inputFor) closeCtxMenu(false); });

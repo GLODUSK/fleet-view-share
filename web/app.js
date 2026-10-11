@@ -128,7 +128,7 @@ import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { mountUsage } from './usage.js';
 import { mountHousekeeping } from './housekeeping.js';
-import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner } from './compose.js';
+import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText } from './compose.js';
 import { forkAt } from './forkat.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects'];
@@ -2388,12 +2388,18 @@ function orderItem(label, list, o = {}) {
   return {
     label, icon: ic, note: [o.subnote, away && list.length > 1 ? `${away} can't be reached here` : ''].filter(Boolean).join(' · ') || null,
     input: {
-      multiline: true, value: o.value || '', placeholder: o.placeholder || 'What should they do?',
-      hint: 'Enter sends · Shift+Enter new line · Esc closes', busy: 'sending…', empty: 'write it first',
-      submit: (text) => {
+      multiline: true, images: true, value: o.value || '', placeholder: o.placeholder || 'What should they do?',
+      hint: 'Enter sends · Shift+Enter new line · paste or drop images · Esc closes', busy: 'sending…', empty: 'write it first',
+      // images are saved on the PC first (as the compose box's), and their paths go after the text: Claude Code
+      // turns each into [Image #N]. One that can't be saved keeps the box open with the reason
+      submit: async (text, imgs = []) => {
         const reach = list.filter((s) => !unreachable(s));
         if (!reach.length) return `none of them can be reached here: ${unreachable(list[0])}`;
-        runOrder(list, text, o);
+        const paths = [];
+        for (const b of imgs) {
+          try { paths.push(await saveImage(b)); } catch (e) { return `couldn't save ${b.name || 'an image'}: ${e?.message || e}`; }
+        }
+        runOrder(list, messageText(text, paths), o);
         return null;
       },
     },

@@ -703,6 +703,41 @@ html.glass .menu.ctx-menu { background: var(--float-bg); }
 /* the right-click menu's order box: a few lines tall (Enter sends, Shift+Enter a new line) */
 .menu.ctx-menu.inputting-wide { min-width: 380px; max-width: min(460px, calc(100vw - 16px)); }
 .path-input.ctx-area { height: auto; min-height: 84px; max-height: 40vh; padding: 7px 10px; resize: vertical; font: 13px/1.45 var(--font-ui); white-space: pre-wrap; }
+/* see-through: the page shows through the frame, frosted; the text area keeps a darker tint of its own so what is
+   typed reads the same over anything (the desktop window can drop the blur while the box repaints) */
+.menu.ctx-menu.inputting-wide, html.glass .menu.ctx-menu.inputting-wide {
+  width: min(440px, calc(100vw - 16px)); /* steady: a longer message or the thumbnails never resize it */
+  background: rgba(15, 18, 28, 0.5); border-color: rgba(255, 255, 255, 0.12);
+  -webkit-backdrop-filter: blur(14px) saturate(1.5); backdrop-filter: blur(14px) saturate(1.5);
+}
+.inputting-wide .path-input.ctx-area { background: rgba(6, 8, 14, 0.55); border-color: rgba(255, 255, 255, 0.09); }
+.inputting-wide .path-input.ctx-area:focus { border-color: rgba(63, 216, 255, 0.45); }
+.inputting-wide .ctx-head { border-bottom-color: rgba(255, 255, 255, 0.08); }
+/* its images: thumbnails with a × each, and the clip button left of the message line */
+.ctx-atts { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 6px 2px; }
+.ctx-atts[hidden] { display: none; }
+.ctx-att { position: relative; flex: none; width: 56px; height: 56px; }
+.ctx-att img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 8px; border: 1px solid var(--glass-edge); background: rgba(0, 0, 0, 0.3); }
+.ctx-att-x {
+  position: absolute; top: -6px; right: -6px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0;
+  border-radius: 50%; border: 1px solid var(--glass-edge); background: #1b1f2e; color: var(--text); cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.ctx-att-x:hover { background: var(--red); color: #fff; }
+.ctx-in-att {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 24px; margin: 3px 0 0 2px; padding: 0;
+  border: 1px solid transparent; border-radius: var(--radius-sm); background: none; color: var(--dim); cursor: pointer;
+  transition: color 160ms var(--ease), background-color 160ms var(--ease);
+}
+.ctx-in-att:hover { color: var(--text); background: var(--hover); border-color: var(--glass-edge); }
+/* a file dragged over the window while the box is open: the box is where it goes */
+.ctx-in-wrap { position: relative; }
+.menu.ctx-menu.ctx-dropping { border-color: rgba(63, 216, 255, 0.55); box-shadow: inset 0 1px 0 var(--glass-highlight), 0 0 0 1px rgba(63, 216, 255, 0.35), 0 18px 48px rgba(0, 0, 0, 0.5); }
+.ctx-dropping .ctx-in-wrap::after {
+  content: 'Drop images to attach'; position: absolute; inset: 2px 4px 0; display: grid; place-items: center; pointer-events: none;
+  border: 1px dashed rgba(63, 216, 255, 0.6); border-radius: var(--radius-sm); background: rgba(10, 14, 24, 0.82);
+  color: var(--cyan); font: 600 12.5px/1 var(--font-ui);
+}
 /* the header's clock button (key w): like the mini view's button */
 .since-btn {
   flex: none; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 26px; padding: 0;
