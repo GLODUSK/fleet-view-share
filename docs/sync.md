@@ -19,6 +19,13 @@ download side (S3) and the page's sync card (S5) are built on it. Its test is `n
 - **Helpers for S2 and S3:** `rest()` and `rpc()` on the `fleet_sync` schema, and `storage.upload`, `download`
   and `remove` on the private `fleet-sync` bucket. Every file path goes under the signed-in user's own folder
   (`<user id>/...`). A path with `..`, a leading `/` or a backslash is refused before anything is sent.
+- **For other parts that need the account (the phone relay):** `accessToken()` (renewed first when less than a
+  minute is left), `uid()`, `email()`, and `onChange(fn)`, which calls `fn({ type, uid, email })` with `type`
+  `signed-in`, `refreshed` or `signed-out` and returns a function that stops it. No event carries a token. A
+  sign-in or sign-out by another process (the CLI) is heard the next time anything reads the sign-in.
+- **`protectedStore(dir, name)`** keeps another secret the way the sign-in is kept: `<dir>/<name>.bin` with DPAPI,
+  the Keychain under account `<name>`, or `<dir>/<name>.json` at `0600`. It returns `{ read, write, clear, stamp }`
+  over plain text. The name is 1 to 41 of `[a-z0-9-]`, and `session` is refused because that is the sign-in's own.
 
 ## Turning sync on (Henry's machines)
 

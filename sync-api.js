@@ -35,12 +35,17 @@
 //   macOS    the login Keychain (service fleet-view-sync), written with `security -i` so the secret is never in a
 //            process's arguments; only the refresh token is kept there; <dataDir>/sync/session.keychain says it is
 //   Linux    <dataDir>/sync/session.json, mode 0600: NOT encrypted, kept safe only by the file's permissions
+// Other secrets (the phone relay's keys) are kept the same way under their own name: protectedStore(dir, name) ->
+// <dir>/<name>.bin | <name>.keychain (Keychain account <name>) | <name>.json. 'session' is the sign-in's own name.
 //
 // The helpers (each throws a SyncError { message, status, code }; none ever puts a token or the key in a message):
 //   rest(method, table, { query, body, prefer, range, full, timeoutMs })   PostgREST on the fleet_sync schema
 //   rpc(name, args)                                                       a fleet_sync function
 //   storage.upload(path, buffer, { contentType, upsert }) / download(path) / remove([paths])   the fleet-sync
 //     bucket; every path is put under '<user id>/' and may hold only [A-Za-z0-9._-] segments, never '.' or '..'
+//   accessToken() (renewed first when under a minute is left), uid(), email()   the signed-in account
+//   onChange(fn) -> unsubscribe   fn({ type: 'signed-in' | 'refreshed' | 'signed-out', uid, email }), never a token;
+//     a sign-in or sign-out by another process (the CLI) is heard the next time anything reads the sign-in
 //
 // CLI:  node sync-api.js setup --url https://<project>.supabase.co --key <the publishable key>
 //       node sync-api.js signin [--port 4777]   opens the sign-in in the default browser (Fleet View must be running)
@@ -66,7 +71,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const NAME_RE = /^[a-z_][a-z0-9_]{0,62}$/;
 const SEGMENT_RE = /^[A-Za-z0-9._-]{1,200}$/;
 const KEYCHAIN_SERVICE = 'fleet-view-sync';
-const KEYCHAIN_ACCOUNT = 'session';
+const SESSION_NAME = 'session'; // the sign-in's store name (and its Keychain account)
+const STORE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,40}$/;
 
 const syncDir = (dataDir) => path.join(dataDir || P.dataDir(), 'sync');
 const configPath = (dataDir) => path.join(syncDir(dataDir), 'config.json');
@@ -140,6 +146,12 @@ const pkceChallenge = (verifier) => crypto.createHash('sha256').update(String(ve
 // ---------- where the sign-in is kept ----------
 // A store: { kind, read() -> Promise<string|null>, write(text) -> Promise, clear() -> Promise, stamp() -> string|null }.
 // stamp() changes whenever another process (the CLI) signs in or out, so the server reads the store again.
+// name: which secret, the file name and Keychain account ('session', the sign-in, by default)
+const storeName = (name) => {
+  const n = name === undefined ? SESSION_NAME : name;
+  if (typeof n !== 'string' || !STORE_NAME_RE.test(n)) fail('a store name is 1 to 41 of [a-z0-9-]', 400, 'bad_request');
+  return n;
+};
 const fileStamp = (f) => { try { const st = fs.statSync(f); return `${st.mtimeMs}:${st.size}`; } catch { return null; } };
 
 const PS_HEAD = "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';Add-Type -AssemblyName System.Security;"
@@ -171,8 +183,8 @@ function dpapi(script, inputB64) {
     c.stdin.end(inputB64);
   });
 }
-function dpapiStore(dir) {
-  const file = path.join(dir, 'session.bin');
+function dpapiStore(dir, name) {
+  const file = path.join(dir, `${storeName(name)}.bin`);
   return {
     kind: 'dpapi',
     file,
@@ -188,11 +200,12 @@ function dpapiStore(dir) {
 }
 // the login Keychain through /usr/bin/security; `security -i` reads its command from stdin, so the secret is never in
 // the arguments of a process (which any other process could list)
-function keychainStore(dir) {
-  const marker = path.join(dir, 'session.keychain');
+function keychainStore(dir, name) {
+  const account = storeName(name);
+  const marker = path.join(dir, `${account}.keychain`);
   const SECURITY = '/usr/bin/security';
   const find = () => new Promise((resolve, reject) => {
-    execFile(SECURITY, ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w'], { encoding: 'utf8', timeout: 15e3 }, (err, out) => {
+    execFile(SECURITY, ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account, '-w'], { encoding: 'utf8', timeout: 15e3 }, (err, out) => {
       if (err) return err.code === 44 ? resolve(null) : reject(new SyncError(`the Keychain could not be read (security exit ${err.code})`));
       resolve(String(out).trim());
     });
@@ -200,7 +213,7 @@ function keychainStore(dir) {
   return {
     kind: 'keychain',
     file: marker,
-    slim: true, // only the refresh token: an access token is got again after a restart
+    slim: true, // the sign-in keeps only the refresh token here: an access token is got again after a restart
     stamp: () => fileStamp(marker),
     async read() {
       if (!fs.existsSync(marker)) return null;
@@ -217,33 +230,46 @@ function keychainStore(dir) {
         c.on('error', (e) => { clearTimeout(t); reject(new SyncError(`could not start security: ${e.message}`)); });
         c.on('close', (code) => { clearTimeout(t); if (code === 0) resolve(e2); else reject(new SyncError(`the Keychain refused it (security exit ${code}): ${clip(e2, 200)}`)); });
         c.stdin.on('error', () => {});
-        c.stdin.end(`add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w "${b64}"\n`);
+        c.stdin.end(`add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${account} -w "${b64}"\n`);
       });
       // read it back: `security -i` exits 0 even after a command that failed
-      if ((await find()) !== b64) throw new SyncError(`the Keychain did not keep the sign-in${err.trim() ? `: ${clip(err, 200)}` : ''}`);
-      writeAtomic(marker, 'The Fleet View sync sign-in is in the login Keychain (service fleet-view-sync).\n');
+      if ((await find()) !== b64) throw new SyncError(`the Keychain did not keep it${err.trim() ? `: ${clip(err, 200)}` : ''}`);
+      writeAtomic(marker, `This Fleet View secret is in the login Keychain (service ${KEYCHAIN_SERVICE}, account ${account}).\n`);
     },
     async clear() {
-      await new Promise((resolve) => execFile(SECURITY, ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT], { timeout: 15e3 }, () => resolve()));
+      await new Promise((resolve) => execFile(SECURITY, ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account], { timeout: 15e3 }, () => resolve()));
       fs.rmSync(marker, { force: true });
     },
   };
 }
-function fileStore(dir) {
-  const file = path.join(dir, 'session.json');
+// { note, text }: the text comes back exactly as written (a file from before, the sign-in's JSON itself, still reads)
+function fileStore(dir, name) {
+  const file = path.join(dir, `${storeName(name)}.json`);
   return {
     kind: 'file',
     file,
     stamp: () => fileStamp(file),
-    async read() { try { return fs.readFileSync(file, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return null; throw e; } },
+    async read() {
+      let raw;
+      try { raw = fs.readFileSync(file, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return null; throw e; }
+      let j = null;
+      try { j = JSON.parse(raw); } catch {}
+      return j && typeof j.text === 'string' ? j.text : raw;
+    },
     async write(text) {
-      const j = JSON.parse(text);
-      writeAtomic(file, `${JSON.stringify({ note: 'Not encrypted: this file is kept safe only by its permissions (0600). Delete it to sign out.', ...j }, null, 2)}\n`);
+      writeAtomic(file, `${JSON.stringify({ note: 'Not encrypted: this file is kept safe only by its permissions (0600).', text: String(text) }, null, 2)}\n`);
     },
     async clear() { fs.rmSync(file, { force: true }); },
   };
 }
-const defaultStore = (dir) => (P.isWin ? dpapiStore(dir) : P.isMac ? keychainStore(dir) : fileStore(dir));
+const defaultStore = (dir, name) => (P.isWin ? dpapiStore(dir, name) : P.isMac ? keychainStore(dir, name) : fileStore(dir, name));
+// a secret kept like the sign-in (DPAPI / Keychain / 0600) under its own name; a store as above. 'session' is refused:
+// that is the sign-in's, and writing it would sign this PC out
+function protectedStore(dir, name) {
+  if (typeof dir !== 'string' || !dir) fail('protectedStore needs a folder', 400, 'bad_request');
+  if (storeName(name) === SESSION_NAME) fail(`'${SESSION_NAME}' is the sync sign-in's own store: pick another name`, 400, 'bad_request');
+  return defaultStore(path.resolve(dir), name);
+}
 
 // ---------- the connection ----------
 // createSync({ port, dataDir, demo, log, fetch, now, store, allowLoopbackUrl }) -> the API below.
@@ -274,6 +300,15 @@ function createSync(opts = {}) {
   }
   const need = () => config() || fail('sync is not set up on this PC', 404, 'off');
 
+  // ---------- who hears about sign-ins ----------
+  const listeners = new Set();
+  function emit(type, s) {
+    const ev = { type, uid: s ? s.uid : null, email: s ? s.email || null : null };
+    for (const fn of [...listeners]) {
+      try { fn(ev); } catch (e) { log(`sync: an onChange listener failed: ${e && e.message}`); }
+    }
+  }
+
   // ---------- the session ----------
   // { url, uid, email, member, accessToken, refreshToken, expiresAt (ms) }; one for another project URL is ignored
   let session = null, sessionSeen, loading = null;
@@ -293,12 +328,21 @@ function createSync(opts = {}) {
     const c = config();
     if (!c) return null;
     const stamp = store.stamp();
-    if (stamp === null) { session = null; sessionSeen = null; return null; }
+    if (stamp === null) {
+      const was = session;
+      session = null; sessionSeen = null;
+      if (was) emit('signed-out', was); // another process signed out
+      return null;
+    }
     if (stamp !== sessionSeen) {
       if (!loading) {
         loading = (async () => {
+          const was = session;
           try { session = parseSession(await store.read()); } catch (e) { log(`sync: the sign-in could not be read: ${e.message}`); session = null; }
           sessionSeen = stamp;
+          // another process signed in or out (one that only renewed it changes nothing a listener holds)
+          if (session && (!was || was.uid !== session.uid)) emit('signed-in', session);
+          else if (!session && was) emit('signed-out', was);
         })().finally(() => { loading = null; });
       }
       await loading;
@@ -313,9 +357,11 @@ function createSync(opts = {}) {
     sessionSeen = store.stamp();
   }
   async function forget() {
+    const was = session;
     try { await store.clear(); } catch (e) { log(`sync: the sign-in could not be removed: ${e.message}`); }
     session = null;
     sessionSeen = store.stamp();
+    if (was) emit('signed-out', was);
   }
   // a token answer -> a session (prev: the one it refreshes)
   function sessionFrom(t, url, prev) {
@@ -392,6 +438,7 @@ function createSync(opts = {}) {
       }
       const next = sessionFrom(t, c.url, s);
       try { await save(next); } catch (e) { session = next; log(`sync: the renewed sign-in could not be saved: ${e.message}`); }
+      emit('refreshed', next);
       return next;
     })().finally(() => { refreshing = null; });
     return refreshing;
@@ -536,6 +583,7 @@ function createSync(opts = {}) {
     }
     s.member = await memberCheck(c, s.accessToken);
     try { await save(s); } catch (err) { return no(`Signed in, but the sign-in could not be saved: ${err.message}`); }
+    emit('signed-in', s);
     log(`sync: signed in as ${s.email || s.uid}${s.member === false ? ' (not on the members list: it can reach nothing)' : ''}`);
     return { ok: true, email: s.email, member: s.member };
   }
@@ -621,6 +669,12 @@ function createSync(opts = {}) {
     enabled: () => !!config(),
     status, handle, signOut, beginSignIn, finishSignIn,
     uid: async () => { const s = await load(); return s ? s.uid : null; },
+    email: async () => { const s = await load(); return s ? s.email || null : null; },
+    onChange(fn) {
+      if (typeof fn !== 'function') fail('onChange takes a function', 400, 'bad_request');
+      listeners.add(fn);
+      return () => { listeners.delete(fn); };
+    },
     accessToken: async () => (await fresh()).accessToken,
     checkMember: async () => {
       const c = need();
@@ -708,7 +762,7 @@ async function cli(argv, io = {}) {
 
 module.exports = {
   createSync, cli, checkUrl, checkKey, readConfig, configPath, pkceVerifier, pkceChallenge, objectPath, checkRel,
-  dpapiStore, keychainStore, fileStore, SyncError, SCHEMA, BUCKET,
+  dpapiStore, keychainStore, fileStore, protectedStore, syncDir, SyncError, SCHEMA, BUCKET,
 };
 
 if (require.main === module) {

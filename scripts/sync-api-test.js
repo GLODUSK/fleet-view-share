@@ -6,7 +6,10 @@
 // members check, a refresh before expiry, one retry after a 401, a refresh that can't reach Supabase (still signed in)
 // and one Supabase refuses (signed out). The REST and Storage helpers send the fleet_sync profile headers and keep
 // every object under '<user id>/' ('../' and absolute names are refused). Remote browsers may read the status but
-// not sign in or out. On Windows, the DPAPI store's round trip, with the secret never in a process's arguments.
+// not sign in or out. onChange hears signed-in, refreshed and signed-out (also by another process), with no token in
+// them; email() gives the account. On Windows, the DPAPI store's round trip, with the secret never in a process's
+// arguments. protectedStore(dir, name) keeps another secret beside the sign-in without touching it, and refuses
+// 'session' and bad names; the file store gives back any text exactly and still reads a sign-in from before.
 // Last, publish-share.js's guard, in a throwaway git repo: a planted Supabase key, project URL or sync config stops
 // its dry run, and sync-api.js, this test and docs/sync.md pass it.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
@@ -240,6 +243,10 @@ async function main() {
   const store = memStore();
   const api = S.createSync({ dataDir: liveDir, port: 4777, fetch: realFetch, now: () => clock, store, allowLoopbackUrl: true, log: (t) => logs.push(t) });
   ok(!api.enabled(), 'before setup: off');
+  const events = [];
+  const unsub = api.onChange((e) => events.push(e));
+  api.onChange(() => { throw new Error('a listener that breaks'); });
+  const lastEvent = () => events[events.length - 1] || {};
   fs.mkdirSync(path.join(liveDir, 'sync'), { recursive: true });
   fs.writeFileSync(S.configPath(liveDir), JSON.stringify({ url: fakeUrl, publishableKey: KEY }));
   ok(api.enabled(), 'a config written while running turns it on (no restart)');
@@ -276,6 +283,12 @@ async function main() {
   ok(!JSON.stringify(st).includes(firstAccess) && !JSON.stringify(st).includes(firstRefresh) && !JSON.stringify(st).includes(KEY), 'status holds no token and no key');
   eq((await route(api, 'GET', '/sync/status', { remote: true })).json, st, 'a remote browser reads the same status');
   ok(JSON.parse(store.peek()).refreshToken === firstRefresh, 'the sign-in went to the store');
+  eq(events, [{ type: 'signed-in', uid: UID, email: 'member@example.com' }], 'onChange: signed-in, with uid and email');
+  ok(logs.some((l) => /an onChange listener failed/.test(l)), 'onChange: a listener that throws is logged, the others still run');
+  eq([await api.uid(), await api.email()], [UID, 'member@example.com'], 'uid() and email()');
+  let threwOn = false;
+  try { api.onChange('nope'); } catch (e) { threwOn = e.code === 'bad_request'; }
+  ok(threwOn, 'onChange takes only a function');
 
   // the states
   const n0 = fake.calls.length;
@@ -341,6 +354,7 @@ async function main() {
   ok(Array.isArray(r1) && Array.isArray(r2), 'calls near expiry work');
   const refreshes = callsOf('/auth/v1/token', 'refresh_token').slice(nRefresh);
   ok(refreshes.length === 1 && JSON.parse(refreshes[0].body).refresh_token === firstRefresh, 'one refresh, with the old refresh token, for both');
+  eq([events.length, lastEvent()], [2, { type: 'refreshed', uid: UID, email: 'member@example.com' }], 'onChange: one refreshed for one refresh');
   const second = JSON.parse(store.peek());
   ok(second.refreshToken !== firstRefresh && fake.refresh.has(second.refreshToken), 'the new refresh token was saved at once');
   last = fake.calls[fake.calls.length - 1];
@@ -398,6 +412,8 @@ async function main() {
   ok(res.statusCode === 200 && callsOf('/auth/v1/logout').length === 1 && callsOf('/auth/v1/logout')[0].search === '?scope=local', 'signout tells Supabase (scope=local)');
   ok(!fake.access.has(atOut) && store.peek() === null, 'the token is revoked and the store is empty');
   ok(!(await api.status()).signedIn, 'signed out');
+  eq(lastEvent(), { type: 'signed-out', uid: UID, email: 'member@example.com' }, 'onChange: signed-out on sign-out');
+  eq([await api.uid(), await api.email()], [null, null], 'signed out: uid() and email() are null');
   await rejects(api.rest('GET', 'devices'), (e) => e.code === 'signed_out', 'signed out: rest() says so');
 
   // a refresh Supabase refuses: signed out
@@ -410,6 +426,7 @@ async function main() {
   fake.refresh.clear(); // revoked on the server
   await rejects(api.rest('GET', 'devices'), (e) => e.code === 'signed_out', 'a refused refresh: the call fails as signed out');
   ok(!(await api.status()).signedIn && store.peek() === null, 'a refused refresh signs out');
+  eq(events.slice(-2).map((e) => e.type), ['signed-in', 'signed-out'], 'onChange: signed-in again, then signed-out on a refused refresh');
 
   // someone not on the members list: told so on the page
   fake.member = false;
@@ -430,7 +447,47 @@ async function main() {
   // another process (the CLI) signs out: the server notices
   await store.clear();
   ok(!(await api.status()).signedIn, 'a sign-out by another process is seen');
+  eq(lastEvent().type, 'signed-out', 'onChange: a sign-out by another process is heard');
+  // another process signs in: heard on the next read
+  await store.write(JSON.stringify({ v: 1, url: fakeUrl, uid: UID, email: 'member@example.com', member: true, refreshToken: 'rt-from-the-cli' }));
+  ok((await api.status()).signedIn && lastEvent().type === 'signed-in', 'onChange: a sign-in by another process is heard');
+  const tokensSeen = [...fake.access.keys(), ...fake.refresh.keys(), firstAccess, firstRefresh, 'rt-from-the-cli'];
+  ok(!tokensSeen.some((t) => JSON.stringify(events).includes(t)), 'onChange events hold no token');
+  const nEv = events.length;
+  unsub();
+  await store.clear();
+  await api.status();
+  ok(events.length === nEv, 'unsubscribed: no more events');
   ok(!logs.some((l) => [...fake.access.keys(), ...fake.refresh.keys(), KEY].some((t) => l.includes(t))), 'no token or key in the log');
+
+  // ---------- named stores: protectedStore and the file store ----------
+  const pdir = path.join(T, 'protected');
+  for (const bad of ['session', '', 'Relay', '../x', 'a/b', 'a.b', '-x', 'x'.repeat(42), 7, null]) {
+    let refused = false;
+    try { S.protectedStore(pdir, bad); } catch (e) { refused = e.code === 'bad_request'; }
+    ok(refused, `protectedStore refuses the name ${JSON.stringify(bad).slice(0, 50)}`);
+  }
+  let noDir = false;
+  try { S.protectedStore('', 'relay-keys'); } catch (e) { noDir = e.code === 'bad_request'; }
+  ok(noDir, 'protectedStore needs a folder');
+  const ps = S.protectedStore(pdir, 'relay-keys');
+  ok(ps.kind === (process.platform === 'win32' ? 'dpapi' : process.platform === 'darwin' ? 'keychain' : 'file'), `protectedStore picks the OS's store (${ps.kind})`);
+  ok(path.dirname(ps.file) === path.resolve(pdir) && path.basename(ps.file).startsWith('relay-keys.'), `its file is <dir>/relay-keys.* (${ps.file})`);
+  const fdir = path.join(T, 'file-store');
+  const fs1 = S.fileStore(fdir, 'relay-keys'), fsSession = S.fileStore(fdir);
+  ok(path.basename(fs1.file) === 'relay-keys.json' && path.basename(fsSession.file) === 'session.json', 'file store: <name>.json, session.json by default');
+  const anyText = 'not JSON at all: é 中 "quotes" \n line two';
+  await fs1.write(anyText);
+  ok((await fs1.read()) === anyText, 'file store: any text comes back exactly');
+  ok((await fsSession.read()) === null, 'file store: a named secret leaves the sign-in alone');
+  const sessionText = JSON.stringify({ v: 1, refreshToken: 'rt-x' });
+  await fsSession.write(sessionText);
+  ok((await fsSession.read()) === sessionText && (await fs1.read()) === anyText, 'file store: both kept side by side');
+  if (process.platform !== 'win32') ok((fs.statSync(fs1.file).mode & 0o777) === 0o600, 'file store: mode 0600');
+  fs.writeFileSync(fsSession.file, JSON.stringify({ note: 'Not encrypted', ...JSON.parse(sessionText) }, null, 2));
+  eq(JSON.parse(await fsSession.read()).refreshToken, 'rt-x', 'file store: a sign-in saved before { text } still reads');
+  await fs1.clear();
+  ok(fs1.stamp() === null && (await fs1.read()) === null && (await fsSession.read()) !== null, 'file store: clearing one leaves the other');
 
   // ---------- the DPAPI store (Windows) ----------
   if (process.platform === 'win32') {
@@ -452,6 +509,15 @@ async function main() {
     await st2.clear();
     ok(st2.stamp() === null && (await st2.read()) === null, 'DPAPI: cleared');
     ok(S.createSync({ dataDir: path.join(T, 'x') }).storeKind === 'dpapi', 'DPAPI is the store on Windows');
+    // a named secret beside the sign-in
+    const signIn = S.dpapiStore(dir), keys = S.protectedStore(dir, 'relay-keys');
+    await signIn.write('the sign-in');
+    await keys.write('the relay keys');
+    ok(fs.existsSync(path.join(dir, 'relay-keys.bin')) && !fs.readFileSync(path.join(dir, 'relay-keys.bin')).includes('the relay keys'), 'DPAPI: relay-keys.bin, encrypted');
+    eq([await signIn.read(), await keys.read()], ['the sign-in', 'the relay keys'], 'DPAPI: a named secret does not overwrite the sign-in');
+    await keys.clear();
+    ok((await keys.read()) === null && (await signIn.read()) === 'the sign-in', 'DPAPI: clearing it leaves the sign-in');
+    await signIn.clear();
   } else console.log('skip: the DPAPI store (Windows only)');
 
   // ---------- publish-share.js's guard, in a throwaway repo ----------
