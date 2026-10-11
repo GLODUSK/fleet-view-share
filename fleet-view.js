@@ -24,6 +24,7 @@ const HOUSEKEEPING = require(path.join(__dirname, 'housekeeping.js'));
 const SYNC_API = require(path.join(__dirname, 'sync-api.js'));
 const RELAY_JS = require(path.join(__dirname, 'relay.js'));
 const SYNC_RUN = require(path.join(__dirname, 'sync-run.js'));
+const SYNC_LIVE = require(path.join(__dirname, 'sync-live.js'));
 const SYNC_ACCOUNTS = require(path.join(__dirname, 'sync-accounts.js'));
 const SYNC_SETUP_JS = require(path.join(__dirname, 'sync-setup.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
@@ -337,7 +338,7 @@ let notify = saved.notify !== false;
 // leave /state and the terminal view; the page offers no new sessions on them. Running sessions keep running.
 const cleanOffAccounts = (v) => (Array.isArray(v) ? [...new Set(v.filter((a) => typeof a === 'string' && /^[A-Z]$/.test(a)))].sort() : null);
 let offAccounts = cleanOffAccounts(saved.offAccounts) || [];
-const acctOff = (s) => offAccounts.length > 0 && offAccounts.includes(accountFor(s));
+const acctOff = (s) => offAccounts.length > 0 && offAccounts.includes(shownAccount(s));
 // Parity rules: in a repo with one, a change users see is made on the website and in the phone app in the same
 // task. Each rule names a repo by its folder name and the path prefixes (relative to the checkout) of its sides:
 // web, app (the phone app) and core (code both use). A file matches the first side, in the order app, core, web,
@@ -1189,9 +1190,10 @@ function moveSession(id, root) {
   return [200, { ok: true, id, root: m.root, name: m.root ? repoName(m.root) : null }];
 }
 
-// a conversation's name before trimming: the one given in Fleet View, else Claude Code's own title (its /rename,
-// then its AI title), else '' (the callers fall back to the start of its id)
-const baseName = (s) => (s && names.get(s.id)) || (s && (s.custom || s.aiTitle)) || '';
+// a conversation's name before trimming: the one given in Fleet View, else the name the device running it shows
+// (sync-live.js: this copy's title lags), else Claude Code's own title (its /rename, then its AI title), else ''
+// (the callers fall back to the start of its id)
+const baseName = (s) => (s && names.get(s.id)) || (s && s.remote && s.remote.entry && s.remote.entry.name) || (s && (s.custom || s.aiTitle)) || '';
 // the shown name of a conversation id, for lists that saved a name when something happened (alerts, ships):
 // the current one while Fleet View knows the conversation, else the one given in Fleet View, else what was saved
 function nameNow(id, had) {
@@ -1993,7 +1995,7 @@ function checkAlerts(s, prev) {
     if (s.wf.done && !s.seenDone) { raise(s, `plan ${s.wf.name} ${s.wf.done === 'completed' ? 'finished' : s.wf.done}`, s.wf.done === 'completed' ? C.mint : C.red, 'plan', s.wf.done === 'completed' ? {} : { fail: true }); planAlert = true; }
     else if (s.wf.fails > s.seenFails) raise(s, 'an agent failed', C.red, 'agentFail', { fail: true });
   }
-  if (s.ready && !planAlert && busy(prev)) {
+  if (s.ready && !planAlert && busy(prev) && !s.quietFlip) {
     // a prompt its live claude shows (s.liveWait) alerts like a question; a panel is open, holding its updates back
     if (s.state === 'ASKING') raise(s, !s.liveWait ? 'is asking you a question' : s.liveWait.panel ? 'has a panel open in its terminal, holding back its updates (Esc closes it)' : `waits on you: ${plain(s.liveWait.text, 80)}`, C.gold, 'question');
     else if (s.state === 'QUESTION') raise(s, 'asked you a question', C.gold, 'question');
@@ -2106,6 +2108,7 @@ function discover() {
 function poll() {
   const now = Date.now();
   const budget = { left: 8 << 20 }; // bytes of history read for token counts per poll, across sessions
+  pollRemote = syncRemote();
   for (const s of [...sessions.values()]) {
     // one conversation whose log trips something must not stop the others, or the server
     try { pollOne(s, now, budget); } catch (e) { logOnce('poll:' + (e && e.message), `poll: skipped ${s.id} this round\n${errorText(e)}`); }
@@ -2190,6 +2193,8 @@ function pollOne(s, now, budget) {
   // model, not the log's time, since a dying claude still writes a stopped-task notice and its cost there
   const ho = !s.demo && s.state !== 'DONE' ? handoffLinks(now).bySession.get(s.id) : null;
   if (ho && (ho.next || ho.handedOffAt) && !liveProcs.has(s.id) && (s.lastAsstT || 0) <= (ho.handedOffAt || ho.created) + 120e3) s.state = 'DONE';
+  // another device runs it: its state is that device's, never this lagging copy's (before the alerts, so they agree)
+  applyRemote(s, pollRemote);
   if (s.late) {
     if (!keepDone(s, now)) { dropSession(s); return; }
     s.late = false;
@@ -2480,7 +2485,7 @@ function footer(W, keys) {
 // the header's numbers for the conversations a view shows; shared by the terminal views and /state
 function headerCounts(list, now) {
   const live = list.filter((s) => s.state !== 'IDLE').length;
-  const agents = list.reduce((n, s) => n + (s.wf && !s.wf.done ? s.wf.agents.filter((a) => a.state === 'run').length : s.liveAgents || 0), 0);
+  const agents = list.reduce((n, s) => n + runningAgents(s), 0);
   // merges today in the picked repo's GitHub repos (every repo when none is picked)
   const ghRepos = shownSels().length ? new Set([...sessions.values()].filter((s) => s.repo && inRepo(s.root || repoOf(s, now))).map((s) => s.repo)) : null;
   const merged = [...mergedToday].reduce((n, [r, set]) => n + (!ghRepos || ghRepos.has(r) ? set.size : 0), 0);
@@ -3938,6 +3943,9 @@ foreach ($id in $env:FV_PIDS.Split(',')) {
 }`;
 const liveAcct = (id, folder) => asListed(liveAccount.get(id) || acctId(folder));
 const accountFor = (s) => liveAcct(s.id, s.account);
+// the letter it shows: the running device's when another device runs it (sync-live.js; its copy here sits in this
+// machine's folder), else accountFor. Opening it and usage stay on accountFor: they need the folder its copy is in here
+const shownAccount = (s) => (s && s.remote && s.remote.entry && s.remote.entry.account) || accountFor(s);
 // The live claude processes, from the same <config>/sessions/<pid>.json files: sessionId -> { pid, at, status,
 // waitingFor, statusAt }, the newest file per conversation (a conversation open twice: the one that spoke last).
 // A file whose pid is gone (claude was killed before it could remove it) does not count. Read on every poll: a few small files and a
@@ -4145,13 +4153,15 @@ function sessionJson(s, now, owners = syncOwners()) {
   const ended = s.state === 'DONE' || s.state === 'QUESTION';
   const side = sideOf(s, root);
   const team = teamOf(s.id);
+  // another device runs it (sync-live.js): its state, label, name, account and times as that device shows them
+  const rm = s.remote && s.remote.entry;
   return {
     id: s.id,
     name: plain(baseName(s) || s.name || s.id.slice(0, 8)),
     // renamed in Fleet View (POST /rename): the name above is that one, not Claude Code's own title
-    renamed: !!names.get(s.id),
-    account: accountFor(s),
-    state: s.state, label: st.label, stateColor: toHex(st.color),
+    renamed: !!names.get(s.id) || (!!rm && rm.renamed),
+    account: shownAccount(s),
+    state: s.state, label: (rm && rm.label) || st.label, stateColor: (rm && rm.stateColor) || toHex(st.color),
     hue: toHex(s.hue),
     repo: root ? { root, name: repoName(root), color: toHex(familyColor(root)) } : null,
     // moved to its repo by hand ("Move to workspace"), itself or the conversation it picked up from
@@ -4159,7 +4169,8 @@ function sessionJson(s, now, owners = syncOwners()) {
     // where its work goes ("Push to"): its own choice (null: it follows the repo's) and the repo's (production by default)
     push: { own: pushTargetOf(s), repo: repoPushTarget(root) || 'production' },
     // its last prompt or reply (last is the log's time, which a resumed claude moves with cost records)
-    active: Math.round(s.actT || 0),
+    // (the owner's times are written only when its state changes: this copy's, laid down as it grows, may be newer)
+    active: Math.max((rm && rm.active) || 0, Math.round(s.actT || 0)),
     branch,
     worktree,
     model: s.model || null,
@@ -4172,13 +4183,13 @@ function sessionJson(s, now, owners = syncOwners()) {
     ...handoffOf(s, now),
     goal: plain(wf && !wf.done ? wf.desc || wf.name : s.prompt, 400) || null,
     lastAction: s.lastAction ? { t: Math.round(s.lastAction.t), who: s.lastAction.who, verb: s.lastAction.verb, what: s.lastAction.what } : null,
-    waitingOn: waitingOf(s),
+    waitingOn: rm ? rm.waitingOn : waitingOf(s),
     // the tool calls running right now, from the fleet-view-feed mod (null without it): main's and its subagents'
     running: s.running && s.running.length ? s.running.map((r) => ({ tool: r.tool, what: plain(r.what, 160), agent: r.agent, at: Math.round(r.at) })) : null,
     // what it runs in the background (a shell, an async agent or workflow): servers do not count as work
     background: (s.bgList || []).map((b) => ({ label: b.label, t: Math.round(b.t), server: !!b.server })),
-    turnStart: s.promptAt || null,
-    last: s.last || s.mtime || now,
+    turnStart: rm ? rm.turnStart : s.promptAt || null,
+    last: Math.max((rm && rm.last) || 0, s.last || s.mtime || 0) || now,
     tokens: s.tokens || 0, cost: s.cost || 0, usagePending: !!s.usagePending,
     spark,
     progress: prog,
@@ -4223,7 +4234,68 @@ function syncOwners() {
 function syncOwnerOf(s, owners) {
   const o = owners && !s.demo ? owners.get(String(s.id).toLowerCase()) : null;
   if (!o || typeof o !== 'object') return {};
-  return { syncOwner: { device: o.device || null, name: o.name || null, live: !!o.live, moving: o.moving || null } };
+  // live: running on that device by its own snapshot (sync-live.js); the lease (renewed only for hosted sessions) when
+  // no snapshot has been read yet
+  return { syncOwner: { device: o.device || null, name: o.name || null, live: s.remote ? s.remote.live : !!o.live, moving: o.moving || null } };
+}
+// What runs on the other devices (sync-live.js), read once per poll: { owners, live } (sync-run.js owners() and live()),
+// or null when sync is off, no other device owns anything, or no snapshot was read (each copy's own reading stands)
+let pollRemote = null;
+function syncRemote() {
+  if (DEMO) return null;
+  const owners = syncOwners();
+  if (!owners) return null;
+  let live = null;
+  try { live = typeof SYNC_RUNNER.live === 'function' ? SYNC_RUNNER.live() : null; } catch {}
+  return live && live.ready ? { owners, live } : null;
+}
+// s.remote = sync-live.js remoteFor's { device, entry, live } while another device owns it, else null. Its state is
+// that device's snapshot's, or DONE when that device's fresh snapshot leaves it out or it has none (offline): this
+// copy is laid down late, so its own reading would show a conversation that ended there as still working. Not one
+// being handed over from here (moving 'away': still this device's), nor one a claude here has open (it runs here).
+// s.quietFlip: its state this poll comes from a switch between this copy's reading and the owner's, or from an owner
+// gone quiet (offline, or it left it out), not from its work: checkAlerts raises nothing for it
+function applyRemote(s, rv) {
+  const had = !!s.remote;
+  s.remote = null;
+  s.quietFlip = had;
+  if (!rv || s.demo || liveProcs.has(s.id)) return;
+  const o = rv.owners.get(String(s.id).toLowerCase());
+  if (!o || o.moving === 'away') return;
+  const r = SYNC_LIVE.remoteFor(rv.live, o.device, s.id);
+  if (!r) return;
+  s.remote = r;
+  s.quietFlip = !had || !r.entry;
+  s.state = r.entry ? (STATE[r.entry.state] ? r.entry.state : 'IDLE') : 'DONE';
+  s.liveWait = null;
+  s.stoppedIdle = false;
+  s.name = clean(baseName(s) || s.id.slice(0, 8), 40);
+}
+// agents running in it now: a plan's running agents, else its fresh subagent logs (the running device's count when
+// another device runs it)
+function runningAgents(s) {
+  if (s.remote) return s.remote.entry ? s.remote.entry.agents || 0 : 0;
+  return s.wf && !s.wf.done ? s.wf.agents.filter((a) => a.state === 'run').length : s.liveAgents || 0;
+}
+// sync-live.js's snapshot of this device: every conversation with a state that no other device owns (one handed over
+// from here counts until the other side has it), as /state shows it. Neither --filter nor the accounts turned off
+// apply: one left out shows as finished on the other devices
+function liveSnapshot() {
+  if (DEMO) return [];
+  const owners = syncOwners(), now = Date.now(), out = [];
+  for (const s of sessions.values()) {
+    if (s.demo || !s.name || !s.state) continue;
+    const o = owners && owners.get(String(s.id).toLowerCase());
+    if (o && o.moving !== 'away') continue;
+    const st = STATE[s.state] || STATE.IDLE;
+    out.push({
+      id: s.id, state: s.state, label: st.label, stateColor: toHex(st.color),
+      name: plain(baseName(s) || s.name || s.id.slice(0, 8)), renamed: !!names.get(s.id), account: accountFor(s),
+      last: s.last || s.mtime || now, active: Math.round(s.actT || 0), turnStart: s.promptAt || null,
+      waitingOn: waitingOf(s), agents: runningAgents(s),
+    });
+  }
+  return out;
 }
 
 // the context window a conversation has: 1M for a [1m] model or one that ever went past 200k, else 200k
@@ -4913,7 +4985,7 @@ function frameOf(s, now) {
   const team = teamOf(s.id);
   return {
     id: s.id, name: plain(baseName(s) || s.name || s.id.slice(0, 8)), state: s.state, label: st.label, stateColor: toHex(st.color), hue: toHex(s.hue),
-    account: accountFor(s), repo: root ? { root, name: repoName(root), color: toHex(familyColor(root)) } : null, branch: branchInfo(s).branch,
+    account: shownAccount(s), repo: root ? { root, name: repoName(root), color: toHex(familyColor(root)) } : null, branch: branchInfo(s).branch,
     // cost to the cent and tokens to the thousand, so a frame lists only the conversations that really moved
     cost: Math.round((s.cost || 0) * 100) / 100, tokens: Math.round((s.tokens || 0) / 1000) * 1000, ctx: used ? Math.round((used / ctxLimit(s)) * 100) / 100 : null,
     lastAction: s.lastAction ? { t: Math.round(s.lastAction.t), who: s.lastAction.who, verb: s.lastAction.verb, what: s.lastAction.what } : null,
@@ -5268,7 +5340,7 @@ function removedOne(h, now, budget) {
     refreshHue(s, now);
     const root = s.root || null;
     return {
-      id: s.id, name: plain(baseName(s) || s.name || s.id.slice(0, 8)), account: accountFor(s),
+      id: s.id, name: plain(baseName(s) || s.name || s.id.slice(0, 8)), account: shownAccount(s),
       repo: root ? { name: repoName(root), root, color: toHex(familyColor(root)) } : null,
       cwd: s.cwd || null, removedAt: h.at, lastActive: Math.round(s.last || s.mtime || 0) || null,
     };
@@ -6159,11 +6231,12 @@ const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, l
 // device; isOpen: a live claude has it open (a pid file), so the materializer never writes under it
 // accounts: the Claude account letters must be Blackbox's before anything syncs (sync-accounts.js moves a login to its
 // letter by itself); mode: 'local' (the start screen's "Work locally", sync-setup.js) keeps sync off here
+// snapshot: what runs here, for the other devices (sync-live.js); their snapshots come back through live() (applyRemote)
 const ACCOUNT_SYNC = SYNC_ACCOUNTS.createAccountSync({ accounts: ACCTS, log: (t) => logOnce(t, t) });
 const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, log: (t) => logOnce(t, t), roots: () => pageRepos(),
   host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
   isOpen: (id) => liveProcs.has(String(id).toLowerCase()),
-  mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC });
+  mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot() });
 // the start screen on Henry's machines (private.json): work locally or sync with Blackbox, then the steps of sync
 const SYNC_SETUP = SYNC_SETUP_JS.createSyncSetup({ dataDir: LOG_DIR, sync: DEMO ? null : SYNC, runner: SYNC_RUNNER, accountSync: ACCOUNT_SYNC,
   accountsView: () => ACCTS.view(), private: SYNC_PRIVATE, log: (t) => logOnce(t, t) });

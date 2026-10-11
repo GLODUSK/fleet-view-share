@@ -56,8 +56,19 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
   - `size`, `sha256`, `generation`: the `main` file's uploaded length, the hex sha256 of those bytes, its generation.
   - `owner_device`: the device that writes it. S2 sets itself on a new row and only uploads rows it owns (or with no
     owner). S4 moves it. `lease_until` is S4's (below).
-- **settings** `{ key, value_enc }`: one row per key, upserted on `(user_id, key)`. S4's request rows are the only ones
-  so far (below).
+- **settings** `{ key, value_enc }`: one row per key, upserted on `(user_id, key)`. S4's request rows (below), and:
+  - `live:<device id>` (`sync-live.js`): what runs on that device right now, written by that device only, sealed with
+    `sealText(json, key, 'setting:live:<device id>')`, `updated_at` set to its `at`:
+    `{ v: 1, device, at, sessions: [{ id, state, label, stateColor, name, renamed, account, last, active, turnStart,
+    waitingOn, agents }] }`. `sessions` lists the conversations it owns that are not DONE, and the DONE ones active
+    in the last day (300 at most, running ones first), in id order. It is written only when that list changes (not
+    `last` or `active`), at most every 5 s. Every device lists the `live:*` keys and `updated_at` every 5 s and fetches
+    a value only when its `updated_at` moved. A snapshot counts while its device is online (S4's `last_seen_at`
+    rule, `sync-move.js` `online()`); then a conversation that device owns shows its state, name and account from it,
+    and DONE when it is not listed or the device is offline. Until this device has seen that `last_seen_at` move
+    (after a start, or while its own reads fail), and for a device with no `live:` row (an older Fleet View), the
+    copy's own reading stands. A switch between the two readings, or to DONE because the owner went quiet, raises no
+    alert; only the owner's own DONE does.
 - **chunks** `{ conversation_id, file, generation, seq, byte_offset, byte_length, object_path, sha256 }`: one per
   object. `sha256` is the hex sha256 of the chunk's plain bytes. A whole file is `seq` 0..n of one generation (one
   chunk unless it is over 8 MiB; an empty one is a single 0-byte chunk).

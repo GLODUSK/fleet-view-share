@@ -13,7 +13,7 @@
 //   createMover({ api, dataDir, key, log, now, up, down, host, isOpen, me, home, projects, isLive, findLog, trusted,
 //                 timing })
 //     -> { start(), stop(), tick(), settle(), move(id, { force }), status(id), cancel(id), owners(), device(),
-//          outgoing() }
+//          online(deviceId), outgoing() }
 //
 //   api       sync-api.js createSync()'s object (rest() only)
 //   key       the 32-byte sync key: the ask and reply rows are sealed with it
@@ -336,8 +336,10 @@ function createMover(o = {}) {
       if (!d || typeof d.id !== 'string') continue;
       const id = d.id.toLowerCase(), prev = devices.byId.get(id), seen = Date.parse(d.last_seen_at);
       const lastSeen = Number.isFinite(seen) ? seen : null;
-      // changedAt: when this device saw it change (or first saw it): the other device was there then
-      byId.set(id, { name: typeof d.name === 'string' && d.name ? d.name.slice(0, 100) : null, lastSeen, changedAt: prev && prev.lastSeen === lastSeen ? prev.changedAt : t });
+      // changedAt: when this device saw it change (or first saw it): the other device was there then; moved: it was
+      // seen changing at least once (a first sight says nothing of whether it is there now)
+      const same = !!prev && prev.lastSeen === lastSeen;
+      byId.set(id, { name: typeof d.name === 'string' && d.name ? d.name.slice(0, 100) : null, lastSeen, changedAt: same ? prev.changedAt : t, moved: !!prev && (prev.moved || !same) });
     }
     devices.byId = byId;
     devices.at = t;
@@ -937,11 +939,22 @@ function createMover(o = {}) {
     return out;
   }
   const device = () => (me ? { id: me, name: myName() } : null);
+  // whether a device is there, for sync-live.js (it trusts a snapshot only while its device is): true once its
+  // last_seen_at was seen changing and did within offlineMs on this clock; false once it sat unchanged that long (or the
+  // table, read, has no such device); null while that is not known yet: since this device started, before it was seen
+  // moving, or while this device's own reads of the table have stopped (no network here says nothing of the other)
+  const online = (id) => {
+    if (!(devices.at > -Infinity) || now() - devices.at > 3 * tm.devicesMs) return null;
+    const d = devices.byId.get(lower(id));
+    if (!d) return false;
+    if (isOffline(id)) return false;
+    return d.moved ? true : null;
+  };
   // the page asks every second while it shows the job; that keeps it going (unwatchedMs)
   const status = (id) => { const j = jobs.get(lower(id)); if (!j) return null; j.seenAt = now(); return jobJson(j); };
   const outgoing = () => [...outs.values()].map((x) => ({ id: x.id, to: x.to, phase: x.phase, force: x.force, held: x.held, note: x.note }));
 
-  return { start, stop, tick, settle, move, status, cancel, owners, device, outgoing };
+  return { start, stop, tick, settle, move, status, cancel, owners, device, online, outgoing };
 }
 
 module.exports = { createMover, awayPath, dropAway, resumeFolder, trustedIn, findLogIn, busyNow, TIMING };

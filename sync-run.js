@@ -14,9 +14,10 @@
 // written by `sync-api.js setup`). Off by default: a PC with none of the three runs no loop,
 // sets no timer beyond the minute check and reaches no network.
 //
-//   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, intervalMs, checkMs,
-//                      makeUploader, makeMaterializer, makeMover })
-//     -> { start(), stop(), check(), status(), move(id, { force }), moveStatus(id), cancelMove(id), owners(), device() }
+//   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, intervalMs, checkMs,
+//                      makeUploader, makeMaterializer, makeMover, makeLive })
+//     -> { start(), stop(), check(), status(), move(id, { force }), moveStatus(id), cancelMove(id), owners(), device(),
+//          live() }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
 //   are one (by default each side's own: ~/.claude and ~/.claude-a); roots: () => [repo folders] (the
 //   repos Fleet View lists; the materializer matches a synced repo's origin against them). host: { list() ->
@@ -34,6 +35,9 @@
 //   owners() -> Map id -> { device, name, live, moving }: conversations another device owns (live: its lease is
 //     ahead), and this device's own moves (moving 'here' or 'away'); an empty Map while not running
 //   device() -> { id, name } of this device | null
+// What runs where (sync-live.js), beside the mover and only with it (it needs the mover's device id): snapshot() ->
+// the conversations this device owns, as fleet-view.js's /state shows them, published for the other devices;
+//   live() -> sync-live.js live(): the other devices' fresh snapshots | null while not running (or no snapshot given)
 // <dataDir>/sync/away.json (what the session host refuses to open, sync-move.js) is deleted when sync stops for a
 // gate (not set up, signed out, not a member, no key), and kept when the server stops: the host still needs it.
 'use strict';
@@ -58,13 +62,15 @@ function createSyncRunner(o = {}) {
   const makeUploader = o.makeUploader || ((a) => require(path.join(__dirname, 'sync-up.js')).createUploader(a));
   const makeMaterializer = o.makeMaterializer || ((a) => require(path.join(__dirname, 'sync-down.js')).createMaterializer(a));
   const makeMover = o.makeMover || ((a) => M.createMover(a));
+  const makeLive = o.makeLive || ((a) => require(path.join(__dirname, 'sync-live.js')).createLive(a));
+  const snapshot = typeof o.snapshot === 'function' ? o.snapshot : null;
   const host = o.host && typeof o.host.list === 'function' ? o.host : null;
   const isOpenOpt = typeof o.isOpen === 'function' ? o.isOpen : null;
   // mode() -> 'local' stops sync here (null / 'sync': the other gates decide); accounts: sync-accounts.js's object
   const modeOf = typeof o.mode === 'function' ? o.mode : () => null;
   const accounts = o.accounts && typeof o.accounts.reconcile === 'function' ? o.accounts : null;
 
-  let run = null; // { uid, keyId, up, down, mover }
+  let run = null; // { uid, keyId, up, down, mover, live }
   let why = 'not started'; // why it is not running, for status()
   let timer = null, offChange = null, checking = null, again = false, stopped = true;
 
@@ -89,7 +95,7 @@ function createSyncRunner(o = {}) {
       const r = run;
       run = null;
       log(`sync: stopped (${reason})`);
-      await Promise.allSettled([r.mover ? r.mover.stop() : null, r.up.stop(), r.down.stop()]);
+      await Promise.allSettled([r.live ? r.live.stop() : null, r.mover ? r.mover.stop() : null, r.up.stop(), r.down.stop()]);
     }
     if (gate) M.dropAway(dataDir);
   }
@@ -137,12 +143,18 @@ function createSyncRunner(o = {}) {
     const down = makeMaterializer({ ...args, roots: () => roots(), isOpen });
     let mover = null;
     try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false) }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
-    run = { uid, keyId: kid, up, down, mover };
+    // the device id is the mover's (it makes the device row on its first tick): no mover, no snapshots
+    let live = null;
+    if (mover && snapshot) {
+      try { live = makeLive({ ...args, device: () => { const d = mover.device(); return d ? d.id : null; }, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null), snapshot: () => snapshot() }); } catch (e) { log(`sync: what runs on the other devices can't be shown here: ${e && e.message}`); }
+    }
+    run = { uid, keyId: kid, up, down, mover, live };
     why = '';
     if (hostFor) hostFor.list().catch(() => {});
     up.start(intervalMs);
     down.start(intervalMs);
     if (mover) mover.start();
+    if (live) live.start();
     log(`sync: running as ${st.email || 'the signed-in account'}`);
   }
   const notRunning = () => Object.assign(new Error(run ? 'conversations can\'t move between devices on this PC' : why || 'sync is not running'), { code: 'not_running' });
@@ -173,6 +185,7 @@ function createSyncRunner(o = {}) {
         up: safe(() => run.up.status()),
         down: safe(() => run.down.status()),
         conflicts: safe(() => (typeof run.down.conflicts === 'function' ? run.down.conflicts() : [])),
+        live: run.live ? safe(() => run.live.status()) : null,
       };
     },
     move(id, opts = {}) {
@@ -186,6 +199,10 @@ function createSyncRunner(o = {}) {
       try { return run.mover.owners(); } catch { return new Map(); }
     },
     device() { return run && run.mover ? run.mover.device() : null; },
+    live() {
+      if (!run || !run.live) return null;
+      try { return run.live.live(); } catch { return null; }
+    },
   };
 }
 

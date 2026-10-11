@@ -627,10 +627,12 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
         if (phaseOf(B, id) === 'offline') sawOffline = true;
       }
       ok(!sawOffline && phaseOf(B, id) === 'noanswer', `skewed clock: 10 minutes behind this clock but moving is not offline (${phaseOf(B, id)})`);
+      ok(B.mover.online(A.me) === true && B.mover.online(crypto.randomUUID()) === false, 'online: a device seen moving is there; one the table lacks is not');
       rowA.last_seen_at = iso(now() + 60 * 60e3); // a clock an hour fast, and then it stops
       const stopAt = now();
       ok(await until(() => phaseOf(B, id) === 'offline', { who: [B], max: 300 }), 'skewed clock: an hour ahead and still is offline in the end');
       ok(now() - stopAt >= 120e3 && now() - stopAt <= 160e3, `skewed clock: offline 2 minutes after it stopped changing (${now() - stopAt} ms)`);
+      ok(B.mover.online(A.me) === false, 'online: false once offline');
       ok(B.mover.cancel(id), 'skewed clock: cancelled');
       await B.mover.settle();
       A.asleep = false;
@@ -706,8 +708,10 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       const dir = path.join(T, 'C', 'data');
       C.writeState(M.awayPath(dir), { v: 1, at: 'x', ids: { [B.me]: { device: 'mac', why: 'owned' } } });
       const fresh = M.createMover({ api, dataDir: dir, key: KEY, now, me: crypto.randomUUID(), up: {}, down: { owners: () => new Map(), status: () => ({ lastOkAt: null }) } });
+      ok(fresh.online(B.me) === null, 'online: not known before the devices table was read');
       await fresh.tick();
       ok(C.readState(M.awayPath(dir), null).ids[B.me], 'before the first listing, away.json from before stays');
+      ok(fresh.online(B.me) === null, 'online: a device only seen once is not known yet (it may have slept for days)');
       M.dropAway(dir);
       ok(!fs.existsSync(M.awayPath(dir)), 'dropAway deletes it');
     }
