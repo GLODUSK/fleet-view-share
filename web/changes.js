@@ -20,7 +20,7 @@
 // and hands it to the chat box, sent at once (handto.js), then clears them. Comments are kept per conversation
 // while the page lives and in localStorage (fv.review.<id>), so a reload keeps them; a comment whose line has left
 // the diff shows at the end of its file (or below the list when the file left it) and is still sent.
-import { esc, revealLink } from './cards.js';
+import { esc, revealLink, loadModule } from './cards.js';
 import { icon } from './icons.js';
 import { handToChat } from './handto.js';
 
@@ -65,13 +65,13 @@ let hlP = null;
 const hlLangs = new Map(); // language -> Promise
 function hljsFor(lang) {
   if (!hlP) {
-    hlP = import('./vendor/highlight/core.min.js').then((m) => m.default);
+    hlP = loadModule('vendor/highlight/core.min.js').then((m) => m.default);
     hlP.catch(() => { hlP = null; });
   }
   return hlP.then((hljs) => {
     if (hljs.getLanguage(lang)) return hljs;
     if (!hlLangs.has(lang)) {
-      const p = import(`./vendor/highlight/languages/${lang}.min.js`).then((m) => { hljs.registerLanguage(lang, m.default); });
+      const p = loadModule(`vendor/highlight/languages/${lang}.min.js`).then((m) => { hljs.registerLanguage(lang, m.default); });
       p.catch(() => hlLangs.delete(lang));
       hlLangs.set(lang, p);
     }

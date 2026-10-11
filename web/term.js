@@ -49,7 +49,7 @@
 // Test without the desktop host: ?fixture=1&fakeTerm=1 installs a fake fleetDesktop.term (installFakeTerm below)
 // that echoes what you type and prints some coloured output. Nothing here runs without that query.
 
-import { esc } from './cards.js';
+import { esc, loadModule } from './cards.js';
 import { icon } from './icons.js';
 import { createRemoteTerm } from './remote-term.js';
 
@@ -300,7 +300,7 @@ function loadXterm() {
       l.rel = 'stylesheet'; l.href = 'vendor/xterm/xterm.css'; l.dataset.xterm = '1';
       document.head.appendChild(l);
     }
-    xtermLoad = Promise.all([import('./vendor/xterm/xterm.mjs'), import('./vendor/xterm/addon-fit.mjs')])
+    xtermLoad = Promise.all([loadModule('vendor/xterm/xterm.mjs'), loadModule('vendor/xterm/addon-fit.mjs')])
       .then(([x, f]) => ({ Terminal: x.Terminal, FitAddon: f.FitAddon }))
       .catch((e) => { xtermLoad = null; throw e; });
   }

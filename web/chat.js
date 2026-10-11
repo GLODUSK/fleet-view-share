@@ -47,7 +47,7 @@
 // ?fixture=1 reads ./fixtures/conversation-sample.json instead of the server (same JSON); with it,
 // ?chatWindow=<n> shrinks the first page (to try "Show earlier") and ?chatRepeat=<n> repeats the sample n times
 // (to time a long conversation).
-import { esc, spinner, C, clockTime, ago } from './cards.js';
+import { esc, spinner, C, clockTime, ago, loadModule } from './cards.js';
 import { icon } from './icons.js';
 import { mountCompose } from './compose.js';
 import { onRekey } from './term.js';
@@ -75,11 +75,11 @@ function libs() {
   if (libsP) return libsP;
   libsP = (async () => {
     const [{ Marked }, { default: DOMPurify }, { default: hljs }] = await Promise.all([
-      import('./vendor/marked/marked.esm.js'),
-      import('./vendor/dompurify/purify.es.mjs'),
-      import('./vendor/highlight/core.min.js'),
+      loadModule('vendor/marked/marked.esm.js'),
+      loadModule('vendor/dompurify/purify.es.mjs'),
+      loadModule('vendor/highlight/core.min.js'),
     ]);
-    const grammars = await Promise.all(LANGS.map((l) => import(`./vendor/highlight/languages/${l}.min.js`).then((m) => [l, m.default])));
+    const grammars = await Promise.all(LANGS.map((l) => loadModule(`vendor/highlight/languages/${l}.min.js`).then((m) => [l, m.default])));
     for (const [l, g] of grammars) hljs.registerLanguage(l, g);
     const md = new Marked({ gfm: true, breaks: false, async: false });
     md.use({

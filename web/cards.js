@@ -12,6 +12,12 @@ export const C = {
 };
 
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+// a vendored module, loaded on first use (path relative to web/). The browser keeps a failed fetch of a module for the
+// page's life: once one failed (the server was restarting), asking again under the same address fails at once, and
+// the Chat tab said "Couldn't load the conversation" until the page reloaded. So after a failure every load asks
+// under a new address (?retry=n), which the browser fetches afresh.
+let loadFails = 0;
+export const loadModule = (p) => import(`./${p}${loadFails ? `?retry=${loadFails}` : ''}`).catch((e) => { loadFails++; throw e; });
 export const isBusy = (st) => st === 'WORKING' || st === 'AGENTS';
 export const needsYou = (st) => st === 'ASKING' || st === 'QUESTION' || st === 'ERROR' || st === 'STALLED';
 export const ago = (ms) => (ms < 60e3 ? `${Math.max(0, Math.round(ms / 1e3))}s` : ms < 3600e3 ? `${Math.round(ms / 60e3)}m` : `${(ms / 3600e3).toFixed(1)}h`);
