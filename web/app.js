@@ -10,7 +10,7 @@
 //                          then shows the server's reply as a toast
 //   ui.openTerminal(id)    always a terminal window (the panel's "Open in terminal" button); on a page from another
 //                          computer (remotePage) the live session here instead, since a terminal would open on the PC
-//   ui.saveSettings(obj)   save any of { view, zoom, query, repo, compact, steady, webBounds, notify, mapLens,
+//   ui.saveSettings(obj)   save any of { view, zoom, query, repo, repos, compact, steady, webBounds, notify, mapLens,
 //                          mapViews, mapCamera } (POST /settings)
 //   ui.keys                {}: a view may set ui.keys[viewName] = (KeyboardEvent) => boolean. While that view
 //                          is shown, every key not taken by the shell goes to it first; return true when handled.
@@ -41,7 +41,10 @@
 //   ui.setMulti(ids)       the map's multi-selection changed (Ctrl+click, Ctrl+drag): the shell keeps one list for
 //                          every view and outlines those cards and tiles; the shell tells the map with map.js
 //                          setMapSelection(ids). ui.multi: that list (read only). ui.toggleMulti(id) / ui.clearMulti():
-//                          the cards' and tiles' Ctrl+click and plain click (cards.js wirePick)
+//                          the cards' and tiles' Ctrl+click and plain click (cards.js wirePick); ui.selectMany(ids): their
+//                          Shift+click (the range from the last card or tile clicked) and the Projects list's. Ctrl+A
+//                          selects every conversation the current view shows (selectAllShown); a workspace's and a team's
+//                          right-click menu have "Select all conversations"; Ctrl+click on a finished row adds it too
 //   ui.takeTab(id)         detail.js: the panel tab asked for once ('details' from the menu), or null
 //   Links: any element with data-act="url" data-url="…", or data-act="reveal" data-kind="file|folder"
 //   data-path="…" [data-line="n"], or data-act="session" data-id="…" (another conversation: the handoff
@@ -68,8 +71,11 @@
 // Right-click (ctxmenu.js): a repo (map anchor, repo chip) offers New session · A / B (desktop window) and
 // Open folder; a conversation offers Remove (ends it if hosted here and takes it off the map; was End session / Hide from map),
 // Send elsewhere ▸ (the other accounts), Rename (renameMenuItem) and Move to workspace (moveMenuItem). A repo also offers "Removed conversations"
-// (a submenu of state.removed) to continue one (see continueConversation). A repo also offers "Remove repo", and
-// empty space "Add workspace" and "Add recent workspace ▸" (removed repos, to add one back). The browser's own menu
+// (a submenu of state.removed, all of them): each one's own ▸ has Continue (see continueConversation), Show again
+// (un-hidden, nothing starts) and Forget (off the list for good: settings.forgotten), and the top of it "Show all
+// again", "Continue all" and "Forget all" (one Undo each but Continue). A repo also offers "Remove repo", and
+// empty space "Add workspace", "Add recent workspace ▸" (every removed repo, to add one back) and "Removed
+// conversations ▸" (every removed conversation, its workspace in the note, those with none too). The browser's own menu
 // is kept only in text inputs and the live terminal (and in Edge outside those targets).
 //
 // New sessions (term.js createSession) are listed in state.pending (and state.allSessions) as stand-ins
@@ -83,9 +89,26 @@
 // Removing a repo (the menu's ×, Delete on the picked row, "Remove from list" on a row's right-click, or "Remove
 // repo" on a repo's right-click in any view; settings.hiddenRepos, [{ root, at }], POST /settings) takes it and its
 // conversations out of every view: the menu, its map anchor, territory and nodes, the cards, wall tiles and the
-// finished strip. In the menu, Ctrl+click, Shift+click, Space or a row's box ticks several; "Remove N workspaces" (or
+// finished strip. In the menu, a row's box, Shift+click or Space ticks several; "Remove N workspaces" (or
 // Delete) removes them together, with one Undo. "Undo" stays on a toast for 6 s. One comes back by itself when a conversation in it works after
 // `at` (the server drops it from the list; the page follows). Removing the picked repo switches to All workspaces.
+// Removing one (or several) with live (not DONE) conversations asks first, naming how many (askRemoveRepos); the
+// rest go straight away. Typing in the menu filters its rows by name or path: '/' starts the filter, and so does a
+// letter that isn't a menu key (j k a u r, 1-9); once on, typed characters go to it (Space still ticks), Backspace
+// edits it, Esc clears it before the ticks and the menu; arrows, Enter, Space and Delete work on the rows it leaves.
+// "Removed workspaces (N) ▸" under "Add workspace" opens in place (by itself while a filter matches some): every
+// removed repo, newest first, with "Add back" (like "Add workspace"), then "Add back all" and "Clear list" (forgets
+// them: off hiddenRepos, one Undo; the ones with recent conversations are kept, since the server would list them
+// again at once; the rest come back on their own only when they work again).
+// Several workspaces at once: Ctrl+click (or Shift+Enter on) a row of the menu adds it to the ones shown, or takes it
+// out (a plain click still shows just that one); each shown one has its ✓, the header reads "A + B" or "3 WORKSPACES".
+// Saved as settings.repos (2+ roots) with settings.repo its first, so an older page or server shows that one
+// (shownSel, inRepo). A row's right-click has "Show it too" / "Stop showing it" as well.
+// Renaming a workspace: "Rename" on its right-click (map hub, repo chip, a menu row) names it in Fleet View only
+// (settings.repoNames, [{ root, name }]; the folder stays as it is); the name shows wherever its folder's name would
+// (repoName, applyRepoNames on /state's names); an empty name goes back to the folder's. One Undo.
+// The menu's order: "Move up" / "Move down" on a workspace's right-click, Shift+↑↓ on the menu's picked row, or
+// dragging a row (settings.repoOrder, roots: those first in that order, the rest busiest first). One Undo each.
 // Adding a repo ("Add workspace" at the bottom of the repo menu, or on empty space's right-click) offers three
 // ways: "Paste path" (a path box; quotes around a pasted path are dropped, forward slashes are fine), "New
 // scratchpad" (POST /repos/scratch: the server makes an empty scratch-YYYY-MM-DD folder under ~/Scratchpads and
@@ -95,7 +118,7 @@
 // (added: true) even with no conversations. Removing an added repo also drops it from addedRepos (POST /repos/remove; Undo adds it back).
 // Hidden conversations (settings.hidden, [{ id, at }], POST /settings) are left out of every view and the
 // finished strip until they work again: a state other than DONE / QUESTION with activity after `at`, which
-// also drops them from the list.
+// also drops them from the list. The strip's "Clear all" removes every row in it at once (one Undo).
 //
 // Map command center (the shell's side; map.js, map-overlay.js and replay.js draw the rest):
 // - Orders (orders.js, through the live sessions of term.js, never a headless claude): a repo's right-click menu
@@ -104,12 +127,15 @@
 //   command), Under a lead ▸ ("<name> leads" per conversation, "A new conversation leads": one team whose lead
 //   gets the order and directs the others, who report to it; POST /teams { lead }), then Model, Effort, Fast mode.
 //   A multi-selection's menu has "Give orders ▸" (Work together, Under a lead ▸, Send to each, Model, Effort, Fast
-//   mode), "Add to team ▸", "Interrupt all", "Open all here", "Clear selection" and "Remove N conversations"; a
-//   team's has "Message the team", "Lead ▸" (who leads, or No lead: POST /teams/lead), "Add <picked>", "Remove
+//   mode), "Add to team ▸", the single conversation's actions for each of them ("Fork each", "Move to workspace ▸",
+//   "Send elsewhere ▸", "Push to ▸", "Cancel N waiting orders", "Unpin from the map"; one toast each, one Undo for a
+//   move or push, new sessions left out), "Interrupt all", "Open all here", "Clear selection" and "Remove N conversations"; a
+//   team's has "Message the team", "Lead ▸" (who leads, or No lead: POST /teams/lead), "Rename team" (POST
+//   /teams/rename: notes and orders from then on carry the new name; nobody is told), "Add <picked>", "Remove
 //   member ▸", "Pick <member>" and "Disband team"; a conflict's or clash's has "Send a note to all" (prefilled by
 //   kind), "Open the file in VS Code", "Pick" and "Interrupt" per conversation; one conversation's gains "Add to
 //   team ▸", "Lead team ▸" (lead its own team, or join another as its lead) and, in a team, 'Team "<name>" ▸'
-//   (Message the team, Lead ▸, Leave team, Disband team). The server tells the members what changed (see the teams
+//   (Message the team, Lead ▸, Rename team, Leave team, Disband team). The server tells the members what changed (see the teams
 //   section); Remove takes a conversation out of its team.
 // - Replay: window 'fv-replay' { on, state } from the map overlay (see the replay section below).
 // - "Since you looked" (since.js): key w, the header's clock button, and by itself after 30+ min away.
@@ -154,7 +180,7 @@ import('./map.js').then((m) => {
 }).catch((e) => { mapMissing = true; console.warn('map.js did not load', e); render(); });
 
 // ---------- settings ----------
-const local = { view: VIEWS.includes(params.get('view')) ? params.get('view') : 'cards', zoom: 1, query: '', repo: null, compact: false, finishedOpen: true, steady: true, notify: true };
+const local = { view: VIEWS.includes(params.get('view')) ? params.get('view') : 'cards', zoom: 1, query: '', repo: null, repos: null, compact: false, finishedOpen: true, steady: true, notify: true };
 let settingsLoaded = false;
 let pendingSave = {}, saveTimer = null;
 
@@ -166,7 +192,7 @@ function post(url, body, keepalive = false) {
 }
 function saveSettings(obj) {
   Object.assign(pendingSave, obj);
-  for (const k of ['view', 'zoom', 'query', 'repo', 'compact', 'finishedOpen', 'steady', 'notify']) if (k in obj) local[k] = obj[k];
+  for (const k of ['view', 'zoom', 'query', 'repo', 'repos', 'compact', 'finishedOpen', 'steady', 'notify']) if (k in obj) local[k] = obj[k];
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flushSettings, 400);
 }
@@ -395,8 +421,11 @@ async function poll() {
     setServerQueued(st.queuedText);
     online = true;
     if (st.settings) syncHiddenRepos(st.settings.hiddenRepos);
+    if (st.settings) syncRepoPrefs(st.settings);
+    applyRepoNames(st);
     if (st.settings && Array.isArray(st.settings.offAccounts) && !('offAccounts' in pendingSave) && Date.now() - offSentAt > 3000) offAccts = st.settings.offAccounts.filter(isAcct);
     if (settingsLoaded && st.settings) mergeServerHidden(st.settings.hidden);
+    if (st.settings) syncForgotten(st.settings.forgotten);
     if (!settingsLoaded && st.settings) {
       settingsLoaded = true;
       const s = st.settings;
@@ -404,6 +433,8 @@ async function poll() {
       if (s.zoom > 0) local.zoom = s.zoom;
       if (typeof s.query === 'string') local.query = s.query;
       local.repo = typeof s.repo === 'string' ? s.repo : null;
+      const several = Array.isArray(s.repos) ? s.repos.filter((x) => typeof x === 'string' && x) : [];
+      local.repos = several.length >= 2 ? several : null;
       local.compact = !!s.compact;
       if (typeof s.finishedOpen === 'boolean') local.finishedOpen = s.finishedOpen;
       if (typeof s.steady === 'boolean') local.steady = s.steady;
@@ -432,12 +463,37 @@ async function poll() {
 const normRoot = (p) => String(p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
 // the home folder (state.home) is "no repo": where conversations sit until they work in a repo; listed last
 const isHomeRoot = (root) => !!root && !!state?.home && normRoot(root) === normRoot(state.home);
-const repoName = (root) => (isHomeRoot(root) ? 'no workspace' : String(root || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'no workspace');
+const repoBase = (root) => (isHomeRoot(root) ? 'no workspace' : String(root || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'no workspace');
+// the name a workspace shows: its name in Fleet View (Rename on its right-click, settings.repoNames), else its folder's
+const repoNames = new Map(); // normRoot -> { root, name }
+const repoName = (root) => repoNames.get(normRoot(root))?.name || repoBase(root);
+// the workspaces shown (the repo menu): several (settings.repos: Ctrl+click or Shift+Enter on its rows), one
+// (settings.repo: a root, or a bare folder name from --repo) or none (every workspace)
+const shownSel = () => (Array.isArray(local.repos) && local.repos.length >= 2 ? local.repos : local.repo ? [local.repo] : []);
+function selMatches(sel, repo) {
+  if (/[\\/]/.test(sel)) return normRoot(repo.root) === normRoot(sel);
+  return String(repo.root ? repoBase(repo.root) : repo.name || '').toLowerCase() === sel.toLowerCase();
+}
 function inRepo(repo) {
-  if (!local.repo) return true;
+  const sel = shownSel();
+  if (!sel.length) return true;
   if (!repo) return false;
-  if (/[\\/]/.test(local.repo)) return normRoot(repo.root) === normRoot(local.repo);
-  return String(repo.name || repoName(repo.root)).toLowerCase() === local.repo.toLowerCase();
+  return sel.some((x) => selMatches(x, repo));
+}
+// what the header calls it: one workspace, "A + B", or "3 workspaces"
+function shownTitle() {
+  const sel = shownSel();
+  if (!sel.length) return 'all workspaces';
+  return sel.length === 1 ? repoName(sel[0]) : sel.length === 2 ? `${repoName(sel[0])} + ${repoName(sel[1])}` : `${sel.length} workspaces`;
+}
+// shows these (roots, or a bare name): several, one, or every workspace when empty; at most 50 (the server's limit)
+function setShown(list) {
+  const out = [], seen = new Set();
+  for (const x of list || []) {
+    const k = /[\\/]/.test(x) ? normRoot(x) : String(x).toLowerCase();
+    if (x && !seen.has(k)) { seen.add(k); out.push(x); }
+  }
+  saveSettings({ repo: out[0] || null, repos: out.length >= 2 ? out.slice(0, 50) : null });
 }
 function queryRe() {
   if (!local.query) return null;
@@ -507,6 +563,19 @@ function mergeServerHidden(list) {
   }
   return added;
 }
+// removed ones taken off the Removed conversations list for good ("Forget"; settings.forgotten, ids still on hidden).
+// The server's list wins, except while a change of ours may not have reached it yet (as hiddenRepos)
+const forgotten = new Set();
+let forgottenSentAt = 0;
+function saveForgotten() {
+  forgottenSentAt = Date.now();
+  saveSettings({ forgotten: [...forgotten].filter((id) => hidden.has(id)).slice(-500) });
+}
+function syncForgotten(list) {
+  if (!Array.isArray(list) || 'forgotten' in pendingSave || Date.now() - forgottenSentAt < 3000) return;
+  forgotten.clear();
+  for (const id of list) if (typeof id === 'string') forgotten.add(id);
+}
 function hideConversation(s, how = 'hidden') {
   hidden.set(s.id, Date.now());
   continued.delete(s.id);
@@ -557,14 +626,33 @@ const UNDO_MS = 10 * 60e3;
 let lastRemoved = null; // { undo, until }: what "Undo" (or u in the menu) puts back
 // it: { root, name } from the repo menu, a map anchor or a repo chip (a checkout folder maps to its repo)
 function removeRepo(it) { removeRepos([it]); }
-// several at once (the repo menu's multi-selection): one toast, one Undo for all of them
-function removeRepos(list) {
-  const done = [], seen = new Set(), prevRepo = local.repo;
+// the repo root an item stands for: the listed one, else the repo of a checkout folder
+function repoRootOf(it) {
+  const listed = (state?.repos || []).find((r) => normRoot(r.root) === normRoot(it.root));
+  return listed ? listed.root : repoForFolder(state || {}, it.root).root || it.root;
+}
+// several at once (the repo menu's multi-selection): one toast, one Undo for all of them. With live (not DONE)
+// conversations in any of them it asks first, naming how many; else they go straight away
+function removeRepos(list) { askRemoveRepos(list, () => dropRepos(list)); }
+function askRemoveRepos(list, go) {
+  const items = (list || []).filter((it) => it && it.root);
+  const keys = new Set(items.map((it) => normRoot(repoRootOf(it))));
+  const live = (state?.sessions || []).filter((s) => !s.pending && s.state !== 'DONE' && !hidden.has(s.id) && s.repo && keys.has(normRoot(s.repo.root)));
+  if (!live.length) { go(); return; }
+  const n = live.length, convs = n === 1 ? '1 live conversation' : `${n} live conversations`;
+  const reposWith = new Set(live.map((s) => normRoot(s.repo.root))).size;
+  const name = items.length === 1 ? (items[0].name && items[0].name !== 'All workspaces' ? items[0].name : repoName(items[0].root)) : '';
+  const html = items.length === 1
+    ? `<b>${esc(name)}</b> has ${convs}. Remove it from the list? ${n === 1 ? 'It leaves' : 'They leave'} every view too (nothing is ended); it comes back if one works again.`
+    : `Remove ${keys.size} workspaces? ${reposWith === 1 ? 'One of them has' : `${reposWith} of them have`} ${convs}; ${n === 1 ? 'it leaves' : 'they leave'} every view too (nothing is ended).`;
+  askConfirm(html, items.length === 1 ? 'Remove' : `Remove ${keys.size}`, go);
+}
+function dropRepos(list) {
+  const done = [], seen = new Set(), prevSel = { repo: local.repo, repos: local.repos };
   let anyPicked = false;
   for (const it of list || []) {
     if (!it || !it.root) continue;
-    const listed = (state?.repos || []).find((r) => normRoot(r.root) === normRoot(it.root));
-    const root = listed ? listed.root : repoForFolder(state || {}, it.root).root || it.root;
+    const root = repoRootOf(it);
     const k = normRoot(root);
     if (seen.has(k)) continue;
     seen.add(k);
@@ -580,7 +668,10 @@ function removeRepos(list) {
   }
   if (!done.length) return;
   saveHiddenRepos();
-  if (anyPicked) { ui.selectedId = null; saveSettings({ repo: null }); }
+  // the shown ones it took leave the shown set; none left: every workspace
+  const left = anyPicked ? shownSel().filter((x) => !done.some((d) => selMatches(x, { root: d.root, name: d.name }))) : null;
+  if (anyPicked) { ui.selectedId = null; setShown(left); }
+  const afterSel = JSON.stringify(shownSel());
   // their conversations leave every view, the panel too
   const inIt = (id) => { const s = id && view?.allSessions?.find((x) => x.id === id); return !!(s && s.repo && seen.has(normRoot(s.repo.root))); };
   if (inIt(ui.selectedId)) ui.selectedId = null;
@@ -592,7 +683,7 @@ function removeRepos(list) {
       if (d.wasAdded) { addedLocal.set(d.k, d.localAdd || { root: d.root, name: d.name, at: Date.now() }); post('/repos/add', { path: d.root }); }
     }
     saveHiddenRepos();
-    if (anyPicked && !local.repo) saveSettings({ repo: prevRepo });
+    if (anyPicked && JSON.stringify(shownSel()) === afterSel) saveSettings(prevSel);
     if (menuOpen) drawMenu();
     render();
   };
@@ -600,7 +691,96 @@ function removeRepos(list) {
   if (menuOpen) drawMenu();
   render();
   const what = done.length === 1 ? done[0].name : `${done.length} workspaces`;
-  toast(`Removed ${what}${anyPicked ? ' · showing every workspace' : ''}. ${done.length === 1 ? 'It comes' : 'Each comes'} back if it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
+  toast(`Removed ${what}${anyPicked && !left.length ? ' · showing every workspace' : ''}. ${done.length === 1 ? 'It comes' : 'Each comes'} back if it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
+}
+
+// ---------- renaming a workspace ----------
+// "Rename" on a workspace's right-click (a map hub, a repo chip, a row of the repo menu): the name it shows in every
+// view (the menu, the map, cards, the header) instead of its folder's; nothing on disk changes. settings.repoNames
+// ([{ root, name }], at most 200); an empty name (or the folder's own) goes back to the folder's name.
+let repoNamesSentAt = 0;
+function saveRepoNames() {
+  repoNamesSentAt = Date.now();
+  saveSettings({ repoNames: [...repoNames.values()].slice(-200) });
+}
+// the server's names and order win, except while a change of ours may not have reached it yet (as hiddenRepos)
+function syncRepoPrefs(s) {
+  if (Array.isArray(s.repoNames) && !('repoNames' in pendingSave) && Date.now() - repoNamesSentAt > 3000) {
+    repoNames.clear();
+    for (const r of s.repoNames) if (r && typeof r.root === 'string' && typeof r.name === 'string' && r.name) repoNames.set(normRoot(r.root), { root: r.root, name: r.name });
+  }
+  if (Array.isArray(s.repoOrder) && !('repoOrder' in pendingSave) && Date.now() - repoOrderSentAt > 3000) repoOrder = s.repoOrder.filter((x) => typeof x === 'string' && x);
+}
+// /state's workspace names (its repos, each conversation's repo, the deploys) become the shown ones; _n0 keeps the
+// server's own, for a name that is cleared
+function applyRepoNames(st) {
+  if (!st) return;
+  const set = (r) => {
+    if (!r || !r.root) return;
+    if (!('_n0' in r)) r._n0 = r.name;
+    r.name = repoNames.get(normRoot(r.root))?.name || r._n0;
+  };
+  for (const r of st.repos || []) set(r);
+  for (const list of [st.sessions, st.finished, st.removed]) for (const x of list || []) set(x && x.repo);
+  for (const d of st.deploys || []) set(d);
+}
+function repoRenameItem(root) {
+  const r = repoRootOf({ root });
+  return {
+    label: 'Rename', icon: 'edit',
+    input: { value: repoName(r), placeholder: `a name (empty: ${repoBase(r)})`, hint: 'Enter saves · empty goes back to the folder name · Esc', allowEmpty: true, submit: (text) => renameRepo(r, text) },
+  };
+}
+// -> null (the menu's box closes); Undo puts the name before back
+function renameRepo(root, raw) {
+  const k = normRoot(root), base = repoBase(root);
+  const name = cleanName(raw), before = repoNames.get(k)?.name || '';
+  const keep = !!name && name !== base;
+  if ((keep ? name : '') === before) return null; // nothing changes
+  if (keep) repoNames.set(k, { root, name }); else repoNames.delete(k);
+  saveRepoNames();
+  applyRepoNames(state);
+  render();
+  const undo = () => renameRepo(root, before);
+  toast(keep ? `Renamed ${before || base} to ${name}` : `${before} goes by its folder name, ${base}, again`, C.mint, { label: 'Undo', run: undo });
+  return null;
+}
+
+// ---------- the repo menu's order ----------
+// set by hand: "Move up" / "Move down" on a workspace's right-click, Shift+↑↓ in the menu, or dragging a row there.
+// settings.repoOrder (roots, at most 300): the ones in it come first in that order, the rest follow, busiest first
+let repoOrder = [], repoOrderSentAt = 0;
+// every workspace root in the menu's order (the filter not applied)
+const menuRoots = () => buildMenuItems().filter((it) => it.root).map((it) => it.root);
+function setRepoOrder(list, text) {
+  const before = repoOrder.slice(), was = menuRoots();
+  if (was.length === list.length && was.every((r, i) => normRoot(r) === normRoot(list[i]))) return; // nothing changes
+  const save = (l) => { repoOrder = l.slice(0, 300); repoOrderSentAt = Date.now(); saveSettings({ repoOrder }); render(); };
+  save(list);
+  toast(text, C.mint, { label: 'Undo', run: () => save(before) });
+}
+function moveRepo(root, delta) {
+  const list = menuRoots(), i = list.findIndex((r) => normRoot(r) === normRoot(root)), j = i + delta;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  setRepoOrder(list, `Moved ${repoName(list[j])} ${delta < 0 ? 'up' : 'down'}`);
+}
+// a dragged row: before (or after) the row it was dropped on
+function moveRepoTo(root, target, after) {
+  const list = menuRoots().filter((r) => normRoot(r) !== normRoot(root));
+  const j = list.findIndex((r) => normRoot(r) === normRoot(target));
+  if (j < 0) return;
+  list.splice(j + (after ? 1 : 0), 0, root);
+  setRepoOrder(list, `Moved ${repoName(root)}`);
+}
+function repoMoveItems(root) {
+  const list = menuRoots(), i = list.findIndex((r) => normRoot(r) === normRoot(repoRootOf({ root })));
+  if (i < 0) return [];
+  const r = list[i];
+  return [
+    { label: 'Move up', icon: 'up', disabled: i === 0, run: () => moveRepo(r, -1) },
+    { label: 'Move down', icon: 'down', disabled: i === list.length - 1, run: () => moveRepo(r, 1) },
+  ];
 }
 
 // ---------- adding a repo ----------
@@ -769,12 +949,51 @@ function shortMenu(kids, timeOf) {
   return [...kids.slice(0, n), { label: `Show ${kids.length - n} more`, icon: 'chevron', more: kids.slice(n) }];
 }
 
-// "Add recent workspace ▸" (empty space's right-click): the removed repos (hiddenRepos), newest first, up to 20; picking
-// one adds it back like "Add workspace" (POST /repos/add takes it off the server's hidden list too)
+// the removed repos (hiddenRepos) still off the list, newest first, all of them
+function removedRepoList() {
+  const keys = hiddenRepoKeys();
+  return [...hiddenRepos].filter(([k]) => keys.has(k)).map(([, h]) => h).sort((a, b) => b.at - a.at);
+}
+// "Add back all" (the repo menu's removed section): each added back like "Add workspace", one toast for all
+async function addBackRepos(list) {
+  let n = 0, err = null;
+  for (const h of list) {
+    const r = await post('/repos/add', { path: h.root });
+    const repo = FIXTURE ? { root: h.root, name: repoName(h.root) } : r && r.ok ? r.repo : null;
+    if (!repo) { err = err || (r && r.message) || 'could not reach Fleet View to add it'; continue; }
+    addedLocal.set(normRoot(repo.root), { root: repo.root, name: repo.name || repoName(repo.root), color: repo.color || null, at: Date.now() });
+    hiddenRepos.delete(normRoot(h.root)); hiddenRepos.delete(normRoot(repo.root));
+    n++;
+  }
+  if (n) saveHiddenRepos();
+  if (n) toast(`Added back ${n === 1 ? repoName(list[0].root) : `${n} workspaces`}`, C.mint);
+  if (err) toast(n ? `${list.length - n} not added: ${err}` : err, C.red);
+  if (menuOpen) drawMenu();
+  render();
+}
+// "Clear list": forgets the removed repos (off hiddenRepos, POST /settings), so the section no longer lists them.
+// The server lists a repo that isn't hidden again whenever it has a conversation in the activity window, so the
+// ones that have one now are kept (forgetting them would put them straight back); the rest come back by
+// themselves only when they work again
+function forgetRemovedRepos(list) {
+  const showing = (h) => (state?.sessions || []).some((s) => s.repo && normRoot(s.repo.root) === normRoot(h.root));
+  const gone = list.filter((h) => !showing(h)), kept = list.length - gone.length;
+  if (!gone.length) { toast(`Nothing to forget: ${kept === 1 ? 'it has' : 'each has'} recent conversations and would show again. Add back puts one back`, C.dim, null, 6000); return; }
+  for (const h of gone) hiddenRepos.delete(normRoot(h.root));
+  saveHiddenRepos();
+  const undo = () => { for (const h of gone) if (!hiddenRepos.has(normRoot(h.root))) hiddenRepos.set(normRoot(h.root), h); saveHiddenRepos(); if (menuOpen) drawMenu(); render(); };
+  toast(`Forgot ${gone.length === 1 ? repoName(gone[0].root) : `${gone.length} removed workspaces`}. ${gone.length === 1 ? 'It comes' : 'Each comes'} back on its own if it works again`
+    + `${kept ? ` · kept ${kept} with recent conversations` : ''}`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
+  if (menuOpen) drawMenu();
+  render();
+}
+
+// "Add recent workspace ▸" (empty space's right-click): the removed repos (hiddenRepos), newest first, all of them
+// (the short list, then "Show N more"); picking one adds it back like "Add workspace" (POST /repos/add takes it off
+// the server's hidden list too)
 function recentRepoMenuItem(at = null) {
   const now = Date.now();
-  const keys = hiddenRepoKeys();
-  const list = [...hiddenRepos].filter(([k]) => keys.has(k)).map(([, h]) => h).sort((a, b) => b.at - a.at).slice(0, 20);
+  const list = removedRepoList();
   if (!list.length) return { label: 'Add recent workspace', icon: 'folder', disabled: true, note: 'none removed' };
   return {
     label: 'Add recent workspace', icon: 'folder',
@@ -785,8 +1004,8 @@ function recentRepoMenuItem(at = null) {
   };
 }
 
-// ---------- removed conversations: continue one (right-click a repo) ----------
-// state.removed: the server's 50 most recently removed, newest first ({ id, name, account, repo, cwd, removedAt,
+// ---------- removed conversations: continue, show again or forget one (right-click a repo, or empty space) ----------
+// state.removed: the server's 50 most recently removed, less the forgotten, newest first ({ id, name, account, repo, cwd, removedAt,
 // lastActive }). Continue takes one off the hidden list and opens it (desktop: its live session in the panel,
 // kept; Edge: a Windows Terminal tab). Until /state shows it working again it stays on the page as a dim
 // stand-in card and map node (continued), even when it is outside the activity window: while it runs here,
@@ -796,22 +1015,98 @@ const CONTINUED_MS = 15 * 60e3;
 // the removed ones the menus offer, optionally only a repo's (folder: a repo root or one of its checkouts)
 function removedFor(folder = null) {
   const keys = folder ? new Set([normRoot(folder), normRoot(repoForFolder(state || {}, folder).root)]) : null;
-  return (state?.removed || []).filter((r) => r && typeof r.id === 'string' && hidden.has(r.id) && !continued.has(r.id)
+  return (state?.removed || []).filter((r) => r && typeof r.id === 'string' && hidden.has(r.id) && !continued.has(r.id) && !forgotten.has(r.id)
     && (!keys || (r.repo && keys.has(normRoot(r.repo.root)))));
 }
 const removedAgo = (ms) => (ms < 60e3 ? 'just now' : ms < 3600e3 ? `${Math.round(ms / 60e3)}m ago` : ms < 48 * 3600e3 ? `${Math.round(ms / 3600e3)}h ago` : `${Math.round(ms / 86400e3)}d ago`);
-// the "Removed conversations" item with its submenu, or null when there are none
+// the "Removed conversations" item with its submenu, or null when there are none: all of them (the short list,
+// then "Show N more"), each with its own ▸ (Continue, Show again, Forget), and with two or more "Show all again",
+// "Continue all" and "Forget all" on top
 function removedMenuItem(list, withRepo) {
   if (!list.length) return null;
-  const now = Date.now();
+  const now = Date.now(), n = list.length;
+  const all = n < 2 ? [] : [
+    { label: `Show all ${n} again`, icon: 'reply', note: 'nothing starts', run: () => showRemovedAgain(list) },
+    { label: `Continue all ${n}`, icon: 'shell', confirm: { text: `Continue all ${n}? Each one's session starts${termApi() ? ' here' : ' in a terminal tab'}.`, yes: 'Continue all' }, run: () => continueAll(list) },
+    { label: `Forget all ${n}`, icon: 'trash', danger: true, note: 'off this list for good', run: () => forgetRemoved(list) },
+    { sep: true },
+  ];
   return {
-    label: 'Removed conversations', icon: 'hide',
-    children: shortMenu(list.map((r) => ({
+    label: 'Removed conversations', icon: 'hide', note: `${n}`,
+    children: [...all, ...shortMenu(list.map((r) => ({
       label: r.name, tag: isAcct(r.account) ? r.account : null, icon: 'shell',
       note: `${withRepo ? `${r.repo ? r.repo.name : 'no workspace'} · ` : ''}removed ${removedAgo(now - (r.removedAt || now))}`, at: r.removedAt || now,
-      run: () => continueConversation(r),
-    })), (k) => k.at),
+      children: [
+        { label: 'Continue', icon: 'shell', note: 'opens it and starts its session', run: () => continueConversation(r) },
+        { label: 'Show again', icon: 'reply', note: 'back on the page, nothing starts', run: () => showRemovedAgain([r]) },
+        { label: 'Forget', icon: 'trash', note: 'off this list for good', run: () => forgetRemoved([r]) },
+      ],
+    })), (k) => k.at)],
   };
+}
+// "Show again": off the hidden list (its removed workspace back too, as Continue does) without starting anything.
+// A finished one shows where finished ones do while it is inside the activity window; older, only Projects lists it
+function showRemovedAgain(list) {
+  const back = list.filter((r) => r && hidden.has(r.id));
+  if (!back.length) return;
+  const was = back.map((r) => [r.id, hidden.get(r.id)]), repos = [];
+  for (const r of back) {
+    const h = r.repo && r.repo.root ? hiddenRepos.get(normRoot(r.repo.root)) : null;
+    if (h) { repos.push(h); unhideRepo(h.root); }
+    unhide(r.id);
+  }
+  saveHidden();
+  const listed = new Set([...(state?.sessions || []), ...(state?.finished || [])].map((s) => s.id));
+  const old = back.filter((r) => !listed.has(r.id)).length;
+  const undo = () => {
+    for (const [id, at] of was) if (!hidden.has(id)) { hidden.set(id, at); unhiddenAt.delete(id); }
+    saveHidden();
+    if (repos.length) { for (const h of repos) if (!hiddenRepos.has(normRoot(h.root))) hiddenRepos.set(normRoot(h.root), h); saveHiddenRepos(); }
+    render();
+  };
+  const what = back.length === 1 ? back[0].name : `${back.length} conversations`;
+  const late = !old ? '' : back.length === 1 ? ' · it finished too long ago for this view: Projects lists it'
+    : ` · ${old} finished too long ago for this view: Projects lists ${old === 1 ? 'it' : 'them'}`;
+  toast(`Showing ${what} again${late}`, C.mint, { label: 'Undo', run: undo, ms: 6000 });
+  render();
+}
+// "Continue all": each as Continue does, in one go (desktop: each one's session starts in the host and is kept;
+// Edge: a Windows Terminal tab each). No Undo: sessions started
+async function continueAll(list) {
+  list = list.filter((r) => r && r.id);
+  if (!list.length) return;
+  if (!termApi() && remotePage()) { toast(noTermMsg('Continuing them'), C.red); return; } // tabs would open on the PC's screen
+  const now = Date.now();
+  for (const r of list) {
+    if (r.repo && r.repo.root) unhideRepo(r.repo.root);
+    if (hidden.has(r.id)) unhide(r.id);
+    continued.set(r.id, { at: now, r });
+  }
+  saveHidden();
+  flushSettings();
+  toast(`Continuing ${list.length} conversations…`, C.dim);
+  render();
+  let bad = 0;
+  if (termApi()) {
+    const rs = await Promise.all(list.map((r) => ensureLive({ id: r.id, cwd: r.cwd || null, account: r.account }).catch((e) => ({ ok: false, message: String(e?.message || e) }))));
+    bad = rs.filter((x) => !x || !x.ok).length;
+  } else {
+    // one at a time: the server takes each off its hidden list first (the save above), then opens its tab
+    for (const r of list) { const res = await post('/open', { id: r.id }); if (!FIXTURE && (!res || !res.ok)) bad++; }
+    if (FIXTURE) return; // fixture data: the POSTs are only recorded (window.__fvPosts)
+  }
+  toast(bad ? `${list.length - bad} continued · ${bad} did not start` : `Continued ${list.length} conversations`, bad ? C.red : C.mint);
+}
+// "Forget": off the Removed conversations list for good (settings.forgotten); they stay off the map until they
+// work again, and one removed again later is listed again
+function forgetRemoved(list) {
+  const ids = list.filter((r) => r && hidden.has(r.id) && !forgotten.has(r.id)).map((r) => r.id);
+  if (!ids.length) return;
+  for (const id of ids) forgotten.add(id);
+  saveForgotten();
+  const undo = () => { for (const id of ids) forgotten.delete(id); saveForgotten(); };
+  toast(ids.length === 1 ? `Forgot ${list.find((r) => r.id === ids[0]).name}: off the Removed list. It comes back only if it works again`
+    : `Forgot ${ids.length} removed conversations. Each comes back only if it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
 }
 async function continueConversation(r) {
   if (!r || !r.id) return;
@@ -936,7 +1231,7 @@ function derive(st) {
   const feed = (st.feed || []).filter((e) => ids.has(e.sid));
   let filterNote = '';
   if (!shown.length && inR.length && q) filterNote = `nothing matches the filter "${local.query}" (Esc clears it)`;
-  else if (!shown.length && local.repo) filterNote = `no live conversations in ${repoName(local.repo)}`;
+  else if (!shown.length && shownSel().length) filterNote = `no live conversations in ${shownTitle()}`;
   if (hiddenSaveDue) { hiddenSaveDue = false; saveHidden(); }
   const pending = pendingSessions(st);
   // a conversation that handed off to a fresh one (handoff.js) is replaced by it: off the strip and the map
@@ -1007,11 +1302,13 @@ function drawClock() {
   $('clock').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-// the server's title follows the saved repo (or a fixed --title); right after a pick it lags one poll behind
+// the server's title follows the saved workspaces (or a fixed --title); right after a pick or a rename it lags one
+// poll behind
 function brandText() {
-  const serverRepo = state.settings?.repo ?? null;
-  if (state.title && serverRepo === (local.repo || null)) return state.title;
-  return (local.repo ? repoName(local.repo) : 'all workspaces').toUpperCase();
+  const s = state.settings || {};
+  const same = (s.repo ?? null) === (local.repo || null) && JSON.stringify(s.repos || null) === JSON.stringify(local.repos || null);
+  if (state.title && same && !('repoNames' in pendingSave) && Date.now() - repoNamesSentAt > 3000) return state.title;
+  return shownTitle().toUpperCase();
 }
 
 // what is left of each account's weekly Claude limit: "A 3%  B 98%  C 70% week left"
@@ -1139,9 +1436,11 @@ let finMore = false;
 function finishedRows(fin) {
   return (fin || []).filter((f) => f && f.id && inRepo(f.repo)).sort((a, b) => b.endedAt - a.endedAt).slice(0, 10);
 }
+let finList = []; // the strip's rows, all of them (not only the short list): what "Clear all" removes
 function drawFinished(v) {
   const box = $('finished');
   const list = finishedRows(v.finished);
+  finList = list;
   box.hidden = !list.length;
   if (!list.length) return;
   const open = !!local.finishedOpen, now = Date.now();
@@ -1156,7 +1455,7 @@ function drawFinished(v) {
   const rest = list.length - n;
   const moreRow = rest >= 2 ? `<button type="button" class="fin-more" data-more="1">Show ${rest} more</button>`
     : finMore && shortCount(list, (f) => f.endedAt) < list.length - 1 ? '<button type="button" class="fin-more" data-more="0">Show less</button>' : '';
-  setOnce('finished-list', list.slice(0, rest >= 2 ? n : list.length).map((f) => `<div class="fin-row${ui.detailId === f.id ? ' picked' : ''}" data-id="${esc(f.id)}" role="button" tabindex="0" title="show ${esc(f.name)} in the panel">`
+  setOnce('finished-list', list.slice(0, rest >= 2 ? n : list.length).map((f) => `<div class="fin-row${ui.detailId === f.id ? ' picked' : ''}${multi.has(f.id) ? ' multi' : ''}" data-id="${esc(f.id)}" role="button" tabindex="0" title="show ${esc(f.name)} in the panel">`
     + `<span class="fin-time">${clockTime(f.endedAt, false)}</span><span class="fin-ago">${minsAgo(now - f.endedAt)}</span>${acctTag(f.account) || '<span></span>'}`
     + `<span class="fin-name">${esc(f.name)}</span><span class="fin-repo">${f.repo ? repoChip({ repo: f.repo }) : ''}</span>`
     + `<span class="fin-sum">${esc(f.summary || '')}</span>`
@@ -1175,6 +1474,16 @@ function removeFinished(id, x, y) {
   ] });
 }
 $('finished-toggle').addEventListener('click', () => { saveSettings({ finishedOpen: !local.finishedOpen }); render(); });
+// "Clear all": every row the strip has, through the same Remove as the row's x, with one Undo for all of them;
+// asks first only when Claude is mid-turn in one that runs here
+$('finished-clear').addEventListener('click', () => {
+  const list = sessionsOf(finList.map((f) => f.id));
+  if (!list.length) { toast('nothing to clear', C.dim); return; }
+  const busy = list.filter((s) => isHosted(s.id) && (hostStatus(s.id) ? hostStatus(s.id) === 'busy' : s.state === 'WORKING' || s.state === 'AGENTS')).length;
+  const go = () => removeMany(list.map((s) => s.id), list.length === 1 ? null : `Cleared ${list.length} finished conversations. Each comes back if it works again`);
+  if (busy) askConfirm(`Clear ${list.length} finished conversations? Claude is mid-turn in ${busy === 1 ? 'one of them' : busy}; ${busy === 1 ? 'it ends' : 'they end'} too.`, 'Clear all', go);
+  else go();
+});
 function pickFinished(row) {
   const id = row?.dataset.id;
   if (!id) return;
@@ -1191,7 +1500,11 @@ $('finished-list').addEventListener('click', (e) => {
     removeFinished(x.closest('.fin-row')?.dataset.id, e.clientX || r.left, e.clientY || r.bottom);
     return;
   }
-  pickFinished(e.target.closest('.fin-row'));
+  // Ctrl+click adds the row to the multi-selection (the cards' and tiles' too) or takes it out; a plain click clears it
+  const row = e.target.closest('.fin-row');
+  if (row && (e.ctrlKey || e.metaKey)) { e.preventDefault(); toggleMulti(row.dataset.id); return; }
+  if (row && multi.size) setMulti([], 'cards');
+  pickFinished(row);
 });
 $('finished-list').addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -1364,12 +1677,12 @@ for (const type of ['dblclick', 'auxclick']) {
 
 // footer keys: [keys (each drawn as a key cap; '/' between two of them reads "or"), what they do]
 const KEYS = {
-  cards: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['c', 'compact'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
-  map: [['v', 'view'], ['click', 'select'], ['ctrl+click', 'select more'], ['double-click', 'open'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['wheel', 'zoom'], ['drag', 'pan'], ['0', 'recenter'], ['n/N', 'needs you'], ['k', 'lens'], ['t', 'replay'], ['l', 'legend'], ['/', 'filter'], ['r', 'workspace']],
-  wall: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
-  projects: [['v', 'view'], ['↑↓', 'pick'], ['enter', 'type'], ['right-click', 'menu'], ['/', 'filter'], ['r', 'workspace'], ['esc', 'clear']],
+  cards: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['shift+click', 'select range'], ['ctrl+a', 'select all'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['c', 'compact'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
+  map: [['v', 'view'], ['click', 'select'], ['ctrl+click', 'select more'], ['ctrl+a', 'select all'], ['double-click', 'open'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['wheel', 'zoom'], ['drag', 'pan'], ['0', 'recenter'], ['n/N', 'needs you'], ['k', 'lens'], ['t', 'replay'], ['l', 'legend'], ['/', 'filter'], ['r', 'workspace']],
+  wall: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['shift+click', 'select range'], ['ctrl+a', 'select all'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
+  projects: [['v', 'view'], ['↑↓', 'pick'], ['enter', 'type'], ['ctrl+click', 'select more'], ['shift+click', 'select range'], ['ctrl+a', 'select all'], ['right-click', 'menu'], ['/', 'filter'], ['r', 'workspace'], ['esc', 'clear']],
 };
-const MOUSE = new Set(['click', 'double-click', 'right-click', 'wheel', 'drag', 'ctrl+click']);
+const MOUSE = new Set(['click', 'double-click', 'right-click', 'wheel', 'drag', 'ctrl+click', 'shift+click']);
 const keyHtml = ([keys, label]) => {
   const caps = keys === '/' ? ['/'] : keys.split('/');
   const k = MOUSE.has(keys) ? `<kbd class="mouse">${keys}</kbd>` : caps.map((c) => `<kbd>${esc(c)}</kbd>`).join('<span class="key-or">/</span>');
@@ -1444,11 +1757,29 @@ for (const b of document.querySelectorAll('.tabs button')) b.addEventListener('c
 
 // ---------- repo menu ----------
 let menuOpen = false, menuSel = 0, menuItems = [];
-// the rows ticked for removing together (Ctrl+click, Shift+click a range, Space, or the row's box): normRoots;
-// emptied when the menu closes
+// menuItems is the rows shown (the filter applied); menuAll every row, so ticks outlast a filter
+let menuAll = [];
+// type-to-filter: null while off, else the typed text ('/' starts it empty, a letter that isn't a menu key starts
+// it with that letter); the rows narrow to the names or paths that hold it
+let menuFilter = null;
+// the "Removed workspaces (N)" row is open in place (its rows: Add back each, Add back all, Clear list): true or
+// false once clicked, null until then (open while a filter is typed, so it finds removed ones too)
+let removedOpen = null;
+const removedIsOpen = () => removedOpen ?? !!(menuFilter || '').trim();
+// the menu's own single-letter keys: these never start the filter (once it is typed they go to it)
+const MENU_KEYS = new Set(['j', 'k', 'a', 'u', 'r']);
+const menuMatch = (it, q) => !q || it.name.toLowerCase().includes(q) || (!!it.root && it.root.toLowerCase().includes(q));
+function setMenuFilter(text) {
+  menuFilter = text;
+  menuAnchor = -1;
+  menuSel = 0;
+  drawMenu();
+}
+// the rows ticked for removing together (the row's box, Shift+click a range, or Space): normRoots;
+// emptied when the menu closes; a filter hides rows but keeps their ticks
 const menuPicked = new Set();
 let menuAnchor = -1;
-const menuPickedItems = () => menuItems.filter((it) => it.root && menuPicked.has(normRoot(it.root)));
+const menuPickedItems = () => menuAll.filter((it) => it.root && menuPicked.has(normRoot(it.root)));
 function togglePicked(i, range) {
   const it = menuItems[i];
   if (!it || !it.root) return;
@@ -1463,10 +1794,10 @@ function togglePicked(i, range) {
   menuSel = i;
   drawMenu();
 }
+// the ticks go only once they are removed (Cancel on the live-conversations question keeps them)
 function removePickedRepos() {
   const list = menuPickedItems();
-  menuPicked.clear(); menuAnchor = -1;
-  removeRepos(list);
+  askRemoveRepos(list, () => { menuPicked.clear(); menuAnchor = -1; dropRepos(list); });
 }
 // the repo list every view shares: /state's repos[] (and the ones added here that it doesn't list yet), less the
 // removed ones; each with its colour (the server's, else its conversations', else dim)
@@ -1483,21 +1814,25 @@ function repoList(st) {
   for (const [k, a] of addedLocal) {
     if (seen.has(k) || repoIsHidden(a.root)) continue;
     seen.add(k);
-    out.push({ root: a.root, name: a.name, live: 0, added: true, color: a.color || colorOf(a.root) || C.dim });
+    out.push({ root: a.root, name: repoNames.get(k)?.name || a.name, live: 0, added: true, color: a.color || colorOf(a.root) || C.dim });
   }
   return out;
 }
+// the order set by hand first (repoOrder), then the busiest; no workspace last; a shown one that isn't listed after them
 function buildMenuItems() {
-  const repos = repoList(state).sort((a, b) => isHomeRoot(a.root) - isHomeRoot(b.root) || b.live - a.live || a.name.localeCompare(b.name));
-  if (local.repo && !repoIsHidden(local.repo) && !repos.some((r) => inRepo({ root: r.root, name: r.name }))) repos.push({ root: local.repo, name: repoName(local.repo), live: 0 });
+  const ix = new Map(repoOrder.map((r, i) => [normRoot(r), i]));
+  const at = (r) => ix.get(normRoot(r.root)) ?? Infinity;
+  const repos = repoList(state).sort((a, b) => at(a) - at(b) || isHomeRoot(a.root) - isHomeRoot(b.root) || b.live - a.live || a.name.localeCompare(b.name));
+  for (const x of shownSel()) if (!repoIsHidden(x) && !repos.some((r) => selMatches(x, r))) repos.push({ root: x, name: repoName(x), live: 0 });
   const total = repos.reduce((n, r) => n + (r.live || 0), 0);
   return [{ root: null, name: 'All workspaces', live: total }, ...repos];
 }
-const isCurrent = (it) => (it.root ? !!local.repo && inRepo({ root: it.root, name: it.name }) : !local.repo);
+const isCurrent = (it) => (it.root ? shownSel().length > 0 && inRepo({ root: it.root, name: it.name }) : !shownSel().length);
 function openMenu() {
   if (!state) return;
   menuOpen = true;
-  menuItems = buildMenuItems();
+  menuFilter = null; removedOpen = null;
+  menuAll = menuItems = buildMenuItems();
   menuSel = Math.max(0, menuItems.findIndex(isCurrent));
   $('repo-menu').hidden = false;
   $('brand').setAttribute('aria-expanded', 'true');
@@ -1506,8 +1841,10 @@ function openMenu() {
 }
 function closeMenu() {
   menuOpen = false;
+  if (menuDrag) endMenuDrag(false);
   addBox = null; addChoose = false;
   menuPicked.clear(); menuAnchor = -1;
+  menuFilter = null; removedOpen = null;
   $('repo-menu').hidden = true;
   $('brand').setAttribute('aria-expanded', 'false');
   render();
@@ -1520,24 +1857,41 @@ const ADD_WAYS = [
   { way: 'scratch', key: 's', icon: 'plus', label: 'New scratchpad', title: 'make a new empty folder under Scratchpads and add it' },
   { way: 'browse', key: 'b', icon: 'folder', label: 'Browse', title: 'pick the folder in a window' },
 ];
+// the removed section's rows as drawn (the filter applied): what its buttons act on
+let menuRemoved = [];
 function drawMenu() {
-  menuItems = buildMenuItems();
-  menuSel = Math.min(menuSel, menuItems.length - 1);
-  // a ticked row that left the list (removed, or gone from /state) is no longer ticked
-  const listed = new Set(menuItems.filter((it) => it.root).map((it) => normRoot(it.root)));
+  if (menuDrag?.on) return; // a row is being dragged: the rows stay as they are until it is dropped
+  menuAll = buildMenuItems();
+  const q = (menuFilter || '').trim().toLowerCase();
+  menuItems = q ? menuAll.filter((it) => menuMatch(it, q)) : menuAll;
+  menuSel = Math.max(0, Math.min(menuSel, menuItems.length - 1));
+  // a ticked row that left the list (removed, or gone from /state) is no longer ticked; one the filter hides still is
+  const listed = new Set(menuAll.filter((it) => it.root).map((it) => normRoot(it.root)));
   for (const k of menuPicked) if (!listed.has(k)) menuPicked.delete(k);
   const nPicked = menuPicked.size;
-  const colorOf = (root) => menuItems.find((r) => r.root && normRoot(r.root) === normRoot(root))?.color || C.dim;
+  const colorOf = (root) => menuAll.find((r) => r.root && normRoot(r.root) === normRoot(root))?.color || C.dim;
+  // while filtering, digits go to the filter: no 1-9 numbers on the rows
+  const num = (i) => (menuFilter === null && i < 9 ? i + 1 : '');
+  const now = Date.now();
+  menuRemoved = addBox || addChoose ? [] : removedRepoList().filter((h) => !q || repoName(h.root).toLowerCase().includes(q) || h.root.toLowerCase().includes(q));
+  const nRoots = menuAll.filter((it) => it.root).length, shownRoots = menuItems.filter((it) => it.root).length;
   // written only when it changed: the open menu is redrawn on every poll, and rewriting it would drop the
   // row under the pointer and repaint the frosted box for nothing
-  const html = `<div class="mi-list${nPicked ? ' picking' : ''}">` + menuItems.map((it, i) => {
+  const html = (menuFilter !== null
+    ? `<div class="mi-filter" aria-live="polite"><span class="mi-filter-ic" aria-hidden="true">${icon('search', 13) || '/'}</span>`
+      + `<span class="mi-filter-q${menuFilter ? '' : ' empty'}">${menuFilter ? esc(menuFilter) : 'type a name or path'}</span><span class="mi-caret" aria-hidden="true"></span>`
+      + `<span class="mi-filter-n">${q ? `${shownRoots} of ${nRoots}` : `${nRoots} workspaces`}</span></div>`
+    : '')
+    + `<div class="mi-list${nPicked ? ' picking' : ''}">` + menuItems.map((it, i) => {
     const ticked = !!it.root && menuPicked.has(normRoot(it.root));
-    return `<div class="menu-item${i === menuSel ? ' sel' : ''}${ticked ? ' ticked' : ''}" data-i="${i}" role="option" aria-selected="${isCurrent(it)}">
-    ${it.root ? `<span class="mi-n mi-tick" data-tick="${i}" role="checkbox" aria-checked="${ticked}" aria-label="Select ${esc(it.name)}" title="Select (Ctrl+click, Shift+click, Space)"><span class="mi-num">${i < 9 ? i + 1 : ''}</span><span class="mi-box" aria-hidden="true">${ticked ? '✓' : ''}</span></span>` : `<span class="mi-n">${i < 9 ? i + 1 : ''}</span>`}<span class="dot" style="background:${it.root ? colorOf(it.root) : C.text}"></span>
+    return `<div class="menu-item${i === menuSel ? ' sel' : ''}${ticked ? ' ticked' : ''}" data-i="${i}" role="option" aria-selected="${isCurrent(it)}"${it.root ? ` title="${esc(it.root)}&#10;ctrl+click: show it with the others · drag: reorder"` : ''}>
+    ${it.root ? `<span class="mi-n mi-tick" data-tick="${i}" role="checkbox" aria-checked="${ticked}" aria-label="Select ${esc(it.name)}" title="Tick to remove several (Shift+click, Space)"><span class="mi-num">${num(i)}</span><span class="mi-box" aria-hidden="true">${ticked ? '✓' : ''}</span></span>` : `<span class="mi-n">${num(i)}</span>`}<span class="dot" style="background:${it.root ? colorOf(it.root) : C.text}"></span>
     <span class="mi-name">${esc(it.name)}</span><span class="mi-live">${it.live} live</span><span class="mi-cur">${isCurrent(it) ? '✓' : ''}</span>`
     + (it.root ? `<button type="button" class="mi-x" data-rm="${i}" tabindex="-1" aria-label="Remove ${esc(it.name)} from the list" title="Remove from the list">×</button>` : '<span></span>')
     + '</div>';
-  }).join('') + '</div>'
+  }).join('')
+    + (q && !menuItems.length ? `<div class="mi-none">no workspace matches “${esc(menuFilter.trim())}”${menuRemoved.length ? ' (removed ones below)' : ''}</div>` : '')
+    + '</div>'
     + (nPicked
       ? `<div class="mi-bulk"><button type="button" class="mi-bulk-rm" data-bulk="rm">Remove ${nPicked === 1 ? '1 workspace' : `${nPicked} workspaces`}</button>`
         + `<button type="button" class="mi-bulk-all" data-bulk="all">Select all</button><button type="button" class="mi-bulk-clear" data-bulk="clear">Clear</button></div>`
@@ -1554,7 +1908,11 @@ function drawMenu() {
       }).join('') + '</div>'
       : `<div class="menu-item mi-add" data-add="1" role="option" aria-selected="false" title="add a workspace: paste a path, a new scratchpad or browse">`
         + `<span class="mi-add-ic" aria-hidden="true">${icon('plus', 14) || '+'}</span><span></span><span class="mi-name">Add workspace</span></div>`)
-    + `<div class="menu-hint">${addChoose ? 'p path · s scratchpad · b browse · esc back' : nPicked ? `space tick · del removes ${nPicked} · esc clears` : '↑↓ pick · enter show · 1-9 jump · space/ctrl+click select · del remove · a add · esc close'}</div>`;
+    + removedSectionHtml(q, now)
+    + `<div class="menu-hint">${addChoose ? 'p path · s scratchpad · b browse · esc back'
+      : menuFilter !== null ? `type to filter · backspace edits · ↑↓ pick · enter show · shift+enter show too · space tick · del remove · esc clears the filter`
+      : nPicked ? `space/shift+click tick · del removes ${nPicked} · / filters · esc clears`
+      : '↑↓ pick · enter show · ctrl+click/shift+enter show several · drag/shift+↑↓ reorder · 1-9 jump · / or a letter filters · space tick · del remove · a add · esc close'}</div>`;
   const menu = $('repo-menu');
   if (menu._html !== html) {
     // a rewrite keeps the path box's text, caret and focus
@@ -1563,6 +1921,23 @@ function drawMenu() {
     const nb = menu.querySelector('.mi-add-input');
     if (nb && addBox) { nb.value = addBox.value; if (had || addBox.focus) { addBox.focus = false; nb.focus({ preventScroll: true }); if (caret !== null) nb.setSelectionRange(caret, caret); } }
   }
+}
+// "Removed workspaces (N) ▸" under "Add workspace": one row that opens in place (by itself while a filter
+// matches some) into each removed repo, newest first, with "Add back", then "Add back all" and "Clear list"
+function removedSectionHtml(q, now) {
+  const list = menuRemoved;
+  if (!list.length) return '';
+  const open = removedIsOpen();
+  const head = `<div class="menu-item mi-add mi-rm-head" data-removed="toggle" role="button" aria-expanded="${open}" title="workspaces taken off the list: add one back">`
+    + `<span class="mi-add-ic" aria-hidden="true">${icon('hide', 14) || ''}</span><span></span>`
+    + `<span class="mi-name">Removed workspaces (${list.length}${q ? ' matching' : ''})</span><span class="mi-key">${open ? '▾' : '▸'}</span></div>`;
+  if (!open) return head;
+  const rows = list.map((h, i) => `<div class="mi-rm-row" title="${esc(h.root)}"><span class="mi-name">${esc(repoName(h.root))}</span>`
+    + `<span class="mi-rm-ago">removed ${removedAgo(now - h.at)}</span><button type="button" class="mi-rm-back" data-back="${i}">Add back</button></div>`).join('');
+  const all = list.length === 1 ? '' : q ? ` ${list.length}` : ' all';
+  return head + `<div class="mi-rm-list">${rows}</div>`
+    + `<div class="mi-bulk mi-rm-bulk"><button type="button" data-rmall="back">Add back${all}</button>`
+    + `<button type="button" class="mi-bulk-all" data-rmall="clear" title="forget them: they leave this list and come back on their own only if they work again">${q ? 'Forget these' : 'Clear list'}</button></div>`;
 }
 // the menu's "Add workspace": its three ways in its place
 function chooseAddInMenu(on = true) {
@@ -1594,17 +1969,42 @@ function pickRepo(it) {
   closeMenu();
   if (!it) return;
   ui.selectedId = null;
-  saveSettings({ repo: it.root });
+  saveSettings({ repo: it.root, repos: null });
   toast(`showing ${it.root ? repoName(it.root) : 'every workspace'}`, C.mint);
   render();
+}
+// Ctrl+click or Shift+Enter on a row: it joins the workspaces shown, or leaves them (the menu stays open); the last
+// one out shows every workspace again
+function toggleShown(it) {
+  if (!it) return;
+  if (!it.root) { pickRepo(it); return; }
+  const sel = shownSel(), has = sel.some((x) => selMatches(x, it));
+  if (has) ui.selectedId = null;
+  setShown(has ? sel.filter((x) => !selMatches(x, it)) : sel.concat(it.root));
+  toast(`showing ${shownTitle()}`, C.mint);
+  render();
+}
+// "Show it too" / "Stop showing it" on a row's right-click, while some are picked (as Ctrl+click on it)
+function showTooItems(it) {
+  const n = shownSel().length, cur = isCurrent(it);
+  if (!n || (cur && n === 1)) return [];
+  return [{ label: cur ? 'Stop showing it' : 'Show it too', icon: cur ? 'hide' : 'plus', note: 'ctrl+click', run: () => toggleShown(it) }];
 }
 $('brand').addEventListener('click', (e) => { e.stopPropagation(); menuOpen ? closeMenu() : openMenu(); });
 $('repo-menu').addEventListener('click', (e) => {
   e.stopPropagation();
+  if (Date.now() - menuDragEnded < 300) return; // the click that ends a drag
   if (e.target.closest('.mi-add-box')) return;
   const way = e.target.closest('[data-way]');
   if (way) { addWayInMenu(way.dataset.way); return; }
   if (e.target.closest('[data-add]')) { chooseAddInMenu(); return; }
+  // the removed section: open or close it, add one or all back, or forget them
+  if (e.target.closest('[data-removed]')) { removedOpen = !removedIsOpen(); drawMenu(); return; }
+  const back = e.target.closest('[data-back]');
+  if (back) { const h = menuRemoved[+back.dataset.back]; if (h) addRepoPath(h.root).then((err) => { if (err) toast(err, C.red); }); return; }
+  const rmAll = e.target.closest('[data-rmall]');
+  if (rmAll) { const list = [...menuRemoved]; if (rmAll.dataset.rmall === 'back') addBackRepos(list); else forgetRemovedRepos(list); return; }
+  if (e.target.closest('.mi-rm-row, .mi-filter, .mi-none')) return;
   const bulk = e.target.closest('[data-bulk]');
   if (bulk) {
     if (bulk.dataset.bulk === 'rm') removePickedRepos();
@@ -1618,8 +2018,10 @@ $('repo-menu').addEventListener('click', (e) => {
   if (tick) { togglePicked(+tick.dataset.tick, e.shiftKey); return; }
   const row = e.target.closest('.menu-item');
   if (!row) return;
-  // Ctrl/Cmd+click ticks a row, Shift+click ticks a range; while any are ticked a plain click ticks too
-  if (row.dataset.i && (e.ctrlKey || e.metaKey || e.shiftKey || menuPicked.size) && menuItems[+row.dataset.i]?.root) { togglePicked(+row.dataset.i, e.shiftKey); return; }
+  // Ctrl/Cmd+click adds the row to the workspaces shown (or takes it out); Shift+click ticks a range for removing;
+  // while any are ticked a plain click ticks too
+  if (row.dataset.i && (e.ctrlKey || e.metaKey)) { toggleShown(menuItems[+row.dataset.i]); return; }
+  if (row.dataset.i && (e.shiftKey || menuPicked.size) && menuItems[+row.dataset.i]?.root) { togglePicked(+row.dataset.i, e.shiftKey); return; }
   pickRepo(menuItems[+row.dataset.i]);
 });
 // the path box's keys: typing is its own; Enter adds, Esc goes back to the three ways (nothing reaches the shortcuts)
@@ -1641,9 +2043,61 @@ $('repo-menu').addEventListener('contextmenu', (e) => {
   const color = it.root ? state?.sessions?.find((s) => s.repo && normRoot(s.repo.root) === normRoot(it.root))?.repo.color || C.dim : C.text;
   closeMenu();
   const items = [{ label: it.root ? `Show only ${it.name}` : 'Show every workspace', icon: 'repo', run: () => pickRepo(it) }];
-  if (it.root) items.push(...repoOrderItems(it.root, it.name), { sep: true }, { label: 'Remove from list', icon: 'hide', run: () => removeRepo(it) });
+  if (it.root) {
+    items.push(...showTooItems(it), repoRenameItem(it.root), ...repoMoveItems(it.root), { sep: true });
+    items.push(...repoOrderItems(it.root, it.name), { sep: true }, { label: 'Remove from list', icon: 'hide', run: () => removeRepo(it) });
+  }
   openCtxMenu({ x: e.clientX, y: e.clientY, title: it.name, dot: color, sub: it.root || `${it.live} live`, items });
 });
+// dragging a row up or down sets the menu's order (settings.repoOrder, as Move up / Move down); "All workspaces"
+// stays first. A line shows where it goes; the menu isn't redrawn meanwhile
+let menuDrag = null; // { i, y0, id, on, to, after } while a row is held
+let menuDragEnded = 0;
+$('repo-menu').addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.target.closest('.mi-x, [data-tick], .mi-add-box')) return;
+  const row = e.target.closest('.mi-list .menu-item[data-i]');
+  if (!row || !menuItems[+row.dataset.i]?.root) return;
+  menuDrag = { i: +row.dataset.i, y0: e.clientY, id: e.pointerId, on: false, to: -1, after: false };
+});
+$('repo-menu').addEventListener('pointermove', (e) => {
+  const d = menuDrag, menu = $('repo-menu');
+  if (!d || e.pointerId !== d.id) return;
+  if (!(e.buttons & 1)) { endMenuDrag(false); return; } // let go somewhere it didn't see
+  if (!d.on) {
+    if (Math.abs(e.clientY - d.y0) < 5) return;
+    d.on = true;
+    try { menu.setPointerCapture(e.pointerId); } catch {}
+    menu.classList.add('dragging');
+    menu.querySelector(`.menu-item[data-i="${d.i}"]`)?.classList.add('mi-held');
+  }
+  // the row under the pointer, and which half of it: the line goes above or below it
+  let to = -1, after = false;
+  for (const r of menu.querySelectorAll('.mi-list .menu-item[data-i]')) {
+    const i = +r.dataset.i, b = r.getBoundingClientRect();
+    if (!menuItems[i]?.root) continue;
+    to = i;
+    if (e.clientY < b.top + b.height / 2) { after = false; break; }
+    after = true;
+  }
+  if (to === d.to && after === d.after) return;
+  d.to = to; d.after = after;
+  for (const r of menu.querySelectorAll('.drop-before, .drop-after')) r.classList.remove('drop-before', 'drop-after');
+  if (to >= 0 && to !== d.i) menu.querySelector(`.menu-item[data-i="${to}"]`)?.classList.add(after ? 'drop-after' : 'drop-before');
+});
+function endMenuDrag(drop) {
+  const d = menuDrag, menu = $('repo-menu');
+  menuDrag = null;
+  if (!d || !d.on) return;
+  menuDragEnded = Date.now();
+  menu.classList.remove('dragging');
+  for (const r of menu.querySelectorAll('.mi-held, .drop-before, .drop-after')) r.classList.remove('mi-held', 'drop-before', 'drop-after');
+  const it = menuItems[d.i], target = menuItems[d.to];
+  if (drop && it?.root && target?.root && d.to !== d.i) moveRepoTo(it.root, target.root, d.after);
+  menu._html = '';
+  if (menuOpen) drawMenu();
+}
+$('repo-menu').addEventListener('pointerup', (e) => { if (menuDrag && e.pointerId === menuDrag.id) endMenuDrag(true); });
+$('repo-menu').addEventListener('pointercancel', () => endMenuDrag(false));
 document.addEventListener('click', () => { if (menuOpen) closeMenu(); });
 
 // ---------- / filter ----------
@@ -1698,6 +2152,8 @@ function askConfirm(html, yes, run) {
 function hideConfirm() { confirmFor = null; $('confirm').hidden = true; }
 $('confirm-yes').addEventListener('click', () => { const s = confirmFor; hideConfirm(); if (s && s.run) s.run(); else if (s) doOpen(s); });
 $('confirm-no').addEventListener('click', hideConfirm);
+// answering a question the repo menu asked (removing workspaces with live conversations) keeps the menu open
+$('confirm').addEventListener('click', (e) => { if (menuOpen) e.stopPropagation(); });
 async function doOpen(s) {
   if (FIXTURE) { toast(`fixture data: ${s.name} is not a real conversation`, C.dim); return; }
   const r = await post('/open', { id: s.id });
@@ -1840,8 +2296,15 @@ onRekey((oldKey, id) => {
 function pickKeys(e) {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
   const k = e.key.toLowerCase();
-  if (k !== 'c' && k !== 'z' && k !== 'v') return;
+  if (k !== 'c' && k !== 'z' && k !== 'v' && k !== 'a') return;
   if (e.target.closest?.('.term-host')) return;
+  // Ctrl+A: every conversation the view shows; in the chat box and other text it selects the text, as usual
+  if (k === 'a') {
+    if (e.target.closest?.('.chat-compose, input, textarea, select, [contenteditable]') || !$('confirm').hidden || menuOpen) return;
+    e.preventDefault();
+    if (!e.repeat) selectAllShown();
+    return;
+  }
   // the chat box often has the cursor just from picking a conversation: with the mouse away from the panel and
   // nothing selected in the box, Ctrl+C and Ctrl+V (with a copy waiting) still mean the conversations
   if (e.target.closest?.('.chat-compose')) {
@@ -1904,12 +2367,23 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (addChoose && (k === 'Escape' || k === 'a')) chooseAddInMenu(false);
     else if (addChoose && ADD_WAYS.some((w) => w.key === k)) addWayInMenu(ADD_WAYS.find((w) => w.key === k).way);
+    // type-to-filter: '/' starts it, so does a letter that isn't one of the menu's keys; once on, every typed
+    // character but Space goes to it (Space still ticks), Backspace edits it (and stops it once empty), Esc clears
+    // it before the ticks and the menu
+    else if (!addChoose && menuFilter !== null && k.length === 1 && k !== ' ' && !(k === '/' && !menuFilter)) setMenuFilter(menuFilter + k);
+    else if (menuFilter === '' && k === '/') { /* already filtering */ }
+    else if (!addChoose && menuFilter === null && (k === '/' || (/^\p{L}$/u.test(k) && !MENU_KEYS.has(k)))) setMenuFilter(k === '/' ? '' : k);
+    else if (menuFilter !== null && k === 'Backspace') setMenuFilter(menuFilter ? menuFilter.slice(0, -1) : null);
+    else if (menuFilter !== null && k === 'Escape') setMenuFilter(null);
     else if (k === 'Escape' && menuPicked.size) { menuPicked.clear(); menuAnchor = -1; drawMenu(); }
     else if (k === 'Escape') closeMenu();
     else if (k === ' ') togglePicked(menuSel, e.shiftKey);
     else if (k === 'Delete' && menuPicked.size) removePickedRepos();
+    else if (!menuItems.length) return; // a filter that matches nothing: nothing to pick
+    else if (e.shiftKey && (k === 'ArrowUp' || k === 'ArrowDown')) moveMenuRow(k === 'ArrowUp' ? -1 : 1);
     else if (k === 'ArrowDown' || k === 'j') { menuSel = (menuSel + 1) % menuItems.length; drawMenu(); }
     else if (k === 'ArrowUp' || k === 'k') { menuSel = (menuSel - 1 + menuItems.length) % menuItems.length; drawMenu(); }
+    else if (k === 'Enter' && e.shiftKey) toggleShown(menuItems[menuSel]);
     else if (k === 'Enter') pickRepo(menuItems[menuSel]);
     else if (k === 'Delete') removeRepo(menuItems[menuSel]);
     else if (k === 'a') chooseAddInMenu();
@@ -1958,6 +2432,15 @@ document.addEventListener('keydown', (e) => {
   if (moves[k]) { e.preventDefault(); movePick(...moves[k]); return; }
   if (k === 'c' && local.view === 'cards') { saveSettings({ compact: !local.compact }); render(); }
 });
+
+// Shift+↑↓ in the repo menu: the picked row moves up or down the list, and stays picked
+function moveMenuRow(delta) {
+  const it = menuItems[menuSel];
+  if (!it || !it.root) return;
+  moveRepo(it.root, delta);
+  menuSel = Math.max(0, menuItems.findIndex((x) => x.root && normRoot(x.root) === normRoot(it.root)));
+  drawMenu();
+}
 
 // Delete: removes what is picked. A multi-selection of 2+ asks first; one conversation asks only when Claude is
 // mid-turn in it; a repo picked on the map goes at once (Undo on the toast), like Delete in the repo menu
@@ -2008,8 +2491,8 @@ function ctxTargetOf(el) {
   const chip = el.closest('[data-act="reveal"][data-kind="folder"]');
   if (chip && chip.dataset.path) return { kind: 'repo', root: chip.dataset.path };
   const row = el.closest('.fin-row[data-id], .card[data-id], .tile[data-id]');
-  // a card or tile of a multi-selection of 2+: the "N conversations" menu
-  if (row && multi.size >= 2 && multi.has(row.dataset.id) && !row.classList.contains('fin-row')) return { kind: 'sessions', ids: [...multi] };
+  // a card, tile or finished row of a multi-selection of 2+: the "N conversations" menu
+  if (row && multi.size >= 2 && multi.has(row.dataset.id)) return { kind: 'sessions', ids: [...multi] };
   if (row) return { kind: 'session', id: row.dataset.id };
   return null;
 }
@@ -2048,10 +2531,14 @@ function openContextMenu(target, x, y) {
     items.push({ label: onPc('Open folder'), icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
     if (pushHook()) items.push(repoPushItem(folder, repo.push || 'production'));
     if (unpinItem(target)) items.push(unpinItem(target));
+    // its name in Fleet View, its place in the repo menu, and (while some are picked) whether it is shown too
+    const rIt = { root: repoRootOf({ root: folder }), name: target.name || repo.name || repoName(folder) };
+    items.push({ sep: true }, ...showTooItems(rIt), repoRenameItem(folder), ...repoMoveItems(folder));
     // orders for every conversation in it, idle and new ones too (one team), or the same text to each
     items.push({ sep: true }, ...repoOrderItems(folder, target.name || repo.name || repoName(folder)));
-    // its removed conversations (only when it has any), to continue one
-    const rm = removedMenuItem(removedFor(folder).slice(0, 15), false);
+    items.push(selectAllItem(repoSessions(folder).filter((s) => !s.pending), `no conversation in ${target.name || repo.name || repoName(folder)}`));
+    // its removed conversations (only when it has any), all of them: continue, show again or forget each
+    const rm = removedMenuItem(removedFor(folder), false);
     if (rm) items.push({ sep: true }, rm);
     // the repo and its conversations leave every view (the repo menu too); Undo on the toast
     items.push({ sep: true }, { label: 'Remove workspace', icon: 'close', danger: true, run: () => removeRepo({ root: folder, name: target.name || repo.name }) });
@@ -2059,11 +2546,13 @@ function openContextMenu(target, x, y) {
     return;
   }
   if (target.kind === 'space') {
-    // empty space on the map, or around the cards or tiles: add a repo (removed conversations are on a repo's menu)
+    // empty space on the map, or around the cards or tiles: add a repo, and every removed conversation (its
+    // workspace in the note; those with no workspace are only here)
+    const rmAll = removedMenuItem(removedFor(), true);
     const extra = [{ sep: true }, notifyMenuItem()];
     if (accountsMenuItem()) extra.push(accountsMenuItem());
     if (multi.size) extra.push({ label: `Clear selection (${multi.size})`, icon: 'close', run: () => setMulti([], 'menu') });
-    openCtxMenu({ x, y, items: [addRepoMenuItem({ x, y }), recentRepoMenuItem({ x, y }), ...extra] });
+    openCtxMenu({ x, y, items: [addRepoMenuItem({ x, y }), recentRepoMenuItem({ x, y }), ...(rmAll ? [rmAll] : []), ...extra] });
     return;
   }
   const s = (view?.allSessions || state.sessions || []).find((x) => x.id === target.id);
@@ -2373,6 +2862,27 @@ function toggleMulti(id) {
   setMulti([...next], 'cards');
 }
 ui.clearMulti = () => setMulti([], 'cards');
+// the conversations of list that the views show now (the repo menu and / filter applied)
+const shownOf = (list) => { const ids = new Set((view?.sessions || []).map((s) => s.id)); return list.filter((s) => ids.has(s.id)); };
+// Ctrl+A: every conversation the current view shows into the multi-selection (Projects: the rows of its list)
+function selectAllShown() {
+  let ids = (view?.sessions || []).map((s) => s.id);
+  if (local.view === 'projects') {
+    const listed = new Set((view?.allSessions || []).map((s) => s.id));
+    ids = [...(viewEls.projects?.querySelectorAll('.pj-side [data-pick]') || [])].map((b) => b.dataset.pick).filter((id) => listed.has(id));
+  }
+  selectAll(ids);
+}
+function selectAll(ids) {
+  if (!ids.length) { toast('no conversation to select here', C.dim); return; }
+  setMulti(ids, 'keys');
+  toast(`Selected ${ids.length === 1 ? 'one conversation' : `${ids.length} conversations`} · Esc clears`, C.dim);
+}
+// "Select all conversations" on a workspace's and a team's menu: the ones shown into the multi-selection
+function selectAllItem(list, none) {
+  if (!list.length) return { label: 'Select all conversations', icon: 'check', disabled: true, note: none };
+  return { label: 'Select all conversations', icon: 'check', note: `${list.length}`, run: () => selectAll(list.map((s) => s.id)) };
+}
 // a split chat's ✕ (detail.js): out of the selection; the panel's own conversation hands its place to the next one
 // A pinned split's ✕ lets go of its pin as well; the leading chat's ✕ hands its place to a pinned split when no
 // other conversation is selected
@@ -2600,7 +3110,9 @@ async function runSet(list, cmd) {
 }
 // the "N conversations" menu (a multi-selection). "Give orders ▸" as on a workspace: Work together (one team of
 // peers), Under a lead ▸ (one of them, or a new conversation in the first one's workspace, leads), Send to each,
-// then Model ▸, Effort ▸ and Fast mode ▸ for all of them
+// then Model ▸, Effort ▸ and Fast mode ▸ for all of them. Then the single conversation's own actions for each of
+// them: Fork, Move to workspace ▸, Send elsewhere ▸, Push to ▸, Cancel waiting orders and Unpin from the map (new
+// sessions with no id yet are left out of those that need one), each with one toast; a move or push has one Undo
 function sessionsMenu(list, x, y) {
   const desk = !!termApi();
   const live = list.filter((s) => isHosted(s.id));
@@ -2617,12 +3129,146 @@ function sessionsMenu(list, x, y) {
     : { label: 'Give orders', icon: 'send', disabled: true, note: noTermNote() };
   openCtxMenu({ x, y, title: `${list.length} conversations`, dot: C.cyan, sub: list.map((s) => s.name).join(' · '), items: [
     orders, addManyItem(list), { sep: true },
-    live.length ? { label: 'Interrupt all', icon: 'stop', note: `${live.length} running here`, run: () => interruptAll(live) } : { label: 'Interrupt all', icon: 'stop', disabled: true, note: 'none of them runs here' },
+    ...[forkManyItem(list), moveManyItem(list), desk && !singleAccount() ? sendManyItem(list) : null, pushHook() ? pushManyItem(list) : null,
+      cancelManyItem(list), unpinManyItem(list)].filter(Boolean),
+    { sep: true },
+    live.length ?{ label: 'Interrupt all', icon: 'stop', note: `${live.length} running here`, run: () => interruptAll(live) } : { label: 'Interrupt all', icon: 'stop', disabled: true, note: 'none of them runs here' },
     desk ? { label: 'Open all here', icon: 'shell', run: () => openAllHere(list) } : { label: 'Open all here', icon: 'shell', disabled: true, note: noTermNote() },
     { sep: true },
     { label: 'Clear selection', icon: 'close', run: () => setMulti([], 'menu') },
     removeAllItem(list),
   ] });
+}
+// ---- the single conversation's actions for a whole selection ----
+// the ones with an id: new sessions (pending stand-ins) and demo ones can't be forked, moved, sent or pushed
+const realOf = (list) => list.filter((s) => !s.pending && !s.demo);
+const midTurn = (s) => isHosted(s.id) && (hostStatus(s.id) ? hostStatus(s.id) === 'busy' : s.state === 'WORKING' || s.state === 'AGENTS');
+const nOf = (k, n) => (k < n ? `${k} of ${n}` : null);
+const whoOf = (l) => (l.length === 1 ? l[0].name : `${l.length} conversations`);
+// "1 new one is left out" when the selection has new sessions in it
+const newLeft = (list, real) => { const k = list.length - real.length; return k ? `${k} new ${k === 1 ? 'one is' : 'ones are'} left out` : ''; };
+const noteOf = (...parts) => parts.filter(Boolean).join(' · ') || null;
+// "Fork": a fork of each (as the single Fork), in the panel; the first one is picked
+function forkManyItem(list) {
+  const label = 'Fork each';
+  if (!termApi()) return { label, icon: 'branch', disabled: true, note: noTermNote() };
+  const real = realOf(list), go = real.filter((s) => s.cwd);
+  if (!go.length) return { label, icon: 'branch', disabled: true, note: real.length ? 'no folder known for them' : 'none of them has an id yet' };
+  const off = real.length - go.length;
+  return { label, icon: 'branch', note: noteOf(`${go.length} new conversations`, off ? `${off} with no folder known` : '', newLeft(list, real)), run: () => forkMany(go) };
+}
+async function forkMany(list) {
+  toast(`Forking ${whoOf(list)}…`, C.dim);
+  const keys = [], bad = [];
+  // one at a time: each new session takes its own key and panel size
+  for (const s of list) {
+    const r = await createSession({ cwd: s.cwd, account: s.account, forkFrom: s.id, ...newSize() });
+    if (r && r.ok) keys.push(r.key); else bad.push((r && r.message) || `could not fork ${s.name}`);
+  }
+  if (!keys.length) { toast(bad[0] || 'could not fork them', C.red); return; }
+  toast(bad.length ? `Forked ${keys.length} · ${bad.length} did not start: ${bad[0]}` : `Forked ${whoOf(list)}: ${keys.length === 1 ? 'a new conversation' : `${keys.length} new conversations`} with their history`,
+    bad.length ? C.red : C.text, null, bad.length ? 9000 : 0);
+  ui.setSelected(keys[0], 'explicit');
+}
+// "Move to workspace ▸": one submenu of the listed repos (less one all of them are in already: "2 of 3" when some
+// are), and "Back to the workspace each started in" when any were moved. One Undo puts each back where it was.
+function moveManyItem(list) {
+  const label = 'Move to workspace';
+  const real = realOf(list);
+  if (!real.length) return { label, icon: 'folder', disabled: true, note: 'none of them has an id yet' };
+  const n = real.length;
+  const away = (r) => real.filter((s) => !s.repo || normRoot(s.repo.root) !== normRoot(r.root));
+  const repos = (state?.repos || []).filter((r) => r.root && !repoIsHidden(r.root) && away(r).length)
+    .sort((a, b) => isHomeRoot(a.root) - isHomeRoot(b.root) || repoName(a.root).localeCompare(repoName(b.root)));
+  const children = repos.map((r) => ({ label: r.name || repoName(r.root), icon: 'folder', badge: nOf(away(r).length, n), run: () => moveMany(away(r), r.root) }));
+  const moved = real.filter((s) => s.moved);
+  if (moved.length) children.unshift({ label: 'Back to the workspace each started in', icon: 'reply', badge: nOf(moved.length, n), run: () => moveMany(moved, null) }, ...(children.length ? [{ sep: true }] : []));
+  if (!children.length) return { label, icon: 'folder', disabled: true, note: 'no other workspace listed' };
+  return { label, icon: 'folder', note: noteOf(`${n} conversations`, newLeft(list, real)), children };
+}
+async function moveMany(list, root) {
+  const before = new Map(list.map((s) => [s.id, s.moved && s.repo ? s.repo.root : null]));
+  const rs = await Promise.all(list.map((s) => post('/sessions/move', { id: s.id, root })));
+  if (FIXTURE) return;
+  const done = list.filter((s, i) => rs[i] && rs[i].ok), bad = rs.filter((r) => !r || !r.ok);
+  if (!done.length) { toast(bad[0]?.message || 'could not move them', C.red); return; }
+  const undo = () => Promise.all(done.map((s) => post('/sessions/move', { id: s.id, root: before.get(s.id) }))).then(() => poll());
+  const to = rs.find((r) => r && r.ok)?.name;
+  const one = done.length === 1;
+  toast((root ? `Moved ${whoOf(done)} to ${to}` : `${whoOf(done)} ${one ? 'is' : 'are'} back in the workspace ${one ? 'it' : 'each'} started in`)
+    + (bad.length ? ` · ${bad.length} could not move: ${bad[0]?.message || 'failed'}` : ''), bad.length ? C.red : C.mint, { label: 'Undo', run: undo });
+  poll();
+}
+// "Send elsewhere ▸": the accounts that are on, less those out of their limit, as the single one's; each row sends
+// the ones not on that account already ("2 of 3"), less one open in another window (it has to be ended there)
+function sendManyItem(list) {
+  const label = 'Send elsewhere';
+  const real = realOf(list);
+  const canGo = (s, a) => a !== (s.account || 'B') && canSendTo(s, a);
+  const to = onAccounts().filter((a) => !acctOut(a) && real.some((s) => canGo(s, a)));
+  if (!to.length) return null;
+  const goes = (a) => real.filter((s) => canGo(s, a) && !(openElsewhere(s) && !isHosted(s.id)));
+  if (!to.some((a) => goes(a).length)) return { label, icon: 'send', disabled: true, note: 'open in another window; end them there' };
+  const children = to.map((a) => {
+    const go = goes(a), busy = go.filter(midTurn).length;
+    if (!go.length) return { label: `Claude ${a}`, tag: a, disabled: true, note: 'open in another window' };
+    return { label: `Claude ${a}`, tag: a, badge: nOf(go.length, real.length),
+      confirm: busy ? { text: `Claude is mid-turn in ${busy === 1 ? 'one of them' : busy}. Stop ${busy === 1 ? 'it' : 'them'} and send ${go.length === 1 ? 'it' : `all ${go.length}`} to account ${a}?`, yes: 'Send anyway' } : null,
+      run: () => sendManyTo(go, a) };
+  });
+  return { label, icon: 'send', note: noteOf(newLeft(list, real)), children };
+}
+async function sendManyTo(list, to) {
+  toast(`Sending ${whoOf(list)} to Claude ${to}: each writes a summary, then a fresh conversation picks it up`, C.text);
+  const size = newSize();
+  const rs = await Promise.all(list.map((s) => sendToAccount(s, to, size).catch((e) => ({ ok: false, message: String(e?.message || e) }))));
+  const bad = rs.filter((r) => !r || !r.ok), ok = list.length - bad.length;
+  if (!ok) { toast(bad[0]?.message || `could not send them to Claude ${to}`, C.red); return; }
+  toast(bad.length ? `${ok} sent to Claude ${to} · ${bad.length} could not go: ${bad[0]?.message || 'failed'}` : `Sent ${whoOf(list)} to Claude ${to}`, bad.length ? C.red : C.mint, null, bad.length ? 9000 : 0);
+}
+// "Push to ▸": Workspace default, Production or Preview for each (a tick: all of them have it; "2 of 3": some do).
+// One Undo gives each its own choice back.
+function pushManyItem(list) {
+  const real = realOf(list);
+  if (!real.length) return null;
+  const n = real.length;
+  const own = (s) => s.push?.own || null, eff = (s) => own(s) || s.push?.repo || 'production';
+  const kid = (label, t) => { const k = real.filter((s) => own(s) === t).length; return { label, icon: k === n ? 'check' : null, badge: k && k < n ? `${k} of ${n}` : null, run: () => pushMany(real, t) }; };
+  const all = new Set(real.map(eff));
+  return { label: 'Push to', icon: 'push', badge: all.size === 1 ? [...all][0] : 'mixed', note: noteOf(newLeft(list, real)),
+    children: [kid('Workspace default', null), { sep: true }, ...['production', 'preview'].map((t) => kid(PUSH_NAME[t], t))] };
+}
+async function pushMany(list, target) {
+  const before = new Map(list.map((s) => [s.id, s.push?.own || null]));
+  const rs = await Promise.all(list.map((s) => post('/push-target', { id: s.id, target })));
+  if (FIXTURE) return;
+  const done = list.filter((s, i) => rs[i] && rs[i].ok), bad = rs.filter((r) => !r || !r.ok);
+  if (!done.length) { toast(bad[0]?.message || 'could not set where they push', C.red); return; }
+  const undo = () => Promise.all(done.map((s) => post('/push-target', { id: s.id, target: before.get(s.id) }))).then(() => poll());
+  const one = done.length === 1;
+  toast((target ? `${whoOf(done)} push${one ? 'es' : ''} to ${PUSH_NAME[target]}` : `${whoOf(done)} follow${one ? 's its' : ' their'} workspace again`)
+    + (bad.length ? ` · ${bad.length} could not be set` : ''), bad.length ? C.red : C.mint, { label: 'Undo', run: undo });
+  poll();
+}
+// "Cancel N waiting orders": every order waiting for one of them (new sessions' first messages too)
+function cancelManyItem(list) {
+  const withQ = list.filter((s) => queuedFor(s.id).length);
+  if (!withQ.length) return { label: 'Cancel waiting orders', icon: 'close', disabled: true, note: 'none of them has one waiting' };
+  const k = withQ.reduce((a, s) => a + queuedFor(s.id).length, 0);
+  return { label: k === 1 ? 'Cancel waiting order' : `Cancel ${k} waiting orders`, icon: 'close', note: withQ.length === 1 ? withQ[0].name : `for ${withQ.length} of them`,
+    run: () => {
+      const n = withQ.reduce((a, s) => a + cancelQueued(s.id), 0);
+      toast(n ? `Cancelled ${n === 1 ? 'the order' : `${n} orders`} waiting for ${whoOf(withQ)}` : 'they were sent already', C.dim);
+      render();
+    } };
+}
+// "Unpin from the map" (the map only): the pinned ones go back on their workspace's ring
+function unpinManyItem(list) {
+  if (local.view !== 'map' || !mapPins) return null;
+  const pins = list.filter((s) => mapPins.pinned({ kind: 'session', id: s.id }));
+  if (!pins.length) return { label: 'Unpin from the map', icon: 'reply', disabled: true, note: 'none of them is pinned' };
+  return { label: 'Unpin from the map', icon: 'reply', note: pins.length < list.length ? `${pins.length} pinned` : null,
+    run: () => { for (const s of pins) mapPins.unpin({ kind: 'session', id: s.id }); toast(`Unpinned ${whoOf(pins)}: back on ${pins.length === 1 ? 'its' : 'their'} workspace's ring`, C.dim); } };
 }
 // "Remove N conversations": the single Remove for each (ends the ones running here, takes them off every view)
 function removeAllItem(list) {
@@ -2630,7 +3276,7 @@ function removeAllItem(list) {
   const text = `Remove ${list.length} conversations?${busy ? ` Claude is mid-turn in ${busy === 1 ? 'one of them' : busy}; ${busy === 1 ? 'it ends' : 'they end'} too.` : ''}`;
   return { label: `Remove ${list.length} conversations`, icon: 'close', danger: true, confirm: { text, yes: 'Remove' }, run: () => removeMany(list.map((s) => s.id)) };
 }
-function removeMany(ids) {
+function removeMany(ids, text = null) {
   let n = 0, first = null;
   for (const id of ids) {
     const s = view?.allSessions.find((x) => x.id === id);
@@ -2645,11 +3291,11 @@ function removeMany(ids) {
   }
   if (!n) return;
   saveHidden();
-  multi.clear();
-  try { mapMod?.setMapSelection?.([]); } catch (e) { console.error(e); }
+  for (const id of ids) multi.delete(id);
+  try { mapMod?.setMapSelection?.([...multi]); } catch (e) { console.error(e); }
   const gone = ids.filter((id) => hidden.has(id));
   const undo = () => { const back = gone.filter((id) => hidden.has(id)); if (!back.length) return; for (const id of back) unhide(id); saveHidden(); render(); };
-  toast(n === 1 ? `Removed ${first.name}. It comes back if it works again` : `Removed ${n} conversations. Each comes back if it works again`, C.dim, { label: 'Undo', run: undo, ms: 6000 });
+  toast(text || (n === 1 ? `Removed ${first.name}. It comes back if it works again` : `Removed ${n} conversations. Each comes back if it works again`), C.dim, { label: 'Undo', run: undo, ms: 6000 });
   render();
 }
 function interruptAll(list) {
@@ -2706,7 +3352,8 @@ function teamMenuItems(t, full) {
   // members removed from the map are left out of what goes to them
   const all = sessionsOf(t.members), members = all.filter((s) => !isHidden(s));
   const sel = ui.selectedId && !t.members.includes(ui.selectedId) ? sessionsOf([ui.selectedId])[0] : null;
-  const items = [orderItem('Message the team', members, { team: false, prefix: `[Fleet View · team "${t.name}"]`, placeholder: `A message to every conversation in "${t.name}"` }), leadItem(t)];
+  const items = [orderItem('Message the team', members, { team: false, prefix: `[Fleet View · team "${t.name}"]`, placeholder: `A message to every conversation in "${t.name}"` }), leadItem(t),
+    teamRenameItem(t), selectAllItem(shownOf(members), 'none of them is shown now')];
   if (full) {
     const why = !sel ? (ui.selectedId ? 'it is in this team already' : 'pick one first') : joinWhy(sel, t);
     items.push(why ? { label: 'Add picked conversation', icon: 'plus', disabled: true, note: why }
@@ -2716,6 +3363,32 @@ function teamMenuItems(t, full) {
     items.push({ sep: true }, { label: 'Disband team', icon: 'close', danger: true, confirm: { text: `Disband "${t.name}"? Its conversations keep working; they stop being a team, and each is told.`, yes: 'Disband' }, run: () => disbandTeam(t) });
   }
   return items;
+}
+// "Rename team": a text box in the menu, like a conversation's Rename. POST /teams/rename keeps it with the team;
+// the map, the menus and every note, brief and order from then on use it. Nobody is told now (a note costs a turn)
+function teamRenameItem(t) {
+  return {
+    label: 'Rename team', icon: 'edit',
+    input: { value: t.name || '', placeholder: 'the team\'s name', hint: 'Enter saves · Esc', busy: 'renaming…', empty: 'give it a name', submit: (text) => renameTeam(t, text) },
+  };
+}
+// -> null when it worked, else a message (the menu's box shows it)
+async function renameTeam(t, raw) {
+  const name = cleanName(raw);
+  if (!name) return 'give it a name';
+  if (name === t.name) return null; // nothing changes
+  const before = t.name;
+  const r = await post('/teams/rename', { id: t.id, name });
+  if (!(FIXTURE && r == null)) {
+    if (!r || !r.ok) return (r && r.message) || 'could not reach Fleet View to rename it';
+  }
+  // at once, until the next /state has it
+  const cur = teamById(t.id);
+  if (cur) cur.name = (r && r.team && r.team.name) || name;
+  render();
+  const undo = async () => { const why = await renameTeam({ ...t, name }, before); if (why) toast(why, C.red); };
+  toast(`Renamed "${before}" to "${name}"`, C.mint, { label: 'Undo', run: undo });
+  return null;
 }
 // why s can't join t, or null
 function joinWhy(s, t) {
@@ -3163,6 +3836,8 @@ if (DEBUG) {
     removeRepo: (root) => removeRepo({ root }),
     openRepoMenu: () => openMenu(),
     get menuItems() { return menuItems; },
+    get menuFilter() { return menuFilter; },
+    get menuRemoved() { return menuRemoved; },
     get view() { return view; },
     get state() { return state; },
     contextMenu: (target, x = 200, y = 200) => openContextMenu(target, x, y),

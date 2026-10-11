@@ -194,6 +194,12 @@ button { font: inherit; color: inherit; }
 .menu-item:hover .mi-box, .mi-list.picking .mi-box { display: inline-flex; }
 .menu-item.ticked { background: color-mix(in srgb, var(--cyan) 14%, transparent); }
 .menu-item.ticked .mi-box { background: var(--cyan); border-color: var(--cyan); }
+/* dragging a row to reorder the list: the held row dims, a line shows where it goes */
+#repo-menu.dragging { cursor: grabbing; user-select: none; }
+#repo-menu.dragging .menu-item:hover { background: none; }
+.menu-item.mi-held { opacity: 0.45; }
+.menu-item.drop-before { box-shadow: inset 0 2px 0 var(--cyan); }
+.menu-item.drop-after { box-shadow: inset 0 -2px 0 var(--cyan); }
 .mi-bulk { display: flex; gap: 6px; align-items: center; padding: 6px 4px 2px; margin-top: 4px; border-top: 1px solid var(--line); }
 .mi-bulk button {
   padding: 5px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: none; cursor: pointer;
@@ -218,6 +224,32 @@ button { font: inherit; color: inherit; }
 .mi-add-box { padding: 6px 4px 2px; margin-top: 4px; }
 .mi-add-msg { color: var(--faint); font-size: 11.5px; padding: 4px 6px 0; overflow-wrap: anywhere; }
 .mi-add-msg.err, .ctx-in-msg.err { color: var(--red); }
+/* type-to-filter: the typed text above the rows, with a caret and how many rows it leaves */
+.mi-filter {
+  display: grid; grid-template-columns: 16px auto 1fr auto; align-items: center; gap: 0 8px;
+  padding: 6px 10px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--line); color: var(--dim);
+}
+.mi-filter-ic { display: inline-flex; align-items: center; justify-content: center; color: var(--cyan); }
+.mi-filter-q { color: var(--text); font: 13px/1.3 var(--font-mono); overflow-wrap: anywhere; min-width: 0; }
+.mi-filter-q.empty { color: var(--faint); font-family: var(--font-ui); }
+.mi-caret { width: 1.5px; height: 14px; background: var(--cyan); animation: mi-blink 1s steps(1) infinite; }
+.mi-filter-n { grid-column: 4; color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+@keyframes mi-blink { 50% { opacity: 0; } }
+.mi-none { color: var(--faint); padding: 8px 10px; font-size: 12.5px; }
+/* "Removed workspaces (N) ▸" and what it opens into: each removed one with "Add back", then Add back all / Clear list */
+.menu-item.mi-rm-head { grid-template-columns: 16px 10px minmax(0, 1fr) auto; }
+.menu-item.mi-rm-head[aria-expanded="true"] { background: var(--hover); }
+.mi-rm-list { max-height: 240px; overflow-y: auto; padding: 2px 0; }
+.mi-rm-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 4px 6px 4px 36px; border-radius: var(--radius-sm); }
+.mi-rm-row:hover { background: var(--hover); }
+.mi-rm-row .mi-name { color: var(--dim); overflow-wrap: normal; word-break: keep-all; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mi-rm-ago { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
+.mi-rm-back {
+  padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: none; cursor: pointer;
+  color: var(--dim); font: 12px/1.2 var(--font-ui);
+}
+.mi-rm-back:hover { background: var(--press); color: var(--text); }
+@media (prefers-reduced-motion: reduce) { .mi-caret { animation: none; } }
 /* the right-click path box's message line, with an optional small link on its right */
 .ctx-in-foot { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }
 .ctx-in-foot .ctx-in-msg { flex: 1 1 auto; min-width: 0; }
@@ -236,13 +268,14 @@ button { font: inherit; color: inherit; }
 
 /* ---------- recently finished strip ---------- */
 .finished {
-  flex: none; margin: 2px var(--side) 10px; border-radius: var(--radius);
+  position: relative; flex: none; margin: 2px var(--side) 10px; border-radius: var(--radius);
   background: var(--glass-bg); border: 1px solid var(--glass-edge); box-shadow: inset 0 1px 0 var(--glass-highlight);
   font: 12.5px/1.45 var(--font-ui);
 }
 .fin-head {
   display: flex; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 6px 14px 6px 12px;
   background: none; border: 0; border-radius: var(--radius); cursor: pointer; text-align: left; color: var(--dim); flex-wrap: wrap;
+  padding-right: 92px; /* room for "Clear all" */
   font: 600 12.5px/1.4 var(--font-ui);
 }
 .fin-head:hover .fin-title { color: var(--text); }
@@ -257,6 +290,13 @@ button { font: inherit; color: inherit; }
 .fin-peek { font-weight: 400; color: var(--dim); overflow-wrap: anywhere; min-width: 0; animation: fade-in 260ms var(--ease); }
 .fin-peek b { color: var(--text); font-weight: 600; }
 .fin-peek:empty { display: none; }
+/* "Clear all": over the head's right end (a button can't sit inside the head's button) */
+.fin-clear {
+  position: absolute; top: 6px; right: 10px; padding: 2px 9px; border: 0; border-radius: var(--radius-sm);
+  background: none; color: var(--dim); font: 500 12px/1.4 var(--font-ui); cursor: pointer; transition: color 180ms var(--ease), background-color 180ms var(--ease);
+}
+.fin-clear:hover { color: var(--text); background: var(--hover); }
+.fin-clear:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 /* folding: the list's height glides to 0 and back */
 .fin-body { display: grid; grid-template-rows: 1fr; transition: grid-template-rows 280ms var(--ease); }
 .finished.collapsed .fin-body { grid-template-rows: 0fr; }
@@ -279,6 +319,8 @@ button { font: inherit; color: inherit; }
 .fin-more:hover { color: var(--text); }
 .fin-more:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .fin-row.picked { background: rgba(63, 216, 255, 0.08); box-shadow: inset 0 0 0 1px rgba(63, 216, 255, 0.4); }
+/* in the multi-selection (Ctrl+click), as the Projects list's rows */
+.fin-row.multi { background: rgba(63, 216, 255, 0.12); box-shadow: inset 0 0 0 1px rgba(63, 216, 255, 0.4); }
 .fin-row:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .fin-time { color: var(--text); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .fin-ago { color: var(--dim); opacity: 0.75; white-space: nowrap; font-variant-numeric: tabular-nums; }

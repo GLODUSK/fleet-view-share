@@ -202,6 +202,11 @@ function cleanHidden(list, now = Date.now()) {
   return [...out.values()];
 }
 let hidden = cleanHidden(saved.hidden) || [];
+// removed conversations the page's "Forget" took off its Removed conversations list for good: ids, at most 500.
+// They stay on hidden (off the map until they work again); one leaves this list when it leaves hidden, so removed
+// again later it is listed again. removedList skips them.
+const cleanForgotten = (list) => (Array.isArray(list) ? [...new Set(list.filter((x) => typeof x === 'string' && UUID_RE.test(x)).map((x) => x.toLowerCase()))].slice(-HIDDEN_MAX) : null);
+let forgotten = (cleanForgotten(saved.forgotten) || []).filter((id) => hidden.some((h) => h.id === id));
 // Hidden by the automation API (api.js: stop { remove }, remove, a temp session that ended): id -> when. The page
 // keeps its own copy of the hidden list and saves all of it back; one saved in the half minute after the server
 // hid something, before the page's /state poll took that up, would put the conversation back. So for that long a
@@ -230,13 +235,28 @@ function cleanHiddenRepos(list, now = Date.now()) {
   }
   return [...out.values()];
 }
+// several workspaces shown at once (the page's Ctrl+click in its repo menu): settings.repos, 2 to 50 roots or bare
+// names, each checked like repo; null while one (repoSel) or every one is shown. repoSel is then the first of them,
+// so an older page or server still shows one. --repo shows just that one.
+const REPOS_SHOWN_MAX = 50;
+function cleanRepoSels(list) {
+  if (!Array.isArray(list)) return null;
+  const out = new Map();
+  for (const x of list.slice(0, REPOS_SHOWN_MAX)) {
+    if (typeof x !== 'string' || !x.trim() || x.length > 1024 || x.toLowerCase() === 'all') continue;
+    out.set(/[\\/]/.test(x) ? rootKey(x) : x.toLowerCase(), x);
+  }
+  return out.size >= 2 ? [...out.values()] : null;
+}
+let repoSels = DEMO || typeof repoArg === 'string' ? null : cleanRepoSels(saved.repos);
 let hiddenRepos = cleanHiddenRepos(saved.hiddenRepos) || [];
 // drops the hidden repos that a conversation worked in after they were hidden; true when the list changed
 function pruneHiddenRepos(list) {
   if (!hiddenRepos.length) return false;
   const lastIn = new Map();
-  // real activity (a prompt or a reply), not the log's time: a resumed claude writes its cost and monitors there
-  for (const s of list) if (s.root) { const k = rootKey(s.root); lastIn.set(k, Math.max(lastIn.get(k) || 0, s.actT || 0)); }
+  // a prompt typed after it was removed, not just any activity: a conversation mid-turn when its workspace was removed
+  // goes on replying, and would bring it straight back
+  for (const s of list) if (s.root) { const k = rootKey(s.root); lastIn.set(k, Math.max(lastIn.get(k) || 0, s.promptAt || 0)); }
   const keep = hiddenRepos.filter((h) => !((lastIn.get(rootKey(h.root)) || 0) > h.at));
   if (keep.length === hiddenRepos.length) return false;
   hiddenRepos = keep;
@@ -388,6 +408,30 @@ function cleanNames(o) {
   return out;
 }
 const names = DEMO ? new Map() : cleanNames(saved.names);
+// workspaces renamed in Fleet View (right-click "Rename" on a workspace): settings.repoNames, [{ root, name }], at
+// most 200; the page shows that name wherever the workspace's folder name would show, the header title too
+const REPO_NAMES_MAX = 200;
+function cleanRepoNames(list) {
+  if (!Array.isArray(list)) return null;
+  const out = new Map();
+  for (const x of list.slice(-REPO_NAMES_MAX)) {
+    const root = x && typeof x === 'object' ? x.root : null, name = x && typeof x === 'object' ? cleanName(x.name) : '';
+    if (typeof root !== 'string' || !root.trim() || root.length > 1024 || !name) continue;
+    out.set(rootKey(root), { root, name });
+  }
+  return [...out.values()];
+}
+let repoNames = DEMO ? [] : cleanRepoNames(saved.repoNames) || [];
+// the repo menu's order, set by hand (Move up / Move down, or dragging a row): settings.repoOrder, roots, at most 300;
+// the ones listed come first in that order, the rest after them, busiest first
+const REPO_ORDER_MAX = 300;
+function cleanRepoOrder(list) {
+  if (!Array.isArray(list)) return null;
+  const out = new Map();
+  for (const x of list.slice(0, REPO_ORDER_MAX)) if (typeof x === 'string' && x.trim() && x.length <= 1024 && !out.has(rootKey(x))) out.set(rootKey(x), x);
+  return [...out.values()];
+}
+let repoOrder = DEMO ? [] : cleanRepoOrder(saved.repoOrder) || [];
 // where a conversation's work goes when it's done (right-click "Push to", POST /push-target): 'production' (the
 // standing rule: merge to main and ship) or 'preview' (push the branch for a preview, don't merge). A repo's choice
 // is the default for its conversations; a conversation's own choice wins over it, and a pickup of its handoff takes
@@ -595,7 +639,7 @@ function flushSettings() {
   clearTimeout(saveTimer);
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
-  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, compact, finishedOpen, steady, miniOpen, hidden, hiddenRepos, addedRepos, mapSpots,
+  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniOpen, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp,
     remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
     moved: [...moved.values()],
@@ -2211,26 +2255,42 @@ function refreshHue(s, now) {
 const HOME_KEY = rootKey(os.homedir());
 const isHomeRoot = (root) => !!root && rootKey(root) === HOME_KEY;
 const repoName = (root) => (!root || isHomeRoot(root) ? 'no workspace' : path.basename(root) || String(root).replace(/[\\/]+$/, '') || root);
-// a picked path matches that repo root; a bare folder name (--repo detailforge-web) matches any root with that name
-function inRepo(root) {
-  if (!repoSel) return true;
-  if (!root) return false;
-  if (/[\\/]/.test(repoSel)) return P.foldCase(path.resolve(root)) === P.foldCase(path.resolve(repoSel));
-  return repoName(root).toLowerCase() === repoSel.toLowerCase();
+// a picked path matches that repo root; a bare folder name (--repo detailforge-web) matches any root with that name;
+// with several shown (repoSels), any of them
+const shownSels = () => repoSels || (repoSel ? [repoSel] : []);
+function selMatches(sel, root) {
+  if (/[\\/]/.test(sel)) return P.foldCase(path.resolve(root)) === P.foldCase(path.resolve(sel));
+  return repoName(root).toLowerCase() === sel.toLowerCase();
 }
+function inRepo(root) {
+  const sels = shownSels();
+  if (!sels.length) return true;
+  if (!root) return false;
+  return sels.some((x) => selMatches(x, root));
+}
+// the name shown for a workspace: its name in Fleet View (settings.repoNames), else its folder's
+const shownRepoName = (root) => (root && repoNames.find((r) => rootKey(r.root) === rootKey(root))?.name) || repoName(root);
 const menu = { open: false, sel: 0, items: [], hits: [], title: null }; // title: { y, x0, x1 } of the clickable name
-const brand = () => TITLE || (repoSel ? repoName(repoSel) : 'all workspaces').toUpperCase();
-// "All workspaces" first, then every repo with a live conversation, busiest first; the picked one stays listed
+// the header: one workspace, "A + B", or "3 WORKSPACES"
+function brand() {
+  if (TITLE) return TITLE;
+  const sels = shownSels();
+  const one = (x) => (/[\\/]/.test(x) ? shownRepoName(x) : x);
+  return (!sels.length ? 'all workspaces' : sels.length === 1 ? one(sels[0]) : sels.length === 2 ? `${one(sels[0])} + ${one(sels[1])}` : `${sels.length} workspaces`).toUpperCase();
+}
+// "All workspaces" first, then every repo with a live conversation: the page's order (repoOrder) first, then busiest
+// first; the picked ones stay listed
 function menuItems(now) {
   const count = new Map();
   pruneHiddenRepos([...sessions.values()]);
   for (const s of activeSessions(now)) if (s.root && !repoHidden(s.root)) count.set(s.root, (count.get(s.root) || 0) + 1);
-  const repos = [...count].sort((a, b) => b[1] - a[1] || repoName(a[0]).localeCompare(repoName(b[0])));
-  if (repoSel && !repos.some(([r]) => inRepo(r))) repos.push([repoSel, 0]);
+  const ix = new Map(repoOrder.map((r, i) => [rootKey(r), i])), at = (r) => ix.get(rootKey(r)) ?? Infinity;
+  const repos = [...count].sort((a, b) => at(a[0]) - at(b[0]) || b[1] - a[1] || repoName(a[0]).localeCompare(repoName(b[0])));
+  for (const x of shownSels()) if (!repos.some(([r]) => selMatches(x, r))) repos.push([x, 0]);
   const all = [...count.values()].reduce((a, b) => a + b, 0);
-  return [{ root: null, label: 'All workspaces', n: all }, ...repos.map(([root, n]) => ({ root, label: repoName(root), n }))];
+  return [{ root: null, label: 'All workspaces', n: all }, ...repos.map(([root, n]) => ({ root, label: shownRepoName(root), n }))];
 }
-const isCurrent = (it) => (it.root ? !!repoSel && inRepo(it.root) : !repoSel);
+const isCurrent = (it) => (it.root ? shownSels().length > 0 && inRepo(it.root) : !shownSels().length);
 function openMenu() {
   menu.open = true;
   menu.items = menuItems(Date.now());
@@ -2240,9 +2300,10 @@ function pickRepo(it) {
   menu.open = false;
   if (!it) return;
   repoSel = it.root;
+  repoSels = null;
   pick.sid = null; map.sel = null; focus.sid = null;
   saveSettings();
-  notice = { text: `  showing ${it.root ? repoName(it.root) : 'every workspace'}`, color: C.mint, until: Date.now() + 2500 };
+  notice = { text: `  showing ${it.root ? shownRepoName(it.root) : 'every workspace'}`, color: C.mint, until: Date.now() + 2500 };
 }
 
 // sessions shown in every view: the picked repo, --filter and the / filter, most urgent first
@@ -2322,7 +2383,7 @@ function headerCounts(list, now) {
   const live = list.filter((s) => s.state !== 'IDLE').length;
   const agents = list.reduce((n, s) => n + (s.wf && !s.wf.done ? s.wf.agents.filter((a) => a.state === 'run').length : s.liveAgents || 0), 0);
   // merges today in the picked repo's GitHub repos (every repo when none is picked)
-  const ghRepos = repoSel ? new Set([...sessions.values()].filter((s) => s.repo && inRepo(s.root || repoOf(s, now))).map((s) => s.repo)) : null;
+  const ghRepos = shownSels().length ? new Set([...sessions.values()].filter((s) => s.repo && inRepo(s.root || repoOf(s, now))).map((s) => s.repo)) : null;
   const merged = [...mergedToday].reduce((n, [r, set]) => n + (!ghRepos || ghRepos.has(r) ? set.size : 0), 0);
   const waiting = list.filter((s) => needsYou(s.state)).length;
   const spent = DEMO ? [...sessions.values()].reduce((n, s) => n + (s.cost || 0), 0) : spentAll; // every conversation seen this run, filters aside
@@ -4439,6 +4500,19 @@ async function removeTeam(b) {
   const told = await noteEach(t, t.members, `The team "${t.name}" is disbanded. Finish your own part; don't message the others about it any more.`);
   return [200, { ok: true, team: teamJson(t), told: toldJson(told) }];
 }
+// POST /teams/rename { id, name }: the team's name (the page's "Rename team"). Nobody is told (each note costs a
+// turn); notes, briefs and orders from now on carry the new name. -> { ok, team, was }
+async function renameTeam(b) {
+  if (!b || typeof b.id !== 'string') return [400, { ok: false, message: 'no team given' }];
+  const t = teams.find((x) => x.id === b.id);
+  if (!t) return [404, { ok: false, message: 'no such team' }];
+  const name = typeof b.name === 'string' && b.name.length <= 200 ? plain(b.name.replace(/[\x00-\x1f\x7f-\x9f]/g, ' '), 80) : '';
+  if (!name) return [400, { ok: false, message: 'give it a name' }];
+  const was = t.name;
+  t.name = name;
+  saveSettings();
+  return [200, { ok: true, team: teamJson(t), was }];
+}
 // POST /teams/leave { id, member, why?: 'left' | 'removed', hidden?, quiet? }: one member out. The rest are told
 // (with the others' ids; a team left with one member is disbanded, and that one is told so; when the lead goes the
 // team has no lead, and they are told to carry on as peers), and so is the member,
@@ -4980,7 +5054,7 @@ function buildOf() {
 }
 
 // ---------- removed conversations: the page's "Removed conversations" menu, to continue one ----------
-// /state lists the 50 most recently removed (settings.hidden, newest first). One still in the session map
+// /state lists the 50 most recently removed (settings.hidden less settings.forgotten, newest first). One still in the session map
 // uses that; an older one is read from its log once (cached by the log's mtime): its title (custom-title,
 // then ai-title, else its first typed prompt, 60 characters), the folder it last worked in, and its account.
 // An id whose log is gone is left out of the list (it stays in settings).
@@ -5109,9 +5183,10 @@ function removedList(now) {
   if (DEMO) return [];
   const budget = { left: 12, bytes: 64 << 20 };
   const out = [];
-  const keep = new Set();
+  const keep = new Set(), forgot = new Set(forgotten);
   for (const h of [...hidden].sort((a, b) => b.at - a.at)) {
     if (out.length >= REMOVED_MAX) break;
+    if (forgot.has(h.id)) continue; // "Forget": off the list for good
     keep.add(h.id);
     let r = null;
     try { r = removedOne(h, now, budget); } catch (e) { logOnce('removed:' + (e && e.message), `removed list: skipped ${h.id}\n${errorText(e)}`); }
@@ -5299,7 +5374,7 @@ function buildState() {
     const have = [...repos.keys()].find((r) => rootKey(r) === rootKey(a.root));
     if (have) repos.get(have).added = true; else repos.set(a.root, { root: a.root, name: a.name, live: 0, added: true });
   }
-  if (repoSel && ![...repos.keys()].some(inRepo)) repos.set(repoSel, { root: repoSel, name: repoName(repoSel), live: 0 });
+  for (const x of shownSels()) if (![...repos.keys()].some((r) => selMatches(x, r))) repos.set(x, { root: x, name: repoName(x), live: 0 });
   for (const r of repos.values()) { r.color = toHex(familyColor(r.root)); r.push = repoPushTarget(r.root) || 'production'; }
   writePushFile();
   dpRoots = [...repos.keys()]; // the deploy watch follows the repos listed
@@ -5327,7 +5402,7 @@ function buildState() {
     now, demo: DEMO, title: brand(), build: buildOf(),
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
-    settings: { view, zoom: map.zoom, query, repo: repoSel, compact, finishedOpen, steady, miniBounds, miniOpen, hidden, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
+    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniBounds, miniOpen, hidden, forgotten, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
       mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() } },
     // remote access (remote.js): the switch, the address, how turning it on went, browsers waiting for approval
     // (with their codes) and the approved ones
@@ -5397,8 +5472,10 @@ function toolsHere() {
   return toolsSeen;
 }
 
-// POST /settings: any of view, zoom, query, repo, compact, finishedOpen, webBounds, steady, miniBounds, miniOpen,
+// POST /settings: any of view, zoom, query, repo, repos (several shown: 2 to 50, each like repo; null: one or all),
+// repoNames ([{ root, name }], up to 200; replaces them), repoOrder (roots, up to 300; replaces it), compact, finishedOpen, webBounds, steady, miniBounds, miniOpen,
 // hidden (an array of up to 500 conversation ids, or { id, at } with the time it was hidden; replaces the list),
+// forgotten (up to 500 ids on hidden that the Removed conversations list leaves out; replaces the list),
 // hiddenRepos (an array of up to 200 { root, at }, root a string of at most 1024 characters; replaces the list),
 // mapSpots (the map's repo spots, up to 300 { id, x, y, pin }; replaces the list), mapLens (one of MAP_LENSES),
 // mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), mapCamera ({ x, y, k }: the map's view), notify (bool), offAccounts (account letters turned off), parity (rules, see PARITY_BUILTIN)
@@ -5409,6 +5486,12 @@ function applySettings(b) {
   if (Number.isFinite(b.zoom) && b.zoom > 0) map.zoom = Math.min(8, Math.max(0.25, b.zoom));
   if (typeof b.query === 'string') query = b.query.slice(0, 200);
   if ('repo' in b) repoSel = typeof b.repo === 'string' && b.repo && b.repo.toLowerCase() !== 'all' ? b.repo : null;
+  // several shown: their first is repo; a page that sends repo alone (an older one) shows just that one
+  if ('repos' in b) repoSels = cleanRepoSels(b.repos);
+  else if ('repo' in b) repoSels = null;
+  if (repoSels && !repoSel) repoSel = repoSels[0];
+  if ('repoNames' in b) { const r = cleanRepoNames(b.repoNames); if (r) repoNames = r; }
+  if ('repoOrder' in b) { const o = cleanRepoOrder(b.repoOrder); if (o) repoOrder = o; }
   if (typeof b.compact === 'boolean') compact = b.compact;
   if (typeof b.finishedOpen === 'boolean') finishedOpen = b.finishedOpen;
   const wb = b.webBounds;
@@ -5432,6 +5515,9 @@ function applySettings(b) {
       for (const id of still) if (!was.has(id)) leaveOnHide(id);
     }
   }
+  if ('forgotten' in b) { const f = cleanForgotten(b.forgotten); if (f) forgotten = f; }
+  // only while on hidden: one shown again and removed later is on the Removed list again
+  if (('hidden' in b || 'forgotten' in b) && forgotten.length) { const on = new Set(hidden.map((h) => h.id)); forgotten = forgotten.filter((id) => on.has(id)); }
   if ('hiddenRepos' in b) { const h = cleanHiddenRepos(b.hiddenRepos); if (h) hiddenRepos = h; }
   if ('mapSpots' in b) { const m = cleanMapSpots(b.mapSpots); if (m) mapSpots = m; }
   if (MAP_LENSES.includes(b.mapLens)) mapLens = b.mapLens;
@@ -5613,6 +5699,7 @@ function hideConversation(id) {
   hidden = hidden.filter((h) => h.id !== id);
   hidden.push({ id, at: now });
   if (hidden.length > HIDDEN_MAX) hidden.sort((a, b) => a.at - b.at).splice(0, hidden.length - HIDDEN_MAX);
+  forgotten = forgotten.filter((x) => x !== id); // removed anew: listed again
   recentlyContinued.delete(id);
   apiHidAt.set(id, now);
   apiTemp = apiTemp.filter((x) => x !== id);
@@ -5922,7 +6009,7 @@ function handleRequest(req, res) {
     }
     // the page's teams; each sends its own notes, so the reply comes once they went in (or were queued)
     // (the page's Work together asks for send: the server types the briefs, as it types every other team text)
-    const teamRoute = { '/teams': (b) => postTeam(b, { send: !!(b && b.send === true) }), '/teams/add': addMember, '/teams/remove': removeTeam, '/teams/leave': leaveTeam, '/teams/lead': setLead }[pathname];
+    const teamRoute = { '/teams': (b) => postTeam(b, { send: !!(b && b.send === true) }), '/teams/add': addMember, '/teams/remove': removeTeam, '/teams/leave': leaveTeam, '/teams/lead': setLead, '/teams/rename': renameTeam }[pathname];
     if (teamRoute) {
       return readBody(req, res, (b) => {
         if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });

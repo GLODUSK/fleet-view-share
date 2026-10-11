@@ -290,8 +290,9 @@ export function renderMap(el, state, ui) {
   syncSettings(state.settings || {});
   syncSpots(state.settings || {});
   if (I.spotsDue) sendSpots(); // a nudge's save, now that what other screens moved is in
-  // a workspace picked from the header's menu: the view recenters on what's shown now, as 0 does
-  const repo = String((state.settings && state.settings.repo) || '').toLowerCase();
+  // a workspace picked from the header's menu (or one more of several shown): the view recenters on what's shown now, as 0 does
+  const st = state.settings || {};
+  const repo = [st.repo || '', ...(Array.isArray(st.repos) ? st.repos : [])].join('|').toLowerCase();
   if (I.repoSeen !== undefined && I.repoSeen !== repo) recenter(2500);
   I.repoSeen = repo;
   rebuild();

@@ -422,11 +422,23 @@ function buildCard(id, ui) {
 // Click picks (and opens the detail panel), double-click opens. The second click of a double-click belongs
 // to the card or tile the first one hit: opening the panel narrows the view, so another one can be under
 // the pointer by then. Used by the Wall too. Ctrl+click (Cmd+click) adds the card to the multi-selection or takes
-// it out (ui.toggleMulti; the shell outlines selected cards and tiles with .multi); a plain click picks one card
+// it out (ui.toggleMulti; the shell outlines selected cards and tiles with .multi); Shift+click selects the cards
+// from the last one clicked to this one, in their order on screen (ui.selectMany); a plain click picks one card
 // and clears the multi-selection.
 let lastPick = null; // { id, t }
+let anchor = null; // the last card or tile clicked (plain or Ctrl): where a Shift+click range starts
 export function wirePick(el, id, ui) {
+  // Shift+click would select the page's text from the last click to here
+  el.addEventListener('mousedown', (e) => { if (e.shiftKey && e.button === 0) e.preventDefault(); });
   el.addEventListener('click', (e) => {
+    if (e.shiftKey && !(e.ctrlKey || e.metaKey) && typeof ui.selectMany === 'function') {
+      e.preventDefault();
+      const ids = [...(el.parentElement?.querySelectorAll(':scope > [data-id]') || [])].map((x) => x.dataset.id);
+      const from = ids.indexOf(anchor || ui.selectedId), to = ids.indexOf(id);
+      ui.selectMany(from < 0 || to < 0 ? [id] : ids.slice(Math.min(from, to), Math.max(from, to) + 1));
+      return;
+    }
+    anchor = id;
     if ((e.ctrlKey || e.metaKey) && typeof ui.toggleMulti === 'function') { e.preventDefault(); ui.toggleMulti(id); return; }
     if (ui.multi?.length && typeof ui.clearMulti === 'function') ui.clearMulti();
     const now = performance.now();
