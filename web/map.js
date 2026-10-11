@@ -1356,7 +1356,11 @@ function rearrange(unpin) {
   assignHomes(I.nodes);
   I.alpha = Math.max(I.alpha, 0.3);
   I.dirty = true;
-  I.camUntil = performance.now() + 1500; // the camera fits the new layout
+  // the groups glide across the map to their new spots, through each other: for the next 8 s the spacing rule
+  // leaves whole groups alone (separate), and the camera drops the hand's pan and zoom (as 0 does; else the fit
+  // landed beside the new layout) and keeps fitting them
+  I.regrid = performance.now() + 8000;
+  recenter(8000);
   saveSpotsSoon(300, true);
 }
 
@@ -1462,7 +1466,10 @@ function separate(share) {
     const h = I.homeXY.get(g.hub.id);
     if (h && !h.pin) { h.x += dx; h.y += dy; I.spotsMoved = true; }
   };
-  for (let i = 0; i < gs.length; i++) for (let j = i + 1; j < gs.length; j++) {
+  // not while a re-arrange's groups glide to their new spots and settle there (rearrange): they pass through each
+  // other on the way and arrive stretched, and pushing them apart then moved their spots too, which scrambled a
+  // sorted layout
+  if (!(performance.now() < I.regrid)) for (let i = 0; i < gs.length; i++) for (let j = i + 1; j < gs.length; j++) {
     const a = gs[i], b = gs[j];
     let dx = b.hub.p.x - a.hub.p.x, dy = b.hub.p.y - a.hub.p.y, d = Math.hypot(dx, dy);
     const want = a.ext + b.ext + 2 * CLUSTER_PAD + CLUSTER_GAP;
@@ -1637,6 +1644,7 @@ function frame() {
     }
     I.dirty = true;
   }
+  if (t0 < I.regrid) I.alpha = Math.max(I.alpha, 0.3); // a re-arrange: the forces keep going until the groups have their shape back
   if (I.alpha > 0.01) { simStep(); simStep(); I.dirty = true; }
   else if (separate(0.15) > 0.05) I.dirty = true; // settled: still never let anything sit too close
   if (gather() > 0.05) I.dirty = true;
