@@ -1823,7 +1823,7 @@ function workspaceItems() {
   const list = all.filter((r) => r.live > 0 || isCurrent(r));
   const total = all.reduce((n, r) => n + (r.live || 0), 0);
   return [
-    { label: 'All projects', icon: shownSel().length ? null : 'check', badge: `${total} live`, run: () => pickRepo({ root: null }) },
+    { label: 'All workspaces', icon: shownSel().length ? null : 'check', badge: `${total} live`, run: () => pickRepo({ root: null }) },
     { sep: true },
     ...(list.length ? list.map((r) => ({ label: r.name, icon: isCurrent(r) ? 'check' : null, badge: `${r.live || 0} live`, run: () => pickRepo(r) }))
       : [{ label: 'No workspace has live conversations', disabled: true }]),
@@ -1834,13 +1834,14 @@ const workspaceMenuItem = () => ({ label: 'Show workspace', icon: 'repo', note: 
 function openWorkspaceList(anchor = null) {
   if (!state) return;
   const r = (anchor || document.querySelector('.tabs')).getBoundingClientRect();
-  openCtxMenu({ x: r.left - 2, y: r.bottom + 4, title: 'Show project', items: workspaceItems() });
+  openCtxMenu({ x: r.left - 2, y: r.bottom + 4, title: 'Show workspace', items: workspaceItems() });
 }
-// the project picker right of the tabs, always there: "All projects" with none picked, else a colour dot per
-// shown workspace (3 at most), shownTitle() and its ✕
+// the workspace picker right of the tabs: always there on Cards and Wall ("All workspaces" with none picked),
+// on the other views only while a filter is on (so it never goes unseen); a colour dot per shown workspace
+// (3 at most), shownTitle() and its ✕
 function drawWsChip() {
   const sel = shownSel(), chip = $('ws-chip');
-  chip.hidden = SOLO;
+  chip.hidden = SOLO || (!sel.length && local.view !== 'cards' && local.view !== 'wall');
   if (chip.hidden) return;
   const repos = repoList(state);
   const dots = sel.slice(0, 3).map((x) => repos.find((r) => selMatches(x, r))?.color || C.dim);
@@ -1850,8 +1851,8 @@ function drawWsChip() {
   chip.classList.toggle('all', !sel.length);
   $('ws-x').hidden = !sel.length;
   chip.querySelector('.ws-dots').innerHTML = dots.map((c) => `<span class="dot" style="background:${esc(c)}"></span>`).join('');
-  chip.querySelector('.ws-t').textContent = sel.length ? shownTitle() : 'All projects';
-  $('ws-pick').title = `${!sel.length ? 'every project shows' : sel.length === 1 ? 'only this project shows' : 'only these projects show'}: click to pick (r)`;
+  chip.querySelector('.ws-t').textContent = sel.length ? shownTitle() : 'All workspaces';
+  $('ws-pick').title = `${!sel.length ? 'every workspace shows' : sel.length === 1 ? 'only this workspace shows' : 'only these workspaces show'}: click to pick (r)`;
 }
 $('ws-pick').addEventListener('click', (e) => { e.stopPropagation(); openWorkspaceList($('ws-chip')); });
 $('ws-x').addEventListener('click', (e) => { e.stopPropagation(); pickRepo({ root: null }); });
