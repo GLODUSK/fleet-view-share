@@ -648,8 +648,7 @@ function drawPick(el, p) {
   go.textContent = p.sent ? 'Launched' : k ? `Launch ${k} selected` : 'Launch selected';
   // the hint stays short; hovering it shows the whole launch line
   const n = el.querySelector('.cpk-n');
-  const recOnly = k && [...el.querySelectorAll('.chat-md li > input[data-pick]')].every((b) => b.checked === b.parentElement.classList.contains('rec'));
-  n.textContent = p.sent ? '' : recOnly ? 'The recommended ones are ticked' : k ? 'Sends them with the launch instructions' : 'Tick the options you want';
+  n.textContent = p.sent ? '' : k ? 'Sends them with the launch instructions' : 'Tick the options you want';
   n.title = !p.sent && k ? LAUNCH_LINE : '';
 }
 // the ticked options, numbered as they stand in the list, then the launch line
