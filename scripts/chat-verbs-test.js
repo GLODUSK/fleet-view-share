@@ -40,6 +40,10 @@ const RULE = '─'.repeat(40);
   assert.equal(SCREEN.spinner(['✻ Cooking…']).strong, false);
   assert.equal(SCREEN.effortShown([RULE, '❯ ', RULE, '  ◐ xhigh · /effort']), 'xhigh');
   assert.equal(SCREEN.effortShown(['nothing']), null);
+  // the effort drawn right-aligned on a row with other text, read glued to it
+  assert.equal(SCREEN.effortShown(['  ⎿  Set model to Sonnet 5.5 and saved as your default for new sessions○ low · /effort']), 'low');
+  assert.equal(SCREEN.effortShown(['…default for new sessions○xhigh·/effort']), 'xhigh');
+  assert.equal(SCREEN.effortShown(['…default for new sessionshigh · /effort', RULE, '❯ ', RULE, '  ? for shortcuts']), 'high');
   ok('screen.js: promptBox, spinner and effortShown read what compose.js reads');
 }
 
@@ -269,6 +273,77 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     assert.equal((await call('POST', `${S}/model`, { effort: 'low' }))[0], 409);
     assert.equal(fs.readFileSync(file, 'utf8'), '{ not json');
     ok('model: /model and /effort typed, the default put back with other changes kept; busy, overseer, draft, bad file refused');
+  }
+
+  // ---------- model: "Switch model?", another menu, a save written late ----------
+  {
+    const file = path.join(home, '.claude', 'settings.json');
+    const start = { model: 'claude-opus-5-5', theme: 'dark', modelSettings: { 'claude-opus-5-5': { effortLevel: 'high' } } };
+    const EDGE = '▔'.repeat(60);
+    // Claude Code 2.1's question before a switch mid-conversation, as the session host's screen showed it
+    const confirm = [EDGE, '   Switch model?', '   Your next response will be slower and use more tokens', '',
+      '   This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets re-read on',
+      '   your next message.', '', '   ❯ 1. Yes, switch to Sonnet 5.5', '     2. No, go back', EDGE];
+    let footer, said, menu, typed;
+    const draw = () => { fake.screen = screenOf(['earlier output', ...said, '', ...(menu || box('', footer))]); };
+    const save = (f) => { const j = JSON.parse(fs.readFileSync(file, 'utf8')); f(j); fs.writeFileSync(file, JSON.stringify(j, null, 2) + '\n'); };
+    const switched = () => { menu = null; save((j) => { j.model = 'sonnet'; j.other = 1; }); said.push('  ⎿  Set model to Sonnet 5.5 and saved as your default for new sessions'); };
+    // a fake Claude Code: onEnter(typed) on Enter, onKey(key) on any other key; /effort always saves and says so
+    const begin = (onEnter, onKey = () => {}) => {
+      fs.writeFileSync(file, JSON.stringify(start, null, 2) + '\n');
+      reset(); live({ status: 'idle' });
+      footer = '  ◐ high · /effort'; said = []; menu = null; typed = '';
+      draw();
+      fake.onWrite = (w) => {
+        if (w.startsWith('\x1b[200~')) { typed += w.slice(6, -6); return; }
+        if (w === '\r') {
+          const t = typed, m = /^\/effort (\S+)$/.exec(t);
+          typed = '';
+          if (m) { save((j) => { (j.modelSettings[j.model] = j.modelSettings[j.model] || {}).effortLevel = m[1]; }); footer = `  ◐ ${m[1]} · /effort`; said.push(`  ⎿  Set effort level to ${m[1]}`); } else onEnter(t);
+        } else onKey(w);
+        draw();
+      };
+    };
+
+    // "Switch model?": its Yes picked, then /effort, then the default put back
+    begin((t) => { if (/^\/model /.test(t)) menu = confirm; }, (k) => { if (menu && k === '1') switched(); });
+    const [c1, o1] = await call('POST', `${S}/model`, { model: 'sonnet', effort: 'medium' });
+    assert.equal(c1, 200, o1.message);
+    assert.equal(o1.ok, true, o1.message);
+    assert.equal(o1.confirmed, 'Yes, switch to Sonnet 5.5');
+    assert.match(o1.said[0], /^Set model to Sonnet 5\.5/);
+    assert.match(o1.said[1], /^Set effort level to medium/);
+    assert.equal(o1.effortNow, 'medium');
+    assert.equal(o1.defaultKept, true);
+    assert.ok(fake.writes.includes('1'));
+    assert.ok(!fake.writes.includes('\x1b'));
+    assert.equal(pasted(), '/model sonnet/effort medium');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { ...start, other: 1 });
+
+    // another menu after /model: closed with Esc, nothing more typed, 409; Claude Code's save after it closed is put back
+    begin((t) => { if (/^\/model /.test(t)) menu = [RULE, '  Pick a model family', '  ❯ 1. Opus', '    2. Sonnet', '', '  Enter to select · Esc to cancel']; },
+      (k) => { if (menu && k === '\x1b') { menu = null; said.push('  ⎿  Kept model as Opus'); setTimeout(() => save((j) => { j.model = 'sonnet'; }), 2000); } });
+    const [c2, o2] = await call('POST', `${S}/model`, { model: 'sonnet', effort: 'low' });
+    assert.equal(c2, 409, o2.message);
+    assert.equal(o2.ok, false);
+    assert.equal(o2.closed, true);
+    assert.equal(o2.menu.title, 'Pick a model family');
+    assert.equal(menu, null);
+    assert.ok(fake.writes.includes('\x1b'));
+    assert.equal(pasted(), '/model sonnet');
+    assert.equal(o2.defaultKept, true);
+    assert.equal(o2.restored, true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), start);
+
+    // Claude Code writes the default again a moment after the menu closed: put back as well
+    begin((t) => { if (/^\/model /.test(t)) menu = confirm; },
+      (k) => { if (menu && k === '1') { switched(); setTimeout(() => save((j) => { j.model = 'sonnet'; j.modelSettings.sonnet = { effortLevel: 'low' }; }), 800); } });
+    const [c3, o3] = await call('POST', `${S}/model`, { model: 'sonnet' });
+    assert.equal(c3, 200, o3.message);
+    assert.equal(o3.ok, true, o3.message);
+    assert.equal(o3.defaultKept, true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { ...start, other: 1 });
+    ok('model: "Switch model?" answered Yes; another menu closed (409); the default put back after a late save');
   }
 
   // ---------- Fleet View's own queue ----------

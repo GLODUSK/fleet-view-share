@@ -1690,8 +1690,15 @@ async function unsendMessage(key, b, ctx) {
 // and one switch at a time (settingsTurn), so a second can't take the first's value for the one to put back.
 // An overseer's (the Chief's, a bot's) model is Henry's to change (as his phone changes a bot's: bots.js), so for one
 // of them only the phone relay may (viaOf).
+// Mid-conversation, /model may first ask "Switch model?" (the history is re-read on the new model): the caller asked
+// for the switch, so its Yes is picked (answerMenu, by its sig). Any other menu that comes up after the typing is
+// closed with Esc (409), so nothing is left up. Once anything was typed the default goes back on every way out, after
+// Claude Code's save has landed (it may write after a menu closes), and is looked at once more a moment later.
 const SAVE_MS = 5000; // how long Claude Code may take to save a switch
-const SETTLE_SAVE_MS = 1500; // after the default is put back: when the screen is read for the effort the session shows
+const LATE_SAVE_MS = 3000; // a command whose save was not seen: how long its late save is waited for
+const SETTLE_SAVE_MS = 1500; // after the default is put back: when it is looked at again and the screen read for the effort
+const YES_SWITCH = /^Yes, switch\b/;
+const isSwitchConfirm = (m) => !!m && /^Switch model\?/.test(m.title) && m.options.some((o) => YES_SWITCH.test(o.label));
 const SAVED_KEYS = ['model', 'modelSettings', 'effortLevel'];
 // the home the session host starts claude under (host.js acctDir), and the account's folder in it (accounts.js)
 const settingsFileOf = (account) => path.join(ACCOUNTS.configDir(account, process.env.USERPROFILE || os.homedir()), 'settings.json');
@@ -1745,47 +1752,101 @@ async function switchModel(key, b, ctx, via = null) {
     for (const k of SAVED_KEYS) if (k in was.json) before[k] = JSON.parse(JSON.stringify(was.json[k]));
     const out = { ok: true, id: p.id, account, ...(b.model != null ? { model: b.model } : {}), ...(b.effort != null ? { effort: b.effort } : {}) };
     const said = [];
-    let wrote = false;
+    // typed: something went in, so the default goes back however this ends; unsaved: a command whose save was not seen
+    let wrote = false, typed = false, unsaved = false;
+    const restore = () => {
+      try { if (putBack(file, before, existed)) wrote = true; } catch (e) { ctx.log(`api: model switch for ${p.id}: could not put the default back in ${file}: ${e.message}`); }
+    };
+    // a menu up after the typing came from it: Esc, then up to POINT_MS for it to go -> 409
+    const closeOurs = async (m, cmd) => {
+      await host.call('write', p.id, '\x1b');
+      let gone = false;
+      for (const end = Date.now() + POINT_MS; Date.now() < end && !gone;) { await sleep(POLL_MS / 4); gone = !(await menuNow(host, p)); }
+      return [409, { ...out, ok: false, menu: m, closed: gone, said, message: `${cmd} brought up "${m.title || 'a menu'}", which this does not answer: ${gone ? 'it was closed (Esc)' : 'Esc did not close it'}, and nothing more was typed` }];
+    };
+    let res;
     try {
-      return await typeOne(p.id, async () => {
+      res = await typeOne(p.id, async () => {
+        let last = null;
         for (const cmd of [b.model != null && `/model ${b.model}`, b.effort != null && `/effort ${b.effort}`].filter(Boolean)) {
           const m = await menuNow(host, p);
-          if (m) return [409, { ...out, ok: false, menu: m, said, message: `${MENU_UP}${said.length ? ` (done so far: ${said.join('; ')})` : ''}` }];
+          if (m && last) return closeOurs(m, last);
+          if (m) return [409, { ...out, ok: false, menu: m, said, message: MENU_UP }];
           const box = SCREEN.promptBox(await rowsNow(host, p));
           if (!box || box.text) return [409, { ...out, ok: false, said, message: box ? 'something is typed in its prompt: clear it in the Session tab first' : 'its prompt is not on screen' }];
           const raw0 = String((await host.call('snapshot', p.id)) || '');
           const file0 = readSettings(file);
+          typed = true; unsaved = true; last = cmd;
           const sent = await sendText(host, p.id, cmd, () => menuNow(host, p));
           if (!sent.entered) return [409, { ...out, ok: false, menu: true, said, message: MENU_LATE }];
-          // saved (the file changed), or Claude Code answered without saving (kept, refused)
-          let line = null;
-          for (const end = Date.now() + SAVE_MS; Date.now() < end;) {
+          // saved (the file changed), or Claude Code answered without saving (kept, refused); a menu first: "Switch
+          // model?" gets its Yes, any other is closed
+          let line = null, saved = false;
+          for (let end = Date.now() + SAVE_MS; Date.now() < end;) {
             await sleep(POLL_MS / 2);
+            const q = await menuNow(host, p);
+            if (q && cmd.startsWith('/model ') && isSwitchConfirm(q)) {
+              const yes = q.options.find((o) => YES_SWITCH.test(o.label));
+              const [code, a] = await answerMenu(p.id, { option: yes.n, sig: q.sig, allowPermission: true }, ctx, null, via);
+              if (code !== 200 || !a.changed) {
+                const now = await menuNow(host, p);
+                if (now) return closeOurs(now, cmd);
+                return [409, { ...out, ok: false, menu: q, said, message: `${cmd} asked "${q.title}" and its Yes could not be picked: ${a.message}` }];
+              }
+              out.confirmed = yes.label;
+              end = Date.now() + SAVE_MS; // the save comes after the answer
+              continue;
+            }
+            if (q) return closeOurs(q, cmd);
+            const snap = String((await host.call('snapshot', p.id)) || '');
             const f = readSettings(file);
-            if (f && file0 && f.raw !== file0.raw) { line = saidSince(raw0, String((await host.call('snapshot', p.id)) || '')); break; }
-            line = saidSince(raw0, String((await host.call('snapshot', p.id)) || ''));
+            if (f && file0 && f.raw !== file0.raw) { saved = true; line = saidSince(raw0, snap); break; }
+            line = saidSince(raw0, snap);
             if (line && !/^Set /.test(line)) break;
           }
           said.push(line || `${cmd}: Claude Code said nothing about it`);
-          if (putBack(file, before, existed)) wrote = true;
+          if (saved) unsaved = false;
+          restore();
         }
-        // the session's effort as its footer shows it, once Claude Code has read the put-back file
-        await sleep(SETTLE_SAVE_MS);
-        if (putBack(file, before, existed)) wrote = true; // a late save
-        const now = readSettings(file);
-        const defaultKept = !!now && SAVED_KEYS.every((k) => JSON.stringify(now.json[k]) === JSON.stringify(before[k]));
-        const effortNow = SCREEN.effortShown(await rowsNow(host, p, 40));
-        const kept = b.effort == null || !effortNow || effortNow === b.effort;
-        const ok = kept && defaultKept;
-        return [200, { ...out, ok, said, defaultKept, restored: wrote, effortNow,
-          message: ok ? `switched for this conversation; the default for new sessions is unchanged${wrote ? ' (put back after Claude Code saved it)' : ''}`
-            : !defaultKept ? `switched, but the default for new sessions could not be put back in ${file}`
-              : `the session shows ${effortNow} effort, not ${b.effort}: Claude Code may have followed the default when it was put back` }];
+        // a menu that came up after the last save
+        const m = await menuNow(host, p);
+        if (m) return closeOurs(m, last);
+        return null;
       });
     } finally {
-      // whatever happened above, the default goes back as it was
-      try { if (putBack(file, before, existed)) ctx.log(`api: model switch for ${p.id}: the default in ${file} was put back`); } catch (e) { ctx.log(`api: model switch for ${p.id}: could not put the default back in ${file}: ${e.message}`); }
+      if (typed) {
+        restore();
+        // a save not seen yet (a menu closed, a refusal, an error): up to LATE_SAVE_MS for it to land
+        if (unsaved) {
+          const seen = (readSettings(file) || {}).raw;
+          for (const end = Date.now() + LATE_SAVE_MS; Date.now() < end;) {
+            await sleep(POLL_MS / 2);
+            const f = readSettings(file);
+            if (f && f.raw !== seen) break;
+          }
+          restore();
+        }
+        // and once more a moment later (Claude Code may write again after a menu closes); the footer then shows the
+        // effort the session runs at, after it read the put-back file
+        await sleep(SETTLE_SAVE_MS);
+        restore();
+        if (wrote) ctx.log(`api: model switch for ${p.id}: the default in ${file} was put back`);
+      }
     }
+    const now = readSettings(file);
+    const defaultKept = !!now && SAVED_KEYS.every((k) => JSON.stringify(now.json[k]) === JSON.stringify(before[k]));
+    if (res) {
+      if (!typed) return res;
+      const [code, o] = res;
+      return [code, { ...o, defaultKept, restored: wrote, message: `${o.message}${defaultKept ? '' : `; the default for new sessions could not be put back in ${file}`}` }];
+    }
+    const effortNow = SCREEN.effortShown(await rowsNow(host, p, 40));
+    const kept = b.effort == null || !effortNow || effortNow === b.effort;
+    const ok = kept && defaultKept;
+    return [200, { ...out, ok, said, defaultKept, restored: wrote, effortNow,
+      message: ok ? `switched for this conversation; the default for new sessions is unchanged${wrote ? ' (put back after Claude Code saved it)' : ''}`
+        : !defaultKept ? `switched, but the default for new sessions could not be put back in ${file}`
+          : `the session shows ${effortNow} effort, not ${b.effort}: Claude Code may have followed the default when it was put back` }];
   }));
   settingsTurn = run.catch(() => {});
   return run;

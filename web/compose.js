@@ -352,11 +352,13 @@ export function parsePanel(lines, o = {}) {
   return { title, tabs, body: out, keys, sig };
 }
 
-// The effort in the footer under the prompt ("◐ medium · /effort"), or null when it isn't on screen.
+// The effort in the footer under the prompt ("◐ medium · /effort"), or null when it isn't on screen. Claude Code draws
+// it right-aligned on a row that may hold other text, and the row can read as glued to it ("…new sessions○ low ·
+// /effort"): nothing is asked of what comes before the level (xhigh first, so it is not read as high).
 export function parseEffort(lines) {
   const L = (Array.isArray(lines) ? lines : []).slice(-8);
   for (let i = L.length - 1; i >= 0; i--) {
-    const m = /(?:^|\s)(low|medium|high|xhigh|max)\s+·\s+\/effort\b/i.exec(String(L[i] ?? ''));
+    const m = /(xhigh|low|medium|high|max)\s*·\s*\/effort\b/i.exec(String(L[i] ?? ''));
     if (m) return m[1].toLowerCase();
   }
   return null;
