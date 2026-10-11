@@ -187,6 +187,7 @@ let tabWant = null; // { id, tab }: the panel tab to show once (the Projects vie
 let projPanel = false;
 // the panel pinned open (its pin button, detail.js): it still shows whatever conversation you pick, but no Esc,
 // empty click or view switch closes it; it keeps the last one until you pick another. Its pin again lets go.
+// The Projects view still hides it (pinned or not) unless asked there; it comes back on the other views.
 // Kept in this browser's storage across reloads.
 let pinned = false;
 try { pinned = localStorage.getItem('fv.pin') === '1'; } catch {}
@@ -1193,7 +1194,7 @@ function savePanel(id) {
 }
 function drawDetail(v) {
   restorePanel(v);
-  const shut = local.view === 'projects' && !projPanel && !pinned;
+  const shut = local.view === 'projects' && !projPanel;
   let s = ui.detailId && !shut ? v.allSessions.find((x) => x.id === ui.detailId) : null;
   // 2+ selected: their chats share the panel (detail.js drawSplits, SPLIT_MAX at most); with none shown, or one shown
   // that isn't in the selection (a pinned panel keeps its last chat; Ctrl+click took the shown one out), the first leads it
