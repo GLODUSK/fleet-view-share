@@ -2,9 +2,9 @@
    nothing blinks or counts up, no sound. */
 
 /* the header pill: clickable, with a small rose dot by an account used elsewhere lately */
-.count.week, .count.accts { cursor: pointer; }
-.count.week:hover, .count.accts:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.18); }
-.count.week:focus-visible, .count.accts:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.count.week { cursor: pointer; }
+.count.week:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.18); }
+.count.week:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .week-away { width: 6px; height: 6px; border-radius: 50%; background: var(--rose); margin-left: -2px; align-self: flex-start; margin-top: 4px; }
 
 /* ---------- the heads-up: bottom left, small, out of the way of the toasts (bottom right) ---------- */

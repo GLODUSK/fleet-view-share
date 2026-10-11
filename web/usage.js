@@ -13,7 +13,7 @@
 //   outside closes it.
 //
 //   mountUsage({ post, notifyOn, focusWindow, refreshSoon, isHosted, endSessions })
-//     -> { update(state), toggle(), open(), openAccounts(), close(), isOpen(), emailOf(a), awayNow(a) }
+//     -> { update(state), toggle(), open(), close(), isOpen(), emailOf(a), awayNow(a) }
 import { esc, C, acctColor, singleAccount, isAcct } from './cards.js';
 import { icon } from './icons.js';
 
@@ -309,7 +309,7 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
     document.removeEventListener('pointerdown', outside, true);
     document.removeEventListener('keydown', escKey, true);
   }
-  const outside = (ev) => { if (card && !card.contains(ev.target) && !ev.target.closest('.count.week, .count.accts, .uw-heads')) close(); };
+  const outside = (ev) => { if (card && !card.contains(ev.target) && !ev.target.closest('.count.week, .uw-heads')) close(); };
   const escKey = (ev) => { if (ev.key === 'Escape' && card) { ev.stopPropagation(); ev.preventDefault(); close(); } };
 
   return {
@@ -322,8 +322,6 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
       drawCard();
     },
     open, close, isOpen: () => !!card, toggle: () => (card ? close() : open()),
-    // the header's Accounts button: the card, with "Add account" asked at once when there is no sign-in going on
-    openAccounts() { open(); if (!form) { form = { a: null }; confirmRm = null; drawAccounts(); } },
     emailOf,
     // an account with usage from elsewhere in the last 5 hours (the header pill's dot)
     awayNow: (a) => !!(usage[a] && (usage[a].episode || usage[a].away5 > 0)),

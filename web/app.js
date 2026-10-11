@@ -1303,7 +1303,8 @@ function drawClock() {
 // what is left of each account's weekly Claude limit: "A 3%  B 98%  C 70% week left"
 function weekPill(wk) {
   const acs = Object.keys(wk || {}).filter((a) => isAcct(a) && wk[a]).sort();
-  if (!acs.length) return '';
+  // no week figures yet (no account signed in): a plain "usage" pill, so the card and its Accounts list stay one click away
+  if (!acs.length) return '<span class="count week" role="button" tabindex="0" title="plan usage and Claude accounts"><span class="count-k">usage</span></span>';
   const col = (n) => (n <= 10 ? C.red : n <= 25 ? C.gold : C.text);
   const tip = acs.map((a) => `account ${a}: ${wk[a].left}% of the week left${wk[a].resets ? ', resets ' + new Date(wk[a].resets).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : ''}`).join('\n');
   // a click opens the plan-usage card (usage.js); a rose dot: used somewhere other than this PC in the last 5 hours
@@ -1330,8 +1331,6 @@ function drawHeader(v) {
     pill(c.mergedToday ?? 0, 'merged today', C.mint, 'merge', n(c.mergedToday ?? 0, 'PR merged today', 'PRs merged today')),
   ].join('') + (c.cost ? pill(fmtCost(c.cost), 'API cost', C.text, 'cost', `${fmtCost(c.cost)} at API prices, every conversation seen since Fleet View started`) : '')
     + weekPill(v.week)
-    // add, switch or remove a Claude account: the Usage card's Accounts list, asking for a new one at once
-    + `<span class="count accts" role="button" tabindex="0" title="Claude accounts: add, switch login or remove"><span class="pill-ic" style="color:${C.cyan}">${icon('plus', 13)}</span><span class="count-k">account</span></span>`
     // conversation sync: who is signed in, sign in / out, the passphrase (sync.js)
     + (SOLO ? '' : `<span class="count sync" role="button" tabindex="0" title="Conversation sync: sign in or out, the sync passphrase, what it is doing"><span class="pill-ic" style="color:${C.cyan}">${icon('sync', 13)}</span><span class="count-k">sync</span></span>`);
   if ($('counts')._html !== html) { $('counts').innerHTML = html.replace(/<span class="pill-ic"[^>]*><\/span>/g, ''); $('counts')._html = html; }
@@ -2094,10 +2093,13 @@ function movePick(dx, dy) {
   if (ids[i] !== ui.selectedId) ui.setSelected(ids[i], 'keys');
 }
 
+// a box you type in (an email, a code, a passphrase) keeps every key but Esc from the one-key shortcuts
+const typingIn = (t) => !!t?.closest?.('textarea, select, [contenteditable]') || (t?.matches?.('input') && !/^(checkbox|radio|button|submit|reset|range|color|file)$/i.test(t.type));
 document.addEventListener('keydown', (e) => {
   if (e.target.closest?.('.term-host')) return;
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   const k = e.key;
+  if (k !== 'Escape' && typingIn(e.target)) return;
   if (!$('confirm').hidden) {
     if (k === 'Escape' || k === 'n') { e.preventDefault(); hideConfirm(); }
     else if (k === 'Enter' || k === 'y') { e.preventDefault(); $('confirm-yes').click(); }
@@ -3391,7 +3393,6 @@ const usagePill = (e) => {
   if (syncUi && e.target.closest('.count.sync')) { syncUi.toggle(); return true; }
   if (!usageUi) return false;
   if (e.target.closest('.count.week')) { usageUi.toggle(); return true; }
-  if (e.target.closest('.count.accts')) { if (usageUi.isOpen()) usageUi.close(); else usageUi.openAccounts(); return true; }
   return false;
 };
 $('counts')?.addEventListener('click', (e) => { if (usagePill(e)) e.stopPropagation(); });
