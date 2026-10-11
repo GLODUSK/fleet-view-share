@@ -13,7 +13,7 @@ import {
   repoChip, linksOf, urlLink, revealLink, turnText, clockTime, setText, statusColor, waitNote, modelName, handoffBits,
 } from './cards.js';
 import { icon, verbIcon } from './icons.js';
-import { renderSessionPane, isHosted, isPreview, openElsewhere, endPreviews, termApi, ensureLive, onRekey } from './term.js';
+import { renderSessionPane, isPreview, openElsewhere, endPreviews, termApi, ensureLive, onRekey } from './term.js';
 import { renderChatPane, copyBtn, copyText } from './chat.js';
 import { renderChangesPane } from './changes.js';
 import { renderPreviewPane } from './preview.js';
@@ -50,7 +50,7 @@ function build(el, ui) {
 <button type="button" class="d-close" data-close title="close (Esc)" aria-label="close the panel">${icon('close', 16)}</button></div>
 <div class="d-tabs" role="tablist" aria-label="panel">
   <button type="button" role="tab" class="d-tab" data-tab="chat"><span class="d-tab-t">Chat</span></button>
-  <button type="button" role="tab" class="d-tab" data-tab="session"><span class="d-tab-t">Session</span><span class="d-here" title="running in Fleet View" hidden></span></button>
+  <button type="button" role="tab" class="d-tab" data-tab="session"><span class="d-tab-t">Session</span></button>
   <button type="button" role="tab" class="d-tab" data-tab="changes"><span class="d-tab-t">Changes</span></button>
   <button type="button" role="tab" class="d-tab" data-tab="preview"><span class="d-tab-t">Preview</span></button>
   <button type="button" role="tab" class="d-tab" data-tab="details"><span class="d-tab-t">Details</span></button>
@@ -94,7 +94,6 @@ function build(el, ui) {
   // review comments (Changes) or a screenshot (Preview) handed to the chat box: show the Chat tab (see handto.js)
   window.addEventListener('fv-handto', (e) => { if (e.detail && e.detail.id === el._id) { el._tab = 'chat'; el._tabPicked = true; ui.showDetail(el._id); } });
   el._tabs = [...el.querySelectorAll('.d-tab')];
-  el._here = el.querySelector('.d-here');
   el._placeBtn = el.querySelector('[data-place]');
   el._previewHint = el.querySelector('.d-preview');
   // the title renames the conversation in place: a double-click on it, its pencil, or F2 anywhere in the panel
@@ -637,8 +636,6 @@ function drawTabs(el, s, ui, work, auto, extras = []) {
     b.setAttribute('aria-selected', String(on));
     b.tabIndex = on ? 0 : -1;
   }
-  const hosted = isHosted(s.id);
-  el._here.hidden = !hosted;
   el._body.hidden = tab !== 'details';
   el._session.hidden = tab !== 'session';
   el._chat.hidden = tab !== 'chat';
