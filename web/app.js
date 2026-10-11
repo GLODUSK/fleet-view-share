@@ -1968,7 +1968,6 @@ function openContextMenu(target, x, y) {
     // empty space on the map, or around the cards or tiles: add a repo (removed conversations are on a repo's menu)
     const extra = [{ sep: true }, notifyMenuItem()];
     if (accountsMenuItem()) extra.push(accountsMenuItem());
-    if (remoteMenuItem()) extra.push(remoteMenuItem());
     if (multi.size) extra.push({ label: `Clear selection (${multi.size})`, icon: 'close', run: () => setMulti([], 'menu') });
     openCtxMenu({ x, y, items: [addRepoMenuItem({ x, y }), recentRepoMenuItem({ x, y }), ...extra] });
     return;
@@ -2951,17 +2950,12 @@ function notifyMenuItem() {
 }
 
 // ---------- remote access (remote.js on the server): Fleet View in a browser on another device, over Tailscale ----------
-// The switch lives on empty space's right-click menu ("Remote access…"), which opens a card like the Usage card: the
-// switch "Use Fleet View from my other devices (Tailscale)" (POST /settings { remote: { enabled } }; only this PC's
-// own page may flip it), the address to open there, how turning it on went (state.remote.status / error), and the
-// approved browsers with Revoke (POST /remote/revoke). A browser asking to be let in (state.remote.pending) shows on
+// Its switch is no longer in the page (Henry, 2026-10-10: other devices go through Supabase sync, not Tailscale);
+// settings.remote.enabled stays off. A browser asking to be let in (state.remote.pending) shows on
 // every viewer that can approve, at the top: "<label> wants to use Fleet View — code <code>" with Allow and Deny
 // (POST /remote/approve | deny); the code is the one its pairing page shows. Nothing blinks; it stays until answered
 // or its 10 minutes run out.
-let remoteMe = null; // GET /remote/me: { remote (this page came through Tailscale), approved, name, enabled }
-if (!FIXTURE) getJson('/remote/me').then((j) => { if (j && typeof j === 'object') { remoteMe = j; drawRemote(); } });
-const isRemoteViewer = () => !!remoteMe?.remote;
-let remoteCard = null, remoteCardKey = '', remoteAskKey = '';
+let remoteAskKey = '';
 const remoteAsks = document.createElement('div');
 remoteAsks.className = 'uw-heads';
 remoteAsks.setAttribute('aria-live', 'polite');
@@ -2969,11 +2963,6 @@ remoteAsks.setAttribute('aria-live', 'polite');
 Object.assign(remoteAsks.style, { top: 'calc(var(--top-h) + 10px)', bottom: 'auto', left: '50%', transform: 'translateX(-50%)', alignItems: 'center', zIndex: '47' });
 document.body.appendChild(remoteAsks);
 
-function remoteMenuItem() {
-  const r = state?.remote;
-  if (!r) return null;
-  return { label: 'Remote access…', icon: 'shield', badge: r.enabled ? (r.status === 'error' ? 'problem' : 'on') : null, note: r.enabled && r.url ? r.url.replace(/^https:\/\//, '') : null, run: () => openRemoteCard() };
-}
 async function remoteAct(url, body, done) {
   const r = await post(url, body);
   if (!r) toast('could not reach Fleet View', C.red);
@@ -2993,9 +2982,6 @@ function drawRemote() {
       + `<div class="uw-s">${esc(p.login)} · over Tailscale · allow it only if that device shows the same code</div></div>`
       + `<div class="uw-acts"><button type="button" data-c="allow">Allow</button><button type="button" class="uw-more" data-c="deny">Deny</button></div></div>`).join('');
   }
-  // with the Remote access card open, the requests show in it instead (the two would overlap at the top right)
-  remoteAsks.hidden = !!remoteCard;
-  if (remoteCard) drawRemoteCard();
 }
 remoteAsks.addEventListener('click', (e) => {
   const b = e.target.closest('button[data-c]'), card = b && b.closest('.uw-card');
@@ -3005,88 +2991,6 @@ remoteAsks.addEventListener('click', (e) => {
   remoteAskKey = '';
   if (b.dataset.c === 'allow') remoteAct('/remote/approve', { id: card.dataset.id }, `${p ? p.label : 'That device'} may use Fleet View now`);
   else remoteAct('/remote/deny', { id: card.dataset.id }, null);
-});
-
-function openRemoteCard() {
-  if (remoteCard) { remoteCard.focus(); return; }
-  remoteCard = document.createElement('div');
-  remoteCard.className = 'uw-pop';
-  remoteCard.tabIndex = -1;
-  remoteCard.setAttribute('role', 'dialog');
-  remoteCard.setAttribute('aria-label', 'Remote access');
-  remoteCardKey = '';
-  document.body.appendChild(remoteCard);
-  remoteAsks.hidden = true;
-  drawRemoteCard();
-  remoteCard.focus();
-  if (!FIXTURE) getJson('/remote/me').then((j) => { if (j && typeof j === 'object') { remoteMe = j; drawRemote(); } });
-}
-function closeRemoteCard() {
-  if (!remoteCard) return;
-  remoteCard.remove();
-  remoteCard = null;
-  remoteAsks.hidden = false;
-}
-const REMOTE_STATUS = { off: 'Off', starting: 'Starting…', 'turning on': 'Turning on…', on: 'On', 'turning off': 'Turning off…', error: 'Not working' };
-function drawRemoteCard() {
-  const r = state?.remote || { enabled: false, status: 'off', pending: [], devices: [] };
-  const here = !isRemoteViewer();
-  const key = JSON.stringify([r, here, Math.floor(Date.now() / 60e3)]);
-  if (key === remoteCardKey) return;
-  remoteCardKey = key;
-  const status = r.enabled ? REMOTE_STATUS[r.status] || r.status : 'Off';
-  const color = r.status === 'error' ? 'var(--rose)' : r.enabled && r.status === 'on' ? 'var(--mint)' : 'var(--dim)';
-  const devices = (r.devices || []).slice().sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
-  const asks = Array.isArray(r.pending) ? r.pending : [];
-  const row = 'display:flex;align-items:center;gap:10px;padding:8px 0';
-  remoteCard.innerHTML = `<div class="uw-top"><span class="uw-title">${icon('shield', 15)}<b>Remote access</b></span><span class="uw-sub"></span><button type="button" class="uw-x" data-c="x" aria-label="Close">${icon('close', 14)}</button></div>`
-    + `<div class="uw-list">`
-    + `<label style="${row};cursor:${here ? 'pointer' : 'default'}"><input type="checkbox" data-c="switch" ${r.enabled ? 'checked' : ''} ${here ? '' : 'disabled'} style="width:16px;height:16px;accent-color:var(--gold);flex:none">`
-    + `<span style="flex:1 1 auto">Use Fleet View from my other devices (Tailscale)</span><span style="color:${color};font-size:12px;white-space:nowrap">${esc(status)}</span></label>`
-    + (here ? '' : `<div class="uw-none">Remote access is switched on and off on the PC.</div>`)
-    + (r.error ? `<div class="uw-lines"><span class="uw-away">${esc(r.error)}</span></div>` : '')
-    + (r.url ? `<div class="uw-lines"><span>Open on your other device, signed in to Tailscale:</span><span class="mono" style="color:var(--text);user-select:all">${esc(r.url)}</span>`
-      + `<span>Each browser asks once; you allow it here with the code it shows.</span></div>` : r.enabled ? '' : `<div class="uw-lines"><span>${r.name === null ? 'Tailscale is not running on this PC, or not signed in.' : ''}</span></div>`)
-    + (asks.length ? `<div class="uw-acct"><div class="uw-ah"><b>Waiting for approval</b><span class="uw-chip">${asks.length}</span></div>`
-      + asks.map((p) => `<div style="${row};padding:5px 0"><div style="flex:1 1 auto;min-width:0"><div>${esc(p.label)} — code <span class="mono" style="color:var(--gold)">${esc(p.code)}</span></div>`
-        + `<div style="color:var(--dim);font-size:12px">${esc(p.login)} · allow it only if that device shows the same code</div></div>`
-        + `<button type="button" class="btn" data-c="allow" data-id="${esc(p.id)}" style="height:28px;padding:0 12px">Allow</button>`
-        + `<button type="button" class="btn" data-c="deny" data-id="${esc(p.id)}" style="height:28px;padding:0 12px">Deny</button></div>`).join('') + `</div>` : '')
-    + `<div class="uw-acct"><div class="uw-ah"><b>Approved browsers</b><span class="uw-chip">${devices.length}</span></div>`
-    + (devices.length ? devices.map((d) => `<div style="${row};padding:5px 0"><div style="flex:1 1 auto;min-width:0"><div>${esc(d.label)}</div>`
-      + `<div style="color:var(--dim);font-size:12px">${esc(d.login)} · last used ${d.lastSeen ? esc(ago(Date.now() - d.lastSeen)) + ' ago' : 'never'}</div></div>`
-      + `<button type="button" class="btn" data-c="revoke" data-id="${esc(d.id)}" style="height:28px;padding:0 12px">Revoke</button></div>`).join('')
-      : `<div class="uw-none">None yet.</div>`)
-    + `</div></div>`
-    + `<div class="uw-foot">An approved browser can do anything Fleet View does on this PC, sessions included. Revoke one you no longer use.</div>`;
-}
-document.addEventListener('pointerdown', (e) => { if (remoteCard && !remoteCard.contains(e.target) && !e.target.closest?.('.ctx-menu, .menu')) closeRemoteCard(); }, true);
-document.addEventListener('keydown', (e) => {
-  if (!remoteCard) return;
-  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeRemoteCard(); }
-  else if (remoteCard.contains(e.target)) e.stopPropagation(); // the card's own keys (Space on the switch) are not shortcuts
-}, true);
-document.addEventListener('click', (e) => {
-  if (!remoteCard || !remoteCard.contains(e.target)) return;
-  const c = e.target.closest('[data-c]');
-  if (!c) return;
-  if (c.dataset.c === 'x') closeRemoteCard();
-  else if (c.dataset.c === 'allow' || c.dataset.c === 'deny') {
-    const p = (state?.remote?.pending || []).find((x) => x.id === c.dataset.id);
-    if (c.dataset.c === 'allow') remoteAct('/remote/approve', { id: c.dataset.id }, `${p ? p.label : 'That device'} may use Fleet View now`);
-    else remoteAct('/remote/deny', { id: c.dataset.id }, null);
-  } else if (c.dataset.c === 'revoke') {
-    const d = (state?.remote?.devices || []).find((x) => x.id === c.dataset.id);
-    remoteAct('/remote/revoke', { id: c.dataset.id }, `${d ? d.label : 'That browser'} can no longer use Fleet View`);
-  }
-});
-document.addEventListener('change', (e) => {
-  if (!remoteCard || !remoteCard.contains(e.target) || e.target.dataset.c !== 'switch') return;
-  const on = e.target.checked;
-  if (state?.remote) state.remote = { ...state.remote, enabled: on, status: on ? 'turning on' : 'turning off', error: null };
-  remoteCardKey = '';
-  drawRemoteCard();
-  remoteAct('/settings', { remote: { enabled: on } }, on ? 'Remote access is turning on' : 'Remote access is off');
 });
 
 if (DEBUG) {
