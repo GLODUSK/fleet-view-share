@@ -731,7 +731,9 @@ function hsl(h, s, l) {
 // colour families: each repo gets one base hue, and its conversations are close shades of it,
 // so clusters read at a glance (ember, gold, mint, cyan, violet, rose, then the in-betweens)
 const FAMILIES = [22, 44, 152, 192, 262, 330, 8, 212, 120, 288];
-const familyBase = (root) => FAMILIES[hashOf(String(root || '').toLowerCase()) % FAMILIES.length];
+// keyed by the repo's folder name, not its whole path, so one repo has one colour on every machine (Z:\Github\x on
+// the PC, /Users/henry/code/x on the Mac)
+const familyBase = (root) => FAMILIES[hashOf(String(root || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop().toLowerCase()) % FAMILIES.length];
 const familyColor = (root, light = 0.68) => hsl(familyBase(root), 0.9, light);
 const shadeOf = (root, id) => { const k = hashOf(id); return hsl(familyBase(root) + ((k % 5) - 2) * 9, 0.82 + (k % 3) * 0.06, 0.6 + ((k >> 3) % 4) * 0.035); };
 
@@ -866,7 +868,50 @@ function hasCommits(gd) {
     try { return fs.readFileSync(path.join(gd, 'packed-refs'), 'utf8').includes(` ${ref}`); } catch { return false; }
   } catch { return true; } // unreadable: keep treating it as a repo, as before
 }
+
+// ---------- paths another machine wrote ----------
+// A synced conversation (sync-down.js) keeps the folders of the machine it ran on: /Users/... here on Windows,
+// Z:\... on a Mac. Those are not paths here: path.resolve would put Z:\x under this process's folder on a Mac.
+const nativeAbs = (p) => typeof p === 'string' && (P.isWin ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(p) : p.startsWith('/'));
+// this machine's folder for a Claude Code slug folder name (C--Users-henry-x -> C:\Users\henry\x), found by walking
+// down from the drive or / and matching each folder's name as the slug spells it (every non-letter-or-digit a '-').
+// null when no folder here spells it. sync-down.js lays a conversation down in the slug folder of this machine's
+// checkout, so its folder here is the one that slug names.
+const slugFolders = new Map(); // lower-case slug -> { at, folder }
+function folderOfSlug(slug) {
+  const k = String(slug || '').toLowerCase();
+  const hit = slugFolders.get(k);
+  if (hit && (hit.folder || Date.now() - hit.at < 10 * 60e3)) return hit.folder;
+  const drive = P.isWin ? /^([a-z])-(-.*)$/.exec(k) : null;
+  let reads = 0;
+  const walk = (dir, rest) => {
+    if (!rest) return dir;
+    if (++reads > 300) return null;
+    let names;
+    try { names = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() || e.isSymbolicLink()).map((e) => e.name); } catch { return null; }
+    // longest first: detailforge-web before detailforge
+    for (const n of names.sort((a, b) => b.length - a.length)) {
+      const nk = '-' + n.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+      if (rest !== nk && !rest.startsWith(nk + '-')) continue;
+      const got = walk(path.join(dir, n), rest.slice(nk.length));
+      if (got) return got;
+    }
+    return null;
+  };
+  const folder = drive ? walk(`${drive[1].toUpperCase()}:\\`, drive[2]) : !P.isWin && k.startsWith('-') ? walk('/', k) : null;
+  slugFolders.set(k, { at: Date.now(), folder });
+  if (slugFolders.size > 500) slugFolders.delete(slugFolders.keys().next().value);
+  return folder;
+}
+// a conversation's folder as this machine has it: its own when it is a path here, else the one its log's slug folder
+// names (logFile: the .jsonl), else the other machine's as written
+function localCwd(cwd, logFile) {
+  if (!cwd || nativeAbs(cwd)) return cwd;
+  return (logFile && folderOfSlug(path.basename(path.dirname(logFile)))) || cwd;
+}
+
 function gitInfo(file) {
+  if (!nativeAbs(file)) return null; // another machine's path (see nativeAbs), or a relative one
   let dir = path.dirname(file);
   const seen = [];
   let found = null;
@@ -902,7 +947,7 @@ const winPath = (p) => (path.sep === '\\' && /^\/[a-zA-Z](\/|$)/.test(p) ? `${p[
 // the absolute path a Read, Write, Edit or NotebookEdit call names, else null
 const toolFile = (c) => {
   const p = /^(Read|Write|Edit|NotebookEdit)$/.test(c.name) ? c.input?.file_path || c.input?.notebook_path : null;
-  return p ? path.resolve(winPath(String(p))) : null;
+  return p && nativeAbs(winPath(String(p))) ? path.resolve(winPath(String(p))) : null;
 };
 
 function vote(s, root, t, top) {
@@ -912,7 +957,7 @@ function vote(s, root, t, top) {
 }
 
 function noteFile(s, t, p, wrote) {
-  if (!p) return;
+  if (!p || !nativeAbs(winPath(String(p)))) return;
   const abs = path.resolve(winPath(String(p)));
   const g = gitInfo(abs);
   // the same file in two worktrees of one repo is the same file for collision purposes
@@ -944,6 +989,7 @@ function commandRepos(cmd) {
   const out = [];
   let n = 0;
   for (const m of String(cmd || '').matchAll(CMD_PATH_RE)) {
+    if (!nativeAbs(winPath(m[0]))) continue;
     const g = gitInfo(path.join(path.resolve(winPath(m[0])), '_'));
     if (g) out.push(g);
     if (++n >= 3) break;
@@ -1075,7 +1121,7 @@ function repoOf(s, now) {
   const prev = pickupRepo(s);
   if (prev) return prev;
   const g = s.cwd && gitInfo(path.join(s.cwd, '_'));
-  return g ? g.root : s.cwd || null;
+  return g ? g.root : nativeAbs(s.cwd) ? s.cwd : null;
 }
 
 // the repo of the conversation s picked up from: the one its tool calls pointed at most, with no time
@@ -1377,7 +1423,7 @@ function ingestMain(s, recs) {
     if (d.isSidechain || (d.type !== 'assistant' && d.type !== 'user')) continue;
     const t = Date.parse(d.timestamp) || Date.now();
     if (t > (s.actT || 0)) s.actT = t; // the last prompt, tool result or reply: real activity, unlike cost records
-    if (d.cwd) { s.cwd = d.cwd; if (!s.homeCwd && s.dir && projDirKey(d.cwd) === path.basename(path.dirname(s.dir)).toLowerCase()) s.homeCwd = d.cwd; }
+    if (d.cwd) { const cwd = localCwd(d.cwd, s.dir); s.cwd = cwd; if (!s.homeCwd && s.dir && projDirKey(cwd) === path.basename(path.dirname(s.dir)).toLowerCase()) s.homeCwd = cwd; }
     if (d.gitBranch) s.gitBranch = d.gitBranch === 'HEAD' ? null : d.gitBranch; // the branch of its folder, when no tool call names a checkout
     const content = d.message?.content;
     const blocks = Array.isArray(content) ? content : [];
@@ -5194,7 +5240,7 @@ function readLogInfo(file, pdir, id, { cap = 48 << 20, head = 4 << 20, votes = f
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!lines[i].includes('"cwd"')) continue;
     const d = parse(lines[i]);
-    if (d && !d.isSidechain && (d.type === 'user' || d.type === 'assistant') && typeof d.cwd === 'string' && d.cwd) { cwd = d.cwd; break; }
+    if (d && !d.isSidechain && (d.type === 'user' || d.type === 'assistant') && typeof d.cwd === 'string' && d.cwd) { cwd = localCwd(d.cwd, file); break; }
   }
   let count = null;
   if (votes) {
@@ -5286,7 +5332,7 @@ function removedSession(id) {
   const info = f && readLogInfo(f.file, f.pdir, id);
   if (!info) return null;
   const g = info.cwd ? gitInfo(path.join(info.cwd, '_')) : null;
-  return { id, name: plain(info.title || plain(info.prompt, 60) || id.slice(0, 8), 80), cwd: info.cwd, account: f.account, projRoot: f.root, root: g ? g.root : info.cwd || null, state: 'DONE' };
+  return { id, name: plain(info.title || plain(info.prompt, 60) || id.slice(0, 8), 80), cwd: info.cwd, account: f.account, projRoot: f.root, root: g ? g.root : nativeAbs(info.cwd) ? info.cwd : null, state: 'DONE' };
 }
 
 // ---------- history: every conversation log of any age, by repo (the Projects view's "Older conversations") ----------
@@ -5362,7 +5408,7 @@ function historyStep() {
     if (!info) continue;
     let repoRoot = null, best = 0;
     for (const [root, c] of Object.entries(info.votes || {})) if (c > best) { repoRoot = root; best = c; }
-    if (!repoRoot && info.cwd) { const g = gitInfo(path.join(info.cwd, '_')); repoRoot = g ? g.root : info.cwd; }
+    if (!repoRoot && info.cwd) { const g = gitInfo(path.join(info.cwd, '_')); repoRoot = g ? g.root : nativeAbs(info.cwd) ? info.cwd : null; }
     histIndex.set(q.file, histFields({ ...q, title: info.title, prompt: info.prompt ? plain(info.prompt, 200) : null, cwd: info.cwd, repoRoot }));
     histDirty = true;
   }

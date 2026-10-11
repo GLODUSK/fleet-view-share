@@ -39,7 +39,8 @@
 //      copied to another path does not open), and its sha256 and then the whole file's are checked. Side files
 //      (subagents/, tool-results/, workflows/) the same way under <slug>/<id>/, from their newest generation; a side
 //      file with two generations up at once is mid-upload and waits for the next scan.
-//   7. Laid down per the recipe: <file>.part, then a rename over the local copy. A local copy is replaced only when it
+//   7. Laid down per the recipe: <file>.part, then a rename over the local copy (a main log then gets its last
+//      entry's time as its modified time, so it does not look like it just worked). A local copy is replaced only when it
 //      is a byte prefix of the new bytes (chunks it already holds are compared by sha256 and not downloaded). A longer
 //      or different local copy is left alone, nothing is written for that conversation, and it is listed in
 //      conflicts() until its row or the local file changes. Two exceptions: a whole side file (not .jsonl) this side
@@ -154,6 +155,24 @@ function renameOver(from, to) {
       while (Date.now() < until) { /* a short wait: something (an antivirus scan) had the file open */ }
     }
   }
+}
+// A log just laid down gets the time of its last entry as its modified time, not the moment it came down: Fleet View
+// and `claude --resume` take a log's modified time as when it last worked, so a months-old conversation that came
+// down now would show as just finished. -> that time (ms), or null when the end of the log names none (left as is).
+const TAIL_BYTES = 256 << 10;
+function stampLastEntry(file) {
+  let fd = null;
+  try {
+    fd = fs.openSync(file, 'r');
+    const size = fs.fstatSync(fd).size, len = Math.min(size, TAIL_BYTES);
+    const text = readRange(fd, size - len, len).toString('utf8');
+    let last = null;
+    for (const m of text.matchAll(/"timestamp":"([^"]{10,40})"/g)) { const t = Date.parse(m[1]); if (Number.isFinite(t) && (last === null || t > last)) last = t; }
+    fs.closeSync(fd); fd = null;
+    if (last === null || last > Date.now()) return null;
+    fs.utimesSync(file, new Date(), new Date(last));
+    return last;
+  } catch { return null; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
 }
 
 // The folders Fleet View knows as repos when no roots option is given: ~/.fleet-view.json's addedRepos and
@@ -477,7 +496,7 @@ function createMaterializer(opts = {}) {
       if (!row.sha256 || !HEX64_RE.test(row.sha256)) fail('main: the row has no sha256', 'bad_sha');
       const r = await layDown({ id, file: 'main', target: mainTarget, chunks: plan.chunks, size, sha256: row.sha256, whole: false, known: null }, key);
       if (r.result === 'conflict') return conflict('main', mainTarget, r);
-      if (r.result === 'written') wroteAny = true;
+      if (r.result === 'written') { wroteAny = true; stampLastEntry(mainTarget); }
       files.main = { generation: gen, size, sha256: row.sha256 };
     }
     // side files, from their newest generation

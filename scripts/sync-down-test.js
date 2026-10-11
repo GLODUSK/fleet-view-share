@@ -256,6 +256,16 @@ async function main() {
   ok(same(mainOf(c1.id), grown), 'prefix: the local copy grew to the new bytes');
   eq(storageGets() - sg, 1, 'prefix: only the new chunk was fetched');
 
+  // ---------- a log laid down keeps its last entry's time, not the moment it came down ----------
+  const WHEN = '2026-06-01T12:00:00.000Z';
+  const dated = line({ type: 'assistant', sessionId: 'a', cwd: 'C:\\Users\\mac\\proj', uuid: crypto.randomUUID(), timestamp: WHEN, text: 'an old reply' });
+  putFile(c1.id, 'main', 0, [dated], 4, grown.length);
+  const grown2 = Buffer.concat([grown, dated]);
+  Object.assign(c1.row, { size: grown2.length, sha256: X.sha256(grown2), updated_at: stamp() });
+  r = await m.scanOnce();
+  ok(same(mainOf(c1.id), grown2), 'dated: the local copy grew');
+  eq(Math.round(fs.statSync(mainOf(c1.id)).mtimeMs / 1000), Date.parse(WHEN) / 1000, 'dated: its modified time is its last entry\'s');
+
   // ---------- a longer local copy, a diverged one ----------
   const c2 = putConvo({ pieces: [Buffer.concat(logOf('b', 4))] });
   const longer = Buffer.concat([c2.main, line({ type: 'cost-state' })]);
