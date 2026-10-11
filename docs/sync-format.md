@@ -60,7 +60,10 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
   - `live:<device id>` (`sync-live.js`): what runs on that device right now, written by that device only, sealed with
     `sealText(json, key, 'setting:live:<device id>')`, `updated_at` set to its `at`:
     `{ v: 1, device, at, sessions: [{ id, state, label, stateColor, name, renamed, account, last, active, turnStart,
-    waitingOn, agents }] }`. `sessions` lists the conversations it owns that are not DONE, and the DONE ones active
+    waitingOn, agents, repo }] }`. `repo` is `{ origin, name }` (the portable root of the `prefs:` rows: GitHub
+    `owner/name` and folder name, either may be null) for the repo that device shows it under, or null; another
+    device shows it under its own checkout of that repo when it has one (by origin, else a same-named folder with no
+    origin), else works the repo out itself. A row from before `repo` (none on its entries) still counts. `sessions` lists the conversations it owns that are not DONE, and the DONE ones active
     in the last day (300 at most, running ones first), in id order. It is written only when that list changes (not
     `last` or `active`), at most every 5 s. Every device lists the `live:*` keys and `updated_at` every 5 s and fetches
     a value only when its `updated_at` moved. A snapshot counts while its device is online (S4's `last_seen_at`

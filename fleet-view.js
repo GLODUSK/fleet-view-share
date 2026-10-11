@@ -1116,10 +1116,15 @@ function homeRootOf(s) {
 
 // the repo a session works in: the one it was moved to, else the one it was started in, else the one its recent
 // tool calls point at most, else its folder. Reading or editing another repo (a teammate's, after "Work together")
-// does not move it: only "Move to workspace" does
+// does not move it: only "Move to workspace" does. One another device runs takes that device's verdict when this
+// machine has that repo: its tool calls name that machine's paths, so here it would fall back to its folder
 function repoOf(s, now) {
   const mv = movedRootOf(s);
   if (mv) return mv;
+  // s.remote is only set once the sync runner is up, which is after PREFS_ROOTS
+  const rr = s.remote && s.remote.entry && s.remote.entry.repo;
+  const there = rr && PREFS_ROOTS.in(rr);
+  if (there) return there;
   const home = homeRootOf(s);
   if (home) return home;
   const count = new Map();
@@ -4299,11 +4304,15 @@ function liveSnapshot() {
     const o = owners && owners.get(String(s.id).toLowerCase());
     if (o && o.moving !== 'away') continue;
     const st = STATE[s.state] || STATE.IDLE;
+    // the repo it shows under here, portable: the other devices can't work it out from its log (this machine's paths)
+    refreshHue(s, now);
+    const rp = s.root ? PREFS_ROOTS.out(s.root) : null;
     out.push({
       id: s.id, state: s.state, label: st.label, stateColor: toHex(st.color),
       name: plain(baseName(s) || s.name || s.id.slice(0, 8)), renamed: !!names.get(s.id), account: accountFor(s),
       last: s.last || s.mtime || now, active: Math.round(s.actT || 0), turnStart: s.promptAt || null,
       waitingOn: waitingOf(s), agents: runningAgents(s),
+      repo: rp && (rp.origin || rp.name) ? { origin: rp.origin || null, name: rp.name || null } : null,
     });
   }
   return out;

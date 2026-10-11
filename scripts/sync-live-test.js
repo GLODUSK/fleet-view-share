@@ -6,7 +6,8 @@
 //   while nothing changed (no heartbeat); a change waits out the 5 s throttle; the other device's snapshot read back,
 //   its own row skipped, its value fetched only when its updated_at moved; fresh only while the mover says its device
 //   is online; a row sealed with another key, or not JSON, ignored, said once and not fetched again until it changes;
-//   a write that fails is said once and tried again; remoteFor's rules (listed, listed but resting, fresh and not
+//   a write that fails is said once and tried again; each conversation's repo ({ origin, name }) published, read back,
+//   cleaned, and a change of it alone written, an older entry with none still valid; remoteFor's rules (listed, listed but resting, fresh and not
 //   listed, offline owner, an owner that never published, not read yet); and sync-run.js's wiring (the mover's device
 //   id and online(), the snapshot, live(), started and stopped with the run, none without a snapshot).
 // Run: node scripts/sync-live-test.js   (exit 0 = all pass)
@@ -186,6 +187,19 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
   step(5e3); await pc.tick();
   ok(rowOf(PC).sessions.some((e) => e.name === 'renamed again'), 'and goes out once Supabase is back');
 
+  // the repo the owner shows it under: published, and a change of it alone goes out
+  const wRepo = writes();
+  pcList[0].repo = { origin: 'GLODUSK/fleet-view', name: 'fleet-view', known: true };
+  step(5e3); await pc.tick();
+  eq(writes(), wRepo + 1, 'a conversation\'s repo set: written');
+  eq(rowOf(PC).sessions.find((e) => e.id === C2).repo, { origin: 'GLODUSK/fleet-view', name: 'fleet-view' }, 'its repo goes out as { origin, name } only');
+  pcList[0].repo = { origin: null, name: 'scratch-2026-10-11' };
+  step(5e3); await pc.tick();
+  eq(writes(), wRepo + 2, 'only its repo changed: written');
+  eq(rowOf(PC).sessions.find((e) => e.id === C2).repo, { origin: null, name: 'scratch-2026-10-11' }, 'a folder with no origin goes by its name');
+  pcList[0].repo = { origin: 'GLODUSK/fleet-view', name: 'fleet-view' };
+  step(5e3); await pc.tick();
+
   // ---------- remoteFor ----------
   step(5e3); await mac.tick();
   view = mac.live();
@@ -208,6 +222,21 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
   ok(L.remoteFor(view, '', C2) === null, 'no owner device: null');
   ok(L.cleanEntry({ id: C1, state: 'WORKING', account: 'AB', stateColor: 'red', name: 'x'.repeat(500) }).account === null, 'cleanEntry drops a bad account');
   ok(L.cleanEntry({ id: C1, state: 'working' }) === null && L.cleanEntry({ id: C1, state: 'WORKING' }).name === null, 'cleanEntry wants an upper-case state');
+  r = L.remoteFor(mac.live(), PC, C2);
+  eq(r && r.entry && r.entry.repo, { origin: 'GLODUSK/fleet-view', name: 'fleet-view' }, 'the other device reads the owner\'s repo');
+  // repo: kept when it is a portable root, null when not; a row from before it (none) is still an entry
+  const ce = (repo) => L.cleanEntry({ id: C1, state: 'WORKING', repo });
+  eq(ce({ origin: 'GLODUSK/fleet-view', name: 'fleet-view', extra: 'x' }).repo, { origin: 'GLODUSK/fleet-view', name: 'fleet-view' }, 'cleanEntry keeps a repo, its two fields only');
+  eq(ce({ name: 'fleet-view' }).repo, { origin: null, name: 'fleet-view' }, 'cleanEntry keeps a repo with a name only');
+  eq(ce({ origin: 'GLODUSK/fleet-view', name: '/Users/henry/code/fleet-view' }).repo, { origin: 'GLODUSK/fleet-view', name: null }, 'cleanEntry drops a name that is a path');
+  eq(ce({ origin: 'GLODUSK/fleet-view', name: 'x'.repeat(201) }).repo, { origin: 'GLODUSK/fleet-view', name: null }, 'cleanEntry drops a name over 200');
+  ok(ce({ origin: 'has space', name: 'a\\b' }).repo === null && ce('fleet-view').repo === null && ce({ origin: 'x'.repeat(301) }).repo === null, 'cleanEntry rejects a bad repo (whitespace origin, path name, not an object, too long)');
+  const old = L.cleanEntry({ id: C1, state: 'WORKING', name: 'old row' });
+  ok(old && old.name === 'old row' && old.repo === null, 'an entry from before repo: still an entry, repo null');
+  const base = [{ ...old, repo: { origin: 'GLODUSK/fleet-view', name: 'fleet-view' } }];
+  ok(L.sigOf(base) !== L.sigOf([{ ...base[0], repo: { origin: 'GLODUSK/other', name: 'fleet-view' } }])
+    && L.sigOf(base) !== L.sigOf([{ ...base[0], repo: { origin: 'GLODUSK/fleet-view', name: 'other' } }])
+    && L.sigOf(base) !== L.sigOf([old]), 'sigOf changes when the repo changes, or goes');
 
   // ---------- sync-run.js wiring ----------
   {

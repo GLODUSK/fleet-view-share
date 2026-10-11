@@ -14,7 +14,9 @@
 //             last_seen_at heartbeat). A snapshot counts only while its device is there; while it is not known, the
 //             conversations of that device keep this machine's own reading. Not given: every snapshot read counts
 //   snapshot() -> [{ id, state, label, stateColor, name, renamed, account, last, active, turnStart, waitingOn,
-//             agents }]: the conversations this device owns, as its /state shows them
+//             agents, repo }]: the conversations this device owns, as its /state shows them. repo: { origin, name }, the
+//             repo it shows it under, portable (sync-prefs.js makeTranslate out()), or null; the other devices show it
+//             under their own checkout of that repo (its tool calls name this machine's paths, which they lack)
 //   now()     the clock (Date.now); timing: { ...TIMING } overrides (tests)
 //
 // The row: fleet_sync.settings key live:<device id>, one per device and written by that device only, sealed with
@@ -41,6 +43,7 @@
 'use strict';
 const path = require('path');
 const K = require(path.join(__dirname, 'sync-crypto.js'));
+const { cleanRoot } = require(path.join(__dirname, 'sync-prefs.js'));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const KEY_RE = /^live:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
@@ -61,6 +64,12 @@ const errText = (e) => String((e && e.message) || e || '').replace(/\s+/g, ' ').
 // ms have gone by since last on this clock, or the clock went back past it (never wait out a jump back)
 const waited = (t, last, ms) => t - last >= ms || t < last;
 const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+// the repo the owner shows it under, portable as sync-prefs.js has roots: { origin, name } | null (an older row has none)
+function cleanRepo(r) {
+  const c = cleanRoot(r);
+  if (c && c.name && c.name.length > 200) c.name = null;
+  return c && (c.origin || c.name) ? c : null;
+}
 
 // one conversation of a snapshot, as written and as read: null when it is not one
 function cleanEntry(x) {
@@ -77,6 +86,7 @@ function cleanEntry(x) {
     last: msOf(x.last), active: msOf(x.active), turnStart: msOf(x.turnStart),
     waitingOn: text(x.waitingOn, 300),
     agents: Number.isInteger(x.agents) && x.agents > 0 ? Math.min(x.agents, 999) : 0,
+    repo: cleanRepo(x.repo),
   };
 }
 // a snapshot's list: clean, one per id, in id order (so a list that only moved around writes nothing)
@@ -96,7 +106,8 @@ function pickList(list, t, doneMs = TIMING.doneMs) {
   return keep.slice(0, MAX_SESSIONS).sort(byId);
 }
 // what decides a write: everything but last and active
-const sigOf = (list) => JSON.stringify(list.map((e) => [e.id, e.state, e.label, e.stateColor, e.name, e.renamed, e.account, e.turnStart, e.waitingOn, e.agents]));
+const sigOf = (list) => JSON.stringify(list.map((e) => [e.id, e.state, e.label, e.stateColor, e.name, e.renamed, e.account, e.turnStart, e.waitingOn, e.agents,
+  e.repo ? [e.repo.origin, e.repo.name] : null]));
 
 function remoteFor(view, device, id) {
   if (!view || !view.ready) return null;
@@ -248,4 +259,4 @@ function createLive(o = {}) {
   return { start, stop, tick, live, status };
 }
 
-module.exports = { createLive, remoteFor, cleanEntry, cleanList, pickList, TIMING, MAX_SESSIONS };
+module.exports = { createLive, remoteFor, cleanEntry, cleanList, pickList, sigOf, TIMING, MAX_SESSIONS };
