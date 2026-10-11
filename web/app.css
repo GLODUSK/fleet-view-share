@@ -738,7 +738,9 @@ html.titlebar .top.fit-6 .tabs button { padding: 0 9px; }
 .menu-item.ctx-item.has-sub[aria-expanded="true"] { background: var(--hover); }
 /* the submenu: the same surface, beside its item; a long one scrolls */
 .menu.ctx-menu.ctx-submenu { min-width: 260px; max-height: calc(100vh - 16px); overflow-y: auto; overscroll-behavior: contain; }
-html.glass .menu.ctx-menu { background: var(--float-bg); }
+/* 25% more see-through than the other menus (Henry, 2026-10-10): 0.9 -> 0.68, and 0.97 -> 0.73 in the desktop window */
+.menu.ctx-menu { background: rgba(15, 18, 28, 0.68); }
+html.glass .menu.ctx-menu { background: rgba(15, 18, 28, 0.73); }
 @media (prefers-reduced-motion: reduce) { .menu.ctx-menu { animation: none; } }
 
 /* ---------- map command center: orders box, replay pill, "Since you looked" ---------- */

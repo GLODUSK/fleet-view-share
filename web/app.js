@@ -2562,9 +2562,8 @@ function openContextMenu(target, x, y) {
     // its removed conversations (only when it has any), all of them: continue, show again or forget each
     const rm = removedMenuItem(removedFor(folder), false);
     if (rm) items.push({ sep: true }, rm);
-    // push and unpin sit at the bottom, just above Remove (Henry, 2026-10-10)
-    const tail = [pushHook() ? repoPushItem(folder, repo.push || 'production') : null, unpinItem(target)].filter(Boolean);
-    if (tail.length) items.push({ sep: true }, ...tail);
+    // push sits at the bottom, just above Remove; a repo has no "Unpin from the map" (Henry, 2026-10-10)
+    if (pushHook()) items.push({ sep: true }, repoPushItem(folder, repo.push || 'production'));
     // the repo and its conversations leave every view (the repo menu too); Undo on the toast
     items.push({ sep: true }, { label: 'Remove workspace', icon: 'close', danger: true, run: () => removeRepo({ root: folder, name: target.name || repo.name }) });
     openCtxMenu({ x, y, title: target.name || repo.name || repoName(folder), dot: color, sub: folder, items });
