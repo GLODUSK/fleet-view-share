@@ -11,6 +11,7 @@
   (function () {
     var h = document.documentElement;
     if (/[?&]glass=1(&|$)/.test(location.search) || navigator.userAgent.indexOf('Electron') >= 0) h.classList.add('glass');
+    if (/[?&]mac=1(&|$)/.test(location.search) || (navigator.userAgent.indexOf('Electron') >= 0 && /Mac/.test(navigator.platform || navigator.userAgent))) h.classList.add('mac');
     if (window.fleetDesktop && window.fleetDesktop.isDesktop) h.classList.add('desktop');
   })();
 </script>

@@ -24,12 +24,14 @@
   // titlebar: that window has no title bar of its own (titlebar=overlay from desktop/main.js); the header is
   // the drag region and leaves room on the right for the native min / max / close buttons.
   // solo: the Bots pop-out window (?solo=chats): only the Bots view, under its own small header (chats.css).
+  // mac: the desktop window on a Mac (or ?mac=1): its vibrancy is darker than Windows acrylic, so the glass tints are lighter.
   (function () {
     var q = location.search, h = document.documentElement, electron = navigator.userAgent.indexOf('Electron') >= 0;
     if (/[?&]glass=1(&|$)/.test(q) || electron) h.classList.add('glass');
     var wco = navigator.windowControlsOverlay;
     if (electron && (/[?&]titlebar=overlay(&|$)/.test(q) || (wco && wco.visible))) h.classList.add('titlebar');
     if (/[?&]solo=chats(&|$)/.test(q)) h.classList.add('solo');
+    if (/[?&]mac=1(&|$)/.test(q) || (electron && /Mac/.test(navigator.platform || navigator.userAgent))) h.classList.add('mac');
   })();
 </script>
 </head>

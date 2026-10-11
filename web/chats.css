@@ -382,6 +382,7 @@ html.solo .view-chats.ch-narrow > .ch { padding: 0 6px 6px; }
 /* no native buttons over the page (macOS keeps its title bar; a browser has none): no room kept for them */
 html:not(.titlebar) .ch-solo-top { padding-right: 12px; }
 html.glass .ch-solo-top { background: rgba(10, 12, 19, 0.16); }
+html.glass.mac .ch-solo-top { background: rgba(10, 12, 19, 0.11); }
 .ch-solo-top button { -webkit-app-region: no-drag; app-region: no-drag; }
 .ch-solo-top .ch-ib { width: 28px; height: 28px; border-radius: 7px; }
 .ch-solo-top .ch-ontop.on { color: var(--gold); background: rgba(255, 194, 74, 0.12); }

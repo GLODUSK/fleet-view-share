@@ -618,6 +618,17 @@ html.glass .c-wait { background: rgba(23, 21, 33, 0.7); }
 @media (max-width: 1300px) {
   html.glass .detail { background: rgba(17, 20, 30, 0.9); } /* over the view: needs more cover to stay readable */
 }
+/* the Mac: its vibrancy (desktop/main.js) is darker than Windows acrylic, so the same tints looked too dark there.
+   The main layers' tints are 30% lighter (Henry, 2026-10-11); floating surfaces keep --float-bg to stay readable */
+html.glass.mac { --glass-bg: rgba(18, 21, 32, 0.39); --glass-bg-strong: rgba(18, 21, 32, 0.55); }
+html.glass.mac body {
+  background:
+    radial-gradient(ellipse 120% 95% at 50% 45%, transparent 55%, rgba(0, 0, 0, 0.14) 100%),
+    rgba(10, 12, 19, 0.31);
+}
+html.glass.mac .top { background: rgba(10, 12, 19, 0.11); }
+html.glass.mac .foot { background: rgba(10, 12, 19, 0.15); }
+html.glass.mac .c-wait { background: rgba(23, 21, 33, 0.49); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(138, 146, 178, 0.28); border-radius: 5px; border: 3px solid transparent; background-clip: padding-box; }

@@ -25,6 +25,7 @@ body {
 /* over the acrylic: a dark tint strong enough to read over anything, the blur still shows */
 html.glass, html.glass body { background: transparent; }
 html.glass body { background: rgba(10, 12, 19, 0.62); }
+html.glass.mac body { background: rgba(10, 12, 19, 0.43); } /* the Mac's vibrancy is darker than acrylic (app.css) */
 button { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
 .grow { flex: 1 1 auto; }
