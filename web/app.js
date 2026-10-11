@@ -95,7 +95,8 @@
 // { id: 'new-<n>' or its id, pending: true, name: 'new session', state: 'NEW', repo, account, cwd } until
 // /state lists the conversation; the map draws them, the panel shows their Session tab. A session here that
 // handed off is the same: its pickup runs under the old conversation's key, is re-keyed to the new id (onRekey
-// moves the pick and the panel), and stands in as 'picked-up session' until /state lists it.
+// moves the pick and the panel), and stands in as 'picked-up session' until /state lists it. One that had turns
+// and aged off /state since (state.aged) is not new: no stand-in, it is off the map like any quiet conversation.
 //
 // One repo list for every view: the workspace list, the map's repo anchors (view.repoAnchors; a listed repo with no
 // conversation in view still gets its anchor and territory) and the repos the cards, wall and strip show.
@@ -1175,12 +1176,14 @@ function repoForFolder(st, folder) {
 const pasteNames = new Map();
 function pendingSessions(st) {
   const listed = new Set((st.sessions || []).map((s) => s.id));
+  // one that had turns and aged off /state (its panel left open for hours) isn't new: it is left off, not a stand-in
+  const aged = new Set(st.aged || []);
   const out = [];
   // an overseer's (its role, or the pickup of one's handoff) is never a stand-in: it waits for /state in the Bots tab
   const over = new Set((st.sessions || []).filter((s) => s.bot).map((s) => s.id));
   for (const h of hosts.values()) {
     // started here, or the pickup of a handoff (re-keyed from the conversation it took over: the panel follows it)
-    if (!(h.created || h.handoffFrom) || !h.alive || listed.has(h.id) || !h.cwd || h.role || over.has(h.handoffFrom)) continue;
+    if (!(h.created || h.handoffFrom) || !h.alive || listed.has(h.id) || aged.has(h.id) || !h.cwd || h.role || over.has(h.handoffFrom)) continue;
     const color = acctColor(h.account);
     out.push({
       id: h.id, pending: true, name: pasteNames.get(h.id)?.name || (h.forkFrom ? 'forked session' : h.handoffFrom && !h.created ? 'picked-up session' : 'new session'), account: h.account, state: 'NEW', label: 'NEW SESSION', stateColor: color, hue: color,

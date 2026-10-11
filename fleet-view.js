@@ -5144,6 +5144,13 @@ function findLog(id) {
   }
   return best;
 }
+// what was typed in a log record: a user message's text that is not a command, a hook's note or an interruption
+function typedText(d) {
+  if (!d || d.type !== 'user' || d.isSidechain || d.isMeta) return null;
+  const c = d.message?.content;
+  const texts = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter((x) => x && x.type === 'text').map((x) => x.text) : [];
+  return texts.find((x) => typeof x === 'string' && x.trim() && !x.startsWith('<') && !/^\[Request interrupted/.test(x)) || null;
+}
 // the title, last folder and first prompt of a log, without parsing every line: only lines that can hold them.
 // A log over `cap` bytes is read as its first `head` bytes and its last cap - head. With votes: also the repos its
 // tool calls point into ({ root: count }), from file paths and shell commands' paths, like repoOf.
@@ -5180,11 +5187,7 @@ function readLogInfo(file, pdir, id, { cap = 48 << 20, head = 4 << 20, votes = f
   // the first prompt typed, from the start
   for (const line of lines) {
     if (!line.includes('"user"')) continue;
-    const d = parse(line);
-    if (!d || d.type !== 'user' || d.isSidechain || d.isMeta) continue;
-    const c = d.message?.content;
-    const texts = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter((x) => x && x.type === 'text').map((x) => x.text) : [];
-    const typed = texts.find((x) => typeof x === 'string' && x.trim() && !x.startsWith('<') && !/^\[Request interrupted/.test(x));
+    const typed = typedText(parse(line));
     if (typed) { prompt = typed; break; }
   }
   // the folder of its last message, from the end
@@ -5416,6 +5419,46 @@ function rememberMap(all, repos, now) {
   if (changed || now - rememberedSavedAt > 10 * 60e3) { rememberedSavedAt = now; saveSettings(); }
 }
 
+// Live conversations (their claude still running, a panel left open) that have had a turn but that /state no longer
+// lists: they aged off it (quiet past the window, or finished more than 3 hours ago). The page draws a session it
+// started as a hollow "new session" until /state lists it; these it leaves off instead, as they aren't new.
+// Only a log quiet past the window counts, so a new conversation's first turn never takes it off before it is listed.
+// Has it had a turn: a reply or a typed prompt in its log (a new session's log can hold mode lines, or a /model,
+// before its first prompt).
+const spokeSeen = new Map(); // id -> the log mtime it was read at, or true once it has had a turn
+function hadTurn(file) {
+  let text = '';
+  try {
+    const size = fs.statSync(file).size, fd = fs.openSync(file, 'r');
+    try {
+      // its head (the first prompt and reply) and its tail (the last turn), never the middle of a long log
+      const part = (at, n) => { const b = Buffer.alloc(n); fs.readSync(fd, b, 0, n, at); return b.toString('utf8'); };
+      text = size <= 2 << 20 ? part(0, size) : part(0, 1 << 20) + '\n' + part(size - (1 << 20), 1 << 20);
+    } finally { fs.closeSync(fd); }
+  } catch { return false; }
+  if (text.includes('"type":"assistant"')) return true;
+  return text.split('\n').some((line) => {
+    if (!line.includes('"user"')) return false;
+    try { return !!typedText(JSON.parse(line)); } catch { return false; }
+  });
+}
+function agedLive(listed, now) {
+  if (DEMO) return [];
+  const out = [];
+  for (const id of liveProcs.keys()) {
+    if (listed.has(id)) continue;
+    const seen = spokeSeen.get(id);
+    if (seen === true) { out.push(id); continue; }
+    const log = conversationLog(id), m = log && log.file ? mtime(log.file) : 0;
+    if (!m || now - m <= WINDOW_MS || seen === m) continue;
+    const yes = hadTurn(log.file);
+    if (spokeSeen.size > 500) spokeSeen.clear();
+    spokeSeen.set(id, yes || m);
+    if (yes) out.push(id);
+  }
+  return out;
+}
+
 // GET /state: everything the page draws, computed fresh from the model
 // the conversations /state lists: named, polled, and matching --filter
 const inState = (s) => s.name && s.state && (!FILTER || FILTER.test(`${s.name} ${s.prompt || ''} ${s.cwd || ''} ${s.wf?.desc || ''}`));
@@ -5507,6 +5550,8 @@ function buildState() {
     alert: al ? { t: al.t, sid: al.s.id, name: nameNow(al.s.id, al.s.name), text: al.text, color: toHex(al.color) } : null,
     hiddenDone: onMap.filter((s) => (s.state === 'DONE' || s.state === 'IDLE') && inWindow(s, now)).length,
     sessions: out,
+    // live conversations that had turns but aged off this list (agedLive): never drawn as new sessions
+    aged: agedLive(listed, now),
     // the "recently finished" strip: the last 10 conversations that finished their turn in the last 3 hours
     // (one that never said or was asked anything, a conversation opened and left empty, is not listed)
     // the most recently removed conversations (settings.hidden), newest first, for the page's Continue
