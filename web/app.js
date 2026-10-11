@@ -304,13 +304,21 @@ const ui = {
 let state = null; // last good /state
 let online = false;
 let pageBuild = null; // the server's code version this page was loaded with
-// the reload for new page code keeps the picked conversation and its open chat (this tab's storage, read once)
+// the reload for new page code keeps the picked conversation and its open chat (this tab's storage, read once).
+// The window restarting for an update (a new tab storage) finds the same in localStorage, written as the page goes,
+// for a minute; compose.js puts the cursor back in the box that had it (fv.typing).
+const REOPEN_MS = 60e3;
 function keepPickForReload() {
   try { sessionStorage.setItem('fv.reopen', JSON.stringify({ sel: ui.selectedId, detail: ui.detailId })); } catch {}
 }
+window.addEventListener('pagehide', () => {
+  try { localStorage.setItem('fv.reopen', JSON.stringify({ sel: ui.selectedId, detail: ui.detailId, at: Date.now() })); } catch {}
+});
 function restorePickAfterReload() {
-  let r = null;
+  let r = null, w = null;
   try { r = JSON.parse(sessionStorage.getItem('fv.reopen') || 'null'); sessionStorage.removeItem('fv.reopen'); } catch {}
+  try { w = JSON.parse(localStorage.getItem('fv.reopen') || 'null'); localStorage.removeItem('fv.reopen'); } catch {}
+  if (!r && w && Date.now() - Number(w.at) < REOPEN_MS) r = w;
   if (!r) return;
   if (typeof r.sel === 'string') ui.selectedId = r.sel;
   if (typeof r.detail === 'string') ui.detailId = r.detail;
@@ -347,6 +355,23 @@ let usageUi = null; // usage.js: the plan-usage card and the "used somewhere els
 // read or draw then). A browser on another device that is no longer approved gets 401: back to the pairing page.
 let stateTag = null;
 const UNCHANGED = {};
+// new page code: the reload waits for a pause in typing (TYPING_PAUSE_MS with no key or input in a text field), so
+// no keystroke lands in the blink; the box saves its text on the way out and takes the cursor back after
+const TYPING_PAUSE_MS = 1500;
+let lastTypedAt = 0, reloadDue = false;
+const noteTyping = (e) => { if (e.target?.closest?.('textarea, input, [contenteditable]')) lastTypedAt = Date.now(); };
+document.addEventListener('keydown', noteTyping, true);
+document.addEventListener('input', noteTyping, true);
+function reloadForUpdate() {
+  if (reloadDue) return;
+  reloadDue = true;
+  const go = () => {
+    const quiet = Date.now() - lastTypedAt;
+    if (quiet < TYPING_PAUSE_MS) { setTimeout(go, TYPING_PAUSE_MS - quiet + 50); return; }
+    flushSettings(); keepPickForReload(); location.reload();
+  };
+  go();
+}
 async function poll() {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 4000);
@@ -362,7 +387,7 @@ async function poll() {
     // new page code on the server (a merge changed web/ or fleet-view.js): load it, settings saved first
     if (st.build) {
       if (!pageBuild) pageBuild = st.build;
-      else if (st.build !== pageBuild) { flushSettings(); keepPickForReload(); location.reload(); return; }
+      else if (st.build !== pageBuild) { reloadForUpdate(); return; }
     }
     applyRenames(st);
     state = st;

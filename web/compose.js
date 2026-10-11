@@ -486,6 +486,11 @@ function storeText(id, text) {
 function storeQuote(id, quote) {
   try { if (quote) localStorage.setItem(quoteKey(id), quote); else localStorage.removeItem(quoteKey(id)); } catch {}
 }
+// typing through a reload (new page code, or the window restarting for an update): as the page goes, the box with
+// the cursor leaves fv.typing = { id, a, b, at } (its selection); the box for that conversation takes the cursor back
+// when it mounts within a minute
+const TYPING_KEY = 'fv.typing';
+const TYPING_MS = 60e3;
 // an attachment leaves the draft: its thumbnail's object URL goes, and a file still on its way to the PC stops
 const dropAtt = (a) => { try { if (a.url) URL.revokeObjectURL(a.url); if (a.abort) a.abort(); } catch {} };
 // a new conversation (new-<n>) got its id: its draft and any box showing it move along. Registered when this
@@ -2183,8 +2188,37 @@ export function mountCompose(slot, s) {
     focus();
     requestAnimationFrame(() => { if (document.activeElement !== ta) focus(); });
   }
+  // the page is going: the text is saved now (not 300 ms later), and where the cursor was if it is in this box
+  const onPageHide = () => {
+    clearTimeout(st.saveTimer);
+    st.d.text = ta.value;
+    storeText(st.id, ta.value);
+    if (document.activeElement !== ta) return;
+    try { localStorage.setItem(TYPING_KEY, JSON.stringify({ id: st.id, a: ta.selectionStart, b: ta.selectionEnd, at: Date.now() })); } catch {}
+  };
+  function takeTyping() {
+    let t = null;
+    try { t = JSON.parse(localStorage.getItem(TYPING_KEY) || 'null'); } catch {}
+    if (!t || t.id !== st.id) return;
+    try { localStorage.removeItem(TYPING_KEY); } catch {}
+    if (!(Date.now() - Number(t.at) < TYPING_MS)) return;
+    const n = ta.value.length;
+    const b = Math.min(Number.isInteger(t.b) ? t.b : n, n), a = Math.min(Number.isInteger(t.a) ? t.a : b, b);
+    const put = () => {
+      if (!st.alive) return;
+      ta.focus({ preventScroll: true });
+      ta.setSelectionRange(a, b);
+      if (b === n) ta.scrollTop = ta.scrollHeight;
+    };
+    put();
+    // the panel may still be settling (the Chat tab switching in); nothing the user clicked meanwhile is taken from
+    const again = () => { const f = document.activeElement; if (f !== ta && (!f || f === document.body)) put(); };
+    requestAnimationFrame(again);
+    setTimeout(again, 400);
+  }
   const onHandto = (e) => { if (e.detail && e.detail.id === st.id) takeHanded(); };
   const onResize = () => grow();
+  window.addEventListener('pagehide', onPageHide);
   window.addEventListener('fv-handto', onHandto);
   pane.addEventListener('keydown', onPaneKey, true);
   pane.addEventListener('dragenter', onDragEnter);
@@ -2199,6 +2233,7 @@ export function mountCompose(slot, s) {
   tick();
   st.timer = setInterval(tick, POLL_MS);
   takeHanded();
+  takeTyping();
 
   return {
     update(next) {
@@ -2239,6 +2274,7 @@ export function mountCompose(slot, s) {
       st.d.text = ta.value;
       storeText(st.id, ta.value);
       document.removeEventListener('pointerdown', outside, true);
+      window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('fv-handto', onHandto);
       pane.removeEventListener('keydown', onPaneKey, true);
       pane.removeEventListener('dragenter', onDragEnter);
