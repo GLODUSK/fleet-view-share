@@ -4,12 +4,10 @@
 // Styles live in views.css. Motion: when the order changes, cards glide to their new place (FLIP); new
 // cards fade and rise in once; cards that leave fade out. Nothing pulses, blinks or brightens.
 import { icon, verbIcon } from './icons.js';
-
-export const C = {
-  bg: '#0a0c13', panel: '#11141e', line: '#262c42', text: '#eef0fa', dim: '#8a92b2', faint: '#4c5372',
-  ember: '#ff6a2b', gold: '#ffc24a', rose: '#ff4d8d', violet: '#a47bff', cyan: '#3fd8ff', mint: '#3dffa8', red: '#ff4d5e',
-  agent: '#71a9ff', acctA: '#3fb950', acctB: '#d97757', acctC: '#58a6ff',
-};
+import { C, isBusy, needsYou, ago, fmtCost } from './card-model.js';
+// the pure pieces (colours, state tests, time and cost text) live in card-model.js, where the phone app imports them
+// too; the page's modules keep importing them from here
+export { C, isBusy, needsYou, ago, fmtCost };
 
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 // a vendored module, loaded on first use (path relative to web/). The browser keeps a failed fetch of a module for the
@@ -18,11 +16,7 @@ export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&a
 // under a new address (?retry=n), which the browser fetches afresh.
 let loadFails = 0;
 export const loadModule = (p) => import(`./${p}${loadFails ? `?retry=${loadFails}` : ''}`).catch((e) => { loadFails++; throw e; });
-export const isBusy = (st) => st === 'WORKING' || st === 'AGENTS';
-export const needsYou = (st) => st === 'ASKING' || st === 'QUESTION' || st === 'ERROR' || st === 'STALLED';
-export const ago = (ms) => (ms < 60e3 ? `${Math.max(0, Math.round(ms / 1e3))}s` : ms < 3600e3 ? `${Math.round(ms / 60e3)}m` : `${(ms / 3600e3).toFixed(1)}h`);
 export const fmtTok = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n || 0}`);
-export const fmtCost = (c) => '$' + (c >= 100 ? Math.round(c).toLocaleString('en-US') : (c || 0).toFixed(2));
 export const lastParts = (rel, n = 2) => String(rel || '').split('/').filter(Boolean).slice(-n).join('/');
 export const clockTime = (t, secs = true) => new Date(t).toLocaleTimeString([], secs ? { hour: '2-digit', minute: '2-digit', second: '2-digit' } : { hour: '2-digit', minute: '2-digit' });
 
