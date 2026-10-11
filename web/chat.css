@@ -514,3 +514,36 @@ details.ci-note[open] > .cn-row svg { transform: rotate(90deg); }
 .ci-bashout .tb-out { max-height: 320px; border-left: 2px solid rgba(255, 77, 141, 0.35); }
 /* read only (read.html): nothing that types into the session */
 .chat-ro .chat-compose, .chat-ro .chat-reply, .chat-ro [data-edit], .chat-ro [data-rewind], .chat-ro [data-fork-at] { display: none !important; }
+
+/* ---------- the Bots tab's messenger look (chat.js opts.bubbles: .chat-bubbles on the pane) ---------- */
+/* Claude's replies in a bubble on the left, the mirror of yours; the markdown inside renders as anywhere else */
+.chat-bubbles .ci-asst { display: flex; flex-direction: column; align-items: flex-start; }
+.chat-bubbles .ci-asst > .chat-md {
+  max-width: min(85%, 720px); min-width: 0; padding: 8px 13px 9px; border-radius: 14px 14px 14px 5px;
+  background: rgba(255, 255, 255, 0.045); border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), 0 2px 10px rgba(0, 0, 0, 0.14);
+}
+html:not(.glass) .chat-bubbles .ci-asst > .chat-md { background: #171b28; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04); }
+.chat-bubbles .ci-asst > .ci-acts { margin: 2px 0 -6px -3px; }
+/* back-to-back replies (a tool step between them folded away) sit closer, like a run of messages */
+.chat-bubbles .ci-asst + .ci-asst { margin-top: 6px; }
+/* the folded work line ("Ran 2 commands") stays a compact line, a little in from the bubbles' edge */
+.chat-bubbles .ci-steps { padding-left: 4px; }
+/* Fleet View's setup notes: a small grey centred note, a quiet "Fleet View" label in front */
+.ci-setup { margin-top: 10px; }
+.ci-setup + .ci-setup { margin-top: 4px; }
+.cs-row { display: inline-flex; align-items: baseline; gap: 6px; max-width: min(100%, 560px); }
+.cs-k {
+  flex: none; padding: 0 6px; border-radius: 8px; background: rgba(255, 255, 255, 0.05); color: var(--dim);
+  font: 600 10px/1.6 var(--font-ui); letter-spacing: 0.02em;
+}
+.ci-setup .cn-row { max-width: min(100%, 560px); }
+/* Dynamic's chip under your message (a bot whose model or effort is Dynamic): what it ran on, quiet and small */
+.cu-pick {
+  display: inline-flex; align-items: center; gap: 4px; margin: 3px 4px 0 0; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--faint); font: 500 10.5px/1.5 var(--font-mono); cursor: default;
+}
+.cu-pick svg { opacity: 0.8; }
+.ci-user:hover .cu-pick { color: var(--dim); }
+/* the Bots tab's narrow layout (chats.js .ch-narrow, measured on the view): wider bubbles */
+.ch-narrow .chat-bubbles .ci-asst > .chat-md { max-width: 92%; }

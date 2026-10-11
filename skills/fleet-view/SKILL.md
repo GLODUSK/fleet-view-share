@@ -44,6 +44,7 @@ fv team disband <team>                   end a team (its conversations keep work
 fv team say <team> <text> [--from <id>]  a message to every member
 fv status [<team>|<id>...] [--from <id>] what each is doing, last reply, branch, PR, context (free)
 fv ask <team>|<id>... <question> --from <id> [--within s] [--wait [s]]   ask each one; answers come back to you
+fv look --from <id> [--shape S] [--color rrggbb]   a bot of Henry's changes its own avatar (auto: picked for it)
 fv api                                   every endpoint
 fv version                               Fleet View's version (1.0.12), here and on the running server
 ```

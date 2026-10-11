@@ -48,6 +48,15 @@
 // blank line between) and the images with the attachments, and focuses the box; one marked send goes at once,
 // as Send would.
 //
+// Dynamic (a bot whose model or effort is 'dynamic', bots.js; chats.js says which conversations are such a bot's with
+// setDynamicBots): before each message (not a "/command" or a bash one), from the box or handed over, the message is
+// sized from its words (chats-model.js sizeTask: a quick question -> Sonnet at low effort, a task -> medium, a plan,
+// build or bug hunt -> Opus at high, a big one -> xhigh, a go-ahead keeps what runs). Only when that differs from what
+// the session runs now (current(), dynamicSwitch) does the server switch it first (POST /bots/:id/switch: api.js
+// switchModel types /model and /effort while it is idle, answers "Switch model?", and puts the default for new
+// sessions back, so no other session is affected); a busy session is not switched (a session started a moment ago is
+// waited for a little first). What it picked goes with 'fv-chat-sent' (detail.pick), for chat.js's chip.
+//
 // What Claude is doing comes from its screen: term.js screenText reads the rendered lines of the session's
 // xterm (made off-screen when the Session tab never showed it), every 400 ms while the box is on screen. The
 // readers (parseSpinner, parseMenu, parseMode) are plain functions over those lines, exported for tests.
@@ -61,6 +70,7 @@ import { icon } from './icons.js';
 import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, noTermMsg } from './term.js';
 import { pickFolder, canPickFolder, uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
+import { sizeTask, dynamicSwitch } from './chats-model.js';
 
 const POLL_MS = 400;
 const ENTER_DELAY_MS = 300; // the paste, then Enter on its own (api.js waits the same)
@@ -84,6 +94,11 @@ const PANEL_KEYS = {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Dynamic (see the top): conversation -> { botId, model, effort } (which of the two are dynamic) or null, set by chats.js
+let dynamicOf = () => null;
+export function setDynamicBots(fn) { dynamicOf = typeof fn === 'function' ? fn : () => null; }
+const DYN_START_MS = 90e3; // a session started this recently: a busy one is waited for before the switch...
+const DYN_WAIT_MS = 20e3; // ...this long at most (its start notes); one busy with Henry's work is not waited for
 const isFixture = () => { try { return new URLSearchParams(location.search).has('fixture'); } catch { return false; } };
 // icons the chat view adds to icons.js; a stand-in until it has them
 const ALT = { send: 'push', attach: 'file', image: 'file', check: 'checks', copy: 'file', shield: 'alert', mode: 'plan' };
@@ -1298,6 +1313,10 @@ export function mountCompose(slot, s) {
         const why = await closeHostPanel(id);
         if (why) { err(why); return; }
       }
+      // a dynamic bot: its model and effort sized for this message, switched first when they need to be
+      const pick = shell || /^\/[^\s/]/.test(msg) ? null : await dynamicPick(id, text);
+      if (st.id === id && st.step) { st.step = ''; drawNotes(); }
+      if (pick && blocked()) { err('Claude is asking something: answer it first, then send'); return; }
       if (shell) {
         // bash mode: "!" as a key of its own into an empty prompt (a "!" after text, or a pasted one, is just text)
         const b = screenReady(id) ? boxNow(id) : null;
@@ -1317,7 +1336,7 @@ export function mountCompose(slot, s) {
       const shots = list.filter((a) => !a.file).map((a) => { try { return URL.createObjectURL(a.blob); } catch { return null; } }).filter(Boolean);
       // a file's path stays in the message as text (an image's becomes [Image #N]), so the bubble shows it too
       const shown = shell ? `!${msg}` : messageText(text, list.filter((a) => a.file).map((a) => a.path));
-      pane.dispatchEvent(new CustomEvent('fv-chat-sent', { detail: { id, text: shown, images: shots, busy: st.busy } }));
+      pane.dispatchEvent(new CustomEvent('fv-chat-sent', { detail: { id, text: shown, images: shots, busy: st.busy, pick } }));
       rememberSent(id, shown);
       if (!fromBox) return true;
       // sent: the draft goes (what was typed meanwhile stays); a bash command leaves bash mode, as Claude Code's prompt does
@@ -1771,6 +1790,51 @@ export function mountCompose(slot, s) {
     modelMenu.hidden = !open;
     modelBtn.setAttribute('aria-expanded', String(open));
     if (open) (modelMenu.querySelector('.cmp-mi.on') || modelMenu.querySelector('.cmp-mi'))?.focus();
+  }
+  // ----- Dynamic (see the top) -----
+  // -> { model, effort, label, switched, at } (what the message runs on, as far as known), or null for a conversation
+  // that is no dynamic bot's. A switch that does not happen (busy, refused) leaves the message to run on what it runs
+  async function dynamicPick(id, msg) {
+    const dyn = dynamicOf(st.s);
+    if (!dyn || !dyn.botId || (!dyn.model && !dyn.effort)) return null;
+    const size = sizeTask(msg);
+    let cur = current();
+    let want = dynamicSwitch(dyn, size, cur, MODEL_IDS);
+    const pick = { model: cur.model || null, effort: cur.effort || null, label: size.label, switched: false, at: Date.now() };
+    if (!want.model && !want.effort) return pick;
+    const say = (w) => [w.model && modelLabel(w.model, true), w.effort && `${w.effort} effort`].filter(Boolean).join(', ');
+    // just started: its start notes may still be going; it is waited for a little, then switched if it went idle
+    const h = hosts.get(id);
+    if (st.busy && h && Date.now() - h.startedAt < DYN_START_MS) {
+      if (st.id === id) { st.step = `Waiting for it to settle, then switching to ${say(want)}…`; drawNotes(); }
+      for (const end = Date.now() + DYN_WAIT_MS; st.busy && st.alive && st.id === id && Date.now() < end;) await sleep(POLL_MS);
+      cur = current();
+      want = dynamicSwitch(dyn, size, cur, MODEL_IDS);
+      Object.assign(pick, { model: cur.model || null, effort: cur.effort || null });
+      if (!want.model && !want.effort) return pick;
+    }
+    if (st.busy || st.id !== id) { pick.label += ': not switched, it was busy'; return pick; }
+    st.step = `Switching to ${say(want)} for this message…`;
+    drawNotes();
+    const from = st.s.model || null;
+    let r = null;
+    try {
+      const res = await fetch(`/bots/${encodeURIComponent(dyn.botId)}/switch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, ...want }) });
+      r = { status: res.status, body: await res.json().catch(() => ({})) };
+    } catch { r = { status: 0, body: { message: 'the server did not answer' } }; }
+    // a 200 switched (ok false: with a "but", such as the effort the screen shows after the default went back)
+    if (r.status === 200) {
+      const effortNow = r.body && typeof r.body.effortNow === 'string' && EFFORTS.includes(r.body.effortNow) ? r.body.effortNow : null;
+      const got = { ...want, ...(want.effort && effortNow ? { effort: effortNow } : {}) };
+      st.want = { ...(st.want || {}), ...got, from, at: Date.now() }; // the model menu shows it until the screen does
+      st.drawn.model = null;
+      drawModel();
+      Object.assign(pick, { model: got.model || pick.model, effort: got.effort || pick.effort, switched: true });
+    } else {
+      const why = (r.body && r.body.message) || `error ${r.status}`;
+      pick.label += `: not switched (${why})`;
+    }
+    return pick;
   }
   async function pickModel(kind, v) {
     openModelMenu(false);

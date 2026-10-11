@@ -553,6 +553,8 @@ if (!app.requestSingleInstanceLock()) {
       if (HIDDEN) { placing = false; return; }
       if (local.maximized) win.maximize();
       win.show();
+      // the Bots window, when it came back popped out and showed first, stays in front of the main window
+      if (chatsPopped() && chats.isVisible()) chats.moveTop();
       setTimeout(() => { if (!win || win.isDestroyed()) return; if (!win.isMaximized()) place(); placing = false; }, 400);
     };
     brand(win);
@@ -770,7 +772,10 @@ if (!app.requestSingleInstanceLock()) {
   // whether it was maximized), is put back on a screen when its old place is on none, and opens again at start-up
   // when it was open when the app quit (chatsOpen). Closing it docks it: chatsOpen false, and the main window comes
   // up (unless the mini view stands in for it). Quitting the app, or closing the main window (which quits it), closes
-  // it but keeps chatsOpen, so it comes back next time. Its page reaches live sessions through /live (web/term.js).
+  // it but keeps chatsOpen, so it comes back next time. So does a close sent from outside (Windows: a bare WM_CLOSE,
+  // see outsideClose below): it closes the whole app the way closing the main window does. When the app starts with
+  // both windows, the Bots window ends up in front of the main one. Its page reaches live sessions through /live
+  // (web/term.js).
   const CHATS_W = 440, CHATS_H = 720, CHATS_MIN_W = 340, CHATS_MIN_H = 420, CHATS_BAR_H = 36;
   let chatsSaveTimer = null;
   const chatsAlive = () => !!(chats && !chats.isDestroyed());
@@ -805,6 +810,23 @@ if (!app.requestSingleInstanceLock()) {
     postSettings(body);
   }
   function saveChatsSoon() { clearTimeout(chatsSaveTimer); chatsSaveTimer = setTimeout(saveChats, 800); }
+  // Windows: tells a close Henry asked for from one sent from outside. The X (a native caption button: it hit-tests
+  // as HTCLOSE), Alt+F4 and the taskbar's "Close window" send WM_SYSCOMMAND SC_CLOSE, which then sends WM_CLOSE;
+  // dockChats() ("Bring it back") closes the window without any WM_CLOSE. A WM_CLOSE with no SC_CLOSE just before it comes from another program:
+  // Process.CloseMainWindow() when a desktop/ update restarts the window (Windows may hand it this window rather
+  // than the main one) or taskkill without /f. Docking then would forget that Bots was popped out, so that close
+  // closes the app instead. Returns () => true while the last WM_CLOSE was such a one (for 2 s).
+  const WM_CLOSE = 0x0010, WM_SYSCOMMAND = 0x0112, SC_CLOSE = 0xF060;
+  function outsideClose(w) {
+    if (!P.isWin) return () => false;
+    let sysAt = 0, bareAt = 0;
+    try {
+      // wParam arrives as a pointer-sized Buffer; the low 4 bits of a WM_SYSCOMMAND code are Windows' own
+      w.hookWindowMessage(WM_SYSCOMMAND, (wp) => { try { if ((wp.readUInt32LE(0) & 0xFFF0) === SC_CLOSE) sysAt = Date.now(); } catch {} });
+      w.hookWindowMessage(WM_CLOSE, () => { bareAt = Date.now() - sysAt > 1000 ? Date.now() : 0; });
+    } catch (e) { hlog(`bots window close hook: ${e.message}`); }
+    return () => bareAt > 0 && Date.now() - bareAt < 2000;
+  }
 
   function createChats() {
     const want = chatsStart();
@@ -843,6 +865,7 @@ if (!app.requestSingleInstanceLock()) {
     guardContents(wc, () => { if (!w.isDestroyed()) w.loadURL(CHATS_URL); });
     editMenu(w);
     wc.on('did-finish-load', () => sendChatsPopped());
+    const fromOutside = outsideClose(w);
     let shown = false;
     const showIt = () => {
       if (shown || w.isDestroyed() || HIDDEN || !local.chatsOpen) return;
@@ -857,17 +880,29 @@ if (!app.requestSingleInstanceLock()) {
     w.on('resize', saveChatsSoon);
     w.on('maximize', saveChatsSoon);
     w.on('unmaximize', saveChatsSoon);
-    w.on('close', () => {
+    w.on('close', (e) => {
       clearTimeout(chatsSaveTimer);
       keepChatsPlace();
       // the app is quitting: it opens again at the next start, so chatsOpen stays
       if (quitting || quittingAll) { writeLocal(); return; }
+      // closed from outside: the whole app goes (closing the main window quits it; this window closes again then,
+      // with quitting set), and chatsOpen stays
+      if (fromOutside()) {
+        e.preventDefault();
+        writeLocal();
+        hlog('the Bots window was closed from outside: closing Fleet View, Bots opens popped out again next start');
+        if (win && !win.isDestroyed()) win.close(); else { quitting = true; app.quit(); }
+        return;
+      }
       local.chatsOpen = false;
       saveChats();
       mainUp();
     });
     w.on('closed', () => { if (chats === w) chats = null; chatsChanged(); });
     w.on('page-title-updated', (e) => e.preventDefault()); // keep "Fleet View Bots"
+    // Windows signing out or shutting down may reach this window first: that is quitting, never docking
+    w.on('query-session-end', endingSession);
+    w.on('session-end', endingSession);
     w.loadURL(CHATS_URL);
   }
   // after docking: the main window comes up, unless the mini view is standing in for it

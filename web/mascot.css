@@ -1,9 +1,49 @@
-/* Mascots (mascot.js): state faces and their gentle motion. Nothing blinks; motion is transform only; held still with reduced motion. */
-.mascot { display: block; flex: none; overflow: visible; }
-.mascot.m-working .m-body { animation: mascot-bob 1.8s ease-in-out infinite; }
-.mascot.m-working .m-eyes { animation: mascot-glance 5s ease-in-out infinite; }
+/* Mascots (mascot.js): alive in every state, gently. The body breathes (bobs while it works), the eyes look around
+   now and then (quicker while it works, up at the dots while it thinks), the thinking dots rise in turn, and .m-ack
+   (mascotAck) is a short hop. Nothing blinks: no eye closes and opens, no colour or brightness changes; every motion
+   is a transform. Each mascot starts at its own point (m-d0..m-d5) so a list of them never moves in step. With
+   prefers-reduced-motion it all holds still. */
+.mascot { display: block; flex: none; overflow: visible; --md: 0s; }
+.mascot.m-d1 { --md: -1.3s; } .mascot.m-d2 { --md: -2.6s; } .mascot.m-d3 { --md: -3.9s; }
+.mascot.m-d4 { --md: -5.2s; } .mascot.m-d5 { --md: -6.5s; }
+.mascot .m-body { transform-box: fill-box; transform-origin: 50% 100%; animation: mascot-breathe 4.6s ease-in-out var(--md) infinite; }
+.mascot .m-eyes { animation: mascot-look 11s ease-in-out var(--md) infinite; }
+/* working: the quicker bob and glance it always had */
+.mascot.m-working .m-body { animation: mascot-bob 1.8s ease-in-out var(--md) infinite; }
+.mascot.m-working .m-eyes { animation: mascot-glance 5s ease-in-out var(--md) infinite; }
+/* thinking: a slow sway of the eyes while they look up, the dots lifting one after another */
+.mascot.m-thinking .m-eyes { animation: mascot-ponder 3.6s ease-in-out infinite; }
+.mascot .m-dot { animation: mascot-dot 1.5s ease-in-out infinite; }
+.mascot .m-dot2 { animation-delay: 0.2s; } .mascot .m-dot3 { animation-delay: 0.4s; }
+/* needs: the eyes stay toward the bubble, only drifting a little */
+.mascot.m-needs .m-eyes { animation: mascot-drift 7s ease-in-out var(--md) infinite; }
+/* idle: slower, sleepier breathing */
+.mascot.m-idle .m-body { animation-duration: 6s; }
+
+@keyframes mascot-breathe { 0%, 100% { transform: scale(1, 1); } 50% { transform: scale(0.988, 1.028); } }
 @keyframes mascot-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
 @keyframes mascot-glance { 0%, 12%, 88%, 100% { transform: translateX(0); } 30%, 40% { transform: translateX(-1.7px); } 60%, 70% { transform: translateX(1.7px); } }
+/* a look around: hold, a glance one way, back, a look up the other way, back; mostly still */
+@keyframes mascot-look {
+  0%, 14%, 100% { transform: translate(0, 0); }
+  20%, 30% { transform: translate(-1.4px, 0.2px); }
+  36%, 52% { transform: translate(0, 0); }
+  58%, 66% { transform: translate(1.3px, -0.7px); }
+  72%, 80% { transform: translate(0.5px, 0.4px); }
+  86% { transform: translate(0, 0); }
+}
+@keyframes mascot-ponder { 0%, 100% { transform: translate(-0.6px, 0); } 50% { transform: translate(0.6px, -0.3px); } }
+@keyframes mascot-drift { 0%, 100% { transform: translate(0, 0); } 50% { transform: translate(0.5px, -0.3px); } }
+@keyframes mascot-dot { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-1.2px); } }
+/* the acknowledge hop: a squash, up, a small landing squash, still */
+.m-ack .mascot .m-body, .mascot.m-ack .m-body { animation: mascot-hop 0.62s cubic-bezier(.3, .7, .4, 1) 1; }
+@keyframes mascot-hop {
+  0% { transform: translateY(0) scale(1, 1); }
+  18% { transform: translateY(0) scale(1.08, 0.9); }
+  45% { transform: translateY(-4px) scale(0.96, 1.06); }
+  72% { transform: translateY(0) scale(1.05, 0.95); }
+  100% { transform: translateY(0) scale(1, 1); }
+}
 @media (prefers-reduced-motion: reduce) {
-  .mascot.m-working .m-body, .mascot.m-working .m-eyes { animation: none; }
+  .mascot .m-body, .mascot .m-eyes, .mascot .m-dot, .m-ack .mascot .m-body, .mascot.m-ack .m-body { animation: none; }
 }

@@ -1,12 +1,14 @@
 // Tests for bots.js (the server side of Bots): name and brief checks, the folder's slug and its clash suffix, the
 // CLAUDE.md fill, /state's tags (sessions, finished, removed; the Chief's too), state.bots, and make / start / follow /
-// tell / change / remove against a fake session host, every folder under a temp one (never ~/Bots). No live host:
+// tell / change / remove against a fake session host, a bot's look (shape and colour: checked, saved, set by the page
+// and by the bot itself through POST /api/bots/look), every folder under a temp one (never ~/Bots). No live host:
 // node scripts/bots-test.mjs
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { SHAPES as MASCOT_SHAPES } from '../web/mascot.js';
 
 const require = createRequire(import.meta.url);
 const B = require('../bots.js');
@@ -58,6 +60,11 @@ test('account, model and effort: the defaults, or what POST /api/sessions takes'
   assert.ok(B.checkOpts({ account: 'a' }, C.DEFAULTS, ['A', 'B']).err);
   assert.ok(B.checkOpts({ model: 'x y' }, C.DEFAULTS, ['A', 'B']).err);
   assert.ok(B.checkOpts({ effort: 'huge' }, C.DEFAULTS, ['A', 'B']).err);
+  // Dynamic: either may be 'dynamic'; a session of the bot starts on the dynamic base for that part
+  assert.deepEqual(B.checkOpts({ model: 'dynamic', effort: 'dynamic' }, C.DEFAULTS, ['A', 'B']), { account: 'B', model: 'dynamic', effort: 'dynamic' });
+  assert.ok(B.checkOpts({ model: 'Dynamic' }, C.DEFAULTS, ['A', 'B']).err === undefined); // a name MODEL_RE takes, not Dynamic
+  assert.deepEqual(B.runOpts({ model: 'dynamic', effort: 'high' }), { model: B.DYNAMIC_START.model, effort: 'high' });
+  assert.deepEqual(B.runOpts({ model: 'opus', effort: 'dynamic' }), { model: 'opus', effort: B.DYNAMIC_START.effort });
 });
 
 // ---------- the folder and its CLAUDE.md ----------
@@ -124,7 +131,9 @@ test('state.bots: not the removed ones, newest first, convId the running one els
   const bots = [mk(BID, T, { ids: [id(1), id(2)] }), mk(BID2, T + 1), mk('cccccccccccc', T + 2, { removed: true })];
   const v = B.listView(bots, new Map([[BID2, { id: id(7) }]]));
   assert.deepEqual(v.map((x) => x.id), [BID2, BID]);
-  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'convId', 'createdAt', 'effort', 'folder', 'id', 'live', 'model', 'name']);
+  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'color', 'convId', 'createdAt', 'effort', 'folder', 'id', 'live', 'model', 'name', 'shape']);
+  assert.equal(v[0].shape, null); assert.equal(v[0].color, null);
+  assert.deepEqual(B.listView([mk(BID, T, { shape: 'heart', color: '#ff6b80' })], new Map()).map((x) => [x.shape, x.color]), [['heart', '#ff6b80']]);
   assert.equal(v[0].convId, id(7)); assert.equal(v[0].live, true);
   assert.equal(v[1].convId, id(2)); assert.equal(v[1].live, false);
   assert.equal(B.listView([mk(BID, T)], new Map())[0].convId, null);
@@ -140,12 +149,26 @@ test('the registry as saved: a bad entry is dropped, ids are checked and capped'
   assert.deepEqual(out[0].told, [id(1)]);
   assert.equal(out[0].account, 'B'); assert.equal(out[0].model, 'claude-sonnet-5-5'); assert.equal(out[0].effort, 'medium');
 });
+test("a look: a shape from mascot.js's list, a #rrggbb colour; null or blank clears; left out stays", () => {
+  assert.deepEqual(B.checkLook({}), {});
+  assert.deepEqual(B.checkLook({ shape: 'heart', color: '#FF6B80' }), { shape: 'heart', color: '#ff6b80' });
+  assert.deepEqual(B.checkLook({ shape: null, color: '' }), { shape: null, color: null });
+  for (const bad of [{ shape: 'blob' }, { shape: 3 }, { color: 'red' }, { color: '#fff' }, { color: '#12345g' }, { color: 'ff6b80' }, { color: '#ff6b80;x' }]) assert.ok(B.checkLook(bad).err, JSON.stringify(bad));
+  // the server's list and the page's are one list
+  assert.deepEqual(B.SHAPES, MASCOT_SHAPES);
+});
+test('the registry as saved keeps a valid look and drops a bad one', () => {
+  const one = (o) => B.loadBots([{ id: BID, name: 'Web', folder: path.join(dir, 'w'), createdAt: T, ids: [], told: [], ...o }], dir)[0];
+  assert.deepEqual([one({ shape: 'clover', color: '#ABCDEF' }).shape, one({ shape: 'clover', color: '#ABCDEF' }).color], ['clover', '#abcdef']);
+  const bad = one({ shape: 'blob', color: 'red' });
+  assert.ok(!('shape' in bad) && !('color' in bad));
+});
 test('api.js: the Chief and the bots are overseers; the API lists the bot routes', () => {
   assert.equal(API.isOverseer('chief'), true);
   assert.equal(API.isOverseer(`bot:${BID}`), true);
   for (const r of [null, undefined, '', 'boss', 'bot:', 'bot:XYZ', 'bot:AAAAAAAAAAAA', `bot:${BID}0`, `x bot:${BID}`]) assert.equal(API.isOverseer(r), false, String(r));
   const paths = API.ENDPOINTS.map((e) => `${e.method} ${e.path}`);
-  for (const p of ['GET /api/bots', 'POST /api/bots', 'POST /api/bots/:id', 'POST /api/bots/:id/start', 'POST /api/bots/:id/remove']) assert.ok(paths.includes(p), p);
+  for (const p of ['GET /api/bots', 'POST /api/bots', 'POST /api/bots/:id', 'POST /api/bots/:id/start', 'POST /api/bots/:id/remove', 'POST /api/bots/look']) assert.ok(paths.includes(p), p);
   assert.equal(B.botOfRole(`bot:${BID}`), BID);
   assert.equal(B.botOfRole('chief'), null);
 });
@@ -161,7 +184,7 @@ let seq = 100;
 function harness(o = {}) {
   const base = o.base || fs.mkdtempSync(path.join(dir, 'base-'));
   let list = o.list || [];
-  const calls = { deliver: [], startBot: [], openBot: [], end: [], trust: [], rename: [], hostList: 0 };
+  const calls = { deliver: [], startBot: [], openBot: [], end: [], trust: [], rename: [], switch: [], hostList: 0 };
   let saved = o.saved || [];
   const logs = new Set(o.logs || []); // conversation ids whose log is on disk
   const promptAt = new Map();
@@ -184,6 +207,10 @@ function harness(o = {}) {
       calls.openBot.push(cid);
       list = [...list.filter((x) => x.id !== cid), { id: cid, alive: true, role: roleOfConv(cid), status: 'idle', pending: false }];
       return [200, { ok: true, id: cid, alreadyRunning: false, ready: true }];
+    },
+    switchModel: async (key, b, ctx, via) => {
+      calls.switch.push({ key, b, via });
+      return [200, { ok: true, id: key, ...b, said: [], defaultKept: true }];
     },
     endHosted: async (key) => {
       calls.end.push(key);
@@ -216,14 +243,14 @@ await (async () => {
     const bot = out.bot;
     assert.match(bot.id, /^[0-9a-f]{12}$/);
     assert.equal(bot.folder, path.join(h.base, 'web-watcher'));
-    assert.equal(bot.name, 'Web Watcher'); assert.equal(bot.account, 'B'); assert.equal(bot.model, 'claude-sonnet-5-5'); assert.equal(bot.effort, 'medium');
+    assert.equal(bot.name, 'Web Watcher'); assert.equal(bot.account, 'B'); assert.equal(bot.model, 'dynamic'); assert.equal(bot.effort, 'dynamic'); // a new bot's
     assert.equal(bot.live, true); assert.equal(bot.convId, out.id); assert.equal(out.key, 'new-1');
     const md = fs.readFileSync(path.join(bot.folder, 'CLAUDE.md'), 'utf8');
     assert.ok(md.startsWith('# Web Watcher\n') && md.includes('Watch the web deploys.'));
     assert.deepEqual(h.calls.trust, [bot.folder]);
     const sb = h.calls.startBot[0];
-    assert.deepEqual({ ...sb, prompt: null }, { repo: bot.folder, account: 'B', model: 'claude-sonnet-5-5', effort: 'medium', prompt: null, name: 'Web Watcher', role: `bot:${bot.id}` });
-    assert.equal(sb.prompt, "[Fleet View] You are Web Watcher, one of Henry's bots. Your standing instructions are in CLAUDE.md in this folder. Your conversation id comes in the next message.");
+    assert.deepEqual({ ...sb, prompt: null }, { repo: bot.folder, account: 'B', model: B.DYNAMIC_START.model, effort: B.DYNAMIC_START.effort, prompt: null, name: 'Web Watcher', role: `bot:${bot.id}` });
+    assert.equal(sb.prompt, "[Fleet View] You are Web Watcher, one of Henry's bots. Your standing instructions are in CLAUDE.md in this folder. Your conversation id comes in the next message: reply to this one with just \"ok\".");
     assert.deepEqual(h.saved()[0].ids, [out.id]);
     // the same name in another case is refused; a clash of folders gets -2; a folder that is there already is left alone
     assert.equal((await h.bots.create({ name: 'web watcher' }))[0], 400);
@@ -239,6 +266,62 @@ await (async () => {
     assert.deepEqual(h.bots.view().map((x) => x.name), ['Notes', 'Web watcher!', 'Web Watcher']);
     assert.deepEqual(h.bots.list()[1].bots.map((x) => x.id), h.bots.view().map((x) => x.id));
     n++; console.log('ok make: checks, folder, CLAUDE.md, trust, start; name and folder clashes');
+  }
+  // Dynamic's switch (POST /bots/:id/switch): only a dynamic part, only in one of the bot's conversations, as Henry's
+  {
+    const h = harness();
+    const [, made] = await h.bots.create({ name: 'Sizer' });
+    const bid = made.bot.id, cid = made.id;
+    const [c1, o1] = await h.bots.switchTo(bid, { id: cid, model: 'claude-opus-5-5', effort: 'high' });
+    assert.equal(c1, 200); assert.equal(o1.ok, true);
+    assert.deepEqual(h.calls.switch, [{ key: cid, b: { model: 'claude-opus-5-5', effort: 'high' }, via: 'henry' }]);
+    assert.equal((await h.bots.switchTo(bid, { id: id(999), effort: 'high' }))[0], 400); // not its conversation
+    assert.equal((await h.bots.switchTo(bid, { id: cid }))[0], 400); // nothing to switch
+    assert.equal((await h.bots.switchTo(bid, { id: cid, effort: 'huge' }))[0], 400);
+    assert.equal((await h.bots.switchTo(bid, { id: cid, model: 'x y' }))[0], 400);
+    assert.equal((await h.bots.switchTo('ffffffffffff', { id: cid, effort: 'low' }))[0], 404);
+    // a fixed effort is never changed here; the dynamic model still is
+    await h.bots.update(bid, { effort: 'medium' });
+    assert.equal((await h.bots.switchTo(bid, { id: cid, effort: 'low' }))[0], 409);
+    assert.equal((await h.bots.switchTo(bid, { id: cid, model: 'claude-sonnet-5-5' }))[0], 200);
+    assert.equal(h.calls.switch.length, 2);
+    await h.bots.remove(bid);
+    assert.equal((await h.bots.switchTo(bid, { id: cid, model: 'claude-sonnet-5-5' }))[0], 404);
+    n++; console.log('ok dynamic switch: dynamic parts only, its own conversation, as Henry');
+  }
+  // the look: made with one, changed or cleared by the page (CLAUDE.md untouched, nobody told), and by the bot itself
+  // from its own conversation only (POST /api/bots/look)
+  {
+    const h = harness();
+    assert.equal((await h.bots.create({ name: 'Bad look', shape: 'blob' }))[0], 400);
+    assert.equal(h.calls.startBot.length, 0);
+    const [, made] = await h.bots.create({ name: 'Petal', shape: 'flower', color: '#F78FD0' });
+    assert.deepEqual([made.bot.shape, made.bot.color], ['flower', '#f78fd0']);
+    const bid = made.bot.id, conv = made.id;
+    const md = fs.readFileSync(path.join(made.bot.folder, 'CLAUDE.md'), 'utf8');
+    const [uc, uo] = await h.bots.update(bid, { shape: 'heart' });
+    assert.equal(uc, 200); assert.deepEqual([uo.bot.shape, uo.bot.color], ['heart', '#f78fd0']);
+    assert.equal(h.calls.deliver.length, 0); // a look is not in CLAUDE.md: nothing to tell it
+    assert.equal(fs.readFileSync(path.join(made.bot.folder, 'CLAUDE.md'), 'utf8'), md);
+    assert.equal((await h.bots.update(bid, { color: 'pink' }))[0], 400);
+    const [, cleared] = await h.bots.update(bid, { color: null });
+    assert.equal(cleared.bot.color, null);
+    assert.ok(!('color' in h.saved().find((x) => x.id === bid)));
+    // the bot itself: from its own conversation
+    assert.equal(h.bots.look({ shape: 'star' })[0], 400); // no from
+    assert.equal(h.bots.look({ from: id(999), shape: 'star' })[0], 403); // not a bot's conversation
+    assert.equal(h.bots.look({ from: conv })[0], 400); // nothing to change
+    assert.equal(h.bots.look({ from: conv, name: 'Boss', shape: 'star' })[0], 400); // only its look
+    assert.equal(h.bots.look({ from: conv, shape: 'blob' })[0], 400);
+    const [lc, lo] = h.bots.look({ from: conv, shape: 'star', color: '#58A6FF' });
+    assert.equal(lc, 200); assert.deepEqual([lo.bot.shape, lo.bot.color], ['star', '#58a6ff']);
+    assert.equal(lo.bot.name, 'Petal');
+    assert.deepEqual([h.saved()[0].shape, h.saved()[0].color], ['star', '#58a6ff']);
+    assert.equal(h.bots.look({ from: conv, shape: null })[1].bot.shape, null);
+    // a removed bot's conversation changes nothing
+    await h.bots.remove(bid);
+    assert.equal(h.bots.look({ from: conv, shape: 'heart' })[0], 403);
+    n++; console.log('ok a look: made with one, changed by the page, and by the bot itself from its own conversation only');
   }
   // start: the running one is taken; else the newest conversation resumed; else a new one. Two at once start one
   {
@@ -289,7 +372,8 @@ await (async () => {
     await h.bots.tick();
     assert.equal(h.calls.deliver.length, 1);
     assert.equal(h.calls.deliver[0].to, first);
-    assert.equal(h.calls.deliver[0].text, `[Fleet View] You are Scout, one of Henry's bots. Your id: ${first}.`);
+    // the conversation the start began: its id note asks for the one hello
+    assert.equal(h.calls.deliver[0].text, `[Fleet View] You are Scout, one of Henry's bots. Your id: ${first}. Greet Henry in one short line, nothing more.`);
     assert.equal(h.calls.deliver[0].opts.via, 'server');
     for (let i = 0; i < 4; i++) { clock(t += 11e3); await h.bots.tick(); }
     assert.equal(h.calls.deliver.length, 1);
@@ -304,6 +388,8 @@ await (async () => {
     assert.deepEqual(h.saved()[0].ids, [first, next]);
     assert.equal(h.bots.view()[0].convId, next);
     assert.equal(h.calls.deliver.length, 2); assert.equal(h.calls.deliver[1].to, next);
+    // a pickup is no new bot: just "ok", no second hello
+    assert.equal(h.calls.deliver[1].text, `[Fleet View] You are Scout, one of Henry's bots. Your id: ${next}. Reply with just "ok".`);
     // another bot's role and a session with none are left alone
     h.setList([{ id: next, alive: true, role, pending: false }, { id: id(501), alive: true, role: 'bot:dddddddddddd' }, { id: id(502), alive: true, role: null }]);
     writeFile([{ id: next, role }]);
@@ -397,6 +483,7 @@ await (async () => {
       bots: {
         list: () => [200, []], create: () => (did.push('create'), [200, { ok: true }]), update: () => (did.push('update'), [200, { ok: true }]),
         start: () => (did.push('start'), [200, { ok: true }]), remove: () => (did.push('remove'), [200, { ok: true }]),
+        look: (b) => (did.push(`look ${b.from}`), [200, { ok: true }]),
       },
     };
     const { EventEmitter } = await import('node:events');
@@ -418,7 +505,11 @@ await (async () => {
     assert.equal((await call(`/api/bots/${BID}`, { brief: 'b', via: 'phone' }, relay))[0], 200);
     assert.equal((await call(`/api/bots/${BID}/remove`, { via: 'phone' }, relay))[0], 200);
     assert.deepEqual(did, ['start', 'create', 'update', 'remove']);
-    n++; console.log('ok /api/bots: start for anyone; make, change and remove only from the phone relay');
+    // a bot's own look: any token caller reaches bots.look (it checks from); not a bot id, and POST only
+    did.length = 0;
+    assert.equal((await call('/api/bots/look', { from: 'x', shape: 'heart' }))[0], 200);
+    assert.deepEqual(did, ['look x']);
+    n++; console.log('ok /api/bots: start for anyone; make, change and remove only from the phone relay; look goes to bots.look');
   }
 })().finally(() => { Date.now = realNow; try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
 

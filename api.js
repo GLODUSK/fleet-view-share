@@ -685,9 +685,10 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, role?: "chief", wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends; role "chief": the Chief (one at a time), which may also run fv start, open, hosted, wait and menu without asking' },
   { method: 'POST', path: '/api/chief/start', body: '{ account?: "B", model?: "claude-sonnet-5-5", effort?: "medium" }', does: 'start the Chief in the Fleet View folder, or adopt the one running: { ok, id, key, started }' },
   { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers like the Chief, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, account, model, effort, folder, createdAt, convId, live' },
-  { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), account?: "B", model?: "claude-sonnet-5-5", effort?: "medium" }', does: 'Henry only (his phone, through the relay; a session gets 403): make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }' },
+  { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), account?: "B", model?: "dynamic" (the default: sized for each message Henry sends from the page) or a name like "claude-sonnet-5-5", effort?: "dynamic" (the default) or "medium" }', does: 'Henry only (his phone, through the relay; a session gets 403): make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }' },
   { method: 'POST', path: '/api/bots/:id', body: '{ name?, brief?, account?, model?, effort? }', does: 'Henry only, as POST /api/bots: change a bot: its CLAUDE.md is written again and a running one is told to read it (account, model and effort take effect in its next new conversation)' },
   { method: 'POST', path: '/api/bots/:id/start', does: 'start a bot: the conversation running already, else its newest one resumed, else a new one: { ok, bot, key, id }' },
+  { method: 'POST', path: '/api/bots/look', body: '{ from: your conversation id, shape?: "hex"|"drop"|"round"|"pill"|"tri"|"square"|"star"|"clover"|"flower"|"heart", color?: "#rrggbb" }', does: 'a bot changes its own avatar (null: picked for it); only from a bot\'s own conversation, and only its look (fv look)' },
   { method: 'POST', path: '/api/bots/:id/remove', does: 'Henry only, as POST /api/bots: end a bot\'s session and take it off the list (its folder and conversations are kept)' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, role, its turn; tail: the last characters of its screen' },
   { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow)' },
@@ -1971,7 +1972,7 @@ async function listConversations(query, ctx) {
 //        remove(id, member), lead(id, member | null), disband(id) } each -> [code, json] or a Promise of one,
 //        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,
 //        chiefStart(b) -> [code, json] or a Promise of one (POST /api/chief/start, chief.js),
-//        bots: { list(), create(b), start(id), update(id, b), remove(id) } each -> [code, json] or a Promise of one
+//        bots: { list(), create(b), start(id), update(id, b), remove(id), look(b) } each -> [code, json] or a Promise of one
 //        (/api/bots, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
 const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity';
 const GET_VERBS = new Set(['menu', 'transcript', 'activity']);
@@ -2010,6 +2011,12 @@ function handle(req, res, pathname, ctx) {
     if (req.method !== 'POST') return answer([405, { ok: false, message: 'method not allowed' }]);
     if (!ctx.chiefStart) return answer([404, { ok: false, message: 'not found' }]);
     return body((b) => Promise.resolve(ctx.chiefStart(b || {})));
+  }
+  // a bot's own look (bots.js look): its shape and colour, from its own conversation (from), nothing else
+  if (pathname === '/api/bots/look') {
+    if (req.method !== 'POST') return answer([405, { ok: false, message: 'method not allowed' }]);
+    if (!ctx.bots || !ctx.bots.look) return answer([404, { ok: false, message: 'not found' }]);
+    return body((b) => Promise.resolve(b ? ctx.bots.look(b) : [400, { ok: false, message: 'bad json' }]));
   }
   // the bots (bots.js): GET lists them; POST makes one, /:id changes one, /:id/start starts it, /:id/remove removes it
   const bm = BOT_ROUTE.exec(pathname);
@@ -2091,5 +2098,5 @@ function handle(req, res, pathname, ctx) {
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
 // relayKey: the phone relay's key (see viaOf), for fleet-view.js to hand the relay
 module.exports = { ensureToken, handle, startChief, startBot, openBot, endHosted, hostList, hostKill, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
-  startQueue, queuedIds, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
+  startQueue, queuedIds, switchModel, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
   askParts: { asks, summaryText, laterText, chiefAnswers, answerLines, flushAsk, settleAnswer, askJson } };

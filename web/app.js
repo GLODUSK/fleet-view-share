@@ -412,7 +412,11 @@ function rebase(st) {
   for (const e of st.feed || []) e.t = sh(e.t);
   for (const a of st.alerts || []) a.t = sh(a.t);
   for (const t of st.teams || []) { t.at = sh(t.at); for (const m of t.messages || []) m.t = sh(m.t); }
-  for (const b of st.bots || []) b.createdAt = sh(b.createdAt);
+  for (const b of st.bots || []) {
+    b.createdAt = sh(b.createdAt);
+    // its tasks' runs (bots.js tasks); a schedule's own times are wall-clock times and stay as they are
+    for (const t of b.tasks || []) { t.nextRun = sh(t.nextRun); t.lastRun = sh(t.lastRun); for (const r of t.runs || []) r.at = sh(r.at); }
+  }
   for (const x of st.deploys || []) { x.createdAt = sh(x.createdAt); x.readyAt = sh(x.readyAt); }
   for (const w of st.worktrees || []) w.lastCommit = sh(w.lastCommit);
   for (const h of st.settings?.hidden || []) if (h && typeof h === 'object') h.at = sh(h.at);

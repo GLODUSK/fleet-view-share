@@ -30,6 +30,39 @@
 //       its last reply (Contact.preview uses it)
 //   replyLine(text) -> string   the first line of a reply that says something: no heading, code fence, table or
 //       rule, list and quote marks and * _ ` stripped; '' for none
+//   botFeed(items) -> items   a bot's or the Chief's chat items (chat.js, GET /conversation) as the Bots tab shows
+//       them: a message of Fleet View's own (its text starts "[Fleet View]": the start prompt, the id note, the
+//       instructions-changed note) becomes { ...it, kind: 'setup', text: without that header }, drawn as a small
+//       grey note, not your bubble; the bare "ok" the bot answers one with (its steps between allowed) is left out; the
+//       switch notes right before one of your messages ("/model x", "Set model to …", "/effort y", …: switchNote) are
+//       left out too, and that message gets switched: { model?, effort? } (chat.js draws it as the message's chip)
+//   setupNote(text) -> string|null   that text without "[Fleet View] ", or null for any other message
+//   switchNote(text) -> { model } | { effort } | {} | null   a note a model or effort switch left: its command, or
+//       Claude Code's answer to one ({}); null for any other note
+//   sizeTask(text) -> { size, model?, effort?, label }   Dynamic's guess at how big a message is, from its words only:
+//       size 'keep' (a go-ahead: "ok", "yes do it", "2 and 3": nothing switches), 'quick' (sonnet, low), 'normal'
+//       (a question: sonnet, medium; a task: opus, medium), 'big' (a plan, build, bug hunt or several parts: opus,
+//       high) or 'huge' (a big plan, a hard bug or a long brief: opus, xhigh); label says which, for the chip
+//   dynamicSwitch(dyn, size, cur, modelIds) -> { model?, effort? }   what to switch before that message: only what
+//       is dynamic (dyn { model, effort } booleans) and differs from cur { model, effort } (a model of the same family
+//       stays); model is the first of modelIds of the family that is not a 1M one
+//   createPickStore(storage = localStorage) -> { put(convId, text, pick), get(convId, text) -> pick|null }   the
+//       Dynamic picks made for messages (pick { model, effort, label, switched, at }), so each wears its chip
+//   DYNAMIC   'dynamic', a bot's model or effort sized per message
+//   doingOf(contact, face) -> string   what a bot or the Chief is doing now, in a few words, for its avatar's hover:
+//       face is mascot.js mascotState(contact) ('thinking': "Thinking about your message"; working: the tool running
+//       or its last action; needs: its question; done / idle: its last reply), "Not running" for a bot that is not
+//   botChoices({ accounts, models, efforts, modelLabel, current? }) -> { account, model, effort }: the New bot and Edit
+//       bot pickers' choices, each [{ value, label }]; current { account?, model? } (the bot being edited) keeps a value
+//       no longer offered (an account gone, an older model) as the first choice. The model and effort lists start
+//       with Dynamic ({ value: 'dynamic', label: 'Dynamic', note }: sized for each message, sizeTask)
+//   botEdits(bot, values) -> body for POST /bots/:id: only the fields that changed (name and brief trimmed; shape and
+//       color '' or null: back to the automatic pick, sent as null); {} when nothing did
+//   taskSchedule(task) -> string   a task's schedule (state.bots[].tasks, bots.js): "Daily 9:00", "Weekdays 9:00",
+//       "Weekly Mon 9:00", "Monthly 1st 9:00", "Hourly :15", "Once Oct 12 15:00", "To do", "No valid schedule"
+//   taskWhen(ms, now) -> string   a run's time, short: "in 5 min", "in 3 h", "Mon 9:00", "Oct 12", "5 min ago", "Yesterday 9:00"
+//   taskLine(task, now) -> string   the task's meta line: next run, last run and its result, or why it does not run
+//   tasksHead(tasks, now) -> { count, open, text }   the collapsed Tasks strip: how many are open, and the next due
 //   Nothing here touches the DOM or window at import time, and it imports nothing, so the phone app (phone/) imports it as it is.
 //
 //   Contact = {
@@ -47,6 +80,9 @@
 //     at,             ms of its latest activity (for sorting and the time on the row); a bot with no conversation
 //                     listed: when it was made
 //     needsYou, busy, pinned (Chief), teamId (team rows), members (team rows: [{ id, name, lead }])
+//     turnStart, lastAction, running, waitingOn   bot and Chief rows: its conversation's, as /state has them (null
+//                     when unknown), so mascot.js mascotState can tell thinking from working and doingOf can say what
+//     shape, color,   bot rows: the bot's own pick (state.bots, bots.js), or null: the page picks one
 //   }
 //   A team is a row only when every member the state knows is an overseer's conversation.
 const NEEDS = new Set(['ASKING', 'QUESTION', 'ERROR', 'STALLED']);
@@ -160,6 +196,17 @@ export function rawToContactsState(st) {
   };
 }
 
+// what a row carries of its conversation's moment (mascotState, doingOf)
+const nowOf = (s) => ({
+  turnStart: (s && Number.isFinite(s.turnStart) && s.turnStart) || null, lastAction: (s && s.lastAction) || null,
+  running: (s && Array.isArray(s.running) && s.running.length && s.running) || null, waitingOn: (s && s.waitingOn) || null,
+});
+// a bot's own shape and colour (bots.js checks them; a colour here is #rrggbb only)
+const lookOf = (b) => ({
+  shape: (b && typeof b.shape === 'string' && b.shape) || null,
+  color: (b && typeof b.color === 'string' && /^#[0-9a-f]{6}$/i.test(b.color) && b.color) || null,
+});
+
 export function buildContacts(input, opts = {}) {
   // the page's derived state has allSessions; anything else is taken as raw GET /state
   const state = input && Array.isArray(input.allSessions) ? input : rawToContactsState(input);
@@ -214,8 +261,9 @@ export function buildContacts(input, opts = {}) {
       name: ren ? ren.name : isChief ? 'Chief' : (b && b.name) || s.name || short(s.id),
       account: s.account, repo: s.repo || null, state: s.state, label: s.label, statusColor: s.stateColor,
       preview: previewOf(s), at: Math.max(...members.map(lastOf)), needsYou: NEEDS.has(s.state), busy: BUSY.has(s.state), pinned: isChief,
+      ...nowOf(s),
     };
-    if (!isChief) Object.assign(row, { botId: tag, live: b ? !!b.live : null });
+    if (!isChief) Object.assign(row, { botId: tag, live: b ? !!b.live : null, ...lookOf(b) });
     out.push(row);
     rowOf.set(tag, row);
   }
@@ -229,6 +277,7 @@ export function buildContacts(input, opts = {}) {
       name: (typeof b.name === 'string' && b.name) || short(b.id), account: b.account || null, repo: null, state: st, label: st, statusColor: null,
       preview: oneLine(replyLine(b.brief)) || (b.live ? 'Starting...' : b.convId ? 'Not running' : 'Not started yet'),
       at: Number(b.createdAt) || 0, needsYou: false, busy: false, pinned: false,
+      ...nowOf(null), ...lookOf(b),
     };
     out.push(row);
     rowOf.set(b.id, row);
@@ -289,4 +338,268 @@ export function teamThread(team, state) {
     .map((m) => ({ t: m.t, from: m.from, fromName: nm(m.from), to: m.to, toName: nm(m.to), text: m.text }));
 }
 
+// ---------- what it is doing (the avatar's hover) ----------
+const FACE_WORDS = { thinking: 'Thinking about your message', working: 'Working', needs: 'Needs you', error: 'Stopped on an error', done: 'Done', idle: 'Idle', new: 'New' };
+export function doingOf(c, face) {
+  if (!c) return '';
+  if (c.kind === 'bot' && c.live === false) return c.id ? 'Not running: Start it, or send it a message' : 'Not started yet';
+  if (c.kind === 'chief' && !c.id) return 'Not started yet';
+  const head = FACE_WORDS[face] || FACE_WORDS.idle;
+  const more = (t) => (t ? `${head}: ${oneLine(t, 120)}` : head);
+  if (face === 'thinking') return head;
+  if (face === 'working') {
+    // a tool of the main loop still running says most; else the last thing it did; a subagent's as "who: verb what"
+    const r = (c.running || []).find((x) => x && !x.agent) || (c.running || [])[0];
+    if (r && r.tool) return more([r.agent ? `${r.agent}:` : '', r.tool, r.what].filter(Boolean).join(' '));
+    return more(actionText(c.lastAction));
+  }
+  if (face === 'needs' || face === 'error') return more(c.waitingOn || c.preview);
+  if (face === 'done' || face === 'idle') return more(c.preview);
+  return head;
+}
+
 export const unread = (c, seen) => !!(c.at && (!seen || !seen[c.key] || seen[c.key] < c.at));
+
+// ---------- a bot's chat as the Bots tab shows it (botFeed) ----------
+// Only Fleet View starts a message with "[Fleet View]": anyone else's is framed ("[Fleet View · unsigned…") or
+// marked "(quoted)" by chief.js frame, so this header alone says it is a setup note
+const SETUP = /^\[Fleet View\][ \t]*/;
+export const setupNote = (text) => { const t = String(text == null ? '' : text); return SETUP.test(t) ? t.replace(SETUP, '') : null; };
+// what a bot answers a setup note with when it asks for "ok" (bots.js startPrompt, idNote)
+const ACK = /^\s*(?:ok(?:ay)?|ready|got it)[.!]?\s*$/i;
+export function botFeed(items) {
+  const out = [];
+  let after = false; // the last message was a setup note (thinking and tool steps since then don't count)
+  let sw = []; // switch notes in a row ("/model …", "Set model to …"), until what comes next says where they go
+  const flush = () => { for (const x of sw) out.push(x); sw = []; };
+  for (const it of items || []) {
+    if (!it) continue;
+    // a switch right before your message (Dynamic's, or one from the model menu) folds into that message's chip
+    if (it.kind === 'note' && switchNote(it.text)) { sw.push(it); after = false; continue; }
+    if (it.kind === 'user') {
+      const note = it.images && it.images.length ? null : setupNote(it.text);
+      if (note != null) {
+        flush();
+        // _j is chat.js's cached JSON of the item as it came: the setup form must not reuse it
+        const { _j, ...rest } = it;
+        out.push({ ...rest, kind: 'setup', text: note });
+        after = true;
+        continue;
+      }
+      after = false;
+      if (sw.length) {
+        const switched = Object.assign({}, ...sw.map((x) => switchNote(x.text)));
+        sw = [];
+        const { _j, ...rest } = it;
+        out.push({ ...rest, switched });
+        continue;
+      }
+    } else if (it.kind === 'assistant') {
+      flush();
+      if (after && ACK.test(String(it.text || ''))) continue;
+      after = false;
+    } else {
+      flush();
+      if (it.kind === 'note') after = false;
+    }
+    out.push(it);
+  }
+  flush();
+  return out;
+}
+
+// ---------- the New bot and Edit bot forms ----------
+const EFFORT_LABEL = { xhigh: 'Extra high' };
+export const DYNAMIC = 'dynamic'; // a bot's model or effort that is sized per message (sizeTask), not fixed
+const DYNAMIC_CHOICE = { value: DYNAMIC, label: 'Dynamic', note: 'sized for each message' };
+export function botChoices({ accounts = [], models = [], efforts = [], modelLabel = (m) => m, current = {} } = {}) {
+  const keep = (list, v) => (v && v !== DYNAMIC && !list.includes(v) ? [v, ...list] : list);
+  return {
+    account: keep(accounts, current.account).map((a) => ({ value: a, label: `Account ${a}` })),
+    model: [DYNAMIC_CHOICE, ...keep(models, current.model).map((m) => ({ value: m, label: modelLabel(m) }))],
+    effort: [DYNAMIC_CHOICE, ...efforts.map((e) => ({ value: e, label: EFFORT_LABEL[e] || e.charAt(0).toUpperCase() + e.slice(1) }))],
+  };
+}
+export function botEdits(bot, v) {
+  const b = bot || {}, out = {};
+  const str = (x) => (x == null ? '' : String(x));
+  if ('name' in v && str(v.name).trim() !== str(b.name)) out.name = str(v.name).trim();
+  if ('brief' in v && str(v.brief).trim() !== str(b.brief).trim()) out.brief = str(v.brief).trim();
+  for (const k of ['account', 'model', 'effort']) if (k in v && v[k] && v[k] !== b[k]) out[k] = v[k];
+  // the look: '' or null is the automatic pick; colours compare in lower case (bots.js keeps them so)
+  const look = (x, k) => (x ? (k === 'color' ? String(x).toLowerCase() : String(x)) : null);
+  for (const k of ['shape', 'color']) if (k in v && look(v[k], k) !== look(b[k], k)) out[k] = look(v[k], k);
+  return out;
+}
+
+// ---------- Dynamic: the model and effort sized for each message ----------
+// A fast local guess from the words alone (no model is asked): quick questions and lookups run on Sonnet at low
+// effort, so they come back fast; a task to do on Opus at medium; a plan, design, build or bug hunt on Opus at high,
+// and a big plan or a hard bug at xhigh. A short go-ahead ("ok", "yes do it", "2 and 3") keeps what the bot runs now:
+// it carries on the work before it (a plan's "go ahead" is no quick question), and nothing is switched for it.
+const ACK_WORDS = new Set(('ok okay k kk yes yep yeah yup ya sure go ahead on do it proceed continue carry sounds good '
+  + 'fine perfect great nice awesome thanks thank you thx ty cool lgtm ship approve approved agreed agree right correct '
+  + 'exactly no nope not now stop wait hold please pls both all them those these that this one ones first second third '
+  + 'last option options and or with the').split(' '));
+const GREET = /^(?:hi|hey|hello|yo|hiya|morning|evening|good (?:morning|afternoon|evening|night)|gm|gn)\b/i;
+const QUESTION = /^(?:what|what's|whats|who|who's|when|where|which|why|how|is|are|was|were|do|does|did|can|could|should|would|will|any|anything|have|has)\b/i;
+// looking something up, reading or telling: quick, when the message is short
+const LOOKUP = /\b(?:check|find|look up|lookup|look at|show|list|tell me|remind|read|open|search|status|how many|summari[sz]e)\b/i;
+// a change to make: a task, not a question
+const ACTION = /\b(?:fix|change|add|update|write|make|create|remove|delete|rename|move|edit|draft|reply|send|review|test|run|install|deploy|merge|ship|clean ?up|organi[sz]e|research|compare|figure out|look into|set ?up|configure|schedule|automate)\b/i;
+const PLAN = /\b(?:plan|planning|plans|design|designs|architect\w*|build|implement\w*|refactor\w*|debug\w*|investigat\w*|diagnos\w*|migrat\w*|rewrite|overhaul|redesign|spec|roadmap|strategy|integrat\w*|prototype)\b/i;
+const HARD = /\b(?:root cause|race condition|deadlock|memory leak|leaks?|intermittent\w*|flaky|hard bug|tricky bug|corrupt\w*|crash\w*|segfault|regression|hangs?|freez\w*|security)\b/i;
+const BIG = /\b(?:whole|entire|full|end[- ]to[- ]end|from scratch|across|every|system|architecture|large|big|major|complete|all (?:the )?(?:repos?|files|bots|sessions|screens|pages))\b/i;
+const LIST_ITEM = /^\s*(?:[-*•]|\d+[.)])\s+\S/;
+const SIZES = {
+  keep: { size: 'keep', label: 'Follow-up' },
+  quick: { size: 'quick', model: 'sonnet', effort: 'low', label: 'Quick question' },
+  hello: { size: 'quick', model: 'sonnet', effort: 'low', label: 'Hello' },
+  question: { size: 'normal', model: 'sonnet', effort: 'medium', label: 'Question' },
+  task: { size: 'normal', model: 'opus', effort: 'medium', label: 'Task' },
+  plan: { size: 'big', model: 'opus', effort: 'high', label: 'Plan or build' },
+  bug: { size: 'big', model: 'opus', effort: 'high', label: 'Bug hunt' },
+  parts: { size: 'big', model: 'opus', effort: 'high', label: 'Several parts' },
+  bigPlan: { size: 'huge', model: 'opus', effort: 'xhigh', label: 'Big plan' },
+  hardBug: { size: 'huge', model: 'opus', effort: 'xhigh', label: 'Hard bug' },
+  long: { size: 'huge', model: 'opus', effort: 'xhigh', label: 'Long brief' },
+};
+export function sizeTask(text) {
+  // the quote it replies to ("> " lines) says what it is about, not how big the ask is
+  const own = String(text == null ? '' : text).split('\n').filter((l) => !/^>( |$)/.test(l)).join('\n').trim();
+  const words = own.toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').split(/\s+/).filter(Boolean);
+  const w = words.length;
+  const pick = (k) => ({ ...SIZES[k] });
+  if (!w) return pick('keep');
+  if (w <= 6 && words.every((x) => ACK_WORDS.has(x) || /^\d+$/.test(x))) return pick('keep');
+  const items = own.split('\n').filter((l) => LIST_ITEM.test(l)).length;
+  const plan = PLAN.test(own), hard = HARD.test(own), big = BIG.test(own), action = ACTION.test(own);
+  if (plan && (big || items >= 4 || w > 250)) return pick('bigPlan');
+  if (hard && (plan || w > 60)) return pick('hardBug');
+  if (w > 400) return pick('long');
+  if (plan) return pick('plan');
+  if (hard) return pick('bug');
+  if (items >= 3 || w > 150) return pick('parts');
+  if (w <= 25) {
+    // a short question is quick even when it names a change ("is the deploy green?"); "can you fix…" asks for one
+    const request = /^(?:(?:can|could|would|will)\s+you|please|pls)\b/i.test(own);
+    const asks = !request && (QUESTION.test(own) || /\?\s*$/.test(own));
+    if (GREET.test(own) && w <= 8 && !action) return pick('hello');
+    if (asks || (!action && (LOOKUP.test(own) || w <= 8))) return pick('quick');
+  }
+  return pick(action ? 'task' : 'question');
+}
+// what to type before a message to a dynamic bot: dyn { model, effort } (which of the two are dynamic), size from
+// sizeTask, cur { model, effort } the session runs now (compose.js current(): a model id like 'claude-opus-5-5[1m]',
+// an effort or null when unknown), ids the model ids on offer (compose.js MODEL_IDS; the first of the family that is
+// not the 1M one is taken). -> { model?, effort? }: only what differs; a model of the same family (Opus 1M for Opus)
+// is not switched, and nothing is for a follow-up
+export function dynamicSwitch(dyn, size, cur, ids = []) {
+  const out = {};
+  if (!dyn || !size || size.size === 'keep') return out;
+  const fam = (m) => (/^claude-([a-z]+)-/.exec(String(m || '')) || /^([a-z]+)$/.exec(String(m || '')) || [])[1] || null;
+  if (dyn.model && size.model && fam(cur && cur.model) !== size.model) {
+    const id = ids.find((k) => fam(k) === size.model && !/\[1m\]$/i.test(k));
+    if (id) out.model = id;
+  }
+  if (dyn.effort && size.effort && (cur && cur.effort) !== size.effort) out.effort = size.effort;
+  return out;
+}
+
+// The picks the page made for messages to a dynamic bot, so each message wears a chip saying what it ran on:
+// { conversation id: [{ t (the message, spaces squeezed, at most 200 characters), m (model id or null), e (effort or
+// null), l (sizeTask's label), s (true when it switched for it), at }] }, the newest last, at most PICKS_CAP in all.
+// Kept in storage (a reload keeps them); a storage that throws keeps them for this page only.
+const PICKS_KEY = 'fv.chats.picks';
+const PICKS_CAP = 400;
+const squeeze = (t) => String(t == null ? '' : t).replace(/\s+/g, ' ').trim().slice(0, 200);
+export function createPickStore(storage) {
+  let st = storage;
+  if (st === undefined) { try { st = globalThis.localStorage; } catch { st = null; } }
+  let list = [];
+  try {
+    const j = JSON.parse(st.getItem(PICKS_KEY));
+    if (Array.isArray(j)) list = j.filter((x) => x && typeof x.id === 'string' && typeof x.t === 'string');
+  } catch {}
+  return {
+    put(id, text, p) {
+      if (!id || !p) return;
+      const t = squeeze(text);
+      list.push({ id, t, m: p.model || null, e: p.effort || null, l: p.label || '', s: !!p.switched, at: Number(p.at) || Date.now() });
+      if (list.length > PICKS_CAP) list = list.slice(-PICKS_CAP);
+      try { st.setItem(PICKS_KEY, JSON.stringify(list)); } catch {}
+    },
+    // the newest pick for that message in that conversation (the start of a long one is enough), or null
+    get(id, text) {
+      const t = squeeze(text);
+      if (!id || !t) return null;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const x = list[i];
+        if (x.id === id && x.t && (x.t === t || (x.t.length >= 60 && t.startsWith(x.t.slice(0, 60))))) return { model: x.m, effort: x.e, label: x.l, switched: x.s, at: x.at };
+      }
+      return null;
+    },
+  };
+}
+
+// the notes a switch leaves in the transcript (api.js switchModel types "/model <id>" and "/effort <level>", and
+// Claude Code answers each): -> { model } or { effort } for a command, {} for its answer, null for any other note
+const SWITCH_SAID = /^(?:Set model to |Kept model as |Set effort level to |Effort level set to )/;
+export function switchNote(text) {
+  const t = String(text == null ? '' : text).trim();
+  const m = /^\/(model|effort)\s+(\S+)$/.exec(t);
+  if (m) return { [m[1]]: m[2] };
+  return SWITCH_SAID.test(t) ? {} : null;
+}
+
+// ---------- a bot's tasks (state.bots[].tasks: bots.js, bot-tasks.js viewTask) ----------
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const hm = (h, m) => `${h}:${String(m).padStart(2, '0')}`;
+const nth = (d) => `${d}${d % 10 === 1 && d !== 11 ? 'st' : d % 10 === 2 && d !== 12 ? 'nd' : d % 10 === 3 && d !== 13 ? 'rd' : 'th'}`;
+export function taskSchedule(t) {
+  const sc = t && t.schedule;
+  if (!t || (t.kind === 'recurring' && !sc) || t.valid === false) return 'No valid schedule';
+  if (!sc) return 'To do';
+  if (t.kind === 'once') { const d = new Date(sc.at); return `Once ${MONTHS[d.getMonth()]} ${d.getDate()} ${hm(d.getHours(), d.getMinutes())}`; }
+  const at = hm(sc.h, sc.m);
+  if (sc.every === 'hourly') return `Hourly :${String(sc.m).padStart(2, '0')}`;
+  if (sc.every === 'weekly') return `Weekly ${DAY_NAMES[sc.day] || '?'} ${at}`;
+  if (sc.every === 'monthly') return `Monthly ${nth(sc.day)} ${at}`;
+  if (sc.every === 'weekdays') return `Weekdays ${at}`;
+  return `Daily ${at}`;
+}
+export function taskWhen(ms, now = Date.now()) {
+  if (!Number.isFinite(ms)) return '';
+  const d = new Date(ms), n = new Date(now);
+  const mins = Math.round((ms - now) / 60e3);
+  const sameDay = (a, b) => a.toDateString() === b.toDateString();
+  const clock = hm(d.getHours(), d.getMinutes());
+  if (Math.abs(ms - now) < 60e3) return ms >= now ? 'now' : 'just now';
+  if (mins > 0 && mins < 60) return `in ${mins} min`;
+  if (mins < 0 && mins > -60) return `${-mins} min ago`;
+  if (mins > 0 && mins < 12 * 60) return `in ${Math.round(mins / 60)} h`;
+  if (sameDay(d, n)) return `today ${clock}`;
+  const y = new Date(now - 864e5), tm = new Date(now + 864e5);
+  if (sameDay(d, y)) return `yesterday ${clock}`;
+  if (sameDay(d, tm)) return `tomorrow ${clock}`;
+  if (Math.abs(ms - now) < 6 * 864e5) return `${DAY_NAMES[d.getDay()]} ${clock}`;
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+}
+export function taskLine(t, now = Date.now()) {
+  if (!t) return '';
+  const last = (t.runs || []).length ? t.runs[t.runs.length - 1] : null;
+  const lastText = t.lastRun ? `last ${taskWhen(t.lastRun, now)}${last && last.result ? `: ${last.result}` : ''}` : '';
+  if (t.status === 'done') return ['done', lastText].filter(Boolean).join(' · ');
+  if (t.status === 'paused') return ['paused', lastText].filter(Boolean).join(' · ');
+  if (t.valid === false) return 'its schedule makes no sense: ask the bot to fix it';
+  const next = t.nextRun ? `next ${taskWhen(t.nextRun, now)}` : '';
+  return [next, lastText].filter(Boolean).join(' · ');
+}
+export function tasksHead(tasks, now = Date.now()) {
+  const list = Array.isArray(tasks) ? tasks : [];
+  const open = list.filter((t) => t && t.status === 'open');
+  const next = open.filter((t) => Number.isFinite(t.nextRun)).sort((a, b) => a.nextRun - b.nextRun)[0];
+  const text = next ? `next: ${oneLine(next.title, 60)}, ${taskWhen(next.nextRun, now)}` : open.length ? `${open.length} open` : list.length ? 'all done' : 'none yet';
+  return { count: list.length, open: open.length, text };
+}

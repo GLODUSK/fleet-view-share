@@ -5524,7 +5524,8 @@ function buildState() {
     queuedText: DEMO ? [] : API.queuedIds(),
     feed: feed.filter((e) => !tagOf(e.sid) && !(e.to && tagOf(e.to))).slice(-120)
       .map((e) => { const x = { t: Math.round(e.t), sid: e.sid, who: e.who, verb: e.verb, what: e.what }; if (e.to) x.to = e.to; return x; }),
-    // the bots (bots.js), newest first: { id, name, brief, account, model, effort, folder, createdAt, convId, live }
+    // the bots (bots.js), newest first: { id, name, brief, account, model, effort, folder, createdAt, convId, live, shape, color,
+    // tasks: its tasks.json as the Tasks list shows it (bot-tasks.js viewTask), tasksError? }
     bots: BOTS ? BOTS.view() : [],
   }, tagOf);
 }
@@ -5987,7 +5988,7 @@ function chiefWatchFacts(chiefIds) {
     turnInfo: (id) => apiCtx.turnInfo(id),
     sessionsFile: HOSTJS.sessionsFile(), trustFolder, accounts: () => accountsHere(), rename: (id, name) => renameSession(id, name),
   });
-  apiCtx.bots = { list: () => BOTS.list(), create: (b) => BOTS.create(b), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id) };
+  apiCtx.bots = { list: () => BOTS.list(), create: (b) => BOTS.create(b), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id), look: (b) => BOTS.look(b) };
   apiCtx.botOf = (id) => BOTS.vouch(id);
 }
 
@@ -6236,15 +6237,25 @@ function handleRequest(req, res) {
       });
     }
     // the Bots tab (bots.js): POST /bots makes a bot, /bots/:id changes one, /bots/:id/start starts one, /bots/:id/remove
-    // removes one; each answers { ok, bot, key?, id?, message? }. Only the page itself (its Origin, as /live) makes,
-    // changes or removes one: a bot's brief is its standing orders (the API's take only Henry's phone, api.js)
-    const botRoute = /^\/bots(?:\/([0-9a-f]{12})(?:\/(start|remove))?)?$/.exec(pathname);
+    // removes one, /bots/:id/switch switches a dynamic one's model or effort before a message (Dynamic: chats-model.js
+    // sizeTask); each answers { ok, bot?, key?, id?, message? }. Only the page itself (its Origin, as /live) makes,
+    // changes, removes or switches one: a bot's brief is its standing orders (the API's take only Henry's phone, api.js)
+    // A bot's tasks (bot-tasks.js): POST /bots/:id/tasks/:taskId { action: pause | resume | run | delete }, the page only
+    const taskRoute = /^\/bots\/([0-9a-f]{12})\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/.exec(pathname);
+    if (taskRoute) {
+      return readBody(req, res, (b) => {
+        if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
+        if (!liveCtx.authorize(req)) return sendJson(res, 403, { ok: false, message: "only the Bots tab changes a bot's tasks" });
+        BOTS.taskAction(taskRoute[1], taskRoute[2], b).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
+      });
+    }
+    const botRoute = /^\/bots(?:\/([0-9a-f]{12})(?:\/(start|remove|switch))?)?$/.exec(pathname);
     if (botRoute) {
       return readBody(req, res, (b) => {
         if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
         const [, bid, verb] = botRoute;
-        if (verb !== 'start' && !liveCtx.authorize(req)) return sendJson(res, 403, { ok: false, message: 'only the Bots tab makes, changes or removes a bot' });
-        const r = !bid ? BOTS.create(b) : verb === 'start' ? BOTS.start(bid) : verb === 'remove' ? BOTS.remove(bid) : BOTS.update(bid, b);
+        if (verb !== 'start' && !liveCtx.authorize(req)) return sendJson(res, 403, { ok: false, message: 'only the Bots tab makes, changes, removes or switches a bot' });
+        const r = !bid ? BOTS.create(b) : verb === 'start' ? BOTS.start(bid) : verb === 'remove' ? BOTS.remove(bid) : verb === 'switch' ? BOTS.switchTo(bid, b) : BOTS.update(bid, b);
         Promise.resolve(r).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
       });
     }
@@ -6283,6 +6294,8 @@ function handleRequest(req, res) {
   if (pathname === '/since') return sendJson(res, 200, sinceOut(new URL(req.url, 'http://x').searchParams));
   // the Chief's free briefing (chief.js): needs you, working, finished, deploys, and the same as a few lines
   if (pathname === '/chief/briefing') return sendJson(res, 200, CHIEF.briefing());
+  // a bot's task list (bots.js tasks; state.bots[].tasks has the same)
+  { const m = /^\/bots\/([0-9a-f]{12})\/tasks$/.exec(pathname); if (m) { const [code, out] = BOTS.tasks(m[1]); return sendJson(res, code, out); } }
   if (pathname === '/conversation') return void CONV.conversation(req, res, convCtx).catch((e) => requestFailed(req, res, e));
   if (pathname === '/chat/commands') return sendJson(res, 200, CMDS.list(new URL(req.url, 'http://x').searchParams.get('cwd')));
   if (pathname === '/chat/files') {
@@ -6552,6 +6565,8 @@ function startWeb() {
     every(5000, 'chief', () => { CHIEF.tick(); });
     // the bots: the same following and telling, for each (bots.js)
     every(5000, 'bots', () => { BOTS.tick(); });
+    // the bots' tasks and routines: each one that comes due is delivered to its bot (bots.js schedule)
+    every(5000, 'bot-tasks', () => { BOTS.schedule(); });
     // messages and orders that waited for a menu before the last restart (api.js's queue)
     API.startQueue(apiCtx);
   });

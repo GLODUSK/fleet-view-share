@@ -2,8 +2,8 @@
 // fv: Fleet View's automation API from the command line (README: "Automation API"), for a person or a Claude
 // Code session that orchestrates other sessions: start one, send it a message, wait for it, read its menu and
 // answer it, read its transcript, stop and remove it, make teams of them (led by one, or peers), see what they are
-// doing for free (fv status) and ask several one question (fv ask). `fv help` lists the commands; `fv api` asks the
-// server.
+// doing for free (fv status) and ask several one question (fv ask); a bot of Henry's changes its own avatar with fv
+// look. `fv help` lists the commands; `fv api` asks the server.
 //
 // Node only, no dependencies. The token comes from %LOCALAPPDATA%\fleet-view\api-token (made by the server's first
 // start), the port from --port, FLEET_VIEW_PORT or 4777. Nothing else is read (but the folder's version.json and git
@@ -57,6 +57,11 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
                                             your chat as one message (later ones one by one). --wait:
                                             print here the ones in within s (default 100, at most 540; a Bash call stops at 2 minutes)
 
+  fv look --from <your id> [--shape S] [--color rrggbb]
+                                            a bot changes its own avatar in the Bots tab: shape hex, drop,
+                                            round, pill, tri, square, star, clover, flower or heart; auto for
+                                            either goes back to the one picked for it
+
   --json         the raw JSON reply          --port <n>   Fleet View's port (default 4777)
   --wait         without a number: the API's default (30 minutes); with one: 1..3600 seconds
   A text argument "-" is read from stdin. Ids may be their first 8+ characters.
@@ -67,7 +72,7 @@ class Refused extends Error {}
 
 // ---------- arguments ----------
 const VALUE_FLAGS = new Set(['account', 'name', 'model', 'effort', 'fork', 'from', 'timeout', 'tail', 'text', 'sig',
-  'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order', 'within']);
+  'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order', 'within', 'shape', 'color']);
 const BOOL_FLAGS = new Set(['temp', 'chrome', 'no-chrome', 'all', 'remove', 'allow-permission', 'json', 'help', 'version', 'no-open']);
 // -> { pos: [...], flags: { name: value | true } }; --wait takes the next argument only when it is a number, --lead
 // only when it is not an option (fv team new … --lead <id>; fv team add … --lead stands alone)
@@ -647,6 +652,19 @@ async function run(argv, env) {
       if (later) lines.push('', j.typedIn === false ? `${later} still to answer: see ${later === 1 ? 'its reply' : 'their replies'} later with fv transcript <id>.`
         : `${later} still to answer: ${later === 1 ? 'its answer' : 'their answers'} will be typed into your chat by itself; nothing to wait for.`);
       return { j: { ...j, answers: a.answers }, lines };
+    }
+    case 'look': {
+      noMore(0);
+      if (flags.from === undefined || flags.from === true) throw new Usage('give --from <your conversation id>: Fleet View told it to you ("Your id: ...")');
+      if (flags.shape === undefined && flags.color === undefined) throw new Usage('give --shape and/or --color: fv look --from <your id> --shape heart --color ff6b80');
+      const body = { from: await resolveId(call, flags.from) };
+      // auto (or none): back to the one picked for it
+      const val = (v, name) => { if (v === true) throw new Usage(`--${name} needs a value`); return /^(?:auto|none)$/i.test(v) ? null : v; };
+      if (flags.shape !== undefined) body.shape = val(flags.shape, 'shape');
+      // a bare rrggbb is taken too: an unquoted # starts a comment in bash and PowerShell
+      if (flags.color !== undefined) { const c = val(flags.color, 'color'); body.color = typeof c === 'string' && /^[0-9a-f]{6}$/i.test(c) ? `#${c}` : c; }
+      const j = await need('POST', '/bots/look', body);
+      return { j, lines: [j.message || 'done'] };
     }
     default: throw new Usage(`unknown command "${cmd}" (fv help)`);
   }
