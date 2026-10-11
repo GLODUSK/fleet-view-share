@@ -10,9 +10,10 @@
 // tick), so turning remote access off or taking a device's approval back closes its socket; recheck() asks every
 // socket at once.
 //
-// The WebSocket itself (RFC 6455, no npm package): version 13 only, no extensions or subprotocols; client frames
-// must be masked, server frames are not; text and binary messages (both read as UTF-8 JSON; the page sends text),
-// continuation frames, ping/pong, the close handshake, 16- and 64-bit lengths, at most 4 MB a message. The server
+// The WebSocket itself (RFC 6455, no npm package; the frame reader and writer are ws-frames.js's, shared with
+// relay-lan.js): version 13 only, no extensions or subprotocols; client frames must be masked, server frames are not;
+// text and binary messages (both read as UTF-8 JSON; the page sends text), continuation frames, ping/pong, the close
+// handshake, 16- and 64-bit lengths, at most 4 MB a message. The server
 // pings every 25 s and drops a browser that missed two. A browser that stops reading (8 MB waiting to go out to
 // it) is dropped too: the page reconnects and takes a fresh snapshot.
 //
@@ -45,12 +46,10 @@
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
-const crypto = require('crypto');
 // requiring it only defines functions (runHost runs only when host.js is the main module): the same pipe name,
 // host.json, ID_RE and KEY_RE the window uses
 const H = require(path.join(__dirname, 'desktop', 'host.js'));
-
-const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const WF = require(path.join(__dirname, 'ws-frames.js'));
 const MSG_MAX = 4 << 20; // one message, all its frames together
 const OUT_MAX = 8 << 20; // waiting to go out to one browser
 const WRITE_MAX = 1 << 20; // one write's data, in characters
@@ -94,18 +93,18 @@ function upgrade(req, socket, head, ctx) {
   if (!ok) return refuse(socket, 403, 'Forbidden');
   if (req.method !== 'GET' || !/\bwebsocket\b/i.test(String(req.headers.upgrade || ''))) return refuse(socket, 400, 'Bad Request');
   if (String(req.headers['sec-websocket-version'] || '').trim() !== '13') return refuse(socket, 426, 'Upgrade Required', 'Sec-WebSocket-Version: 13\r\n');
-  const key = String(req.headers['sec-websocket-key'] || '').trim();
-  if (!/^[A-Za-z0-9+/]{22}==$/.test(key) || Buffer.from(key, 'base64').length !== 16) return refuse(socket, 400, 'Bad Request');
+  const accept = WF.acceptKey(req.headers['sec-websocket-key']);
+  if (!accept) return refuse(socket, 400, 'Bad Request');
   if (clients.size >= CLIENTS_MAX) return refuse(socket, 503, 'Service Unavailable');
-  const accept = crypto.createHash('sha1').update(key + GUID).digest('base64');
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
   socket.setNoDelay(true);
   socket.setTimeout(0);
   const c = {
-    req, socket, ctx, origin: String(req.headers.origin).slice(0, 200),
-    chunks: [], have: 0, need: 2, frag: null, missed: 0, closing: false, gone: false,
+    req, socket, ctx, origin: String(req.headers.origin).slice(0, 200), ...WF.state(),
     authAt: Date.now(), inflight: 0, ready: false, queue: [],
   };
+  // what the frame reader (ws-frames.js) calls back
+  c.h = { max: MSG_MAX, close: (code, why) => close(c, code, why), message: (m) => message(c, m), pong: (d) => write(c, frame(0xA, d)), gone: () => gone(c) };
   clients.add(c);
   log(`live: a browser connected (${c.origin}), ${clients.size} now`);
   socket.on('data', (chunk) => onData(c, chunk));
@@ -134,15 +133,7 @@ function gone(c) {
 }
 
 // ---------- frames ----------
-function frame(op, payload) {
-  const len = payload.length;
-  let head;
-  if (len < 126) { head = Buffer.alloc(2); head[1] = len; }
-  else if (len < 65536) { head = Buffer.alloc(4); head[1] = 126; head.writeUInt16BE(len, 2); }
-  else { head = Buffer.alloc(10); head[1] = 127; head.writeUInt32BE(Math.floor(len / 2 ** 32), 2); head.writeUInt32BE(len >>> 0, 6); }
-  head[0] = 0x80 | op;
-  return Buffer.concat([head, payload]);
-}
+const frame = WF.frame;
 
 function write(c, buf) {
   if (c.gone || c.socket.destroyed) return;
@@ -165,85 +156,14 @@ function broadcast(msg) {
 function close(c, code, reason = '') {
   if (c.gone || c.closing) return;
   c.closing = true;
-  const r = Buffer.from(String(reason).slice(0, 120));
-  const p = Buffer.alloc(2 + r.length);
-  p.writeUInt16BE(code, 0);
-  r.copy(p, 2);
-  write(c, frame(0x8, p));
+  write(c, frame(0x8, WF.closePayload(code, reason)));
   c.closeTimer = setTimeout(() => gone(c), 2000);
   c.closeTimer.unref();
 }
 
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
-function onData(c, chunk) {
-  if (c.gone) return;
-  c.chunks.push(chunk);
-  c.have += chunk.length;
-  if (c.have > MSG_MAX + 64) return close(c, 1009, 'message too big');
-  while (!c.gone && c.have >= c.need) {
-    const b = c.chunks.length === 1 ? c.chunks[0] : Buffer.concat(c.chunks, c.have);
-    c.chunks = [b];
-    const used = parseFrame(c, b);
-    if (used < 0) return; // closed
-    if (used === 0) return; // c.need was raised: wait for more
-    const rest = b.subarray(used);
-    c.chunks = rest.length ? [rest] : [];
-    c.have = rest.length;
-    c.need = 2;
-  }
-}
-
-// one frame from the front of b: the bytes it took, 0 when more are needed (c.need says how many), -1 when closed
-function parseFrame(c, b) {
-  if (b.length < 2) { c.need = 2; return 0; }
-  const fin = (b[0] & 0x80) !== 0, op = b[0] & 0x0f;
-  if (b[0] & 0x70) { close(c, 1002, 'no extensions'); return -1; }
-  if (!(b[1] & 0x80)) { close(c, 1002, 'client frames must be masked'); return -1; }
-  let len = b[1] & 0x7f, off = 2;
-  if (len === 126) {
-    if (b.length < 4) { c.need = 4; return 0; }
-    len = b.readUInt16BE(2); off = 4;
-  } else if (len === 127) {
-    if (b.length < 10) { c.need = 10; return 0; }
-    if (b.readUInt32BE(2) !== 0) { close(c, 1009, 'message too big'); return -1; }
-    len = b.readUInt32BE(6); off = 10;
-  }
-  if (op >= 0x8 && (!fin || len > 125)) { close(c, 1002, 'bad control frame'); return -1; }
-  if (len > MSG_MAX) { close(c, 1009, 'message too big'); return -1; }
-  const total = off + 4 + len;
-  if (b.length < total) { c.need = total; return 0; }
-  const mask = b.subarray(off, off + 4);
-  const data = Buffer.from(b.subarray(off + 4, total));
-  for (let i = 0; i < data.length; i++) data[i] ^= mask[i & 3];
-  c.missed = 0; // anything from it means it is there
-  switch (op) {
-    case 0x0: // continuation
-      if (!c.frag) { close(c, 1002, 'nothing to continue'); return -1; }
-      c.frag.size += data.length;
-      if (c.frag.size > MSG_MAX) { close(c, 1009, 'message too big'); return -1; }
-      c.frag.parts.push(data);
-      if (fin) { const m = Buffer.concat(c.frag.parts, c.frag.size); c.frag = null; if (!message(c, m)) return -1; }
-      return total;
-    case 0x1: case 0x2: // text, binary
-      if (c.frag) { close(c, 1002, 'a message is still open'); return -1; }
-      if (!fin) { c.frag = { parts: [data], size: data.length }; return total; }
-      return message(c, data) ? total : -1;
-    case 0x8: { // close: answer it (with its code, or 1000) and let the socket go
-      if (data.length === 1) { close(c, 1002, 'bad close frame'); return -1; }
-      if (!c.closing) {
-        const code = data.length >= 2 ? data.readUInt16BE(0) : 1000;
-        const ok = (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1011) || (code >= 3000 && code <= 4999);
-        close(c, ok ? code : 1002);
-      }
-      setImmediate(() => gone(c));
-      return -1;
-    }
-    case 0x9: write(c, frame(0xA, data)); return total; // ping: pong with its payload
-    case 0xA: return total; // pong
-    default: close(c, 1002, 'unknown opcode'); return -1;
-  }
-}
+const onData = (c, chunk) => WF.feed(c, chunk, c.h);
 
 // a whole message: JSON, one request. false when the socket was closed for it
 function message(c, buf) {

@@ -67,6 +67,9 @@ const P = {
   mic: '<rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5v4"/><path d="M8.5 21.5h7"/>',
   sync: '<path d="M20.5 12A8.5 8.5 0 0 1 6 18"/><path d="M3.5 12A8.5 8.5 0 0 1 18 6"/><path d="M18 2.5V6h-3.5"/><path d="M6 21.5V18h3.5"/>',
   key: '<circle cx="7.5" cy="15.5" r="4"/><path d="m10.4 12.6 9.6-9.6"/><path d="m16.5 6.5 3 3"/><path d="m14 9 2 2"/>',
+  // how a phone reaches the PC (Pair an iPhone, the phone's start screen): on this Wi-Fi, or through Blackbox
+  wifi: '<path d="M2.5 9a14 14 0 0 1 19 0"/><path d="M5.5 12.5a9.5 9.5 0 0 1 13 0"/><path d="M8.6 16a5 5 0 0 1 6.8 0"/><circle cx="12" cy="19.3" r="0.9"/>',
+  cloud: '<path d="M7 19h10.5a4.5 4.5 0 0 0 .7-8.95A6.5 6.5 0 0 0 5.7 9.2 5 5 0 0 0 7 19Z"/>',
   // the view tabs (index.html's .tabs, and the phone app's tab bar)
   cards: '<path d="M8 7V5a1.5 1.5 0 0 1 1.5-1.5h10A1.5 1.5 0 0 1 21 5v10a1.5 1.5 0 0 1-1.5 1.5h-2"/><rect x="3" y="7" width="14.5" height="13.5" rx="1.5"/><path d="M6.5 11.5h7.5"/><path d="M6.5 15h5"/>',
   map: '<circle cx="5.5" cy="6.5" r="2.5"/><circle cx="18.5" cy="5.5" r="2.5"/><circle cx="12" cy="18.5" r="2.5"/><path d="M8 6.3 16 5.7"/><path d="m6.8 8.7 4 7.6"/><path d="m17.3 7.7-4.1 8.6"/>',

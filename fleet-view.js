@@ -6099,8 +6099,9 @@ const HK = HOUSEKEEPING.createHousekeeping({
 const SYNC_PRIVATE = DEMO ? null : SYNC_SETUP_JS.readPrivate(__dirname);
 const SYNC = SYNC_API.createSync({ port: PORT, demo: DEMO, dataDir: LOG_DIR, log: (t) => logOnce(t, t),
   onlyEmail: SYNC_PRIVATE ? SYNC_PRIVATE.syncEmail : null });
-// relay.js: the phone relay (docs/phone.md). Off (no socket, no key read) unless sync is set up and signed in and a
-// phone is paired; it answers the phone through this server's own routes over loopback, and marks what Henry sent
+// relay.js: the phone relay (docs/phone.md). Off (no socket, no key read) until a phone is paired: through Supabase
+// while sync is set up and signed in, or on this PC's Wi-Fi (relay-lan.js: port 4779 on the private addresses only,
+// no sync needed); it answers the phone through this server's own routes over loopback, and marks what Henry sent
 // from it with api.js's in-memory relay key (viaOf)
 const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, logDir: LOG_DIR, apiToken: API.TOKEN_FILE,
   relayKey: () => API.relayKey(), version: () => VERSION.current().version, log: (t) => logOnce(t, t) });
@@ -6356,6 +6357,12 @@ function handleRequest(req, res) {
   if (pathname === '/since') return sendJson(res, 200, sinceOut(new URL(req.url, 'http://x').searchParams));
   // the Chief's free briefing (chief.js): needs you, working, finished, deploys, and the same as a few lines
   if (pathname === '/chief/briefing') return sendJson(res, 200, CHIEF.briefing());
+  // the Accounts list alone (accounts.js view(), as /state's accountList): the phone's Claude accounts screen reads it
+  // through the relay, which passes on only the fields it needs. On the PC only, like the /accounts/* changes
+  if (pathname === '/accounts') {
+    if (who.kind !== 'local') return sendJson(res, 403, { ok: false, message: 'accounts can only be seen on the PC' });
+    return sendJson(res, 200, DEMO ? { list: [{ a: 'A', email: 'a@example.com', signedIn: true }, { a: 'B', email: 'b@example.com', signedIn: true }], jobs: {} } : ACCTS.view());
+  }
   // a bot's task list (bots.js tasks; state.bots[].tasks has the same)
   { const m = /^\/bots\/([0-9a-f]{12})\/tasks$/.exec(pathname); if (m) { const [code, out] = BOTS.tasks(m[1]); return sendJson(res, code, out); } }
   if (pathname === '/conversation') return void CONV.conversation(req, res, convCtx).catch((e) => requestFailed(req, res, e));
@@ -6590,7 +6597,7 @@ function startWeb() {
     const every = (ms, name, fn) => setInterval(() => { try { fn(); } catch (e) { logOnce(name + ':' + (e && e.message), `${name} failed\n${errorText(e)}`); } }, ms);
     // remote access: this PC's tailnet name, read now and every minute; with the switch on, 443 is made to point here
     REMOTE.start();
-    // the phone relay: it opens a socket only once sync is signed in and a phone is paired
+    // the phone relay: it opens a socket only once a phone is paired (Supabase: and sync is signed in)
     if (!DEMO) RELAY.start();
     if (!DEMO) SYNC_RUNNER.start();
     if (DEMO) {
