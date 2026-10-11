@@ -41,8 +41,8 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
   - `owner_device`: the device that writes it. S2 sets itself on a new row and only uploads rows it owns (or with no
     owner). S4 moves it. `lease_until` is S4's.
 - **chunks** `{ conversation_id, file, generation, seq, byte_offset, byte_length, object_path, sha256 }`: one per
-  object. `sha256` is the hex sha256 of the chunk's plain bytes. For whole files, one chunk with `seq` 0 per
-  generation.
+  object. `sha256` is the hex sha256 of the chunk's plain bytes. A whole file is `seq` 0..n of one generation (one
+  chunk unless it is over 8 MiB; an empty one is a single 0-byte chunk).
 
 ## Objects (bucket `fleet-sync`, under `<user id>/`, through `sync-api.js` storage)
 
@@ -61,7 +61,11 @@ chunks.
    generation's rows and objects.
 4. Order, always: object, then its chunk row, then the conversation row (`size`, `sha256`, `generation`,
    `updated_at`). A reader never sees a row whose object is missing, and a conversation row never claims more than
-   its chunk rows hold.
+   its chunk rows hold. The chunks' foreign key needs the conversation row first, so a new one is inserted with
+   `size` 0 before any chunk and filled in last. Any file's upload (a side file too) bumps `updated_at`, so the
+   materializer sees side-file-only changes.
+   A new generation (and every whole file) uploads all its objects first, then inserts all its chunk rows at once,
+   so a reader never sees half of one.
 5. Only lines that are whole: an upload of `main` or a `.jsonl` stops at the last `\n`, so a line being written is
    never cut.
 6. Newest first, a few MB/s at most, one conversation at a time; a failure backs off and retries, never loses state.
@@ -69,7 +73,8 @@ chunks.
 
 ## The materializer's rules (S3)
 
-1. For every conversation row owned by another device (and `state = 'active'`): find this device's root for its
+1. For every conversation row owned by another device (and `state = 'active'`; with `size` 0 the row has no `main`
+   yet, and no `main` is laid down): find this device's root for its
    `repo_id` (repo_paths, or a scan of the repos Fleet View knows); none: skip it. Folder `X` = root + `rel_cwd`
    (see above), slug of `X`, projects folder of `account`.
 2. Read its chunk rows for the current generation, ordered by `seq`; check they cover `[0, size)` with no gap; fetch

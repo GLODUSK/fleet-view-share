@@ -2553,8 +2553,6 @@ function openContextMenu(target, x, y) {
       items.push({ sep: true });
     }
     items.push({ label: onPc('Open folder'), icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
-    if (pushHook()) items.push(repoPushItem(folder, repo.push || 'production'));
-    if (unpinItem(target)) items.push(unpinItem(target));
     // its name in Fleet View, and (while some are picked) whether it is shown too
     const rIt = { root: repoRootOf({ root: folder }), name: target.name || repo.name || repoName(folder) };
     items.push({ sep: true }, ...showTooItems(rIt), repoRenameItem(folder));
@@ -2564,6 +2562,9 @@ function openContextMenu(target, x, y) {
     // its removed conversations (only when it has any), all of them: continue, show again or forget each
     const rm = removedMenuItem(removedFor(folder), false);
     if (rm) items.push({ sep: true }, rm);
+    // push and unpin sit at the bottom, just above Remove (Henry, 2026-10-10)
+    const tail = [pushHook() ? repoPushItem(folder, repo.push || 'production') : null, unpinItem(target)].filter(Boolean);
+    if (tail.length) items.push({ sep: true }, ...tail);
     // the repo and its conversations leave every view (the repo menu too); Undo on the toast
     items.push({ sep: true }, { label: 'Remove workspace', icon: 'close', danger: true, run: () => removeRepo({ root: folder, name: target.name || repo.name }) });
     openCtxMenu({ x, y, title: target.name || repo.name || repoName(folder), dot: color, sub: folder, items });
@@ -2588,10 +2589,11 @@ function openContextMenu(target, x, y) {
   if (desk && !s.pending && !s.demo) items.push(forkMenuItem(s));
   if (!s.pending && !s.demo) { const mv = moveMenuItem(s); if (mv) items.push(mv); }
   if (desk && !s.pending && !s.demo && !singleAccount()) { const se = sendElsewhereItem(s, hosted); if (se) items.push(se); }
-  if (!s.pending && !s.demo && pushHook()) items.push(sessionPushItem(s));
   items.push(...teamItems(s));
   if (waitingOrderItem(s)) items.push(waitingOrderItem(s));
-  if (unpinItem(target)) items.push(unpinItem(target));
+  // push and unpin sit at the bottom, just above Remove (Henry, 2026-10-10)
+  const tail = [!s.pending && !s.demo && pushHook() ? sessionPushItem(s) : null, unpinItem(target)].filter(Boolean);
+  if (tail.length) items.push({ sep: true }, ...tail);
   // Remove: ends the session if it runs here, and takes the conversation off the map, cards and strip (Henry: "to me end
   // is delete"). Its log stays on disk; it comes back by itself if it works again (open in another window, say).
   const st = hosted ? hostStatus(s.id) : null;

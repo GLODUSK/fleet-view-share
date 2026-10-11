@@ -48,6 +48,23 @@ download side (S3) and the page's sync card (S5) are built on it. Its test is `n
    "Signed in as ...".
 3. Check it: `node sync-api.js status`. To sign out, run `node sync-api.js signout`. To turn sync off again,
    run `node sync-api.js off`, which signs out and deletes the config.
+4. Set the sync key, in a terminal (the passphrase is typed hidden, so not through `!`):
+
+   ```
+   node sync-crypto.js passphrase
+   ```
+
+   Use the same passphrase on every machine. `node sync-crypto.js status` says whether the key is here.
+
+## Running (S2 and S3)
+
+`sync-run.js` starts the uploader (`sync-up.js`) and the materializer (`sync-down.js`) inside the server once all
+three are true: the config is there, a member is signed in, and the sync key is on this machine. It stops them on
+a sign-out, and restarts them when another account signs in or the key changes. It looks again on every sign-in
+change and once a minute. `GET /sync/activity` shows whether they run (or why not) and their counts, never a
+title, a path inside a conversation, a token or the key. Conflicts (a local copy longer than, or different from,
+the synced one) are listed there and left alone. The wire format is `docs/sync-format.md`. Tests:
+`node scripts/sync-common-test.js`, `sync-up-test.js`, `sync-down-test.js`, `sync-run-test.js` (all in `scripts/`).
 
 The server decides who may sync, not this code. The `fleet_sync.members` list is checked by every table policy
 and every storage policy. A Google account that is not on the list can sign in, but it reads and writes nothing.
