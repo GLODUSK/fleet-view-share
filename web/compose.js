@@ -17,7 +17,7 @@
 //
 // It never starts a headless claude. Text goes into the same interactive pty the Session tab shows
 // (window.fleetDesktop.term, see term.js), exactly the way api.js sends a message: bracketed pastes of one line
-// at most 400 characters each, Alt+Enter between lines (term.js typeInto: a long or multi-line paste reaches
+// at most 400 characters each, Ctrl+J between lines (term.js typeInto: a long or multi-line paste reaches
 // the model as <pasted_content>, not the user's words), 300 ms, then Enter on its own. A
 // conversation that isn't running here is started first (term.js ensureLive: like the Session tab's explicit
 // open, then wait until Claude is idle). Images go to the server first (POST /chat/image saves them under

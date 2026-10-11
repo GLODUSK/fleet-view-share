@@ -739,15 +739,15 @@ export async function closePanel(id) {
 }
 
 // The writes that type text into Claude Code's prompt as the user's own words: each line as bracketed pastes
-// (ESC[200~ text ESC[201~) of at most PASTE_MAX characters (never splitting a surrogate pair), Alt+Enter (a new
-// line in the prompt) between lines. Claude Code wraps a paste of several lines, or a long one, in
+// (ESC[200~ text ESC[201~) of at most PASTE_MAX characters (never splitting a surrogate pair), Ctrl+J (a line
+// feed: a new line in the prompt) between lines. Claude Code wraps a paste of several lines, or a long one, in
 // <pasted_content> tags, which tell the model the text is not the user's own request; pieces this small stay
-// plain. Kept in step with api.js pasteWrites.
-const PASTE_MAX = 400, PASTE_GAP_MS = 40;
+// plain. Kept in step with api.js pasteWrites and typePasted.
+const PASTE_MAX = 400;
 export function pasteWrites(text) {
   const out = [];
   String(text).split('\n').forEach((line, x) => {
-    if (x) out.push('\x1b\r');
+    if (x) out.push('\n');
     for (let i = 0; i < line.length;) {
       let j = Math.min(line.length, i + PASTE_MAX);
       if (j < line.length && /[\ud800-\udbff]/.test(line[j - 1])) j--;
@@ -757,13 +757,12 @@ export function pasteWrites(text) {
   });
   return out;
 }
-// Write pasteWrites(text) with write(data) (false: it could not), PASTE_GAP_MS apart: an Alt+Enter Claude Code
-// reads in one chunk with the pastes around it is lost. -> true when every write went
+// Write pasteWrites(text) with write(data) (false: it could not), back to back. Tested on Claude Code 2.1.296
+// (~10,000 characters, 10 to 100 lines, typed then sent): every write arrives, as plain text, in no time. The
+// Alt+Enter (ESC CR) used before needed 40 ms around it, and even then a long text now and then had one read as
+// Enter, sending the message half typed; Ctrl+J is one byte with no such race. -> true when every write went
 export async function typeInto(write, text) {
-  for (const [x, w] of pasteWrites(text).entries()) {
-    if (x) await sleep(PASTE_GAP_MS);
-    if (write(w) === false) return false;
-  }
+  for (const w of pasteWrites(text)) if (write(w) === false) return false;
   return true;
 }
 
@@ -1085,7 +1084,7 @@ export function installFakeTerm() {
         else if (data === '\x1b') { p.panel = null; emit(id, `\r\n${E}2m${'─'.repeat(50)}${E}0m\r\n${E}1m>${E}0m `); }
         return;
       }
-      if (data === '\x1b\r') { p.line += '\n'; emit(id, '\r\n'); return; } // Alt+Enter: a new line in the prompt
+      if (data === '\x1b\r' || data === '\n') { p.line += '\n'; emit(id, '\r\n'); return; } // Alt+Enter or Ctrl+J: a new line in the prompt
       if (data === '\x1b') { p.status = 'idle'; emit(id, `\r\n${E}2m(Esc reached the session)${E}0m\r\n${E}1m>${E}0m ${p.line}`); return; }
       // Shift+Tab: the next permission mode, shown as Claude Code's footer line (the Chat tab's mode picker reads it)
       if (data === '\x1b[Z') {

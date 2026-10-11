@@ -16,7 +16,7 @@
 // the token from host.json (the same way desktop/terms.js does), sends its requests and closes it.
 //
 // Prompts and messages go in as bracketed pastes (ESC[200~ text ESC[201~), the way the panel's Reply does
-// (web/term.js): one per line, in pieces of at most PASTE_MAX characters, the lines joined by Alt+Enter (a new
+// (web/term.js): one per line, in pieces of at most PASTE_MAX characters, the lines joined by Ctrl+J (a new
 // line in the prompt); then Enter, separately, sends it. Claude Code wraps a paste of several lines or a long one
 // in <pasted_content> tags, which tell the model the text is not the user's own request, so it is never pasted
 // whole. Control characters other than new line and tab are refused, so nothing in the text can end a paste early
@@ -182,14 +182,13 @@ function cleanText(v) {
   return t;
 }
 // the writes that type text into Claude Code's prompt as the user's own (see the top): each line pasted in pieces
-// of at most PASTE_MAX characters (never splitting a surrogate pair), Alt+Enter between lines. They go in
-// PASTE_GAP_MS apart: an Alt+Enter read in one chunk with the pastes around it is lost. Kept in step with
-// web/term.js pasteWrites.
-const PASTE_MAX = 400, PASTE_GAP_MS = 40;
+// of at most PASTE_MAX characters (never splitting a surrogate pair), Ctrl+J (a line feed: a new line in the
+// prompt) between lines. typePasted writes them. Kept in step with web/term.js pasteWrites and typeInto.
+const PASTE_MAX = 400;
 function pasteWrites(text) {
   const out = [];
   String(text).split('\n').forEach((line, x) => {
-    if (x) out.push('\x1b\r');
+    if (x) out.push('\n');
     for (let i = 0; i < line.length;) {
       let j = Math.min(line.length, i + PASTE_MAX);
       if (j < line.length && /[\ud800-\udbff]/.test(line[j - 1])) j--;
@@ -199,13 +198,17 @@ function pasteWrites(text) {
   });
   return out;
 }
-// type it (pasteWrites), then Enter on its own. beforeEnter: an async check just before the Enter; when it answers
+// type text into conversation id: pasteWrites, back to back. Tested on Claude Code 2.1.296 (~10,000 characters,
+// 10 to 100 lines, typed then sent): every write arrives, as plain text, in no time. The Alt+Enter (ESC CR) used
+// before needed 40 ms around it, and even then a long text now and then had one read as Enter, sending the
+// message half typed; Ctrl+J is one byte with no such race. Kept in step with web/term.js typeInto.
+async function typePasted(host, id, text) {
+  for (const w of pasteWrites(text)) await host.call('write', id, w);
+}
+// type it (typePasted), then Enter on its own. beforeEnter: an async check just before the Enter; when it answers
 // true (a menu came up) the Enter is not sent. -> { entered }
 async function sendText(host, id, text, beforeEnter) {
-  for (const [x, w] of pasteWrites(text).entries()) {
-    if (x) await sleep(PASTE_GAP_MS);
-    await host.call('write', id, w);
-  }
+  await typePasted(host, id, text);
   await sleep(ENTER_DELAY_MS);
   if (beforeEnter && await beforeEnter()) return { entered: false };
   await host.call('write', id, '\r');
@@ -1273,7 +1276,7 @@ async function answerMenu(key, b, ctx, gone) {
     text = cleanText(b.text);
     if (!text) return [400, { ok: false, message: 'text must be text, without control characters other than new lines and tabs' }];
     if (typeof b.option !== 'number') return [400, { ok: false, message: 'text goes with a "Type something." option' }];
-    // a new line there would go in as Alt+Enter, inside the question's one-line answer: join the lines
+    // a new line there would go in as Ctrl+J, inside the question's one-line answer: join the lines
     text = text.split(/\s*\n\s*/).filter(Boolean).join(' ');
   }
   const ms = waitMs(b.wait);
@@ -1354,7 +1357,7 @@ async function answerMenu(key, b, ctx, gone) {
         if (await notQuestion()) return [409, { ok: false, id: p.id, menu: await menuNow(host, p), message: 'the question is no longer up after picking that option: the text was not typed' }];
         if (multi) {
           // a multiple-choice question: the text ticks it, and Enter would untick it (Submit sends the answers)
-          for (const [x, w] of pasteWrites(text).entries()) { if (x) await sleep(PASTE_GAP_MS); await host.call('write', p.id, w); }
+          await typePasted(host, p.id, text);
         } else {
           const sent = await sendText(host, p.id, text, notQuestion);
           if (!sent.entered) return [409, { ok: false, id: p.id, message: 'the question went away before Enter: the text was pasted (it may sit in its prompt box) but not sent' }];
