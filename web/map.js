@@ -198,6 +198,9 @@ const STEP_NAMES = ['push', 'PR', 'checks', 'merged', 'live'];
 const LENSES = ['state', 'cost', 'account', 'idle', 'context'];
 const DASH_BAND = [5, 4], DASH_GHOST = [2, 3], DASH_LINK = [3, 4];
 const TEAM_ALPHA = 0.42, PARITY_ALPHA = 0.6, TRAIL_ALPHA = 0.26, CONFLICT_LINE_ALPHA = 0.5;
+// every node stays wired (Henry): a shared file's node keeps a steady line to each conversation sharing it, and a
+// recent file's path never fades below its dot (drawn at 0.14 at least)
+const CLASH_LINK_ALPHA = 0.4, PATH_MIN_ALPHA = 0.14;
 const GLIDE_MS = 650;               // saved views, n / N and the overlay's panTo glide over this
 const IDLE_FULL_MS = 60 * 60e3;     // the idle lens: fully faded after an hour without activity
 const WT_MAX = 16;                  // worktree satellites drawn per hub
@@ -1941,7 +1944,7 @@ function draw() {
     }
   }
 
-  // links: conversation -> repo (a gradient from its colour to the repo's), -> PR, -> agents
+  // links: conversation -> repo (a gradient from its colour to the repo's), -> PR, -> shared file, -> agents
   for (const e of I.springs) {
     const a = byId.get(e.a), b = byId.get(e.b);
     if (!a || !b) continue;
@@ -1954,6 +1957,12 @@ function draw() {
       ctx.strokeStyle = rgba(shipColor(b.ship), 0.32); ctx.lineWidth = 0.9;
       curve(ctx, a, b);
     }
+    else if (b.kind === 'clash') {
+      // steady, in the clash's colour: its recent-work paths (below) only run while the file was touched in the
+      // last ten minutes, and a finished conversation has none
+      ctx.strokeStyle = rgba(b.c.writers >= 2 ? COL.red : COL.gold, CLASH_LINK_ALPHA); ctx.lineWidth = 1;
+      curve(ctx, a, b);
+    }
   }
   for (const n of I.nodes) {
     if (n.kind !== 'agent') continue;
@@ -1963,8 +1972,8 @@ function draw() {
     line(ctx, sn.sx + ux * (sn.RG + 2), sn.sy + uy * (sn.RG + 2), n.sx - ux * n.R, n.sy - uy * n.R);
   }
 
-  // recent-work paths: steady fade from 0.9 to 0.08 over ten minutes, from timestamps every frame;
-  // while the conversation works, the dashes flow from it toward the file (opacity unchanged)
+  // recent-work paths: steady fade from 0.9 to 0.08 over ten minutes, from timestamps every frame, never below
+  // PATH_MIN_ALPHA; while the conversation works, the dashes flow from it toward the file (opacity unchanged)
   const fileAlpha = I.fileAlpha || (I.fileAlpha = new Map());
   fileAlpha.clear();
   const flow = I.still ? 0 : (I.time / 1000) * FLOW_PX_S;
@@ -1974,7 +1983,7 @@ function draw() {
     const age = clamp((nowC - p.t) / FADE_MS, 0, 1);
     const op = 0.9 - 0.82 * age;
     const dim = focusSid && a.sid !== focusSid ? 0.45 : 1;
-    ctx.strokeStyle = rgba(p.hue, op * 0.6 * dim); ctx.lineWidth = p.wrote ? 1.1 : 0.9;
+    ctx.strokeStyle = rgba(p.hue, Math.max(PATH_MIN_ALPHA, op * 0.6 * dim)); ctx.lineWidth = p.wrote ? 1.1 : 0.9;
     if (flow && BUSY.has(a.s.state)) { ctx.setLineDash(p.wrote ? DASH_WROTE_FLOW : DASH_READ); ctx.lineDashOffset = -flow; }
     else { ctx.setLineDash(p.wrote ? DASH_NONE : DASH_READ); ctx.lineDashOffset = 0; }
     curve(ctx, a, b);
