@@ -19,6 +19,7 @@ const CHANGES = require(path.join(__dirname, 'changes.js'));
 const PREVIEW = require(path.join(__dirname, 'preview.js'));
 const UPDATER = require(path.join(__dirname, 'updater.js'));
 const HOUSEKEEPING = require(path.join(__dirname, 'housekeeping.js'));
+const SYNC_API = require(path.join(__dirname, 'sync-api.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
@@ -5808,6 +5809,9 @@ const HK = HOUSEKEEPING.createHousekeeping({
   // its own gh runner: paging ~1000 PRs needs more than the 25 s the map's lookups get
   gh: GITHUB ? undefined : () => Promise.reject(new Error('GitHub is off (--no-github)')),
 });
+// sync-api.js: the link to Supabase for conversation sync. Off (no network, no timers, /sync/* 404 but GET
+// /sync/status) unless this machine has <dataDir>/sync/config.json; the sign-in comes back to this port
+const SYNC = SYNC_API.createSync({ port: PORT, demo: DEMO, dataDir: LOG_DIR, log: (t) => logOnce(t, t) });
 // live.js's: authorize(req) is true only for this PC's page (Origin http://127.0.0.1:PORT or localhost) or an approved
 // remote device (Origin https://<its tailnet name>); state() is GET /state's object
 const liveCtx = {
@@ -5867,6 +5871,7 @@ function handleRequest(req, res) {
   if (pathname === '/upload') return FILES.upload(req, res, pageCtx);
   if (pathname === '/update' || pathname.startsWith('/update/')) return UPDATER.handle(req, res, pathname, pageCtx);
   if (pathname === '/housekeeping' || pathname.startsWith('/housekeeping/')) return HK.handle(req, res, pathname, pageCtx);
+  if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   if (req.method === 'POST') {
     if (pathname === '/open') {
       return readBody(req, res, (b) => {
