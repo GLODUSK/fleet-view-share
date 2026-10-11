@@ -183,6 +183,11 @@ async function withHost(fn) {
 function hostList() {
   return withHost((host) => host.call('list')).then((l) => (Array.isArray(l) ? l : []), () => null);
 }
+// end a hosted session (the host's kill: Ctrl+C twice, then the process tree; it is not resumed after a restart).
+// For sync's mover (sync-move.js, through sync-run.js's host option); rejects when the host is not running
+function hostKill(id) {
+  return withHost((host) => host.call('kill', id));
+}
 
 // ---------- helpers ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -587,6 +592,8 @@ async function resumeIn(host, id, where, account, ctx, gone) {
   if (!alreadyRunning) {
     if (ctx.openElsewhere && ctx.openElsewhere(id)) return { err: [409, { ok: false, id, elsewhere: true, message: 'it is open in a terminal outside Fleet View: end it there first' }] };
     const r = await host.call('open', { id, cwd: where.cwd, account: account || where.account || 'B', ...(where.role ? { role: where.role } : {}) });
+    // another device has it (sync): the host's own message ("This conversation is on <device>: use Continue here")
+    if (r && r.away) return { err: [409, { ok: false, id, away: r.away, message: r.message }] };
     if (!r || !r.ok) return { err: [502, { ok: false, id, message: (r && r.message) || 'the session host could not open it' }] };
     if (r.message === 'already running') alreadyRunning = true; // it started meanwhile
   }
@@ -1739,6 +1746,6 @@ function handle(req, res, pathname, ctx) {
 
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
 // relayKey: the phone relay's key (see viaOf), for fleet-view.js to hand the relay
-module.exports = { ensureToken, handle, startChief, startBot, openBot, endHosted, hostList, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
+module.exports = { ensureToken, handle, startChief, startBot, openBot, endHosted, hostList, hostKill, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
   startQueue, queuedIds, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
   askParts: { asks, summaryText, laterText, chiefAnswers, answerLines, flushAsk, settleAnswer, askJson } };

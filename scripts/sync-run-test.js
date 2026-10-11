@@ -1,5 +1,8 @@
-// sync-run-test.js: sync-run.js starts the two loops only when all three gates are open, and stops them when one
-// closes. A fake sync-api object and fake loops; a temp data folder for the key. Run: node scripts/sync-run-test.js
+// sync-run-test.js: sync-run.js starts the two loops and the mover only when all three gates are open, and stops them
+// when one closes. The mover gets the uploader, the materializer, the host and isOpen; the materializer's isOpen is
+// isOpen or the host's last list; move / moveStatus / cancelMove / owners / device go to the mover, and say so when
+// sync is not running; away.json goes on a gate halt and stays on stop(). A fake sync-api object, fake loops, a fake
+// mover and a fake host; a temp data folder for the key. Run: node scripts/sync-run-test.js
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -7,10 +10,13 @@ const path = require('path');
 const crypto = require('crypto');
 const S = require(path.join(__dirname, '..', 'sync-api.js'));
 const C = require(path.join(__dirname, '..', 'sync-crypto.js'));
+const SC = require(path.join(__dirname, '..', 'sync-common.js'));
+const M = require(path.join(__dirname, '..', 'sync-move.js'));
 const { createSyncRunner } = require(path.join(__dirname, '..', 'sync-run.js'));
 
 let pass = 0, fail = 0;
 const ok = (c, name) => { if (c) pass++; else { fail++; console.log(`FAIL ${name}`); } };
+const eq = (a, b, name) => ok(JSON.stringify(a) === JSON.stringify(b), `${name}: got ${JSON.stringify(a)}, want ${JSON.stringify(b)}`);
 
 function fakeSync() {
   const listeners = new Set();
@@ -26,19 +32,33 @@ function fakeSync() {
   return s;
 }
 function fakeLoop(kind, made) {
-  const l = { kind, started: 0, stopped: 0, start() { l.started++; }, async stop() { l.stopped++; }, status: () => ({ kind }), conflicts: () => [] };
+  const l = { kind, started: 0, stopped: 0, start() { l.started++; }, async stop() { l.stopped++; }, status: () => ({ kind }), conflicts: () => [], owners: () => new Map() };
   made.push(l);
   return l;
+}
+function fakeMover(args, made) {
+  const m = {
+    args, started: 0, stopped: 0, calls: [],
+    start() { m.started++; }, async stop() { m.stopped++; },
+    move(id, o) { m.calls.push(['move', id, o]); if (id === 'bad') throw Object.assign(new Error('not a conversation id'), { code: 'bad_id' }); return { id, phase: 'asking', force: !!(o && o.force) }; },
+    status(id) { m.calls.push(['status', id]); return { id, phase: 'waiting' }; },
+    cancel(id) { m.calls.push(['cancel', id]); return true; },
+    owners: () => new Map([['c1', { device: 'd2', name: 'mac', live: true, moving: null }]]),
+    device: () => ({ id: 'd1', name: 'pc' }),
+  };
+  made.push(m);
+  return m;
 }
 
 (async () => {
   const dir = fs.mkdtempSync(path.join(process.env.SYNC_TEST_DIR || os.tmpdir(), 'fv-sync-run-'));
   try {
-    const sync = fakeSync(), made = [], logs = [];
+    const sync = fakeSync(), made = [], logs = [], movers = [];
     const runner = createSyncRunner({
       sync, dataDir: dir, log: (t) => logs.push(t), projects: () => [], roots: () => ['X'], checkMs: 1e6,
       makeUploader: (a) => { ok(a.key && a.key.length === 32 && a.api === sync && Array.isArray(a.projects()), 'the uploader gets the key, the api and the projects'); return fakeLoop('up', made); },
       makeMaterializer: (a) => { ok(a.roots()[0] === 'X', 'the materializer gets the roots'); return fakeLoop('down', made); },
+      makeMover: (a) => fakeMover(a, movers),
     });
     await runner.start();
     ok(made.length === 0 && /not set up/.test(runner.status().reason), 'off without config');
@@ -91,6 +111,106 @@ function fakeLoop(kind, made) {
     await r2.start();
     ok(seen.length === 2 && seen.every((x) => x === false), 'no projects given: neither side gets a projects option');
     await r2.stop();
+    ok(movers.length === 4 && movers.every((m) => m.started === 1 && m.stopped === 1), 'every run started its mover once, and every halt stopped it');
+
+    // ---------- the mover, the host, isOpen and away.json ----------
+    {
+      const s3 = fakeSync();
+      s3.on = true; s3.signedIn = true;
+      const dir3 = path.join(dir, 'three');
+      fs.mkdirSync(dir3, { recursive: true });
+      await C.saveKey(S.syncDir(dir3), crypto.randomBytes(32));
+      const mv = [], downs = [], kills = [];
+      let hostSessions = [{ id: 'AAAA-1', alive: true }, { id: 'bbbb-2', alive: false }];
+      const host = { list: async () => hostSessions, kill: async (id) => { kills.push(id); } };
+      const r3 = createSyncRunner({
+        sync: s3, dataDir: dir3, checkMs: 1e6, host, isOpen: (id) => id === 'ext-3',
+        makeUploader: () => fakeLoop('up', []), makeMaterializer: (a) => { downs.push(a); return fakeLoop('down', []); },
+        makeMover: (a) => fakeMover(a, mv),
+      });
+      let code = null, message = null;
+      try { r3.move('c1'); } catch (e) { code = e.code; message = e.message; }
+      ok(code === 'not_running' && message === 'not started', 'move() before start: not_running, with why');
+      ok(r3.moveStatus('c1') === null && r3.cancelMove('c1') === false && r3.owners() instanceof Map && r3.owners().size === 0 && r3.device() === null, 'not running: moveStatus null, cancelMove false, owners empty, device null');
+      await r3.start();
+      const m = mv[0];
+      ok(mv.length === 1 && m.started === 1, 'the mover starts with the loops');
+      ok(m.args.api === s3 && m.args.dataDir === dir3 && m.args.key.length === 32 && m.args.up && m.args.up.kind === 'up' && m.args.down && m.args.down.kind === 'down', 'the mover gets the api, the data folder, the key, the uploader and the materializer');
+      ok(m.args.isOpen('ext-3') === true && m.args.isOpen('x') === false, 'the mover gets isOpen');
+      await m.args.host.list();
+      ok(downs[0].isOpen('aaaa-1') && downs[0].isOpen('AAAA-1'), 'the materializer\'s isOpen: alive in the host\'s last list, any case');
+      ok(!downs[0].isOpen('bbbb-2') && downs[0].isOpen('ext-3') && !downs[0].isOpen('cccc-3'), 'not when it ended there; yes when isOpen says so');
+      hostSessions = [];
+      await m.args.host.list();
+      ok(!downs[0].isOpen('aaaa-1'), 'each host list the mover asks for refreshes it');
+      await m.args.host.kill('AAAA-1');
+      eq(kills, ['AAAA-1'], 'the mover\'s kill goes to the host');
+      eq(r3.move('c1', { force: true }), { id: 'c1', phase: 'asking', force: true }, 'move() gives the mover\'s job');
+      try { r3.move('bad'); } catch (e) { code = e.code; }
+      eq(code, 'bad_id', 'the mover\'s bad_id comes through');
+      ok(r3.moveStatus('c1').phase === 'waiting' && r3.cancelMove('c1') === true, 'moveStatus and cancelMove go to the mover');
+      ok(r3.owners().get('c1').name === 'mac' && r3.device().name === 'pc', 'owners and device go to the mover');
+      // away.json: a gate halt deletes it
+      SC.writeState(M.awayPath(dir3), { v: 1, at: 'x', ids: { c1: { device: 'mac', why: 'owned' } } });
+      s3.signedIn = false;
+      await r3.check();
+      ok(m.stopped === 1 && !fs.existsSync(M.awayPath(dir3)), 'signed out: the mover stops and away.json is gone');
+      try { r3.move('c1'); } catch (e) { code = e.code; message = e.message; }
+      ok(code === 'not_running' && message === 'not signed in', 'move() while signed out: not_running, not signed in');
+      SC.writeState(M.awayPath(dir3), { v: 1, at: 'x', ids: {} });
+      await r3.check();
+      ok(!fs.existsSync(M.awayPath(dir3)), 'a gate still closed: an away.json written meanwhile is deleted too');
+      for (const [what, set, unset] of [
+        ['no key', async () => C.forgetKey(S.syncDir(dir3)), async () => C.saveKey(S.syncDir(dir3), crypto.randomBytes(32))],
+        ['not a member', async () => { s3.member = false; }, async () => { s3.member = true; }],
+        ['not set up', async () => { s3.on = false; }, async () => { s3.on = true; }],
+      ]) {
+        s3.signedIn = true;
+        await r3.check();
+        SC.writeState(M.awayPath(dir3), { v: 1, at: 'x', ids: {} });
+        await set();
+        await r3.check();
+        ok(!fs.existsSync(M.awayPath(dir3)) && !r3.status().running, `${what}: away.json is gone`);
+        await unset();
+      }
+      // a restart for another account keeps it (the new run writes it again); stop() keeps it (the host still needs it)
+      s3.signedIn = true;
+      await r3.check();
+      ok(r3.status().running, 'running again');
+      SC.writeState(M.awayPath(dir3), { v: 1, at: 'x', ids: {} });
+      s3.who = 'u9';
+      await r3.check();
+      ok(fs.existsSync(M.awayPath(dir3)) && r3.status().running, 'another account: away.json stays');
+      await r3.stop();
+      ok(fs.existsSync(M.awayPath(dir3)) && mv.every((x) => x.stopped === 1), 'stop(): every mover stopped, away.json stays');
+    }
+
+    // ---------- the default mover; and a mover that can't be made ----------
+    {
+      const s4 = fakeSync();
+      s4.on = true; s4.signedIn = true;
+      s4.rest = async () => []; // a reachable Supabase that has nothing
+      const dir4 = path.join(dir, 'four');
+      fs.mkdirSync(dir4, { recursive: true });
+      await C.saveKey(S.syncDir(dir4), crypto.randomBytes(32));
+      const r4 = createSyncRunner({ sync: s4, dataDir: dir4, checkMs: 1e6, makeUploader: () => fakeLoop('up', []), makeMaterializer: () => fakeLoop('down', []) });
+      await r4.start();
+      let code = null;
+      try { r4.move('6f1c2b8e-0d3a-4c5b-9e7f-1a2b3c4d5e6f'); } catch (e) { code = e.code; }
+      eq(code, 'not_elsewhere', 'the default mover: a conversation no other device has is not_elsewhere');
+      try { r4.move('nope'); } catch (e) { code = e.code; }
+      eq(code, 'bad_id', 'the default mover: a bad id');
+      ok(r4.owners().size === 0 && r4.moveStatus('6f1c2b8e-0d3a-4c5b-9e7f-1a2b3c4d5e6f') === null, 'the default mover: nothing owned elsewhere, no job');
+      await r4.stop();
+      const logs5 = [];
+      const r5 = createSyncRunner({ sync: s4, dataDir: dir4, checkMs: 1e6, log: (t) => logs5.push(t), makeUploader: () => fakeLoop('up', []), makeMaterializer: () => fakeLoop('down', []), makeMover: () => { throw new Error('boom'); } });
+      await r5.start();
+      code = null;
+      let message = null;
+      try { r5.move('6f1c2b8e-0d3a-4c5b-9e7f-1a2b3c4d5e6f'); } catch (e) { code = e.code; message = e.message; }
+      ok(r5.status().running && code === 'not_running' && /can't move between devices/.test(message) && logs5.some((t) => /boom/.test(t)), 'a mover that can\'t be made: sync runs without it, and move() says why');
+      await r5.stop();
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

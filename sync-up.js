@@ -2,8 +2,8 @@
 // Supabase, sealed, so the materializer (sync-down.js, S3) on another machine can lay them down again byte for byte.
 // docs/sync-format.md is the contract, and "The uploader's rules" there are what this file does:
 //
-//   createUploader({ api, dataDir, key, log, now, projects, chunkBytes, rateBytesPerSec })
-//     -> { scanOnce(), start(intervalMs = 5000), stop(), status() }
+//   createUploader({ api, dataDir, key, log, now, projects, chunkBytes, rateBytesPerSec, only })
+//     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), flush(id), forget(id), hold(id), unhold(id), held() }
 //
 //   api              sync-api.js createSync()'s object (rest() and storage are all it uses)
 //   key              the 32-byte sync key (sync-crypto.js loadKey); every byte that leaves goes through it
@@ -14,6 +14,21 @@
 //   now()            the clock for back-offs and row times (Date.now by default; tests move it)
 //   chunkBytes       plain bytes per chunk, at most 8 MiB (the default)
 //   rateBytesPerSec  sealed bytes per second sent to Storage, 4 MB/s by default
+//   only(id)         optional: a scan looks only at the conversations this says true for (live tests)
+//
+// For S4's moves (sync-move.js), with ids lower-case:
+//   flush(id) -> Promise<{ size, sha256, generation, owner_device }>: upload that conversation now. It is urgent: a
+//     running scan lets it go next, between two conversations; with no scan it runs at once. Both take the same lock,
+//     so one conversation is never sent twice at once. Its back-off and skip are cleared, it is synced, the row is read
+//     again (size, sha256 and generation of 'main' as the row now says; owner_device lower-case), and while the log
+//     grew meanwhile it goes again (at most 3 more passes). Throws a SyncError when there is no log here ('missing'),
+//     no row, another device owns it ('foreign'), it is in no repo ('noRepo'), or the upload failed.
+//   forget(id): its up-state.json entry, back-off, running sha256 and pending count go, so the next pass takes over
+//     what the server has (adopt); a pass of it under way stops before its next write ('forgotten').
+//   hold(id) / unhold(id) / held() -> ids: a held conversation is never uploaded by a scan (counted 'held'); a scan
+//     that reached it before hold() stops before its next write. flush(id) still runs for a held id.
+//   Every chunk write checks ownership again when 20 s have passed since the last look: another owner ends the pass
+//     with 'lost' (no chunk written after), and the conversation is left alone like any other device's.
 //
 // One scan (scanOnce): this machine's devices row (sync-common.js ensureDevice); every conversation in every projects
 // folder, newest log first, one at a time. For each one whose files changed since the last scan:
@@ -70,6 +85,20 @@ const SAVE_EVERY_MS = 5e3; // up-state.json at most this often while one convers
 const READ_BLOCK = 64 * 1024;
 const LOG_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 const FATAL = new Set(['signed_out', 'off', 'bad_key']); // these end a scan: every other conversation would fail too
+const OWNER_RECHECK_MS = 20e3; // a write asks whose the conversation is again when this long passed since the last look
+const FLUSH_REPEATS = 3; // flush goes again at most this often while the log keeps growing
+const FLUSH_COLS = 'id,owner_device,generation,size,sha256,state';
+const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// what a pass that sent nothing ends with -> the SyncError flush throws
+const NOT_SYNCED = {
+  foreign: 'another device owns this conversation',
+  noRepo: 'this conversation is in no git checkout with an origin',
+  inactive: 'this conversation is not active on the server',
+  empty: 'this conversation has no whole line yet',
+  held: 'this conversation is held',
+  forgotten: 'this conversation was forgotten while it went up',
+  backingOff: 'this conversation is backing off',
+};
 
 const clip = (s, n = 200) => { const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
@@ -175,7 +204,9 @@ function createUploader(opts = {}) {
   const repoIds = new Map(); // origin -> repos.id
   const repoPathsDone = new Set(); // `${device}|${repoId}|${root}` written in this process
   const skipLogged = new Set();
-  const counts = { conversations: 0, synced: 0, pending: 0, noRepo: 0, foreign: 0, inactive: 0, empty: 0, backingOff: 0 };
+  const holds = new Set(); // ids no scan uploads (hold/unhold)
+  const epochs = new Map(); // id -> how often it was forgotten: a pass that began before a forget() writes nothing more
+  const counts = { conversations: 0, synced: 0, pending: 0, noRepo: 0, foreign: 0, inactive: 0, empty: 0, held: 0, backingOff: 0 };
   const totals = { scans: 0, uploadedBytes: 0, uploadedChunks: 0, lastScanAt: null, lastScanMs: null, lastError: null };
 
   function loadState(device) {
@@ -215,6 +246,23 @@ function createUploader(opts = {}) {
     if (stopping) throw new S.SyncError('stopped', 0, 'stopped');
   }
 
+  // ---------- one conversation at a time ----------
+  // The scan takes this lock for each conversation and flush() for its whole run, so no two passes ever upload at once.
+  // An urgent waiter (flush) goes ahead of the scan's next conversation, behind any earlier urgent one.
+  let lockHeld = false;
+  const lockQ = []; // { urgent, go }
+  function lock(urgent) {
+    if (!lockHeld) { lockHeld = true; return Promise.resolve(); }
+    return new Promise((go) => {
+      const e = { urgent, go };
+      if (!urgent) { lockQ.push(e); return; }
+      let i = 0;
+      while (i < lockQ.length && lockQ[i].urgent) i++;
+      lockQ.splice(i, 0, e);
+    });
+  }
+  function unlock() { const n = lockQ.shift(); if (n) n.go(); else lockHeld = false; }
+
   // ---------- rows ----------
   async function repoId(origin) {
     if (repoIds.has(origin)) return repoIds.get(origin);
@@ -238,9 +286,26 @@ function createUploader(opts = {}) {
     repoPathsDone.add(k);
   }
   const ROW_COLS = 'id,owner_device,generation,size,state';
-  async function getRow(id) {
-    const rows = await api.rest('GET', 'conversations', { query: { select: ROW_COLS, id: `eq.${id}` } });
+  async function getRow(id, cols = ROW_COLS) {
+    const rows = await api.rest('GET', 'conversations', { query: { select: cols, id: `eq.${id}` } });
     return Array.isArray(rows) && rows[0] ? rows[0] : null;
+  }
+  const ownerOf = (row) => (row && row.owner_device ? String(row.owner_device).toLowerCase() : null);
+  // Before every write of a pass: not stopping, not forgotten since the pass began, not held (unless flush runs it),
+  // and (owner: true, at most every 20 s) still this device's on the server. Throws a SyncError: 'stopped',
+  // 'forgotten', 'held' or 'lost'.
+  async function guard(w, owner = true) {
+    const check = () => {
+      if (stopping) throw new S.SyncError('stopped', 0, 'stopped');
+      if ((epochs.get(w.id) || 0) !== w.epoch) throw new S.SyncError(NOT_SYNCED.forgotten, 0, 'forgotten');
+      if (!w.urgent && holds.has(w.id)) throw new S.SyncError(NOT_SYNCED.held, 0, 'held');
+    };
+    check();
+    if (!owner || now() - w.mem.ownerAt < OWNER_RECHECK_MS) return;
+    const row = await getRow(w.id);
+    w.mem.ownerAt = now();
+    if (ownerOf(row) !== w.device) throw new S.SyncError(row ? 'another device owns it now' : 'its row is gone', 0, 'lost');
+    check();
   }
   // every chunk row of a conversation (or of one file of it), in pages
   async function chunkRows(id, filter = {}) {
@@ -281,22 +346,24 @@ function createUploader(opts = {}) {
   // ---------- sending bytes ----------
   // [from, end) of a file as chunks gen/seq.., each sealed with its own path. batch: objects only, the rows are
   // given back for one insert; else each row goes in after its object and done(row, buf) runs once the server has it.
+  // guard() runs before every object and every row: a pass that lost the conversation, was held or forgotten stops.
   async function send(w, f, fd, { generation, seq, from, end, batch, done }) {
     const rows = [];
     let pos = from;
     do {
-      if (stopping) throw new S.SyncError('stopped', 0, 'stopped');
+      await guard(w);
       const len = Math.min(chunkBytes, end - pos);
       const buf = readExact(fd, pos, len);
       const objectPath = C.objectPath(w.id, f.fileKey, generation, seq);
       const sealed = K.sealChunk(buf, key, objectPath);
       await pace(sealed.length);
+      await guard(w);
       await api.storage.upload(objectPath, sealed, { upsert: true });
       totals.uploadedBytes += sealed.length;
       totals.uploadedChunks++;
       const row = { conversation_id: w.id, file: f.fileKey, generation, seq, byte_offset: pos, byte_length: len, object_path: objectPath, sha256: K.sha256(buf) };
       if (batch) rows.push({ row, buf });
-      else { await postChunks([row]); done(row, buf); }
+      else { await guard(w); await postChunks([row]); done(row, buf); }
       pos += len;
       seq++;
     } while (pos < end);
@@ -400,6 +467,7 @@ function createUploader(opts = {}) {
       if (end > 0 || !f.appendOnly) {
         rows = await send(w, f, fd, { generation: gen, seq: 0, from: 0, end, batch: true });
         for (const r of rows) h.update(r.buf);
+        await guard(w);
         await postChunks(rows.map((r) => r.row));
       }
       const fstNew = { generation: gen, seq: rows.length, offset: end, tailSha: tailShaAt(fd, end) };
@@ -434,18 +502,23 @@ function createUploader(opts = {}) {
     }
   }
 
-  function skip(c, mem, why, ms) {
+  function skip(c, mem, why, ms, tally) {
     mem.skip = { sig: `${c.size}:${c.mtimeMs}`, until: now() + ms, why };
-    counts[why]++;
+    tally[why]++;
+    return why;
   }
 
   // ---------- one conversation ----------
-  async function syncConversation(c, device) {
+  // -> 'synced' | 'backingOff' | 'noRepo' | 'foreign' | 'inactive' | 'empty' | 'held' | 'forgotten'; throws when an
+  // upload failed. how: { urgent (flush: a hold does not stop it), tally (the counts to add to) }
+  async function syncConversation(c, device, how = {}) {
     const id = c.id, t = now();
+    const tally = how.tally || counts;
+    const epoch = epochs.get(id) || 0;
     let mem = memo.get(id);
-    if (!mem) { mem = { fails: 0, backoffUntil: 0, skip: null, listedAt: 0 }; memo.set(id, mem); }
-    if (mem.backoffUntil > t) { counts.backingOff++; return; }
-    if (mem.skip && mem.skip.sig === `${c.size}:${c.mtimeMs}` && mem.skip.until > t) { counts[mem.skip.why]++; return; }
+    if (!mem) { mem = { fails: 0, backoffUntil: 0, skip: null, listedAt: 0, ownerAt: 0 }; memo.set(id, mem); }
+    if (mem.backoffUntil > t) { tally.backingOff++; return 'backingOff'; }
+    if (mem.skip && mem.skip.sig === `${c.size}:${c.mtimeMs}` && mem.skip.until > t) { tally[mem.skip.why]++; return mem.skip.why; }
     mem.skip = null;
     let st = state.conversations[id] || null;
     if (st && (!st.files || typeof st.files !== 'object')) st = null;
@@ -453,7 +526,7 @@ function createUploader(opts = {}) {
     // cheap: an idle conversation whose log is as it was is listed again only now and then
     const main0 = st && st.files && st.files.main;
     if (settled && main0 && main0.size === c.size && main0.mtimeMs === c.mtimeMs && Date.now() - c.mtimeMs > IDLE_MS && t - mem.listedAt < IDLE_LIST_MS) {
-      counts.synced++; return;
+      tally.synced++; return 'synced';
     }
     const files = C.conversationFiles(c.slugDir, c.name, { onSkip: (p, why) => {
       if (skipLogged.has(p)) return;
@@ -463,8 +536,8 @@ function createUploader(opts = {}) {
     mem.listedAt = t;
     if (settled && files.every((f) => { const s = st.files[f.fileKey]; return s && s.size === f.size && s.mtimeMs === f.mtimeMs; })) {
       pendingOf.set(id, 0);
-      counts.synced++;
-      return;
+      tally.synced++;
+      return 'synced';
     }
 
     // where it belongs: the folder its log lives in (it resumes there), else its last cwd when that folder is in no repo
@@ -472,21 +545,30 @@ function createUploader(opts = {}) {
     const home = C.homeCwd(c.mainPath, meta.cwd);
     let repo = home ? await repoFor(home) : null;
     if (!repo && meta.cwd && meta.cwd !== home) repo = await repoFor(meta.cwd);
-    if (!repo) { pendingOf.delete(id); return skip(c, mem, 'noRepo', SKIP_RECHECK_MS); }
+    if (!repo) { pendingOf.delete(id); return skip(c, mem, 'noRepo', SKIP_RECHECK_MS, tally); }
     const rid = await repoId(repo.origin);
-    await repoPath(device, rid, repo.mainRoot);
 
     // its row
     let row = await getRow(id);
-    const lose = () => { pendingOf.delete(id); skip(c, mem, 'foreign', FOREIGN_RECHECK_MS); };
+    mem.ownerAt = now();
+    const lose = () => { pendingOf.delete(id); return skip(c, mem, 'foreign', FOREIGN_RECHECK_MS, tally); };
+    // forgotten or held while the row was fetched: nothing written yet, nothing will be
+    if ((epochs.get(id) || 0) !== epoch) { tally.held++; return 'forgotten'; }
+    if (!how.urgent && holds.has(id)) { tally.held++; return 'held'; }
     if (row && row.owner_device && String(row.owner_device).toLowerCase() !== device) return lose();
-    if (row && row.state && row.state !== 'active') { pendingOf.delete(id); return skip(c, mem, 'inactive', SKIP_RECHECK_MS); }
+    if (row && row.state && row.state !== 'active') { pendingOf.delete(id); return skip(c, mem, 'inactive', SKIP_RECHECK_MS, tally); }
     if (st && !row) { log(`${short(id)}: the server has no row for it any more: uploading it again`); st = null; }
-    if (st && row && !st.rowStale && st.files.main && (Number(row.generation) !== st.files.main.generation || Number(row.size) !== st.files.main.offset)) {
+    // up-state.json must not be behind the server: a settled entry must match the row exactly, and one mid-upload
+    // (rowStale) may be ahead of the row but never behind it (then another device wrote: what the server has is
+    // checked and taken over, so no seq number is written twice with other bytes)
+    const m0 = st && st.files.main;
+    if (st && row && m0 && (st.rowStale
+      ? Number(row.generation) > m0.generation || (Number(row.generation) === m0.generation && Number(row.size) > m0.offset)
+      : Number(row.generation) !== m0.generation || Number(row.size) !== m0.offset)) {
       log(`${short(id)}: the server's row and up-state.json disagree: checking the server's chunks`);
       st = null;
     }
-    if (!row && !hasWholeLine(c.mainPath) && files.length <= 1) { pendingOf.delete(id); return skip(c, mem, 'empty', SKIP_RECHECK_MS); }
+    if (!row && !hasWholeLine(c.mainPath) && files.length <= 1) { pendingOf.delete(id); return skip(c, mem, 'empty', SKIP_RECHECK_MS, tally); }
     const freshState = !st;
     if (!st) { st = { files: {}, titleSha: null, meta: null, rowStale: true, deletes: [] }; state.conversations[id] = st; dirty = true; }
     if (!Array.isArray(st.deletes)) st.deletes = [];
@@ -509,7 +591,10 @@ function createUploader(opts = {}) {
       log(`${short(id)}: claimed (it had no owner)`);
     }
 
-    const w = { id, st, rowExisted, listing: null, maxGen: {}, changed: false };
+    // this device's checkout of the repo, only once the conversation is this device's: a copy laid down here from
+    // another device names that device's folders, which must not become this device's repo_paths row
+    await repoPath(device, rid, repo.mainRoot);
+    const w = { id, st, rowExisted, listing: null, maxGen: {}, changed: false, device, mem, epoch, urgent: !!how.urgent };
     // a row on the server but no state here (a lost up-state.json, or one that disagreed): one look at the server's
     // chunk rows, so what is already there is taken over and not sent again
     if (rowExisted && freshState) w.listing = await chunkRows(id);
@@ -519,6 +604,7 @@ function createUploader(opts = {}) {
         if (stopping) throw new S.SyncError('stopped', 0, 'stopped');
         await syncFile(w, f);
       }
+      await guard(w, false);
       // rule 4: the row last, and only while it is still ours
       const metaChanged = JSON.stringify(st.meta) !== JSON.stringify(metaNow) || st.titleSha !== titleSha;
       if (st.rowStale || metaChanged) {
@@ -537,14 +623,28 @@ function createUploader(opts = {}) {
         st.rowStale = false; st.meta = metaNow; st.titleSha = titleSha; dirty = true;
       }
       if (st.deletes.length) await dropOld(w);
+    } catch (e) {
+      const code = e && e.code;
+      if (code === 'lost') { log(`${short(id)}: another device owns it now: stopped uploading it`); return lose(); }
+      if (code === 'held') { pendingOf.delete(id); tally.held++; return 'held'; }
+      if (code === 'forgotten') {
+        if (state.conversations[id] === st) delete state.conversations[id]; // what this pass learnt is not kept
+        pendingOf.delete(id);
+        tally.held++;
+        return 'forgotten';
+      }
+      throw e;
     } finally { saveState(true); }
     mem.fails = 0;
     pendingOf.set(id, 0);
-    counts.synced++;
+    tally.synced++;
+    return 'synced';
   }
 
   // ---------- the scan ----------
-  function listConversations() {
+  // every conversation in the projects folders (want: only that id, whatever only() says), newest first
+  function listConversations(want) {
+    const only = !want && typeof opts.only === 'function' ? opts.only : null;
     const byId = new Map();
     for (const { account, dir } of projectsList()) {
       let slugs;
@@ -557,10 +657,12 @@ function createUploader(opts = {}) {
         for (const n of names) {
           const m = LOG_ID.exec(n);
           if (!m) continue;
+          const lid = m[1].toLowerCase();
+          if (want ? lid !== want : only && !only(lid)) continue;
           let fst;
           try { fst = fs.lstatSync(path.join(slugDir, n)); } catch { continue; }
           if (!fst.isFile()) continue;
-          const c = { id: m[1].toLowerCase(), name: m[1], account, slugDir, mainPath: path.join(slugDir, n), size: fst.size, mtimeMs: fst.mtimeMs };
+          const c = { id: lid, name: m[1], account, slugDir, mainPath: path.join(slugDir, n), size: fst.size, mtimeMs: fst.mtimeMs };
           const had = byId.get(c.id);
           if (!had || c.mtimeMs > had.mtimeMs) byId.set(c.id, c); // the same conversation in two folders: the newer copy
         }
@@ -589,7 +691,12 @@ function createUploader(opts = {}) {
     for (const id of [...pendingOf.keys()]) if (!ids.has(id)) pendingOf.delete(id);
     for (const c of list) {
       if (stopping) break;
-      try { await syncConversation(c, device); } catch (e) {
+      await lock(false); // a flush() waiting goes first
+      try {
+        if (stopping) break;
+        if (holds.has(c.id)) { counts.held++; continue; } // held after the scan began: looked at at its turn
+        await syncConversation(c, device);
+      } catch (e) {
         if (e && e.code === 'stopped') break;
         setError(e);
         if (e && FATAL.has(e.code)) { log(`scan stopped: ${clip(e.message)}`); break; }
@@ -600,7 +707,7 @@ function createUploader(opts = {}) {
           mem.backoffUntil = now() + wait;
           log(`${short(c.id)}: failed (${clip(e && e.message)}); trying again in ${Math.round(wait / 1000)} s`);
         }
-      }
+      } finally { unlock(); }
     }
     counts.pending = [...pendingOf.values()].filter((n) => n > 0).length;
     saveState(true);
@@ -636,20 +743,85 @@ function createUploader(opts = {}) {
     if (timer) { clearTimeout(timer); timer = null; }
     stopping = true;
     wake();
-    try { if (running) await running; } finally { stopping = false; }
+    try {
+      if (running) await running;
+      await Promise.allSettled([...flights]);
+    } finally { stopping = false; }
   }
+
+  // ---------- S4: flush, forget, hold ----------
+  const flights = new Set(); // flush() calls under way (stop() waits for them)
+  const idOf = (raw) => String(raw == null ? '' : raw).toLowerCase();
+  function flush(raw) {
+    const p = flushNow(idOf(raw));
+    flights.add(p);
+    const done = () => { flights.delete(p); };
+    p.then(done, done);
+    return p;
+  }
+  async function flushNow(id) {
+    if (!ID_RE.test(id)) throw new S.SyncError('not a conversation id', 0, 'bad_request');
+    if (stopping) throw new S.SyncError('stopped', 0, 'stopped');
+    await lock(true);
+    try {
+      if (stopping) throw new S.SyncError('stopped', 0, 'stopped');
+      const device = await C.ensureDevice(api, dataDir);
+      loadState(device);
+      const tally = Object.fromEntries(Object.keys(counts).map((k) => [k, 0])); // a flush is not a scan's count
+      for (let pass = 0; ; pass++) {
+        const c = listConversations(id)[0];
+        if (!c) throw new S.SyncError('this machine has no log for that conversation', 0, 'missing');
+        const mem = memo.get(id);
+        if (mem) { mem.backoffUntil = 0; mem.skip = null; mem.listedAt = 0; }
+        const out = await syncConversation(c, device, { urgent: true, tally });
+        if (out !== 'synced') throw new S.SyncError(NOT_SYNCED[out] || out, 0, out);
+        const row = await getRow(id, FLUSH_COLS);
+        if (!row) throw new S.SyncError('the server has no row for that conversation', 0, 'missing');
+        const owner = ownerOf(row);
+        if (owner !== device) throw new S.SyncError(NOT_SYNCED.foreign, 0, 'foreign');
+        // the log grew (or changed) while it went up: again, so the row catches up with it
+        let fst = null;
+        try { fst = fs.statSync(c.mainPath); } catch {}
+        if (pass < FLUSH_REPEATS && fst && (fst.size !== c.size || fst.mtimeMs !== c.mtimeMs)) continue;
+        return { size: Number(row.size), sha256: row.sha256 || null, generation: Number(row.generation), owner_device: owner };
+      }
+    } catch (e) {
+      log(`${short(id)}: flush: ${clip(e && e.message)}`);
+      throw e;
+    } finally { saveState(true); unlock(); }
+  }
+  // the next pass takes over what the server has: nothing of what this side remembers about it is trusted
+  function forget(raw) {
+    const id = idOf(raw);
+    if (!ID_RE.test(id)) return false;
+    epochs.set(id, (epochs.get(id) || 0) + 1);
+    memo.delete(id); hashes.delete(id); pendingOf.delete(id);
+    if (state) {
+      if (state.conversations[id]) { delete state.conversations[id]; dirty = true; saveState(true); }
+    } else {
+      const s = C.readState(statePath, null); // not loaded yet: the file on disk
+      if (s && s.conversations && s.conversations[id]) {
+        delete s.conversations[id];
+        try { C.writeState(statePath, s); } catch (e) { log(`up-state.json could not be saved: ${clip(e.message)}`); }
+      }
+    }
+    return true;
+  }
+  function hold(raw) { const id = idOf(raw); if (!ID_RE.test(id)) return false; holds.add(id); return true; }
+  function unhold(raw) { return holds.delete(idOf(raw)); }
+  const held = () => [...holds];
   function status() {
     let pendingBytes = 0;
     for (const n of pendingOf.values()) pendingBytes += n;
     return {
       running: started, scanning: !!running, scans: totals.scans, lastScanAt: totals.lastScanAt, lastScanMs: totals.lastScanMs,
       conversations: counts.conversations, synced: counts.synced, pending: counts.pending, pendingBytes,
-      skipped: { noRepo: counts.noRepo, foreign: counts.foreign, inactive: counts.inactive, empty: counts.empty }, backingOff: counts.backingOff,
+      skipped: { noRepo: counts.noRepo, foreign: counts.foreign, inactive: counts.inactive, empty: counts.empty, held: counts.held }, backingOff: counts.backingOff,
       uploadedBytes: totals.uploadedBytes, uploadedChunks: totals.uploadedChunks,
       lastError: totals.lastError ? { ...totals.lastError } : null,
     };
   }
-  return { scanOnce, start, stop, status };
+  return { scanOnce, start, stop, status, flush, forget, hold, unhold, held };
 }
 
 module.exports = { createUploader, repoFor, lastLineEnd, MAX_CHUNK, TAIL_BYTES };

@@ -34,6 +34,19 @@
 // pastes into it; previews end (term.kill) when the panel moves to another conversation or closes. Arrow keys
 // only show the tab ("press Enter"); Enter, a double-click or a button opens a session that stays.
 //
+// Another device owns it (sync, docs/sync.md): /state's syncOwner { device, name, live, moving? } is set while a
+// different PC owns the conversation. The tab never opens such a one by itself; it says "On <name>" (running or
+// idle there) and offers Continue here, which moves it to this PC through Supabase (the server's sync-move.js):
+//   POST /sync/move { id, force? } -> the job | 409/400 { error }     GET /sync/move?id= -> the job | 404
+//   DELETE /sync/move?id= -> { ok }   (plain same-origin fetch, like the Sync card; remote browsers send their cookie)
+// While the tab shows that conversation it polls the job every second and shows its phase in one line (job.note,
+// else a line of its own): asking, waiting (what Claude is doing there, and "Take over now"), ending, uploading,
+// downloading, claiming, then ready, and the session opens here in ready.cwd with ready.account. offline and
+// noanswer offer "Use the cloud copy"; both force buttons POST again with force. Cancel (DELETE) until ready;
+// failed and cancelled show why and Try again. syncOwner.moving 'here' (a move this PC started, the tab reopened)
+// picks the job up again; 'away' (another PC is taking it from this one) says so with no button. When the folder
+// was never trusted for that account here (ready.trusted false) the tab says Claude will ask; it never answers.
+//
 // The terminal is xterm.js, vendored in vendor/xterm/ and loaded the first time a session is shown. One xterm
 // per hosted conversation, kept while its pty exists, so switching between conversations keeps each one's
 // screen and scrollback. Live output for a conversation with no xterm yet is dropped: the snapshot covers it
@@ -507,12 +520,17 @@ export function renderSessionPane(pane, s, o) {
     pane._id = s.id;
     pane._err = '';
     if (!pane._opening || pane._opening.id !== s.id) pane._opening = null;
+    stopMove(pane); // a move goes on in the server; this tab only stops watching it
+    if (pane._trust?.id !== s.id) pane._trust = null;
   }
   if (h && pane._opening && pane._opening.id === s.id) pane._opening = null;
+  // a move this PC started (or the one on show) is watched again whenever the tab shows it
+  if (t && !h) watchMove(pane, s);
+  const moving = pane._move?.id === s.id && pane._move.job && !pane._move.opened;
   if (t && o.auto) {
     if (h && h.alive) { if (o.auto === 'explicit') { keep(s.id); pane._focusNext = s.id; } }
     else if (pane._opening?.id === s.id) { if (o.auto === 'explicit') pane._opening.explicit = true; } // a double-click: the first click is starting it
-    else if (!h && !pane._opening && !openElsewhere(s)) { openHere(pane, s, o.auto === 'preview'); return; }
+    else if (!h && !pane._opening && !openElsewhere(s) && !s.syncOwner && !moving) { openHere(pane, s, o.auto === 'preview'); return; }
   }
   const mode = !t ? 'nodesk' : h ? 'term' : 'open';
   pane.dataset.mode = mode;
@@ -531,9 +549,11 @@ export function renderSessionPane(pane, s, o) {
   // (with autoContinue the host types the "carry on" itself, so the line says that instead of asking for it)
   const bar = ended ? `<span class="s-end-t">${icon('error', 14)}<span>Session ended${h.exitCode != null ? ` (code ${esc(h.exitCode)})` : ''}</span></span>`
     + '<span class="grow"></span><button type="button" class="btn s-btn" data-s="reopen">Reopen</button><button type="button" class="btn s-btn" data-s="dismiss">Close</button>'
-    : h.interrupted ? `<span class="s-end-t s-int-t"><span>Was interrupted when Fleet View closed — ${h.autoContinue ? 'it carries on by itself once it has loaded' : 'tell it to continue'}</span></span>` : '';
+    : h.interrupted ? `<span class="s-end-t s-int-t"><span>Was interrupted when Fleet View closed — ${h.autoContinue ? 'it carries on by itself once it has loaded' : 'tell it to continue'}</span></span>`
+      : pane._trust?.id === s.id ? trustBarHtml(pane._trust.cwd) : '';
   if (pane._barHtml !== bar) { pane._bar.innerHTML = bar; pane._barHtml = bar; }
   pane._bar.hidden = !bar;
+  pane._bar.classList.toggle('s-bar-note', !ended && !h.interrupted && !!bar);
   pane._termBox.classList.toggle('ended', ended);
   if (o.visible) mount(pane, s.id);
 }
@@ -556,11 +576,16 @@ function noDeskHtml() {
 function openHtml(s, pane) {
   if (pane._opening) {
     return `<div class="s-card"><div class="s-ic">${icon('shell', 20)}</div><div class="s-title">Starting the session…</div>`
-      + `<div class="s-text mono">claude --resume ${esc(s.id.slice(0, 8))}…</div></div>`;
+      + `<div class="s-text mono">claude --resume ${esc(s.id.slice(0, 8))}…</div>`
+      + (pane._trust?.id === s.id ? trustNoteHtml(pane._trust.cwd) : '') + '</div>';
   }
+  const m = pane._move?.id === s.id ? pane._move : null;
+  if (m && (m.job || m.busy) && !m.opened) return moveHtml(s, pane, m);
+  if (s.syncOwner) return ownerHtml(s, pane, m);
   const where = s.cwd || '';
   const whereHtml = where ? `<div class="s-where"><span class="s-k">${icon('folder', 13)}<span>in</span></span><span class="s-v mono">${esc(where)}</span></div>` : '';
-  const errHtml = pane._err ? `<div class="s-err">${icon('error', 14)}<span>${esc(pane._err)}</span></div>` : '';
+  const err = pane._err || (m && m.err) || '';
+  const errHtml = err ? `<div class="s-err">${icon('error', 14)}<span>${esc(err)}</span></div>` : '';
   if (openElsewhere(s)) {
     // a terminal (or another Claude window) has it open right now: say where, open here only on purpose
     return `<div class="s-card s-elsewhere"><div class="s-ic">${icon('shell', 20)}</div><div class="s-title">Open in another window</div>`
@@ -596,12 +621,205 @@ function buildPane(pane) {
     if (act === 'open' || act === 'open-anyway') openHere(pane, s, false);
     else if (act === 'reopen') reopen(pane, s);
     else if (act === 'dismiss') dismiss(pane, s);
+    else if (act === 'move' || act === 'move-retry') startMove(pane, s, false);
+    else if (act === 'move-force') startMove(pane, s, true);
+    else if (act === 'move-cancel') cancelMove(pane, s);
+    else if (act === 'move-open') openReady(pane, s);
+    else if (act === 'trust-hide') { pane._trust = null; rerender(pane); }
   });
   const ro = new ResizeObserver(() => { cancelAnimationFrame(pane._fitRaf); pane._fitRaf = requestAnimationFrame(() => fitMounted(pane)); });
   ro.observe(pane._host);
 }
 
 const rerender = (pane) => { if (pane._s) renderSessionPane(pane, pane._s, pane._o || {}); };
+
+// ---------- Continue here: move a conversation another device owns to this PC (see the header) ----------
+// pane._move: { id, job, err, busy, want, timer, fetching, opened }: the move the tab shows. job is the server's
+// (null before the first answer, or after a 404); busy while a POST or DELETE is on its way; want while the job
+// still changes (polled every second while the tab shows this conversation and the panel is open).
+const MOVE_POLL_MS = 1000;
+const MOVE_FINAL = new Set(['ready', 'failed', 'cancelled']);
+const newMove = (id) => ({ id, job: null, err: '', busy: false, want: false, timer: 0, fetching: false, opened: false });
+
+// /sync/move: POST with a body, GET and DELETE with ?id=. -> { status, data } (data: the JSON, or null), or null
+// when Fleet View did not answer
+async function moveCall(method, id, body) {
+  const url = method === 'POST' ? '/sync/move' : `/sync/move?id=${encodeURIComponent(id)}`;
+  const init = method === 'POST'
+    ? { method, cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+    : { method, cache: 'no-store' };
+  try {
+    const r = await fetch(url, init);
+    let data = null;
+    try { data = await r.json(); } catch {}
+    return { status: r.status, data };
+  } catch { return null; }
+}
+const moveErr = (r) => (r && r.data && typeof r.data.error === 'string' && r.data.error) || (r ? `Fleet View answered ${r.status}` : 'Fleet View did not answer');
+
+function stopMove(pane) {
+  const m = pane._move;
+  if (m) clearTimeout(m.timer);
+  pane._move = null;
+}
+// the tab still shows this move: same conversation, in the page, the panel open
+const watched = (pane, m) => pane._move === m && pane._id === m.id && pane.isConnected && !pane.closest('[aria-hidden="true"]');
+
+// each draw: pick up a move this PC started (syncOwner.moving 'here') and poll again after the panel was closed
+function watchMove(pane, s) {
+  let m = pane._move;
+  if (m && m.id !== s.id) { stopMove(pane); m = null; }
+  if (!m) {
+    if (s.syncOwner?.moving !== 'here') return;
+    m = pane._move = newMove(s.id);
+    m.want = true;
+  }
+  if (m.want && !m.timer && !m.fetching && !m.busy) pollMove(pane, m, 0);
+}
+
+function pollMove(pane, m, delay) {
+  clearTimeout(m.timer);
+  m.timer = setTimeout(async () => {
+    m.timer = 0;
+    if (!m.want || !watched(pane, m)) return;
+    m.fetching = true;
+    const r = await moveCall('GET', m.id);
+    m.fetching = false;
+    if (pane._move !== m || m.busy) return; // a POST or DELETE on its way polls again when it is answered
+    if (r && r.status === 404) { m.want = false; m.job = null; rerender(pane); return; }
+    if (r && r.status === 200 && r.data) { m.job = r.data; m.err = ''; } else m.err = moveErr(r);
+    if (m.job && MOVE_FINAL.has(m.job.phase)) m.want = false;
+    if (m.want) pollMove(pane, m, MOVE_POLL_MS); // before the draw, so the draw does not start another poll
+    rerender(pane);
+    if (m.job?.phase === 'ready' && !m.opened) openReady(pane, pane._s);
+  }, delay);
+}
+
+// Continue here (force: Take over now, Use the cloud copy), and Try again: a second POST for the same move returns
+// that job (with force, upgraded)
+async function startMove(pane, s, force) {
+  if (pane._move?.id !== s.id) { stopMove(pane); pane._move = newMove(s.id); }
+  const m = pane._move;
+  if (m.busy) return;
+  clearTimeout(m.timer);
+  m.timer = 0;
+  m.busy = true;
+  m.err = '';
+  m.opened = false;
+  if (!force) m.job = null; // a new try starts at "asking"; a force keeps the phase on show until answered
+  rerender(pane);
+  const r = await moveCall('POST', s.id, force ? { id: s.id, force: true } : { id: s.id });
+  if (pane._move !== m) return;
+  m.busy = false;
+  if (r && r.status === 200 && r.data) m.job = r.data;
+  else m.err = moveErr(r); // a 409: sync is not running, or no other device owns it
+  m.want = !!m.job && !MOVE_FINAL.has(m.job.phase);
+  if (m.want) pollMove(pane, m, MOVE_POLL_MS);
+  rerender(pane);
+  if (m.job?.phase === 'ready') openReady(pane, pane._s);
+}
+
+async function cancelMove(pane, s) {
+  const m = pane._move;
+  if (!m || m.id !== s.id || m.busy) return;
+  clearTimeout(m.timer);
+  m.timer = 0;
+  m.busy = true;
+  rerender(pane);
+  const r = await moveCall('DELETE', s.id);
+  if (pane._move !== m) return;
+  m.busy = false;
+  m.err = r && r.status === 200 ? '' : moveErr(r);
+  m.want = true; // read the job again: it says cancelled (or why not)
+  pollMove(pane, m, 0);
+  rerender(pane);
+}
+
+// ready: the log is on this PC and this PC owns it. Opens it in the folder the move found (ready.cwd) and the
+// account the server picked; an untrusted folder only gets a note (Claude asks, the user answers)
+function openReady(pane, s) {
+  const m = pane._move;
+  const rd = m && m.job && m.job.phase === 'ready' ? m.job.ready : null;
+  if (!rd || !s || s.id !== m.id || pane._opening) return;
+  m.opened = true;
+  m.want = false;
+  pane._trust = rd.trusted === false && rd.cwd ? { id: s.id, cwd: rd.cwd } : null;
+  openHere(pane, { ...s, cwd: rd.cwd || s.cwd, account: rd.account || s.account }, false);
+}
+
+const trustNoteHtml = (cwd) => `<div class="s-note">${icon('folder', 13)}<span>Claude will ask whether you trust <b>${esc(cwd)}</b>: answer it in the session.</span></div>`;
+const trustBarHtml = (cwd) => `<span class="s-note-t">${icon('folder', 13)}<span>Claude will ask whether you trust <b>${esc(cwd)}</b></span></span>`
+  + '<span class="grow"></span><button type="button" class="btn s-btn" data-s="trust-hide">OK</button>';
+
+// another device owns it, no move on show: where it is, and Continue here (none while it moves away from this PC)
+function ownerHtml(s, pane, m) {
+  const o = s.syncOwner;
+  const name = o.name || 'another PC';
+  const err = pane._err || (m && m.err) || '';
+  const errHtml = err ? `<div class="s-err">${icon('error', 14)}<span>${esc(err)}</span></div>` : '';
+  if (o.moving === 'away') {
+    return `<div class="s-card s-elsewhere s-move"><div class="s-ic">${icon('sync', 20)}</div><div class="s-title">Moving to ${esc(name)}…</div>`
+      + `<div class="s-text">${esc(name)} asked to continue this conversation there. Its session here ends when Claude is done, after the last lines are uploaded.</div>`
+      + errHtml + '</div>';
+  }
+  const state = o.live ? '<span class="s-state live">running</span>' : '<span class="s-state">idle</span>';
+  const text = o.live
+    ? `Claude is running it on ${esc(name)} right now. Continue here asks ${esc(name)} to finish and upload its last lines, then opens it on this PC.`
+    : `It is idle on ${esc(name)}. Continue here brings it to this PC with every line ${esc(name)} has written.`;
+  return `<div class="s-card s-elsewhere s-move"><div class="s-ic">${icon('sync', 20)}</div><div class="s-title">On ${esc(name)} ${state}</div>`
+    + `<div class="s-text">${text}</div>` + errHtml
+    + `<div class="s-actions"><button type="button" class="btn primary s-go" data-s="move">${icon('sync', 15)}<span>Continue here</span></button></div></div>`;
+}
+
+// a move on show: its phase in one line, and the buttons that phase allows
+const MOVE_LINES = {
+  asking: (n) => `Asking ${n} to hand it over…`,
+  waiting: (n) => `${n} hands it over when Claude is done there`,
+  ending: (n) => `Ending the session on ${n}…`,
+  uploading: (n) => `${n} is uploading the last lines…`,
+  downloading: () => 'Downloading the conversation…',
+  claiming: () => 'Making this PC its owner…',
+  ready: () => 'On this PC now',
+  failed: () => 'The move did not finish',
+  cancelled: () => 'The move was cancelled',
+  offline: (n) => `${n} is offline`,
+  noanswer: (n) => `${n} did not answer`,
+};
+function moveHtml(s, pane, m) {
+  const j = m.job;
+  const name = (j && j.from && j.from.name) || s.syncOwner?.name || 'the other PC';
+  const phase = j ? j.phase : 'asking';
+  const title = phase === 'ready' ? `Moved here from ${name}`
+    : phase === 'failed' ? 'Could not move it here'
+      : phase === 'cancelled' ? 'Move cancelled'
+        : phase === 'offline' || phase === 'noanswer' ? `${name} can't hand it over`
+          : `Moving here from ${name}`;
+  const line = (j && j.note) || (MOVE_LINES[phase] ? MOVE_LINES[phase](name) : phase);
+  let detail = '';
+  if (phase === 'waiting' && j) {
+    detail = j.status === 'waiting' ? `Claude is waiting there${j.waitingFor ? `: ${j.waitingFor}` : ''}.` : 'Claude is working there.';
+    detail += ' Take over now ends it there, even mid-turn.';
+  } else if (phase === 'offline' || phase === 'noanswer') {
+    detail = `The cloud copy has what ${name} last uploaded; anything newer stays on ${name}.`;
+  }
+  const err = pane._err || (j && j.error) || m.err || '';
+  const errHtml = err ? `<div class="s-err">${icon('error', 14)}<span>${esc(err)}</span></div>` : '';
+  const rd = phase === 'ready' && j ? j.ready : null;
+  const whereHtml = rd && rd.cwd ? `<div class="s-where"><span class="s-k">${icon('folder', 13)}<span>in</span></span><span class="s-v mono">${esc(rd.cwd)}</span></div>` : '';
+  const dis = m.busy ? ' disabled' : '';
+  const btns = [];
+  if (j && j.canForce && phase === 'waiting') btns.push(`<button type="button" class="btn primary s-go" data-s="move-force"${dis}>${icon('sync', 15)}<span>Take over now</span></button>`);
+  if (j && j.canForce && (phase === 'offline' || phase === 'noanswer')) btns.push(`<button type="button" class="btn primary s-go" data-s="move-force"${dis}>${icon('sync', 15)}<span>Use the cloud copy</span></button>`);
+  if (phase === 'failed' || phase === 'cancelled') btns.push(`<button type="button" class="btn primary s-go" data-s="move-retry"${dis}>${icon('sync', 15)}<span>Try again</span></button>`);
+  if (phase === 'ready') btns.push(`<button type="button" class="btn primary s-go" data-s="move-open">${icon('shell', 15)}<span>Open here</span></button>`);
+  else if (j && !MOVE_FINAL.has(phase)) btns.push(`<button type="button" class="btn s-btn" data-s="move-cancel"${dis}>Cancel</button>`);
+  const working = !MOVE_FINAL.has(phase) && phase !== 'offline' && phase !== 'noanswer';
+  return `<div class="s-card s-move${working ? ' working' : ''}"><div class="s-ic">${icon('sync', 20)}</div><div class="s-title">${esc(title)}</div>`
+    + `<div class="s-phase">${esc(line)}</div>`
+    + (detail ? `<div class="s-text">${esc(detail)}</div>` : '')
+    + whereHtml + (rd && rd.trusted === false && rd.cwd ? trustNoteHtml(rd.cwd) : '') + errHtml
+    + (btns.length ? `<div class="s-actions">${btns.join('')}</div>` : '') + '</div>';
+}
 
 // cols and rows for a pty about to start, from the space the terminal will get (fit corrects it once shown)
 function guessSize(pane) {

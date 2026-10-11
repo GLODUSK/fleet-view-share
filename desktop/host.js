@@ -40,6 +40,13 @@
 // The pipe is the lock: a second host finds the name taken and exits. The pipe keeps the default ACL (the
 // user, SYSTEM and administrators), and the token keeps out anything that did not read the user's own folder.
 //
+// Away (sync's "Continue here", ../sync-move.js): a conversation another device owns, or one moving there, is
+// listed in <data dir>/sync/away.json (the server's sync runner keeps it; see awayOf). open() and sendTo() of such a
+// conversation start, end and write nothing, and answer the value (not an error)
+//   { ok: false, away: { device }, message: 'This conversation is on <device>: use Continue here' }
+// One already running here is still attached to by open() ('already running'): the mover ends it. A restore skips
+// such conversations, with a log line. Every client (the window, live.js's remote browsers, api.js) gets that value.
+//
 // Restore list: %LOCALAPPDATA%\fleet-view\sessions.json is rewritten on every change:
 //   { reason, sessions: [{ id, cwd, account, startedAt, busy, interrupted, cols, rows, pendingKey?, pickup?, handoffFrom?, restartBy?, role? }],
 //     ui: { selectedId, wide } }   (pickup / handoffFrom: a handoff's pickup that had no id yet, see Handoffs)
@@ -49,7 +56,7 @@
 // exit, stays in it; one closed from the page, or that exited cleanly, leaves it). When a host starts, it resumes every listed
 // conversation (claude --resume) and marks the ones that were busy as interrupted (list() says interrupted
 // until Claude starts work again or Enter is typed); new sessions that never got an id are dropped, and so is a
-// conversation a live claude elsewhere already has open.
+// conversation a live claude elsewhere already has open, or another device has (see Away).
 //
 // Auto-continue: `claude --resume` starts no turn, so a conversation cut off mid-turn, or whose background tasks
 // died with the host, would sit idle for good. Each resumed one gets a one-line "[Fleet View] …" note typed into
@@ -293,6 +300,33 @@ function stoppedWork(file, offset) {
   }
   return found;
 }
+
+// ---------- conversations on another device (sync's "Continue here", ../sync-move.js) ----------
+// <data dir>/sync/away.json, which the server's sync runner writes (temp file + rename) and deletes:
+//   { v: 1, at, ids: { <id>: { device: <that device's name>, why: 'owned' | 'moving' } } }
+// awayOf(id) -> { device, why } or null. Read again only when the file's mtime or size changes (one stat per call);
+// a missing or unreadable file means nothing is away, and one that could not be read is tried again next call.
+const awayFile = () => path.join(dataDir(), 'sync', 'away.json');
+let awayCache = { key: null, ids: null };
+function awayOf(id) {
+  if (typeof id !== 'string') return null;
+  let st;
+  try { st = fs.statSync(awayFile()); } catch { awayCache = { key: null, ids: null }; return null; }
+  const key = `${st.mtimeMs}:${st.size}`;
+  if (awayCache.key !== key) {
+    const j = readJson(awayFile());
+    const ids = j && typeof j === 'object' && j.ids && typeof j.ids === 'object' && !Array.isArray(j.ids) ? j.ids : null;
+    awayCache = { key: j ? key : null, ids };
+  }
+  const ids = awayCache.ids, k = id.toLowerCase();
+  const e = ids && Object.prototype.hasOwnProperty.call(ids, k) ? ids[k] : null;
+  if (!e || typeof e !== 'object') return null;
+  const name = typeof e.device === 'string' ? e.device.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 100) : '';
+  const device = name || 'another device';
+  return { device, why: e.why === 'moving' ? 'moving' : 'owned' };
+}
+// what open() and sendTo() answer for such a conversation (a value, not an error)
+const awayRefusal = (a) => ({ ok: false, away: { device: a.device }, message: `This conversation is on ${a.device}: use Continue here` });
 
 // ---------- the pty side (what terms.js did inside Electron before) ----------
 // variables that must not leak from Fleet View's own environment into a Claude session it starts: the
@@ -636,6 +670,9 @@ function createPtys(opts = {}) {
     if (!loadPty()) return noPty();
     const old = terms.get(id);
     if (old && old.alive) return { ok: true, message: 'already running', pid: old.pid };
+    // another device has it (or it is moving there): never start it here (one running here is only attached to, above)
+    const away = awayOf(id);
+    if (away) { log(`open: ${id} refused: it is on ${away.device}`); return awayRefusal(away); }
     if (old) terms.delete(id); // ended: start it again
     const role = soleRole(roleOf(extra && extra.role) || roleOf(o.role) || (old ? old.role : null), id, 'open');
     const r = spawnPty(id, commandFor(id, role), o, { ...(extra || {}), role });
@@ -652,6 +689,9 @@ function createPtys(opts = {}) {
   function sendTo(o) {
     const { id } = o || {};
     if (typeof id !== 'string' || !ID_RE.test(id)) return Promise.reject(new Error('bad conversation id'));
+    // on another device: nothing here is ended or started
+    const away = awayOf(id);
+    if (away) { log(`send to ${acctId(o.account)}: ${id} refused: it is on ${away.device}`); return Promise.resolve(awayRefusal(away)); }
     if (!loadPty()) return Promise.resolve(noPty());
     const account = acctId(o.account);
     const old = terms.get(id);
@@ -1169,6 +1209,9 @@ function runHost() {
       if (typeof s.id !== 'string' || !ID_RE.test(s.id)) { log(`restore: dropped a new session that never got an id (${s.pendingKey || '?'})`); continue; }
       const id = s.id.toLowerCase();
       if (openNow.has(id)) { log(`restore: ${id} is open in another claude; not resumed`); continue; }
+      // another device has it now (sync, away.json): resuming it here would run it in two places
+      const away = awayOf(id);
+      if (away) { log(`restore: ${id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); continue; }
       const interrupted = !!(s.busy || s.interrupted);
       let nudge = null;
       if (autoContinue) {

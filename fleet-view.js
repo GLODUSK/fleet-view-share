@@ -4051,7 +4051,8 @@ function handoffOf(s, now) {
   };
 }
 
-function sessionJson(s, now) {
+// owners: syncOwners(), read once per /state by buildState
+function sessionJson(s, now, owners = syncOwners()) {
   refreshHue(s, now);
   const st = STATE[s.state] || STATE.IDLE;
   const root = s.root || null;
@@ -4136,7 +4137,20 @@ function sessionJson(s, now) {
     cwd: s.demo ? null : s.cwd || null,
     // a live claude process has this conversation open (a terminal, or Fleet View's own Session tab)
     openElsewhere: s.demo ? false : liveProcs.has(s.id),
+    // another device has it (sync), or it is moving: { device, name, live, moving }; no key otherwise
+    ...syncOwnerOf(s, owners),
   };
+}
+// the conversations another device has, and the ones moving between this one and another (sync-run.js owners():
+// a Map id -> { device, name, live, moving }), or null when sync is off or the runner has no owners()
+function syncOwners() {
+  if (DEMO) return null;
+  try { const m = typeof SYNC_RUNNER.owners === 'function' ? SYNC_RUNNER.owners() : null; return m instanceof Map && m.size ? m : null; } catch { return null; }
+}
+function syncOwnerOf(s, owners) {
+  const o = owners && !s.demo ? owners.get(String(s.id).toLowerCase()) : null;
+  if (!o || typeof o !== 'object') return {};
+  return { syncOwner: { device: o.device || null, name: o.name || null, live: !!o.live, moving: o.moving || null } };
 }
 
 // the context window a conversation has: 1M for a [1m] model or one that ever went past 200k, else 200k
@@ -5384,7 +5398,8 @@ function buildState() {
   const now = Date.now();
   const all = [...sessions.values()].filter((s) => inState(s) && !acctOff(s));
   all.sort((a, b) => (RANK[a.state] ?? 9) - (RANK[b.state] ?? 9) || b.last - a.last);
-  const out = all.map((s) => sessionJson(s, now));
+  const owners = syncOwners();
+  const out = all.map((s) => sessionJson(s, now, owners));
   // the overseers' conversations, the Chief's and the bots' (bots.js): tagged bot: '<bot id>' or 'chief' in sessions,
   // finished and removed (below), and never a repo's live count, a clash, a conflict, a header count or the feed
   const tagOf = BOTS ? BOTS.tagOf(CHIEF ? CHIEF.chiefIds() : []) : () => null;
@@ -6008,7 +6023,53 @@ const HK = HOUSEKEEPING.createHousekeeping({
 const SYNC = SYNC_API.createSync({ port: PORT, demo: DEMO, dataDir: LOG_DIR, log: (t) => logOnce(t, t) });
 // sync-run.js: the uploader and the materializer, running only while sync is set up, signed in and has its key;
 // the materializer finds a synced repo here among the repos the page lists
-const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, log: (t) => logOnce(t, t), roots: () => pageRepos() });
+// host: the session host (api.js), for "Continue here": its list, and kill to end a conversation moving to another
+// device; isOpen: a live claude has it open (a pid file), so the materializer never writes under it
+const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, log: (t) => logOnce(t, t), roots: () => pageRepos(),
+  host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
+  isOpen: (id) => liveProcs.has(String(id).toLowerCase()) });
+// /sync/move: "Continue here" brings a conversation another device has to this one (sync-run.js move, moveStatus,
+// cancelMove; sync-move.js does the work). This PC's page and approved remote browsers, as /sync/activity, and
+// never a request another site's page sent.
+//   POST { id, force? }  -> 200 the job | 409 { error, code } (code 'not_running': sync is not running, error says
+//                           why; 'not_elsewhere': no other device has it) | 400 { error }
+//   GET ?id=<id>         -> 200 the job | 404 { error: 'no move for that conversation' }
+//   DELETE ?id=<id>      -> 200 { ok: true | false } (false: there was no move to cancel)
+// The job: { id, phase, from: { device, name }, force, canForce, note, status, waitingFor, ready, error, startedAt, at }.
+// A sync-run.js without moves answers as when sync is not running. Every error body also has message (= error).
+const moveErr = (res, code, error, extra) => sendJson(res, code, { ok: false, error, message: error, ...extra });
+function syncMove(req, res) {
+  const R = SYNC_RUNNER, has = (k) => typeof R[k] === 'function';
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site' || site === 'same-site') return moveErr(res, 403, 'bad origin');
+  const idOf = (v) => (typeof v === 'string' && UUID_RE.test(v) ? v.toLowerCase() : null);
+  if (req.method === 'POST') {
+    return readBody(req, res, (b) => {
+      const id = idOf(b && b.id);
+      if (!id) return moveErr(res, 400, 'give a conversation id', { code: 'bad_id' });
+      if (!has('move')) return moveErr(res, 409, 'this version of Fleet View cannot move conversations', { code: 'not_running' });
+      let job;
+      try { job = R.move(id, { force: b.force === true }); } catch (e) {
+        const code = e && e.code;
+        if (code === 'not_running' || code === 'not_elsewhere') return moveErr(res, 409, e.message, { code });
+        if (code === 'bad_id') return moveErr(res, 400, e.message, { code });
+        throw e; // readBody answers 500 (requestFailed)
+      }
+      return sendJson(res, 200, job);
+    });
+  }
+  const id = idOf(new URL(req.url, 'http://x').searchParams.get('id'));
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    if (!id) return moveErr(res, 400, 'give a conversation id', { code: 'bad_id' });
+    const job = has('moveStatus') ? R.moveStatus(id) : null;
+    return job ? sendJson(res, 200, job) : moveErr(res, 404, 'no move for that conversation');
+  }
+  if (req.method === 'DELETE') {
+    if (!id) return moveErr(res, 400, 'give a conversation id', { code: 'bad_id' });
+    return sendJson(res, 200, { ok: has('cancelMove') ? !!R.cancelMove(id) : false });
+  }
+  return moveErr(res, 405, 'POST, GET or DELETE');
+}
 // live.js's: authorize(req) is true only for this PC's page (Origin http://127.0.0.1:PORT or localhost) or an approved
 // remote device (Origin https://<its tailnet name>); state() is GET /state's object
 const liveCtx = {
@@ -6077,6 +6138,7 @@ function handleRequest(req, res) {
     if (remoteOf(req) && Array.isArray(st.conflicts)) st.conflicts = st.conflicts.map(({ path: _p, ...c }) => c);
     return sendJson(res, 200, st);
   }
+  if (pathname === '/sync/move') return syncMove(req, res);
   if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   if (req.method === 'POST') {
     if (pathname === '/open') {

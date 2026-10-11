@@ -11,8 +11,13 @@
 // are ignored; a rel_cwd with '..', a drive or an absolute path is refused; a subfolder rel_cwd gets its own slug and
 // a missing worktree falls back to the root; account A goes to ~/.claude-a; a repo with no checkout here is skipped;
 // a log already on this machine in another slug folder grows there; a whole side file this side wrote is replaced
-// by a new generation, a side file mid-upload waits; no .part file is
-// ever left behind; status() holds no key or token; start/stop.
+// by a new generation, a side file mid-upload waits; a local log whose last line was cut off counts by its whole lines
+// (the row's bytes replace the cut line, with or without new lines after it; a whole line the row lacks is still a
+// conflict); no .part file is ever left behind; status() holds no key or token; start/stop.
+// S4: pull(id) -> missing (no row, or not active) / mine (this device's) / done with dir and folder / same / conflict
+// (left alone, still saying where) / skip when open here; a back-off does not hold a pull up; a pull asked for while a
+// scan is mid-way runs right after that row, never at the same time; owners() with leaseUntil (a copy, empty before
+// the first scan); only(id).
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders or the real Supabase. Exit 0 = all pass.
 'use strict';
@@ -60,7 +65,7 @@ const ORIGIN = 'https://github.com/glodusk/proj';
 // ---------- the fake Supabase ----------
 const fake = {
   tables: { devices: [{ id: OTHER, name: 'mac', platform: 'darwin' }], repos: [{ id: REPO_ID, origin: ORIGIN }, { id: REPO2_ID, origin: 'https://github.com/glodusk/elsewhere' }], repo_paths: [], conversations: [], chunks: [] },
-  objects: new Map(), calls: [],
+  objects: new Map(), calls: [], onGet: null,
 };
 const json = (res, code, o) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
 function restCall(req, u, body, res) {
@@ -121,6 +126,7 @@ const server = http.createServer((req, res) => {
     if (u.pathname.startsWith(pre) && req.method === 'GET') {
       const name = u.pathname.slice(pre.length).split('/').map(decodeURIComponent).join('/');
       if (!fake.objects.has(name)) return json(res, 400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
+      if (fake.onGet) fake.onGet(name);
       res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
       return res.end(fake.objects.get(name));
     }
@@ -274,6 +280,32 @@ async function main() {
   ok(same(mainOf(c2.id), c2.main), 'conflict: laid down once the local copy is gone');
   ok(!m.conflicts().some((x) => x.id === c2.id), 'conflict: no longer listed');
 
+  // ---------- a cut last line (its writer ended mid-line; that part never went up) ----------
+  const cutTail = Buffer.from('{"type":"assistant","text":"half a li');
+  const k1 = putConvo({ pieces: [Buffer.concat(logOf('k', 4))] }); // the row is exactly the whole lines
+  write(mainOf(k1.id), Buffer.concat([k1.main, cutTail]));
+  const e1 = Buffer.concat(logOf('l', 3)), e2 = Buffer.concat(logOf('l', 2, 'm'));
+  const k2 = putConvo({ pieces: [Buffer.concat([e1, e2])] }); // the other machine wrote more after the whole lines
+  write(mainOf(k2.id), Buffer.concat([e1, cutTail]));
+  const f1 = Buffer.concat(logOf('n', 2)), f2 = Buffer.concat(logOf('n', 2, 'o'));
+  const k3 = putConvo({ pieces: [f1, f2] }); // the same, a chunk boundary right at the cut
+  write(mainOf(k3.id), Buffer.concat([f1, cutTail]));
+  const k4 = putConvo({ pieces: [Buffer.concat(logOf('p', 3))] }); // a whole line the row lacks, then a cut one
+  const k4local = Buffer.concat([k4.main, line({ type: 'user', text: 'only here' }), cutTail]);
+  write(mainOf(k4.id), k4local);
+  sg = storageGets();
+  r = await m.scanOnce();
+  ok(same(mainOf(k1.id), k1.main), 'cut: the cut line goes; the copy is the row\'s bytes');
+  ok(same(mainOf(k2.id), k2.main), 'cut: the other machine\'s new lines replace the cut line');
+  ok(same(mainOf(k3.id), k3.main), 'cut: at a chunk boundary too');
+  eq(storageGets() - sg, 2, 'cut: the chunk the whole lines hold is not fetched (k2 and k3\'s second one only)');
+  ok(!m.conflicts().some((x) => [k1.id, k2.id, k3.id].includes(x.id)), 'cut: no conflict for them');
+  ok(logs.some((t) => t.includes(k1.id) && /its cut last line \(\d+ bytes\) was replaced/.test(t)), 'cut: logged');
+  ok(same(mainOf(k4.id), k4local) && m.conflicts().some((x) => x.id === k4.id && /longer/.test(x.reason)), 'cut: a whole line the row lacks is still a conflict');
+  fs.rmSync(mainOf(k4.id));
+  r = await m.scanOnce();
+  ok(same(mainOf(k4.id), k4.main) && !m.conflicts().some((x) => x.id === k4.id), 'cut: laid down once that copy is gone');
+
   // ---------- broken uploads write nothing ----------
   const broken = [];
   const c4 = putConvo({ pieces: [Buffer.concat(logOf('d', 3)), Buffer.concat(logOf('d', 3, 'y'))] }); // an object missing
@@ -396,6 +428,100 @@ async function main() {
   r = await m.scanOnce();
   ok(same(mainOf(mine.id, plain), mine.main), 'already here: the local log grew where it is');
   ok(!fs.existsSync(mainOf(mine.id)), 'already here: no second copy in the repo root\'s slug folder');
+
+  // ---------- S4: pull, owners, only ----------
+  const lower = (x) => String(x).toLowerCase();
+  // missing: no row, or one that is not active
+  eq(await m.pull(crypto.randomUUID()), { outcome: 'missing' }, 'pull: no row -> missing');
+  eq((await m.pull(c9c.id)).outcome, 'missing', 'pull: an archived row -> missing');
+  let threwPull = null;
+  try { await m.pull('nope'); } catch (e) { threwPull = e; }
+  ok(threwPull && threwPull.code === 'bad_request', 'pull: a bad id throws');
+  // mine: this device owns it
+  const pm = await m.pull(c9.id.toUpperCase());
+  ok(pm.outcome === 'mine' && pm.row && pm.row.id === c9.id && !fs.existsSync(mainOf(c9.id)), 'pull: this device\'s own row -> mine, nothing laid down');
+  // done: laid down now, with the slug folder and the resume folder
+  const pd = putConvo({ pieces: [Buffer.concat(logOf('pd', 3)), Buffer.concat(logOf('pd', 2, 'y'))], rel_cwd: 'sub' });
+  let pr = await m.pull(pd.id);
+  const subDir = path.join(rootDir, 'sub');
+  ok(pr.outcome === 'done' && same(mainOf(pd.id, subDir), pd.main), `pull: laid down at once (${pr.outcome})`);
+  ok(P_same(pr.dir, slugDir(subDir)) && path.isAbsolute(pr.dir), `pull: dir is the slug folder (${pr.dir})`);
+  ok(P_same(pr.folder, subDir), `pull: folder is the resume folder root + rel_cwd (${pr.folder})`);
+  ok(pr.row && pr.row.id === pd.id && 'lease_until' in pr.row, 'pull: the row comes back (with lease_until)');
+  pr = await m.pull(pd.id);
+  ok(pr.outcome === 'same' && P_same(pr.dir, slugDir(subDir)), 'pull again: same, and dir still given');
+  // a back-off is cleared: a failed one is pulled at once once fixed
+  const pb = putConvo({ pieces: [Buffer.concat(logOf('pb', 2)), Buffer.concat(logOf('pb', 2, 'y'))] });
+  const pbLost = chunkRows(pb.id)[1];
+  const pbBlob = fake.objects.get(`${UID}/${pbLost.object_path}`);
+  fake.objects.delete(`${UID}/${pbLost.object_path}`);
+  r = await m.scanOnce();
+  ok(!fs.existsSync(mainOf(pb.id)) && m.status().waiting >= 1, 'pull: the broken one backs off in the scan');
+  let pbErr = null;
+  try { await m.pull(pb.id); } catch (e) { pbErr = e; }
+  ok(pbErr && !fs.existsSync(mainOf(pb.id)), 'pull: a failure throws and writes nothing');
+  fake.objects.set(`${UID}/${pbLost.object_path}`, pbBlob);
+  pr = await m.pull(pb.id);
+  ok(pr.outcome === 'done' && same(mainOf(pb.id), pb.main), 'pull: the back-off does not hold it up');
+  // conflict: a longer local copy
+  const pc = putConvo({ pieces: [Buffer.concat(logOf('pc', 3))] });
+  const pcLocal = Buffer.concat([pc.main, line({ type: 'cost-state' })]);
+  write(mainOf(pc.id), pcLocal);
+  pr = await m.pull(pc.id);
+  ok(pr.outcome === 'conflict' && /longer/.test(pr.reason) && same(mainOf(pc.id), pcLocal), `pull: a longer local copy -> conflict, left alone (${pr.outcome})`);
+  ok(P_same(pr.dir, slugDir(rootDir)) && P_same(pr.folder, rootDir), 'pull: a conflict still says where');
+  fs.rmSync(mainOf(pc.id));
+  // open here: skip, with where
+  const pl = putConvo({ pieces: [Buffer.concat(logOf('pl', 2))] });
+  const mOpen = D.createMaterializer({ api, dataDir, key: KEY, home, roots: [plain, repoDir], now: () => clock, isOpen: (id) => id === pl.id });
+  pr = await mOpen.pull(pl.id);
+  ok(pr.outcome === 'skip' && pr.reason === 'open on this machine' && P_same(pr.dir, slugDir(rootDir)) && !fs.existsSync(mainOf(pl.id)), 'pull: open here (isOpen) -> skip, nothing written');
+
+  // a pull asked for while a scan is mid-way runs next, not at the same time
+  const q3 = putConvo({ pieces: [Buffer.concat(logOf('q3', 2)), Buffer.concat(logOf('q3', 2, 'y')), Buffer.concat(logOf('q3', 2, 'z'))] });
+  const q2 = putConvo({ pieces: [Buffer.concat(logOf('q2', 2)), Buffer.concat(logOf('q2', 2, 'y')), Buffer.concat(logOf('q2', 2, 'z'))] });
+  const q1 = putConvo({ pieces: [Buffer.concat(logOf('q1', 2)), Buffer.concat(logOf('q1', 2, 'y')), Buffer.concat(logOf('q1', 2, 'z'))] });
+  // the scan goes newest first: q1, q2, then q3 (which the pull lays down in between)
+  const order = [];
+  let pullP = null;
+  fake.onGet = (name) => {
+    const id = name.split('/')[2];
+    order.push(id);
+    if (!pullP && id === q1.id) pullP = m.pull(q3.id);
+  };
+  r = await m.scanOnce();
+  fake.onGet = null;
+  pr = await pullP;
+  const runs = order.filter((x) => [q1.id, q2.id, q3.id].includes(x)).filter((x, i, a) => i === 0 || a[i - 1] !== x);
+  eq(runs, [q1.id, q3.id, q2.id], 'pull mid-scan: the scan finishes its row, the pull goes next, then the scan goes on');
+  ok(pr.outcome === 'done' && [q1, q2, q3].every((c) => same(mainOf(c.id), c.main)), 'pull mid-scan: all three laid down');
+
+  // owners(): the rows other devices own, with their lease
+  const fresh = D.createMaterializer({ api, dataDir, key: KEY, home, roots: [repoDir] });
+  eq([fresh.owners().size, fresh.status().listedAt], [0, null], 'owners: empty before the first scan, listedAt null');
+  const leaseAt = new Date(Date.now() + 120e3).toISOString();
+  c1.row.lease_until = leaseAt;
+  clock += 1000;
+  const listStart = clock;
+  r = await m.scanOnce();
+  eq(m.status().listedAt, new Date(listStart).toISOString(), 'owners: status().listedAt is when the listing began');
+  const ow = m.owners();
+  ok(ow instanceof Map && ow.size > 5, `owners: a Map of the rows another device owns (${ow.size})`);
+  eq(ow.get(c1.id), { device: lower(OTHER), leaseUntil: Date.parse(leaseAt) }, 'owners: device and leaseUntil');
+  eq(ow.get(c2.id), { device: lower(OTHER), leaseUntil: null }, 'owners: no lease -> null');
+  ok(!ow.has(c9.id) && !ow.has(c9b.id) && !ow.has(c9c.id), 'owners: not this device\'s, not nobody\'s, not archived');
+  ow.delete(c1.id);
+  ok(m.owners().has(c1.id), 'owners: a copy, the caller cannot change it');
+
+  // only(): a scan looks only at the conversations it names
+  const o1 = putConvo({ pieces: [Buffer.concat(logOf('o1', 2))] });
+  const o2 = putConvo({ pieces: [Buffer.concat(logOf('o2', 2))] });
+  const mOnly = D.createMaterializer({ api, dataDir, key: KEY, home, roots: [repoDir], only: (id) => id === o1.id });
+  r = await mOnly.scanOnce();
+  ok(same(mainOf(o1.id), o1.main) && !fs.existsSync(mainOf(o2.id)), 'only: just the one it names is laid down');
+  eq([r.rows, [...mOnly.owners().keys()]], [1, [o1.id]], 'only: one row looked at, one in owners()');
+  r = await m.scanOnce();
+  ok(same(mainOf(o2.id), o2.main), 'only: the other is laid down by a scan without only');
 
   eq(parts(), [], 'no .part file anywhere at the end');
   ok(!walk(T).some((f) => !inside(T, f)), 'nothing outside the temp folder');

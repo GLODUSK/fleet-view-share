@@ -353,8 +353,19 @@ const deviceChecked = new Map(); // device.json path -> id already checked again
 // This machine's device id. <dataDir>/sync/device.json { id } when its row is still there (asked once per process);
 // else a new fleet_sync.devices row { name: hostname, platform: process.platform } (the server fills in the user and
 // the id) whose id is saved. api: sync-api.js createSync()'s object (only api.rest is used). A failure to reach
-// Supabase throws (a SyncError) and changes nothing on disk; the caller tries again later.
-async function ensureDevice(api, dataDir) {
+// Supabase throws (a SyncError) and changes nothing on disk; the caller tries again later. Calls for one device.json
+// at the same time share one answer: the uploader, the materializer and the mover all start at once, and each making
+// its own row would leave them with different ids for this machine.
+const deviceFlight = new Map(); // device.json path -> the ensureDevice under way for it
+function ensureDevice(api, dataDir) {
+  const file = devicePath(dataDir);
+  const going = deviceFlight.get(file);
+  if (going) return going;
+  const p = ensureDeviceOnce(api, dataDir).finally(() => { if (deviceFlight.get(file) === p) deviceFlight.delete(file); });
+  deviceFlight.set(file, p);
+  return p;
+}
+async function ensureDeviceOnce(api, dataDir) {
   const file = devicePath(dataDir);
   const saved = readState(file, null);
   const id = saved && typeof saved.id === 'string' && UUID_RE.test(saved.id) ? saved.id.toLowerCase() : null;

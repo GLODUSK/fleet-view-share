@@ -227,6 +227,13 @@ async function main() {
   const d3 = await C.ensureDevice(api, dataDir3);
   ok(d3 !== 'bbbbbbbb-0000-4000-8000-000000000000' && rows.has(d3), 'ensureDevice: a row that is gone gets a new one');
   eq(C.readState(path.join(dataDir3, 'sync', 'device.json')), { id: d3 }, 'ensureDevice: the new id saved');
+  // the uploader, the materializer and the mover ask at once on a first start: one row, one id for all three
+  calls.length = 0;
+  const dataDir4 = path.join(T, 'data4');
+  const at4 = await Promise.all([C.ensureDevice(api, dataDir4), C.ensureDevice(api, dataDir4), C.ensureDevice(api, dataDir4)]);
+  ok(at4.every((d) => d === at4[0]) && rows.has(at4[0]), 'ensureDevice: three at once share one id');
+  eq(calls.filter((c) => c.method === 'POST').length, 1, 'ensureDevice: three at once make one row');
+  eq(C.readState(path.join(dataDir4, 'sync', 'device.json')), { id: at4[0] }, 'ensureDevice: that id saved');
   calls.length = 0;
   const t0 = Date.parse('2026-10-10T12:00:00Z');
   eq(await C.touchDevice(api, d1, { now: t0 }), true, 'touchDevice: first time sent');

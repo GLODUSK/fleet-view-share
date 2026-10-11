@@ -1,4 +1,4 @@
-# Sync: what goes up, and how it comes back (the S2/S3 contract)
+# Sync: what goes up, and how it comes back (the S2/S3/S4 contract)
 
 The uploader (`sync-up.js`, S2) and the materializer (`sync-down.js`, S3) never talk to each other: they meet only in
 Supabase. This page is the format they share. `sync-api.js` is the connection ([sync.md](sync.md)), `sync-crypto.js`
@@ -23,7 +23,7 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
 
 - **devices** `{ id, name, platform, last_seen_at }`: one per machine. The id is kept in `<dataDir>/sync/device.json`
   (`{ id }`), made on first start by inserting a row (name = hostname, platform = `process.platform`). Each side
-  updates `last_seen_at` at most every 5 minutes.
+  updates `last_seen_at` at most every 5 minutes, and S4's mover every 30 s (see [Moving a conversation](#moving-a-conversation-s4)).
 - **repos** `{ id, origin }`: one per GitHub repo, `origin` normalized: `https://github.com/<owner>/<repo>` in lower
   case, from `git remote get-url origin` (ssh `git@github.com:o/r.git`, `https://user@github.com/o/r.git` and
   `.../o/r/` all become the same string). Other hosts: `https://<host>/<path>` the same way. No origin: not synced.
@@ -43,7 +43,9 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
   - `title_enc`: `sealText(title, key, 'title:<id>')`, the last `custom-title` (or `summary`) line's title.
   - `size`, `sha256`, `generation`: the `main` file's uploaded length, the hex sha256 of those bytes, its generation.
   - `owner_device`: the device that writes it. S2 sets itself on a new row and only uploads rows it owns (or with no
-    owner). S4 moves it. `lease_until` is S4's.
+    owner). S4 moves it. `lease_until` is S4's (below).
+- **settings** `{ key, value_enc }`: one row per key, upserted on `(user_id, key)`. S4's request rows are the only ones
+  so far (below).
 - **chunks** `{ conversation_id, file, generation, seq, byte_offset, byte_length, object_path, sha256 }`: one per
   object. `sha256` is the hex sha256 of the chunk's plain bytes. A whole file is `seq` 0..n of one generation (one
   chunk unless it is over 8 MiB; an empty one is a single 0-byte chunk).
@@ -86,12 +88,39 @@ chunks.
 2. Read its chunk rows for the current generation, ordered by `seq`; check they cover `[0, size)` with no gap; fetch
    and open each, check each `sha256`, then the whole file's against the conversation row.
 3. Lay it down per the recipe: write `<id>.jsonl.part`, rename. If a local copy exists, replace it only when it is a
-   byte prefix of the new file; if it is longer or different, leave it, write nothing, and report a conflict.
+   byte prefix of the new file; if it is longer or different, leave it, write nothing, and report a conflict. A local
+   `.jsonl` whose last line was cut off (its writer ended mid-line, so that part never went up, rule 5 above) counts
+   by its whole lines: the new bytes replace the cut line.
 4. Side files the same way, under `<slug>/<id>/`.
 5. Never touch a conversation that is running on this machine (the session host or a live Claude process has it open).
 6. Remember what it laid down (`<dataDir>/sync/down-state.json`), so an unchanged row costs one cheap compare.
 
+## Moving a conversation (S4)
+
+`sync-move.js` moves `owner_device` from A (the device that has it) to B (the device that asks), with no lost line and
+no fork; its header has the whole order. What it adds to the rows:
+
+- **Two settings rows per move**, each written by one side only, sealed with `sealText(json, key, 'setting:<key>')`:
+  - `move:<id>:ask` (B's): `{ v: 1, id, to: B, from: A, at, nonce, force }`. B writes `at` again every 20 s while it
+    waits.
+  - `move:<id>:reply` (A's): `{ v: 1, id, nonce, from: A, at, phase, note, status?, waitingFor?, external?, final? }`,
+    `phase` one of `asked`, `waiting`, `ending`, `uploading`, `released`, `failed`; `final` `{ size, sha256,
+    generation }` comes with `released`. A writes `at` again every 10 s.
+
+  Each side judges the other's row fresh by seeing its `at` change on its own clock, never by comparing two clocks. B
+  deletes both rows when its job ends; A deletes its reply when the ask goes away.
+- **The claim**: B's `PATCH conversations?id=eq.<id>&owner_device=eq.<A>&sha256=eq.<sha256>` sets `owner_device` to B
+  and `lease_until`. The sha256 is A's `final` (or, for a forced takeover, the row B just laid down). A line A writes
+  after it let go makes the claim fail; ownership never moves any other way.
+- **`lease_until`**: the owner puts it 3 minutes ahead every 60 s on the conversations it runs in its session host
+  (one PATCH, conditional on `owner_device` = itself), and a claim sets it. A forced takeover (A offline or not
+  answering) waits while it is ahead, and after one the new owner's uploader stays held 30 s, then takes over what the
+  server has, so a chunk A still had on its way never replaces one the new owner wrote.
+- **`devices.last_seen_at`**: the mover touches it every 30 s. Another device counts it offline when it sees the value
+  unchanged for 2 minutes on its own clock.
+
 ## Done means
 
 S2: 50 random real conversations uploaded, downloaded by S3 into a temp projects folder, byte-identical (main and
-side files). S3: a PC conversation resumes in a second checkout with the session host's `open` op.
+side files). S3: a PC conversation resumes in a second checkout with the session host's `open` op. S4: one
+conversation moves three times between two devices with no lost line and no fork.

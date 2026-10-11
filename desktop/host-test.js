@@ -1,6 +1,7 @@
-// Fleet View desktop: a test of the session host's auto-continue, panel auto-close, restart and the roles: the chief
+// Fleet View desktop: a test of the session host's auto-continue, panel auto-close, restart, the roles: the chief
 // (its allowed and blocked fv commands, kept through a re-key, a restore and a handoff; one at a time; dropped when it
-// resumes an older conversation) and a bot's (the usual commands; kept and dropped the same ways) (host.js), run
+// resumes an older conversation) and a bot's (the usual commands; kept and dropped the same ways), and conversations
+// on another device (sync/away.json: open, sendTo and a restore refuse them) (host.js), run
 // with the system node:   node desktop/host-test.js
 // It starts a test host (its own pipe \\.\pipe\fleet-view-host-test-<random>, on macOS and Linux the socket
 // <temp>/fleet-view-host-test-<random>.sock; every file under one temp folder,
@@ -75,6 +76,23 @@ function session(name, extra) {
   fs.mkdirSync(cwd, { recursive: true });
   return (S[name] = { name, id: crypto.randomUUID(), cwd, pidFile: path.join(PIDS, `${9000 + Object.keys(S).length}.json`), ...extra });
 }
+// a session the restart's "every session started again" check must not count (one the host never starts)
+const OTHERS = [];
+function otherSession(name) {
+  const cwd = path.join(ROOT, `s-${name}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const s = { name, id: crypto.randomUUID(), cwd };
+  OTHERS.push(s);
+  return s;
+}
+// <data dir>/sync/away.json as the server's sync runner writes it (text: written as it is, for a bad file)
+const AWAY = path.join(DATA, 'sync', 'away.json');
+function writeAway(ids) {
+  fs.mkdirSync(path.dirname(AWAY), { recursive: true });
+  fs.writeFileSync(AWAY, typeof ids === 'string' ? ids : JSON.stringify({ v: 1, at: Date.now(), ids }));
+}
+const awayMsg = (device) => `This conversation is on ${device}: use Continue here`;
+const isAwayRefusal = (r, device) => !!r && r.ok === false && !!r.away && r.away.device === device && r.message === awayMsg(device);
 const received = (s) => { try { return fs.readFileSync(path.join(s.cwd, 'received.txt'), 'latin1'); } catch { return ''; } };
 const starts = (s) => { try { return fs.readFileSync(path.join(s.cwd, 'starts.txt'), 'utf8').split('\n').filter(Boolean); } catch { return []; } };
 // the arguments of each start, oldest first
@@ -175,7 +193,7 @@ function cleanup() {
   const hf = hostJson();
   if (hf && Number.isInteger(hf.pid)) pids.add(hf.pid);
   for (const m of hostLog().matchAll(/\[host (\d+)\]/g)) pids.add(Number(m[1])); // every host that ran on the test pipe
-  for (const s of Object.values(S)) for (const l of starts(s)) pids.add(Number(l.split(' ')[0]));
+  for (const s of [...Object.values(S), ...OTHERS]) for (const l of starts(s)) pids.add(Number(l.split(' ')[0]));
   for (const pid of pids) {
     if (!(pid > 0) || pid === process.pid) continue;
     try { process.kill(pid, 0); } catch { continue; }
@@ -195,8 +213,11 @@ async function main() {
   const A = session('a', { busy: true }), B = session('b', { busy: true }), C = session('c', { busy: true });
   const D1 = session('d1', { busy: false }), D2 = session('d2', { busy: false });
   for (const d of [D1, D2]) fs.writeFileSync(transcript(d), userLine('build it') + asstLine('Started the build in the background.'));
+  // aw: in the restore list too, but another device has it now (away.json): never resumed here
+  const AW = otherSession('aw');
+  writeAway({ [AW.id]: { device: 'Laptop', why: 'owned' } });
   fs.writeFileSync(path.join(DATA, 'sessions.json'), JSON.stringify({ version: 1, savedAt: Date.now() - 60000, reason: 'change', hostPid: 1,
-    sessions: [A, B, C, D1, D2].map((s) => ({ id: s.id, cwd: s.cwd, account: 'B', startedAt: Date.now() - 60000, busy: s.busy, interrupted: false, cols: 100, rows: 30 })), ui: null }));
+    sessions: [A, B, C, AW, D1, D2].map((s) => ({ id: s.id, cwd: s.cwd, account: 'B', startedAt: Date.now() - 60000, busy: s.busy, interrupted: false, cols: 100, rows: 30 })), ui: null }));
 
   startHost();
   if (!await waitFor(() => hostJson(), 15000)) { check('the test host starts', false, hostLog()); return; }
@@ -204,6 +225,8 @@ async function main() {
   if (!cl) { check('connect to the test host', false); return; }
   const allUp = await waitFor(() => [A, B, C, D1, D2].every((s) => starts(s).length), 15000);
   check('restore resumes every conversation (each fake claude started)', allUp, [A, B, C, D1, D2].map((s) => starts(s).length));
+  check('away. restore skips a conversation away.json says is on another device (a log line, nothing started)',
+    starts(AW).length === 0 && hostLog().includes(`restore: ${AW.id} is on Laptop; not resumed`) && hostLog().includes('restore: 5 of 6 resumed'), { starts: starts(AW), log: hostLog().split('\n').filter((l) => l.includes('restore')) });
 
   // b: a key typed before it is ready cancels its note
   await cl.req('write', B.id, 'x');
@@ -416,6 +439,43 @@ async function main() {
   fs.writeFileSync(path.join(W.cwd, 'want-id.txt'), W.id);
   const rw = await cl.req('create', { cwd: W.cwd, account: 'B', role: 'chief', cols: 100, rows: 30 });
   check('i. move: once the old one lost the role, a new Chief starts', rw && rw.ok && rw.role === 'chief', rw);
+
+  // ===== j. away: open and sendTo of a conversation on another device start and end nothing =====
+  await waitFor(async () => (await cl.req('list')).some((x) => x.id === W.id && x.alive), 20000); // the new Chief, keyed to its id
+  const ro1 = await cl.req('open', { id: AW.id, cwd: AW.cwd, account: 'B', cols: 100, rows: 30 });
+  // an upper-case id is the same conversation
+  const rs1 = await cl.req('sendTo', { id: AW.id.toUpperCase(), cwd: AW.cwd, account: 'A', cols: 100, rows: 30 });
+  await sleep(1000);
+  check('j. away: open of a conversation on another device is refused with its device and the message, and starts nothing',
+    isAwayRefusal(ro1, 'Laptop') && starts(AW).length === 0 && !(await cl.req('list')).some((x) => x.id === AW.id)
+    && hostLog().includes(`open: ${AW.id} refused: it is on Laptop`), { ro1, starts: starts(AW) });
+  check('j. away: sendTo of it is refused the same way, and starts nothing', isAwayRefusal(rs1, 'Laptop') && starts(AW).length === 0, rs1);
+  // the file rewritten: a running one moving away is
+  // still attached to by open, and sendTo neither ends it nor starts anything
+  writeAway({ [AW.id]: { device: 'Laptop', why: 'owned' }, [W.id]: { device: 'Desk PC', why: 'moving' } });
+  const wStarts = starts(W).length;
+  const ro2 = await cl.req('open', { id: W.id, cwd: W.cwd, account: 'B', cols: 100, rows: 30 });
+  const rs2 = await cl.req('sendTo', { id: W.id, cwd: W.cwd, account: 'A', cols: 100, rows: 30 });
+  await sleep(1000);
+  const lw = (await cl.req('list')).find((x) => x.id === W.id);
+  check('j. away: a rewritten away.json is read again: sendTo of a running conversation now listed is refused and leaves it running',
+    isAwayRefusal(rs2, 'Desk PC') && lw && lw.alive && starts(W).length === wStarts, { rs2, lw, starts: starts(W).length, wStarts });
+  check('j. away: open of a running one that is moving away attaches to it (already running), starting nothing', ro2 && ro2.ok && ro2.message === 'already running' && starts(W).length === wStarts, ro2);
+  // taken off the list: it opens
+  writeAway({ [W.id]: { device: 'Desk PC', why: 'moving' } });
+  const ro3 = await cl.req('open', { id: AW.id, cwd: AW.cwd, account: 'B', cols: 100, rows: 30 });
+  check('j. away: once away.json no longer lists it, open starts it', ro3 && ro3.ok && await waitFor(() => starts(AW).length === 1, 10000), { ro3, starts: starts(AW) });
+  // a bad file (cut short mid-write) means nothing is away, though it names the conversation
+  const AW2 = otherSession('aw2');
+  writeAway({ [AW2.id]: { device: 'Laptop', why: 'owned' } });
+  const ro4 = await cl.req('open', { id: AW2.id, cwd: AW2.cwd, account: 'B', cols: 100, rows: 30 });
+  writeAway(`{"v":1,"ids":{"${AW2.id}":{"device":"Laptop"`);
+  const ro5 = await cl.req('open', { id: AW2.id, cwd: AW2.cwd, account: 'B', cols: 100, rows: 30 });
+  check('j. away: a bad away.json is ignored (listed: refused; the same id in a file cut short: it opens)',
+    isAwayRefusal(ro4, 'Laptop') && ro5 && ro5.ok && await waitFor(() => starts(AW2).length === 1, 10000), { ro4, ro5, starts: starts(AW2) });
+  fs.rmSync(AWAY, { force: true });
+  const ro6 = await cl.req('open', { id: AW2.id, cwd: AW2.cwd, account: 'B', cols: 100, rows: 30 });
+  check('j. away: with no away.json at all, open works as before', ro6 && ro6.ok, ro6);
   await cl.req('killAll').catch(() => {});
   cl.close();
 }

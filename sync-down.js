@@ -4,9 +4,23 @@
 // `claude --resume` picks it up in the right folder. It reaches Supabase only through the api object it is handed
 // (sync-api.js createSync()), opens what it fetches with sync-crypto.js, and names things with sync-common.js.
 //
-//   createMaterializer({ api, dataDir, key, log, now, projects, roots, home, isOpen })
-//     (projects: [{ account, dir }], or a function giving it; ~/.claude for B and ~/.claude-a for A when not given)
-//     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), conflicts() }
+//   createMaterializer({ api, dataDir, key, log, now, projects, roots, home, isOpen, only })
+//     (projects: [{ account, dir }], or a function giving it; ~/.claude for B and ~/.claude-a for A when not given;
+//     isOpen(id): true when this machine has it open in a way sessions/<pid>.json does not show yet, such as a panel
+//     the session host is starting; only(id): a scan looks only at the conversations this says true for, live tests)
+//     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), conflicts(), pull(id), owners() }
+//
+// For S4's moves (sync-move.js), with ids lower-case:
+//   pull(id) -> Promise<{ outcome, reason?, dir?, folder?, row? }>: lay that conversation down now. It is urgent: a
+//     running scan lets it go next, between two conversations; with no scan it runs at once (one lock for both, so a
+//     conversation is never laid down twice at once). Its row is read whoever owns it: none (or not active) ->
+//     { outcome: 'missing' }; this device's -> { outcome: 'mine', row }; else its back-off is cleared and it is laid
+//     down as a scan would (steps 3 to 8) -> that outcome ('done' | 'same' | 'conflict' | 'skip' | 'pending'), the
+//     reason, dir (the slug folder its log is in, absolute), folder (the resume folder X from root + rel_cwd) and the
+//     row. A failure throws, as in a scan (no back-off is set for it).
+//   owners() -> Map<id, { device, leaseUntil }>: the active rows other devices own, from the last scan's list (device
+//     lower-case, leaseUntil = Date.parse(lease_until) or null). Empty before the first scan. status().listedAt is
+//     when that list began (ISO), so a change of owner made before then is in it.
 //
 // One scan:
 //   1. This machine's device row (ensureDevice; last_seen_at at most every 5 minutes).
@@ -28,8 +42,10 @@
 //   7. Laid down per the recipe: <file>.part, then a rename over the local copy. A local copy is replaced only when it
 //      is a byte prefix of the new bytes (chunks it already holds are compared by sha256 and not downloaded). A longer
 //      or different local copy is left alone, nothing is written for that conversation, and it is listed in
-//      conflicts() until its row or the local file changes. One exception: a whole side file (not .jsonl) this side
-//      laid down itself and that nobody changed since may be replaced by the other machine's new version.
+//      conflicts() until its row or the local file changes. Two exceptions: a whole side file (not .jsonl) this side
+//      laid down itself and that nobody changed since may be replaced by the other machine's new version; and a .jsonl
+//      whose last line was cut off (its writer ended mid-line, so that part never went up) counts by its whole lines,
+//      and the new bytes replace the cut line.
 //      Every path is checked to stay inside the projects folder, with no link on the way, before anything is written.
 //   8. What was laid down goes in <dataDir>/sync/down-state.json after each conversation. A conversation that fails
 //      (a missing object, a gap, a bad sha256, the network) writes nothing, leaves no .part, and is tried again after
@@ -45,6 +61,7 @@ const P = require(path.join(__dirname, 'platform.js'));
 const S = require(path.join(__dirname, 'sync-api.js'));
 const X = require(path.join(__dirname, 'sync-crypto.js'));
 const C = require(path.join(__dirname, 'sync-common.js'));
+const { lastLineEnd } = require(path.join(__dirname, 'sync-up.js'));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEX64_RE = /^[0-9a-f]{64}$/;
@@ -186,7 +203,26 @@ function createMaterializer(opts = {}) {
   const stampOf = (p) => { const st = lstatOr(p); return st ? `${st.size}:${st.mtimeMs}` : 'none'; };
 
   const backoff = new Map(); // id -> { n, until }
-  const st = { running: false, scanning: false, scans: 0, lastScanAt: null, lastOkAt: null, lastError: null, last: null, laidDown: 0 };
+  let ownersMap = new Map(); // id -> { device, leaseUntil }: the last scan's rows other devices own
+  const onlyOf = () => (typeof opts.only === 'function' ? opts.only : null);
+
+  // ---------- one conversation at a time ----------
+  // A scan takes this lock for each row and pull() for its whole run. An urgent waiter (pull) goes ahead of the scan's
+  // next row, behind any earlier urgent one.
+  let lockHeld = false;
+  const lockQ = []; // { urgent, go }
+  function lock(urgent) {
+    if (!lockHeld) { lockHeld = true; return Promise.resolve(); }
+    return new Promise((go) => {
+      const e = { urgent, go };
+      if (!urgent) { lockQ.push(e); return; }
+      let i = 0;
+      while (i < lockQ.length && lockQ[i].urgent) i++;
+      lockQ.splice(i, 0, e);
+    });
+  }
+  function unlock() { const n = lockQ.shift(); if (n) n.go(); else lockHeld = false; }
+  const st = { running: false, scanning: false, scans: 0, lastScanAt: null, lastOkAt: null, listedAt: null, lastError: null, last: null, laidDown: 0 };
 
   const live = (id) => C.isLive(id, { home, fresh: true }) || (typeof opts.isOpen === 'function' && !!opts.isOpen(id));
 
@@ -295,8 +331,15 @@ function createMaterializer(opts = {}) {
     const part = `${target}.part`;
     let fd = null, pfd = null, wrote = false;
     try {
-      const localSize = before && !ignoreLocal ? before.size : 0;
+      let localSize = before && !ignoreLocal ? before.size : 0;
       if (before && !ignoreLocal) fd = fs.openSync(target, 'r');
+      // a .jsonl whose last line was cut off (its writer ended mid-line; the uploader never sends that part, and
+      // sync-move.js hands a conversation over without it): only its whole lines count, the new bytes replace the rest
+      let cut = 0;
+      if (fd !== null && !job.whole && localSize > 0) {
+        const end = lastLineEnd(fd, 0, localSize);
+        if (end < localSize) { cut = localSize - end; localSize = end; }
+      }
       if (fd !== null && localSize > job.size) return { result: 'conflict', reason: 'the local copy is longer', localSize };
       // the chunks the local copy holds already: compared by sha256, not downloaded; any that differs is a conflict
       const whole = crypto.createHash('sha256');
@@ -307,7 +350,7 @@ function createMaterializer(opts = {}) {
           if (hashRange(fd, c.start, c.len, whole) !== c.sha256) return { result: 'conflict', reason: 'the local copy is different', localSize };
           have.add(c.seq);
         }
-        if (localSize === job.size && have.size === job.chunks.length) {
+        if (localSize === job.size && have.size === job.chunks.length && !cut) {
           if (job.sha256 && whole.digest('hex') !== job.sha256) fail(`${job.file}: the file's sha256 is not the row's`, 'bad_sha');
           return { result: 'same' };
         }
@@ -351,6 +394,7 @@ function createMaterializer(opts = {}) {
       if (!!now2 !== !!before || (before && (now2.size !== before.size || now2.mtimeMs !== before.mtimeMs))) fail(`${job.file}: the local copy changed meanwhile`, 'changed');
       renameOver(part, target);
       wrote = false;
+      if (cut) log(`sync-down: ${job.id} ${job.file}: its cut last line (${cut} bytes) was replaced`);
       return { result: 'written' };
     } finally {
       if (pfd !== null) { try { fs.closeSync(pfd); } catch {} }
@@ -375,7 +419,8 @@ function createMaterializer(opts = {}) {
   }
 
   // ---------- one conversation ----------
-  // -> { outcome: 'done' | 'same' | 'conflict' | 'skip' | 'pending', reason }; throws when it failed (tried again later)
+  // -> { outcome: 'done' | 'same' | 'conflict' | 'skip' | 'pending', reason, folder, dir }; throws when it failed
+  // (tried again later). folder (the resume folder X) and dir (its slug folder) come once they are known.
   async function syncOne(row, ctx, key) {
     const id = row.id.toLowerCase();
     const prev = state.convos[id] || null;
@@ -386,7 +431,7 @@ function createMaterializer(opts = {}) {
     let folder = parts.length ? path.resolve(root, ...parts) : path.resolve(root);
     if (parts.length && (!inside(root, folder) || !isDir(folder))) folder = path.resolve(root);
     const projects = projectsFor(row.account);
-    if (!projects) return { outcome: 'skip', reason: `no projects folder for account ${row.account}` };
+    if (!projects) return { outcome: 'skip', reason: `no projects folder for account ${row.account}`, folder };
     let slugDir = path.join(projects, C.slugOf(folder));
     // once on this machine, it stays where it is while its file is there (never two copies on one machine): where it
     // was laid down, else wherever its log already is (one this machine started, that another one took over)
@@ -394,9 +439,10 @@ function createMaterializer(opts = {}) {
       && lstatOr(path.join(prev.dir, `${id}.jsonl`))) slugDir = path.resolve(prev.dir);
     else if (!lstatOr(path.join(slugDir, `${id}.jsonl`))) slugDir = ctx.localDir(projects, id) || slugDir;
     if (!inside(projects, slugDir) || fold(path.dirname(slugDir)) !== fold(projects) || !noLinks(projects, [path.basename(slugDir), id])) {
-      return { outcome: 'skip', reason: 'its folder would be outside the projects folder' };
+      return { outcome: 'skip', reason: 'its folder would be outside the projects folder', folder };
     }
-    if (live(id)) return { outcome: 'skip', reason: 'open on this machine' };
+    const dir = path.resolve(slugDir);
+    if (live(id)) return { outcome: 'skip', reason: 'open on this machine', folder, dir };
 
     // every chunk row of the conversation, at once
     const rows = await api.rest('GET', 'chunks', {
@@ -423,7 +469,7 @@ function createMaterializer(opts = {}) {
       state.convos[id] = { sig: sigOf(row), dir: slugDir, files: prev ? prev.files || {} : {}, conflict: true, localStamp: stampOf(path.join(slugDir, `${id}.jsonl`)), at: now() };
       saveState();
       log(`sync-down: ${id} ${file}: ${r.reason}; left alone`);
-      return { outcome: 'conflict', reason: r.reason };
+      return { outcome: 'conflict', reason: r.reason, folder, dir };
     };
     const mainTarget = path.join(slugDir, `${id}.jsonl`);
     if (size > 0) {
@@ -454,16 +500,20 @@ function createMaterializer(opts = {}) {
     for (const k of Object.keys(state.conflicts)) if (k.startsWith(`${id}|`)) delete state.conflicts[k];
     state.convos[id] = { sig: pending ? null : sigOf(row), dir: slugDir, files, conflict: false, at: now() };
     saveState();
-    if (pending) return { outcome: 'pending', reason: 'a side file is mid-upload' };
-    return { outcome: wroteAny ? 'done' : 'same' };
+    if (pending) return { outcome: 'pending', reason: 'a side file is mid-upload', folder, dir };
+    return { outcome: wroteAny ? 'done' : 'same', folder, dir };
   }
 
   // ---------- a scan ----------
+  const ROW_COLS = 'id,account,repo_id,rel_cwd,size,sha256,generation,updated_at,owner_device,lease_until';
+  // a row this side can lay down: a conversation id, account a or b, whole numbers for size and generation
+  const usable = (row) => !!row && typeof row.id === 'string' && UUID_RE.test(row.id) && (row.account === 'a' || row.account === 'b')
+    && Number.isSafeInteger(Number(row.size)) && Number(row.size) >= 0 && Number.isSafeInteger(Number(row.generation)) && Number(row.generation) >= 0;
   async function listRows(me) {
     const out = [];
     for (let offset = 0; ; offset += PAGE) {
       const rows = await api.rest('GET', 'conversations', {
-        query: { select: 'id,account,repo_id,rel_cwd,size,sha256,generation,updated_at,owner_device', state: 'eq.active', owner_device: `neq.${me}`, order: 'updated_at.desc', limit: String(PAGE), offset: String(offset) },
+        query: { select: ROW_COLS, state: 'eq.active', owner_device: `neq.${me}`, order: 'updated_at.desc', limit: String(PAGE), offset: String(offset) },
       });
       if (!Array.isArray(rows)) break;
       out.push(...rows);
@@ -476,21 +526,34 @@ function createMaterializer(opts = {}) {
     if (!key) { st.lastError = 'no sync key on this machine'; return { skipped: 'no key' }; }
     const me = await C.ensureDevice(api, dataDir);
     try { await C.touchDevice(api, me, { now: now() }); } catch (e) { log(`sync-down: last_seen_at not sent: ${e.message}`); }
-    state = loadState();
+    await lock(false);
+    try { state = loadState(); } finally { unlock(); } // not under a pull's feet
     const ctx = newCtx(me);
     const tally = { rows: 0, unchanged: 0, done: 0, same: 0, conflict: 0, skip: 0, pending: 0, failed: 0, waiting: 0 };
     const reasons = {};
-    for (const row of await listRows(me)) {
-      if (!row || typeof row.id !== 'string' || !UUID_RE.test(row.id)) continue;
+    const only = onlyOf();
+    const listStart = now();
+    const rows = (await listRows(me)).filter((row) => row && typeof row.id === 'string' && UUID_RE.test(row.id) && (!only || only(row.id.toLowerCase())));
+    // who owns what, for owners(): every active row another device owns
+    const seen = new Map();
+    for (const row of rows) {
+      const owner = typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null;
+      if (!owner || owner === me) continue;
+      const lease = row.lease_until ? Date.parse(row.lease_until) : NaN;
+      seen.set(row.id.toLowerCase(), { device: owner, leaseUntil: Number.isFinite(lease) ? lease : null });
+    }
+    ownersMap = seen;
+    st.listedAt = new Date(listStart).toISOString();
+    for (const row of rows) {
       const owner = typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null;
       if (!owner || owner === me) continue; // this device's own (or nobody's): the uploader's
-      if (row.account !== 'a' && row.account !== 'b') continue;
-      if (!Number.isSafeInteger(Number(row.size)) || Number(row.size) < 0 || !Number.isSafeInteger(Number(row.generation)) || Number(row.generation) < 0) continue;
+      if (!usable(row)) continue;
       tally.rows++;
       const id = row.id.toLowerCase(), prev = state.convos[id];
       if (prev && prev.sig === sigOf(row) && (!prev.conflict || prev.localStamp === stampOf(path.join(prev.dir || '', `${id}.jsonl`)))) { tally.unchanged++; continue; }
       const b = backoff.get(id);
       if (b && now() < b.until) { tally.waiting++; continue; }
+      await lock(false); // a pull() waiting goes first
       try {
         const r = await syncOne(row, ctx, key);
         tally[r.outcome]++;
@@ -505,10 +568,44 @@ function createMaterializer(opts = {}) {
         reasons[why] = (reasons[why] || 0) + 1;
         log(`sync-down: ${id}: ${why}`);
         if (e && ['network', 'timeout', 'signed_out', 'off'].includes(e.code)) throw e; // Supabase is out of reach: stop this scan
-      }
+      } finally { unlock(); }
     }
     return { ...tally, reasons };
   }
+
+  // ---------- S4: pull and owners ----------
+  const flights = new Set(); // pull() calls under way (stop() waits for them)
+  function pull(raw) {
+    const p = pullNow(String(raw == null ? '' : raw).toLowerCase());
+    flights.add(p);
+    const done = () => { flights.delete(p); };
+    p.then(done, done);
+    return p;
+  }
+  async function pullNow(id) {
+    if (!UUID_RE.test(id)) throw new S.SyncError('not a conversation id', 400, 'bad_request');
+    const key = await getKey();
+    if (!key) throw new S.SyncError('no sync key on this machine', 0, 'bad_key');
+    const me = await C.ensureDevice(api, dataDir);
+    await lock(true);
+    try {
+      const got = await api.rest('GET', 'conversations', { query: { select: ROW_COLS, id: `eq.${id}`, state: 'eq.active' } });
+      const row = Array.isArray(got) && got[0] ? got[0] : null;
+      if (!row) return { outcome: 'missing' };
+      const owner = typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null;
+      if (owner === me) return { outcome: 'mine', row };
+      if (!usable(row)) return { outcome: 'skip', reason: 'the row cannot be laid down here', row };
+      backoff.delete(id);
+      const r = await syncOne(row, newCtx(me), key);
+      if (r.outcome === 'done') st.laidDown++;
+      return { ...r, row };
+    } catch (e) {
+      log(`sync-down: ${id}: pull: ${(e && e.message) || e}`);
+      throw e;
+    } finally { unlock(); }
+  }
+  // a copy: the caller cannot change this side's map
+  const owners = () => new Map([...ownersMap].map(([id, o]) => [id, { ...o }]));
 
   let current = null, timer = null, interval = 5000;
   function scanOnce() {
@@ -548,17 +645,18 @@ function createMaterializer(opts = {}) {
     st.running = false;
     if (timer) { clearTimeout(timer); timer = null; }
     if (current) { try { await current; } catch {} }
+    await Promise.allSettled([...flights]);
   }
   function status() {
     return {
-      running: st.running, scanning: st.scanning, scans: st.scans, lastScanAt: st.lastScanAt, lastOkAt: st.lastOkAt,
+      running: st.running, scanning: st.scanning, scans: st.scans, lastScanAt: st.lastScanAt, lastOkAt: st.lastOkAt, listedAt: st.listedAt,
       lastError: st.lastError, laidDown: st.laidDown, last: st.last ? { ...st.last, reasons: { ...st.last.reasons } } : null,
       conflicts: Object.keys(state.conflicts).length, waiting: backoff.size,
     };
   }
   const conflicts = () => Object.values(state.conflicts).map((c) => ({ ...c }));
 
-  return { scanOnce, start, stop, status, conflicts };
+  return { scanOnce, start, stop, status, conflicts, pull, owners };
 }
 
 module.exports = { createMaterializer, relParts, planChunks, downStatePath };

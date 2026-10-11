@@ -13,6 +13,11 @@
 //   no repo or no whole line is not sent; a failed upload leaves up-state.json where the server is and a later scan
 //   finishes it; a lost up-state.json sends nothing twice; no transcript text or title ever reaches the server in
 //   plain; the pace stays under rateBytesPerSec; start/stop never run two scans at once; status() holds nothing secret.
+// S4: flush(id) gives the row's final size and sha256 and catches up a log that grew while it went up; a flush asked
+//   for while a scan is mid-way runs right after that conversation, never at the same time as it; hold/unhold/held(),
+//   and a hold that comes mid-pass stops it before its next write; forget(id) makes the next pass take over what the
+//   server has (and stops a pass under way); only(id); a row whose owner changes mid-upload ends the pass ('lost')
+//   with no chunk written after.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders, the real Supabase or claude.
 // Exit 0 = all pass.
@@ -65,7 +70,7 @@ const DEFAULTS = {
   chunks: () => ({ created_at: new Date().toISOString() }),
 };
 const db = Object.fromEntries(Object.keys(PK).map((t) => [t, []]));
-const fake = { calls: [], objects: new Map(), uploads: 0, failObject: null };
+const fake = { calls: [], objects: new Map(), uploads: 0, failObject: null, onObject: null, order: [] };
 const keyOf = (row, cols) => JSON.stringify(cols.map((c) => (row[c] == null ? null : String(row[c]).toLowerCase())));
 function match(row, params) {
   for (const [col, v] of params) {
@@ -173,6 +178,8 @@ const server = http.createServer((req, res) => {
         if (fake.objects.has(name) && req.headers['x-upsert'] !== 'true') return json(400, { statusCode: '409', error: 'Duplicate', message: 'The resource already exists' });
         fake.objects.set(name, body);
         fake.uploads++;
+        fake.order.push(name.split('/')[2]);
+        if (fake.onObject) fake.onObject(name);
         return json(200, { Key: `fleet-sync/${name}` });
       }
       if (req.method === 'GET') {
@@ -473,6 +480,9 @@ async function main() {
   sameAsLocal(A, 'main', aMain, true, 'A appended after a take-over');
   rowMatchesMain(A, aMain, 'A appended after a take-over');
 
+  Object.assign(ctx, { projB, repo1, mainOf, conv, sameAsLocal, rowMatchesMain, wholeLines, upState, dev, otherDev, F, logs, make, tick: (ms) => { clock += ms; } });
+  await s4(up2);
+
   // ---------- no plain text ever reached the server ----------
   const titles = ['Title A secret', 'Title B secret'];
   const leaks = fake.calls.filter((c) => {
@@ -518,6 +528,144 @@ async function main() {
 }
 
 function short(id) { return String(id).slice(0, 8); }
+
+// ---------- S4: flush, hold, forget, only, lost ----------
+const ctx = {};
+async function s4(up) {
+  const { projB, repo1, mainOf, conv, sameAsLocal, rowMatchesMain, wholeLines, upState, dev, otherDev, F, logs, make, tick } = ctx;
+  const lc = (id) => id.toLowerCase();
+  const chunksOf = (id) => db.chunks.filter((r) => r.conversation_id === lc(id));
+  const objsOf = (id) => [...fake.objects.keys()].filter((k) => k.startsWith(`${UID}/t/${lc(id)}/`));
+  const runs = (list) => list.filter((x, i) => i === 0 || list[i - 1] !== x); // [a,a,b,a] -> [a,b,a]
+  const threw = async (p) => { try { await p; return {}; } catch (e) { return e; } };
+
+  // flush: the row's final size and sha256, caught up with a log that grew while it went up
+  const J = newId('J');
+  const jMain = mainOf(projB, repo1, J);
+  write(jMain, lines(repo1, 40));
+  let grew = false;
+  fake.onObject = (name) => { if (!grew && name.includes(`/t/${lc(J)}/`)) { grew = true; append(jMain, lines(repo1, 30)); } };
+  const r1 = await up.flush(J);
+  fake.onObject = null;
+  ok(grew, 'flush: the log grew while it went up');
+  const jWant = wholeLines(jMain);
+  eq(r1, { size: jWant.length, sha256: K.sha256(jWant), generation: 0, owner_device: dev }, 'flush: gives the row as it ends, the growth included');
+  rowMatchesMain(J, jMain, 'flush');
+  sameAsLocal(J, 'main', jMain, true, 'flush');
+  eq((await threw(up.flush(F))).code, 'foreign', 'flush of another device\'s conversation throws foreign');
+  eq((await threw(up.flush(crypto.randomUUID()))).code, 'missing', 'flush of a conversation not on this machine throws missing');
+  eq((await threw(up.flush('nope'))).code, 'bad_request', 'flush of a bad id throws');
+  const half = line(repo1);
+  append(jMain, half.slice(0, 30)); // a cut last line is left out of what flush reports
+  const r1b = await up.flush(J.toUpperCase());
+  eq(r1b.size, jWant.length, 'flush: a cut last line is not counted (and an upper-case id works)');
+  append(jMain, half.slice(30));
+
+  // a flush asked for while a scan is mid-way runs next, not at the same time
+  const Kc = newId('Kc'), Lc = newId('Lc'), J2 = newId('J2');
+  const kMain = mainOf(projB, repo1, Kc), lMain = mainOf(projB, repo1, Lc), j2Main = mainOf(projB, repo1, J2);
+  write(kMain, lines(repo1, 60)); write(lMain, lines(repo1, 60)); write(j2Main, lines(repo1, 60));
+  const tn = Date.now() / 1000;
+  fs.utimesSync(kMain, tn + 5, tn + 5); fs.utimesSync(lMain, tn + 4, tn + 4); fs.utimesSync(j2Main, tn - 500, tn - 500);
+  fake.order.length = 0;
+  let flushP = null;
+  fake.onObject = (name) => { if (!flushP && name.includes(`/t/${lc(Kc)}/`)) flushP = up.flush(J2); };
+  await up.scanOnce();
+  fake.onObject = null;
+  const r2 = await flushP;
+  const seq = runs(fake.order.filter((x) => [Kc, Lc, J2].map(lc).includes(x)));
+  eq(seq, [Kc, J2, Lc].map(lc), 'flush mid-scan: the scan finishes the conversation it is on, the flush goes next, then the scan goes on');
+  ok(fake.order.filter((x) => x === lc(Kc)).length > 2, 'flush mid-scan: the scan\'s conversation had several chunks');
+  ok(r2 && r2.size === wholeLines(j2Main).length, 'flush mid-scan: it gives its row');
+  for (const [id, m] of [[Kc, kMain], [Lc, lMain], [J2, j2Main]]) rowMatchesMain(id, m, `mid-scan ${short(id)}`);
+
+  // hold, unhold, held()
+  const H2 = newId('H2');
+  const h2Main = mainOf(projB, repo1, H2);
+  write(h2Main, lines(repo1, 6));
+  ok(up.hold(H2.toUpperCase()), 'hold: takes an id');
+  eq(up.held(), [lc(H2)], 'held(): the held ids, lower-case');
+  await up.scanOnce();
+  ok(!conv(H2) && !objsOf(H2).length, 'hold: a scan uploads nothing of it');
+  eq(up.status().skipped.held, 1, 'hold: counted as held');
+  const r3 = await up.flush(H2);
+  ok(r3.size === wholeLines(h2Main).length && !!conv(H2), 'hold: flush still uploads it');
+  append(h2Main, lines(repo1, 2));
+  const n0 = chunksOf(H2).length;
+  await up.scanOnce();
+  eq(chunksOf(H2).length, n0, 'hold: what it gained after the flush stays here');
+  ok(up.unhold(H2) && up.held().length === 0, 'unhold');
+  await up.scanOnce();
+  rowMatchesMain(H2, h2Main, 'after unhold');
+  // a hold that comes while a scan is sending it: nothing written after
+  const M = newId('M');
+  const mMain = mainOf(projB, repo1, M);
+  write(mMain, lines(repo1, 60));
+  fake.onObject = (name) => { if (name.includes(`/t/${lc(M)}/`)) up.hold(M); };
+  await up.scanOnce();
+  fake.onObject = null;
+  ok(objsOf(M).length === 1 && chunksOf(M).length === 0 && conv(M) && conv(M).size === 0, `hold mid-pass: no write after the hold (${objsOf(M).length} object, ${chunksOf(M).length} rows)`);
+  up.unhold(M);
+  await up.scanOnce();
+  sameAsLocal(M, 'main', mMain, true, 'M after unhold');
+  rowMatchesMain(M, mMain, 'M after unhold');
+
+  // forget: the next pass takes over what the server has
+  ok(upState().conversations[lc(J)], 'forget: J is in up-state.json before');
+  ok(up.forget(J), 'forget');
+  ok(!upState().conversations[lc(J)], 'forget: gone from up-state.json');
+  logs.length = 0;
+  let u0 = fake.uploads;
+  await up.scanOnce();
+  ok(logs.some((l) => l.includes(short(J)) && /took over/.test(l)), 'forget: the next pass took over the server\'s chunks');
+  eq(fake.uploads - u0, 0, 'forget: nothing sent again');
+  rowMatchesMain(J, jMain, 'after forget');
+  // forget while a pass is sending: it stops before its next write and keeps nothing
+  const N = newId('N');
+  const nMain = mainOf(projB, repo1, N);
+  write(nMain, lines(repo1, 60));
+  fake.onObject = (name) => { if (name.includes(`/t/${lc(N)}/`)) up.forget(N); };
+  await up.scanOnce();
+  fake.onObject = null;
+  ok(chunksOf(N).length === 0 && !upState().conversations[lc(N)], `forget mid-pass: no row written after it, nothing kept (${chunksOf(N).length})`);
+  await up.scanOnce();
+  sameAsLocal(N, 'main', nMain, true, 'N after a forget mid-pass');
+  rowMatchesMain(N, nMain, 'N after a forget mid-pass');
+
+  // only()
+  const O1 = newId('O1'), O2 = newId('O2');
+  write(mainOf(projB, repo1, O1), lines(repo1, 3));
+  write(mainOf(projB, repo1, O2), lines(repo1, 3));
+  const upO = make({ only: (id) => id === lc(O1) });
+  await upO.scanOnce();
+  ok(!!conv(O1) && !conv(O2), 'only: just the one it names');
+  eq(upO.status().conversations, 1, 'only: the scan saw one conversation');
+  await upO.stop();
+
+  // lost: the row's owner changes mid-upload, so no chunk goes in after
+  const Q = newId('Q');
+  const qMain = mainOf(projB, repo1, Q);
+  write(qMain, lines(repo1, 80));
+  let flipped = false;
+  fake.onObject = (name) => {
+    if (!flipped && name.includes(`/t/${lc(Q)}/`) && name.endsWith(`/0/1`)) { flipped = true; conv(Q).owner_device = otherDev; tick(21e3); }
+  };
+  logs.length = 0;
+  await up.scanOnce();
+  fake.onObject = null;
+  const qRows = chunksOf(Q);
+  ok(flipped, 'lost: the owner changed mid-upload');
+  ok(qRows.length === 1 && qRows[0].seq === 0, `lost: no chunk row after the change was seen (${qRows.map((r) => r.seq)})`);
+  ok(objsOf(Q).length === 2 && objsOf(Q).every((k) => /\/0\/[01]$/.test(k)), `lost: no object after it (${objsOf(Q).map((k) => k.split('/').pop())})`);
+  ok(conv(Q).owner_device === otherDev && conv(Q).size === 0, 'lost: the row is left as the new owner has it');
+  ok(logs.some((l) => l.includes(short(Q)) && /another device owns it now/.test(l)), 'lost: logged');
+  ok(up.status().skipped.foreign >= 2 && !logs.some((l) => l.includes(short(Q)) && /failed/.test(l)), `lost: counted as another device's, not as a failure (${up.status().skipped.foreign})`);
+  u0 = fake.uploads;
+  append(qMain, lines(repo1, 2));
+  await up.scanOnce();
+  eq(fake.uploads - u0, 0, 'lost: left alone afterwards');
+}
+
 
 main().catch((e) => { failures++; console.log(`FAIL the test threw: ${e && e.stack ? e.stack : e}`); }).finally(() => {
   server.close();
