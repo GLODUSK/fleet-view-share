@@ -735,7 +735,9 @@ const FAMILIES = [22, 44, 152, 192, 262, 330, 8, 212, 120, 288];
 // the PC, /Users/henry/code/x on the Mac)
 const familyBase = (root) => FAMILIES[hashOf(String(root || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop().toLowerCase()) % FAMILIES.length];
 const familyColor = (root, light = 0.68) => hsl(familyBase(root), 0.9, light);
-const shadeOf = (root, id) => { const k = hashOf(id); return hsl(familyBase(root) + ((k % 5) - 2) * 9, 0.82 + (k % 3) * 0.06, 0.6 + ((k >> 3) % 4) * 0.035); };
+// k >>> 3, never k >> 3: k is unsigned, and a signed shift of one over 2^31 is negative, so its lightness fell below
+// the family's (half of all conversations came out darker and deeper, reading as another repo's colour)
+const shadeOf = (root, id) => { const k = hashOf(id); return hsl(familyBase(root) + ((k % 5) - 2) * 6, 0.82 + (k % 3) * 0.06, 0.6 + ((k >>> 3) % 4) * 0.035); };
 
 // A line is a list of segments [text, color, bold?]. Rendering clips to width and pads the rest.
 // Cells keep the terminal's default background, which is the one Windows Terminal blurs with acrylic.
