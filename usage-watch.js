@@ -121,9 +121,13 @@ function createWatch(o = {}) {
     if (pts >= 3) A.ratio = Math.round((usd / pts) * 1000) / 1000;
   }
 
+  // opts.login: who the letter is signed in as. A letter signed in to another login since (the Accounts list's
+  // Switch login, or a remove and add) starts afresh: the old login's climb is not this one's
   function read(a, r0, opts = {}) {
     const t = num(r0 && r0.t) || now();
+    if (opts.login && saved.accounts[a] && saved.accounts[a].login && saved.accounts[a].login !== opts.login) { delete saved.accounts[a]; local.delete(a); }
     const A = acct(a);
+    if (opts.login) A.login = opts.login;
     const r = {
       t, five: num(r0.five), fiveResets: num(r0.fiveResets), week: num(r0.week), weekResets: num(r0.weekResets),
       credits: r0.credits && typeof r0.credits === 'object' ? { used: num(r0.credits.used), limit: num(r0.credits.limit), enabled: !!r0.credits.enabled } : null,

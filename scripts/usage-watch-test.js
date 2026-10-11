@@ -159,6 +159,19 @@ function rig(o = {}) {
   ok(noCred.credits === null, '11e: never had credits: none shown');
 }
 
+// 12. the letter signs in to another login: its history starts afresh, so the new login's meter is no climb
+{
+  const r = rig();
+  const read = (five, login) => { r.w.read('B', { t: r.t, five, fiveResets: r.t + 3600e3, week: 50, breakdown: [] }, { login }); return r.w.view(r.t).B; };
+  read(5, 'u1');
+  r.tick(5, 6);
+  let v = read(60, 'u2');
+  ok(!v.episode && v.bars.length === 0 && v.five.pct === 60, '12a: a new login is not a climb');
+  v = read(61, 'u2');
+  ok(v.five.pct === 61 && !v.episode, '12b: the same login keeps its history');
+  ok(r.w._saved().accounts.B.login === 'u2', '12c: the login is kept');
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

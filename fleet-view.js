@@ -17,6 +17,7 @@ const PREVIEW = require(path.join(__dirname, 'preview.js'));
 const UPDATER = require(path.join(__dirname, 'updater.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
+const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
 
 // ---------- options ----------
 const argv = process.argv.slice(2);
@@ -1232,7 +1233,7 @@ async function readWeekLeft() {
       // five: the 5-hour session limit, which can run out with week left
       if (w && typeof w.utilization === 'number') weekLeft[a] = { ...left(w), five: f && typeof f.utilization === 'number' ? left(f) : null };
       const u = UW.fromEndpoint(j, Date.now());
-      if (u) USAGE.read(a, u, { pending: [...sessions.values()].some((x) => x.usagePending) });
+      if (u) USAGE.read(a, u, { pending: [...sessions.values()].some((x) => x.usagePending), login: loginOf(a) });
       weekDue[a] = Date.now() + (USAGE.suspicious() ? 2 * 60e3 : 5 * 60e3);
     } catch (e) {
       weekDue[a] = Date.now() + (next || 30e3);
@@ -1245,6 +1246,14 @@ async function readWeekLeft() {
 }
 const onlyListed = (o) => Object.fromEntries(Object.entries(o || {}).filter(([a]) => accountsHere().includes(a)));
 const weekNow = (now) =>Object.fromEntries(Object.entries(weekLeft).filter(([, w]) => w && !(w.resets && w.resets < now)));
+// adding, signing in and removing accounts (accounts.js; the Usage card's Accounts list). An account whose folder
+// a live claude runs in (liveFolder), or that a claude pays with (liveAccount), is not removed. A change lists the
+// accounts again at once and reads that account's limits within seconds (readWeekLeft wakes at least every 30 s)
+const ACCTS = ACCOUNTS.createAccounts({
+  log: (t) => logLine(t),
+  liveOn: (a) => [...liveProcs.keys()].filter((id) => liveFolder.get(id) === a || liveAccount.get(id) === a).map((id) => ({ id, name: nameNow(id) || id.slice(0, 8) })),
+  changed: (a) => { acctListAt = 0; delete weekLeft[a]; weekDue[a] = 0; },
+});
 
 function ingestMain(s, recs) {
   for (const { d, raw } of recs) {
@@ -3706,6 +3715,7 @@ function topOf(s, root) {
 // to B's usage, not to a C nobody reads any more, and B's climb isn't taken for use from elsewhere.
 const procAccount = new Map(); // "pid:sessionId" -> account letter | null (unreadable)
 const liveAccount = new Map(); // sessionId -> account letter
+const liveFolder = new Map(); // sessionId -> the account whose folder its claude runs in (an account that pays by /swap aside)
 let procBusy = false;
 const ENV_PS = `$cs = @'
 using System; using System.Runtime.InteropServices; using System.Text;
@@ -3819,17 +3829,20 @@ function accountsFromProcesses() {
   const enc = Buffer.from(ENV_PS, 'utf16le').toString('base64');
   execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', enc], { timeout: 30000, windowsHide: true, env: { ...process.env, FV_PIDS: ask.map(([, p]) => p.pid).join(',') } }, (err, out) => {
     procBusy = false;
-    const got = new Map();
+    const got = new Map(), folderOf = new Map();
     for (const line of String(out || '').split(/\r?\n/)) {
       const [pid, ok, cfg, payer, tok] = line.trim().split('|');
       if (!pid) continue;
-      got.set(+pid, ok !== '1' ? null : /^[a-z]$/i.test(payer || '') ? payer.toUpperCase() : tok === '1' ? 'B' : folderAccount((cfg || '').replace(/[\\/]+$/, '') + '/'));
+      const folder = folderAccount((cfg || '').replace(/[\\/]+$/, '') + '/');
+      got.set(+pid, ok !== '1' ? null : /^[a-z]$/i.test(payer || '') ? payer.toUpperCase() : tok === '1' ? 'B' : folder);
+      if (ok === '1') folderOf.set(+pid, folder);
     }
     for (const [sid, p] of ask) {
       if (!got.has(p.pid) && err) continue; // the helper failed: try again next round
       const a = got.get(p.pid) ?? null;
       procAccount.set(`${p.pid}:${sid}`, a);
       if (a) liveAccount.set(sid, a);
+      if (folderOf.has(p.pid)) liveFolder.set(sid, folderOf.get(p.pid));
     }
   });
 }
@@ -5276,6 +5289,8 @@ function buildState() {
     usage: DEMO ? {} : onlyListed(USAGE.view(now)),
     // the Claude accounts here: B plus one per ~/.claude-<x> folder, sorted (just ['B']: the page shows no letters)
     accounts: DEMO ? ['A', 'B'] : accountsHere(),
+    // every account folder with who it is signed in as, and the sign-ins going on (accounts.js), for the Accounts list
+    accountList: DEMO ? { list: [{ a: 'A', email: 'a@example.com', signedIn: true }, { a: 'B', email: 'b@example.com', signedIn: true }], jobs: {} } : ACCTS.view(),
     alert: al ? { t: al.t, sid: al.s.id, name: nameNow(al.s.id, al.s.name), text: al.text, color: toHex(al.color) } : null,
     hiddenDone: all.filter((s) => (s.state === 'DONE' || s.state === 'IDLE') && inWindow(s, now)).length,
     sessions: out,
@@ -5846,6 +5861,16 @@ function handleRequest(req, res) {
       return readBody(req, res, (b) => {
         if (!b || typeof b.account !== 'string' || typeof b.episode !== 'string') return sendJson(res, 400, { ok: false, message: 'account and episode are needed' });
         sendJson(res, 200, { ok: USAGE.ack(acctId(b.account), b.episode.slice(0, 40)) });
+      });
+    }
+    // the Accounts list: add, sign in again, a code from claude.ai, stop a sign-in, remove. On the PC only: a sign-in
+    // opens this PC's browser
+    if (pathname.startsWith('/accounts/')) {
+      return readBody(req, res, (b) => {
+        if (who.kind !== 'local') return sendJson(res, 403, { ok: false, message: 'accounts can only be changed on the PC' });
+        if (DEMO) return sendJson(res, 200, { ok: false, message: 'demo: no accounts change' });
+        const [code, out] = ACCTS.route(pathname, b || {});
+        sendJson(res, code, out);
       });
     }
     if (pathname === '/settings') {

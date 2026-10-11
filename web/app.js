@@ -1000,7 +1000,9 @@ function drawHeader(v) {
     pill(waiting, 'waiting', C.gold, 'waiting', `${waiting} waiting on you`),
     pill(c.mergedToday ?? 0, 'merged today', C.mint, 'merge', n(c.mergedToday ?? 0, 'PR merged today', 'PRs merged today')),
   ].join('') + (c.cost ? pill(fmtCost(c.cost), 'API cost', C.text, 'cost', `${fmtCost(c.cost)} at API prices, every conversation seen since Fleet View started`) : '')
-    + weekPill(v.week);
+    + weekPill(v.week)
+    // add, switch or remove a Claude account: the Usage card's Accounts list, asking for a new one at once
+    + `<span class="count accts" role="button" tabindex="0" title="Claude accounts: add, switch login or remove"><span class="pill-ic" style="color:${C.cyan}">${icon('plus', 13)}</span><span class="count-k">account</span></span>`;
   if ($('counts')._html !== html) { $('counts').innerHTML = html.replace(/<span class="pill-ic"[^>]*><\/span>/g, ''); $('counts')._html = html; }
 }
 
@@ -2842,10 +2844,20 @@ const since = mountSince({ fetchJson: getJson, onPick: (id) => pickFromAnywhere(
 $('since-btn')?.addEventListener('click', (e) => { e.stopPropagation(); since.toggle(); });
 
 // ---------- plan usage: this PC vs. elsewhere (usage.js; usage-watch.js on the server) ----------
-usageUi = mountUsage({ post, notifyOn: () => local.notify !== false, focusWindow: () => window.fleetDesktop?.focus?.() });
+usageUi = mountUsage({
+  post, notifyOn: () => local.notify !== false, focusWindow: () => window.fleetDesktop?.focus?.(),
+  // the Accounts list: read /state again soon after a change, and end this window's sessions on an account it removes
+  refreshSoon: () => { setTimeout(poll, 400); setTimeout(poll, 2500); }, isHosted,
+  endSessions: (ids) => { for (const id of ids) if (isHosted(id)) endSession(id); },
+});
 if (state) usageUi.update(state);
-$('counts')?.addEventListener('click', (e) => { if (e.target.closest('.count.week')) { e.stopPropagation(); usageUi.toggle(); } });
-$('counts')?.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('.count.week')) { e.preventDefault(); usageUi.toggle(); } });
+const usagePill = (e) => {
+  if (e.target.closest('.count.week')) { usageUi.toggle(); return true; }
+  if (e.target.closest('.count.accts')) { if (usageUi.isOpen()) usageUi.close(); else usageUi.openAccounts(); return true; }
+  return false;
+};
+$('counts')?.addEventListener('click', (e) => { if (usagePill(e)) e.stopPropagation(); });
+$('counts')?.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && usagePill(e)) e.preventDefault(); });
 
 // ---------- "Update available" (update.js; updater.js on the server) ----------
 if (!FIXTURE) mountUpdate({ pill: $('update-pill'), verBtn: $('ver-btn'), getJson });
