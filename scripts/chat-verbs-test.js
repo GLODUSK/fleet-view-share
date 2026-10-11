@@ -47,6 +47,64 @@ const RULE = '─'.repeat(40);
   ok('screen.js: promptBox, spinner and effortShown read what compose.js reads');
 }
 
+// ---------- menus: 2.1.296's unnumbered trust question, the older numbered one ----------
+// the raw pty output of Claude Code 2.1.296's folder trust question on the Mac (cols 120): every space drawn as a
+// move to a column (CSI n G), "No, exit" first with the ❯ on it, no numbers
+const TRUST_RAW = "\u001b7\u001b[r\u001b8\u001b[?25h\u001b[?25l\u001b[?2004h\u001b[?2031h\u001b[?1004h\r\r\n\u001b[38;2;255;193;7m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\u001b[39m\r\r\n\u001b[2G\u001b[38;2;255;193;7m\u001b[1mAccessing\u001b[12Gworkspace:\u001b[22m\u001b[39m\r\r\n\r\r\n\u001b[2G\u001b[1m/Users/henry/code/fleet-view\u001b[22m\r\r\n\r\r\n\u001b[2GQuick\u001b[8Gsafety\u001b[15Gcheck:\u001b[22GIs\u001b[25Gthis\u001b[30Ga\u001b[32Gproject\u001b[40Gyou\u001b[44Gcreated\u001b[52Gor\u001b[55Gone\u001b[59Gyou\u001b[63Gtrust?\u001b[70G(Like\u001b[76Gyour\u001b[81Gown\u001b[85Gcode,\u001b[91Ga\u001b[93Gwell-known\u001b[104Gopen\u001b[109Gsource\r\r\n\u001b[2Gproject,\u001b[11Gor\u001b[14Gwork\u001b[19Gfrom\u001b[24Gyour\u001b[29Gteam).\u001b[36GIf\u001b[39Gnot,\u001b[44Gtake\u001b[49Ga\u001b[51Gmoment\u001b[58Gto\u001b[61Greview\u001b[68Gwhat's\u001b[75Gin\u001b[78Gthis\u001b[83Gfolder\u001b[90Gfirst.\r\r\n\r\r\n\u001b[2GClaude\u001b[9GCode'll\u001b[17Gbe\u001b[20Gable\u001b[25Gto\u001b[28Gread,\u001b[34Gedit,\u001b[40Gand\u001b[44Gexecute\u001b[52Gfiles\u001b[58Ghere.\r\r\n\r\r\n\u001b[2G\u001b[38;2;153;153;153mSecurity\u001b[11Gguide\u001b[39m\r\r\n\r\r\n\u001b[2G\u001b[38;2;177;185;249m❯\u001b[4GNo,\u001b[8Gexit\u001b[39m\r\r\n\u001b[4GYes,\u001b[9GI\u001b[11Gtrust\u001b[17Gthis\u001b[22Gfolder\r\r\n\r\r\n\u001b[2G\u001b[38;2;153;153;153mEnter\u001b[8Gto\u001b[11Gconfirm\u001b[19G·\u001b[21GEsc\u001b[25Gto\u001b[28Gcancel\u001b[39m\r\r\n\u001b[1C\u001b[4A\u001b[>0q\u001b[?u\u001b]7501;?\u0007\u001b[c";
+// the same with the ❯ moved down to "Yes, I trust this folder"
+const TRUST_RAW_YES = TRUST_RAW.replace('\x1b[2G\x1b[38;2;177;185;249m❯\x1b[4GNo,\x1b[8Gexit\x1b[39m\r\r\n\x1b[4GYes,',
+  '\x1b[4GNo,\x1b[8Gexit\r\r\n\x1b[2G\x1b[38;2;177;185;249m❯\x1b[4GYes,');
+{
+  assert.notEqual(TRUST_RAW_YES, TRUST_RAW);
+  const m = SCREEN.menuDetailsShown(TRUST_RAW, 120, 30);
+  assert.ok(m, 'the unnumbered trust question reads as a menu');
+  assert.equal(m.kind, 'trust');
+  assert.equal(m.unnumbered, true);
+  assert.equal(m.title, 'Quick safety check: Is this a project you created or one you trust?');
+  assert.ok(m.context.includes('/Users/henry/code/fleet-view'));
+  assert.deepEqual(m.options.map(({ n, label, on }) => ({ n, label, on })), [{ n: 1, label: 'No, exit', on: true }, { n: 2, label: 'Yes, I trust this folder', on: false }]);
+  assert.ok(SCREEN.menuShown(TRUST_RAW, 120, 30));
+  const y = SCREEN.menuDetailsShown(TRUST_RAW_YES, 120, 30);
+  assert.equal(y.kind, 'trust');
+  assert.deepEqual(y.options.map((o) => o.on), [false, true]);
+  assert.notEqual(y.sig, m.sig, 'the sig changes when the pointer moves');
+  // a narrower panel: the question wraps onto more rows, the menu still reads
+  assert.equal(SCREEN.menuDetailsShown(TRUST_RAW, 80, 30)?.kind, 'trust');
+
+  // a reply that merely has a "❯ something" line over another indented line, no keys line: not a menu
+  assert.equal(SCREEN.menuDetails(['● Here is the layout:', '', '  ❯ First thing', '    Second thing', '', RULE, '❯ ', RULE, '  ? for shortcuts']), null);
+  assert.equal(SCREEN.menuDetails(['● Steps:', '  ❯ No, exit', '    Yes, I trust this folder', '', '  that is all']), null);
+  // the keys line too far under them, two pointers, or the options at two indentations: not a menu
+  assert.equal(SCREEN.menuDetails([RULE, ' Pick', '', ' ❯ One', '   Two', '', '', '', ' Enter to confirm · Esc to cancel']), null);
+  assert.equal(SCREEN.menuDetails([RULE, ' Pick', '', ' ❯ One', ' ❯ Two', '', ' Enter to confirm · Esc to cancel']), null);
+  assert.equal(SCREEN.menuDetails([RULE, ' Pick', '', ' ❯ One', '     Two', '', ' Enter to confirm · Esc to cancel']), null);
+  // a list in a command's panel (its ▔ edge above): the panel's, not a menu
+  assert.equal(SCREEN.menuDetails(['▔'.repeat(40), ' Theme', '', ' ❯ Dark mode', '   Light mode', '', ' ↑/↓ to navigate · Enter to select · Esc to cancel']), null);
+  // the prompt box holding a typed "Enter to confirm": not a menu
+  assert.equal(SCREEN.menuDetails(['done.', RULE, '❯ No, exit', '  Yes', '  Enter to confirm', RULE, '  ? for shortcuts']), null);
+  // an unnumbered menu not about trust is never a question (only a question is answered without allowPermission)
+  const other = SCREEN.menuDetails([RULE, ' Pick a colour', '', ' ❯ Type something.', '   Chat about this', '', ' Enter to select · Esc to cancel']);
+  assert.equal(other.kind, 'other');
+  assert.ok(other.options.every((o) => !o.free));
+
+  // the older numbered trust question still reads as before
+  const old = SCREEN.menuDetails([RULE, ' Do you trust the files in this folder?', '', ' /Users/henry/code/fleet-view', '',
+    ' Claude Code may read, write, or execute files contained in this directory. This can pose security risks.', '',
+    ' ❯ 1. Yes, proceed', '   2. No, exit', '', ' Enter to confirm · Esc to exit']);
+  assert.equal(old.kind, 'trust');
+  assert.equal(old.title, 'Do you trust the files in this folder?');
+  assert.equal(old.unnumbered, undefined);
+  assert.deepEqual(old.options.map(({ n, label, on }) => ({ n, label, on })), [{ n: 1, label: 'Yes, proceed', on: true }, { n: 2, label: 'No, exit', on: false }]);
+
+  // tail text: a move to a column on the Mac turned into the spaces it skips
+  const plain = API.plainText(TRUST_RAW);
+  assert.ok(plain.includes(' Yes, I trust this folder'), plain);
+  assert.ok(plain.includes(' Quick safety check: Is this a project you created or one you trust?'));
+  assert.ok(plain.includes(' Enter to confirm · Esc to cancel'));
+  assert.equal(API.plainText('ab\x1b[5Gc\x1b[2Gd\r\n\x1b[3Ge\x1b[2Cf'), 'ab  cd\n  e  f');
+  ok('screen.js: the unnumbered trust question (kind, title, pointer, sig), not a reply, the numbered one as before; plainText\'s CSI G');
+}
+
 // ---------- the fake session host ----------
 const fake = { list: [], screen: '', writes: [], onWrite: null };
 const screenOf = (rows) => rows.join('\r\n');
@@ -344,6 +402,53 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     assert.equal(o3.defaultKept, true);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { ...start, other: 1 });
     ok('model: "Switch model?" answered Yes; another menu closed (409); the default put back after a late save');
+  }
+
+  // ---------- answer: the unnumbered trust question ----------
+  {
+    // compose.js's parseMenu reads it the same (everything but kind)
+    const { parseMenu } = await import('../web/compose.js');
+    for (const raw of [TRUST_RAW, TRUST_RAW_YES]) {
+      const rows = SCREEN.render(raw, 120, 30, 40, false);
+      const { kind, ...rest } = SCREEN.menuDetails(rows);
+      assert.equal(kind, 'trust');
+      assert.deepEqual(parseMenu(rows), rest);
+    }
+    assert.equal(parseMenu(['● Steps:', '  ❯ No, exit', '    Yes, I trust this folder', '', '  that is all']), null);
+
+    reset(); live({ status: 'waiting', waitingFor: 'trust', cols: 120, rows: 30 });
+    fake.screen = TRUST_RAW;
+    const [c0, o0] = await call('GET', `${S}/menu`);
+    assert.equal(c0, 200, o0.message);
+    assert.equal(o0.menu.kind, 'trust');
+    assert.equal(o0.menu.unnumbered, true);
+    // trust still needs allowPermission
+    const [c1, o1] = await call('POST', `${S}/answer`, { option: 2 });
+    assert.equal(c1, 403, o1.message);
+    assert.deepEqual(fake.writes, []);
+    // picked with ↓ and Enter, never a digit
+    fake.onWrite = (w) => {
+      if (w === '\x1b[B') fake.screen = TRUST_RAW_YES;
+      else if (w === '\r' && fake.screen === TRUST_RAW_YES) fake.screen = screenOf(['', ...box()]);
+    };
+    const [c2, o2] = await call('POST', `${S}/answer`, { option: 2, sig: o0.menu.sig, allowPermission: true });
+    assert.equal(c2, 200, o2.message);
+    assert.deepEqual(fake.writes, ['\x1b[B', '\r']);
+    assert.deepEqual(o2.answered, { n: 2, label: 'Yes, I trust this folder' });
+    assert.equal(o2.changed, true);
+    // the ❯ on it already: Enter alone
+    reset(); fake.screen = TRUST_RAW_YES;
+    fake.onWrite = (w) => { if (w === '\r') fake.screen = screenOf(['', ...box()]); };
+    const [c3, o3] = await call('POST', `${S}/answer`, { option: 2, allowPermission: true });
+    assert.equal(c3, 200, o3.message);
+    assert.deepEqual(fake.writes, ['\r']);
+    // Enter that does nothing after the pointer moved: not reported as a change
+    reset(); fake.screen = TRUST_RAW;
+    fake.onWrite = (w) => { if (w === '\x1b[B') fake.screen = TRUST_RAW_YES; };
+    const [c4, o4] = await call('POST', `${S}/answer`, { option: 2, allowPermission: true });
+    assert.equal(c4, 200, o4.message);
+    assert.equal(o4.changed, false);
+    ok('answer: the unnumbered trust question picked with ↓ and Enter (no digit), only with allowPermission; parseMenu agrees');
   }
 
   // ---------- Fleet View's own queue ----------

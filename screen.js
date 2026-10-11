@@ -13,7 +13,9 @@
 //   render(raw, cols, rows, lastN = 40, join = true) -> [line]  the last lastN lines (soft-wrapped rows joined
 //                                                   unless join is false, blank rows at the bottom dropped), like
 //                                                   term.js screenText
-//   menuDetails(lines) -> { kind, title, context, more, options: [{ n, label, desc, on }], sig } | null
+//   menuDetails(lines) -> { kind, title, context, more, options: [{ n, label, desc, on }], sig, unnumbered? } | null
+//                                                   (unnumbered: options drawn without numbers, numbered 1..k here;
+//                                                   pick one with ↑/↓ and Enter, a digit does nothing)
 //   menuDetailsShown(raw, cols, rows) -> the same, from raw output (its rows unjoined)
 //   menuIn(lines) -> { options: [{ n, label, on }] } | null   (menuDetails, cut down)
 //   menuShown(raw, cols, rows) -> the same, from raw output
@@ -215,11 +217,44 @@ function promptBoxAt(L, i) {
   }
   return false;
 }
+// A menu drawn without numbers: Claude Code 2.1.296's folder trust question ("❯ No, exit" over "  Yes, I trust this
+// folder", then "Enter to confirm · Esc to cancel"). Read strictly, so a reply's text never reads as one: two or more
+// lines in a row at one indentation, the ❯ two columns left of exactly one of their labels, and the keys line within
+// 3 lines under them. -> its options numbered 1..k in screen order (like OPT_RE's), or null
+const PLAIN_KEYS = /\bEnter to (?:confirm|select)\b/i;
+function plainRun(L, raw, start) {
+  let h = L.length - 1;
+  while (h >= start && !PLAIN_KEYS.test(L[h])) h--;
+  if (h < start) return null;
+  let e = h - 1;
+  while (e >= Math.max(start, h - 3) && !L[e].trim()) e--;
+  if (e < Math.max(start, h - 3)) return null;
+  // one line as an option: its label's column, and whether the ❯ is on it
+  const row = (l) => {
+    if (OPT_RE.test(l) || isRule(l) || isBoxEdge(l) || PLAIN_KEYS.test(l)) return null;
+    const p = /^(\s*)[❯›] (\S.*?)\s*$/.exec(l);
+    if (p) return { col: p[1].length + 2, on: true, label: p[2] };
+    const q = /^( +)([^\s❯›].*?)\s*$/.exec(l);
+    return q ? { col: q[1].length, on: false, label: q[2] } : null;
+  };
+  const got = [];
+  const col = row(L[e])?.col;
+  for (let i = e; i >= start && got.length < 20; i--) {
+    const r = row(L[i]);
+    if (!r || r.col !== col) break;
+    got.unshift({ i, on: r.on, label: r.label, col, boxed: /^\s*[│┃]/.test(raw[i]) });
+  }
+  if (got.length < 2 || got.filter((o) => o.on).length !== 1) return null;
+  // a list in a command's panel (its ▔ edge above, no rule between): the panel reader's, not a menu
+  for (let i = got[0].i - 1; i >= start && !isRule(L[i]); i--) if (/^\s*▔{12,}\s*$/.test(L[i])) return null;
+  return got.map((o, x) => ({ ...o, n: x + 1 }));
+}
 
 // What kind of menu it is, so a caller can tell a question it may answer from a tool call it must not approve:
 //   'question'   AskUserQuestion: its tab bar (☐ / ☒ / ✔ Submit), its "Type something." / "Chat about this"
 //                options, or its last step ("Ready to submit your answers?")
-//   'trust'      the folder trust question at startup
+//   'trust'      the folder trust question at startup ("Do you trust the files in this folder?", and 2.1.296's
+//                "Accessing workspace: … Is this a project you created or one you trust?" with "Yes, I trust this folder")
 //   'plan'       the plan approval ("Would you like to proceed?" with auto-accept edits / keep planning)
 //   'permission' a tool's permission prompt ("Do you want to proceed?", "Do you want to make this edit to x?",
 //                "Do you want to create x?", or a "Yes, and don't ask again" / "Yes, allow" option)
@@ -229,7 +264,8 @@ function kindOf(title, context, options, above) {
   const labels = options.map((o) => o.label);
   const all = [title, ...context].join('\n');
   // permission, plan and trust first: a question is the one kind answered without allowPermission, so a doubt fails closed
-  if (/trust the files in this folder|do you trust/i.test(all)) return 'trust';
+  if (/trust the files in this folder|do you trust|a project you created or one you trust|^\s*Accessing workspace:/im.test(all)
+    || labels.some((l) => /\btrust this folder\b/i.test(l))) return 'trust';
   if (/would you like to proceed\?/i.test(title)
     && (labels.some((l) => /auto-accept|keep planning|manually approve|bypass permissions|clear context/i.test(l)) || /\bplan\b/i.test(all))) return 'plan';
   if (/^Do you want to (?:proceed|make this edit|create|allow|run|write|delete|overwrite|fetch|use)\b/i.test(title)
@@ -243,11 +279,12 @@ function kindOf(title, context, options, above) {
 
 // A select menu at the bottom of the screen: Claude Code's permission prompts, AskUserQuestion, the plan
 // approval, the folder trust question. Only when at least two options numbered one after another sit in the last
-// ~30 non-empty lines and one of them carries the ❯ pointer; the prompt box (❯ under a rule, where a typed
+// ~30 non-empty lines and one of them carries the ❯ pointer (or, with none numbered, an unnumbered menu as plainRun
+// reads it: its options are numbered 1..k here and it is marked unnumbered); the prompt box (❯ under a rule, where a typed
 // "1. … 2. …" list would look the same) and a menu with the prompt drawn under it are not menus. Read it over the
 // rows as drawn (render(..., join = false)): joined soft-wrapped rows hide a narrow panel's menu.
-// -> { kind, title, context: [lines], more, options: [{ n, label, desc, on, check?, free? }], submit, sig } or null;
-// everything but kind is exactly what parseMenu gives for the same lines
+// -> { kind, title, context: [lines], more, options: [{ n, label, desc, on, check?, free? }], submit, sig, unnumbered? }
+// or null; everything but kind is exactly what parseMenu gives for the same lines
 function menuDetails(lines) {
   const raw = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
   const L = raw.map(unbox);
@@ -269,6 +306,9 @@ function menuDetails(lines) {
     else { close(); cur = [o]; }
   }
   close();
+  // none numbered: one drawn without numbers (2.1.296's trust question), picked with ↑/↓ and Enter, never a digit
+  let unnumbered = false;
+  if (!run && (run = plainRun(L, raw, start))) unnumbered = true;
   if (!run) return null;
   const first = run[0], last = run[run.length - 1];
   let k = first.i - 1;
@@ -286,7 +326,7 @@ function menuDetails(lines) {
     const label = o.label.replace(PREVIEW_RE, '').replace(/\s+/g, ' ');
     const box = CHECK_RE.exec(label);
     const desc = [];
-    for (let j = o.i + 1; j < end; j++) {
+    for (let j = unnumbered ? end : o.i + 1; j < end; j++) {
       const l = L[j];
       if (!l.trim() || isRule(l) || isPreview(l)) continue;
       const sm = box && SUBMIT_RE.exec(l);
@@ -298,7 +338,7 @@ function menuDetails(lines) {
     if (box) opt.check = box[1] !== ' ';
     return opt;
   });
-  options.forEach((o, x) => { if (FREE_RE.test(o.label) || /^chat about this$/i.test(options[x + 1]?.label || '')) o.free = true; });
+  if (!unnumbered) options.forEach((o, x) => { if (FREE_RE.test(o.label) || /^chat about this$/i.test(options[x + 1]?.label || '')) o.free = true; });
   // the title: the line above the first option; the context: what's above it, up to the dialog's top
   let title = '';
   if (k >= 0 && !isRule(L[k]) && !isBoxEdge(L[k]) && !OPT_RE.test(L[k])) { title = L[k].trim(); k--; }
@@ -320,6 +360,15 @@ function menuDetails(lines) {
     if (title) ctx.push(pad + title);
     title = q;
   }
+  // an unnumbered menu's question can end mid-line ("Quick safety check: Is this a project you created or one you
+  // trust? (Like your own code, …"): the title is up to its "?", the rest of the line stays in the context
+  const qm = unnumbered && qi < 0 && !/\?$/.test(title) ? ctx.map((l) => /\?\s/.test(l)).lastIndexOf(true) : -1;
+  if (qm >= 0) {
+    const l = ctx[qm], pad = l.match(/^\s*/)[0], cut = l.search(/\?\s/) + 1, rest = l.slice(cut).trim();
+    if (rest) ctx[qm] = pad + rest; else ctx.splice(qm, 1);
+    if (title) ctx.push(pad + title);
+    title = l.slice(0, cut).trim();
+  }
   while (ctx.length && !ctx[0].trim()) ctx.shift();
   while (ctx.length && !ctx[ctx.length - 1].trim()) ctx.pop();
   const squeezed = ctx.filter((l, x) => l.trim() || (ctx[x - 1] || '').trim()); // no two blank lines in a row
@@ -327,8 +376,11 @@ function menuDetails(lines) {
   const context = squeezed.map((l) => l.slice(Math.min(ind, l.match(/^\s*/)[0].length)));
   const more = context.length > 8;
   const sig = JSON.stringify([title, options.map((o) => [o.n, o.label, o.on, o.check ?? null]), submit && submit.on]);
-  const kind = kindOf(title, context, options, L.slice(Math.max(0, top - 3), Math.min(first.i, top + 3)));
-  return { kind, title, context: context.slice(0, 8), more, options, submit, sig };
+  let kind = kindOf(title, context, options, L.slice(Math.max(0, top - 3), Math.min(first.i, top + 3)));
+  if (unnumbered && kind === 'question') kind = 'other'; // AskUserQuestion is always numbered: fail closed
+  const out = { kind, title, context: context.slice(0, 8), more, options, submit, sig };
+  if (unnumbered) out.unnumbered = true;
+  return out;
 }
 
 // the test for "a menu is up" (api.js before typing, the host before its auto-continue note): menuDetails, cut down

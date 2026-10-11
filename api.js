@@ -378,9 +378,21 @@ async function afterSend(host, id, sentAt, before, ms, ctx, gone, o = {}) {
 
 // terminal output as plain text: escape sequences gone, carriage returns made new lines
 function plainText(s) {
+  let col = 0; // the column since the last line break, for a move to a column
   return String(s || '')
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC (titles, links)
-    .replace(/\x1b\[(\d*)C/g, (_, n) => ' '.repeat(Math.min(200, Number(n) || 1))) // cursor forward: the spaces it skips
+    // cursor forward (CSI n C), and to column n (CSI n G: Claude Code on the Mac draws every space that way): the
+    // spaces they skip on the line; a move left draws nothing
+    .replace(/\x1b\[(\d*)([CG])|\x1b\[[0-?]*[ -/]*[@-~]|\r\n?|\n|[^\x1b\r\n]+/g, (t, n, f) => {
+      if (f) {
+        const k = f === 'C' ? Math.min(200, Number(n) || 1) : Math.max(0, Math.min(1000, Number(n) || 1) - 1 - col);
+        col += k;
+        return ' '.repeat(k);
+      }
+      if (t[0] === '\x1b') return t;
+      if (t[0] === '\r' || t[0] === '\n') col = 0; else col += t.length;
+      return t;
+    })
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '') // CSI (colours, other cursor moves)
     .replace(/\x1b[PX^_][\s\S]*?\x1b\\/g, '') // DCS and the like
     .replace(/\x1b[@-_]/g, '')
@@ -1367,8 +1379,9 @@ async function readMenu(key) {
 // recognised) is answered only with allowPermission: an orchestrator must never approve a tool call by accident. option "esc" presses Esc once (it cancels the menu). text goes with
 // an AskUserQuestion's "Type something." option (o.free): the pointer onto it, what it holds cleared, the text pasted,
 // then Enter (in a multiple-choice question no Enter: that would untick it). Any other option is its digit (Claude
-// Code picks it at once; in a multiple-choice question it ticks or unticks it), or ↑/↓ to it and Enter past 9 or
-// while the pointer is on "Type something" (a digit would be typed into it). "submit": a multiple-choice question's
+// Code picks it at once; in a multiple-choice question it ticks or unticks it), or ↑/↓ to it and Enter past 9,
+// while the pointer is on "Type something" (a digit would be typed into it), or in a menu drawn without numbers
+// (m.unnumbered: 2.1.296's trust question, where a digit does nothing). "submit": a multiple-choice question's
 // Submit row. Then up to ANSWER_MS for the menu to
 // change; with wait, once no menu is left, the turn is waited on like a message's.
 async function answerMenu(key, b, ctx, gone, via = null) {
@@ -1428,7 +1441,7 @@ async function answerMenu(key, b, ctx, gone, via = null) {
       await host.call('write', p.id, (to > from ? '\x1b[B' : '\x1b[A').repeat(Math.abs(to - from)));
       return settle(at);
     };
-    let answered;
+    let answered, before = m;
     if (esc) {
       await host.call('write', p.id, '\x1b');
       answered = 'esc';
@@ -1449,7 +1462,7 @@ async function answerMenu(key, b, ctx, gone, via = null) {
         // onto it: its digit in a one-answer question (a digit there only moves the pointer), ↑/↓ in a
         // multiple-choice one (a digit there ticks it)
         let at = opt.on ? m : null;
-        if (!at && !multi && opt.n <= 9 && !onFree) {
+        if (!at && !multi && opt.n <= 9 && !onFree && !m.unnumbered) {
           await host.call('write', p.id, String(opt.n));
           at = await settle((x) => x.options.some((o) => o.free && o.on));
         } else if (!at) at = await pointTo(opt.n);
@@ -1470,24 +1483,27 @@ async function answerMenu(key, b, ctx, gone, via = null) {
           const sent = await sendText(host, p.id, text, notQuestion);
           if (!sent.entered) return [409, { ok: false, id: p.id, message: 'the question went away before Enter: the text was pasted (it may sit in its prompt box) but not sent' }];
         }
-      } else if (opt.n <= 9 && !onFree) await host.call('write', p.id, String(opt.n));
+      } else if (opt.n <= 9 && !onFree && !m.unnumbered) await host.call('write', p.id, String(opt.n));
       else {
-        // two digits would pick the first at once: move the pointer instead, then Enter
-        if (!(await pointTo(opt.n))) return [409, { ok: false, id: p.id, menu: await menuNow(host, p), message: 'the pointer did not reach that option: nothing was picked' }];
+        // two digits would pick the first at once, and a menu without numbers takes none: move the pointer
+        // instead, then Enter
+        const at = await pointTo(opt.n);
+        if (!at) return [409, { ok: false, id: p.id, menu: await menuNow(host, p), message: 'the pointer did not reach that option: nothing was picked' }];
+        before = at; // the pointer moved the sig: the answer shows as a change from this one
         await host.call('write', p.id, '\r');
       }
       answered = { n: opt.n, label: opt.label };
     }
     const at = Date.now();
-    let next = m;
+    let next = before;
     for (const end = at + ANSWER_MS; Date.now() < end;) {
       await sleep(POLL_MS / 2);
       const q = hosted(await host.call('list'), p.id);
       if (!q || !q.alive) { next = null; break; }
       next = await menuNow(host, q);
-      if (!next || next.sig !== m.sig) break;
+      if (!next || next.sig !== before.sig) break;
     }
-    const changed = !next || next.sig !== m.sig;
+    const changed = !next || next.sig !== before.sig;
     const out = { ok: true, id: p.id, answered, changed, next };
     if (!ms) return [200, { ...out, message: changed ? 'answered' : 'answered, but the menu has not changed yet' }];
     if (!changed) return [200, { ...out, done: false, message: 'answered, but the answer did not register: the menu is unchanged' }];

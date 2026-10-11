@@ -190,6 +190,38 @@ function promptBoxAt(L, i) {
   }
   return false;
 }
+// A menu drawn without numbers: Claude Code 2.1.296's folder trust question ("❯ No, exit" over "  Yes, I trust this
+// folder", then "Enter to confirm · Esc to cancel"). Read strictly, so a reply's text never reads as one: two or more
+// lines in a row at one indentation, the ❯ two columns left of exactly one of their labels, and the keys line within
+// 3 lines under them. -> its options numbered 1..k in screen order (like OPT_RE's), or null
+const PLAIN_KEYS = /\bEnter to (?:confirm|select)\b/i;
+function plainRun(L, raw, start) {
+  let h = L.length - 1;
+  while (h >= start && !PLAIN_KEYS.test(L[h])) h--;
+  if (h < start) return null;
+  let e = h - 1;
+  while (e >= Math.max(start, h - 3) && !L[e].trim()) e--;
+  if (e < Math.max(start, h - 3)) return null;
+  // one line as an option: its label's column, and whether the ❯ is on it
+  const row = (l) => {
+    if (OPT_RE.test(l) || isRule(l) || isBoxEdge(l) || PLAIN_KEYS.test(l)) return null;
+    const p = /^(\s*)[❯›] (\S.*?)\s*$/.exec(l);
+    if (p) return { col: p[1].length + 2, on: true, label: p[2] };
+    const q = /^( +)([^\s❯›].*?)\s*$/.exec(l);
+    return q ? { col: q[1].length, on: false, label: q[2] } : null;
+  };
+  const got = [];
+  const col = row(L[e])?.col;
+  for (let i = e; i >= start && got.length < 20; i--) {
+    const r = row(L[i]);
+    if (!r || r.col !== col) break;
+    got.unshift({ i, on: r.on, label: r.label, col, boxed: /^\s*[│┃]/.test(raw[i]) });
+  }
+  if (got.length < 2 || got.filter((o) => o.on).length !== 1) return null;
+  // a list in a command's panel (its ▔ edge above, no rule between): the panel reader's, not a menu
+  for (let i = got[0].i - 1; i >= start && !isRule(L[i]); i--) if (/^\s*▔{12,}\s*$/.test(L[i])) return null;
+  return got.map((o, x) => ({ ...o, n: x + 1 }));
+}
 
 // The spinner line while Claude works, e.g. "✻ Brewing… (12s · ↓ 1.2k tokens · esc to interrupt)", whose
 // parentheses may run onto the next line when the screen is narrow. -> { verb, detail, strong } or null.
@@ -235,11 +267,13 @@ export function parseMode(lines) {
 // A select menu at the bottom of the screen: Claude Code's permission prompts ("Do you want to proceed?",
 // "Do you want to make this edit to x?"), AskUserQuestion, the plan approval ("Would you like to proceed?"),
 // the folder trust question. Only when at least two options numbered one after another sit in the last ~30
-// non-empty lines and one of them carries the ❯ pointer; the prompt box (❯ under a rule, where a typed
-// "1. … 2. …" list would look the same) and a menu with the prompt drawn under it are not menus.
-// -> { title, context: [lines], more, options: [{ n, label, desc, on, check?, free? }], submit, sig } or null.
+// non-empty lines and one of them carries the ❯ pointer (or, with none numbered, an unnumbered menu as plainRun
+// reads it); the prompt box (❯ under a rule, where a typed "1. … 2. …" list would look the same) and a menu with
+// the prompt drawn under it are not menus.
+// -> { title, context: [lines], more, options: [{ n, label, desc, on, check?, free? }], submit, sig, unnumbered? } or null.
 // check: a multiple-choice option's box (true ticked); free: the option that takes typed text; submit: { on } for
-// a multiple-choice question's Submit row, else null
+// a multiple-choice question's Submit row, else null; unnumbered: drawn without numbers (numbered 1..k here), so a
+// digit picks nothing: ↑/↓ to the option, then Enter
 export function parseMenu(lines) {
   const raw = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
   const L = raw.map(unbox);
@@ -261,6 +295,9 @@ export function parseMenu(lines) {
     else { close(); cur = [o]; }
   }
   close();
+  // none numbered: one drawn without numbers (2.1.296's trust question), picked with ↑/↓ and Enter, never a digit
+  let unnumbered = false;
+  if (!run && (run = plainRun(L, raw, start))) unnumbered = true;
   if (!run) return null;
   const first = run[0], last = run[run.length - 1];
   let k = first.i - 1;
@@ -278,7 +315,7 @@ export function parseMenu(lines) {
     const label = o.label.replace(PREVIEW_RE, '').replace(/\s+/g, ' ');
     const box = CHECK_RE.exec(label);
     const desc = [];
-    for (let j = o.i + 1; j < end; j++) {
+    for (let j = unnumbered ? end : o.i + 1; j < end; j++) {
       const l = L[j];
       if (!l.trim() || isRule(l) || isPreview(l)) continue;
       const sm = box && SUBMIT_RE.exec(l);
@@ -290,7 +327,7 @@ export function parseMenu(lines) {
     if (box) opt.check = box[1] !== ' ';
     return opt;
   });
-  options.forEach((o, x) => { if (FREE_RE.test(o.label) || /^chat about this$/i.test(options[x + 1]?.label || '')) o.free = true; });
+  if (!unnumbered) options.forEach((o, x) => { if (FREE_RE.test(o.label) || /^chat about this$/i.test(options[x + 1]?.label || '')) o.free = true; });
   // the title: the line above the first option; the context: what's above it, up to the dialog's top
   let title = '';
   if (k >= 0 && !isRule(L[k]) && !isBoxEdge(L[k]) && !OPT_RE.test(L[k])) { title = L[k].trim(); k--; }
@@ -310,6 +347,15 @@ export function parseMenu(lines) {
     if (title) ctx.push(pad + title);
     title = q;
   }
+  // an unnumbered menu's question can end mid-line ("Quick safety check: Is this a project you created or one you
+  // trust? (Like your own code, …"): the title is up to its "?", the rest of the line stays in the context
+  const qm = unnumbered && qi < 0 && !/\?$/.test(title) ? ctx.map((l) => /\?\s/.test(l)).lastIndexOf(true) : -1;
+  if (qm >= 0) {
+    const l = ctx[qm], pad = l.match(/^\s*/)[0], cut = l.search(/\?\s/) + 1, rest = l.slice(cut).trim();
+    if (rest) ctx[qm] = pad + rest; else ctx.splice(qm, 1);
+    if (title) ctx.push(pad + title);
+    title = l.slice(0, cut).trim();
+  }
   while (ctx.length && !ctx[0].trim()) ctx.shift();
   while (ctx.length && !ctx[ctx.length - 1].trim()) ctx.pop();
   const squeezed = ctx.filter((l, x) => l.trim() || (ctx[x - 1] || '').trim()); // no two blank lines in a row
@@ -317,7 +363,9 @@ export function parseMenu(lines) {
   const context = squeezed.map((l) => l.slice(Math.min(ind, l.match(/^\s*/)[0].length)));
   const more = context.length > 8;
   const sig = JSON.stringify([title, options.map((o) => [o.n, o.label, o.on, o.check ?? null]), submit && submit.on]);
-  return { title, context: context.slice(0, 8), more, options, submit, sig };
+  const out = { title, context: context.slice(0, 8), more, options, submit, sig };
+  if (unnumbered) out.unnumbered = true;
+  return out;
 }
 
 // A command's panel: what /usage, /status, /config, /help, /mcp, /permissions, /theme, /resume and the like draw
@@ -1532,9 +1580,9 @@ export function mountCompose(slot, s) {
     const o = now.options.find((x) => x.n === n);
     if (o.free) { focusFree(); return; } // its text comes from its box
     const tick = o.check != null;
-    // a digit, as the terminal takes it; but with the ❯ on "Type something" a digit would be typed into it, and
-    // past 9 there is none: ↑/↓ to it, then Enter
-    if (n <= 9 && !now.options.find((x) => x.on)?.free) {
+    // a digit, as the terminal takes it; but with the ❯ on "Type something" a digit would be typed into it, past 9
+    // there is none, and a menu drawn without numbers (the trust question) ignores digits: ↑/↓ to it, then Enter
+    if (n <= 9 && !now.unnumbered && !now.options.find((x) => x.on)?.free) {
       if (!writeKey(String(n))) return;
     } else {
       st.answering = true;
