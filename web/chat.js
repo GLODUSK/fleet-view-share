@@ -603,7 +603,8 @@ function renderItem(it, c) {
 // A reply that offers options as a task list with every box unticked ("- [ ] …", which CLAUDE.md asks for) gets
 // live boxes and a Launch button: it sends the ticked options with the line that otherwise gets typed by hand.
 // A list with a ticked box is progress, not a choice, and stays as it is. c.picks: key -> { on: Set, sent }
-const LAUNCH_LINE = 'Launch subagents accordingly with model and effort.';
+// The launch line is one line: it opens with the old words, then says how to run, check and ship the picks.
+const LAUNCH_LINE = 'Launch subagents accordingly with model and effort: first check which items touch the same files and run those one after another (the rest in parallel), one subagent per item at its stated model and effort, each in its own worktree; then review every diff yourself, run the checks, and ship.';
 function pickList(el, md, it, c) {
   const boxes = [...md.querySelectorAll('li > input[type="checkbox"]')];
   if (!boxes.length || boxes.some((b) => b.checked)) return;
@@ -627,7 +628,10 @@ function drawPick(el, p) {
   const k = p.on.size;
   go.disabled = p.sent || !k;
   go.textContent = p.sent ? 'Launched' : k ? `Launch ${k} selected` : 'Launch selected';
-  el.querySelector('.cpk-n').textContent = p.sent ? '' : k ? `Sends them with "${LAUNCH_LINE}"` : 'Tick the options you want';
+  // the hint stays short; hovering it shows the whole launch line
+  const n = el.querySelector('.cpk-n');
+  n.textContent = p.sent ? '' : k ? 'Sends them with the launch instructions' : 'Tick the options you want';
+  n.title = !p.sent && k ? LAUNCH_LINE : '';
 }
 // the ticked options, numbered as they stand in the list, then the launch line
 function pickText(el, p) {
@@ -645,7 +649,7 @@ function launchPicks(c, el) {
   p.sent = true;
   for (const b of el.querySelectorAll('input[data-pick]')) b.disabled = true;
   drawPick(el, p);
-  handToChat(c.id, { text, send: true });
+  handToChat(c.id, { text, send: true, effort: 'high' }); // the session coordinating the launch runs at high or above
 }
 
 // "/pickup <handoff file>": a file icon that opens the summary, in Fleet View's own viewer (Ctrl+click: VS Code)

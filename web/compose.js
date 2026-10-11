@@ -389,15 +389,18 @@ export function matchCommands(list, q, max = 50) {
 }
 // Claude Code runs a command only at the start of a message, so one typed mid-sentence ("compare these /deep-research
 // for me") moves to the front: "/deep-research compare these for me". Only a name on the list counts (a path like
-// "/usr" or a URL stays as typed), and a message that already starts with "/" is left alone.
+// "/usr" or a URL stays as typed), and a message that already starts with "/" is left alone. Only the first line is
+// looked at: a command named further down is part of what the message says ("switches to /effort high").
 export function hoistCommand(text, names) {
   const t = String(text ?? '');
   if (/^\s*\//.test(t)) return t;
   const known = new Set([...(names || [])].map((n) => String(n).toLowerCase()));
-  const re = /(^|\s)\/([^\s/]+)(?=\s|$)/g;
-  for (let m; (m = re.exec(t));) {
+  const lead = t.length - t.replace(/^\s+/, '').length;
+  const first = t.slice(lead).split('\n')[0];
+  const re = /(^|[ \t])\/([^\s/]+)(?=\s|$)/g;
+  for (let m; (m = re.exec(first));) {
     if (!known.has(m[2].toLowerCase())) continue;
-    const start = m.index + m[1].length, end = start + 1 + m[2].length;
+    const start = lead + m.index + m[1].length, end = start + 1 + m[2].length;
     const before = t.slice(0, start).replace(/[ \t]+$/, ''), after = t.slice(end).replace(/^[ \t]+/, '');
     const rest = (before && after && !/\n$/.test(before) && !/^\n/.test(after) ? `${before} ${after}` : before + after).trim();
     return rest ? `/${m[2]} ${rest}` : `/${m[2]}`;
@@ -1265,7 +1268,8 @@ export function mountCompose(slot, s) {
         try { paths.push(await uploadImage(a)); } catch (e) { if (!a.file) err(`Couldn't upload ${a.name}: ${e?.message || e}`); return; }
       }
       if (st.id === id && st.step) { st.step = ''; drawNotes(); }
-      if (!shell && /(^|\s)\/[^\s/]/.test(text)) text = hoistCommand(text, (await commandsFor(s0.cwd)).map((c) => c.name));
+      // (only what was typed in the box: text handed in, a Launch's among them, goes as it is written)
+      if (fromBox && !shell && /(^|\s)\/[^\s/]/.test(text)) text = hoistCommand(text, (await commandsFor(s0.cwd)).map((c) => c.name));
       const msg = messageText(text, paths);
       if (!msg) return;
       const r = await ensureLive(s0, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
@@ -2148,6 +2152,20 @@ export function mountCompose(slot, s) {
     ta.setSelectionRange(ta.value.length, ta.value.length);
     ta.scrollTop = ta.scrollHeight;
   };
+  // an item that asks for at least some effort (a Launch: the session coordinating it should think at high): a
+  // session known to run below it, or not known, gets "/effort <it>" first; one at it or above is never lowered.
+  // If the command doesn't go in, the text still goes as it would have.
+  async function raiseEffort(want) {
+    const k = EFFORTS.indexOf(want);
+    if (k < 0 || EFFORTS.indexOf(current().effort) >= k) return;
+    const from = st.s.model || null, asked = st.elsewhereAt;
+    // (not gone in: "send again to open a second copy" stays for the text to ask, not taken as said by this)
+    if (await send(`/effort ${want}`) !== true) { st.elsewhereAt = asked; return; }
+    st.want = { ...(st.want || {}), effort: want, from, at: Date.now() }; // the picker shows it until the screen does
+    st.drawn.model = null;
+    drawModel();
+    await sleep(ENTER_DELAY_MS); // the command takes effect before the text is typed
+  }
   // handed over from another tab (handto.js). One to send at once goes as its own message (send(text): what is
   // typed in the box, its quote and attachments stay where they are); if it can't go now (a question is up, a send
   // is under way...) it lands in the box instead. The others: the text after what is typed, the images as
@@ -2168,6 +2186,8 @@ export function mountCompose(slot, s) {
       const text = String(it.text || '').replace(/\s+$/, '');
       const imgs = (it.images || []).filter((im) => im && im.blob);
       if (it.send && text && !imgs.length) {
+        await raiseEffort(it.effort);
+        if (!st.alive) return;
         if (await send(text) === true) continue;
         if (!st.alive) return;
       }
