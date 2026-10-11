@@ -564,7 +564,7 @@ export function mapNodes() {
   const r = I.canvas ? I.canvas.getBoundingClientRect() : { left: 0, top: 0 };
   const out = I.nodes.filter((n) => n.sx !== undefined).map((n) => ({
     id: n.id, kind: n.kind, x: n.sx, y: n.sy, cx: r.left + n.sx, cy: r.top + n.sy, sid: n.sid || null, wx: n.p ? n.p.x : null, wy: n.p ? n.p.y : null,
-    pending: !!(n.s && n.s.pending), root: n.root || null, name: n.kind === 'session' ? n.s.name : n.name || null,
+    cl: n.cl || null, pending: !!(n.s && n.s.pending), root: n.root || null, name: n.kind === 'session' ? n.s.name : n.name || null,
     // draw params: the bump scale (1 at rest), the alpha the node was drawn at, a hub's ring angle, finished
     fin: !!n.fin, state: n.kind === 'session' ? n.s.state : null, R: n.R, scale: n.bs || 1, alpha: n.da === undefined ? 1 : n.da, spin: n.spin === undefined ? null : n.spin,
     multi: !!(n.kind === 'session' ? I.multi.has(n.sid) : n.kind === 'repo' && I.multiRepos.has(n.id)),
@@ -1191,7 +1191,7 @@ function syncSpots(set) {
   I.spotsSig = sig; I.spotsSeen = next;
   if (I.spotsSent.includes(sig)) return;
   const d = I.drag && I.drag.moved ? I.drag : null;
-  const held = new Set(d ? [d.node, ...((d.hubs || []).map((h) => h && h.id))].filter(Boolean) : []);
+  const held = new Set(d ? [d.node, ...(d.hubs || [])].filter(Boolean) : []);
   const same = (a, b) => a && b && a.x === b.x && a.y === b.y && a.pin === b.pin;
   const moved = new Map(); // repo id -> how far its spot moved here
   let convs = false;
@@ -1217,7 +1217,7 @@ function syncSpots(set) {
     for (const [id, m] of moved) {
       const t = I.terr && I.terr.get(id);
       if (t) { t.x += m.dx; t.y += m.dy; }
-      for (const tr of I.trail ? I.trail.values() : []) if (tr.hub.id === id) I.trail.delete(tr.hub);
+      if (I.trail) I.trail.delete(id);
     }
   }
   if (convs) I.alpha = Math.max(I.alpha, 0.05);
@@ -1334,34 +1334,38 @@ function rearrange(unpin) {
 // A dragged repo's members (conversations, PRs, files) ease toward their place around the hub each frame instead
 // of moving with it as one rigid block: conversations keep up closely, the dots around them lag a little more,
 // the far ones a little more again. No overshoot, and it ends on the shape the group had when the drag began.
-// I.trail: hub -> its trail, one for each hub on the move (several when a multi-selection's hubs move together)
+// I.trail: hub id -> its trail, one for each hub on the move (several when a multi-selection's hubs move together).
+// Everything in it is held by id, never by node: each /state rebuilds the nodes (a second or less apart while
+// conversations are working), and a trail tied to the old objects fell apart mid-drag, leaving the group behind.
 function startTrail(hub) {
   if (!I.trail) I.trail = new Map();
-  if (I.trail.has(hub)) return;
-  const offs = new Map();
-  for (const m of I.sim) if (m.p && m !== hub && m.cl === hub.id) offs.set(m, { x: m.p.x - hub.p.x, y: m.p.y - hub.p.y });
-  I.trail.set(hub, { hub, offs, t: performance.now() });
+  let tr = I.trail.get(hub.id);
+  if (!tr) I.trail.set(hub.id, (tr = { id: hub.id, offs: new Map(), t: performance.now() }));
+  // a member that showed up since (a new conversation, a PR) joins where it is now
+  for (const m of I.sim) if (m.p && m !== hub && m.cl === hub.id && !tr.offs.has(m.id)) tr.offs.set(m.id, { x: m.p.x - hub.p.x, y: m.p.y - hub.p.y });
 }
-const trailing = (nd) => { if (I.trail) for (const tr of I.trail.values()) if (tr.offs.has(nd)) return true; return false; };
+const trailing = (nd) => { if (I.trail) for (const tr of I.trail.values()) if (nd.cl === tr.id && tr.offs.has(nd.id)) return true; return false; };
 function trailStep(now) {
   if (!I.trail || !I.trail.size) return false;
   for (const tr of I.trail.values()) {
-    if (!tr.hub.p || I.byId.get(tr.hub.id) !== tr.hub) { I.trail.delete(tr.hub); continue; }
+    const hub = I.byId.get(tr.id);
+    if (!hub || !hub.p) { I.trail.delete(tr.id); continue; }
     const dt = Math.min(64, Math.max(1, now - tr.t)) / 16.7;
     tr.t = now;
     let most = 0;
-    for (const [m, o] of tr.offs) {
-      if (!m.p || m.cl !== tr.hub.id) { tr.offs.delete(m); continue; }
-      const tx = tr.hub.p.x + o.x, ty = tr.hub.p.y + o.y, ex = tx - m.p.x, ey = ty - m.p.y;
+    for (const [id, o] of tr.offs) {
+      const m = I.byId.get(id);
+      if (!m || !m.p || m.cl !== tr.id) { tr.offs.delete(id); continue; }
+      const tx = hub.p.x + o.x, ty = hub.p.y + o.y, ex = tx - m.p.x, ey = ty - m.p.y;
       const far = Math.min(1, Math.hypot(o.x, o.y) / 500);
       const k = (m.kind === 'session' ? 0.3 : 0.2) * (1 - 0.35 * far);
       const f = 1 - Math.pow(1 - k, dt);
       m.p.x += ex * f; m.p.y += ey * f; m.p.vx = m.p.vy = 0;
       most = Math.max(most, Math.abs(ex), Math.abs(ey));
     }
-    if (most < 0.3 && !(I.drag && I.drag.hubs && I.drag.hubs.includes(tr.hub))) {
-      for (const [m, o] of tr.offs) if (m.p) { m.p.x = tr.hub.p.x + o.x; m.p.y = tr.hub.p.y + o.y; }
-      I.trail.delete(tr.hub);
+    if (most < 0.3 && !(I.drag && I.drag.hubs && I.drag.hubs.includes(tr.id))) {
+      for (const [id, o] of tr.offs) { const m = I.byId.get(id); if (m && m.p) { m.p.x = hub.p.x + o.x; m.p.y = hub.p.y + o.y; } }
+      I.trail.delete(tr.id);
     }
   }
   return true;
@@ -3135,9 +3139,8 @@ function wireMouse(cv) {
       return;
     }
     const node = !mod && !e.shiftKey && hit && (hit.kind === 'repo' || hit.kind === 'session') ? hit.id : null;
-    const hubs = node && hit.kind === 'repo'
-      ? (I.multiRepos.has(node) ? [...I.multiRepos].map((id) => I.byId.get(id)).filter((h) => h && h.p) : [hit])
-      : null;
+    // the hubs it moves, by id (a /state can rebuild the nodes mid-drag)
+    const hubs = node && hit.kind === 'repo' ? (I.multiRepos.has(node) ? [...I.multiRepos].filter((id) => I.byId.has(id)) : [node]) : null;
     I.drag = { x: e.clientX, y: e.clientY, moved: false, button: e.button, mod, shift: e.shiftKey, node, hubs };
   });
   window.addEventListener('mousemove', (e) => {
@@ -3187,10 +3190,11 @@ function wireMouse(cv) {
           // the hub (and the other selected hubs with it) follows the mouse and everything on it trails behind,
           // easing back into the same shape (trailStep); its spot follows and is pinned
           const wx = dx / K(), wy = dy / K();
-          for (const h of I.drag.hubs || [hub]) {
-            if (!h.p) continue;
+          for (const id of I.drag.hubs || [hub.id]) {
+            const h = I.byId.get(id);
+            if (!h || !h.p) continue;
+            startTrail(h); // before it moves: the shape to come back to is the one it has now
             h.p.x += wx; h.p.y += wy; h.p.vx = h.p.vy = 0;
-            startTrail(h);
             // its territory glow moves with it (its easing is for changes of shape, not for the drag)
             const t = I.terr && I.terr.get(h.id);
             if (t) { t.x += wx; t.y += wy; }
