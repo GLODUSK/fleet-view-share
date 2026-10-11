@@ -210,12 +210,12 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
 
   | Route | Relay | With `wait` | The phone waits |
   |---|---|---|---|
-  | `POST /api/sessions`, `/api/chief/start`, `/api/bots`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it) | 95 s | 95 s + the wait | 100 s (+ the wait) |
+  | `POST /api/sessions`, `/api/chief/start`, `/api/bots`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it); the page's `/bots/:id/tasks/:taskId` (Run now starts the bot first when it is not running) | 95 s | 95 s + the wait | 100 s (+ the wait) |
   | `POST /api/sessions/:id/message` and `/open`; `POST /api/teams`, `/api/teams/:id/add`, `/lead` and `/message`; the page's `/teams`, `/teams/add` and `/teams/lead` (each may resume a stopped conversation first, up to 60 s, before it types) | 75 s | 75 s + the wait | 80 s (+ the wait) |
   | any other `/api/*` POST with `wait` (e.g. `/answer`) | 60 s | | the wait + 15 s |
   | `GET /api/sessions/:id/activity` (the chat's activity line, polled) | 5 s | | 20 s |
   | `POST /api/sessions/:id/now` (send now) | 10 s | | 20 s |
-  | `POST /api/sessions/:id/model` (a model or effort switch: `/model`, `/effort`, the default put back) | 20 s | | 25 s (the caller sets `timeoutMs`) |
+  | `POST /api/sessions/:id/model` (a model or effort switch: `/model`, `/effort`, the default put back), and the page's `/bots/:id/switch` (the same, for a dynamic bot) | 20 s | | 25 s (the caller sets `timeoutMs`) |
   | everything else (`/unsend` among them) | 30 s | | 20 s |
 
   So 145 s and 125 s at most. The wait added is the one the relay passed on (`true` and anything over 50 count as
@@ -249,7 +249,7 @@ Per device, on the relay:
   and hellos. Over that, a `req` or `hello` gets 429 with `retryAfter`, and a part is dropped.
 - **The routes that start or resume a Claude: 2 at once, and 12 in 10 minutes.** Each counts one (`POST
   /api/sessions`, `/api/sessions/:id/open`, `/api/chief/start`, `/api/bots`, `/api/bots/:id/start`,
-  `/api/teams/:id/add`, the page's `/teams/add`), a team one per distinct member (`POST /api/teams`, the page's
+  `/api/teams/:id/add`, the page's `/teams/add`, and the page's `/bots/:id/tasks/:taskId` with `action: "run"`), a team one per distinct member (`POST /api/teams`, the page's
   `/teams`; 12 at most), and a lead only when there is one (`/api/teams/:id/lead`, `/teams/lead`). A message counts
   what it may resume, as `/state` says it (read again when over 15 s old): `POST /api/sessions/:id/message` that
   opens one (`open: true`, or a `from` without `open`) counts one unless a claude process has that conversation
@@ -276,8 +276,8 @@ ids and bot ids must match their own patterns, and a path with `..`, `//`, `%`, 
 `/api/teams/:id/add`, `/api/teams/:id/remove`, `/api/teams/:id/lead`, `/api/teams/:id/disband`,
 `/api/teams/:id/message`, `/api/chief/start`, `/api/bots`, `/api/bots/:id`, `/api/bots/:id/start`,
 `/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
-`/chat/image`, and the page's `/teams`, `/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead` and
-`/teams/rename`.
+`/chat/image`, and the page's `/teams`, `/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`,
+`/teams/rename`, `/bots/:id/switch` and `/bots/:id/tasks/:taskId`.
 
 The Chief and the bots:
 
@@ -286,12 +286,25 @@ The Chief and the bots:
   or adopts the one running: `{ ok, id, key, started }`, and 503 while the desktop app (the session host) is not
   running. The relay passes on only `account`, `model` and `effort` and drops anything else. The Chief starts
   only this way: `POST /api/sessions` with a `role` in its body (any value) is 403.
-- **Bots** (bots.js, api.js): `POST /api/bots { name, brief?, account?, model?, effort? }` makes a bot and starts it,
-  `POST /api/bots/:id { name?, brief?, account?, model?, effort? }` changes one, `POST /api/bots/:id/start` starts
-  one, `POST /api/bots/:id/remove` takes one off the list. A bot id is 12 lowercase hex digits (bots.js
-  `BOT_ID_RE`). api.js takes making, changing and removing a bot only from Henry, which from the phone means the
-  relay's marker (below); starting one is open to any caller, so `/start` is not marked. A task for a bot goes
-  through `POST /api/sessions/:id/message` to its conversation (`convId` in `/state`'s `bots`), as for any session.
+- **Bots** (bots.js, api.js): `POST /api/bots { name, brief?, account?, model?, effort?, shape?, color? }` makes a
+  bot and starts it, `POST /api/bots/:id { name?, brief?, account?, model?, effort?, shape?, color? }` changes one
+  (the phone's Edit bot sends only what changed), `POST /api/bots/:id/start` starts one, `POST /api/bots/:id/remove`
+  takes one off the list. `model` and `effort` may each be `"dynamic"` (a new bot's default: each message is sized
+  for it); `shape` is one of web/mascot.js `SHAPES` and `color` a `#rrggbb`, `null` for the automatic pick. A bot id
+  is 12 lowercase hex digits (bots.js `BOT_ID_RE`). api.js takes making, changing and removing a bot only from
+  Henry, which from the phone means the relay's marker (below); starting one is open to any caller, so `/start` is
+  not marked. A message for a bot goes through `POST /api/sessions/:id/message` to its conversation (`convId` in
+  `/state`'s `bots`), as for any session. `POST /api/bots/look` (a bot changing its own look) is the bot's alone,
+  never the phone's.
+- **A dynamic bot's switch** (bots.js `switchTo`): before a message to a bot whose model or effort is `"dynamic"`,
+  the phone sizes the message from its words (web/chats-model.js `sizeTask`) and, when that differs from what its
+  session runs now, asks the PC to switch first: the page's `POST /bots/:id/switch { id, model?, effort? }`, `id` its
+  conversation. It is a page route, so it goes with this PC's Origin (fleet-view.js lets only the page switch a bot)
+  and is not marked.
+- **A bot's tasks and routines** (bots.js, bot-tasks.js): `/state`'s `bots[].tasks` lists each bot's tasks.json
+  (`tasksError` when it can't be read), and the page's `POST /bots/:id/tasks/:taskId { action }` acts on one:
+  `pause`, `resume`, `run` (send it to the bot now, started first if it is not running) or `delete`. A task id is
+  1 to 64 of `A-Z a-z 0-9 . _ -`, starting with a letter or digit. A page route too: this PC's Origin, not marked.
 
 Narrower rules:
 
@@ -304,9 +317,14 @@ Narrower rules:
 - `chief` in `POST /settings` must be `{ watch: true | false }` (the Chief's watch mode), else 400. Only `watch`
   goes on: the `id` that `/state`'s `settings.chief` carries (and anything else in it) is dropped, so the phone
   may send back what it read with `watch` changed.
-- `POST /api/bots` and `POST /api/bots/:id` take only `name`, `brief`, `account`, `model` and `effort` (what
-  bots.js reads); any other key, `folder` included, makes the request 403. `POST /api/bots/:id/start` and `/remove`
-  take no fields at all (403 otherwise).
+- `POST /api/bots` and `POST /api/bots/:id` take only `name`, `brief`, `account`, `model`, `effort`, `shape` and
+  `color` (what bots.js reads; it checks the values itself); any other key, `folder` included, makes the request
+  403. `POST /api/bots/:id/start` and `/remove` take no fields at all (403 otherwise).
+- `POST /bots/:id/switch` takes only `id`, `model` and `effort` (403 otherwise): `id` a conversation id, and at
+  least one of `model` (a name api.js `MODEL_RE` takes) and `effort` (`low` to `max`), else 400.
+  `POST /bots/:id/tasks/:taskId` takes only `action` (403 otherwise), one of `pause`, `resume`, `run`, `delete`
+  (400 otherwise). The page's other bot routes (`/bots`, `/bots/:id`, `/start`, `/remove`) stay off: the phone uses
+  the `/api/bots` ones.
 - **The chat's verbs** (api.js): `POST /api/sessions/:id/now` (the page's Interrupt on a queued message: Claude
   takes what is queued now) takes no fields (403 otherwise) and counts toward no start limit.
   `POST /api/sessions/:id/unsend { text }` takes only `text` (403 otherwise), which must be text as api.js

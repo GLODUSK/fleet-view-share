@@ -444,6 +444,8 @@ async function main() {
     ['POST', '/teams'], ['POST', '/teams/add'], ['POST', '/teams/remove'], ['POST', '/teams/leave'], ['POST', '/teams/lead'], ['POST', '/teams/rename'],
     ['GET', '/chief/briefing'], ['POST', '/api/chief/start'], ['POST', '/api/bots'], ['POST', `/api/bots/${BOT}`], ['POST', '/api/bots/0123456789ab'],
     ['POST', `/api/bots/${BOT}/start`], ['POST', `/api/bots/${BOT}/remove`],
+    // a dynamic bot's switch, and its tasks' actions (page routes)
+    ['POST', `/bots/${BOT}/switch`], ['POST', `/bots/${BOT}/tasks/t-deploys`], ['POST', `/bots/${BOT}/tasks/a.b_c-1`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(63)}`],
     // the chat's verbs
     ['GET', `/api/sessions/${SID}/activity`], ['GET', '/api/sessions/new-3/activity'], ...['now', 'unsend', 'model'].map((v) => ['POST', `/api/sessions/${SID}/${v}`]),
   ];
@@ -465,6 +467,12 @@ async function main() {
     ['POST', '/api/bots/A1B2C3D4E5F6'], ['POST', '/api/bots/a1b2c3d4e5f'], ['POST', '/api/bots/a1b2c3d4e5f67'], ['POST', '/api/bots/a1b2c3d4e5fg'],
     ['POST', '/api/bots//start'], ['POST', '/api/bots/a1b2c3d4e5f%36'], ['POST', '/api/bots/b 1'], ['POST', `/api/bots/${BOT}/../../sessions`], ['POST', `/api/bot/${BOT}`],
     ['GET', `/api/bots/${BOT}/start`], ['POST', `/api/bots/${BOT}/start?x=1`], ['POST', '/api/bots/b1/start'], ['POST', '/api/bots/b1/remove'],
+    // near misses of a bot's switch and its tasks: the page's other bot routes stay its own
+    ['POST', '/bots'], ['POST', `/bots/${BOT}`], ['POST', `/bots/${BOT}/start`], ['POST', `/bots/${BOT}/remove`], ['GET', `/bots/${BOT}/switch`],
+    ['POST', '/bots/b1/switch'], ['POST', `/bots/${BOT}/switch/`], ['GET', `/bots/${BOT}/tasks`], ['POST', `/bots/${BOT}/tasks`], ['POST', `/bots/${BOT}/tasks/`],
+    ['GET', `/bots/${BOT}/tasks/t1`], ['POST', `/bots/${BOT}/tasks/-t1`], ['POST', `/bots/${BOT}/tasks/.t1`], ['POST', `/bots/${BOT}/tasks/t..1`],
+    ['POST', `/bots/${BOT}/tasks/t1/run`], ['POST', `/bots/${BOT}/tasks/t 1`], ['POST', `/bots/${BOT}/tasks/t%31`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(64)}`],
+    ['POST', `/api/bots/${BOT}/tasks/t1`], ['POST', `/api/bots/${BOT}/switch`], ['POST', '/api/bots/look'], ['POST', '/bots/look'],
     // near misses of the chat's verbs
     ['POST', `/api/sessions/${SID}/activity`], ['GET', `/api/sessions/${SID}/now`], ['GET', `/api/sessions/${SID}/model`], ['GET', `/api/sessions/${SID}/unsend`],
     ['POST', `/api/sessions/${SID}/now/x`], ['POST', `/api/sessions/${SID}/models`], ['GET', '/api/sessions/activity'], ['POST', '/api/sessions/now'],
@@ -475,7 +483,7 @@ async function main() {
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/remove`, `/api/sessions/${SID}/model`];
   const unmarked = [`/api/sessions/${SID}/interrupt`, `/api/sessions/${SID}/stop`, `/api/sessions/${SID}/remove`, '/api/teams', '/api/teams/t0a1b2c3d/add',
     '/api/chief/start', `/api/bots/${BOT}/start`, '/api/bots/b1', '/settings', '/rename', '/teams', `/api/sessions/${SID}`, `/api/sessions/${SID}/message/`,
-    `/api/sessions/${SID}/now`, `/api/sessions/${SID}/unsend`, `/api/sessions/${SID}/activity`];
+    `/api/sessions/${SID}/now`, `/api/sessions/${SID}/unsend`, `/api/sessions/${SID}/activity`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/t1`];
   for (const p of marked) ok(R.MARKED.test(p), `marked: ${p}`);
   for (const p of unmarked) ok(!R.MARKED.test(p), `not marked: ${p}`);
   eq(R.TIMES, { ROUTE_MS: 30e3, WAIT_ROUTE_MS: 60e3, WAIT_CAP_S: 50, START_ROUTE_MS: 95e3, RESUME_ROUTE_MS: 75e3, ACTIVITY_MS: 5e3, NOW_MS: 10e3, MODEL_MS: 20e3 }, 'the timeouts');
@@ -490,6 +498,7 @@ async function main() {
     ['POST', `/api/sessions/${SID}/answer`, 0, 30e3], ['POST', `/api/sessions/${SID}/answer`, 50, 60e3], ['POST', `/api/sessions/${SID}/stop`, 0, 30e3],
     ['POST', '/api/teams/t0a1b2c3d/remove', 0, 30e3], ['POST', '/teams/remove', 0, 30e3], ['POST', `/api/bots/${BOT}/remove`, 0, 30e3],
     ['GET', '/api/sessions', 0, 30e3], ['GET', '/chief/briefing', 0, 30e3], ['POST', '/rename', 0, 30e3],
+    ['POST', `/bots/${BOT}/switch`, 0, 20e3], ['POST', `/bots/${BOT}/tasks/t1`, 0, 95e3],
   ];
   for (const [m, p, w, want] of times) eq(R.routeTimeout(m, p, w), want, `the timeout of ${m} ${p}${w ? ` with wait ${w}` : ''}`);
   // the start limits' weights: one each, a team one per (distinct) member, a lead only when there is one
@@ -500,6 +509,9 @@ async function main() {
     ['POST', '/api/teams/t0a1b2c3d/lead', { member: SID }, 1], ['POST', '/teams/lead', { member: null }, 0], ['POST', `/api/sessions/${SID}/message`, {}, 0],
     ['POST', '/api/teams/t0a1b2c3d/message', {}, 0], ['POST', `/api/bots/${BOT}`, {}, 0], ['GET', '/api/sessions', {}, 0], ['POST', '/rename', {}, 0],
     ['POST', `/api/sessions/${SID}/now`, {}, 0], ['POST', `/api/sessions/${SID}/model`, {}, 0], ['POST', `/api/sessions/${SID}/unsend`, {}, 0],
+    // a task's Run now starts its bot when it is not running; its other actions and a switch start nothing
+    ['POST', `/bots/${BOT}/tasks/t1`, { action: 'run' }, 1], ['POST', `/bots/${BOT}/tasks/t1`, { action: 'pause' }, 0], ['POST', `/bots/${BOT}/tasks/t1`, {}, 0],
+    ['POST', `/bots/${BOT}/switch`, { id: SID, model: 'sonnet' }, 0],
   ];
   for (const [m, p, b, w] of weights) eq(R.startWeight(m, p, b), w, `the start weight of ${m} ${p} ${JSON.stringify(b)}`);
   // a message weighs what it may resume: what /state says is not running (openElsewhere), when it opens one
@@ -766,6 +778,38 @@ async function main() {
     ok(last.headers.authorization === `Bearer ${API_TOKEN}`, `POST ${p}: the token`);
     if (marked) ok(via === 'phone' && last.headers['x-fleet-view-relay'] === RELAY_KEY, `POST ${p}: marked (${via})`);
     else ok(via === undefined && last.headers['x-fleet-view-relay'] === undefined, `POST ${p}: not marked (${via})`);
+  }
+  // a bot's look goes with create and update (bots.js checks the shape and colour itself)
+  await tick(A.timers, 1001, ws);
+  for (const [p, b] of [['/api/bots', { name: 'Scout', model: 'dynamic', effort: 'dynamic', shape: 'heart', color: '#ff6b80' }], [`/api/bots/${BOT}`, { shape: null, color: '#58a6ff' }]]) {
+    r = await ph.ask(ws, 'POST', p, { b });
+    const { via, ...rest } = seenFor(p).pop().body;
+    ok(r && r.s === 200 && via === 'phone', `POST ${p} with a look: 200, marked (${r && r.s})`);
+    eq(rest, b, `POST ${p} with a look: the body that went on`);
+  }
+  // a dynamic bot's switch and its tasks' actions: page routes (fleet-view.js lets in only this PC's Origin), never marked
+  await tick(A.timers, 1001, ws);
+  const TK = `/bots/${BOT}/tasks/t-deploys`, SW = `/bots/${BOT}/switch`;
+  const pageBotCases = [
+    // [path, the phone's body, want, the body that goes on (default: as sent, less via)]
+    [TK, { action: 'pause' }, 200], [TK, { action: 'resume' }, 200], [TK, { action: 'run', via: 'phone' }, 200, { action: 'run' }], [TK, { action: 'delete' }, 200],
+    [TK, {}, 400], [TK, { action: 'edit' }, 400], [TK, { action: ['run'] }, 400], [TK, { action: 'run', title: 'x' }, 403], [TK, { action: 'run', schedule: {} }, 403],
+    [SW, { id: SID, model: 'claude-opus-5-5', effort: 'high' }, 200], [SW, { id: SID, effort: 'low', via: 'server' }, 200, { id: SID, effort: 'low' }],
+    [SW, { id: SID }, 400], [SW, { model: 'sonnet' }, 400], [SW, { id: 'new-3', model: 'sonnet' }, 400], [SW, { id: SID, model: 'bad model!' }, 400],
+    [SW, { id: SID, effort: 'ultra' }, 400], [SW, { id: SID, model: 'sonnet', text: 'x' }, 403], [SW, { id: SID, model: 'sonnet', account: 'A' }, 403],
+  ];
+  for (const [p, b, want, body] of pageBotCases) {
+    const sent = JSON.parse(JSON.stringify(b));
+    await tick(A.timers, 100, ws);
+    const n0 = seenFor(p).length;
+    r = await ph.ask(ws, 'POST', p, { b });
+    const reached = seenFor(p).length - n0;
+    ok(r && r.s === want && reached === (want === 200 ? 1 : 0), `POST ${p} ${JSON.stringify(sent)}: want ${want}, got ${r && r.s} (${r && r.b && r.b.message || ''}), reached ${reached}`);
+    if (want !== 200) continue;
+    last = seenFor(p).pop();
+    const { via: _v, ...sentRest } = sent;
+    eq(last.body, body || sentRest, `POST ${p}: the body that went on`);
+    ok(last.headers.origin === ORIGIN && !last.headers.authorization && last.headers['x-fleet-view-relay'] === undefined, `POST ${p}: this PC's Origin, no token, not marked`);
   }
   // the chat's verbs (api.js): send now, unsend, a model or effort switch (marked: an overseer's is Henry's alone), now
   // on a message, the activity line

@@ -294,8 +294,10 @@ function qrSvg(text) {
 // ---------- the allowlist (docs/phone.md "What the phone may call") ----------
 const KEY = '(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|new-\\d{1,9})'; // a session id or new-<n>
 const TEAM = 't[0-9a-f]{6,16}';
-// a bot's id, as bots.js makes them (BOT_ID_RE) and api.js takes them
+// a bot's id, as bots.js makes them (BOT_ID_RE) and api.js takes them; a task's id in its tasks.json, as fleet-view.js's
+// route takes it (bot-tasks.js ID_RE)
 const BOT = '[0-9a-f]{12}';
+const TASK = '[A-Za-z0-9][A-Za-z0-9._-]{0,63}';
 const ALLOW = {
   GET: ['/state', '/conversation', '/conversation/image', '/repo-history', '/chat/commands', '/chat/files', '/chat/kind', '/file',
     '/since', '/api/sessions', `/api/sessions/${KEY}`, `/api/sessions/${KEY}/(?:menu|transcript|activity)`, '/api/conversations',
@@ -303,7 +305,7 @@ const ALLOW = {
   POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
     '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)', '/api/chief/start',
-    '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`],
+    '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/${TASK}`],
 };
 const ALLOW_RE = Object.fromEntries(Object.entries(ALLOW).map(([m, list]) => [m, new RegExp(`^(?:${list.join('|')})$`)]));
 // the path alone: printable ASCII, no '..', '//', '%', '?', '#' or backslash
@@ -313,10 +315,14 @@ const routeAllowed = (m, p) => !!ALLOW_RE[m] && pathOk(p) && ALLOW_RE[m].test(p)
 // what POST /settings may set from the phone (the Chats window's chatsBounds, chatsOpen, chatsOnTop are desktop state)
 const SETTINGS_KEYS = new Set(['repo', 'repos', 'hidden', 'hiddenRepos', 'finishedOpen', 'repoNames', 'repoOrder', 'forgotten', 'chief']);
 // what goes on to POST /api/chief/start (chief.js start reads no more), and what a bot may be given from the phone
-// (bots.js create and update read no more)
+// (bots.js create and update read no more: shape and color are its avatar's look)
 const CHIEF_START_KEYS = new Set(['account', 'model', 'effort']);
-const BOT_KEYS = new Set(['name', 'brief', 'account', 'model', 'effort']);
+const BOT_KEYS = new Set(['name', 'brief', 'account', 'model', 'effort', 'shape', 'color']);
 const BOT_ONE = new RegExp(`^/api/bots/${BOT}$`), BOT_ACT = new RegExp(`^/api/bots/${BOT}/(?:start|remove)$`);
+// a dynamic bot's switch before a message (bots.js switchTo: { id, model?, effort? }), and an action on one of its
+// tasks (bots.js taskAction: { action }; run sends it to the bot now, starting the bot first when it is not running)
+const BOT_SWITCH = new RegExp(`^/bots/${BOT}/switch$`), BOT_TASK = new RegExp(`^/bots/${BOT}/tasks/${TASK}$`);
+const TASK_ACTIONS = ['pause', 'resume', 'run', 'delete'];
 // the chat's verbs: send now takes nothing, unsend the message's text, a switch a model and/or an effort as api.js
 // takes them (MODEL_RE, EFFORTS)
 const VERB_RE = new RegExp(`^/api/sessions/${KEY}/(now|unsend|model|message)$`);
@@ -330,7 +336,7 @@ const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|o
 // POST routes that start a Claude before they answer (api.js startSession waits up to 60 s for it, settles, types;
 // POST /api/bots makes the bot and starts it), and ones that may resume a stopped conversation first (up to 60 s
 // too) before they type into it
-const START_ROUTES = new RegExp(`^/api/(?:sessions|chief/start|bots|bots/${BOT}/start)$`);
+const START_ROUTES = new RegExp(`^(?:/api/(?:sessions|chief/start|bots|bots/${BOT}/start)|/bots/${BOT}/tasks/${TASK})$`);
 const RESUME_ROUTES = new RegExp(`^(?:/api/sessions/${KEY}/(?:message|open)|/api/teams(?:/${TEAM}/(?:add|lead|message))?|/teams(?:/add|/lead)?)$`);
 // the routes that start or resume a Claude, as the per-device start limits count them: one each, a team one per
 // member (POST /api/teams and the page's /teams), a lead only when there is one (it gets its brief). A message to a
@@ -342,6 +348,8 @@ function startWeight(m, p, b) {
   const o = b && typeof b === 'object' && !Array.isArray(b) ? b : {};
   if (p === '/api/teams' || p === '/teams') return Math.min(STARTS_MAX, Math.max(1, new Set(arr(o.members).filter((x) => typeof x === 'string')).size));
   if (STARTS_LEAD.test(p)) return o.member == null ? 0 : 1;
+  // a task's Run now starts its bot when it is not running
+  if (BOT_TASK.test(p)) return o.action === 'run' ? 1 : 0;
   return STARTS_ONE.test(p) ? 1 : 0;
 }
 // a message that may resume a stopped conversation first (api.js deliverText): POST /api/sessions/:id/message when
@@ -370,7 +378,7 @@ function routeTimeout(m, p, waitS = 0, base = ROUTE_MS, waitBase = WAIT_ROUTE_MS
   const verb = (VERB_RE.exec(p) || [])[1] || (/\/activity$/.test(p) ? 'activity' : null);
   if (m === 'GET' && verb === 'activity') return ACTIVITY_MS;
   if (m === 'POST' && verb === 'now') return NOW_MS;
-  if (m === 'POST' && verb === 'model') return MODEL_MS;
+  if (m === 'POST' && (verb === 'model' || BOT_SWITCH.test(p))) return MODEL_MS;
   const long = m !== 'POST' ? 0 : START_ROUTES.test(p) ? START_ROUTE_MS : RESUME_ROUTES.test(p) ? RESUME_ROUTE_MS : 0;
   if (long) return long + waitS * 1000;
   return waitS ? waitBase : base;
@@ -713,6 +721,19 @@ function createRelay(opts = {}) {
       return bad.length ? no(`the phone may not set a bot's ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`) : null;
     }
     if (BOT_ACT.test(p)) return Object.keys(b).length ? no('starting or removing a bot takes nothing else from the phone') : null;
+    if (BOT_TASK.test(p)) {
+      const bad = Object.keys(b).filter((k) => k !== 'action');
+      if (bad.length) return no(`a task's action takes only action, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      return TASK_ACTIONS.includes(b.action) ? null : [400, `action must be one of ${TASK_ACTIONS.join(', ')}`];
+    }
+    if (BOT_SWITCH.test(p)) {
+      const bad = Object.keys(b).filter((k) => !['id', 'model', 'effort'].includes(k));
+      if (bad.length) return no(`a bot's switch takes only id, model and effort, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      if (!(typeof b.id === 'string' && UUID_RE.test(b.id))) return [400, "id must be the bot's conversation id"];
+      if (b.model == null && b.effort == null) return [400, 'give model, effort or both'];
+      if (b.model != null && !(typeof b.model === 'string' && MODEL_RE.test(b.model))) return [400, 'model must be a model name like claude-opus-5-5'];
+      return b.effort == null || EFFORTS.includes(b.effort) ? null : [400, `effort must be one of ${EFFORTS.join(', ')}`];
+    }
     const verb = (VERB_RE.exec(p) || [])[1];
     if (verb === 'now') return Object.keys(b).length ? no('send now takes nothing else from the phone') : null;
     if (verb === 'unsend') {
