@@ -311,6 +311,17 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
   `t0` after `at`, or not a number, is 400. A GET runs again in any case. So the relay never runs a POST twice:
   either it still has the `id`'s answer, or it says it can't tell. (It remembers 15,000 ids per device, more than
   the 1,200-a-minute limit lets a phone send in 9 minutes.)
+- **`pc-closing` ends what is in flight.** The server sends the notice as it exits (on a restart after an update,
+  mostly), and the answers still owed die with it. So the phone fails every request still waiting at once, rather
+  than at its timeout, with the code `pc-restarted` and the request's `id`. A POST cut off that way may have gone in
+  (the server may have typed the message just before it exited), and the kept answer that would make a resend safe
+  is gone: the phone shows it as "may have gone in", never offers Retry, and lets the transcript settle it. A GET is
+  a plain no-answer, which the pollers try again. A link that only drops sends no notice, and a resend with the same
+  `id` still gets the relay's kept answer.
+- **The transcript settles any bubble.** A message the phone sent goes from the chat once the transcript shows its
+  text, whatever its state, even one still "Sending..." or "Not sent yet": the answer can be lost while the message
+  went in. Only a message the PC answered may also be matched another way (the oldest sent before the transcript
+  logged one whose text reads differently).
 - **Timeouts.** The relay caps `wait` in an `/api/*` body at 50 seconds, then gives each request this long on the
   server before it answers 408 itself:
 
