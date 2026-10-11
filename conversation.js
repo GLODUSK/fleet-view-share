@@ -493,7 +493,8 @@ async function transcriptOf(file, o = {}) {
       items.push(it);
     }
   } finally { rd.close(); }
-  return { total, from, items };
+  // the messages Claude Code holds queued (typed while it works), oldest first: meaningful only while its claude runs
+  return { total, from, items, queue: L.queue.slice(0, 50) };
 }
 
 // ---------- GET /conversation/image?id=<id>&key=<item key>&n=<i> ----------

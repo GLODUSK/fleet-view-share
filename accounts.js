@@ -50,6 +50,10 @@ const URL_RE = /https:\/\/\S*oauth\S*/;
 // what must not reach the claude started here from Fleet View's own environment (as host.js's childEnv)
 const DROP_ENV = /^(CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_SWAP_KEY|CLAUDE_SWAP_PAYER|CLAUDE_LAUNCH_KEY|CLAUDECODE|CLAUDE_PID|ELECTRON_RUN_AS_NODE|CLAUDE_CODE_(CHILD_SESSION|SESSION_ID|MESSAGING_SOCKET|MESSAGING_TOKEN|ENTRYPOINT|SESSION_ATTENDED)|FLEET_VIEW_\w+|FV_\w+)$/i;
 
+// an account's Claude Code config folder (CLAUDE_CONFIG_DIR): ~/.claude for B, ~/.claude-<x> for the others. The one
+// mapping: createAccounts and api.js (its model switch's settings.json) use it
+const configDir = (a, home = os.homedir()) => path.join(home, a === 'B' ? '.claude' : '.claude-' + String(a).toLowerCase());
+
 const stamp = (t = new Date()) => t.toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
 
 function createAccounts(o = {}) {
@@ -61,7 +65,7 @@ function createAccounts(o = {}) {
   const claudeCmd = o.claudeCmd || 'claude';
   const jobs = new Map(); // letter -> { status, url, message, email, at, child, fresh, before, out }
 
-  const dirOf = (a) => path.join(home, a === 'B' ? '.claude' : '.claude-' + a.toLowerCase());
+  const dirOf = (a) => configDir(a, home);
   const fileOf = (a) => (a === 'B' ? path.join(home, '.claude.json') : path.join(dirOf(a), '.claude.json'));
   const credOf = (a) => path.join(dirOf(a), '.credentials.json');
   const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
@@ -319,4 +323,4 @@ function createAccounts(o = {}) {
   return { view, add, login, code, cancel, remove, route, letters, loginOf, _jobs: jobs };
 }
 
-module.exports = { createAccounts };
+module.exports = { createAccounts, configDir };

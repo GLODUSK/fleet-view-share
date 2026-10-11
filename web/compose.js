@@ -91,7 +91,8 @@ const ic = (name, size = 14) => icon(name, size) || icon(ALT[name] || 'dot', siz
 
 // The prompt box at the bottom (between its two rules), from the screen's rows as drawn (screenText would glue a
 // row that fills the width to the next one): { text, lines } with the ❯ gone, text '' when it shows
-// only its hint; null when it isn't on screen (a menu or panel covers it)
+// only its hint; null when it isn't on screen (a menu or panel covers it). screen.js promptBox is a port of it for
+// the API (keep the two in step), as are its spinner and effortShown of parseSpinner and parseEffort below.
 const BOX_HINT = /^(?:Press up to edit queued messages|Try ".*")$/;
 export function parsePromptBox(lines) {
   const L = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));

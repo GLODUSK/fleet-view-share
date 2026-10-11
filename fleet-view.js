@@ -5906,6 +5906,8 @@ const apiCtx = {
   },
   // GET /api/status: what members are doing, free -> [code, json] (statusOf)
   status: statusOf,
+  // what one conversation is doing, in a few words (doingOf, as /api/status gives it), or null: GET .../activity
+  doing: (id) => { const s = sessions.get(id); return s && inState(s) ? doingOf(sessionJson(s, Date.now())) : null; },
   // its transcript, compact (conversation.js transcriptOf) -> Promise of { total, from, items } or null (no log)
   transcript(id, q) {
     const where = conversationLog(id);

@@ -17,6 +17,8 @@
 //   menuDetailsShown(raw, cols, rows) -> the same, from raw output (its rows unjoined)
 //   menuIn(lines) -> { options: [{ n, label, on }] } | null   (menuDetails, cut down)
 //   menuShown(raw, cols, rows) -> the same, from raw output
+//   promptBox(lines), spinner(lines), effortShown(lines): ports of compose.js parsePromptBox, parseSpinner and
+//                                                   parseEffort, for api.js's chat verbs (unsend, activity, model)
 'use strict';
 
 // ---------- the terminal ----------
@@ -340,4 +342,51 @@ function menuIn(lines) {
 const menuDetailsShown = (raw, cols, rows) => menuDetails(render(raw, cols, rows, 40, false));
 const menuShown = (raw, cols, rows) => menuIn(render(raw, cols, rows, 40, false));
 
-module.exports = { render, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf };
+// ---------- the rest of the chat's screen readers (ports of web/compose.js; keep each in step with its original) ----------
+// parsePromptBox: the prompt box at the bottom (between its two rules), over the rows as drawn: { text, lines } with
+// the ❯ gone, text '' when it shows only its hint; null when it isn't on screen (a menu or panel covers it)
+const BOX_HINT = /^(?:Press up to edit queued messages|Try ".*")$/;
+function promptBox(lines) {
+  const L = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
+  let b = L.length - 1;
+  while (b >= Math.max(0, L.length - 6) && !isRule(L[b])) b--;
+  if (b < 1 || !isRule(L[b])) return null;
+  let a = b - 1;
+  while (a >= 0 && !isRule(L[a])) a--;
+  if (a < 0 || b - a < 2 || !/^\s*[❯>](\s|$)/.test(L[a + 1])) return null;
+  const rows = L.slice(a + 1, b);
+  const text = rows.map((l, i) => (i ? l.replace(/^ {2}/, '') : l.replace(/^\s*[❯>]\s?/, '')).trimEnd()).join('\n').trim();
+  return { text: BOX_HINT.test(text) ? '' : text, lines: rows.length };
+}
+// parseSpinner: the spinner line while Claude works ("✻ Brewing… (12s · ↓ 1.2k tokens · esc to interrupt)", its
+// parentheses maybe running onto the next rows) -> { verb, detail, strong } or null; strong: it carries the time,
+// tokens or "esc to interrupt", so it is the live spinner and not some text
+const SPIN_RE = /^\s*([·✢✳✶✻✽✺*])\s+([A-Z][A-Za-z']*(?: [a-z][A-Za-z']*){0,2})…\s*(?:\((.*))?$/;
+function spinner(lines) {
+  const L = Array.isArray(lines) ? lines : [];
+  for (let i = L.length - 1; i >= Math.max(0, L.length - 30); i--) {
+    const m = SPIN_RE.exec(String(L[i] ?? ''));
+    if (!m) continue;
+    let inner = m[3] ?? null;
+    if (inner != null) {
+      for (let j = i + 1; !inner.includes(')') && j < L.length && j <= i + 2; j++) inner += ` ${String(L[j]).trim()}`;
+      inner = inner.replace(/\).*$/, '');
+    }
+    const parts = (inner || '').split(/\s+·\s+/).map((p) => p.trim()).filter(Boolean);
+    const strong = parts.some((p) => /esc to interrupt|^\d+(?:h|m|s)\b|\d+(?:\.\d+)?k? tokens/i.test(p));
+    const detail = parts.filter((p) => !/^esc to interrupt$|^ctrl\+\w to /i.test(p)).join(' · ');
+    return { verb: m[2], detail, strong };
+  }
+  return null;
+}
+// parseEffort: the effort in the footer under the prompt ("◐ medium · /effort"), or null when it isn't on screen
+function effortShown(lines) {
+  const L = (Array.isArray(lines) ? lines : []).slice(-8);
+  for (let i = L.length - 1; i >= 0; i--) {
+    const m = /(?:^|\s)(low|medium|high|xhigh|max)\s+·\s+\/effort\b/i.exec(String(L[i] ?? ''));
+    if (m) return m[1].toLowerCase();
+  }
+  return null;
+}
+
+module.exports = { render, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, spinner, effortShown };

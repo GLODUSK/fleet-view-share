@@ -31,6 +31,7 @@
 'use strict';
 const fs = require('fs');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 // requiring it only defines functions (runHost runs only when host.js is the main module, the pty module
@@ -39,6 +40,7 @@ const H = require(path.join(__dirname, 'desktop', 'host.js'));
 const SCREEN = require(path.join(__dirname, 'screen.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CHIEF = require(path.join(__dirname, 'chief.js'));
+const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
 
 const P = require(path.join(__dirname, 'platform.js'));
 const DATA_DIR = P.dataDir();
@@ -420,8 +422,9 @@ async function need(host, key, alive) {
 // Send text into a hosted, live session as message does: a "/" panel closed first, never into a menu, then wait
 // as asked. note(id, sentAt, status): called once it went in (status: the session's before it, 'busy' or 'idle').
 // q: { from, original, onSent?, onDrop? } to keep it in the queue (see below) instead of refusing it while a menu or a
-// panel is up; it goes in later. -> [code, json]
-async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null) {
+// panel is up; it goes in later. now: one that went in while Claude was busy (into Claude Code's queue) is sent at
+// once, as the page's Interrupt on a queued message does (pressSendNow). -> [code, json]
+async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null, now = false) {
   const later = (more, why = 'is showing a question or a prompt; it goes in once that is answered') => {
     enqueue(p.id, text, q);
     return [202, { ok: true, id: p.id, ...extra, ...more, queued: true, message: `queued: ${nameFor(p.id, ctx)} ${why}` }];
@@ -443,13 +446,16 @@ async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null)
     const sentAt = Date.now();
     const sent = await sendText(host, p.id, text, () => menuNow(host, cur));
     if (!sent.entered) return { r: [409, { ok: false, id: p.id, ...extra, menu: true, message: MENU_LATE }] };
-    return { sentAt, status };
+    const sentNow = now && status === 'busy';
+    if (sentNow) { await sleep(ENTER_DELAY_MS); await pressSendNow(host, p.id); }
+    return { sentAt, status, sentNow };
   });
   if (typed.r) return typed.r;
-  const { sentAt, status } = typed;
+  const { sentAt, status, sentNow } = typed;
   if (note) note(p.id, sentAt, status);
   const w = await afterSend(host, p.id, sentAt, status, ms, ctx, gone);
-  return [200, { ok: true, id: p.id, ...extra, status, ...w, message: doneText(w, ms, status === 'busy' ? 'sent while Claude was busy (queued)' : 'sent') }];
+  return [200, { ok: true, id: p.id, ...extra, status, ...(sentNow ? { sentNow } : {}), ...w,
+    message: doneText(w, ms, sentNow ? 'sent now (Claude stopped the step it was on)' : status === 'busy' ? 'sent while Claude was busy (queued)' : 'sent') }];
 }
 
 function doneText(w, ms, sent) {
@@ -625,7 +631,7 @@ async function resumeIn(host, id, where, account, ctx, gone) {
 // receiver; with original (the text as the sender wrote it), recorded through ctx.noteMessage once it goes in.
 // o.via, for text with no from: 'server' (Fleet View's own) or 'henry' (the phone relay, viaOf); an overseer (the
 // Chief or a bot) gets any other such text marked unsigned (chief.js frame). Callers never set it from a request body.
-// o.chiefText: the text an overseer gets instead (an ask's answers without the question in their header).
+// o.chiefText: the text an overseer gets instead (an ask's answers without the question in their header). o.now: see deliver.
 async function deliverText(key, text, o, ctx, gone = () => false) {
   qCtx = qCtx || ctx;
   const asked = resolveKey(key);
@@ -666,7 +672,7 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
       if (o.onSent) o.onSent(convId(to) || to, at, status);
     };
     return deliver(host, p, typed, o.wait || 0, ctx, gone, note, extra,
-      o.queue === false ? null : { from, original: o.original || body, ...(kind ? { kind } : {}), onSent: o.onSent, onDrop: o.onDrop });
+      o.queue === false ? null : { from, original: o.original || body, ...(kind ? { kind } : {}), onSent: o.onSent, onDrop: o.onDrop }, o.now === true);
   });
 }
 
@@ -684,13 +690,17 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/bots/:id/start', does: 'start a bot: the conversation running already, else its newest one resumed, else a new one: { ok, bot, key, id }' },
   { method: 'POST', path: '/api/bots/:id/remove', does: 'Henry only, as POST /api/bots: end a bot\'s session and take it off the list (its folder and conversations are kept)' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, role, its turn; tail: the last characters of its screen' },
-  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from' },
+  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow)' },
+  { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
+  { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
+  { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. An overseer\'s: Henry only (his phone)' },
+  { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code)' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
   { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|other), title, context, options, sig; or null' },
   { method: 'POST', path: '/api/sessions/:id/answer', body: '{ option: n | "submit" | "esc", sig?, text?, allowPermission?, wait? }', does: 'answer the menu (text: for a "Type something." option; "submit": a multiple-choice question\'s Submit); any menu but a question needs allowPermission (esc never does)' },
   { method: 'POST', path: '/api/sessions/:id/interrupt', does: 'press Esc once to stop Claude mid-turn (not while a menu is up)' },
   { method: 'POST', path: '/api/sessions/:id/open', body: '{ account?, prompt?, wait? }', does: 'resume a conversation Fleet View knows as a hosted session; prompt: then send it' },
-  { method: 'GET', path: '/api/sessions/:id/transcript', query: 'since?, limit? (default the last 50, at most 500)', does: 'any conversation\'s transcript, compact: user, assistant, tool (name, input, result), note, thinking' },
+  { method: 'GET', path: '/api/sessions/:id/transcript', query: 'since?, limit? (default the last 50, at most 500)', does: 'any conversation\'s transcript, compact: user, assistant, tool (name, input, result), note, thinking; queue: the messages queued in Claude Code (while it runs here)' },
   { method: 'POST', path: '/api/sessions/:id/stop', body: '{ remove? }', does: 'end the session (remove: also hide it from the map)' },
   { method: 'POST', path: '/api/sessions/:id/remove', does: 'hide a conversation from the map (not one still running: stop it first); logs are kept' },
   { method: 'GET', path: '/api/teams', does: 'the teams: id, name, members, lead, order, roster (each member\'s name, repo, branch, state, lead), messages' },
@@ -869,7 +879,7 @@ function endHosted(key) {
   return withHost(async (host) => { await host.call('kill', key); return [200, { ok: true, id: key }]; }).catch(serverFail);
 }
 
-// POST /api/sessions/:id/message { text, wait?, from?, queue?, open? }
+// POST /api/sessions/:id/message { text, wait?, from?, queue?, open?, now? }
 // from: the conversation id of the sender, when one conversation messages another (fv send --from, or the older
 // scripts/fleet-msg.js). It must be a conversation Fleet View knows; one that handed off counts as the one that
 // carries on. The text then goes in after a line saying who it is from ("teammate" when the two share a team) and
@@ -877,6 +887,8 @@ function endHosted(key) {
 // queue and open (both true by default with from, false without) go to deliverText: with queue, a receiver showing
 // a menu gets it later (202 queued); with open, one not running here is resumed first. Without either it must be
 // running here, and a menu turns it down (409), as before.
+// now: sent while Claude works, it goes at once (deliver), not after the step Claude is on; only a message of your own
+// (no from): one conversation never cuts another's step short.
 // via: 'henry' when the phone relay sent it (viaOf), for a chief's framing; never read from the body here
 async function sendMessage(key, b, ctx, gone, via = null) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
@@ -884,7 +896,7 @@ async function sendMessage(key, b, ctx, gone, via = null) {
   if (!text) return [400, { ok: false, message: 'text must be text, without control characters other than new lines and tabs' }];
   const ms = waitMs(b.wait);
   if (ms === null) return [400, { ok: false, message: WAIT_BAD }];
-  for (const k of ['queue', 'open']) if (k in b && typeof b[k] !== 'boolean') return [400, { ok: false, message: `${k} must be true or false` }];
+  for (const k of ['queue', 'open', 'now']) if (k in b && typeof b[k] !== 'boolean') return [400, { ok: false, message: `${k} must be true or false` }];
   let from = null;
   if (b.from !== undefined && b.from !== null) {
     from = typeof b.from === 'string' ? convId(b.from) : null;
@@ -893,7 +905,8 @@ async function sendMessage(key, b, ctx, gone, via = null) {
     from = (ctx.successorOf && ctx.successorOf(from)) || from;
   }
   const queue = 'queue' in b ? b.queue : !!from, open = 'open' in b ? b.open : !!from;
-  if (!from) return deliverText(key, text, { kind: 'message', wait: ms, queue, open, via }, ctx, gone);
+  if (from && b.now === true) return [400, { ok: false, message: 'now goes only with a message of your own (no from)' }];
+  if (!from) return deliverText(key, text, { kind: 'message', wait: ms, queue, open, via, now: b.now === true }, ctx, gone);
   const name = headName(from, ctx);
   // "your lead" when from leads a team the receiver is in, "teammate" when they share one without that
   const head = (to) => {
@@ -1542,6 +1555,268 @@ async function interruptSession(key) {
   });
 }
 
+// ---------- the chat's verbs: send now, unsend, model and effort, the activity line ----------
+// What the page's Chat tab does below its feed (web/compose.js), for a caller that has no screen of its own (the
+// phone's chat): the same keys and the same checks, with the screen read from the host's snapshot (screen.js ports of
+// compose.js's readers) instead of an xterm.
+const CHORD_MS = 150; // between the two keys of Claude Code's "send now" chord (compose.js waits the same)
+const QUEUE_LOOKS = 8, QUEUE_LOOK_MS = 250; // a message just sent may take a moment to show in the transcript's queue
+const flat = (v) => String(v || '').replace(/\[Image #\d+\]\s*/g, '').replace(/\s+/g, ' ').trim(); // compose.js flat
+const squash = (v) => String(v || '').replace(/\s+/g, ''); // the prompt box wraps a message at its width
+// the session's screen, its rows as drawn (the last n)
+async function rowsNow(host, p, n = 60) {
+  const raw = await host.call('snapshot', p.id);
+  const { cols, rows } = sizeOf(p);
+  return SCREEN.render(typeof raw === 'string' ? raw : '', cols, rows, n, false);
+}
+// the messages Claude Code holds queued for a conversation (typed while it works), oldest first, from its transcript's
+// queue-operation lines (conversation.js) -> [text]
+async function claudeQueue(id, ctx) {
+  const cid = convId(id);
+  if (!cid || !ctx.transcript) return [];
+  try { const t = await ctx.transcript(cid, { limit: 1 }); return t && Array.isArray(t.queue) ? t.queue : []; } catch { return []; }
+}
+// Claude Code's "send now", Ctrl+X then Ctrl+S on its own (a chord; compose.js sendNow): it stops the step Claude is on
+// and sends every queued message as the next turn, as that terminal's "ctrl+x ctrl+s to send now" does
+async function pressSendNow(host, id) {
+  await host.call('write', id, '\x18');
+  await sleep(CHORD_MS);
+  await host.call('write', id, '\x13');
+}
+const PANEL_UP = 'a panel is open in its terminal (like /usage): close it there first (Esc)';
+
+// POST /api/sessions/:id/now: the page's Interrupt on a queued message. Only while Claude works with messages queued
+// in Claude Code (its transcript says so), and no menu or panel up (the keys would go to it). Every queued message
+// goes, as in the terminal. (POST .../message with now: true sends one and does this right after.)
+async function sendNowSession(key, ctx) {
+  return withHost(async (host) => {
+    const { p, err } = await need(host, key, true);
+    if (err) return err;
+    if (panelOpen(p)) return [409, { ok: false, id: p.id, panel: true, message: PANEL_UP }];
+    if (p.status !== 'busy') return [409, { ok: false, id: p.id, status: p.status || null, message: 'Claude is not working on anything: a message goes straight in' }];
+    const m = await menuNow(host, p);
+    if (m) return [409, { ok: false, id: p.id, menu: m, message: MENU_UP }];
+    let queued = [];
+    for (let i = 0; i < QUEUE_LOOKS && !queued.length; i++) {
+      if (i) await sleep(QUEUE_LOOK_MS);
+      queued = await claudeQueue(p.id, ctx);
+    }
+    if (!queued.length) return [409, { ok: false, id: p.id, queue: [], message: 'nothing is queued: Claude took it already' }];
+    await typeOne(p.id, () => pressSendNow(host, p.id));
+    return [200, { ok: true, id: p.id, sent: queued, message: `sent now: Claude stops the step it is on and takes ${queued.length === 1 ? 'the queued message' : `the ${queued.length} queued messages`}` }];
+  });
+}
+
+// POST /api/sessions/:id/unsend { text }: takes a message back before Claude reads it. Text waiting in Fleet View's own
+// queue (behind a menu, above; not one from another conversation) is just dropped there. Else it comes out of Claude
+// Code's queue the way the page's Unsend does (compose.js unsendQueued): Up pulls every queued message into the
+// prompt, Ctrl+U clears it a row at a time (Ctrl+C or Esc would stop Claude), and the others are queued again, each
+// as it was (never into a menu: each one's Enter waits for none to be up). Claude Code reads its queue into the
+// running turn at its next step (2 to 4 s after the send, often), so this often finds it gone: 409 taken.
+async function unsendMessage(key, b, ctx) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  const text = cleanText(b.text);
+  if (!text) return [400, { ok: false, message: 'text must be the message as it was sent' }];
+  const want = flat(text);
+  const asked = resolveKey(key);
+  const succ = convId(asked) && ctx.successorOf ? ctx.successorOf(convId(asked)) : null;
+  const id = succ && succ !== convId(asked) ? succ : asked;
+  // as it waits in Fleet View's queue: framed for an overseer (chief.js frame), else as it is
+  const forms = new Set([text, CHIEF.frame(text, 'henry'), CHIEF.frame(text, 'unsigned')].map(flat));
+  const mine = loadQueue().find((x) => x.id === id && !x.from && !x.kind && forms.has(flat(x.text)));
+  if (mine) {
+    unqueue(mine);
+    return [200, { ok: true, id, unsent: true, where: 'fleetView', message: 'taken back: it was waiting in Fleet View for a menu to be answered' }];
+  }
+  return withHost(async (host) => {
+    const { p, err } = await need(host, id, true);
+    if (err) return err;
+    // the others in Claude Code's queue (the transcript may lag the send by a moment)
+    let rest = null;
+    for (let i = 0; i < QUEUE_LOOKS && !rest; i++) {
+      if (i) await sleep(QUEUE_LOOK_MS);
+      const q = (await claudeQueue(p.id, ctx)).slice();
+      let k = q.findIndex((x) => flat(x) === want);
+      if (k < 0 && want) k = q.findIndex((x) => flat(x).includes(want.slice(0, 80)));
+      if (k >= 0) { q.splice(k, 1); rest = q; }
+    }
+    if (!rest) return [409, { ok: false, id: p.id, taken: true, message: 'it is not queued any more: Claude already took it' }];
+    if (panelOpen(p)) return [409, { ok: false, id: p.id, panel: true, message: PANEL_UP }];
+    const m = await menuNow(host, p);
+    if (m) return [409, { ok: false, id: p.id, menu: m, message: MENU_UP }];
+    return typeOne(p.id, async () => {
+      const box = async () => SCREEN.promptBox(await rowsNow(host, p));
+      const b0 = await box();
+      if (!b0 || b0.text) return [409, { ok: false, id: p.id, message: b0 ? 'something is typed in its prompt: clear it in the Session tab first' : 'its prompt is not on screen' }];
+      await host.call('write', p.id, '\x1b[A');
+      let b1 = null;
+      for (let i = 0; i < 10 && !(b1 && b1.text); i++) { await sleep(150); b1 = await box(); }
+      if (!b1 || !b1.text) return [409, { ok: false, id: p.id, taken: true, message: 'it could not be taken back: the queue was empty (Claude took it)' }];
+      // Ctrl+U until the prompt is empty
+      let empty = false;
+      for (let i = 0; i < 40 && !empty; i++) {
+        const b2 = await box();
+        if (!b2) break;
+        if (!b2.text) { empty = true; break; }
+        await host.call('write', p.id, '\x15'.repeat(Math.min(b2.lines + 1, 30)));
+        await sleep(120);
+      }
+      if (!empty) return [409, { ok: false, id: p.id, message: 'the queued messages are in its prompt and it could not be cleared: clear it in the Session tab' }];
+      // what Up pulled is what is queued now: the message itself, unless Claude took it meanwhile (then only the others
+      // that are still queued go back)
+      const pulled = squash(b1.text);
+      const was = pulled.includes(squash(want).slice(0, 60));
+      const back = rest.map(cleanText).filter((x) => x && pulled.includes(squash(x).slice(0, 60)));
+      let requeued = 0;
+      for (const x of back) {
+        const sent = await sendText(host, p.id, x, () => menuNow(host, p));
+        if (!sent.entered) return [409, { ok: false, id: p.id, unsent: was, requeued, menu: true, message: `${was ? 'taken back, but ' : ''}a menu came up while the other queued messages went back: the next one is in its prompt box, not sent` }];
+        requeued++;
+        await sleep(250);
+      }
+      if (!was) return [409, { ok: false, id: p.id, taken: true, requeued, message: 'Claude took it just now; the other queued messages are queued again' }];
+      return [200, { ok: true, id: p.id, unsent: true, where: 'claude', requeued, message: requeued ? `taken back; the ${requeued} other queued message${requeued > 1 ? 's are' : ' is'} queued again` : 'taken back' }];
+    });
+  });
+}
+
+// POST /api/sessions/:id/model { model?, effort? }: the page's model and effort picker, for this conversation only.
+// Claude Code has no session-only switch: /model <id> and /effort <level> switch the running session AND save the
+// choice in its account's settings.json as the default for every new session (`model`, and
+// `modelSettings.<model>.effortLevel`). The page's picker accepts that (its menu says so); this does not. It types the
+// commands as the page does, waits until Claude Code has saved them, then puts those keys back as they were (the rest
+// of the file as Claude Code left it), so new sessions start as before. Only while Claude is idle with nothing typed in
+// its prompt (a command typed mid-turn waits in Claude Code's queue, and would be saved after this stopped watching),
+// and one switch at a time (settingsTurn), so a second can't take the first's value for the one to put back.
+// An overseer's (the Chief's, a bot's) model is Henry's to change (as his phone changes a bot's: bots.js), so for one
+// of them only the phone relay may (viaOf).
+const SAVE_MS = 5000; // how long Claude Code may take to save a switch
+const SETTLE_SAVE_MS = 1500; // after the default is put back: when the screen is read for the effort the session shows
+const SAVED_KEYS = ['model', 'modelSettings', 'effortLevel'];
+// the home the session host starts claude under (host.js acctDir), and the account's folder in it (accounts.js)
+const settingsFileOf = (account) => path.join(ACCOUNTS.configDir(account, process.env.USERPROFILE || os.homedir()), 'settings.json');
+let settingsTurn = Promise.resolve();
+// the file's text, or '' when there is none -> { raw, json } or null when it is there but not JSON
+function readSettings(file) {
+  let raw = '';
+  try { raw = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') return null; }
+  if (!raw.trim()) return { raw, json: {} };
+  try { const j = JSON.parse(raw.replace(/^﻿/, '')); return j && typeof j === 'object' && !Array.isArray(j) ? { raw, json: j } : null; } catch { return null; }
+}
+// the keys of `before` back in the file as it is now -> true when it wrote
+function putBack(file, before, existed) {
+  const now = readSettings(file);
+  if (!now) return false;
+  const j = { ...now.json };
+  for (const k of SAVED_KEYS) { if (k in before) j[k] = before[k]; else delete j[k]; }
+  if (JSON.stringify(j) === JSON.stringify(now.json)) return false;
+  if (!existed && !Object.keys(j).length) { try { fs.unlinkSync(file); } catch {} return true; }
+  fs.writeFileSync(file + '.fv-tmp', JSON.stringify(j, null, 2) + (/\n$/.test(now.raw) || !now.raw ? '\n' : ''));
+  fs.renameSync(file + '.fv-tmp', file);
+  return true;
+}
+// what Claude Code said about a command, from what the screen got after it: the last line that answers it
+const SAID_RE = /(Set model to .*|Kept model as .*|Set effort level to .*|Effort level set to .*|Couldn't save .*|The model was not changed.*|Cloud session couldn't switch .*)$/;
+function saidSince(before, after) {
+  const tail = before.slice(-400);
+  const at = tail ? after.lastIndexOf(tail) : -1;
+  const fresh = at >= 0 ? after.slice(at + tail.length) : after.slice(-4000);
+  const lines = plainText(fresh).split('\n').map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) { const m = SAID_RE.exec(lines[i]); if (m) return m[1].trim(); }
+  return null;
+}
+async function switchModel(key, b, ctx, via = null) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  if (b.model == null && b.effort == null) return [400, { ok: false, message: 'give model, effort or both' }];
+  if (b.model != null && (typeof b.model !== 'string' || !MODEL_RE.test(b.model))) return [400, { ok: false, message: 'model must be a model name like opus, sonnet, haiku or claude-opus-5-5[1m] (letters, digits, . - [ ])' }];
+  if (b.effort != null && !EFFORTS.includes(b.effort)) return [400, { ok: false, message: `effort must be one of ${EFFORTS.join(', ')}` }];
+  const run = settingsTurn.then(() => withHost(async (host) => {
+    const { p, err } = await need(host, key, true);
+    if (err) return err;
+    if (isOverseer(p.role) && via !== 'henry') return [403, { ok: false, id: p.id, message: 'only Henry changes an overseer\'s model or effort (his phone)' }];
+    if (panelOpen(p)) return [409, { ok: false, id: p.id, panel: true, message: PANEL_UP }];
+    if (p.status !== 'idle') return [409, { ok: false, id: p.id, status: p.status || null, message: 'Claude is working: switch once it is idle (or interrupt it first)' }];
+    const account = /^[A-Z]$/.test(p.account) ? p.account : 'B';
+    const file = settingsFileOf(account);
+    const was = readSettings(file);
+    if (!was) return [409, { ok: false, id: p.id, message: `its account's settings.json is not JSON, so the default could not be kept: nothing was changed (${file})` }];
+    const existed = !!was.raw;
+    const before = {};
+    for (const k of SAVED_KEYS) if (k in was.json) before[k] = JSON.parse(JSON.stringify(was.json[k]));
+    const out = { ok: true, id: p.id, account, ...(b.model != null ? { model: b.model } : {}), ...(b.effort != null ? { effort: b.effort } : {}) };
+    const said = [];
+    let wrote = false;
+    try {
+      return await typeOne(p.id, async () => {
+        for (const cmd of [b.model != null && `/model ${b.model}`, b.effort != null && `/effort ${b.effort}`].filter(Boolean)) {
+          const m = await menuNow(host, p);
+          if (m) return [409, { ...out, ok: false, menu: m, said, message: `${MENU_UP}${said.length ? ` (done so far: ${said.join('; ')})` : ''}` }];
+          const box = SCREEN.promptBox(await rowsNow(host, p));
+          if (!box || box.text) return [409, { ...out, ok: false, said, message: box ? 'something is typed in its prompt: clear it in the Session tab first' : 'its prompt is not on screen' }];
+          const raw0 = String((await host.call('snapshot', p.id)) || '');
+          const file0 = readSettings(file);
+          const sent = await sendText(host, p.id, cmd, () => menuNow(host, p));
+          if (!sent.entered) return [409, { ...out, ok: false, menu: true, said, message: MENU_LATE }];
+          // saved (the file changed), or Claude Code answered without saving (kept, refused)
+          let line = null;
+          for (const end = Date.now() + SAVE_MS; Date.now() < end;) {
+            await sleep(POLL_MS / 2);
+            const f = readSettings(file);
+            if (f && file0 && f.raw !== file0.raw) { line = saidSince(raw0, String((await host.call('snapshot', p.id)) || '')); break; }
+            line = saidSince(raw0, String((await host.call('snapshot', p.id)) || ''));
+            if (line && !/^Set /.test(line)) break;
+          }
+          said.push(line || `${cmd}: Claude Code said nothing about it`);
+          if (putBack(file, before, existed)) wrote = true;
+        }
+        // the session's effort as its footer shows it, once Claude Code has read the put-back file
+        await sleep(SETTLE_SAVE_MS);
+        if (putBack(file, before, existed)) wrote = true; // a late save
+        const now = readSettings(file);
+        const defaultKept = !!now && SAVED_KEYS.every((k) => JSON.stringify(now.json[k]) === JSON.stringify(before[k]));
+        const effortNow = SCREEN.effortShown(await rowsNow(host, p, 40));
+        const kept = b.effort == null || !effortNow || effortNow === b.effort;
+        const ok = kept && defaultKept;
+        return [200, { ...out, ok, said, defaultKept, restored: wrote, effortNow,
+          message: ok ? `switched for this conversation; the default for new sessions is unchanged${wrote ? ' (put back after Claude Code saved it)' : ''}`
+            : !defaultKept ? `switched, but the default for new sessions could not be put back in ${file}`
+              : `the session shows ${effortNow} effort, not ${b.effort}: Claude Code may have followed the default when it was put back` }];
+      });
+    } finally {
+      // whatever happened above, the default goes back as it was
+      try { if (putBack(file, before, existed)) ctx.log(`api: model switch for ${p.id}: the default in ${file} was put back`); } catch (e) { ctx.log(`api: model switch for ${p.id}: could not put the default back in ${file}: ${e.message}`); }
+    }
+  }));
+  settingsTurn = run.catch(() => {});
+  return run;
+}
+
+// GET /api/sessions/:id/activity: the page's activity line (compose.js drawAct, its tick's reading) for a caller to
+// poll: busy as the page has it (the host says busy, or the screen shows the live spinner, and no menu or panel up),
+// line ("Brewing… (12s · ↓ 1.2k tokens)", or "Working…" without a spinner), the spinner's verb and detail, doing (the
+// tool running or the last action, from the transcript: doingOf), waiting ('menu' | 'panel' | null) with the menu's
+// kind and title, the effort its footer shows, and queue (what Claude Code holds queued, while it runs). One host list,
+// one read of its screen and the transcript's cached state: cheap enough to poll every second or two.
+async function readActivity(key, ctx) {
+  return withHost(async (host) => {
+    const { p, err } = await need(host, key, false);
+    if (err) return err;
+    const cid = convId(p.id);
+    let doing = null;
+    try { doing = cid && ctx.doing ? ctx.doing(cid) : null; } catch {}
+    const base = { ok: true, id: p.id, alive: !!p.alive, status: p.status || null, waitingFor: p.waitingFor || null, doing };
+    if (!p.alive) return [200, { ...base, busy: false, line: null, verb: null, detail: null, waiting: null, menu: null, effort: null, queue: [] }];
+    const rows = await rowsNow(host, p, 40);
+    const spin = SCREEN.spinner(rows);
+    const m = SCREEN.menuDetails(rows);
+    const panel = panelOpen(p);
+    const busy = (p.status === 'busy' || !!(spin && spin.strong)) && !m && !panel;
+    return [200, { ...base, busy, line: busy ? `${spin ? `${spin.verb}…` : 'Working…'}${spin && spin.detail ? ` (${spin.detail})` : ''}` : null,
+      verb: spin ? spin.verb : null, detail: spin ? spin.detail || null : null, waiting: m ? 'menu' : panel ? 'panel' : null,
+      menu: m ? { kind: m.kind, title: m.title } : null, effort: SCREEN.effortShown(rows), queue: await claudeQueue(p.id, ctx) }];
+  });
+}
+
 // POST /api/sessions/:id/open { account?, prompt?, wait? }: a conversation Fleet View knows (its log on disk) resumed
 // as a hosted session (claude --resume, the host's open), in its last folder under its account, as the panel's Open
 // does; it must be in a folder a new session could start in. Then up to START_MS for it to be idle; with prompt,
@@ -1589,7 +1864,11 @@ async function readTranscript(key, query, ctx) {
   let t;
   try { t = await ctx.transcript(id, q); } catch { t = null; }
   if (!t) return [404, { ok: false, message: 'no such conversation (its log is not on disk)' }];
-  return [200, { ok: true, id, ...t }];
+  // queue: the messages Claude Code holds queued, only while its claude runs here (one that ended with some queued
+  // left them in its log)
+  let live = false;
+  try { live = !!(await withHost(async (host) => hosted(await host.call('list'), id)))?.alive; } catch (e) { if (!(e instanceof HostDown)) throw e; }
+  return [200, { ok: true, id, ...t, queue: live && Array.isArray(t.queue) ? t.queue : [] }];
 }
 
 // GET /api/conversations?state=&repo=&all=1&limit=: every conversation Fleet View shows, hosted or not
@@ -1624,17 +1903,17 @@ async function listConversations(query, ctx) {
 //        turnInfo(id) -> { promptAt, turnEndT, turnOpen, asking, askAt, askText, apiError, errAt, lastReply }, or null,
 //        nameOf(id) -> a conversation's name or null, noteMessage(from, to, text, { kind }?) -> records a message
 //        between two, rename(id, name) -> [code, json], hide(id) -> off the map, markTemp(id), isTemp(id),
-//        conversations({ state, repo, all, limit }) -> [row], transcript(id, { since, limit }) -> Promise,
+//        conversations({ state, repo, all, limit }) -> [row], transcript(id, { since, limit }) -> Promise of { ..., queue },
 //        whereIs(id) -> { known, cwd, account }, successorOf(id) -> the one that carries on or null,
 //        openElsewhere(id) -> open in a claude outside Fleet View, isRemoved(id) -> removed from the map, teamOf(id) -> { id, name, lead, members } or null,
 //        teams: { list(), get(id) -> { id, name, lead, members } or null, make(b), add(id, member, lead),
 //        remove(id, member), lead(id, member | null), disband(id) } each -> [code, json] or a Promise of one,
-//        status({ team, ids, from }) -> [code, json],
+//        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,
 //        chiefStart(b) -> [code, json] or a Promise of one (POST /api/chief/start, chief.js),
 //        bots: { list(), create(b), start(id), update(id, b), remove(id) } each -> [code, json] or a Promise of one
 //        (/api/bots, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
-const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript';
-const GET_VERBS = new Set(['menu', 'transcript']);
+const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity';
+const GET_VERBS = new Set(['menu', 'transcript', 'activity']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
 const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|lead|disband|message))?\/?$/;
 const ASK_ROUTE = /^\/api\/ask(?:\/([^/]+))?(?:\/(collected))?\/?$/;
@@ -1726,6 +2005,7 @@ function handle(req, res, pathname, ctx) {
     if (!verb) return key ? run(readSession(k, query(), ctx)) : run(listSessions(ctx));
     if (verb === 'menu') return run(readMenu(k));
     if (verb === 'transcript') return run(readTranscript(k, query(), ctx));
+    if (verb === 'activity') return run(readActivity(k, ctx));
     return answer([405, { ok: false, message: 'method not allowed' }]);
   }
   if (req.method === 'POST' && !GET_VERBS.has(verb)) {
@@ -1738,6 +2018,9 @@ function handle(req, res, pathname, ctx) {
       case 'wait': return body((b) => waitSession(k, b, ctx, gone));
       case 'interrupt': return run(interruptSession(k));
       case 'open': return body((b) => openSession(k, b, ctx, gone, via(b)));
+      case 'now': return run(sendNowSession(k, ctx));
+      case 'unsend': return body((b) => unsendMessage(k, b, ctx));
+      case 'model': return body((b) => switchModel(k, b, ctx, via(b)));
       default: break;
     }
   }
