@@ -12,6 +12,7 @@ const P = require(path.join(__dirname, 'platform.js'));
 // macOS: started from the window, launchd or Finder, PATH is a bare one; the login shell's has git, gh, claude, node
 P.applyLoginPath();
 const API = require(path.join(__dirname, 'api.js'));
+const CHIEF_JS = require(path.join(__dirname, 'chief.js'));
 const CONV = require(path.join(__dirname, 'conversation.js'));
 const CMDS = require(path.join(__dirname, 'commands.js'));
 const FILES = require(path.join(__dirname, 'files.js'));
@@ -155,6 +156,8 @@ const OLD_SETTINGS_FILE = path.join(os.homedir(), '.agent-pulse.json'); // from 
 let saved = {};
 try { saved = JSON.parse(fs.readFileSync(fs.existsSync(SETTINGS_FILE) ? SETTINGS_FILE : OLD_SETTINGS_FILE, 'utf8')) || {}; } catch {}
 if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+// the Chief's part of the server (chief.js), made once the API's ctx is there (below apiCtx)
+let CHIEF = null;
 // remote access (remote.js): the page in a browser on another device, over Tailscale. settings.remote.enabled is the
 // switch (off unless turned on); settings.remote.logins, by hand only, lets more Tailscale logins than this PC's
 // owner pair a browser. The demo keeps its devices in memory and never changes `tailscale serve`; nor does a server on
@@ -648,6 +651,7 @@ function flushSettings() {
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp,
+    chief: CHIEF ? CHIEF.saveShape() : saved.chief,
     remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
     moved: [...moved.values()],
     names: Object.fromEntries(names),
@@ -4382,7 +4386,9 @@ const joinNames = (a) => (a.length < 2 ? a.join('') : `${a.slice(0, -1).join(', 
 
 // Text for one conversation, through api.js deliverText (it follows a handoff, waits behind a menu, resumes one that
 // is not running). kind 'order' (a brief) may resume it; 'note' (who joined or left) goes only to a conversation
-// running now, since every typed note costs a Claude turn. Nothing is typed in the demo.
+// running now, since every typed note costs a Claude turn. Nothing is typed in the demo. No via: a chief gets team
+// text marked unsigned (chief.js frame) even from the page, since a bot makes teams through /api/teams too and the
+// brief carries its order and names (chief/BRIEF.md tells the Chief to ask Henry).
 // -> Promise of { id, name, ok, queued?, message }
 async function tell(id, text, kind) {
   const name = memberOf(id).name;
@@ -4648,12 +4654,7 @@ function statusOf(q) {
     const s = byId.get(id), raw = sessions.get(id), m = memberOf(id);
     const lead = t ? t.lead === id : !!(teamOf(id) && teamOf(id).lead === id);
     if (!s) return { id, name: m.name, repo: m.repo, branch: m.branch, state: raw ? raw.state || null : null, label: null, doing: null, lastReply: null, lastReplyAt: null, pr: null, ctx: null, cost: 0, removed: hiddenNow(id), lead };
-    const run = s.running && s.running[0];
-    const act = s.lastAction;
-    const doing = run ? plain(`${run.tool}${run.what ? ' ' + run.what : ''}`, 200)
-      : s.state === 'ASKING' && s.waitingOn ? plain(`asking: ${s.waitingOn}`, 200)
-        : s.state === 'STALLED' && s.waitingOn ? plain(s.waitingOn, 200)
-          : (s.state === 'WORKING' || s.state === 'AGENTS') && act ? plain(`${act.verb} ${act.what || ''}`, 200) : s.label || null;
+    const doing = doingOf(s);
     const shp = raw && raw.lastPr ? ships.get(`${raw.repo}#${raw.lastPr}`) : null;
     return {
       id, name: s.name, repo: s.repo ? s.repo.name : m.repo, branch: s.branch || null, state: s.state, label: s.label || null, doing,
@@ -4664,6 +4665,17 @@ function statusOf(q) {
     };
   });
   return [200, { ok: true, ...(t ? { team: { id: t.id, name: t.name, lead: t.lead || null } } : {}), members }];
+}
+
+// what a conversation (as /state lists it) is doing, in a few words: the tool running, the question it asks, why it
+// stalled, its last action while it works, else its state's label (GET /api/status, the Chief's briefing)
+function doingOf(s) {
+  const run = s.running && s.running[0];
+  const act = s.lastAction;
+  return run ? plain(`${run.tool}${run.what ? ' ' + run.what : ''}`, 200)
+    : s.state === 'ASKING' && s.waitingOn ? plain(`asking: ${s.waitingOn}`, 200)
+      : s.state === 'STALLED' && s.waitingOn ? plain(s.waitingOn, 200)
+        : (s.state === 'WORKING' || s.state === 'AGENTS') && act ? plain(`${act.verb} ${act.what || ''}`, 200) : s.label || null;
 }
 
 // The conversation that carries on for id: following its handoff (the summary's next session, or the one that
@@ -5421,7 +5433,9 @@ function buildState() {
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
     settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
-      mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() } },
+      mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() },
+      // the Chief: { id: the live Chief's conversation id, else the last one's while its log is there, else null; watch }
+      chief: CHIEF ? CHIEF.view() : { id: null, watch: false } },
     // remote access (remote.js): the switch, the address, how turning it on went, browsers waiting for approval
     // (with their codes) and the approved ones
     remote: REMOTE.view(),
@@ -5498,6 +5512,7 @@ function toolsHere() {
 // hiddenRepos (an array of up to 200 { root, at }, root a string of at most 1024 characters; replaces the list),
 // mapSpots (the map's repo spots, up to 300 { id, x, y, pin }; replaces the list), mapLens (one of MAP_LENSES),
 // mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), mapCamera ({ x, y, k }: the map's view), notify (bool), offAccounts (account letters turned off), parity (rules, see PARITY_BUILTIN)
+// chief ({ watch: bool }: the Chief's watch mode, chief.js; other keys in it are left alone),
 // remote ({ enabled }: remote access, remote.js) is taken from this PC's own page only, in the route itself
 function applySettings(b) {
   if (!b || typeof b !== 'object') return;
@@ -5551,6 +5566,7 @@ function applySettings(b) {
   else if (okBounds(b.miniBounds, 80, 40)) miniBounds = roundBounds(b.miniBounds);
   if (b.chatsBounds === null) chatsBounds = null;
   else if (okBounds(b.chatsBounds, CHATS_MIN_W, CHATS_MIN_H)) chatsBounds = roundBounds(b.chatsBounds);
+  if (b.chief && typeof b.chief === 'object' && typeof b.chief.watch === 'boolean' && CHIEF) CHIEF.setWatch(b.chief.watch);
   saveSettings();
 }
 
@@ -5869,6 +5885,47 @@ const apiCtx = {
   whereIs,
 };
 
+// ---------- the Chief (chief.js) ----------
+// What its briefing and watch mode read, all of it from what /state has already: each conversation /state lists (less
+// the ones removed from the map), the recently finished strip, the production deploys, the conflicts, and the
+// Chief's orders (its messages to other conversations, from the timeline's events). No model call, no GitHub call.
+function chiefRows() {
+  const now = Date.now(), st = buildState();
+  const rows = st.sessions.filter((s) => !hiddenNow(s.id)).map((s) => {
+    const raw = sessions.get(s.id);
+    return { id: s.id, name: s.name, repo: s.repo ? s.repo.name : null, state: s.state, label: s.label, doing: doingOf(s), waitingOn: s.waitingOn || null,
+      since: raw ? waitSince(raw) : s.active || 0, turnStart: s.turnStart || null, active: s.active || null,
+      lastReply: s.lastReply ? plain(s.lastReply, 600) : null, replyAt: raw && raw.replyAt ? Math.round(raw.replyAt) : 0, actionAt: s.lastAction ? s.lastAction.t : 0 };
+  });
+  return { now, st, rows };
+}
+function chiefFacts() {
+  const { now, st, rows } = chiefRows();
+  return { now, sessions: rows,
+    finished: st.finished.map((x) => ({ id: x.id, name: x.name, repo: x.repo ? x.repo.name : null, summary: x.summary, at: x.endedAt })),
+    deploys: st.deploys.map((x) => ({ repo: x.name || x.repo, state: x.state, title: x.title, at: x.readyAt || x.createdAt })) };
+}
+function chiefWatchFacts(chiefIds) {
+  const { now, st, rows } = chiefRows();
+  const ids = new Set(chiefIds);
+  const orders = tl.events.filter((e) => e.verb === 'message' && e.to && ids.has(e.sid) && now - e.t < 24 * 3600e3)
+    .map((e) => ({ to: successorOf(e.to) || e.to, t: e.t }));
+  return { now, sessions: rows, orders, conflicts: st.conflicts.map((c) => ({ id: c.id, kind: c.kind, label: c.label, sessions: c.sessions })) };
+}
+{
+  const HOSTJS = require(path.join(__dirname, 'desktop', 'host.js'));
+  CHIEF = CHIEF_JS.createChief({
+    api: API, ctx: apiCtx, saved: saved.chief, save: saveSettings, demo: DEMO, dir: __dirname,
+    log: (t) => logOnce(t, t),
+    exists: (id) => !!conversationLog(id),
+    facts: chiefFacts, watchFacts: chiefWatchFacts,
+    turnInfo: (id) => apiCtx.turnInfo(id),
+    sessionsFile: HOSTJS.sessionsFile(), normDir: HOSTJS.normDir,
+  });
+  // POST /api/chief/start from a token caller (the phone relay, a script): api.js routes it here
+  apiCtx.chiefStart = (b) => CHIEF.start(b);
+}
+
 // the log the Chat tab reads (conversation.js): a conversation in the window, else any log under the projects
 // folders with that id (an older one, opened from the history), the newer one when both accounts have it
 const convoLogs = new Map(); // id -> log path found by looking
@@ -5967,7 +6024,10 @@ function handleRequest(req, res) {
     res.fvZip = zipFor(req);
     if (REMOTE.route(req, res, pathname, who, pageCtx)) return;
   } else {
-    if (pathname === '/api' || pathname.startsWith('/api/')) return API.handle(req, res, pathname, apiCtx);
+    // POST /api/chief/start is the page's too (the Chats tab's Start): with an Origin it goes on to the page's routes
+    // below and their Origin check; without one it is the API's (token)
+    const pageChief = pathname === '/api/chief/start' && req.headers.origin !== undefined;
+    if (!pageChief && (pathname === '/api' || pathname.startsWith('/api/'))) return API.handle(req, res, pathname, apiCtx);
     const origin = req.headers.origin;
     if (origin && origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) return sendJson(res, 403, { ok: false, message: 'bad origin' });
   }
@@ -6049,6 +6109,13 @@ function handleRequest(req, res) {
       });
     }
     if (pathname === '/chat/image') return CONV.saveImage(req, res, convCtx);
+    // the Chats tab's Start for the Chief (chief.js): starts it, or adopts the one running
+    if (pathname === '/api/chief/start') {
+      return readBody(req, res, (b) => {
+        if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
+        CHIEF.start(b).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
+      });
+    }
     // "I know, keep using": the heads-up for that episode of usage from elsewhere stays away
     if (pathname === '/usage/ack') {
       return readBody(req, res, (b) => {
@@ -6082,6 +6149,8 @@ function handleRequest(req, res) {
   if (pathname === '/state') return sendState(req, res);
   if (pathname === '/timeline') return sendJson(res, 200, timelineOut(new URL(req.url, 'http://x').searchParams));
   if (pathname === '/since') return sendJson(res, 200, sinceOut(new URL(req.url, 'http://x').searchParams));
+  // the Chief's free briefing (chief.js): needs you, working, finished, deploys, and the same as a few lines
+  if (pathname === '/chief/briefing') return sendJson(res, 200, CHIEF.briefing());
   if (pathname === '/conversation') return void CONV.conversation(req, res, convCtx).catch((e) => requestFailed(req, res, e));
   if (pathname === '/chat/commands') return sendJson(res, 200, CMDS.list(new URL(req.url, 'http://x').searchParams.get('cwd')));
   if (pathname === '/chat/files') {
@@ -6343,6 +6412,8 @@ function startWeb() {
     setTimeout(() => { try { codeGraphs(); } catch {} }, 20e3);
     // the API's throwaway sessions: off the map once they end
     every(10000, 'api-temp', sweepTemp);
+    // the Chief: follow it through handoffs, tell a new one its id, watch mode (chief.js)
+    every(5000, 'chief', () => { CHIEF.tick(); });
     // messages and orders that waited for a menu before the last restart (api.js's queue)
     API.startQueue(apiCtx);
   });

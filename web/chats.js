@@ -18,6 +18,12 @@
 // this one with ?solo=chats (SOLO): only this view, under a small 36px header that drags the window, with a
 // pin-on-top toggle (setChatsOnTop) and a dock-back button (dockChats); Session and Details there open the
 // conversation in the main window (showMain).
+//
+// The Chief: with none started (settings.chief.id null) its pane is a short card with a Start button (POST
+// /api/chief/start). Once there is one, its pane is a bot's chat with a strip above the thread: the briefing card
+// (GET /chief/briefing when the pane opens and at most every 60 s while it shows; free, it sends the Chief nothing)
+// and the Watch mode switch (POST /settings { chief: { watch } }). With ?fixture=1 nothing is posted: Start fakes
+// a Chief from a fixture conversation and the briefing is built here from the fixture sessions.
 import { C, esc, setHTML, badge, acctTag, acctColor, isAcct, repoChip } from './cards.js';
 import { icon } from './icons.js';
 import { renderChatPane } from './chat.js';
@@ -48,6 +54,19 @@ let onTop = !!store.get(TOP_KEY, false);
 let syncedSel = null; // the last ui.selectedId this view followed
 let selLast = null; // the last copy of the picked bot's conversation, kept if it leaves the lists
 let pane = null;
+
+const FIXTURE = new URLSearchParams(location.search).has('fixture');
+const BRIEF_MS = 60000; // the briefing card reads again at most this often while the Chief's pane shows
+const START_WAIT = 30000; // after Start: how long "Starting..." waits for the Chief to be listed
+const NEEDS = new Set(['ASKING', 'QUESTION', 'ERROR', 'STALLED']);
+const BUSY = new Set(['WORKING', 'AGENTS']);
+const chief = {
+  fakeId: null, // ?fixture=1 only: the fixture conversation standing in for a started Chief
+  starting: false, startedAt: 0, err: '',
+  watch: false, // ?fixture=1: the local switch
+  watchSet: null, watchAt: 0, watchErr: '', // the switch as just flipped, until /state agrees
+  brief: null, briefAt: 0, briefBusy: false, briefOn: false, more: false,
+};
 
 onRekey((oldKey, id) => {
   if (selKey === oldKey) { selKey = id; store.set(SEL_KEY, id); }
@@ -80,9 +99,9 @@ function when(ms, now) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 const colorOf = (c) => {
+  if (c && c.kind === 'chief') return C.gold; // the Chief keeps its own colour whatever folder it runs in
   const r = c && c.repo && c.repo.color;
   if (HEX.test(String(r || ''))) return r;
-  if (c && c.kind === 'chief') return C.gold;
   if (c && c.kind === 'team' && HEX.test(String(c.statusColor || ''))) return c.statusColor;
   return c && isAcct(c.account) ? acctColor(c.account) : C.cyan;
 };
@@ -107,7 +126,7 @@ const avatar = (state, c, size = 40) => (c.kind === 'team' ? cluster(state, c, s
   : mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: c.kind === 'chief' && !c.id ? 'new' : mascotState(c), color: colorOf(c), size }));
 const previewOf = (c) => {
   const p = typeof c.preview === 'string' ? c.preview : '';
-  if (c.kind === 'chief' && !c.id) return p || 'Not started yet';
+  if (c.kind === 'chief') return c.id ? p || 'Ready' : chief.starting || Date.now() - chief.startedAt < START_WAIT ? 'Starting...' : p || 'Not started yet';
   if (c.kind === 'team' && !p) return 'Group chat';
   return p;
 };
@@ -159,7 +178,7 @@ function build(el, ui) {
     + `<div class="ch-list" role="listbox" aria-label="chats"></div></nav>`
     + `<section class="ch-main"><header class="ch-head" hidden><button type="button" class="ch-ib ch-back" title="Back to the chats (Esc)" aria-label="Back">${icon('chevron', 16)}</button>`
     + `<span class="ch-head-av"></span><div class="ch-head-t"></div><div class="ch-head-b"></div></header>`
-    + `<div class="ch-chat" hidden></div>`
+    + `<div class="ch-chief" hidden></div><div class="ch-chat" hidden></div>`
     + `<div class="ch-team" hidden><div class="ch-thread" role="log" aria-live="polite"></div>`
     + `<div class="ch-tcomp"><textarea rows="1" spellcheck="true" placeholder="Message the team"></textarea>`
     + `<button type="button" class="ch-send" title="Send to every member (Enter)" aria-label="Send">${icon('send', 16)}</button><div class="ch-tnote" hidden></div></div></div>`
@@ -168,7 +187,7 @@ function build(el, ui) {
   Object.assign(el, {
     _ch: q('.ch'), _side: q('.ch-side'), _list: q('.ch-list'), _accts: q('.ch-accts'), _pop: q('.ch-pop'), _new: q('.ch-new'),
     _search: q('.ch-search input'), _head: q('.ch-head'), _headAv: q('.ch-head-av'), _headT: q('.ch-head-t'), _headB: q('.ch-head-b'),
-    _chat: q('.ch-chat'), _team: q('.ch-team'), _thread: q('.ch-thread'), _ta: q('.ch-tcomp textarea'), _send: q('.ch-send'),
+    _chat: q('.ch-chat'), _chief: q('.ch-chief'), _team: q('.ch-team'), _thread: q('.ch-thread'), _ta: q('.ch-tcomp textarea'), _send: q('.ch-send'),
     _tnote: q('.ch-tnote'), _blank: q('.ch-blank'), _popped: q('.ch-popped'), _onTop: q('.ch-ontop'),
   });
   el._built = true;
@@ -237,6 +256,16 @@ function build(el, ui) {
     else if (e.key === 'Escape') { e.preventDefault(); el._ta.blur(); if (el.classList.contains('ch-narrow')) back(ui); }
   });
   el._send.addEventListener('click', () => sendTeam(el, ui));
+  el._blank.addEventListener('click', (e) => { if (e.target.closest('.ch-start-btn')) startChief(el, ui); });
+  el._chief.addEventListener('click', (e) => {
+    const o = e.target.closest('[data-open]');
+    if (o) {
+      const t = (el._contacts || []).find((x) => x.id === o.dataset.open || (x.ids || []).includes(o.dataset.open));
+      if (t) pick(t.key, ui, true);
+    } else if (e.target.closest('.ch-more')) { chief.more = !chief.more; ui.refresh(); }
+    else if (e.target.closest('.ch-ask')) askBrief(el);
+  });
+  el._chief.addEventListener('change', (e) => { if (e.target.closest('.ch-watch')) setWatch(el, ui, e.target.checked); });
 
   if (SOLO) {
     const head = el.querySelector('.ch-solo-top');
@@ -349,7 +378,7 @@ function drawHead(el, state, c, s) {
     setHTML(el._headB, '');
     return;
   }
-  setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(s.name || c.name)}</span>${acctTag(s.account)}${badge(s)}</div>`
+  setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.kind === 'chief' ? c.name : s.name || c.name)}</span>${acctTag(s.account)}${badge(s)}</div>`
     + `<div class="ch-head-m">${repoChip(s)}${s.goal ? `<span class="ch-goal" title="${esc(s.goal)}">${esc(s.goal)}</span>` : ''}</div>`);
   const live = !s.past && inState(state, s.id);
   const where = SOLO && typeof desk()?.showMain === 'function' ? 'in the main window' : 'in the side panel';
@@ -408,10 +437,138 @@ function drawTeam(el, state, c) {
 }
 const curUi = () => pane?._ui || {};
 
+// ---------- the Chief ----------
+const ago = (ms, now) => {
+  const m = Math.max(0, Math.round((now - ms) / 60000));
+  return !ms ? '' : m < 1 ? 'now' : m < 60 ? `${m}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+};
+async function postJson(url, body) {
+  if (FIXTURE) { try { window.__fvPosts?.push({ url, body: JSON.parse(JSON.stringify(body)) }); } catch {} return { ok: true, status: 200, body: null }; }
+  try {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => null);
+    return { ok: r.ok && !(j && j.ok === false), status: r.status, body: j };
+  } catch { return { ok: false, status: 0, body: null }; }
+}
+const failText = (r, what) => (r.status === 503 ? "The desktop app's session host is not running"
+  : r.status === 0 ? 'Could not reach Fleet View'
+  : (r.body && (r.body.error || r.body.message)) || `${what} (error ${r.status})`);
+
+async function startChief(el, ui) {
+  if (chief.starting) return;
+  chief.starting = true;
+  chief.err = '';
+  ui.refresh();
+  if (FIXTURE) {
+    // nothing is posted: a fixture conversation stands in for the started Chief
+    const ss = (el._state && el._state.allSessions) || [];
+    const s = ss.find((x) => x.state === 'IDLE') || ss.find((x) => x.state === 'DONE') || ss[ss.length - 1];
+    chief.fakeId = s ? s.id : null;
+    chief.starting = false;
+    ui.refresh();
+    return;
+  }
+  const r = await postJson('/api/chief/start', {});
+  chief.starting = false;
+  if (r.ok) chief.startedAt = Date.now();
+  else chief.err = failText(r, 'Could not start the Chief');
+  ui.refresh();
+}
+
+const watchOn = (state) => (FIXTURE ? chief.watch
+  : chief.watchSet !== null && Date.now() - chief.watchAt < 6000 ? chief.watchSet : !!(state.settings && state.settings.chief && state.settings.chief.watch));
+async function setWatch(el, ui, on) {
+  chief.watchErr = '';
+  if (FIXTURE) { chief.watch = on; ui.refresh(); return; } // kept local
+  chief.watchSet = on;
+  chief.watchAt = Date.now();
+  ui.refresh();
+  const r = await postJson('/settings', { chief: { watch: on } });
+  if (!r.ok) { chief.watchSet = null; chief.watchErr = failText(r, 'Could not change Watch mode'); ui.refresh(); }
+}
+
+// "Ask the Chief": puts "Brief me" in the chat box. Nothing is sent; Enter does that.
+function askBrief(el) {
+  const ta = el._chat.querySelector('.chat-compose textarea');
+  if (!ta) return;
+  if (!ta.value.trim()) { ta.value = 'Brief me'; ta.dispatchEvent(new Event('input', { bubbles: true })); }
+  ta.focus();
+  try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch {}
+}
+
+// ?fixture=1: a briefing in the server's shape, built from the fixture sessions
+function fixtureBriefing(state) {
+  const now = Date.now(), ss = state.allSessions || [];
+  const repoOf = (s) => (s.repo && s.repo.name) || '';
+  const act = (s) => (s.lastAction && s.lastAction.what ? `${s.lastAction.verb || 'working'} ${s.lastAction.what}` : s.goal || s.label || '');
+  const needsYou = ss.filter((s) => NEEDS.has(s.state)).slice(0, 10).map((s) => ({
+    id: s.id, name: s.name, repo: repoOf(s), since: (s.lastAction && s.lastAction.t) || now,
+    what: s.state === 'ERROR' ? 'hit an error' : s.state === 'STALLED' ? 'looks stalled' : (typeof s.waitingOn === 'string' ? s.waitingOn : s.waitingOn && s.waitingOn.text) || 'asked you a question',
+  }));
+  const working = ss.filter((s) => BUSY.has(s.state)).slice(0, 12).map((s) => ({ id: s.id, name: s.name, repo: repoOf(s), doing: act(s), since: s.turnStart || (s.lastAction && s.lastAction.t) || now }));
+  const finished = (state.finished || []).slice(0, 10).map((f) => ({ id: f.id, name: f.name, repo: (f.repo && f.repo.name) || '', summary: f.summary || '', at: f.endedAt || now }));
+  const deploys = (state.deploys || []).slice(0, 6).map((d) => ({ repo: d.name || d.repo, state: d.state, title: d.title || '', at: d.readyAt || d.createdAt || now }));
+  const text = [];
+  if (needsYou.length) text.push(`${needsYou.length} need${needsYou.length === 1 ? 's' : ''} you: ${needsYou.slice(0, 3).map((n) => `${n.name} (${n.what})`).join(', ')}${needsYou.length > 3 ? ` and ${needsYou.length - 3} more` : ''}`);
+  if (working.length) text.push(`${working.length} working: ${working.slice(0, 3).map((w) => w.name).join(', ')}${working.length > 3 ? ` and ${working.length - 3} more` : ''}`);
+  if (finished.length) text.push(`${finished.length} finished: ${finished.slice(0, 2).map((f) => `${f.name} (${f.summary})`).join(', ')}`);
+  for (const d of deploys.slice(0, 2)) text.push(`Deploy ${d.state}: ${d.repo}${d.title ? ` · ${d.title}` : ''}`);
+  return { at: now, needsYou, working, finished, deploys, text: text.join('\n') || 'Nothing is going on.' };
+}
+
+async function loadBrief(el, state) {
+  if (chief.briefBusy) return;
+  chief.briefBusy = true;
+  chief.briefAt = Date.now();
+  try {
+    if (FIXTURE) chief.brief = fixtureBriefing(state);
+    else {
+      const r = await fetch('/chief/briefing', { cache: 'no-store' });
+      if (!r.ok) throw new Error(String(r.status));
+      chief.brief = await r.json();
+    }
+    chief.briefErr = '';
+  } catch { chief.briefErr = 'Could not read the briefing.'; }
+  chief.briefBusy = false;
+  if (pane === el) curUi().refresh?.();
+}
+
+function briefRow(o, kind, a, b, c, when) {
+  const tag = o.id ? 'button type="button"' : 'div';
+  return `<${tag} class="ch-br-row ${kind}"${o.id ? ` data-open="${esc(o.id)}" title="Open ${esc(o.name || '')}"` : ''}>`
+    + `<span class="ch-br-n">${esc(a)}</span>${b ? `<span class="ch-br-r">${esc(b)}</span>` : ''}<span class="ch-br-w">${esc(c)}</span><span class="ch-br-s">${esc(when)}</span></${o.id ? 'button' : 'div'}>`;
+}
+function briefHtml(b, now) {
+  if (!b) return chief.briefErr ? `<div class="ch-br-lines bad">${esc(chief.briefErr)}</div>` : '<div class="ch-br-lines faint">Reading what is going on...</div>';
+  if (!chief.more) return `<div class="ch-br-lines">${String(b.text || '').split('\n').filter(Boolean).map((l) => `<div>${esc(l)}</div>`).join('') || '<div class="faint">Nothing is going on.</div>'}</div>`;
+  const sec = (title, list, row) => (list.length ? `<div class="ch-br-sec"><div class="ch-br-st">${title}<span>${list.length}</span></div>${list.map(row).join('')}</div>` : '');
+  const body = sec('Needs you', b.needsYou || [], (x) => briefRow(x, 'needs', x.name, x.repo, x.what, ago(x.since, now)))
+    + sec('Working', b.working || [], (x) => briefRow(x, 'work', x.name, x.repo, x.doing, ago(x.since, now)))
+    + sec('Finished', b.finished || [], (x) => briefRow(x, 'done', x.name, x.repo, x.summary, ago(x.at, now)))
+    + sec('Deploys', b.deploys || [], (x) => briefRow({}, `dep ${/^\w+$/.test(x.state) ? x.state : ''}`, x.repo, x.state, x.title, ago(x.at, now)));
+  return body || '<div class="ch-br-lines faint">Nothing is going on.</div>';
+}
+function drawChief(el, state) {
+  const now = Date.now(), b = chief.brief, on = watchOn(state);
+  const at = b && b.at ? new Date(b.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : '';
+  setHTML(el._chief, `<div class="ch-br"><div class="ch-br-h"><span class="ch-br-t">Briefing</span>${at ? `<span class="ch-br-at">${esc(at)}</span>` : ''}<span class="grow"></span>`
+    + `<button type="button" class="ch-more" aria-expanded="${chief.more}">${chief.more ? 'Less' : 'More'}</button></div>`
+    + `<div class="ch-br-body">${briefHtml(b, now)}</div>`
+    + `<div class="ch-br-f"><button type="button" class="btn ch-ask" title="Types &quot;Brief me&quot; in the chat box. Free: reading the briefing sends the Chief nothing, and nothing is sent until you press Enter">Ask the Chief</button><span class="grow"></span>`
+    + `<label class="ch-wsw"><input type="checkbox" class="ch-watch" role="switch"${on ? ' checked' : ''} aria-label="Watch mode"><span class="ch-track"></span><span class="ch-wl">Watch mode</span></label></div></div>`
+    + `<div class="ch-wnote${chief.watchErr ? ' bad' : ''}">${esc(chief.watchErr || 'Off: the Chief acts only when you tell it. On: it checks in every 15 min at most and may nudge stalled bots.')}</div>`);
+}
+
 function blankHtml(state, c) {
   if (c && c.kind === 'chief') {
-    return `<div class="ch-empty">${mascotSVG('chief', { state: 'new', color: C.gold, size: 72 })}<div class="ch-empty-t">The Chief</div>`
-      + `<div class="ch-empty-s">The Chief arrives in the next update: one bot that keeps an eye on all the others and tells you what needs you.</div></div>`;
+    const mas = mascotSVG('chief', { state: 'new', color: C.gold, size: 72 });
+    if (c.id) return `<div class="ch-empty">${mas}<div class="ch-empty-t">The Chief</div><div class="ch-empty-s">Opening its chat...</div></div>`;
+    const wait = chief.starting || Date.now() - chief.startedAt < START_WAIT;
+    return `<div class="ch-empty ch-start">${mas}<div class="ch-empty-t">The Chief</div>`
+      + `<div class="ch-empty-s">Briefs you, answers what's going on, passes your orders on</div>`
+      + `<div class="ch-defaults" title="What it starts with">Sonnet 5.5 · medium · account B</div>`
+      + `<button type="button" class="btn primary ch-start-btn"${wait ? ' disabled' : ''}>${wait ? 'Starting...' : 'Start the Chief'}</button>`
+      + `${chief.err ? `<div class="ch-start-err" role="alert">${esc(chief.err)}</div>` : ''}</div>`;
   }
   return `<div class="ch-empty">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 72 })}<div class="ch-empty-t">Pick a chat</div>`
     + `<div class="ch-empty-s">Every bot, team and the Chief are on the left.</div></div>`;
@@ -432,7 +589,7 @@ export function renderChats(el, state, ui) {
   if (!chains) { try { chains = createChainStore(); } catch (e) { console.warn(e); chains = undefined; } }
   let contacts = [];
   try {
-    contacts = sortContacts(buildContacts(state, { chiefId: state.settings?.chief?.id || null, chiefPlaceholder: true, chains: chains || undefined }));
+    contacts = sortContacts(buildContacts(state, { chiefId: state.settings?.chief?.id || (FIXTURE ? chief.fakeId : null), chiefPlaceholder: true, chains: chains || undefined }));
   } catch (e) { console.error('chats: contacts', e); }
   el._contacts = contacts;
   // a pick made in another view (a card, the map) carries over to the row that holds it
@@ -460,6 +617,16 @@ export function renderChats(el, state, ui) {
   const team = c && c.kind === 'team';
   el._head.hidden = !c;
   el._chat.hidden = !s;
+  // the Chief's strip (briefing + Watch mode) sits above its thread, scrolling inside itself when it is tall; the briefing reads only while that pane shows
+  const isChief = !!(s && c.kind === 'chief' && c.id);
+  el._chief.hidden = !isChief;
+  if (isChief) {
+    if (!narrow || open) {
+      if (!chief.briefOn) { chief.briefOn = true; chief.briefAt = 0; }
+      if (Date.now() - chief.briefAt >= BRIEF_MS) loadBrief(el, state);
+    } else chief.briefOn = false;
+    drawChief(el, state);
+  } else chief.briefOn = false;
   el._team.hidden = !team;
   el._blank.hidden = !!(s || team);
   if (!s && !team) { setHTML(el._blank, blankHtml(state, c)); if (c) drawHead(el, state, c, null); return; }

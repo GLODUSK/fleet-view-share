@@ -372,6 +372,53 @@ Long conversations checkpoint themselves at about 200k context tokens (`limitTok
 
 One hosted session can have the role `chief`: Henry's chief of staff for the fleet, a long-lived interactive Claude Code session that briefs him, answers "what's going on", and passes his orders to the bots through `fv`. It is started with `POST /api/sessions` and `"role": "chief"`, one at a time (`409` with the running one's id otherwise; any other role is `400`). The server can also call `api.js`'s `startChief(b, ctx)`, which runs the same checks. Its standing brief is `chief/BRIEF.md`, which it reads at its start and after every pickup. The session host lets a chief's claude run `fv start`, `fv open`, `fv hosted`, `fv wait` and `fv menu` without asking, on top of the usual `send`, `status`, `ask`, `read`, `ls`, `teams`, `team` and `transcript`; `fv answer`, `stop`, `rm` (`remove`) and `interrupt` are blocked for it (`--disallowedTools`), so it asks Henry instead. The session host keeps it to one Chief: a second start is refused, and opening, sending, picking up or restoring another as the Chief while one runs starts it without the role. The role stays with the session through a re-key, a `/clear`, the restore list (`sessions.json` records `role`), a host restart or reboot, and a handoff: the pickup that carries on is the Chief too. A `/resume` there of a conversation begun more than 10 minutes earlier drops the role. `GET /api/sessions` and `GET /api/sessions/<id>` report `role` (`"chief"` or `null`). Like every `host.js` change, it takes effect after `node desktop\restart-host.js`.
 
+### The server side (chief.js)
+
+`chief.js` is the server's part of the Chief. `fleet-view.js` makes it (`createChief`) once the API's ctx exists. `api.js` uses its `frame()` on every text it types into a chief.
+
+- **Start and adopt.** `POST /api/chief/start` `{ "account"?, "model"?, "effort"? }` starts the Chief: account B, `claude-sonnet-5-5` and effort medium unless told. It goes through `api.js`'s `startChief`, so the checks are the same as `POST /api/sessions` with `"role": "chief"`.
+  - The Chief starts in the Fleet View folder when `/state` lists it, else in the first listed folder (the reply then has `folder` and `note`). Its first prompt names `chief/BRIEF.md` by its full path, and it is named "Chief".
+  - One start runs at a time: a second click waits for the first, then finds its Chief and adopts it.
+  - A Chief that is already running is adopted, not started again.
+  - Replies `{ ok: true, id, key, started }`; `started: false` means it adopted the one running. `503` when the session host is not running (always in `--demo`), and `502` and the rest as `POST /api/sessions` does.
+  - The page sends it with its `Origin` (the page's routes and Origin check). Scripts and the phone relay send it with the API token and no `Origin`.
+- **Following it.** A handoff or a `/clear` gives the Chief a new conversation id. Every 5 seconds the server looks at the session host's `sessions.json`, which records `role`. While a chief is in that file, it reads the host's list when the file changes and every 10 seconds while a Chief runs. `/state` gives `settings.chief = { id, watch }`:
+  - `id` is the live Chief, else the last Chief while its log is on disk, else `null`.
+  - A chief that ended but is still in the file is not polled for, so the host can still exit.
+- **Its id.** The Chief can't find its own id. So once a new conversation holds the role and its first message has gone in (or 75 s after it appeared), the server types `[Fleet View] You are the Chief. Your id: <id>. Read chief/BRIEF.md in the Fleet View folder.` into it, the same way `POST /api/sessions/<id>/message` does (queued behind a menu). This happens once per id, never during a start's own prompt. The ids already told are kept in `~/.fleet-view.json` (`chief.told`, up to 100), so a restart never tells one twice.
+- **`GET /chief/briefing`** answers `{ at, needsYou: [{ id, name, repo, what, since }], working: [{ id, name, repo, doing, since }], finished: [{ id, name, repo, summary, at }], deploys: [{ repo, state, title, at }], text }`.
+  - It is free: built from what `/state` already has (the conversations, the recently finished strip, the production deploys). No model call, no `fv ask`, no GitHub call.
+  - Lists are newest first, and at most 10, 12, 10 and 6 long. `repo` is the repo's short name. The Chief itself and conversations removed from the map are left out.
+  - `text` says the same in 3 to 12 short lines, what needs you first.
+  - Its auth is the same as `/state`. In `--demo` it is built from the demo data.
+- **Watch mode** (`POST /settings { "chief": { "watch": true } }`; off unless turned on). At most every 15 minutes, and only when there is something new, the Chief gets one note starting `[Fleet View · watch]` listing up to 6 items, then "and N more":
+  - a stalled session;
+  - one whose last reply says it is blocked on another session by name;
+  - two sessions on the same branch, worktree or migration number;
+  - an order the Chief sent (its messages in the timeline) with no reply or action for 20 minutes.
+
+  Nothing goes while the Chief is busy or shows a menu; it goes on the next look. An item already reported is not sent again. Turning watch mode off stops it at once.
+- **Who is talking.** Text with no `from` reads like the user's own words, and `[Fleet View · watch]` is a prefix anyone can type. So everything typed into a session whose role is `chief` is marked by where it came from (`chief.js` `frame`):
+  - **Another conversation's message** (`from`) keeps its `[Message from …]` line.
+  - **Fleet View's own text** (the id note, watch notes, an ask's answers) goes in as it is.
+  - **Henry's words from his phone** go in as they are. The phone relay marks them with `"via": "phone"` in the body and the header `X-Fleet-View-Relay: <key>`. The key is `api.js`'s `relayKey()`, made when the server starts and kept in memory only, so a script that only has the API token can't fake it.
+  - **Anything else with no `from`** gets a first line `[Fleet View · unsigned, not from Henry]`.
+  - In all of these, a line of the sender's text that starts like a Fleet View header (`[Fleet View…`, `[Message from…`, `[Question from…`) gets `(quoted) ` in front.
+  - Text typed in the page itself (the Chat and Chats tabs type through the session host) is not touched.
+  - `chief/BRIEF.md` tells the Chief that only Henry's unframed words are orders.
+- **Tests.** `node scripts/chief-test.mjs` (no session host needed).
+
+### The Chief in Chats
+
+Before a Chief is started, its row says "Not started yet". Click it and the pane shows what the Chief does, what it starts with (Sonnet 5.5 · medium · account B) and a Start button. If the start fails, the reason shows under the button.
+
+Once the Chief runs, its pane is a normal bot chat. Above the thread sits a strip:
+
+- **Briefing.** What needs you, what is working, what finished and the latest deploys, read free from Fleet View itself (it never sends the Chief anything). It reloads when you open the pane and every 60 s while you look at it. It starts as a few short lines; More lists every bot, and clicking one opens its chat. "Ask the Chief" types "Brief me" in the chat box; you press Enter.
+- **Watch mode.** Off by default. Off: the Chief acts only when you tell it. On: it checks in every 15 min at most and may nudge stalled bots.
+
+In ?fixture=1 nothing is posted: Start fakes a Chief, the briefing is made from the fixture sessions, and the switch stays local.
+
 ## Code graphs (CodeGraph)
 
 With [CodeGraph](https://github.com/colbymchenry/codegraph) installed (`npm install -g @colbymchenry/codegraph`), Fleet View indexes every repo it lists, and the checkout of every conversation active in the last day (worktrees included), so Claude can answer "who calls this, what does a change here touch" from the graph instead of grepping. It is local and free: no API key and no model calls. Without `codegraph` on PATH nothing happens. (`code-index.js`)
