@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="preview.css" onerror="this.remove()">
 <link rel="stylesheet" href="viewer.css" onerror="this.remove()">
 <link rel="stylesheet" href="usage.css" onerror="this.remove()">
+<link rel="stylesheet" href="housekeeping.css" onerror="this.remove()">
 <script>
   // glass: the desktop window (Electron, ?glass=1) has acrylic behind the page, so the page goes see-through.
   // titlebar: that window has no title bar of its own (titlebar=overlay from desktop/main.js); the header is
@@ -50,6 +51,7 @@
   <button type="button" id="replay-pill" class="count replay-pill" title="the map shows a replay: click to go back to live" hidden></button>
   <button type="button" id="since-btn" class="since-btn" title="Since you looked (w)" aria-label="Since you looked"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></button>
   <button type="button" id="notify-btn" class="since-btn notify-btn" aria-pressed="true"></button>
+  <button type="button" id="hk-btn" class="since-btn hk-hdr" title="Housekeeping: old worktrees and branches" aria-label="Housekeeping" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 3l-7.5 7.5"/><path d="M9.5 9.5l5 5"/><path d="M9.5 9.5c-2.5 0-4.5 1.5-5.5 4l-1 7 7-1c2.5-1 4-3 4-5.5"/><path d="M7 15.5l-1.5 4"/></svg></button>
   <div id="counts" class="counts"></div>
   <div id="clock" class="clock"></div>
 </header>

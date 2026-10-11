@@ -15,6 +15,7 @@ const FILES = require(path.join(__dirname, 'files.js'));
 const CHANGES = require(path.join(__dirname, 'changes.js'));
 const PREVIEW = require(path.join(__dirname, 'preview.js'));
 const UPDATER = require(path.join(__dirname, 'updater.js'));
+const HOUSEKEEPING = require(path.join(__dirname, 'housekeeping.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
@@ -5740,6 +5741,19 @@ const remoteOf = (req) => { const w = req && req.fvWho; return w && w.kind === '
 // repos(): the workspaces the page lists by hand or remembers, newest first (GET /folders' starting places)
 const pageRepos = () => [...new Set([...addedRepos.map((a) => a && a.root).filter(Boolean).reverse(), ...[...remembered.repos].sort((x, y) => y[1] - x[1]).map(([r]) => r)])];
 const pageCtx = { sendJson, readBody, folders: knownFolders, repos: pageRepos, log: (t) => logOnce('page:' + t, t), remote: remoteOf, tailnet: REMOTE };
+// housekeeping.js: old worktrees, local branches and GitHub branches; a report, and clean-ups only when asked
+const HK = HOUSEKEEPING.createHousekeeping({
+  repos: () => (DEMO ? [] : pageRepos().filter((r) => !repoHidden(r) && !isHomeRoot(r)).map((root) => ({ root }))),
+  // the checkout each unfinished or running session works in
+  liveTops: () => { const t = new Set(); for (const s of sessions.values()) if (!s.demo && ((s.state && s.state !== 'DONE') || liveProcs.has(s.id))) { const b = branchInfo(s); if (b.top) t.add(b.top); } return t; },
+  codegraphBusy: (dir) => { const st = CODEGRAPH.status(); return [st.building, ...(st.queued || [])].some((p) => p && rootKey(p) === rootKey(dir)); },
+  isQuiet: () => ![...sessions.values()].some((s) => inState(s) && (s.state === 'WORKING' || s.state === 'AGENTS')),
+  projectsDirs: () => roots().map((r) => r.dir),
+  dataDir: LOG_DIR,
+  log: (t) => logLine('housekeeping: ' + t),
+  // its own gh runner: paging ~1000 PRs needs more than the 25 s the map's lookups get
+  gh: GITHUB ? undefined : () => Promise.reject(new Error('GitHub is off (--no-github)')),
+});
 // live.js's: authorize(req) is true only for this PC's page (Origin http://127.0.0.1:PORT or localhost) or an approved
 // remote device (Origin https://<its tailnet name>); state() is GET /state's object
 const liveCtx = {
@@ -5798,6 +5812,7 @@ function handleRequest(req, res) {
   if (pathname === '/folders') return void Promise.resolve(FILES.folders(req, res, pageCtx)).catch((e) => requestFailed(req, res, e));
   if (pathname === '/upload') return FILES.upload(req, res, pageCtx);
   if (pathname === '/update' || pathname.startsWith('/update/')) return UPDATER.handle(req, res, pathname, pageCtx);
+  if (pathname === '/housekeeping' || pathname.startsWith('/housekeeping/')) return HK.handle(req, res, pathname, pageCtx);
   if (req.method === 'POST') {
     if (pathname === '/open') {
       return readBody(req, res, (b) => {
@@ -6135,6 +6150,8 @@ function startWeb() {
     every(8000, 'discover', discover);
     every(5000, 'github', github);
     every(60e3, 'codegraph', codeGraphs);
+    // the nightly clean-up: does nothing unless Henry turned it on in the card
+    HK.startNightly();
     setTimeout(() => { try { codeGraphs(); } catch {} }, 20e3);
     // the API's throwaway sessions: off the map once they end
     every(10000, 'api-temp', sweepTemp);

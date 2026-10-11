@@ -126,6 +126,7 @@ import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unr
 import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { mountUsage } from './usage.js';
+import { mountHousekeeping } from './housekeeping.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner } from './compose.js';
 import { forkAt } from './forkat.js';
 
@@ -2858,6 +2859,9 @@ const usagePill = (e) => {
 };
 $('counts')?.addEventListener('click', (e) => { if (usagePill(e)) e.stopPropagation(); });
 $('counts')?.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && usagePill(e)) e.preventDefault(); });
+
+// ---------- Housekeeping (housekeeping.js; the header's broom button) ----------
+mountHousekeeping({ button: $('hk-btn') });
 
 // ---------- "Update available" (update.js; updater.js on the server) ----------
 if (!FIXTURE) mountUpdate({ pill: $('update-pill'), verBtn: $('ver-btn'), getJson });
