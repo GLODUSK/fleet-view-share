@@ -405,10 +405,25 @@ let ptyLib = null, ptyName = null, ptyError = null, ptyTried = false;
 function loadPty() {
   if (ptyTried) return ptyLib;
   ptyTried = true;
+  hidePtyForks();
   for (const name of ['node-pty', '@lydell/node-pty']) {
     try { ptyLib = require(name); ptyName = name; if (!P.isWin) spawnHelperExecutable(name); break; } catch (e) { ptyError = e; }
   }
   return ptyLib;
+}
+// Windows: killing a pty makes node-pty fork() its conpty_console_list_agent with no windowsHide. This process has
+// no console, so the agent got a new one, which Windows Terminal (the default terminal) tried to host and showed
+// "error 0x800700e8 when launching ... conpty_console_list_agent" in a window. Every fork from here runs hidden.
+function hidePtyForks() {
+  if (!P.isWin) return;
+  const cp = require('child_process');
+  if (cp.fork.fleetHidden) return;
+  const fork = cp.fork;
+  cp.fork = function (modulePath, args, options) {
+    if (args && !Array.isArray(args) && typeof args === 'object') { options = args; args = []; }
+    return fork.call(this, modulePath, args || [], { ...options, windowsHide: true });
+  };
+  cp.fork.fleetHidden = true;
 }
 // macOS: node-pty starts each pty through its spawn-helper program, and an install that lost the file's execute
 // bit fails every spawn ("posix_spawnp failed"): put the bit back

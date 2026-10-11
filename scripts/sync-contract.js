@@ -150,7 +150,19 @@ function fabricate({ id, cwd, version, word, title, extra }) {
 // ---------- the interactive claude in a pseudo-terminal, as desktop/host.js starts it ----------
 // node-pty comes with desktop/ (its npm install); --pty-from <folder> looks in another one (a worktree has none)
 function loadPty() {
-  const from = [arg('--pty-from'), path.join(__dirname, '..', 'desktop'), __dirname].filter(Boolean);
+  // node-pty forks conpty_console_list_agent with no windowsHide when a pty is killed; with no console of its own
+  // (a scheduled task) that popped a Windows Terminal error window, so every fork from here runs hidden
+  if (process.platform === 'win32') {
+    const cp = require('child_process'), fork = cp.fork;
+    if (!fork.fleetHidden) {
+      cp.fork = function (modulePath, args, options) {
+        if (args && !Array.isArray(args) && typeof args === 'object') { options = args; args = []; }
+        return fork.call(this, modulePath, args || [], { ...options, windowsHide: true });
+      };
+      cp.fork.fleetHidden = true;
+    }
+  }
+  const from =[arg('--pty-from'), path.join(__dirname, '..', 'desktop'), __dirname].filter(Boolean);
   for (const name of ['node-pty', '@lydell/node-pty']) {
     try { return require(require.resolve(name, { paths: from })); } catch {}
   }
