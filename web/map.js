@@ -3530,6 +3530,10 @@ function fillTip(n) {
     if (s.model || s.context) {
       const pct = ctxPct(s);
       const d = row(tip, 'model', s.model || '?');
+      // its effort in Claude Code's color for that level (app.css .eff-*)
+      if (s.effort && /^(low|medium|high|xhigh|max)$/.test(s.effort)) {
+        const e = document.createElement('span'); e.textContent = s.effort; e.className = `eff eff-${s.effort}`; e.style.marginLeft = '8px'; d.appendChild(e);
+      }
       if (pct !== null) {
         const c = document.createElement('span'); c.textContent = `   ctx ${pct}%`; c.style.cssText = `color:${ctxColor(pct)};font:11.5px ${CSS_MONO}`; d.appendChild(c);
       }

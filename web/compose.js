@@ -649,7 +649,7 @@ export function mountCompose(slot, s) {
     <button type="button" class="cmp-ib" data-c="attach" title="Attach files or images (or paste, or drop them here)" aria-label="attach files">${ic('attach', 16)}</button>
     <button type="button" class="cmp-ib" data-c="folder" title="Attach a folder (or paste, or drop one here): Claude gets its path" aria-label="attach a folder">${ic('folder', 16)}</button>
     <span class="cmp-modew"><button type="button" class="cmp-modeb" data-c="mode" aria-haspopup="menu" aria-expanded="false" title="Permission mode (Shift+Tab in the session)">${ic('mode', 13)}<span class="cmp-model-t">Mode</span>${icon('chevron', 11)}</button><div class="cmp-menu" role="menu" hidden></div></span>
-    <span class="cmp-modew cmp-modelw"><button type="button" class="cmp-modeb cmp-modelb" data-c="model" aria-haspopup="menu" aria-expanded="false" title="Model and effort">${icon('model', 13)}<span class="cmp-model-t mono">Model</span>${icon('chevron', 11)}</button><div class="cmp-menu cmp-menu-model" role="menu" hidden></div></span>
+    <span class="cmp-modew cmp-modelw"><button type="button" class="cmp-modeb cmp-modelb" data-c="model" aria-haspopup="menu" aria-expanded="false" title="Model and effort">${icon('model', 13)}<span class="cmp-model-t mono">Model</span><span class="cmp-eff" hidden></span>${icon('chevron', 11)}</button><div class="cmp-menu cmp-menu-model" role="menu" hidden></div></span>
     <button type="button" class="cmp-modeb cmp-rcb" data-c="remote" aria-pressed="false" data-cur="off" aria-label="Remote Control">${ic('phone', 14)}</button>
     <span class="cmp-hint">Enter to send · Shift+Enter new line · / for commands · ! for bash · ↑ last message</span>
     <span class="grow"></span>
@@ -1719,15 +1719,19 @@ export function mountCompose(slot, s) {
     const t = termApi();
     const { model, effort } = current();
     const name = model ? modelLabel(model, true) : 'Model';
-    const label = effort ? `${name} · ${effort}` : name;
-    const key = `${label}|${model}|${effort}|${!!t}|${!!(st.menu || st.panel)}|${st.sending}`;
+    const key = `${name}|${model}|${effort}|${!!t}|${!!(st.menu || st.panel)}|${st.sending}`;
     if (st.drawn.model === key) return;
     st.drawn.model = key;
-    modelBtn.querySelector('.cmp-model-t').textContent = label;
+    // the model name shortens when space runs out; the effort, in its Claude Code color, always shows in full
+    modelBtn.querySelector('.cmp-model-t').textContent = name;
+    const eff = modelBtn.querySelector('.cmp-eff');
+    eff.hidden = !EFFORTS.includes(effort);
+    eff.className = `cmp-eff eff${eff.hidden ? '' : ` eff-${effort}`}`;
+    eff.textContent = eff.hidden ? '' : effort;
     modelBtn.disabled = !t || !!st.menu || !!st.panel || st.sending;
     modelBtn.title = !t ? noTermMsg('Changing the model') : `Model and effort${st.s.model ? ` (now ${st.s.model}${effort ? `, ${effort} effort` : ''})` : ''}`;
     const item = (k, label, on, attr) => `<button type="button" role="menuitemradio" class="cmp-mi${on ? ' on' : ''}" ${attr}="${esc(k)}" aria-checked="${on}">`
-      + `<span class="cmp-mi-c">${on ? ic('check', 13) : ''}</span><span>${esc(label)}</span></button>`;
+      + `<span class="cmp-mi-c">${on ? ic('check', 13) : ''}</span><span${attr === 'data-effort' ? ` class="eff eff-${esc(k)}"` : ''}>${esc(label)}</span></button>`;
     // the one it runs comes first in the list when it isn't one of the newest (an older version)
     const ids = model && !MODEL_IDS.includes(model) ? [model, ...MODEL_IDS] : MODEL_IDS;
     modelMenu.innerHTML = '<div class="cmp-mh">Model</div>' + ids.map((k) => item(k, modelLabel(k), k === model, 'data-model')).join('')

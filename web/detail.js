@@ -10,7 +10,7 @@
 // its inner edge sets its width. Both sizes are kept per user.
 import {
   C, esc, setHTML, setIcon, badge, acctTag, ctxGauge, shipTrack, planSteps, needsYou, isBusy, ago, fmtTok, fmtCost,
-  repoChip, linksOf, urlLink, revealLink, turnText, clockTime, setText, statusColor, waitNote, modelName, handoffBits,
+  repoChip, linksOf, urlLink, revealLink, turnText, clockTime, setText, statusColor, waitNote, modelName, effortSpan, handoffBits,
 } from './cards.js';
 import { icon, verbIcon } from './icons.js';
 import { renderSessionPane, isPreview, openElsewhere, endPreviews, termApi, ensureLive, onRekey } from './term.js';
@@ -418,6 +418,7 @@ function metaRows(s) {
   if (s.branch) row('branch', 'branch', `<span class="mono">${urlLink(l.branch, esc(s.branch), `open branch ${s.branch} on GitHub`)}</span>`);
   if (s.worktree) row('worktree', 'worktree', `<span class="mono">${esc(s.worktree)}</span>`);
   if (s.model) row('model', 'model', `<span class="mono">${esc(modelName(s.model))}</span>`);
+  if (s.effort) row('think', 'effort', effortSpan(s.effort));
   if (s.context?.limit) row('tokens', 'context', ctxGauge(s.context, true));
   for (const [k, v] of handoffBits(s)) row('open', k.replace(/ →$/, ''), v);
   // the turn's timer is filled in by turnOf, so the rows (and the links in them) aren't rewritten every second

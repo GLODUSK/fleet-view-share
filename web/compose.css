@@ -311,6 +311,9 @@ html.glass .cmp-box { background: rgba(14, 17, 27, 0.66); -webkit-backdrop-filte
 .cmp-modelw { flex: 0 1 auto; min-width: 0; max-width: 46%; }
 .cmp-modelb { max-width: 100%; }
 .cmp-modelb .cmp-model-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 500 11px/1 var(--font-mono); }
+.cmp-modelb .cmp-eff { flex: none; font-size: 11px; }
+.cmp-modelb .cmp-eff[hidden] { display: none; }
+.cmp-mi .eff { font: inherit; font-weight: 600; }
 .cmp-menu-model { min-width: 200px; }
 .cmp-mh { padding: 6px 10px 3px 8px; color: var(--faint); font: 600 10.5px/1 var(--font-ui); letter-spacing: 0.06em; text-transform: uppercase; }
 .cmp-msep { height: 1px; margin: 4px 2px; background: var(--line); }

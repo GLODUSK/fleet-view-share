@@ -277,7 +277,11 @@ export function branchChip(s) {
   return `<span class="chip mono" title="branch${s.worktree ? ' (worktree ' + esc(s.worktree) + ')' : ''}">${icon('branch', 12)}${name}${wt}</span>`;
 }
 export const modelName = (m) => String(m || '').replace(/^claude-/, '');
-export const modelChip = (s) => (s.model ? `<span class="chip mono model">${icon('model', 12)}${esc(modelName(s.model))}</span>` : '');
+// effort in Claude Code's colors (dark theme): low warning, medium success, high permission, xhigh autoAccept, max
+// rainbow (app.css .eff-max); the class carries the color, EFFORT_COLOR is for drawing outside the page's CSS
+export const EFFORT_COLOR = { low: '#ffc107', medium: '#4eba65', high: '#b1b9f9', xhigh: '#af87ff', max: '#ff6b80' };
+export const effortSpan = (e) => (EFFORT_COLOR[e] ? `<span class="eff eff-${e}">${e}</span>` : '');
+export const modelChip = (s) =>(s.model ? `<span class="chip mono model">${icon('model', 12)}${esc(modelName(s.model))}</span>` : '');
 
 // the quiet line under a card: branch, worktree, model, tokens and cost (all also in the detail panel)
 export function metaLine(s) {
@@ -287,7 +291,8 @@ export function metaLine(s) {
     bits.push(`<span class="m" title="branch">${icon('branch', 12)}<span class="mono">${url ? urlLink(url, esc(s.branch), `open branch ${s.branch} on GitHub`) : esc(s.branch)}</span></span>`);
   }
   if (s.worktree && s.worktree !== s.branch && !String(s.branch || '').endsWith('/' + s.worktree)) bits.push(`<span class="m" title="worktree">${icon('worktree', 12)}<span class="mono">${esc(s.worktree)}</span></span>`);
-  if (s.model) bits.push(`<span class="m" title="model">${icon('model', 12)}<span class="mono">${esc(modelName(s.model))}</span></span>`);
+  if (s.model) bits.push(`<span class="m" title="model${s.effort ? ' and effort' : ''}">${icon('model', 12)}<span class="mono">${esc(modelName(s.model))}</span>${s.effort ? ` ${effortSpan(s.effort)}` : ''}</span>`);
+  else if (s.effort) bits.push(`<span class="m" title="effort">${effortSpan(s.effort)}</span>`);
   for (const [k, v] of handoffBits(s)) bits.push(`<span class="m ho">${icon('open', 12)}<span class="ho-k">${k}</span>${v}</span>`);
   if (s.tokens || s.usagePending) {
     bits.push(`<span class="m" title="tokens, this conversation and its agents">${icon('tokens', 12)}<span class="num">${fmtTok(s.tokens)}</span></span>`);

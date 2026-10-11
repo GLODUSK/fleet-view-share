@@ -329,6 +329,16 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; transiti
   overflow-wrap: anywhere;
 }
 .chip.model { color: var(--text); }
+/* effort, in the colors Claude Code gives each level */
+.eff { font: 600 11.5px/1 var(--mono); white-space: nowrap; }
+.eff-low { color: #ffc107; }
+.eff-medium { color: #4eba65; }
+.eff-high { color: #b1b9f9; }
+.eff-xhigh { color: #af87ff; }
+.eff-max {
+  color: #ff6b80; background: linear-gradient(90deg, #ff6b80, #ffc107, #4eba65, #3fd8ff, #af87ff);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
 .chip.turn { color: var(--cyan); }
 .ctx { display: inline-flex; align-items: center; gap: 6px; font: 12px var(--mono); white-space: nowrap; }
 .ctx-k { color: var(--faint); }
