@@ -321,7 +321,8 @@ function ingestRecord(L, d, off, len) {
 // one line of the log (its bytes, and where it is in the file)
 function line(L, buf, off) {
   // records that are never chat (titles, file snapshots, modes, costs...) start with their type: skip them unread
-  const head = buf.toString('latin1', 0, Math.min(buf.length, 24));
+  // (32 bytes: '{"type":"queue-operation"' is 25, and a shorter head never matched it, so every queue line was skipped)
+  const head = buf.toString('latin1', 0, Math.min(buf.length, 32));
   if (head.startsWith('{"type":"') && !/^\{"type":"(?:user|assistant|system|attachment|queue-operation)"/.test(head)) return;
   let d;
   try { d = JSON.parse(buf.toString('utf8')); } catch { return; }
