@@ -148,7 +148,10 @@ function readJson(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8'))
 function writeJsonAtomic(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true, ...(P.isWin ? {} : { mode: 0o700 }) });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), P.isWin ? undefined : { mode: 0o600 });
+  // on disk before the rename: a power cut can keep the rename and lose unflushed data, leaving an empty file
+  // where the restore list was (2026-10-10: the PC went down and the next host resumed nothing)
+  const fd = fs.openSync(tmp, 'w', P.isWin ? undefined : 0o600);
+  try { fs.writeFileSync(fd, JSON.stringify(obj, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmp, file);
 }
 function fileHash(file) { try { return crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex').slice(0, 12); } catch { return null; } }
@@ -1036,7 +1039,10 @@ function runHost() {
   // On start: resume every conversation the last list had running
   function restore() {
     const saved = readJson(sessionsFile());
-    if (!saved || typeof saved !== 'object') return;
+    if (!saved || typeof saved !== 'object') {
+      if (fs.existsSync(sessionsFile())) log('restore: sessions.json could not be read (cut short when the PC went down?); nothing resumed');
+      return;
+    }
     if (saved.ui && typeof saved.ui === 'object') ui = saved.ui;
     const list = Array.isArray(saved.sessions) ? saved.sessions : [];
     if (!list.length) return;
