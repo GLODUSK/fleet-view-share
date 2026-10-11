@@ -684,6 +684,9 @@ html.glass .menu.ctx-menu { background: var(--float-bg); }
 .since-btn:hover, .since-btn:focus-visible { color: var(--text); border-color: rgba(255, 255, 255, 0.18); outline: none; }
 .since-btn svg { display: block; }
 html.titlebar .top.fit-3 .since-btn { display: none; }
+/* the bell next to it: desktop notifications on or off (struck through and dimmer when off) */
+.notify-btn.off { opacity: 0.6; }
+html.titlebar .top.fit-3 .notify-btn { display: none; }
 /* "Replay · 10:42 PM" while the map shows a replay; a click goes back to live */
 .replay-pill { cursor: pointer; color: var(--gold); border-color: rgba(255, 194, 74, 0.35); }
 .replay-pill b { color: var(--gold); font-weight: 600; font-size: 12px; }
@@ -702,6 +705,8 @@ html.titlebar .top.fit-3 .since-btn { display: none; }
 }
 .ver-btn:hover, .ver-btn:focus-visible { color: var(--text); opacity: 1; outline: none; }
 .ver-btn.behind { color: var(--mint); opacity: 1; }
+/* the app's name, just left of the version */
+.app-name { color: var(--dim); opacity: 0.7; font: 600 11.5px/1 var(--font-ui); letter-spacing: 0.02em; white-space: nowrap; }
 .update-card {
   position: fixed; top: calc(var(--top-h) + 10px); right: 16px; z-index: 40; width: min(420px, calc(100vw - 32px));
   max-height: calc(100vh - var(--top-h) - 60px); overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;

@@ -958,6 +958,7 @@ function render() {
   }
   markMulti(el);
   drawReplayPill();
+  drawNotifyBtn();
 }
 
 function drawClock() {
@@ -2946,8 +2947,30 @@ function notifyMenuItem() {
   const on = local.notify !== false;
   return { label: on ? 'Turn off desktop notifications' : 'Turn on desktop notifications', icon: 'alert',
     note: on ? 'questions, errors, failed checks and deploys, messages' : null,
-    run: () => { saveSettings({ notify: !on }); if (!on) askNotify(); toast(on ? 'Desktop notifications are off' : 'Desktop notifications are on', C.dim); render(); } };
+    run: toggleNotify };
 }
+function toggleNotify() {
+  const on = local.notify !== false;
+  saveSettings({ notify: !on });
+  if (!on) askNotify();
+  toast(on ? 'Desktop notifications are off' : 'Desktop notifications are on', C.dim);
+  render();
+}
+// the header's bell, right of the clock button: the same switch as the menu item
+function drawNotifyBtn() {
+  const b = $('notify-btn');
+  if (!b) return;
+  const on = local.notify !== false;
+  if (b._on === on) return;
+  b._on = on;
+  b.classList.toggle('off', !on);
+  b.setAttribute('aria-pressed', String(on));
+  b.title = on ? 'Turn off desktop notifications' : 'Turn on desktop notifications';
+  b.setAttribute('aria-label', b.title);
+  const bell = '<path d="M6 8.5a6 6 0 0 1 12 0c0 6.5 2.5 8 2.5 8h-17S6 15 6 8.5"/><path d="M10.3 20a1.9 1.9 0 0 0 3.4 0"/>';
+  b.innerHTML = `<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${bell}${on ? '' : '<path d="M3 3l18 18"/>'}</svg>`;
+}
+$('notify-btn')?.addEventListener('click', (e) => { e.stopPropagation(); toggleNotify(); });
 
 // ---------- remote access (remote.js on the server): Fleet View in a browser on another device, over Tailscale ----------
 // Its switch is no longer in the page (Henry, 2026-10-10: other devices go through Supabase sync, not Tailscale);
