@@ -550,6 +550,7 @@ kbd {
   transition: background-color 180ms var(--ease), border-color 180ms var(--ease);
 }
 .btn:hover { background: rgba(255, 255, 255, 0.10); }
+.btn.on { background: rgba(255, 255, 255, 0.13); border-color: rgba(255, 255, 255, 0.28); color: var(--text); }
 .btn.primary { background: rgba(255, 194, 74, 0.14); border-color: rgba(255, 194, 74, 0.45); color: var(--gold); }
 .btn.primary:hover { background: rgba(255, 194, 74, 0.2); }
 .btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }

@@ -92,7 +92,8 @@ function build(el, ui) {
   el._changes = el.querySelector('.d-changes');
   el._previewPane = el.querySelector('.d-previewpane');
   // review comments (Changes) or a screenshot (Preview) handed to the chat box: show the Chat tab (see handto.js)
-  window.addEventListener('fv-handto', (e) => { if (e.detail && e.detail.id === el._id) { el._tab = 'chat'; el._tabPicked = true; ui.showDetail(el._id); } });
+  // (in Projects and Bots the view's own chat box takes it: the panel there has no Chat tab)
+  window.addEventListener('fv-handto', (e) => { if (e.detail && e.detail.id === el._id && !el._noChat) { el._tab = 'chat'; el._tabPicked = true; ui.showDetail(el._id); } });
   el._tabs = [...el.querySelectorAll('.d-tab')];
   el._placeBtn = el.querySelector('[data-place]');
   el._previewHint = el.querySelector('.d-preview');
@@ -205,8 +206,11 @@ try {
     : localStorage.getItem('fv.detailFloat') === '0' ? (localStorage.getItem('fv.detailLeft') === '1' ? 'left' : 'right') : 'float';
 } catch {}
 let float = place === 'float', left = place === 'left';
+// Projects and Bots dock it (on the left when it is set there, else on the right) so it sits beside their chat and
+// never over its Session / Details buttons, which close it again (Henry, 2026-10-11)
+let docked = false;
 function setPlace(p) {
-  place = p; float = p === 'float'; left = p === 'left';
+  place = p; float = p === 'float' && !docked; left = p === 'left';
   try { localStorage.setItem('fv.detailPlace', p); } catch {}
 }
 // the docked panel's width, as last dragged by its inner edge (null: the default --detail-w)
@@ -554,11 +558,13 @@ export function renderDetail(el, s, ui, gone = false, extras = []) {
   el.classList.toggle('open', open);
   el.setAttribute('aria-hidden', String(!open));
   const work = el.closest('.work');
+  docked = !!ui.chatInView?.();
+  float = place === 'float' && !docked;
   work?.classList.toggle('detail-left', left);
   work?.classList.toggle('detail-float', float);
   if (dockW) work?.style.setProperty('--detail-w', `${dockW}px`);
   // the panel closed or moved on: the preview sessions it started end (after the switch, never the one shown)
-  if (!open) { el._id = null; el._placed = null; peek = null; if (el._renaming) { el._renaming = null; el._slots.head._html = null; } endPreviews(null); return; }
+  if (!open) { el._id = null; el._shown = null; el._placed = null; peek = null; if (el._renaming) { el._renaming = null; el._slots.head._html = null; } endPreviews(null); return; }
   if (!el._built) build(el, ui);
   const now = Date.now();
   const sl = el._slots;
@@ -566,6 +572,7 @@ export function renderDetail(el, s, ui, gone = false, extras = []) {
   // how this conversation was just picked, once: 'preview' (a click), 'explicit' (Enter, a double-click),
   // 'keys' (arrows: shown, never started), or null (a redraw)
   const intent = ui.takeIntent ? ui.takeIntent(s.id) : null;
+  const was = el._shown;
   if (el._id !== s.id) {
     // a different conversation: start at the top, on the tab it was last shown on, else Chat
     el._id = s.id;
@@ -579,6 +586,10 @@ export function renderDetail(el, s, ui, gone = false, extras = []) {
   const wantTab = ui.takeTab ? ui.takeTab(s.id) : null;
   if (wantTab === 'details' || wantTab === 'chat' || wantTab === 'changes' || wantTab === 'preview' || (wantTab === 'session' && desk)) el._tab = wantTab;
   else if (intent) el._tab = openTab(s.id, desk);
+  // Projects and Bots show the chat beside the panel: no Chat tab there (but for a previous conversation's chat
+  // read under it, openPeek), so a conversation last shown on Chat opens on the tab the panel was on, else Details
+  el._noChat = !!ui.chatInView?.() && !(peek && peek.for === s.id);
+  if (el._noChat && el._tab === 'chat') el._tab = was && was !== 'chat' && (was !== 'session' || desk) ? was : 'details';
   // the floating card goes beside a pick when it opens, and later moves only off a pick it covers (placeFloat);
   // opened without a pick (the panel restored when the app starts), it goes where it was last put
   if (float && work && (intent || el._placed !== s.id)) placeFloat(el, work, s.id, intent === 'preview' || intent === 'explicit', wasOpen, !intent && !wasOpen);
@@ -631,8 +642,10 @@ export function renderDetail(el, s, ui, gone = false, extras = []) {
 function drawTabs(el, s, ui, work, auto, extras = []) {
   const tab = ['session', 'chat', 'changes', 'preview'].includes(el._tab) ? el._tab : 'details';
   rememberTab(s.id, tab);
+  el._shown = tab;
   for (const b of el._tabs) {
     const on = b.dataset.tab === tab;
+    b.hidden = b.dataset.tab === 'chat' && el._noChat;
     b.classList.toggle('on', on);
     b.setAttribute('aria-selected', String(on));
     b.tabIndex = on ? 0 : -1;
@@ -659,3 +672,7 @@ function drawTabs(el, s, ui, work, auto, extras = []) {
   // after the pane (an auto-open there may have just made it a preview)
   el._previewHint.hidden = !(tab === 'session' && isPreview(s.id));
 }
+
+// the tab the open panel shows ({ id, tab }), or null when it is shut: the Projects and Bots views' buttons close it
+// when the one pressed is the tab already showing (app.js ui.panel)
+export const shownTab = (el) => (el && el.classList.contains('open') && el._id && el._shown ? { id: el._id, tab: el._shown } : null);

@@ -246,8 +246,10 @@ export function renderProjects(el, state, ui) {
   setHTML(el._topT, `<div class="pj-top-n"><span class="name">${esc(s.name)}</span>${acctTag(s.account)}${badge(s)}</div>`
     + `<div class="pj-top-m">${repoChip(s)}${s.branch ? branchChip(s) : ''}${s.goal ? `<span class="pj-goal" title="${esc(s.goal)}">${esc(s.goal)}</span>` : ''}</div>`);
   const inState = !s.past && (state.allSessions || []).some((x) => x.id === s.id);
-  setHTML(el._topB, (inState ? `<button type="button" class="btn" data-pane="session" title="the live session, in the side panel">${icon('shell', 14)}<span>Session</span></button>`
-    + `<button type="button" class="btn" data-pane="details" title="plan, ship track, files and cost, in the side panel">${icon('info', 14)}<span>Details</span></button>` : '')
+  // the one whose tab the side panel shows is lit, and a click on it closes the panel (ui.panel)
+  const on = (p) => (ui.panelTab?.(s.id) === p ? ' on" aria-pressed="true' : '" aria-pressed="false');
+  setHTML(el._topB, (inState ? `<button type="button" class="btn${on('session')}" data-pane="session" title="the live session, in the side panel (again: close it)">${icon('shell', 14)}<span>Session</span></button>`
+    + `<button type="button" class="btn${on('details')}" data-pane="details" title="plan, ship track, files and cost, in the side panel (again: close it)">${icon('info', 14)}<span>Details</span></button>` : '')
     + `<button type="button" class="btn" data-pane="terminal" title="open it in Windows Terminal">${icon('open', 14)}<span>Terminal</span></button>`);
   renderChatPane(el._chat, s, { visible: true });
 }

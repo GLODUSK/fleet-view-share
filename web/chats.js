@@ -587,9 +587,12 @@ function drawHead(el, state, c, s) {
     + `<div class="ch-head-m">${repoChip(s)}${s.goal ? `<span class="ch-goal" title="${esc(s.goal)}">${esc(s.goal)}</span>` : ''}</div>`);
   if (start) { setHTML(el._headB, start); return; }
   const live = !s.past && inState(state, s.id);
-  const where = SOLO && typeof desk()?.showMain === 'function' ? 'in the main window' : 'in the side panel';
-  setHTML(el._headB, (live ? `<button type="button" class="btn" data-pane="session" title="the live session, ${where}">${icon('shell', 14)}<span>Session</span></button>`
-    + `<button type="button" class="btn" data-pane="details" title="plan, ship track, files and cost, ${where}">${icon('info', 14)}<span>Details</span></button>` : '')
+  const solo = SOLO && typeof desk()?.showMain === 'function';
+  const where = solo ? 'in the main window' : 'in the side panel (again: close it)';
+  // the one whose tab the side panel shows is lit, and a click on it closes the panel (ui.panel)
+  const on = (p) => (!solo && el._ui?.panelTab?.(s.id) === p ? ' on" aria-pressed="true' : '" aria-pressed="false');
+  setHTML(el._headB, (live ? `<button type="button" class="btn${on('session')}" data-pane="session" title="the live session, ${where}">${icon('shell', 14)}<span>Session</span></button>`
+    + `<button type="button" class="btn${on('details')}" data-pane="details" title="plan, ship track, files and cost, ${where}">${icon('info', 14)}<span>Details</span></button>` : '')
     + `<button type="button" class="btn" data-pane="terminal" title="open it in Windows Terminal">${icon('open', 14)}<span>Terminal</span></button>`);
 }
 

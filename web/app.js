@@ -157,7 +157,7 @@ import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects } from './projects.js';
 import { renderChats } from './chats.js';
-import { renderDetail, openPeek, SPLIT_MAX } from './detail.js';
+import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote } from './term.js';
 import { pickFolder, canPickFolder, uploads, upload, sizeText, droppedFolders } from './pcfiles.js';
@@ -273,12 +273,21 @@ const ui = {
     pickIntent = id && how ? { id, kind: intentOf(how) } : null;
     render();
   },
-  // the Projects view's Session / Details buttons: the side panel on that tab (it stays shut there otherwise)
+  // the Projects view's Session / Details buttons: the side panel on that tab (it stays shut there otherwise).
+  // The button of the tab already showing closes it again (Henry, 2026-10-11: "if i click it twice it dissapears")
   panel(id, tab) {
+    if (ui.panelTab(id) === tab) { projPanel = false; render(); return; }
     tabWant = { id, tab };
     projPanel = true;
     ui.showDetail(id);
   },
+  // the tab the side panel shows for that conversation in the Projects and Bots views, or null while it is shut there
+  panelTab(id) {
+    const t = projPanel ? shownTab($('detail')) : null;
+    return t && t.id === id ? t.tab : null;
+  },
+  // the view shows the conversation's chat itself (Projects, Bots): the panel there has no Chat tab (detail.js)
+  chatInView: () => local.view === 'projects' || local.view === 'chats',
   pinned: () => pinned,
   // the panel's pin button: keeps the panel open, or lets it close again
   togglePin() {
