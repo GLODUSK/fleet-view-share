@@ -307,10 +307,15 @@ html.glass .cmp-box { background: rgba(14, 17, 27, 0.66); -webkit-backdrop-filte
 .cmp-mi.on:hover, .cmp-mi.on:focus-visible { background: rgba(63, 216, 255, 0.2); }
 .cmp-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); }
 .cmp-hint { flex: 0 100 auto; font: 11.5px/1 var(--font-ui); padding-left: 4px; }
-/* the model and effort picker, at the right by Send; its label shortens before the hint goes */
-.cmp-modelw { flex: 0 1 auto; min-width: 0; max-width: 46%; }
-.cmp-modelb { max-width: 100%; }
-.cmp-modelb .cmp-model-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 500 11px/1 var(--font-mono); }
+/* the model and effort picker, at the right by Send: always shown in full (the hint shortens and goes instead) */
+.cmp-modelw { flex: none; }
+/* in a narrow box (no hint left) the permission mode's label shortens instead (its color still tells the mode) */
+@container cmp (max-width: 520px) {
+  .cmp-modew:not(.cmp-modelw) { flex: 0 1 auto; min-width: 30px; }
+  .cmp-modew:not(.cmp-modelw) .cmp-modeb { max-width: 100%; }
+  .cmp-modew:not(.cmp-modelw) .cmp-model-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+}
+.cmp-modelb .cmp-model-t { font: 500 11px/1 var(--font-mono); }
 .cmp-modelb .cmp-eff { flex: none; font-size: 11px; }
 .cmp-modelb .cmp-eff[hidden] { display: none; }
 .cmp-mi .eff { font: inherit; font-weight: 600; }
