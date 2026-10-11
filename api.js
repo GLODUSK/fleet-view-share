@@ -898,9 +898,10 @@ async function sendMessage(key, b, ctx, gone, via = null) {
   return deliverText(key, head, { kind: 'message', from, original: text, wait: ms, queue, open }, ctx, gone);
 }
 // a sender's name for the first line of what it sends: no control characters (an ESC in a title could end the
-// paste early and type the rest as keys), quotes or line breaks, so the line stays one line of plain text
+// paste early and type the rest as keys), quotes, brackets or line breaks, so the line stays one line of plain text
+// with the name inside its quotes (chief.js headName)
 function headName(from, ctx) {
-  return String(nameFor(from, ctx)).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim().slice(0, 80) || from.slice(0, 8);
+  return CHIEF.headName(nameFor(from, ctx), 80) || from.slice(0, 8);
 }
 
 // ---------- teams ----------
@@ -960,7 +961,7 @@ async function messageTeam(tid, b, ctx, gone, via = null) {
     let r;
     try {
       [, r] = from ? await sendMessage(m, { text, from }, ctx, gone)
-        : await deliverText(m, `[Fleet View · team "${t.name}"]\n${text}`, { kind: 'order', via: via === 'henry' ? 'server' : null }, ctx, gone);
+        : await deliverText(m, `[Fleet View · team "${CHIEF.headName(t.name)}"]\n${text}`, { kind: 'order', via: via === 'henry' ? 'server' : null }, ctx, gone);
     } catch (e) { r = { ok: false, message: e instanceof HostDown ? e.message : String((e && e.message) || e) }; }
     return { id: r.id || m, name: nameFor(r.id || m, ctx), ok: !!r.ok, ...(r.queued ? { queued: true } : {}), message: r.message || '' };
   }));

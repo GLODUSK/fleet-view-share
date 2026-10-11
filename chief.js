@@ -72,6 +72,15 @@ function frame(text, origin) {
   if (origin === 'henry') return lines.map(neutralise).join('\n');
   return [UNSIGNED, ...lines.map(neutralise)].join('\n');
 }
+// a name the server puts inside its own first line (a team's, a sender's: api.js), so it can't end the quotes or the
+// line and start a header of its own: a double quote of any kind becomes ', a bracket a space (lookalikes too, by
+// fold), control characters and line breaks a space, and it is kept short
+const HEAD_QUOTE = /["\u201c\u201d\u201e\u201f\u2033\u2036]/;
+const HEAD_BRACKET = /[[\]\u3010\u3011\u3014\u3015\u27e6\u27e7\u301a\u301b\u3016\u3017]/;
+const headName = (s, n = 60) => oneLine([...String(s == null ? '' : s)].map((c) => {
+  const f = fold(c);
+  return HEAD_QUOTE.test(f) ? "'" : HEAD_BRACKET.test(f) ? ' ' : c;
+}).join(''), n);
 
 // ---------- small helpers ----------
 function ago(ms) {
@@ -423,5 +432,5 @@ function createChief(deps) {
     _state: () => ({ watch, lastId, told: [...teller.told()], live, wst, starting }) };
 }
 
-module.exports = { createChief, createTeller, frame, neutralise, fold, buildBriefing, briefingText, watchItems, watchStep, watchCommit, shouldTell, idNote, pickChief,
+module.exports = { createChief, createTeller, frame, neutralise, fold, headName, buildBriefing, briefingText, watchItems, watchStep, watchCommit, shouldTell, idNote, pickChief,
   convId, DEFAULTS, BRIEF_FILE, WATCH_EVERY_MS, ORDER_STUCK_MS, TELL_AFTER_MS, TELL_RETRY_MS, UNSIGNED, WATCH_MARK };
