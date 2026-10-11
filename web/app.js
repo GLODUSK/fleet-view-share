@@ -173,8 +173,8 @@ import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner
 import { forkAt } from './forkat.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects', 'chats'];
-// the views the tabs offer (Henry, 2026-10-11: no Map or Projects tab); the others still open with ?view=
-const TAB_VIEWS = ['cards', 'wall', 'chats'];
+// the views the tabs offer: Cards, Map, Wall, Projects, Bots (Henry, 2026-10-11: Map and Projects tabs back after #260)
+const TAB_VIEWS = ['cards', 'map', 'wall', 'projects', 'chats'];
 const params = new URLSearchParams(location.search);
 const SOLO = params.get('solo') === 'chats';
 const FIXTURE = params.has('fixture');
