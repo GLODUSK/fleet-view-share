@@ -55,8 +55,11 @@ cards again):
    the same login. A login that is here under another letter (the C an old bug handed out instead of A) is moved to
    its letter by itself; a letter holding a login Blackbox does not want there is moved aside to a free letter first,
    so no login is lost. A missing one has a **Sign in as ...** button (the claude.ai link and a field for its code
-   too, for a browser signed in to another claude.ai account). Claude B's folder (`~/.claude`) is never renamed: when
-   B is in the way the screen says what to do by hand.
+   too, for a browser signed in to another claude.ai account). Claude B's folder (`~/.claude`) is never renamed, so
+   a login goes onto or off B by signing in, and since one login is on one letter only, in order: B first (its
+   button **Remove Claude C and sign in** removes the letter that has B's login now, backing that login up), then the
+   letter that wants B's old login (**After Claude B** until then). A machine with B and C the other way round from
+   Blackbox is two sign-ins.
 3. **First sync**: what is on Blackbox comes here and what is here goes up; the screen closes by itself when both
    sides have looked once (**Open now** skips the wait).
 

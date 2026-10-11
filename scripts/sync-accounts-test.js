@@ -65,10 +65,22 @@ const states = (p) => p.letters.map((l) => `${l.letter}:${l.state}${l.from ? '<'
   eq(states(p), 'A:move<C B:ok', 'plan 3: states');
 }
 {
-  // B holds A's login: B's folder never moves, so it is blocked with what to do
-  const p = SA.plan({ A: art, B: work }, [at('A', work), at('B', art)]);
-  ok(p.letters.every((l) => l.state === 'blocked') && /Claude B/.test(p.letters[0].message), 'plan 4: B in the way is blocked, with a message');
-  ok(!p.moves.some((m) => m.from === 'B' || m.to === 'B'), 'plan 4: no move touches B');
+  // B holds A's login (the PC wrote the list the other way round): B's folder never moves, so it is two sign-ins:
+  // B as Blackbox's B first (after removing the letter that has that login), then A as B's old one
+  const p = SA.plan({ A: work, B: art }, [at('B', work), at('C', art)]);
+  eq(states(p), 'A:signin B:signin', 'plan 4: the Mac the other way round: two sign-ins');
+  ok(p.letters[0].after === 'B' && p.letters[0].here === false, 'plan 4: A waits for B, in a new folder');
+  ok(p.letters[1].clear === 'C' && p.letters[1].replaces === work.email && p.letters[1].here === true, 'plan 4: B removes C first and takes the place of its login');
+  ok(!p.moves.length, 'plan 4: no move touches B');
+  // after C is removed and B is signed in as art: only A, a plain sign-in
+  const q = SA.plan({ A: work, B: art }, [at('B', art)]);
+  ok(states(q) === 'A:signin B:ok' && !q.letters[0].after, 'plan 4b: B done, A signs in');
+  ok(SA.plan({ A: work, B: art }, [at('A', work), at('B', art)]).ok, 'plan 4c: then they match');
+  // an exact swap of A and B: B removes A first, A waits for B
+  const r = SA.plan({ A: work, B: art }, [at('A', art), at('B', work)]);
+  ok(r.letters[1].clear === 'A' && r.letters[0].after === 'B' && !r.moves.length, 'plan 4d: A and B swapped');
+  // a list with one login on two letters is the only one left blocked
+  ok(SA.plan({ A: work, B: work }, [at('B', work)]).letters[0].state === 'blocked', 'plan 4e: one login on two letters is blocked');
 }
 {
   // a login that is not here: signed in on its letter; an empty A folder is signed in where it is (no parking)
@@ -173,12 +185,13 @@ function fakeAccounts(init, o = {}) {
     ok(!r.ok && a.state === 'signin' && a.again === true, 'sync 4: a lost login asks for a sign-in again');
   }
   {
-    // B in the way: blocked, and nothing moves
+    // the Mac with B and C the other way round from Blackbox: nothing moves by itself, the reason says the order
     const api = fakeApi();
-    api.rows.set('accounts', K.sealText(JSON.stringify({ v: 1, letters: { A: art, B: work } }), key, 'setting:accounts'));
-    const acc = fakeAccounts({ B: art, C: work });
+    api.rows.set('accounts', K.sealText(JSON.stringify({ v: 1, letters: { A: work, B: art } }), key, 'setting:accounts'));
+    const acc = fakeAccounts({ B: work, C: art });
     const r = await SA.createAccountSync({ accounts: acc }).reconcile({ api, key });
-    ok(!r.ok && !acc.calls.length && /by hand/.test(r.reason), 'sync 5: blocked, no move');
+    ok(!r.ok && !acc.calls.length && api.writes === 0, 'sync 5: B in the way: no move, nothing written');
+    ok(/sign in Claude B, then Claude A/.test(r.reason), `sync 5: B first, then A (${r.reason})`);
   }
   {
     // a list sealed with another key: an error result, not a crash, and nothing written

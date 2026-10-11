@@ -181,7 +181,9 @@ export function mountSetup({ post, isRemote = () => false, fixture = false } = {
     if (!a) return `<div class="su-wait"><span class="su-spin"></span>Reading the Claude accounts on ${esc(name())}…</div>`;
     if (a.error) return `<div class="su-note bad">${esc(a.reason)}</div><div class="su-btns"><button type="button" data-c="recheck">Try again</button></div>`;
     const jobs = info.signins || {};
-    const rows = (a.letters || []).map((l) => {
+    // a letter that waits for B (after: 'B') goes below B, so the rows read in the order they are done
+    const list = (a.letters || []).slice().sort((x, y) => (x.after ? 1 : 0) - (y.after ? 1 : 0));
+    const rows = list.map((l) => {
       const j = jobs[l.letter];
       const who = `<span class="su-letter">${esc(l.letter)}</span><span class="su-who2"><b>Claude ${esc(l.letter)}</b><span class="su-email">${esc(l.email || '')}</span></span>`;
       if (l.state === 'ok') return `<div class="su-acct ok">${who}<span class="su-mark">${svg(PIC.check, 16)}</span></div>`;
@@ -195,9 +197,13 @@ export function mountSetup({ post, isRemote = () => false, fixture = false } = {
             + `<button type="button" data-c="cancel" data-a="${esc(l.letter)}">Stop</button></form>` : '');
       } else {
         const msg = j && j.status !== 'done' && j.message ? `<div class="su-why su-bad">${esc(j.message)}</div>` : '';
-        const warn = l.replaces ? `<div class="su-why su-warn">Claude B here is ${esc(l.replaces)}; signing it in as ${esc(l.email || 'Blackbox\'s')} takes its place.</div>` : '';
-        act = `${l.again ? '<div class="su-why">Its login stayed behind when it moved: sign it in again.</div>' : ''}${warn}${msg}`
-          + `<div class="su-btns"><button type="button" class="su-go" data-c="acct" data-a="${esc(l.letter)}" data-e="${esc(l.email || '')}" data-h="${l.here ? 1 : 0}"${busy ? ' disabled' : ''}>Sign in</button></div>`;
+        // B's login is wanted on another letter: it moves there by a sign-in after B's (one login is on one letter)
+        const next = l.replaces && list.find((x) => x.after === 'B');
+        const warn = l.replaces ? `<div class="su-why su-warn">Claude B here is ${esc(l.replaces)}; signing it in as ${esc(l.email || 'Blackbox\'s')} takes its place${next ? `, and ${esc(l.replaces)} becomes Claude ${esc(next.letter)} next` : ''}.</div>` : '';
+        const clear = l.clear ? `<div class="su-why">${esc(l.email || 'That login')} is Claude ${esc(l.clear)} here, and a login can be on one letter only: Claude ${esc(l.clear)} is removed first (its login is saved, its conversations stay).</div>` : '';
+        const first = l.after && (list.find((x) => x.letter === l.after) || { state: 'ok' }).state !== 'ok';
+        act = `${l.again ? '<div class="su-why">Its login stayed behind when it moved: sign it in again.</div>' : ''}${first ? `<div class="su-why su-dim">${esc(l.email || 'This login')} is Claude ${esc(l.after)} here until Claude ${esc(l.after)} is signed in above; then sign it in here.</div>` : ''}${clear}${warn}${msg}`
+          + `<div class="su-btns"><button type="button" class="su-go" data-c="acct" data-a="${esc(l.letter)}" data-e="${esc(l.email || '')}" data-h="${l.here ? 1 : 0}"${l.clear ? ` data-x="${esc(l.clear)}"` : ''}${busy || first ? ' disabled' : ''}>${first ? `After Claude ${esc(l.after)}` : l.clear ? `Remove Claude ${esc(l.clear)} and sign in` : 'Sign in'}</button></div>`;
       }
       return `<div class="su-acct">${who}<span class="su-mark dim">○</span>${act}</div>`;
     }).join('');
@@ -235,8 +241,12 @@ export function mountSetup({ post, isRemote = () => false, fixture = false } = {
     else if (c === 'signout') act(async () => { said(await post('/sync/signout', {})); });
     else if (c === 'recheck') act(checkAccounts);
     else if (c === 'acct') {
-      const a = b.dataset.a, email = b.dataset.e || undefined;
-      act(async () => { said(b.dataset.h === '1' ? await post('/accounts/login', { account: a, email }) : await post('/accounts/add', { letter: a, email }), 'Your browser is opening claude.ai to sign in.'); });
+      const a = b.dataset.a, email = b.dataset.e || undefined, x = b.dataset.x;
+      act(async () => {
+        // the letter that has this login now goes first (accounts.js backs its login up), else the sign-in is turned away
+        if (x && !said(await post('/accounts/remove', { account: x }))) return;
+        said(b.dataset.h === '1' ? await post('/accounts/login', { account: a, email }) : await post('/accounts/add', { letter: a, email }), 'Your browser is opening claude.ai to sign in.');
+      });
     } else if (c === 'cancel') act(async () => { said(await post('/accounts/cancel', { account: b.dataset.a })); });
     else if (c === 'open') act(finish);
   }

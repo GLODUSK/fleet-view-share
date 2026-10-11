@@ -13,8 +13,11 @@
 //                            "C instead of A" bug left there. The first machine to sync writes the whole list.
 //   plan(map, local)      -> { ok, letters: [{ letter, email, state, from?, message? }], moves: [{ from, to }] }
 //                            state 'ok' (that login is on that letter here), 'move' (it is here on letter `from`:
-//                            moved by itself), 'signin' (not here: sign it in on that letter), 'blocked' (it would
-//                            need Claude B's folder renamed, which never happens: message says what to do by hand).
+//                            moved by itself), 'signin' (not here: sign it in on that letter), 'blocked' (a list
+//                            that names one login on two letters: message says what to do by hand).
+//                            B's folder never moves, so a login onto or off B is a sign-in: B's own letter says
+//                            clear: X when its login is here on letter X (X is removed first, then B signs in), and
+//                            a letter whose login is on B now says after: 'B' (it signs in once B has changed).
 //                            moves first parks a letter that holds a login Blackbox does not want there (to the
 //                            first free letter from C on, so no login is lost), then moves each login onto its
 //                            letter. A 'signin' letter says here: true when its folder is here already (sign it in
@@ -103,8 +106,22 @@ function plan(map, local) {
       holder.letter = L;
       continue;
     }
+    // B's folder is never renamed, so a login goes onto or off B by signing in instead. One login is on one letter
+    // only (accounts.js turns a second away), which sets the order: B first, then the letter that wants B's old login
+    if (holder && L === 'B') {
+      // Blackbox's B is here on another letter: that letter is removed first (accounts.js remove: its login is backed
+      // up, its folder moved aside), then B signs in as it, in place of the login B has now
+      const bNow = here.find((x) => x.letter === 'B');
+      letters.push({ letter: 'B', email, state: 'signin', here: !!bNow, clear: holder.letter, ...(bNow && login(bNow) ? { replaces: bNow.email || null } : {}) });
+      continue;
+    }
+    if (holder && holder.letter === 'B' && m.B && !same(m.B, holder)) {
+      // B has this letter's login now: B signs in as Blackbox's B first, then this letter signs in as B's old one
+      letters.push({ letter: L, email, state: 'signin', here: !!here.find((x) => x.letter === L), after: 'B' });
+      continue;
+    }
     if (holder) {
-      // B holds the login A should have, or B should have a login another letter holds: B's folder is never renamed
+      // only a list that names one login on two letters gets here: B's folder is never renamed
       const msg = holder.letter === 'B'
         ? `Claude B here is signed in as ${holder.email || 'the account'} that Blackbox has as Claude ${L}. Sign Claude B in again as ${(m.B && m.B.email) || 'Blackbox\'s Claude B'}, then this one can be added as ${L}.`
         : `Blackbox has ${email || 'this account'} as Claude B, but here it is Claude ${holder.letter}. Remove Claude ${holder.letter}, then sign Claude B in again as ${email || 'that account'}.`;
@@ -175,9 +192,9 @@ function createAccountSync(o = {}) {
     const lost = new Set(moved.filter((m) => m.signedIn === false).map((m) => m.to));
     const letters = p.letters.map((l) => (l.state === 'ok' && lost.has(l.letter) ? { ...l, state: 'signin', again: true } : l));
     const ok = letters.length > 0 && letters.every((l) => l.state === 'ok');
-    const todo = letters.filter((l) => l.state !== 'ok');
+    const todo = letters.filter((l) => l.state !== 'ok').sort((x, y) => (x.after ? 1 : 0) - (y.after ? 1 : 0));
     const reason = ok ? '' : todo.some((l) => l.state === 'blocked') ? 'the Claude accounts here need a change by hand to match Blackbox\'s'
-      : `sign in ${todo.map((l) => `Claude ${l.letter}`).join(' and ')} to match Blackbox's accounts`;
+      : `sign in ${todo.map((l) => `Claude ${l.letter}`).join(todo.some((l) => l.after) ? ', then ' : ' and ')} to match Blackbox's accounts`;
     return {
       ok, reason, first: !had, letters, moved,
       local: local.map(({ letter, email }) => ({ letter, email })),
