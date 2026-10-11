@@ -7,7 +7,7 @@
 // a local prefix is extended, fetching only the new chunk; a longer local copy and a diverged one are left alone and
 // reported in conflicts(); a missing object, a gap, a short cover, a bad chunk or file sha256, an object row pointing
 // at another conversation's object and an object copied to another path all write nothing (and a fixed one is laid
-// down after the back-off); a conversation open on this machine is skipped; rows owned by this device or by nobody
+// down after the back-off), but a download cut because the machine slept sets no back-off; a conversation open on this machine is skipped; rows owned by this device or by nobody
 // are ignored; a rel_cwd with '..', a drive or an absolute path is refused; a subfolder rel_cwd gets its own slug and
 // a missing worktree falls back to the root; account A goes to ~/.claude-a; a repo with no checkout here is skipped;
 // a log already on this machine in another slug folder grows there; a whole side file this side wrote is replaced
@@ -364,6 +364,21 @@ async function main() {
   later();
   r = await m.scanOnce();
   ok(same(mainOf(c4.id), c4.main), 'back-off: the fixed one is laid down after it');
+  // a download cut because the machine slept stops the scan but sets no back-off: the next scan lays it down
+  const cS = putConvo({ pieces: [Buffer.concat(logOf('z', 3))] });
+  const realDownload = api.storage.download;
+  let cutAt = null;
+  api.storage.download = async (p, o) => {
+    if (cutAt || !p.includes(cS.id)) return realDownload(p, o);
+    cutAt = p;
+    throw Object.assign(new S.SyncError('the connection was cut by sleep; trying again', 0, 'network'), { slept: true });
+  };
+  let cut = null;
+  try { await m.scanOnce(); } catch (e) { cut = e; }
+  api.storage.download = realDownload;
+  ok(cut && cut.slept && cutAt && !fs.existsSync(mainOf(cS.id)), 'sleep cut: the scan stops, nothing written');
+  r = await m.scanOnce();
+  ok(same(mainOf(cS.id), cS.main), 'sleep cut: no back-off, laid down by the very next scan');
 
   // ---------- open on this machine ----------
   const c8 = putConvo({ pieces: [Buffer.concat(logOf('k', 3))] });

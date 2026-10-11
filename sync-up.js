@@ -738,7 +738,8 @@ function createUploader(opts = {}) {
         setError(e);
         if (e && FATAL.has(e.code)) { log(`scan stopped: ${clip(e.message)}`); break; }
         const mem = memo.get(c.id);
-        if (mem) {
+        if (e && e.slept) log(`${short(c.id)}: ${clip(e.message)}`); // the machine slept mid-request: no back-off
+        else if (mem) {
           mem.fails++;
           const wait = Math.min(BACKOFF_MS * 2 ** (mem.fails - 1), BACKOFF_MAX_MS);
           mem.backoffUntil = now() + wait;

@@ -68,10 +68,20 @@ const STATE_MS = 10 * 60e3; // a sign-in has 10 minutes to come back
 const STATE_KEEP_MS = 2 * STATE_MS; // after that it is "expired" for as long again, then unknown
 const STATE_MAX = 20; // sign-ins remembered at once
 const EARLY_MS = 60e3; // an access token with less than this left is refreshed first
+// Timeouts. Node's timers run on a monotonic clock, which on macOS (and Linux) stops while the machine sleeps, and a
+// connection open across a sleep is usually dead with no reset ever coming. So a flat timer alone could wait hours of
+// wall-clock time on a Mac that keeps napping (Maintenance Sleep, DarkWake). Every request therefore also has a
+// wall-clock deadline (Date.now()), and a watchdog (every WATCH_MS while requests are in flight) cuts any request the
+// machine slept through: its wall-clock age ran ahead of its monotonic age by more than SLEPT_MS. A cut request fails
+// as a 'network' SyncError with slept: true, and the caller's next round tries again on a new connection.
 const AUTH_TIMEOUT_MS = 20e3;
-const REST_TIMEOUT_MS = 30e3;
-const STORAGE_TIMEOUT_MS = 5 * 60e3;
+const REST_TIMEOUT_MS = 30e3; // a REST call, answer and body, start to end
+const STORAGE_TIMEOUT_MS = 5 * 60e3; // a storage call's overall cap
+const STALL_MS = 30e3; // a download must start answering within REST_TIMEOUT_MS, then is cut when no byte comes for this long
+const WATCH_MS = 5e3;
+const SLEPT_MS = 15e3;
 const MAX_OBJECT = 50 * 1024 * 1024; // the bucket's file_size_limit
+const MAX_ANSWER = MAX_OBJECT + 1024 * 1024; // more than this read from one answer: refused, never all in memory
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NAME_RE = /^[a-z_][a-z0-9_]{0,62}$/;
 const SEGMENT_RE = /^[A-Za-z0-9._-]{1,200}$/;
@@ -303,8 +313,9 @@ function readSmallJson(req, max) {
 }
 
 // ---------- the connection ----------
-// createSync({ port, dataDir, demo, log, fetch, now, store, allowLoopbackUrl, openUrl }) -> the API below.
-// fetch, now, store, allowLoopbackUrl and openUrl (in place of the default browser) are for tests.
+// createSync({ port, dataDir, demo, log, fetch, now, store, allowLoopbackUrl, openUrl, wallNow, monoNow, watchMs }) -> the API below.
+// fetch, now, store, allowLoopbackUrl, openUrl (in place of the default browser), wallNow / monoNow (the wall and
+// monotonic clocks the requests' watchdog compares) and watchMs (its tick) are for tests.
 function createSync(opts = {}) {
   const dataDir = opts.dataDir || P.dataDir();
   const dir = syncDir(dataDir);
@@ -315,6 +326,9 @@ function createSync(opts = {}) {
   const store = opts.store || defaultStore(dir);
   const urlOpts = { allowLoopback: !!opts.allowLoopbackUrl };
   const openUrl = typeof opts.openUrl === 'function' ? opts.openUrl : openInBrowser;
+  const wallNow = typeof opts.wallNow === 'function' ? opts.wallNow : Date.now;
+  const monoNow = typeof opts.monoNow === 'function' ? opts.monoNow : () => performance.now();
+  const watchMs = Number(opts.watchMs) > 0 ? Number(opts.watchMs) : WATCH_MS;
   // sync-crypto.js needs this file, so it is loaded when first used, not at the top
   // onlyEmail (Henry's machines, private.json's syncEmail): the one Google account that may sign in here. Another one
   // is refused at the callback and never kept, and a kept sign-in for another account counts as signed out.
@@ -418,20 +432,104 @@ function createSync(opts = {}) {
   }
 
   // ---------- HTTP ----------
+  // Requests in flight, for the watchdog: { wall0, mono0, deadline (wall clock), cut(why) }
+  const flying = new Set();
+  let watch = null;
+  function watchdog() {
+    const w = wallNow(), m = monoNow();
+    for (const f of [...flying]) {
+      if ((w - f.wall0) - (m - f.mono0) > SLEPT_MS) f.cut('slept');
+      else if (w > f.deadline) f.cut('total');
+    }
+  }
+  function fly(f) {
+    flying.add(f);
+    if (!watch) { watch = setInterval(watchdog, watchMs); if (watch.unref) watch.unref(); }
+    return () => {
+      flying.delete(f);
+      if (!flying.size && watch) { clearInterval(watch); watch = null; }
+    };
+  }
+  // the body as a Buffer, read piece by piece so f.moved() can push the stall timer back; at most MAX_ANSWER bytes
+  async function readBody(r, f) {
+    if (!r.body || typeof r.body.getReader !== 'function') return Buffer.from(await r.arrayBuffer());
+    const reader = r.body.getReader();
+    const parts = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_ANSWER) {
+        reader.cancel().catch(() => {});
+        throw new SyncError(`Supabase sent more than ${Math.round(MAX_ANSWER / 1048576)} MB`, 0, 'too_big');
+      }
+      parts.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+      f.moved();
+    }
+    return Buffer.concat(parts, size);
+  }
   // -> { status, headers, data } (JSON) or { status, headers, body } (o.raw: a Buffer). Never follows a redirect, so
-  // the token can't go to another host
+  // the token can't go to another host. o.timeoutMs: start to end (monotonic and wall clock); o.headMs: the answer
+  // must start within this (default timeoutMs); o.stallMs: after that, cut when no byte of the body comes for this long
   async function request(url, o) {
     const timeoutMs = o.timeoutMs || REST_TIMEOUT_MS;
+    const headMs = Math.min(o.headMs || timeoutMs, timeoutMs);
+    const stallMs = o.stallMs || 0;
+    const secs = (ms) => Math.round(ms / 1000);
     const netFail = (e) => {
       const timeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
-      return timeout ? new SyncError(`Supabase did not answer within ${Math.round(timeoutMs / 1000)} s`, 0, 'timeout')
+      return timeout ? new SyncError(`Supabase did not answer within ${secs(timeoutMs)} s`, 0, 'timeout')
         : new SyncError(`could not reach Supabase (${clip((e && e.cause && e.cause.code) || (e && e.message) || 'network error', 120)})`, 0, 'network');
     };
+    const ac = new AbortController();
+    let cutErr = null, cutNow;
+    // a cut settles the request at once, whether or not fetch heeds the abort (a dead socket may never answer it)
+    const cutP = new Promise((resolve, reject) => { cutNow = reject; });
+    cutP.catch(() => {});
+    let phase = null, total = null;
+    const f = {
+      wall0: wallNow(), mono0: monoNow(), deadline: 0,
+      cut(why) {
+        if (cutErr) return;
+        cutErr = why === 'slept' ? Object.assign(new SyncError('the connection was cut by sleep (this machine slept while Supabase was answering); trying again', 0, 'network'), { slept: true })
+          : why === 'head' ? new SyncError(`Supabase did not answer within ${secs(headMs)} s`, 0, 'timeout')
+            : why === 'stall' ? new SyncError(`Supabase stopped sending (nothing for ${secs(stallMs)} s)`, 0, 'timeout')
+              : new SyncError(`Supabase did not answer within ${secs(timeoutMs)} s`, 0, 'timeout');
+        try { ac.abort(cutErr); } catch {}
+        cutNow(cutErr);
+      },
+      moved() {
+        if (!stallMs) return;
+        clearTimeout(phase);
+        phase = setTimeout(() => f.cut('stall'), stallMs);
+        if (phase.unref) phase.unref();
+      },
+    };
+    f.deadline = f.wall0 + timeoutMs;
+    const land = fly(f);
+    total = setTimeout(() => f.cut('total'), timeoutMs);
+    if (total.unref) total.unref();
+    if (headMs < timeoutMs) { phase = setTimeout(() => f.cut('head'), headMs); if (phase.unref) phase.unref(); }
     let r, buf;
     try {
-      r = await fetchFn(url, { method: o.method, headers: o.headers, body: o.body, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
-      buf = Buffer.from(await r.arrayBuffer());
-    } catch (e) { throw netFail(e); }
+      const fp = fetchFn(url, { method: o.method, headers: o.headers, body: o.body, redirect: 'error', signal: ac.signal });
+      Promise.resolve(fp).catch(() => {});
+      r = await Promise.race([fp, cutP]);
+      clearTimeout(phase); phase = null;
+      f.moved(); // the answer started: from here the body must keep coming
+      const bp = readBody(r, f);
+      bp.catch(() => {});
+      buf = await Promise.race([bp, cutP]);
+    } catch (e) {
+      try { ac.abort(); } catch {} // let go of the socket (a body cut short, one too big)
+      if (cutErr) throw cutErr;
+      if (e instanceof SyncError) throw e;
+      throw netFail(e);
+    } finally {
+      clearTimeout(phase); clearTimeout(total);
+      land();
+    }
     if (r.status < 200 || r.status > 299) {
       let j = null;
       try { j = JSON.parse(buf.toString('utf8')); } catch {}
@@ -560,7 +658,8 @@ function createSync(opts = {}) {
       const c = need();
       checkRel(rel);
       return authed(async (s) => (await request(objectUrl(c, objectPath(s.uid, rel)), {
-        method: 'GET', raw: true, timeoutMs: o.timeoutMs || STORAGE_TIMEOUT_MS, headers: authHeaders(c, s.accessToken),
+        method: 'GET', raw: true, headers: authHeaders(c, s.accessToken),
+        timeoutMs: o.timeoutMs || STORAGE_TIMEOUT_MS, headMs: o.headMs || REST_TIMEOUT_MS, stallMs: o.stallMs || STALL_MS,
       })).body);
     },
     async remove(rels, o = {}) {

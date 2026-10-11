@@ -11,7 +11,7 @@
 //   half-written last line is held back until it ends; a rewrite (and a whole file that changed) becomes generation+1
 //   and the old generation's rows and objects are gone; a conversation another device owns is left alone, one with
 //   no repo or no whole line is not sent; a failed upload leaves up-state.json where the server is and a later scan
-//   finishes it; a lost up-state.json sends nothing twice; no transcript text or title ever reaches the server in
+//   finishes it (an upload cut because the machine slept: the very next scan, no back-off); a lost up-state.json sends nothing twice; no transcript text or title ever reaches the server in
 //   plain; the pace stays under rateBytesPerSec; start/stop never run two scans at once; status() holds nothing secret.
 // S4: flush(id) gives the row's final size and sha256 and catches up a log that grew while it went up; a flush asked
 //   for while a scan is mid-way runs right after that conversation, never at the same time as it; hold/unhold/held(),
@@ -462,6 +462,24 @@ async function main() {
   sameAsLocal(G, 'main', gMain, true, 'G after the retry');
   rowMatchesMain(G, gMain, 'G after the retry');
   eq(new Set(db.chunks.filter((r) => r.conversation_id === G.toLowerCase()).map((r) => r.seq)).size, db.chunks.filter((r) => r.conversation_id === G.toLowerCase()).length, 'no chunk was written twice');
+
+  // ---------- an upload cut because the machine slept: no back-off, the next scan sends it ----------
+  const Hs = newId('H');
+  const hsMain = mainOf(projB, repo1, Hs);
+  write(hsMain, lines(repo1, 20));
+  const realUpload = api.storage.upload;
+  let sleptAt = null;
+  api.storage.upload = async (p, b, o) => {
+    if (sleptAt || !p.includes(Hs.toLowerCase())) return realUpload(p, b, o);
+    sleptAt = p;
+    throw Object.assign(new S.SyncError('the connection was cut by sleep; trying again', 0, 'network'), { slept: true });
+  };
+  logs.length = 0;
+  await up.scanOnce();
+  api.storage.upload = realUpload;
+  ok(sleptAt && logs.some((l) => l.includes(short(Hs)) && /cut by sleep/.test(l)), 'a sleep cut is logged');
+  await up.scanOnce();
+  sameAsLocal(Hs, 'main', hsMain, true, 'a sleep cut: sent by the very next scan, no back-off');
 
   // ---------- F changes hands: no upload while another device owns it ----------
   append(fMain, lines(repo1, 2));

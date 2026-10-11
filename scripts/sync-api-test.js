@@ -7,7 +7,11 @@
 // and one Supabase refuses (signed out). The REST and Storage helpers send the fleet_sync profile headers and keep
 // every object under '<user id>/' ('../' and absolute names are refused). Remote browsers may read the status but
 // not sign in or out. onChange hears signed-in, refreshed and signed-out (also by another process), with no token in
-// them; email() gives the account. On Windows, the DPAPI store's round trip, with the secret never in a process's
+// them; email() gives the account. Timeouts: a download whose body stops is cut after the stall window, a slow one that
+// keeps moving is read whole, one that never starts answering is cut after the head window; a request in flight while
+// the machine sleeps (the wall clock jumps ahead of the monotonic one) is cut at the watchdog's next tick as a 'network'
+// error with slept: true, one started after it goes through, a call past its wall-clock deadline is cut too, and the
+// watchdog's interval stops once nothing is in flight. On Windows, the DPAPI store's round trip, with the secret never in a process's
 // arguments. protectedStore(dir, name) keeps another secret beside the sign-in without touching it, and refuses
 // 'session' and bad names; the file store gives back any text exactly and still reads a sign-in from before.
 // The Sync card's routes: POST /sync/open-signin opens /sync/signin in the default browser, only on this PC (not
@@ -36,7 +40,10 @@ cp.execFile = function (...a) { started.push(a); return realExecFile.apply(this,
 let timers = 0;
 const realSetTimeout = global.setTimeout, realSetInterval = global.setInterval;
 global.setTimeout = function (...a) { timers++; return realSetTimeout.apply(this, a); };
-global.setInterval = function (...a) { timers++; return realSetInterval.apply(this, a); };
+const liveIntervals = new Set(); // the intervals not cleared yet (sync-api.js's watchdog must stop when idle)
+const realClearInterval = global.clearInterval;
+global.setInterval = function (...a) { timers++; const h = realSetInterval.apply(this, a); liveIntervals.add(h); return h; };
+global.clearInterval = function (h) { liveIntervals.delete(h); return realClearInterval.call(this, h); };
 const realFetch = global.fetch;
 let offFetches = 0;
 global.fetch = async () => { offFetches++; throw new Error('the network is not allowed here'); };
@@ -140,6 +147,15 @@ const server = http.createServer((req, res) => {
         return json(200, { Key: `fleet-sync/${name}`, Id: crypto.randomUUID() });
       }
       if (req.method === 'GET') {
+        // the stall tests: an answer that never starts, one that starts and stops, one slow but always moving
+        if (name.endsWith('/hang')) return;
+        if (name.endsWith('/stall')) { res.writeHead(200, { 'Content-Type': 'application/octet-stream' }); return res.write(Buffer.alloc(100, 1)); }
+        if (name.endsWith('/trickle')) {
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+          let n = 0;
+          const t = setInterval(() => { res.write(Buffer.alloc(10, 2)); if (++n === 10) { clearInterval(t); res.end(); } }, 60);
+          return;
+        }
         if (!fake.objects.has(name)) return json(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
         res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
         return res.end(fake.objects.get(name));
@@ -421,6 +437,38 @@ async function main() {
   // Storage's InvalidJWT (a 400) counts as a 401: one new token, one more try
   fake.access.delete(JSON.parse(store.peek()).accessToken);
   ok((await api.storage.upload(rel, bytes)).size === 5000, 'an InvalidJWT from Storage gets a new token and one more try');
+
+  // a download whose body stops is cut after the stall window, not after the 5 minutes
+  const since = (t0) => Date.now() - t0;
+  let t0 = Date.now();
+  await rejects(api.storage.download('t/stall', { stallMs: 300 }), (e) => e.code === 'timeout' && /stopped sending/.test(e.message) && since(t0) < 3000, 'a download whose body stops is cut after the stall window');
+  // a slow body that keeps moving is not: 10 pieces 60 ms apart, 600 ms in all, against a 300 ms stall window
+  t0 = Date.now();
+  const slow = await api.storage.download('t/trickle', { stallMs: 300 }).catch((e) => e);
+  ok(Buffer.isBuffer(slow) && slow.length === 100 && since(t0) >= 500, `a slow body that keeps coming is read whole (${slow && slow.length} bytes in ${since(t0)} ms)`);
+  // an answer that never starts: cut after the head window
+  t0 = Date.now();
+  await rejects(api.storage.download('t/hang', { headMs: 1000 }), (e) => e.code === 'timeout' && /did not answer within 1 s/.test(e.message) && since(t0) < 3000, 'a download that never starts answering is cut after the head window');
+  ok(Buffer.compare(await api.storage.download(rel), bytes) === 0, 'after the cuts a download works as before');
+
+  // the machine sleeps mid-request: the wall clock jumps ahead of the monotonic one, and the watchdog cuts what was
+  // in flight across it (here the next tick, 30 ms, not the 30 s stall window)
+  let wallSkew = 0, monoSkew = 0;
+  const jumpy = S.createSync({ dataDir: liveDir, port: 4777, fetch: realFetch, now: () => clock, store, allowLoopbackUrl: true, wallNow: () => Date.now() + wallSkew, monoNow: () => performance.now() + monoSkew, watchMs: 30 });
+  t0 = Date.now();
+  const napping = jumpy.storage.download('t/stall');
+  await new Promise((r) => realSetTimeout(r, 150));
+  wallSkew += 10 * 60e3; // ten minutes asleep
+  await rejects(napping, (e) => e.code === 'network' && e.slept === true && /cut by sleep/.test(e.message) && since(t0) < 3000, 'a request in flight across a sleep is cut at the next tick');
+  ok(Buffer.compare(await jumpy.storage.download(rel), bytes) === 0, 'a request started after the sleep goes through');
+  ok(Array.isArray(await jumpy.rest('GET', 'devices')), '... and a REST call too');
+  // a wall-clock deadline: both clocks move on together (no sleep) past the call's 10 s; cut at the next tick
+  t0 = Date.now();
+  const late = jumpy.rest('GET', 'slow', { timeoutMs: 10e3 });
+  await new Promise((r) => realSetTimeout(r, 150));
+  wallSkew += 20e3; monoSkew += 20e3;
+  await rejects(late, (e) => e.code === 'timeout' && /within 10 s/.test(e.message) && !e.slept && since(t0) < 3000, 'a call past its wall-clock deadline is cut by the watchdog');
+  ok(liveIntervals.size === 0, `the watchdog stops when nothing is in flight (${liveIntervals.size} left)`);
 
   // sign out: told to Supabase, gone here
   const atOut = JSON.parse(store.peek()).accessToken;

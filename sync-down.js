@@ -608,8 +608,11 @@ function createMaterializer(opts = {}) {
         backoff.delete(id);
       } catch (e) {
         tally.failed++;
-        const n = b ? b.n + 1 : 1;
-        backoff.set(id, { n, until: now() + Math.min(BACKOFF_MIN_MS * 2 ** (n - 1), BACKOFF_MAX_MS) });
+        // a request cut because the machine slept is not this conversation's fault: the next scan tries it again
+        if (!(e && e.slept)) {
+          const n = b ? b.n + 1 : 1;
+          backoff.set(id, { n, until: now() + Math.min(BACKOFF_MIN_MS * 2 ** (n - 1), BACKOFF_MAX_MS) });
+        }
         const why = (e && e.message) || String(e);
         reasons[why] = (reasons[why] || 0) + 1;
         log(`sync-down: ${id}: ${why}`);
