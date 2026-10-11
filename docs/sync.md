@@ -21,7 +21,7 @@ download side (S3) and the page's sync card (S5) are built on it. Its test is `n
   (`<user id>/...`). A path with `..`, a leading `/` or a backslash is refused before anything is sent.
 - **For other parts that need the account (the phone relay):** `accessToken()` (renewed first when less than a
   minute is left), `uid()`, `email()`, and `onChange(fn)`, which calls `fn({ type, uid, email })` with `type`
-  `signed-in`, `refreshed`, `signed-out` or `key-saved` (the Sync card saved the sync key) and returns a function
+  `signed-in`, `refreshed` or `signed-out` and returns a function
   that stops it. No event carries a token or the key. A
   sign-in or sign-out by another process (the CLI) is heard the next time anything reads the sign-in.
 - **`protectedStore(dir, name)`** keeps another secret the way the sign-in is kept: `<dir>/<name>.bin` with DPAPI,
@@ -49,14 +49,15 @@ cards again):
    callback, nothing of it is kept, and the screen says which account it was. A sign-in kept from before for another
    account counts as signed out. Without `syncEmail` (a friend's install) Google shows its account picker as before.
    A `private.json` without `syncUrl`/`syncKey` still shows the old **Connect** step first (`POST /sync/connect`).
-2. **Passphrase**: chosen (twice) on the first machine, the same one on every other.
-3. **Claude accounts**: each letter Blackbox has (A and B, the only ones a conversations row knows) signed in here as
+   **No passphrase.** Once signed in, the server fetches the sync key from Blackbox by itself (see
+   [The sync key](#the-sync-key)); the screen shows a spinner while it does, and **Try again** if it can't.
+2. **Claude accounts**: each letter Blackbox has (A and B, the only ones a conversations row knows) signed in here as
    the same login. A login that is here under another letter (the C an old bug handed out instead of A) is moved to
    its letter by itself; a letter holding a login Blackbox does not want there is moved aside to a free letter first,
    so no login is lost. A missing one has a **Sign in as ...** button (the claude.ai link and a field for its code
    too, for a browser signed in to another claude.ai account). Claude B's folder (`~/.claude`) is never renamed: when
    B is in the way the screen says what to do by hand.
-4. **First sync**: what is on Blackbox comes here and what is here goes up; the screen closes by itself when both
+3. **First sync**: what is on Blackbox comes here and what is here goes up; the screen closes by itself when both
    sides have looked once (**Open now** skips the wait).
 
 **Work locally instead** closes it at any step. The choice is kept in `<dataDir>/sync/mode.json`
@@ -95,23 +96,33 @@ The start screen above does all of this. By hand:
      inside embedded windows). Pick a Google account on the members list. The card updates by itself and then
      shows "Signed in as ..." and whether the account is on the members list.
    - **Sign out** asks once more in the card, then signs this PC out.
-   - **The sync passphrase:** the first machine chooses one (typed twice); every other machine types the same
-     one, and a different one is refused. Only the derived key is kept on the PC (the same store the CLI uses),
-     never the passphrase, and syncing starts at once.
+   - **Sync key:** whether it is on this PC, or being fetched from Blackbox (nothing to type).
    - Below that it says whether sync is running (or why not), how many conversations are up to date, how many
      came from other machines, and how many conflicts there are. It never shows a title, a path, a token or the
      key.
 
-   A remote browser (the phone, another computer) sees the card read-only: sign-in, sign-out and the passphrase
-   are done on the PC. When sync is not set up yet, the card shows the setup command to copy.
+   A remote browser (the phone, another computer) sees the card read-only: sign-in and sign-out are done on the PC. When sync is not set up yet, the card shows the setup command to copy.
 3. Or from a terminal, the same steps: `node sync-api.js signin` (Fleet View must be running),
-   `node sync-api.js status`, `node sync-api.js signout`, and `node sync-crypto.js passphrase` (typed hidden, so
-   not through `!`; `node sync-crypto.js status` says whether the key is here). To turn sync off again, run
+   `node sync-api.js status`, `node sync-api.js signout`, and `node sync-crypto.js key` (fetches the sync key now;
+   sync does it by itself; `node sync-crypto.js status` says whether the key is here). To turn sync off again, run
    `node sync-api.js off`, which signs out and deletes the config.
 
 The card's routes, all on this PC's own page only (not a remote browser, not another site's page):
-`POST /sync/open-signin`, `GET /sync/passphrase` (`{ hasKey }`, and with `?first=1` whether this is the first
-machine), `POST /sync/passphrase` (`{ passphrase, repeat? }`, at most 4 KB) and the existing `POST /sync/signout`.
+`POST /sync/open-signin` and the existing `POST /sync/signout`; whether the key is here is in `GET /sync/setup`
+(`hasKey`).
+
+## The sync key
+
+Everything that leaves a machine is sealed with one 32-byte key (`sync-crypto.js`, AES-256-GCM). The first machine
+that signs in makes it at random and puts it in Blackbox itself: `fleet_sync.settings`, key `sync-key`,
+`{ v: 1, key: <base64> }`. Every other machine fetches it on its first gate check after the sign-in
+(`sync-crypto.js` `fetchKey`, called by `sync-run.js`) and keeps it in the protected store (`sync-key`, DPAPI /
+Keychain / `0600`), so later checks ask Blackbox nothing. Two machines making it at once: the first row wins and
+both keep that one.
+
+The trade-off (Henry, 2026-10-11: "remove passphrase step"): the key is guarded by the Google sign-in (only
+`syncEmail` on Henry's machines) and the members list (RLS), not by a passphrase only Henry knows. Anyone who can
+read the `settings` table as Henry, or with the project's service role, can open the synced chats.
 Tests: `node scripts/sync-api-test.js` (the card's routes are in its "Sync card" part).
 
 ## Running (S2 and S3)

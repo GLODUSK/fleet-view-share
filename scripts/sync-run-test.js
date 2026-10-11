@@ -1,5 +1,5 @@
 // sync-run-test.js: sync-run.js starts the two loops and the mover only when all the gates are open (the mode is not
-// local, set up, signed in, the key, the Claude accounts matching Blackbox's), and stops them when one closes. The mover gets the uploader, the materializer, the host and isOpen; the materializer's isOpen is
+// local, set up, signed in, the key (fetched from Blackbox), the Claude accounts matching Blackbox's), and stops them when one closes. The mover gets the uploader, the materializer, the host and isOpen; the materializer's isOpen is
 // isOpen or the host's last list; move / moveStatus / cancelMove / owners / device go to the mover, and say so when
 // sync is not running; away.json goes on a gate halt and stays on stop(). A fake sync-api object, fake loops, a fake
 // mover and a fake host; a temp data folder for the key. Run: node scripts/sync-run-test.js
@@ -71,15 +71,22 @@ function fakeMover(args, made) {
     ok(made.length === 0 && /members/.test(runner.status().reason), 'off for a non-member');
     sync.member = true;
     await runner.check();
-    ok(made.length === 0 && /no sync key/.test(runner.status().reason), 'off without a key');
+    ok(made.length === 0 && /no sync key.*Blackbox/.test(runner.status().reason), 'off while the key cannot be fetched from Blackbox');
 
-    const key = crypto.randomBytes(32);
-    await C.saveKey(S.syncDir(dir), key);
+    // Blackbox has the key (another machine made it): the next check fetches it, saves it here and starts
+    const key = crypto.randomBytes(32), settings = [];
+    sync.rest = async (method, table, o = {}) => {
+      if (table !== 'settings') throw new Error(`unexpected table ${table}`);
+      settings.push(method);
+      return method === 'GET' ? [{ value_enc: JSON.stringify({ v: 1, key: key.toString('base64') }) }] : null;
+    };
     await runner.check();
     ok(made.length === 2 && made.every((l) => l.started === 1), 'both loops start when every gate is open');
+    ok((await C.loadKey(S.syncDir(dir))).equals(key) && settings.join() === 'GET', 'the key came from Blackbox and is saved here');
+    ok(logs.some((t) => /fetched the sync key from Blackbox/.test(t)), 'the log says it was fetched');
     ok(runner.status().running === true && runner.status().up.kind === 'up', 'status shows them running');
     await runner.check();
-    ok(made.length === 2, 'a second check with nothing changed starts nothing new');
+    ok(made.length === 2 && settings.length === 1, 'a second check with nothing changed starts nothing new (and asks Blackbox nothing)');
 
     sync.signedIn = false;
     sync.fire();

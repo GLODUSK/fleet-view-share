@@ -5,14 +5,14 @@
 //                  syncEmail is let in; another account is turned away and said so here.
 //                  Blackbox's address and key come from private.json too (the server connects by itself); only a
 //                  private.json without them still shows the old Connect form (POST /sync/connect)
-//   2. Passphrase  the sync passphrase: set by the first machine, the same one typed on every other (POST
-//                  /sync/passphrase)
-//   3. Accounts    each Claude letter signed in as the login Blackbox has for it. A login that is here under another
+//                  No passphrase: once signed in, the server fetches the sync key from Blackbox (or makes it there
+//                  on the first machine, sync-crypto.js fetchKey); a spinner shows while it does, Try again if it can't
+//   2. Accounts    each Claude letter signed in as the login Blackbox has for it. A login that is here under another
 //                  letter is moved by the server itself (sync-accounts.js); a missing one has a Sign in button
 //                  (POST /accounts/add { letter, email } or /accounts/login { account, email }), with the claude.ai
 //                  link and a field for its code when the browser is signed in to another claude.ai account
-//   4. First sync  what is on Blackbox comes here and what is here goes up; Open now skips the wait
-// Sync stays off until step 3 matches (sync-run.js's gates); the screen closes by itself when the first sync is done
+//   3. First sync  what is on Blackbox comes here and what is here goes up; Open now skips the wait
+// Sync stays off until step 2 matches (sync-run.js's gates); the screen closes by itself when the first sync is done
 // (POST /sync/done). "Work locally" (POST /sync/mode { mode: 'local' }) closes it at any step; Back shows the two
 // cards again without changing anything. Never on a remote browser, a fixture or the chats window.
 //
@@ -21,7 +21,7 @@
 import { esc } from './cards.js';
 
 const POLL_MS = 1500;
-const ACCOUNTS_EVERY_MS = 8000; // POST /sync/accounts/check while step 3 waits (a sign-in may have finished)
+const ACCOUNTS_EVERY_MS = 8000; // POST /sync/accounts/check while the key or step 2 waits (a sign-in may have finished)
 const here = /Mac/i.test(navigator.platform || navigator.userAgent || '') ? 'this Mac' : 'this PC';
 const Here = here === 'this Mac' ? 'This Mac' : 'This PC';
 
@@ -40,7 +40,7 @@ const PIC = {
 const GOOGLE = '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.9z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.6-.4-3.9z"/></svg>';
 
 export function mountSetup({ post, isRemote = () => false, fixture = false } = {}) {
-  let root = null, timer = null, info = null, busy = false, note = null, firstDevice = null, lastAccountsCheck = 0;
+  let root = null, timer = null, info = null, busy = false, note = null, lastAccountsCheck = 0;
   let drawnStep = null; // the step whose form is in the page (drawn again only when the step changes, so typing stays)
   let choosing = false; // Back: the two cards again, the server's choice unchanged until one is picked
   let googleAt = 0; // when the Google sign-in was opened (the button then says it waits for the browser)
@@ -56,12 +56,12 @@ export function mountSetup({ post, isRemote = () => false, fixture = false } = {
     if (!i || !i.mode || choosing) return 'choose';
     if (!i.configured) return i.autoConnect ? 'connecting' : 'connect';
     if (!i.signedIn || i.member === false) return 'google';
-    if (!i.hasKey) return 'passphrase';
+    if (!i.hasKey) return 'key';
     if (!i.accounts || !i.accounts.ok) return 'accounts';
     return 'first';
   }
   const steps = () => [...(info && !info.autoConnect ? [['connect', 'Connect']] : []),
-    ['google', 'Sign in'], ['passphrase', 'Passphrase'], ['accounts', 'Claude accounts'], ['first', 'First sync']];
+    ['google', 'Sign in'], ['accounts', 'Claude accounts'], ['first', 'First sync']];
 
   // ---------- drawing ----------
   function frame() {
@@ -95,7 +95,7 @@ export function mountSetup({ post, isRemote = () => false, fixture = false } = {
       return;
     }
     stage.querySelector('.su-top').innerHTML = topHtml();
-    const list = steps(), idx = list.findIndex(([k]) => k === (s === 'connecting' ? 'google' : s));
+    const list = steps(), idx = list.findIndex(([k]) => k === (s === 'connecting' ? 'google' : s === 'key' ? 'accounts' : s));
     stage.querySelector('.su-steps').innerHTML = list.map(([, label], i) =>
       `<div class="su-step ${i < idx ? 'done' : i === idx ? 'now' : ''}"><span class="su-n">${i < idx ? svg(PIC.check, 12) : i + 1}</span><span class="su-sl">${esc(label)}</span></div>`).join('<span class="su-bar"></span>');
     if (drawnStep !== s) { drawnStep = s; stage.querySelector('.su-body').innerHTML = body(s); focusFirst(); }
@@ -142,29 +142,17 @@ export function mountSetup({ post, isRemote = () => false, fixture = false } = {
         + '<div class="su-btns"><button class="su-go" type="submit">Connect</button></div></form>';
     }
     if (s === 'google') return '<div class="su-live" data-l="google"></div>';
-    if (s === 'passphrase') {
-      return `<form class="su-form" data-f="passphrase"><div class="su-row"><span class="su-chip-ic">${svg(PIC.lock, 18)}</span><div class="su-p su-pass-what"></div></div>`
-        + '<label>Passphrase<input name="passphrase" type="password" autocomplete="off" minlength="8" required></label>'
-        + '<label class="su-repeat" hidden>Type it again<input name="repeat" type="password" autocomplete="off" minlength="8"></label>'
-        + '<div class="su-btns"><button class="su-go wide" type="submit">Continue</button></div></form>';
-    }
+    if (s === 'key') return '<div class="su-live" data-l="key"></div>';
     if (s === 'accounts') return '<div class="su-live" data-l="accounts"></div>';
     return '<div class="su-live" data-l="first"></div>';
   }
   // the parts read again on every poll (no inputs in them, except the code fields, kept while focused)
   function liveParts(s) {
     const el = root.querySelector('.su-live');
-    if (s === 'passphrase') {
-      const what = root.querySelector('.su-pass-what');
-      if (what) what.textContent = firstDevice ? `${Here} is the first machine on ${name()}: choose a sync passphrase and type it twice. Every other machine types the same one. Only a key made from it is kept here.`
-        : `Type the sync passphrase you chose on your other machine. Only a key made from it is kept here.`;
-      const rep = root.querySelector('.su-repeat');
-      if (rep) rep.hidden = !firstDevice;
-      return;
-    }
     if (!el) return;
     if (el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
     if (s === 'google') el.innerHTML = googleHtml();
+    else if (s === 'key') el.innerHTML = keyHtml();
     else if (s === 'accounts') el.innerHTML = accountsHtml();
     else if (s === 'first') el.innerHTML = firstHtml();
   }
@@ -181,6 +169,12 @@ export function mountSetup({ post, isRemote = () => false, fixture = false } = {
     const wait = waiting ? '<div class="su-wait"><span class="su-spin"></span>Finish signing in in your browser. This moves on by itself.</div>'
       : '<div class="su-p su-dim su-center">It opens in your default browser.</div>';
     return refused + btn + wait + who;
+  }
+  // signed in, the key not here yet: sync-run.js fetches it from Blackbox (it says why when it can't)
+  function keyHtml() {
+    const why = /could not be fetched/.test(info.reason || '') ? (info.reason.match(/Blackbox: (.+)\)$/) || [])[1] || 'no answer' : '';
+    if (why) return `<div class="su-note bad">Couldn't get the sync key from ${esc(name())} (${esc(why)}).</div><div class="su-btns"><button type="button" data-c="recheck"${busy ? ' disabled' : ''}>Try again</button></div>`;
+    return `<div class="su-wait"><span class="su-spin"></span>Signed in as ${esc(info.email || onlyEmail() || 'you')}. Getting the sync key from ${esc(name())}…</div>`;
   }
   function accountsHtml() {
     const a = info.accounts;
@@ -254,11 +248,6 @@ export function mountSetup({ post, isRemote = () => false, fixture = false } = {
     if (f.dataset.f === 'connect') {
       const body = { url: v('url').trim(), key: v('key').trim() };
       act(async () => { if (said(await post('/sync/connect', body), `Connected to ${name()}.`)) f.reset(); });
-    } else if (f.dataset.f === 'passphrase') {
-      const body = { passphrase: v('passphrase') };
-      if (firstDevice) body.repeat = v('repeat');
-      for (const el of f.querySelectorAll('input')) el.value = '';
-      act(async () => { said(await post('/sync/passphrase', body)); });
     } else if (f.dataset.f === 'code') {
       const body = { account: f.dataset.a, code: v('code').trim() };
       act(async () => { said(await post('/accounts/code', body)); });
@@ -283,10 +272,8 @@ export function mountSetup({ post, isRemote = () => false, fixture = false } = {
     if (!i.ask && i.mode !== 'sync') { close(); return; }
     if (i.signedIn || i.refused) googleAt = 0;
     const s = step();
-    if (s === 'passphrase' && firstDevice === null) {
-      const f = await get('/sync/passphrase?first=1');
-      if (f && typeof f.firstDevice === 'boolean') firstDevice = f.firstDevice;
-    }
+    // the key comes with the sign-in's own check; a while without it, the server looks again (POST /sync/accounts/check)
+    if (s === 'key' && Date.now() - lastAccountsCheck > ACCOUNTS_EVERY_MS) checkAccounts().then(() => setTimeout(refresh, 300));
     if (s === 'accounts') {
       // a sign-in that just finished, or a while since the last look: the server looks at the accounts again
       const jobs = JSON.stringify(Object.entries(i.signins || {}).map(([a, j]) => [a, j.status]));

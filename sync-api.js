@@ -14,12 +14,6 @@
 //   POST /sync/signout   this PC only
 //   POST /sync/open-signin  this PC only: opens http://127.0.0.1:<port>/sync/signin in the default browser (the page's
 //                        Sync card; the page itself may be inside the Electron window, which Google refuses)
-//   GET  /sync/passphrase   this PC only: { hasKey } (a file check, no network); ?first=1 adds firstDevice (true when
-//                        no machine has set the passphrase yet: one call to the settings table)
-//   POST /sync/passphrase   this PC only, { passphrase, repeat? } (at most 4 KB): what `node sync-crypto.js
-//                        passphrase` does (sync-crypto.js setPassphrase: the first machine sets it, a wrong one on a
-//                        later machine is refused), then onChange 'key-saved' so sync-run.js looks again at once.
-//                        The passphrase is never logged or kept: only the derived key, in the CLI's own store.
 //   "This PC only": not a remote browser (h.remote), and no Sec-Fetch-Site of cross-site or same-site.
 // The sign-in should open in a real browser (Google refuses embedded ones): http://127.0.0.1:<port>/sync/signin.
 //
@@ -54,9 +48,9 @@
 //   storage.upload(path, buffer, { contentType, upsert }) / download(path) / remove([paths])   the fleet-sync
 //     bucket; every path is put under '<user id>/' and may hold only [A-Za-z0-9._-] segments, never '.' or '..'
 //   accessToken() (renewed first when under a minute is left), uid(), email()   the signed-in account
-//   onChange(fn) -> unsubscribe   fn({ type: 'signed-in' | 'refreshed' | 'signed-out' | 'key-saved', uid, email }),
+//   onChange(fn) -> unsubscribe   fn({ type: 'signed-in' | 'refreshed' | 'signed-out', uid, email }),
 //     never a token or the key; a sign-in or sign-out by another process (the CLI) is heard the next time anything
-//     reads the sign-in; 'key-saved' when POST /sync/passphrase saved the sync key on this PC
+//     reads the sign-in
 //
 // CLI:  node sync-api.js setup --url https://<project>.supabase.co --key <the publishable key>
 //       node sync-api.js signin [--port 4777]   opens the sign-in in the default browser (Fleet View must be running)
@@ -84,8 +78,6 @@ const SEGMENT_RE = /^[A-Za-z0-9._-]{1,200}$/;
 const KEYCHAIN_SERVICE = 'fleet-view-sync';
 const SESSION_NAME = 'session'; // the sign-in's store name (and its Keychain account)
 const STORE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,40}$/;
-const BODY_MAX = 4096; // POST /sync/passphrase's body
-const PASSPHRASE_MAX = 1024;
 
 const syncDir = (dataDir) => path.join(dataDir || P.dataDir(), 'sync');
 const configPath = (dataDir) => path.join(syncDir(dataDir), 'config.json');
@@ -324,8 +316,6 @@ function createSync(opts = {}) {
   const urlOpts = { allowLoopback: !!opts.allowLoopbackUrl };
   const openUrl = typeof opts.openUrl === 'function' ? opts.openUrl : openInBrowser;
   // sync-crypto.js needs this file, so it is loaded when first used, not at the top
-  const crypt = () => require(path.join(__dirname, 'sync-crypto.js'));
-  let settingKey = false; // one POST /sync/passphrase at a time
   // onlyEmail (Henry's machines, private.json's syncEmail): the one Google account that may sign in here. Another one
   // is refused at the callback and never kept, and a kept sign-in for another account counts as signed out.
   const onlyEmail = typeof opts.onlyEmail === 'string' && opts.onlyEmail ? opts.onlyEmail.toLowerCase() : null;
@@ -728,42 +718,6 @@ function createSync(opts = {}) {
         const url = `http://127.0.0.1:${port}/sync/signin`;
         if (!openUrl(url)) return send(500, { ok: false, message: `The browser did not open: open ${url} in it yourself.` });
         return send(200, { ok: true, message: 'Your browser is opening the Google sign-in.' });
-      }
-      if (pathname === '/sync/passphrase') {
-        if (req.method === 'GET') {
-          if (!pcOnly()) return send(403, { ok: false, message: 'only on the PC' });
-          const hasKey = crypt().hasKey(dir);
-          const out = { ok: true, hasKey };
-          // the first machine chooses the passphrase (and types it twice); one REST call, so only when asked
-          if (!hasKey && new URL(req.url || '/', 'http://x').searchParams.get('first') === '1' && await load().catch(() => null)) {
-            out.firstDevice = !(await crypt().readKdf(api));
-          }
-          return send(200, out);
-        }
-        if (req.method !== 'POST') return send(405, { ok: false, message: 'GET or POST' });
-        if (!pcOnly()) return send(403, { ok: false, message: 'only on the PC' });
-        const b = await readSmallJson(req, BODY_MAX);
-        if (b.tooBig) return send(413, { ok: false, message: 'That is too long.' });
-        if (b.bad) return send(400, { ok: false, message: 'Send { "passphrase": "..." }.' });
-        let pass = b.value.passphrase;
-        const same = b.value.repeat === undefined || b.value.repeat === pass;
-        b.value = null;
-        if (typeof pass !== 'string' || pass.length < 8) return send(400, { ok: false, message: 'The passphrase needs at least 8 characters.' });
-        if (pass.length > PASSPHRASE_MAX) return send(400, { ok: false, message: `The passphrase can have at most ${PASSPHRASE_MAX} characters.` });
-        if (!same) return send(400, { ok: false, message: 'The two passphrases do not match.' });
-        const s = await load().catch(() => null);
-        if (!s) return send(401, { ok: false, message: 'Sign in first.' });
-        if (settingKey) return send(409, { ok: false, message: 'A passphrase is being checked already.' });
-        settingKey = true;
-        let r;
-        try { r = await crypt().setPassphrase(api, dir, pass); } catch (e) {
-          // never the passphrase in a message: setPassphrase's own messages hold none
-          const code = e && (e.code === 'wrong_passphrase' || e.code === 'bad_request') ? 400 : e && e.status >= 400 && e.status < 600 ? e.status : 502;
-          return send(code, { ok: false, message: (e && e.message) || 'The passphrase could not be checked.' });
-        } finally { settingKey = false; pass = null; }
-        log(`sync: the sync key was saved from the page (${r.created ? 'the first machine: the passphrase is set' : 'the passphrase matches'})`);
-        emit('key-saved', s);
-        return send(200, { ok: true, created: r.created, message: r.created ? 'Sync passphrase set; the key is saved on this PC.' : 'Passphrase matches; the key is saved on this PC.' });
       }
       return send(404, { ok: false, message: 'no such route' });
     } catch (e) {

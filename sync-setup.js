@@ -1,7 +1,7 @@
 // sync-setup.js: the first start on Henry's machines. Before the page shows anything it asks once: work locally, or
 // sync with Blackbox (Henry's sync project, docs/sync.md). Sync then walks through, in order: the project's address
 // and publishable key (written by itself from private.json's syncUrl and syncKey; asked only when it has none), the
-// Google sign-in (only private.json's syncEmail, sync-api.js onlyEmail), the sync passphrase, the Claude accounts (each letter
+// Google sign-in (only private.json's syncEmail, sync-api.js onlyEmail; the sync key then comes from Blackbox by itself), the Claude accounts (each letter
 // signed in as the login Blackbox has for it; sync-accounts.js moves a login that is here under another letter by
 // itself), and the first pass of sync. Only then does the page open (web/setup.js draws it).
 //

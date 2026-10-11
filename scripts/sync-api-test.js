@@ -10,10 +10,10 @@
 // them; email() gives the account. On Windows, the DPAPI store's round trip, with the secret never in a process's
 // arguments. protectedStore(dir, name) keeps another secret beside the sign-in without touching it, and refuses
 // 'session' and bad names; the file store gives back any text exactly and still reads a sign-in from before.
-// The Sync card's routes: POST /sync/open-signin opens /sync/signin in the default browser; GET and POST
-// /sync/passphrase: the first machine sets the passphrase, a wrong one on a second machine is refused and saves nothing,
-// a right one saves the same key and makes sync-run.js start at once; too short, too long, unmatched and oversized are
-// refused; all three only on this PC (not remote, not cross-site); the passphrase never reaches a log or an answer.
+// The Sync card's routes: POST /sync/open-signin opens /sync/signin in the default browser, only on this PC (not
+// remote, not cross-site); /sync/passphrase is gone. The key with no passphrase: signed out, sync-run.js waits; the
+// first machine's sign-in makes the key in Blackbox's settings, a second machine's sign-in fetches the same one and
+// starts at once (no minute wait); the key never reaches a log.
 // Last, publish-share.js's guard, in a throwaway git repo: a planted Supabase key, project URL or sync config stops
 // its dry run, and sync-api.js, this test and docs/sync.md pass it.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
@@ -160,7 +160,7 @@ const server = http.createServer((req, res) => {
       if (req.method === 'GET') return json(200, [{ id: 'd1', name: 'pc', user_id: uid }]);
       if (req.method === 'POST') return json(201, [{ ...JSON.parse(body.toString()), user_id: uid, prefer: req.headers.prefer || null }]);
     }
-    if (u.pathname === '/rest/v1/settings') { // the kdf row (sync-crypto.js); one table for every user here
+    if (u.pathname === '/rest/v1/settings') { // the sync-key row (sync-crypto.js); one table for every user here
       if (req.method === 'GET') { const k = String(u.searchParams.get('key') || '').replace(/^eq\./, ''); return json(200, fake.settings.has(k) ? [{ value_enc: fake.settings.get(k) }] : []); }
       if (req.method === 'POST') {
         const b = JSON.parse(body.toString());
@@ -515,7 +515,6 @@ async function main() {
   {
     const C = require(path.join(ROOT, 'sync-crypto.js'));
     const { createSyncRunner } = require(path.join(ROOT, 'sync-run.js'));
-    const PASS = 'card passphrase 中 é';
     const opened = [], cardLogs = [];
     const machine = (name) => {
       const dir = path.join(T, `card-${name}`);
@@ -534,18 +533,13 @@ async function main() {
     const A = machine('a'), B = machine('b');
     fake.member = true;
     fake.settings.clear();
-    const pass = (x, body, o = {}) => route(x.api, 'POST', '/sync/passphrase', { body: typeof body === 'string' ? body : JSON.stringify(body), ...o });
 
-    // PC only: a remote browser, or another site's page, gets 403 and nothing opens or is saved
-    for (const [m, u] of [['POST', '/sync/open-signin'], ['GET', '/sync/passphrase'], ['POST', '/sync/passphrase']]) {
-      let r = await route(A.api, m, u, { remote: true, body: m === 'POST' ? JSON.stringify({ passphrase: PASS }) : undefined });
-      ok(r.statusCode === 403, `card: a remote browser can't ${m} ${u} (${r.statusCode})`);
-      for (const site of ['cross-site', 'same-site']) {
-        r = await route(A.api, m, u, { headers: { 'sec-fetch-site': site }, body: m === 'POST' ? JSON.stringify({ passphrase: PASS }) : undefined });
-        ok(r.statusCode === 403, `card: a ${site} ${m} ${u} is refused (${r.statusCode})`);
-      }
+    // PC only: a remote browser, or another site's page, gets 403 and nothing opens
+    for (const o of [{ remote: true }, { headers: { 'sec-fetch-site': 'cross-site' } }, { headers: { 'sec-fetch-site': 'same-site' } }]) {
+      const r = await route(A.api, 'POST', '/sync/open-signin', o);
+      ok(r.statusCode === 403, `card: open-signin refused for ${JSON.stringify(o)} (${r.statusCode})`);
     }
-    ok(opened.length === 0 && !C.hasKey(S.syncDir(A.dir)), 'card: refused requests opened nothing and saved nothing');
+    ok(opened.length === 0, 'card: refused requests opened nothing');
     eq((await route(A.api, 'GET', '/sync/open-signin')).statusCode, 405, 'card: GET /sync/open-signin is 405');
 
     // the sign-in opens in the default browser, on this port's /sync/signin
@@ -556,66 +550,35 @@ async function main() {
     r = await route(failing, 'POST', '/sync/open-signin');
     ok(r.statusCode === 500 && /yourself/.test(r.json.message), 'card: a browser that does not start says to open it by hand');
 
-    // signed out: the passphrase waits for a sign-in
-    r = await pass(A, { passphrase: PASS });
-    ok(r.statusCode === 401 && !C.hasKey(S.syncDir(A.dir)), `card: signed out, the passphrase is refused (${r.statusCode})`);
-    await signInAs(A, 'member@example.com');
-    r = await route(A.api, 'GET', '/sync/passphrase');
-    eq([r.statusCode, r.json.hasKey, 'firstDevice' in r.json], [200, false, false], 'card: GET /sync/passphrase: no key, no network unless asked');
-    const settingsCalls = () => fake.calls.filter((c) => c.path === '/rest/v1/settings').length;
-    const before = settingsCalls();
-    r = await route(A.api, 'GET', '/sync/passphrase?first=1');
-    ok(r.json.firstDevice === true && settingsCalls() === before + 1, 'card: ?first=1: the first machine (one settings read)');
+    eq((await route(A.api, 'GET', '/sync/passphrase')).statusCode, 404, 'card: there is no /sync/passphrase any more');
 
-    // refused before anything is derived or sent
-    const n0 = settingsCalls();
-    r = await pass(A, { passphrase: 'short' });
-    ok(r.statusCode === 400 && /at least 8/.test(r.json.message), `card: a passphrase under 8 characters is refused (${r.statusCode})`);
-    r = await pass(A, { passphrase: 'x'.repeat(1025) });
-    ok(r.statusCode === 400 && /at most/.test(r.json.message), 'card: a passphrase over 1024 characters is refused');
-    r = await pass(A, { passphrase: PASS, repeat: `${PASS}!` });
-    ok(r.statusCode === 400 && /do not match/.test(r.json.message), 'card: a repeat that does not match is refused');
-    r = await pass(A, JSON.stringify({ passphrase: 'y'.repeat(5000) }));
-    ok(r.statusCode === 413, `card: a body over 4 KB is refused (${r.statusCode})`);
-    r = await pass(A, 'not json');
-    ok(r.statusCode === 400, 'card: a body that is not JSON is refused');
-    r = await pass(A, JSON.stringify(['a list']));
-    ok(r.statusCode === 400, 'card: a body that is not an object is refused');
-    r = await pass(A, { passphrase: 12345678 });
-    ok(r.statusCode === 400, 'card: a passphrase that is not a string is refused');
-    ok(settingsCalls() === n0 && !C.hasKey(S.syncDir(A.dir)), 'card: none of those reached Supabase or saved a key');
-
-    // the first machine sets it
-    const evA = [];
-    A.api.onChange((e) => evA.push(e));
-    r = await pass(A, { passphrase: PASS, repeat: PASS });
-    ok(r.statusCode === 200 && r.json.ok && r.json.created === true, `card: the first machine sets the passphrase (${r.statusCode} ${r.json && r.json.message})`);
-    ok(C.hasKey(S.syncDir(A.dir)) && (await C.loadKey(S.syncDir(A.dir))).length === 32, 'card: the key is saved where the CLI keeps it');
-    ok(evA.some((e) => e.type === 'key-saved'), 'card: onChange hears key-saved');
-    eq((await route(A.api, 'GET', '/sync/passphrase')).json.hasKey, true, 'card: GET /sync/passphrase: the key is here');
-
-    // a second machine, with sync-run.js watching it
-    await signInAs(B, 'member@example.com');
-    r = await route(B.api, 'GET', '/sync/passphrase?first=1');
-    ok(r.json.hasKey === false && r.json.firstDevice === false, 'card: the second machine is told it is not the first');
+    // no passphrase: the runner fetches (or on the first machine makes) the key once signed in
     const made = [];
     const loop = () => { const l = { start() { made.push(l); }, async stop() {}, status: () => ({}) }; return l; };
-    const runner = createSyncRunner({ sync: B.api, dataDir: B.dir, log: (t) => cardLogs.push(t), checkMs: 1e6, makeUploader: loop, makeMaterializer: loop });
-    await runner.start();
-    ok(!runner.status().running && /no sync key/.test(runner.status().reason), 'card: the runner waits for the key');
-    r = await pass(B, { passphrase: 'not the passphrase at all' });
-    ok(r.statusCode === 400 && /not the sync passphrase/.test(r.json.message), `card: a wrong passphrase on a second machine is refused (${r.statusCode} ${r.json && r.json.message})`);
-    ok(!C.hasKey(S.syncDir(B.dir)) && !runner.status().running, 'card: ... and saves nothing');
-    r = await pass(B, { passphrase: PASS });
-    ok(r.statusCode === 200 && r.json.created === false, `card: the right passphrase is taken (${r.statusCode})`);
-    ok((await C.loadKey(S.syncDir(B.dir))).equals(await C.loadKey(S.syncDir(A.dir))), 'card: ... and gives the same key as the first machine');
-    for (let i = 0; i < 100 && made.length < 2; i++) await new Promise((res2) => realSetTimeout(res2, 20));
-    ok(made.length === 2 && runner.status().running, 'card: a saved passphrase makes the runner start at once (no minute wait)');
-    await runner.stop();
+    const runnerOf = (x) => createSyncRunner({ sync: x.api, dataDir: x.dir, log: (t) => cardLogs.push(t), checkMs: 1e6, makeUploader: loop, makeMaterializer: loop });
+    const settle = async (n) => { for (let i = 0; i < 100 && made.length < n; i++) await new Promise((res2) => realSetTimeout(res2, 20)); };
+    const runA = runnerOf(A);
+    await runA.start();
+    ok(!runA.status().running && /not signed in/.test(runA.status().reason) && !C.hasKey(S.syncDir(A.dir)), 'card: signed out, no key is made');
+    await signInAs(A, 'member@example.com');
+    await settle(2);
+    ok(made.length === 2 && runA.status().running, 'card: the first machine runs as soon as it signs in');
+    const keyA = await C.loadKey(S.syncDir(A.dir));
+    const row = JSON.parse(fake.settings.get('sync-key'));
+    ok(keyA && keyA.length === 32 && Buffer.from(row.key, 'base64').equals(keyA), 'card: it made the key and put it in Blackbox');
+    await runA.stop();
+
+    const runB = runnerOf(B);
+    await runB.start();
+    ok(!runB.status().running && !C.hasKey(S.syncDir(B.dir)), 'card: the second machine waits for its sign-in');
+    await signInAs(B, 'member@example.com');
+    await settle(4);
+    ok(made.length === 4 && runB.status().running, 'card: the second machine runs as soon as it signs in (no minute wait)');
+    ok((await C.loadKey(S.syncDir(B.dir))).equals(keyA), 'card: ... with the same key as the first machine');
+    await runB.stop();
 
     const all = JSON.stringify([cardLogs, logs]);
-    ok(!all.includes(PASS) && !all.includes('not the passphrase at all'), 'card: no passphrase in any log');
-    ok(!String(fake.settings.get('kdf')).includes(PASS), 'card: the kdf row holds no passphrase');
+    ok(!all.includes(keyA.toString('base64')) && !all.includes(keyA.toString('hex')), 'card: the key is in no log');
     await C.forgetKey(S.syncDir(A.dir));
     await C.forgetKey(S.syncDir(B.dir));
   }

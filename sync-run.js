@@ -4,15 +4,14 @@
 //   0. this machine did not choose to work locally (o.mode(), sync-setup.js: the first-start choice)
 //   1. sync is set up on this PC (<dataDir>/sync/config.json, sync-api.js enabled())
 //   2. someone is signed in, and the server has not said they are off the members list (sync-api.js status())
-//   3. the sync key is on this PC (sync-crypto.js loadKey: the page's Sync card or `node sync-crypto.js passphrase`
-//      saves it)
+//   3. the sync key is on this PC (sync-crypto.js fetchKey: the first check after the sign-in fetches it from Blackbox,
+//      or makes it there on the first machine; no passphrase)
 //   4. the Claude account letters here are Blackbox's (o.accounts.reconcile, sync-accounts.js: it moves a login to
 //      its letter by itself and says which letters still need a sign-in). Looked at on every check, so a sign-in
 //      done in the page starts sync within a minute (at once when the page asks for a check). While sync runs, a
 //      list that could not be read (the network) does not stop it; a mismatch does.
-// The gates are looked at when sync-api.js reports a sign-in, a sign-out or a key saved from the page (onChange,
-// 'key-saved'), and once a minute (a key saved
-// from a terminal, a config written by `sync-api.js setup`). Off by default: a PC with none of the three runs no loop,
+// The gates are looked at when sync-api.js reports a sign-in or a sign-out (onChange), and once a minute (a config
+// written by `sync-api.js setup`). Off by default: a PC with none of the three runs no loop,
 // sets no timer beyond the minute check and reaches no network.
 //
 //   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, intervalMs, checkMs,
@@ -115,8 +114,14 @@ function createSyncRunner(o = {}) {
     if (!st.signedIn) return halt('not signed in', true);
     if (st.member === false) return halt('this account is not on the sync members list', true);
     const uid = await sync.uid();
-    const key = await C.loadKey(S.syncDir(dataDir));
-    if (!key) return halt('no sync key on this PC (set the passphrase in the Sync card, or node sync-crypto.js passphrase)', true);
+    let key = null;
+    try {
+      const r = await C.fetchKey(sync, S.syncDir(dataDir));
+      key = r.key;
+      if (r.fetched) log(r.created ? 'sync: made the sync key and put it in Blackbox' : 'sync: fetched the sync key from Blackbox');
+    } catch (e) {
+      return halt(`no sync key on this PC (it could not be fetched from Blackbox: ${(e && e.message) || e})`, true);
+    }
     const kid = keyId(key);
     if (accounts) {
       const r = await accounts.reconcile({ api: sync, key });

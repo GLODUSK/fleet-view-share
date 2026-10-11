@@ -6,14 +6,13 @@
 //                        terminal) / signed out / signed in as <email>, on the members list or not
 //   GET /sync/activity   running or why not, and the two loops' counts and the number of conflicts in plain words
 //                        (never a title, a path, a token or the key: only counts are read from it)
-//   GET /sync/passphrase whether the sync key is on this PC; ?first=1 once, to know if this is the first machine
+//   GET /sync/setup      whether the sync key is on this PC (hasKey). No passphrase: once signed in, the server
+//                        fetches the key from Blackbox by itself (sync-run.js), and this only says so
 // and does, on this PC's own page only:
 //   Sign in with Google  POST /sync/open-signin: the server opens the sign-in in the real default browser (Google
 //                        refuses embedded windows, and this page may be inside the Fleet View window); the card then
 //                        watches the status until it says signed in
 //   Sign out             POST /sync/signout, after a second click in the card
-//   Save (passphrase)    POST /sync/passphrase { passphrase, repeat? }: the key is derived and kept on the PC; the
-//                        passphrase never leaves it and is cleared from the field at once
 // A remote browser (the phone, another computer) sees the same card read-only: sign-in is done on the PC.
 //
 // On Henry's own machines (GET /sync/setup says private) it also says whether this machine syncs with Blackbox or
@@ -38,10 +37,10 @@ const ago = (iso) => {
 
 export function mountSync({ post, isRemote = () => false, fixture = false, openSetup = () => {} } = {}) {
   let card = null, timer = null, gen = 0;
-  let status = null, activity = null, key = null; // the last answers (null: none yet or no answer)
+  let status = null, activity = null; // the last answers (null: none yet or no answer)
+  let keyInfo = null; // GET /sync/setup's hasKey (and why sync is not running)
   let setup = null; // GET /sync/setup: { private, name, mode, accounts, ... } (Henry's machines only say private)
   let confirmLocal = false;
-  let firstDevice = null; // asked once per card opening, when the key is missing
   let waiting = false; // a sign-in was started from this card
   let confirmOut = false, busy = false;
   let note = null; // { text, bad }
@@ -57,17 +56,10 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     const my = gen;
     const [st, act, su] = await Promise.all([get('/sync/status'), get('/sync/activity'), get('/sync/setup')]);
     setup = su && su.private ? su : null;
-    let k = null;
-    if (st && st.configured && st.signedIn && !remote()) {
-      k = await get('/sync/passphrase');
-      if (k && k.ok && !k.hasKey && firstDevice === null) {
-        const f = await get('/sync/passphrase?first=1');
-        if (f && typeof f.firstDevice === 'boolean') firstDevice = f.firstDevice;
-      }
-    }
+    keyInfo = su && typeof su.hasKey === 'boolean' ? { hasKey: su.hasKey, reason: su.reason || '' } : null;
     if (my !== gen || !card) return;
     answered = true;
-    status = st; activity = act; key = k && k.ok ? k : null;
+    status = st; activity = act;
     if (waiting && st && st.signedIn) { waiting = false; note = { text: `Signed in as ${st.email || 'your Google account'}.` }; }
     draw();
   }
@@ -160,12 +152,12 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     return lines.join('');
   }
 
-  // the passphrase form: its own element, drawn again only when its step changes, so what is typed stays
+  // the sync key: here, or being fetched from Blackbox (sync-run.js says why when it can't)
   function keyStep() {
     const st = status;
-    if (!st || !st.configured || !st.signedIn || remote() || !key) return null;
-    if (key.hasKey) return 'have';
-    return firstDevice ? 'first' : 'form';
+    if (!st || !st.configured || !st.signedIn || remote() || !keyInfo) return null;
+    if (keyInfo.hasKey) return 'have';
+    return /could not be fetched/.test(keyInfo.reason) ? `bad:${keyInfo.reason}` : 'wait';
   }
   function drawKey() {
     const el = card.querySelector('.sy-key');
@@ -174,18 +166,10 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     el._step = step;
     if (!step) { el.innerHTML = ''; el.hidden = true; return; }
     el.hidden = false;
-    if (step === 'have') {
-      el.innerHTML = `<div class="sy-h">${icon('key', 13)}<b>Sync key</b></div><div class="sy-line">The sync key is on this PC.</div>`;
-      return;
-    }
-    el.innerHTML = `<div class="sy-h">${icon('key', 13)}<b>Sync passphrase</b></div>`
-      + `<div class="sy-line sy-dim">${step === 'first'
-        ? 'No machine has a sync passphrase yet: choose one (8 or more characters).'
-        : 'Type the sync passphrase you set on your other machine.'} Every machine uses the same one, and it never leaves this PC.</div>`
-      + '<form class="sy-form" autocomplete="off">'
-      + `<input type="password" class="sy-pass" minlength="8" maxlength="1024" placeholder="${step === 'first' ? 'choose a passphrase' : 'the sync passphrase'}" autocomplete="off" spellcheck="false" aria-label="Sync passphrase">`
-      + (step === 'first' ? '<input type="password" class="sy-pass2" minlength="8" maxlength="1024" placeholder="repeat it" autocomplete="off" spellcheck="false" aria-label="Repeat the passphrase">' : '')
-      + '<button type="submit" class="sy-go">Save</button></form>';
+    const line = step === 'have' ? '<div class="sy-line">The sync key is on this PC.</div>'
+      : step === 'wait' ? `<div class="sy-line sy-dim">Getting the sync key from ${esc((setup && setup.name) || 'Blackbox')}…</div>`
+        : `<div class="sy-line sy-warn">Couldn't get it from ${esc((setup && setup.name) || 'Blackbox')} (${esc((step.match(/Blackbox: (.+)\)$/) || [])[1] || 'no answer')}); it tries again every minute.</div>`;
+    el.innerHTML = `<div class="sy-h">${icon('key', 13)}<b>Sync key</b></div>${line}`;
   }
   function draw() {
     if (!card) return;
@@ -245,41 +229,16 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       if (busy) return;
       const r = await act('/sync/signout', {});
       confirmOut = false;
-      if (r && r.ok) { note = { text: 'Signed out of sync on this PC.' }; firstDevice = null; }
+      if (r && r.ok) note = { text: 'Signed out of sync on this PC.' };
       else if (r) note = { text: r.message || 'The sign-out did not work.', bad: true };
       await refresh();
     }
     draw();
   }
-  async function onSubmit(ev) {
-    ev.preventDefault();
-    if (busy || !card) return;
-    const f = ev.target.closest('.sy-form');
-    const p1 = f.querySelector('.sy-pass'), p2 = f.querySelector('.sy-pass2');
-    const pass = p1.value;
-    if (pass.length < 8) { note = { text: 'The passphrase needs at least 8 characters.', bad: true }; draw(); p1.focus(); return; }
-    if (p2 && p2.value !== pass) { note = { text: 'The two passphrases do not match.', bad: true }; draw(); p2.focus(); return; }
-    const body = p2 ? { passphrase: pass, repeat: p2.value } : { passphrase: pass };
-    // nothing keeps it here: the fields are cleared at once, whatever the answer
-    p1.value = ''; if (p2) p2.value = '';
-    note = { text: 'Checking the passphrase…' };
-    for (const x of f.querySelectorAll('input, button')) x.disabled = true;
-    const r = await act('/sync/passphrase', body);
-    body.passphrase = body.repeat = null;
-    if (!card) return;
-    for (const x of f.querySelectorAll('input, button')) x.disabled = false;
-    if (r && r.ok) { note = { text: r.message || 'The sync key is saved on this PC.' }; await refresh(); }
-    else {
-      if (r) note = { text: r.message || 'The passphrase was not taken.', bad: true };
-      draw();
-      f.querySelector('.sy-pass')?.focus();
-    }
-  }
-
   function open() {
     if (card) return;
     gen++;
-    answered = false; status = activity = key = null; firstDevice = null; note = null; confirmOut = false; busy = false;
+    answered = false; status = activity = keyInfo = null; note = null; confirmOut = false; busy = false;
     card = document.createElement('div');
     card.className = 'uw-pop sy-pop';
     card.setAttribute('role', 'dialog');
@@ -289,11 +248,10 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       + `<button type="button" class="uw-x" aria-label="close" title="close (Esc)">${icon('close', 13)}</button></div>`
       + '<div class="uw-scroll"><div class="sy-main"></div><div class="sy-sec sy-key" hidden></div><div class="sy-sec sy-act" hidden></div>'
       + '<div class="sy-note" hidden aria-live="polite"></div></div>'
-      + `<div class="uw-foot">${remote() ? 'Read-only here: sign-in, sign-out and the passphrase are done on the PC.' : 'Chats sync through your Supabase project, encrypted with the sync key before they leave this PC.'}</div>`;
+      + `<div class="uw-foot">${remote() ? 'Read-only here: sign-in and sign-out are done on the PC.' : 'Chats sync through your Supabase project, encrypted with the sync key before they leave this PC.'}</div>`;
     document.body.appendChild(card);
     draw();
     card.addEventListener('click', (ev) => { if (ev.target.closest('.uw-x')) close(); else onClick(ev); });
-    card.addEventListener('submit', onSubmit);
     card.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } });
     setTimeout(() => document.addEventListener('pointerdown', outside, true), 0);
     document.addEventListener('keydown', escKey, true);

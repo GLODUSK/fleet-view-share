@@ -1,8 +1,9 @@
 // Sync crypto: a test of sync-crypto.js, run with the system node:   node scripts/sync-crypto-test.js
 // Seal and open round trips (text, binary, empty, gzip chunks); a wrong key, a wrong label (the blob moved elsewhere),
-// a flipped byte, a cut blob or a missing FVS1 header never open; a gzip bomb is refused. The passphrase: the first
-// machine writes the kdf row with a check, a second machine with the same passphrase gets the same key, a wrong one is
-// refused and saves nothing; the key is kept in the protected 'sync-key' store beside, never over, the sign-in.
+// a flipped byte, a cut blob or a missing FVS1 header never open; a gzip bomb is refused. The key: the first machine
+// makes it and puts it in Blackbox's settings, a second machine fetches the same one, a key already here asks Blackbox
+// nothing, two machines at once keep the first row, a damaged row is refused and saves nothing; the key is kept in the
+// protected 'sync-key' store beside, never over, the sign-in.
 // Everything happens in a temp folder, deleted at the end. Exit 0 = all pass.
 'use strict';
 const fs = require('fs');
@@ -68,32 +69,37 @@ async function main() {
   ok(/^[A-Za-z0-9+/=]+$/.test(t) && C.openText(t, key, 'title:abc') === 'My title', 'sealText / openText');
   ok(C.sha256(Buffer.from('abc')) === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'sha256');
 
-  // the key from a passphrase (N 2^14 here for speed; the real default is 2^17)
-  const kdf = { ...C.newKdf(), N: 2 ** 14 };
-  ok(Buffer.from(kdf.salt, 'base64').length === 16 && C.newKdf().N === 2 ** 17, 'newKdf: a 16-byte salt, N 2^17');
-  const k1 = await C.deriveKey('correct horse battery', kdf), k2 = await C.deriveKey('correct horse battery', kdf);
-  ok(k1.length === 32 && k1.equals(k2), 'the same passphrase and salt give the same key');
-  ok(!(await C.deriveKey('correct horse batterz', kdf)).equals(k1), 'another passphrase, another key');
-  ok((await C.deriveKey('café passphrase', kdf)).equals(await C.deriveKey('café passphrase', kdf)), 'NFC: the same passphrase typed two ways gives one key');
-  await rejectsCode(C.deriveKey('short', kdf), 'bad_request', 'a passphrase under 8 characters is refused');
-  await rejectsCode(C.deriveKey('long enough', { ...kdf, N: 1000 }), 'bad_request', 'odd kdf parameters are refused');
-  kdf.check = C.makeCheck(k1);
-  ok(C.checkKey(k1, kdf) && !C.checkKey(crypto.randomBytes(32), kdf) && !C.checkKey(k1, {}), 'checkKey');
-
   // two machines and one settings table
   const api = fakeApi();
   const dirA = path.join(T, 'a', 'sync'), dirB = path.join(T, 'b', 'sync');
   ok((await C.loadKey(dirA)) === null && C.hasKey(dirA) === false, 'no key at first');
-  ok((await C.setPassphrase(api, dirA, 'the sync passphrase')).created === true, 'the first machine sets it');
-  const stored = JSON.parse(api.rows.get('kdf'));
-  ok(stored.v === 1 && stored.check && stored.N === 2 ** 17 && !JSON.stringify(stored).includes('the sync passphrase'), 'the kdf row holds a salt and a check, not the passphrase');
+  const rA = await C.fetchKey(api, dirA);
+  ok(rA.created === true && rA.fetched === true && rA.key.length === 32, 'the first machine makes it');
+  const stored = JSON.parse(api.rows.get('sync-key'));
+  ok(stored.v === 1 && Buffer.from(stored.key, 'base64').equals(rA.key), 'Blackbox holds it in the sync-key setting');
   const keyA = await C.loadKey(dirA);
-  ok(keyA && keyA.length === 32 && C.checkKey(keyA, stored) && C.hasKey(dirA) === true, 'the key is saved on the first machine (hasKey says so)');
-  await rejectsCode(C.setPassphrase(api, dirB, 'not the passphrase'), 'wrong_passphrase', 'a second machine with another passphrase is refused');
-  ok((await C.loadKey(dirB)) === null, '... and saves nothing');
-  ok((await C.setPassphrase(api, dirB, 'the sync passphrase')).created === false, 'a second machine with the same passphrase');
-  ok((await C.loadKey(dirB)).equals(keyA), '... gets the same key');
+  ok(keyA && keyA.equals(rA.key) && C.hasKey(dirA) === true, 'the key is saved on the first machine (hasKey says so)');
+  const rB = await C.fetchKey(api, dirB);
+  ok(rB.created === false && rB.fetched === true && (await C.loadKey(dirB)).equals(keyA), 'a second machine fetches the same key');
   ok(C.openText(C.sealText('across', keyA, 'x'), await C.loadKey(dirB), 'x') === 'across', 'what one machine seals the other opens');
+  const quiet = { rest: async () => { throw new Error('asked Blackbox'); } };
+  ok((await C.fetchKey(quiet, dirB)).fetched === false, 'a key already here asks Blackbox nothing');
+  // two machines at once: the other one's row lands first, this one keeps that
+  const race = fakeApi(), theirs = crypto.randomBytes(32);
+  const get = race.rest;
+  let first = true;
+  race.rest = async (method, table, o) => {
+    if (method === 'POST' && first) { first = false; race.rows.set('sync-key', JSON.stringify({ v: 1, key: theirs.toString('base64') })); }
+    return get(method, table, o);
+  };
+  const dirC = path.join(T, 'c', 'sync');
+  const rC = await C.fetchKey(race, dirC);
+  ok(rC.created === false && rC.key.equals(theirs) && (await C.loadKey(dirC)).equals(theirs), 'a race keeps the first row');
+  const broken = fakeApi();
+  broken.rows.set('sync-key', '{"v":1,"key":"c2hvcnQ="}');
+  const dirD = path.join(T, 'd', 'sync');
+  await rejectsCode(C.fetchKey(broken, dirD), 'bad_blob', 'a damaged sync-key row is refused');
+  ok((await C.loadKey(dirD)) === null, '... and saves nothing');
   const signIn = S.protectedStore(path.join(T, 'a'), 'other'); // a neighbour in another folder stays apart
   await signIn.write('neighbour');
   ok(fs.readdirSync(dirA).some((f) => f.startsWith('sync-key.')) && !fs.readdirSync(dirA).some((f) => f.startsWith('session.')), 'the key is in sync-key.*, not the sign-in\'s session.*');

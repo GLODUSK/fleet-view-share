@@ -1354,7 +1354,7 @@ function drawHeader(v) {
     pill(c.mergedToday ?? 0, 'merged today', C.mint, 'merge', n(c.mergedToday ?? 0, 'PR merged today', 'PRs merged today')),
   ].join('') + (c.cost ? pill(fmtCost(c.cost), 'API cost', C.text, 'cost', `${fmtCost(c.cost)} at API prices, every conversation seen since Fleet View started`) : '')
     + weekPill(v.week)
-    // conversation sync: who is signed in, sign in / out, the passphrase (sync.js)
+    // conversation sync: who is signed in, sign in / out, the sync key (sync.js)
     + (SOLO ? '' : `<span class="count sync" role="button" tabindex="0" title="Conversation sync: sign in or out, the sync passphrase, what it is doing"><span class="pill-ic" style="color:${C.cyan}">${icon('sync', 13)}</span><span class="count-k">sync</span></span>`)
     // the phone relay: pair an iPhone, the paired phones (phone.js); this PC only
     + (SOLO ? '' : `<span class="count phone" role="button" tabindex="0" title="Pair an iPhone with the Fleet View app, and the phones paired with this PC"><span class="pill-ic" style="color:${C.cyan}">${icon('phone', 13)}</span><span class="count-k">iPhone</span></span>`);
