@@ -118,8 +118,8 @@
 // Renaming a workspace: "Rename" on its right-click (map hub, repo chip, a menu row) names it in Fleet View only
 // (settings.repoNames, [{ root, name }]; the folder stays as it is); the name shows wherever its folder's name would
 // (repoName, applyRepoNames on /state's names); an empty name goes back to the folder's. One Undo.
-// The menu's order: "Move up" / "Move down" on a workspace's right-click, Shift+↑↓ on the menu's picked row, or
-// dragging a row (settings.repoOrder, roots: those first in that order, the rest busiest first). One Undo each.
+// The menu's order: Shift+↑↓ on the menu's picked row, or dragging a row (settings.repoOrder, roots: those first
+// in that order, the rest busiest first). One Undo each.
 // Adding a repo ("Add workspace" at the bottom of the repo menu, or on empty space's right-click) offers three
 // ways: "Paste path" (a path box; quotes around a pasted path are dropped, forward slashes are fine), "New
 // scratchpad" (POST /repos/scratch: the server makes an empty scratch-YYYY-MM-DD folder under ~/Scratchpads and
@@ -770,7 +770,7 @@ function renameRepo(root, raw) {
 }
 
 // ---------- the repo menu's order ----------
-// set by hand: "Move up" / "Move down" on a workspace's right-click, Shift+↑↓ in the menu, or dragging a row there.
+// set by hand: Shift+↑↓ in the menu, or dragging a row there.
 // settings.repoOrder (roots, at most 300): the ones in it come first in that order, the rest follow, busiest first
 let repoOrder = [], repoOrderSentAt = 0;
 // every workspace root in the menu's order (the filter not applied)
@@ -795,15 +795,6 @@ function moveRepoTo(root, target, after) {
   if (j < 0) return;
   list.splice(j + (after ? 1 : 0), 0, root);
   setRepoOrder(list, `Moved ${repoName(root)}`);
-}
-function repoMoveItems(root) {
-  const list = menuRoots(), i = list.findIndex((r) => normRoot(r) === normRoot(repoRootOf({ root })));
-  if (i < 0) return [];
-  const r = list[i];
-  return [
-    { label: 'Move up', icon: 'up', disabled: i === 0, run: () => moveRepo(r, -1) },
-    { label: 'Move down', icon: 'down', disabled: i === list.length - 1, run: () => moveRepo(r, 1) },
-  ];
 }
 
 // ---------- adding a repo ----------
@@ -2072,12 +2063,12 @@ $('repo-menu').addEventListener('contextmenu', (e) => {
   closeMenu();
   const items = [{ label: it.root ? `Show only ${it.name}` : 'Show every workspace', icon: 'repo', run: () => pickRepo(it) }];
   if (it.root) {
-    items.push(...showTooItems(it), repoRenameItem(it.root), ...repoMoveItems(it.root), { sep: true });
+    items.push(...showTooItems(it), repoRenameItem(it.root), { sep: true });
     items.push(...repoOrderItems(it.root, it.name), { sep: true }, { label: 'Remove from list', icon: 'hide', run: () => removeRepo(it) });
   }
   openCtxMenu({ x: e.clientX, y: e.clientY, title: it.name, dot: color, sub: it.root || `${it.live} live`, items });
 });
-// dragging a row up or down sets the menu's order (settings.repoOrder, as Move up / Move down); "All workspaces"
+// dragging a row up or down sets the menu's order (settings.repoOrder, as Shift+↑↓); "All workspaces"
 // stays first. A line shows where it goes; the menu isn't redrawn meanwhile
 let menuDrag = null; // { i, y0, id, on, to, after } while a row is held
 let menuDragEnded = 0;
@@ -2564,9 +2555,9 @@ function openContextMenu(target, x, y) {
     items.push({ label: onPc('Open folder'), icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
     if (pushHook()) items.push(repoPushItem(folder, repo.push || 'production'));
     if (unpinItem(target)) items.push(unpinItem(target));
-    // its name in Fleet View, its place in the repo menu, and (while some are picked) whether it is shown too
+    // its name in Fleet View, and (while some are picked) whether it is shown too
     const rIt = { root: repoRootOf({ root: folder }), name: target.name || repo.name || repoName(folder) };
-    items.push({ sep: true }, ...showTooItems(rIt), repoRenameItem(folder), ...repoMoveItems(folder));
+    items.push({ sep: true }, ...showTooItems(rIt), repoRenameItem(folder));
     // orders for every conversation in it, idle and new ones too (one team), or the same text to each
     items.push({ sep: true }, ...repoOrderItems(folder, target.name || repo.name || repoName(folder)));
     items.push(selectAllItem(repoSessions(folder).filter((s) => !s.pending), `no conversation in ${target.name || repo.name || repoName(folder)}`));

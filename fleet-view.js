@@ -428,7 +428,7 @@ function cleanRepoNames(list) {
   return [...out.values()];
 }
 let repoNames = DEMO ? [] : cleanRepoNames(saved.repoNames) || [];
-// the repo menu's order, set by hand (Move up / Move down, or dragging a row): settings.repoOrder, roots, at most 300;
+// the repo menu's order, set by hand (Shift+↑↓ or dragging a row): settings.repoOrder, roots, at most 300;
 // the ones listed come first in that order, the rest after them, busiest first
 const REPO_ORDER_MAX = 300;
 function cleanRepoOrder(list) {
