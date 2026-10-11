@@ -605,9 +605,12 @@ if (!app.requestSingleInstanceLock()) {
       body.chatsOpen = !!local.chatsOpen;
       body.chatsOnTop = !!local.chatsOnTop;
       writeLocal();
-      const t = setTimeout(() => { if (!win.isDestroyed()) win.destroy(); }, 1200);
+      // this window, not `win`: when the 1.2 s timer wins, 'closed' sets win to null before the settings post
+      // (slow while the server restarts) calls back, and win.isDestroyed() then threw a main-process error box
+      const w = win;
+      const t = setTimeout(() => { if (!w.isDestroyed()) w.destroy(); }, 1200);
       let left = 2;
-      const one = () => { if (--left === 0) { clearTimeout(t); if (!win.isDestroyed()) win.destroy(); } };
+      const one = () => { if (--left === 0) { clearTimeout(t); if (!w.isDestroyed()) w.destroy(); } };
       postSettings(body, one);
       if (quittingAll) one();
       else readUi().then((ui) => { if (ui) terms.setUi(ui); one(); });
