@@ -83,12 +83,12 @@ async function main() {
   // two machines and one settings table
   const api = fakeApi();
   const dirA = path.join(T, 'a', 'sync'), dirB = path.join(T, 'b', 'sync');
-  ok((await C.loadKey(dirA)) === null, 'no key at first');
+  ok((await C.loadKey(dirA)) === null && C.hasKey(dirA) === false, 'no key at first');
   ok((await C.setPassphrase(api, dirA, 'the sync passphrase')).created === true, 'the first machine sets it');
   const stored = JSON.parse(api.rows.get('kdf'));
   ok(stored.v === 1 && stored.check && stored.N === 2 ** 17 && !JSON.stringify(stored).includes('the sync passphrase'), 'the kdf row holds a salt and a check, not the passphrase');
   const keyA = await C.loadKey(dirA);
-  ok(keyA && keyA.length === 32 && C.checkKey(keyA, stored), 'the key is saved on the first machine');
+  ok(keyA && keyA.length === 32 && C.checkKey(keyA, stored) && C.hasKey(dirA) === true, 'the key is saved on the first machine (hasKey says so)');
   await rejectsCode(C.setPassphrase(api, dirB, 'not the passphrase'), 'wrong_passphrase', 'a second machine with another passphrase is refused');
   ok((await C.loadKey(dirB)) === null, '... and saves nothing');
   ok((await C.setPassphrase(api, dirB, 'the sync passphrase')).created === false, 'a second machine with the same passphrase');
@@ -98,7 +98,7 @@ async function main() {
   await signIn.write('neighbour');
   ok(fs.readdirSync(dirA).some((f) => f.startsWith('sync-key.')) && !fs.readdirSync(dirA).some((f) => f.startsWith('session.')), 'the key is in sync-key.*, not the sign-in\'s session.*');
   await C.forgetKey(dirA);
-  ok((await C.loadKey(dirA)) === null && (await signIn.read()) === 'neighbour', 'forgetKey removes only the key');
+  ok((await C.loadKey(dirA)) === null && !C.hasKey(dirA) && (await signIn.read()) === 'neighbour', 'forgetKey removes only the key');
 }
 
 main().catch((e) => { failures++; console.log(`FAIL the test crashed: ${e && e.stack}`); }).finally(() => {

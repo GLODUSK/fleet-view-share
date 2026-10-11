@@ -5974,7 +5974,12 @@ function handleRequest(req, res) {
   if (pathname === '/upload') return FILES.upload(req, res, pageCtx);
   if (pathname === '/update' || pathname.startsWith('/update/')) return UPDATER.handle(req, res, pathname, pageCtx);
   if (pathname === '/housekeeping' || pathname.startsWith('/housekeeping/')) return HK.handle(req, res, pathname, pageCtx);
-  if (pathname === '/sync/activity' && (req.method === 'GET' || req.method === 'HEAD')) return sendJson(res, 200, SYNC_RUNNER.status());
+  if (pathname === '/sync/activity' && (req.method === 'GET' || req.method === 'HEAD')) {
+    // a remote browser gets the conflicts without their paths on this PC
+    const st = SYNC_RUNNER.status();
+    if (remoteOf(req) && Array.isArray(st.conflicts)) st.conflicts = st.conflicts.map(({ path: _p, ...c }) => c);
+    return sendJson(res, 200, st);
+  }
   if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   if (req.method === 'POST') {
     if (pathname === '/open') {

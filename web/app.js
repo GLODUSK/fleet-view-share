@@ -165,6 +165,7 @@ import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unr
 import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { mountUsage } from './usage.js';
+import { mountSync } from './sync.js';
 import { mountHousekeeping } from './housekeeping.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText } from './compose.js';
 import { forkAt } from './forkat.js';
@@ -1358,7 +1359,9 @@ function drawHeader(v) {
   ].join('') + (c.cost ? pill(fmtCost(c.cost), 'API cost', C.text, 'cost', `${fmtCost(c.cost)} at API prices, every conversation seen since Fleet View started`) : '')
     + weekPill(v.week)
     // add, switch or remove a Claude account: the Usage card's Accounts list, asking for a new one at once
-    + `<span class="count accts" role="button" tabindex="0" title="Claude accounts: add, switch login or remove"><span class="pill-ic" style="color:${C.cyan}">${icon('plus', 13)}</span><span class="count-k">account</span></span>`;
+    + `<span class="count accts" role="button" tabindex="0" title="Claude accounts: add, switch login or remove"><span class="pill-ic" style="color:${C.cyan}">${icon('plus', 13)}</span><span class="count-k">account</span></span>`
+    // conversation sync: who is signed in, sign in / out, the passphrase (sync.js)
+    + (SOLO ? '' : `<span class="count sync" role="button" tabindex="0" title="Conversation sync: sign in or out, the sync passphrase, what it is doing"><span class="pill-ic" style="color:${C.cyan}">${icon('sync', 13)}</span><span class="count-k">sync</span></span>`);
   if ($('counts')._html !== html) { $('counts').innerHTML = html.replace(/<span class="pill-ic"[^>]*><\/span>/g, ''); $('counts')._html = html; }
 }
 
@@ -3699,7 +3702,10 @@ if (!SOLO) usageUi = mountUsage({
   endSessions: (ids) => { for (const id of ids) if (isHosted(id)) endSession(id); },
 });
 if (state) usageUi?.update(state);
+// ---------- conversation sync: the header's "sync" button opens the Sync card (sync.js; sync-api.js on the server) ----------
+const syncUi = SOLO ? null : mountSync({ post, isRemote: remotePage, fixture: !!FIXTURE });
 const usagePill = (e) => {
+  if (syncUi && e.target.closest('.count.sync')) { syncUi.toggle(); return true; }
   if (!usageUi) return false;
   if (e.target.closest('.count.week')) { usageUi.toggle(); return true; }
   if (e.target.closest('.count.accts')) { if (usageUi.isOpen()) usageUi.close(); else usageUi.openAccounts(); return true; }

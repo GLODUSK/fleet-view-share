@@ -21,7 +21,8 @@ download side (S3) and the page's sync card (S5) are built on it. Its test is `n
   (`<user id>/...`). A path with `..`, a leading `/` or a backslash is refused before anything is sent.
 - **For other parts that need the account (the phone relay):** `accessToken()` (renewed first when less than a
   minute is left), `uid()`, `email()`, and `onChange(fn)`, which calls `fn({ type, uid, email })` with `type`
-  `signed-in`, `refreshed` or `signed-out` and returns a function that stops it. No event carries a token. A
+  `signed-in`, `refreshed`, `signed-out` or `key-saved` (the Sync card saved the sync key) and returns a function
+  that stops it. No event carries a token or the key. A
   sign-in or sign-out by another process (the CLI) is heard the next time anything reads the sign-in.
 - **`protectedStore(dir, name)`** keeps another secret the way the sign-in is kept: `<dir>/<name>.bin` with DPAPI,
   the Keychain under account `<name>`, or `<dir>/<name>.json` at `0600`. It returns `{ read, write, clear, stamp }`
@@ -37,24 +38,30 @@ download side (S3) and the page's sync card (S5) are built on it. Its test is `n
 
    It refuses anything that is not an `https://<project>.supabase.co` address, and it refuses a secret or
    `service_role` key. It never prints the key.
-2. Sign in with Google, with Fleet View running:
+2. The rest is done in the page: click **sync** in the header (next to **account**) to open the **Sync card**.
+   - **Sign in with Google** opens `http://127.0.0.1:4777/sync/signin` in the default browser (the server
+     starts it, so it is a real browser even when the page is in the Fleet View window; Google refuses sign-ins
+     inside embedded windows). Pick a Google account on the members list. The card updates by itself and then
+     shows "Signed in as ..." and whether the account is on the members list.
+   - **Sign out** asks once more in the card, then signs this PC out.
+   - **The sync passphrase:** the first machine chooses one (typed twice); every other machine types the same
+     one, and a different one is refused. Only the derived key is kept on the PC (the same store the CLI uses),
+     never the passphrase, and syncing starts at once.
+   - Below that it says whether sync is running (or why not), how many conversations are up to date, how many
+     came from other machines, and how many conflicts there are. It never shows a title, a path, a token or the
+     key.
 
-   ```
-   node sync-api.js signin
-   ```
+   A remote browser (the phone, another computer) sees the card read-only: sign-in, sign-out and the passphrase
+   are done on the PC. When sync is not set up yet, the card shows the setup command to copy.
+3. Or from a terminal, the same steps: `node sync-api.js signin` (Fleet View must be running),
+   `node sync-api.js status`, `node sync-api.js signout`, and `node sync-crypto.js passphrase` (typed hidden, so
+   not through `!`; `node sync-crypto.js status` says whether the key is here). To turn sync off again, run
+   `node sync-api.js off`, which signs out and deletes the config.
 
-   This opens `http://127.0.0.1:4777/sync/signin` in the default browser. Use a real browser, because Google
-   refuses sign-ins inside embedded windows. Pick a Google account on the members list. The page then says
-   "Signed in as ...".
-3. Check it: `node sync-api.js status`. To sign out, run `node sync-api.js signout`. To turn sync off again,
-   run `node sync-api.js off`, which signs out and deletes the config.
-4. Set the sync key, in a terminal (the passphrase is typed hidden, so not through `!`):
-
-   ```
-   node sync-crypto.js passphrase
-   ```
-
-   Use the same passphrase on every machine. `node sync-crypto.js status` says whether the key is here.
+The card's routes, all on this PC's own page only (not a remote browser, not another site's page):
+`POST /sync/open-signin`, `GET /sync/passphrase` (`{ hasKey }`, and with `?first=1` whether this is the first
+machine), `POST /sync/passphrase` (`{ passphrase, repeat? }`, at most 4 KB) and the existing `POST /sync/signout`.
+Tests: `node scripts/sync-api-test.js` (the card's routes are in its "Sync card" part).
 
 ## Running (S2 and S3)
 

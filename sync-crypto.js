@@ -20,6 +20,8 @@
 //   sealChunk(buf, key, label) / openChunk(blob, key, label)   the same with gzip inside
 //   sealText(string, key, label) -> base64 / openText(base64, key, label) -> string   (titles, settings)
 //   loadKey(dir) -> Promise<Buffer|null>   saveKey(dir, key)   forgetKey(dir)   the key on this machine
+//   hasKey(dir) -> boolean   whether one is stored (a file check, nothing decrypted)
+//   setPassphrase(api, dir, passphrase) -> { created }   the CLI's `passphrase`, also POST /sync/passphrase (sync-api.js)
 //   sha256(buf) -> hex
 //
 // CLI:  node sync-crypto.js passphrase   (asks for it without echo; the first machine sets it, others must match)
@@ -103,6 +105,8 @@ async function loadKey(dir) {
 }
 const saveKey = (dir, key) => keyStore(dir).write(asKey(key).toString('base64'));
 const forgetKey = (dir) => keyStore(dir).clear();
+// is a key stored here? A file check only (nothing is decrypted), cheap enough for the page to ask every few seconds
+const hasKey = (dir) => keyStore(dir).stamp() !== null;
 
 // the kdf row in fleet_sync.settings (value_enc holds plain JSON here: a salt and a check are not secret)
 async function readKdf(api) {
@@ -189,7 +193,7 @@ async function cli(argv, io = {}) {
 
 module.exports = {
   seal, open, sealChunk, openChunk, sealText, openText, sha256,
-  newKdf, deriveKey, makeCheck, checkKey, readKdf, setPassphrase, loadKey, saveKey, forgetKey, cli,
+  newKdf, deriveKey, makeCheck, checkKey, readKdf, setPassphrase, loadKey, saveKey, forgetKey, hasKey, cli,
   MAGIC, KDF_SETTING, KEY_STORE,
 };
 

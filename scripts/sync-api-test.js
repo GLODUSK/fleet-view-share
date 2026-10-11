@@ -10,6 +10,10 @@
 // them; email() gives the account. On Windows, the DPAPI store's round trip, with the secret never in a process's
 // arguments. protectedStore(dir, name) keeps another secret beside the sign-in without touching it, and refuses
 // 'session' and bad names; the file store gives back any text exactly and still reads a sign-in from before.
+// The Sync card's routes: POST /sync/open-signin opens /sync/signin in the default browser; GET and POST
+// /sync/passphrase: the first machine sets the passphrase, a wrong one on a second machine is refused and saves nothing,
+// a right one saves the same key and makes sync-run.js start at once; too short, too long, unmatched and oversized are
+// refused; all three only on this PC (not remote, not cross-site); the passphrase never reaches a log or an answer.
 // Last, publish-share.js's guard, in a throwaway git repo: a planted Supabase key, project URL or sync config stops
 // its dry run, and sync-api.js, this test and docs/sync.md pass it.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
@@ -21,6 +25,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const cp = require('child_process');
+const { Readable } = require('stream');
 
 // every process start, timer and fetch from here on is counted (the off state must make none); patched before
 // sync-api.js is loaded, so its own references are the counting ones
@@ -70,7 +75,9 @@ const ctx = (remote) => ({
   remote: () => (remote ? { name: 'pc.example.ts.net', login: 'someone', device: 'a Mac' } : null),
 });
 async function route(api, method, url, o = {}) {
-  const req = { method, url, headers: o.headers || {} }, res = fakeRes();
+  const head = { method, url, headers: o.headers || {} };
+  // a body: the request is a stream, as http gives it
+  const req = o.body === undefined ? head : Object.assign(Readable.from([Buffer.from(o.body)]), head), res = fakeRes();
   await api.handle(req, res, decodeURIComponent(new URL(url, 'http://x').pathname), ctx(o.remote));
   return res;
 }
@@ -81,7 +88,7 @@ const memStore = () => {
 
 // ---------- the fake Supabase ----------
 const UID = crypto.randomUUID();
-const fake = { codes: new Map(), refresh: new Map(), access: new Map(), calls: [], objects: new Map(), member: true, refreshDown: false };
+const fake = { codes: new Map(), refresh: new Map(), access: new Map(), calls: [], objects: new Map(), member: true, refreshDown: false, settings: new Map() };
 const issue = (uid, email) => {
   const at = `at-${crypto.randomBytes(12).toString('hex')}`, rt = `rt-${crypto.randomBytes(12).toString('hex')}`;
   fake.access.set(at, uid);
@@ -153,6 +160,15 @@ const server = http.createServer((req, res) => {
       if (req.method === 'GET') return json(200, [{ id: 'd1', name: 'pc', user_id: uid }]);
       if (req.method === 'POST') return json(201, [{ ...JSON.parse(body.toString()), user_id: uid, prefer: req.headers.prefer || null }]);
     }
+    if (u.pathname === '/rest/v1/settings') { // the kdf row (sync-crypto.js); one table for every user here
+      if (req.method === 'GET') { const k = String(u.searchParams.get('key') || '').replace(/^eq\./, ''); return json(200, fake.settings.has(k) ? [{ value_enc: fake.settings.get(k) }] : []); }
+      if (req.method === 'POST') {
+        const b = JSON.parse(body.toString());
+        if (!fake.settings.has(b.key) || !/ignore-duplicates/.test(req.headers.prefer || '')) fake.settings.set(b.key, b.value_enc);
+        res.writeHead(201);
+        return res.end();
+      }
+    }
     if (u.pathname === '/rest/v1/slow') return; // never answers
     if (u.pathname === '/rest/v1/broken') return json(403, { code: '42501', details: null, hint: null, message: 'permission denied for table broken' });
     json(404, { message: 'no such thing' });
@@ -170,7 +186,7 @@ async function main() {
   eq(await off.status(), { configured: false }, 'no config: status');
   eq((await route(off, 'GET', '/sync/status')).json, { configured: false }, 'no config: GET /sync/status');
   eq((await route(off, 'GET', '/sync/status', { remote: true })).json, { configured: false }, 'no config: a remote browser reads the status too');
-  for (const [m, u] of [['GET', '/sync/signin'], ['GET', '/sync/callback?state=x&code=y'], ['POST', '/sync/signout'], ['GET', '/sync'], ['GET', '/sync/other']]) {
+  for (const [m, u] of [['GET', '/sync/signin'], ['GET', '/sync/callback?state=x&code=y'], ['POST', '/sync/signout'], ['POST', '/sync/open-signin'], ['GET', '/sync/passphrase'], ['GET', '/sync'], ['GET', '/sync/other']]) {
     eq((await route(off, m, u)).statusCode, 404, `no config: ${m} ${u} is 404`);
   }
   await rejects(off.rest('GET', 'devices'), (e) => e.code === 'off', 'no config: rest() says off');
@@ -459,6 +475,115 @@ async function main() {
   await api.status();
   ok(events.length === nEv, 'unsubscribed: no more events');
   ok(!logs.some((l) => [...fake.access.keys(), ...fake.refresh.keys(), KEY].some((t) => l.includes(t))), 'no token or key in the log');
+
+  // ---------- the Sync card's routes ----------
+  {
+    const C = require(path.join(ROOT, 'sync-crypto.js'));
+    const { createSyncRunner } = require(path.join(ROOT, 'sync-run.js'));
+    const PASS = 'card passphrase 中 é';
+    const opened = [], cardLogs = [];
+    const machine = (name) => {
+      const dir = path.join(T, `card-${name}`);
+      fs.mkdirSync(path.join(dir, 'sync'), { recursive: true });
+      fs.writeFileSync(S.configPath(dir), JSON.stringify({ url: fakeUrl, publishableKey: KEY }));
+      return { dir, api: S.createSync({ dataDir: dir, port: 4777, fetch: realFetch, store: memStore(), allowLoopbackUrl: true, log: (t) => cardLogs.push(t), openUrl: (u) => { opened.push(u); return true; } }) };
+    };
+    const signInAs = async (x, email) => {
+      const r1 = await route(x.api, 'GET', '/sync/signin');
+      const loc = new URL(r1.headers.Location), back = new URL(loc.searchParams.get('redirect_to'));
+      const c = crypto.randomUUID();
+      fake.codes.set(c, { challenge: loc.searchParams.get('code_challenge'), uid: UID, email });
+      const r2 = await route(x.api, 'GET', `/sync/callback?state=${back.searchParams.get('state')}&code=${c}`);
+      ok(r2.statusCode === 200 && (await x.api.status()).signedIn, `card: ${email} signs in`);
+    };
+    const A = machine('a'), B = machine('b');
+    fake.member = true;
+    fake.settings.clear();
+    const pass = (x, body, o = {}) => route(x.api, 'POST', '/sync/passphrase', { body: typeof body === 'string' ? body : JSON.stringify(body), ...o });
+
+    // PC only: a remote browser, or another site's page, gets 403 and nothing opens or is saved
+    for (const [m, u] of [['POST', '/sync/open-signin'], ['GET', '/sync/passphrase'], ['POST', '/sync/passphrase']]) {
+      let r = await route(A.api, m, u, { remote: true, body: m === 'POST' ? JSON.stringify({ passphrase: PASS }) : undefined });
+      ok(r.statusCode === 403, `card: a remote browser can't ${m} ${u} (${r.statusCode})`);
+      for (const site of ['cross-site', 'same-site']) {
+        r = await route(A.api, m, u, { headers: { 'sec-fetch-site': site }, body: m === 'POST' ? JSON.stringify({ passphrase: PASS }) : undefined });
+        ok(r.statusCode === 403, `card: a ${site} ${m} ${u} is refused (${r.statusCode})`);
+      }
+    }
+    ok(opened.length === 0 && !C.hasKey(S.syncDir(A.dir)), 'card: refused requests opened nothing and saved nothing');
+    eq((await route(A.api, 'GET', '/sync/open-signin')).statusCode, 405, 'card: GET /sync/open-signin is 405');
+
+    // the sign-in opens in the default browser, on this port's /sync/signin
+    let r = await route(A.api, 'POST', '/sync/open-signin', { headers: { 'sec-fetch-site': 'same-origin' } });
+    ok(r.statusCode === 200 && r.json.ok, `card: POST /sync/open-signin answers ok (${r.statusCode})`);
+    eq(opened, ['http://127.0.0.1:4777/sync/signin'], 'card: it opens http://127.0.0.1:<port>/sync/signin');
+    const failing = S.createSync({ dataDir: A.dir, store: memStore(), allowLoopbackUrl: true, openUrl: () => false });
+    r = await route(failing, 'POST', '/sync/open-signin');
+    ok(r.statusCode === 500 && /yourself/.test(r.json.message), 'card: a browser that does not start says to open it by hand');
+
+    // signed out: the passphrase waits for a sign-in
+    r = await pass(A, { passphrase: PASS });
+    ok(r.statusCode === 401 && !C.hasKey(S.syncDir(A.dir)), `card: signed out, the passphrase is refused (${r.statusCode})`);
+    await signInAs(A, 'member@example.com');
+    r = await route(A.api, 'GET', '/sync/passphrase');
+    eq([r.statusCode, r.json.hasKey, 'firstDevice' in r.json], [200, false, false], 'card: GET /sync/passphrase: no key, no network unless asked');
+    const settingsCalls = () => fake.calls.filter((c) => c.path === '/rest/v1/settings').length;
+    const before = settingsCalls();
+    r = await route(A.api, 'GET', '/sync/passphrase?first=1');
+    ok(r.json.firstDevice === true && settingsCalls() === before + 1, 'card: ?first=1: the first machine (one settings read)');
+
+    // refused before anything is derived or sent
+    const n0 = settingsCalls();
+    r = await pass(A, { passphrase: 'short' });
+    ok(r.statusCode === 400 && /at least 8/.test(r.json.message), `card: a passphrase under 8 characters is refused (${r.statusCode})`);
+    r = await pass(A, { passphrase: 'x'.repeat(1025) });
+    ok(r.statusCode === 400 && /at most/.test(r.json.message), 'card: a passphrase over 1024 characters is refused');
+    r = await pass(A, { passphrase: PASS, repeat: `${PASS}!` });
+    ok(r.statusCode === 400 && /do not match/.test(r.json.message), 'card: a repeat that does not match is refused');
+    r = await pass(A, JSON.stringify({ passphrase: 'y'.repeat(5000) }));
+    ok(r.statusCode === 413, `card: a body over 4 KB is refused (${r.statusCode})`);
+    r = await pass(A, 'not json');
+    ok(r.statusCode === 400, 'card: a body that is not JSON is refused');
+    r = await pass(A, JSON.stringify(['a list']));
+    ok(r.statusCode === 400, 'card: a body that is not an object is refused');
+    r = await pass(A, { passphrase: 12345678 });
+    ok(r.statusCode === 400, 'card: a passphrase that is not a string is refused');
+    ok(settingsCalls() === n0 && !C.hasKey(S.syncDir(A.dir)), 'card: none of those reached Supabase or saved a key');
+
+    // the first machine sets it
+    const evA = [];
+    A.api.onChange((e) => evA.push(e));
+    r = await pass(A, { passphrase: PASS, repeat: PASS });
+    ok(r.statusCode === 200 && r.json.ok && r.json.created === true, `card: the first machine sets the passphrase (${r.statusCode} ${r.json && r.json.message})`);
+    ok(C.hasKey(S.syncDir(A.dir)) && (await C.loadKey(S.syncDir(A.dir))).length === 32, 'card: the key is saved where the CLI keeps it');
+    ok(evA.some((e) => e.type === 'key-saved'), 'card: onChange hears key-saved');
+    eq((await route(A.api, 'GET', '/sync/passphrase')).json.hasKey, true, 'card: GET /sync/passphrase: the key is here');
+
+    // a second machine, with sync-run.js watching it
+    await signInAs(B, 'member@example.com');
+    r = await route(B.api, 'GET', '/sync/passphrase?first=1');
+    ok(r.json.hasKey === false && r.json.firstDevice === false, 'card: the second machine is told it is not the first');
+    const made = [];
+    const loop = () => { const l = { start() { made.push(l); }, async stop() {}, status: () => ({}) }; return l; };
+    const runner = createSyncRunner({ sync: B.api, dataDir: B.dir, log: (t) => cardLogs.push(t), checkMs: 1e6, makeUploader: loop, makeMaterializer: loop });
+    await runner.start();
+    ok(!runner.status().running && /no sync key/.test(runner.status().reason), 'card: the runner waits for the key');
+    r = await pass(B, { passphrase: 'not the passphrase at all' });
+    ok(r.statusCode === 400 && /not the sync passphrase/.test(r.json.message), `card: a wrong passphrase on a second machine is refused (${r.statusCode} ${r.json && r.json.message})`);
+    ok(!C.hasKey(S.syncDir(B.dir)) && !runner.status().running, 'card: ... and saves nothing');
+    r = await pass(B, { passphrase: PASS });
+    ok(r.statusCode === 200 && r.json.created === false, `card: the right passphrase is taken (${r.statusCode})`);
+    ok((await C.loadKey(S.syncDir(B.dir))).equals(await C.loadKey(S.syncDir(A.dir))), 'card: ... and gives the same key as the first machine');
+    for (let i = 0; i < 100 && made.length < 2; i++) await new Promise((res2) => realSetTimeout(res2, 20));
+    ok(made.length === 2 && runner.status().running, 'card: a saved passphrase makes the runner start at once (no minute wait)');
+    await runner.stop();
+
+    const all = JSON.stringify([cardLogs, logs]);
+    ok(!all.includes(PASS) && !all.includes('not the passphrase at all'), 'card: no passphrase in any log');
+    ok(!String(fake.settings.get('kdf')).includes(PASS), 'card: the kdf row holds no passphrase');
+    await C.forgetKey(S.syncDir(A.dir));
+    await C.forgetKey(S.syncDir(B.dir));
+  }
 
   // ---------- named stores: protectedStore and the file store ----------
   const pdir = path.join(T, 'protected');
