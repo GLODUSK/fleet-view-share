@@ -146,7 +146,7 @@ const TITLE = typeof opt('title', null) === 'string' ? opt('title').toUpperCase(
 const SOLID = !!opt('solid', false);
 const GITHUB = !opt('no-github', false) && !DEMO;
 const VIEWS = ['cards', 'map', 'wall'];
-const WEB_ONLY_VIEW = 'projects'; // a view only the page has (web/projects.js)
+const WEB_ONLY_VIEWS = ['projects', 'chats']; // views only the page has (web/projects.js, web/chats.js)
 
 // settings that survive a restart; flags on the command line win, and the demo never saves
 const SETTINGS_FILE = path.join(os.homedir(), '.fleet-view.json');
@@ -168,8 +168,8 @@ const REMOTE = require(path.join(__dirname, 'remote.js')).createRemote({
   // switched off, or a device's approval taken back: live sockets that are no longer allowed close at once
   onChange: () => { saveSettings(); if (LIVE) LIVE.recheck(); },
 });
-// the page's Projects view is kept for the page; the terminal view starts in Cards instead
-let view = VIEWS.includes(opt('view', null)) ? opt('view') : VIEWS.includes(saved.view) || (WEB && saved.view === WEB_ONLY_VIEW) ? saved.view : 'cards';
+// the page's Projects and Chats views are kept for the page; the terminal view starts in Cards instead
+let view = VIEWS.includes(opt('view', null)) ? opt('view') : VIEWS.includes(saved.view) || (WEB && WEB_ONLY_VIEWS.includes(saved.view)) ? saved.view : 'cards';
 let query = DEMO ? '' : typeof saved.query === 'string' ? saved.query : ''; // the / filter, matched like --filter
 // the repo picked in the header menu (a repo root path, or a bare folder name from --repo), or null for every repo
 const repoArg = opt('repo', null);
@@ -186,6 +186,12 @@ const okBounds = (b, minW, minH) => !!b && typeof b === 'object' && ['x', 'y', '
 const roundBounds = (b) => ({ x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) });
 let miniBounds = okBounds(saved.miniBounds, 1, 1) ? roundBounds(saved.miniBounds) : null;
 let miniOpen = saved.miniOpen === true;
+// the Chats window (the Chats tab popped out of the desktop window): its place and size, whether it was open, and
+// whether it stays on top of other windows
+const CHATS_MIN_W = 340, CHATS_MIN_H = 420;
+let chatsBounds = okBounds(saved.chatsBounds, CHATS_MIN_W, CHATS_MIN_H) ? roundBounds(saved.chatsBounds) : null;
+let chatsOpen = saved.chatsOpen === true;
+let chatsOnTop = saved.chatsOnTop === true;
 // conversations hidden from the page's views (right-click, "Hide from map"): [{ id, at }], at most 500.
 // The page shows one again when it gets busy after `at`; the server only keeps the list.
 const HIDDEN_MAX = 500;
@@ -639,7 +645,7 @@ function flushSettings() {
   clearTimeout(saveTimer);
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
-  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniOpen, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
+  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp,
     remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
     moved: [...moved.values()],
@@ -648,6 +654,7 @@ function flushSettings() {
     remembered: { sessions: [...remembered.sessions].map(([id, at]) => ({ id, at })), repos: [...remembered.repos].map(([root, at]) => ({ root, at })) } };
   if (webBounds) out.webBounds = webBounds; else delete out.webBounds;
   if (miniBounds) out.miniBounds = miniBounds; else delete out.miniBounds;
+  if (chatsBounds) out.chatsBounds = chatsBounds; else delete out.chatsBounds;
   try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(out, null, 2)); } catch (e) { logOnce('settings', `could not save ${SETTINGS_FILE}: ${e.message}`); }
 }
 
@@ -5402,7 +5409,7 @@ function buildState() {
     now, demo: DEMO, title: brand(), build: buildOf(),
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
-    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniBounds, miniOpen, hidden, forgotten, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
+    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
       mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() } },
     // remote access (remote.js): the switch, the address, how turning it on went, browsers waiting for approval
     // (with their codes) and the approved ones
@@ -5474,6 +5481,7 @@ function toolsHere() {
 
 // POST /settings: any of view, zoom, query, repo, repos (several shown: 2 to 50, each like repo; null: one or all),
 // repoNames ([{ root, name }], up to 200; replaces them), repoOrder (roots, up to 300; replaces it), compact, finishedOpen, webBounds, steady, miniBounds, miniOpen,
+// chatsBounds ({ x, y, w, h }, at least 340x420; null forgets it), chatsOpen, chatsOnTop,
 // hidden (an array of up to 500 conversation ids, or { id, at } with the time it was hidden; replaces the list),
 // forgotten (up to 500 ids on hidden that the Removed conversations list leaves out; replaces the list),
 // hiddenRepos (an array of up to 200 { root, at }, root a string of at most 1024 characters; replaces the list),
@@ -5482,7 +5490,7 @@ function toolsHere() {
 // remote ({ enabled }: remote access, remote.js) is taken from this PC's own page only, in the route itself
 function applySettings(b) {
   if (!b || typeof b !== 'object') return;
-  if (VIEWS.includes(b.view) || (WEB && b.view === WEB_ONLY_VIEW)) view = b.view;
+  if (VIEWS.includes(b.view) || (WEB && WEB_ONLY_VIEWS.includes(b.view))) view = b.view;
   if (Number.isFinite(b.zoom) && b.zoom > 0) map.zoom = Math.min(8, Math.max(0.25, b.zoom));
   if (typeof b.query === 'string') query = b.query.slice(0, 200);
   if ('repo' in b) repoSel = typeof b.repo === 'string' && b.repo && b.repo.toLowerCase() !== 'all' ? b.repo : null;
@@ -5498,6 +5506,8 @@ function applySettings(b) {
   if (wb && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(wb[k])) && wb.w >= 200 && wb.h >= 150) webBounds = { x: Math.round(wb.x), y: Math.round(wb.y), w: Math.round(wb.w), h: Math.round(wb.h) };
   if (typeof b.steady === 'boolean') steady = b.steady;
   if (typeof b.miniOpen === 'boolean') miniOpen = b.miniOpen;
+  if (typeof b.chatsOpen === 'boolean') chatsOpen = b.chatsOpen;
+  if (typeof b.chatsOnTop === 'boolean') chatsOnTop = b.chatsOnTop;
   if ('hidden' in b) {
     const h = cleanHidden(b.hidden);
     if (h) {
@@ -5528,6 +5538,8 @@ function applySettings(b) {
   if ('parity' in b) { const p = cleanParity(b.parity); if (p) { parityRules = p; saved.parity = p; } }
   if (b.miniBounds === null) miniBounds = null;
   else if (okBounds(b.miniBounds, 80, 40)) miniBounds = roundBounds(b.miniBounds);
+  if (b.chatsBounds === null) chatsBounds = null;
+  else if (okBounds(b.chatsBounds, CHATS_MIN_W, CHATS_MIN_H)) chatsBounds = roundBounds(b.chatsBounds);
   saveSettings();
 }
 

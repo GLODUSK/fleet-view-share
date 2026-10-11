@@ -114,6 +114,7 @@ export function mountSince({ fetchJson, onPick, fallback } = {}) {
     from = Number.isFinite(t) && t > 0 ? t : lastLook || Date.now() - 3600e3;
     if (Date.now() - from < 60e3) from = Date.now() - 3600e3; // "since a moment ago" says nothing: the last hour
     openNow = true;
+    document.getElementById('since-btn')?.setAttribute('aria-expanded', 'true');
     more = new Set();
     el.hidden = false;
     place();
@@ -130,6 +131,7 @@ export function mountSince({ fetchJson, onPick, fallback } = {}) {
   function close() {
     if (!openNow) return;
     openNow = false;
+    document.getElementById('since-btn')?.setAttribute('aria-expanded', 'false');
     reqSeq++;
     if (el) { el.hidden = true; el.innerHTML = ''; }
     writeSeen(Date.now());

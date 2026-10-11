@@ -1,0 +1,9 @@
+/* Mascots (mascot.js): state faces and their gentle motion. Nothing blinks; motion is transform only; held still with reduced motion. */
+.mascot { display: block; flex: none; overflow: visible; }
+.mascot.m-working .m-body { animation: mascot-bob 1.8s ease-in-out infinite; }
+.mascot.m-working .m-eyes { animation: mascot-glance 5s ease-in-out infinite; }
+@keyframes mascot-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+@keyframes mascot-glance { 0%, 12%, 88%, 100% { transform: translateX(0); } 30%, 40% { transform: translateX(-1.7px); } 60%, 70% { transform: translateX(1.7px); } }
+@media (prefers-reduced-motion: reduce) {
+  .mascot.m-working .m-body, .mascot.m-working .m-eyes { animation: none; }
+}

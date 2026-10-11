@@ -1,4 +1,4 @@
-// Fleet View web shell: polls GET /state once a second and draws the Cards, Map, Wall or Projects view.
+// Fleet View web shell: polls GET /state once a second and draws the Cards, Map, Wall, Projects or Chats view.
 //
 // ---- the ui object (third argument of renderCards / renderWall / renderMap) ----
 //   ui.selectedId          id of the picked conversation, or null
@@ -16,9 +16,10 @@
 //                          is shown, every key not taken by the shell goes to it first; return true when handled.
 //                          The shell always handles: v / Tab (next view), / (filter), r (repo menu),
 //                          Esc (close menu, filter, pick), Enter / o (open ui.selectedId), s (steady / live
-//                          order), m (mini window, desktop only), Delete (remove the pick: see deleteKey), and, in Cards and
-//                          Wall only, arrows/hjkl (pick) and c (compact). In the Map, arrows, + / -, 0, l
-//                          and the mouse belong to map.js.
+//                          order), m (mini window, desktop only), i (the Chats view), Delete (remove the pick: see
+//                          deleteKey), and, in Cards and Wall only, arrows/hjkl (pick) and c (compact). In the Map,
+//                          arrows, + / -, 0, l and the mouse belong to map.js. In Projects and Chats the view's
+//                          handler sees Enter and the arrows first (Chats also / and Esc).
 //   ui.compact             read only: compact cards on/off
 //   ui.showDetail(id, how) open the detail panel for that conversation (finished ones too); null closes it.
 //                          how 'click' counts as a pick (see setSelected); without it, it only redraws.
@@ -46,6 +47,12 @@
 //                          selects every conversation the current view shows (selectAllShown); a workspace's and a team's
 //                          right-click menu have "Select all conversations"; Ctrl+click on a finished row adds it too
 //   ui.takeTab(id)         detail.js: the panel tab asked for once ('details' from the menu), or null
+//   ui.panel(id, tab)      the Projects and Chats views' Session / Details buttons: the side panel on that tab
+//   ui.messageTeam(teamId, text)   the Chats view's group chat box: the same as the team menu's "Message the team"
+//                          (every member not removed, each on its own, prefixed with the team's name). Returns null
+//                          when it went off (a toast says how it went), else why it can't. ui.teamReach(teamId):
+//                          that "why" before anything is written, or null
+//   ui.solo                read only: true on the Chats pop-out window's page (?solo=chats; see SOLO)
 //   Links: any element with data-act="url" data-url="…", or data-act="reveal" data-kind="file|folder"
 //   data-path="…" [data-line="n"], or data-act="session" data-id="…" (another conversation: the handoff
 //   lines), opens on click anywhere on the page, before the card or tile under it sees the click (cards.js has
@@ -60,7 +67,11 @@
 // state.settings.zoom is the saved map zoom.
 //
 // Test without the server: ?fixture=1 loads ./fixtures/state-sample.json (timestamps moved to now);
-// ?view=cards|map|wall|projects picks the starting view; ?select=<id> picks that conversation and opens its panel.
+// ?view=cards|map|wall|projects|chats picks the starting view; ?select=<id> picks that conversation and opens its panel.
+// ?solo=chats is the Chats pop-out window's page (SOLO): only the Chats view, filling the window under its own
+// small header (chats.js); no other views, no view switching or saving, no desktop notifications, mini view,
+// "Since you looked", usage heads-ups, update pill, housekeeping, remote-access asks or saved window bounds, and
+// no restored or pinned panel (those are the main window's). It still polls /state as usual.
 // ?fixture=1&fakeTerm=1 also installs a fake live-session host (term.js) that echoes what you type, to test the
 // Session tab without the desktop window; without fixture=1 the query does nothing.
 // window.fvSelect(id) does the same from outside (the desktop mini window): it keeps the current view, picks
@@ -144,6 +155,7 @@
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects } from './projects.js';
+import { renderChats } from './chats.js';
 import { renderDetail, openPeek, SPLIT_MAX } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote } from './term.js';
@@ -157,8 +169,9 @@ import { mountHousekeeping } from './housekeeping.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText } from './compose.js';
 import { forkAt } from './forkat.js';
 
-const VIEWS = ['cards', 'map', 'wall', 'projects'];
+const VIEWS = ['cards', 'map', 'wall', 'projects', 'chats'];
 const params = new URLSearchParams(location.search);
+const SOLO = params.get('solo') === 'chats';
 const FIXTURE = params.has('fixture');
 const DEBUG = FIXTURE || params.has('debug');
 const $ = (id) => document.getElementById(id);
@@ -180,7 +193,7 @@ import('./map.js').then((m) => {
 }).catch((e) => { mapMissing = true; console.warn('map.js did not load', e); render(); });
 
 // ---------- settings ----------
-const local = { view: VIEWS.includes(params.get('view')) ? params.get('view') : 'cards', zoom: 1, query: '', repo: null, repos: null, compact: false, finishedOpen: true, steady: true, notify: true };
+const local = { view: SOLO ? 'chats' : VIEWS.includes(params.get('view')) ? params.get('view') : 'cards', zoom: 1, query: '', repo: null, repos: null, compact: false, finishedOpen: true, steady: true, notify: true };
 let settingsLoaded = false;
 let pendingSave = {}, saveTimer = null;
 
@@ -210,11 +223,11 @@ function flushSettings(keepalive = false) {
 // itself), 'explicit' (Enter, a double-click: starts and stays), 'keys' (arrows: the panel shows, nothing starts)
 let pickIntent = null; // { id, kind }
 let tabWant = null; // { id, tab }: the panel tab to show once (the Projects view's Session / Details buttons)
-// the Projects view shows the chat itself, so the panel opens there only when asked (ui.panel)
+// the Projects and Chats views show the chat themselves, so the panel opens there only when asked (ui.panel)
 let projPanel = false;
 // the panel pinned open (its pin button, detail.js): it still shows whatever conversation you pick, but no Esc,
 // empty click or view switch closes it; it keeps the last one until you pick another. Its pin again lets go.
-// The Projects view still hides it (pinned or not) unless asked there; it comes back on the other views.
+// The Projects and Chats views still hide it (pinned or not) unless asked there; it comes back on the other views.
 // Kept in this browser's storage across reloads.
 let pinned = false;
 try { pinned = localStorage.getItem('fv.pin') === '1'; } catch {}
@@ -324,6 +337,16 @@ const ui = {
   selectMany: (ids) => setMulti(ids, 'cards'),
   // the right-click menu is open: the map keeps its hover tooltip hidden meanwhile
   menuOpen: () => ctxMenuOpen(),
+  // the Chats view's group chat: as the team menu's "Message the team" (teamMenuItems)
+  teamReach: (id) => teamReach(teamById(id)),
+  messageTeam: (id, text) => {
+    const t = teamById(id), why = teamReach(t);
+    if (why) return why;
+    if (!String(text || '').trim()) return 'write it first';
+    runOrder(teamMembers(t), String(text), teamMsgOpts(t));
+    return null;
+  },
+  solo: SOLO,
 };
 
 // ---------- polling ----------
@@ -429,7 +452,7 @@ async function poll() {
     if (!settingsLoaded && st.settings) {
       settingsLoaded = true;
       const s = st.settings;
-      if (!params.has('view') && VIEWS.includes(s.view)) local.view = s.view;
+      if (!SOLO && !params.has('view') && VIEWS.includes(s.view)) local.view = s.view;
       if (s.zoom > 0) local.zoom = s.zoom;
       if (typeof s.query === 'string') local.query = s.query;
       local.repo = typeof s.repo === 'string' ? s.repo : null;
@@ -1256,10 +1279,10 @@ function derive(st) {
 
 // ---------- drawing ----------
 let view = null; // the derived state last drawn
-const viewEls = { cards: $('view-cards'), map: $('view-map'), wall: $('view-wall'), projects: $('view-projects') };
+const viewEls = { cards: $('view-cards'), map: $('view-map'), wall: $('view-wall'), projects: $('view-projects'), chats: $('view-chats') };
 
 function render() {
-  for (const v of VIEWS) viewEls[v].hidden = v !== local.view;
+  for (const v of VIEWS) if (viewEls[v]) viewEls[v].hidden = v !== local.view;
   for (const b of document.querySelectorAll('.tabs button')) {
     b.classList.toggle('on', b.dataset.view === local.view);
     b.setAttribute('aria-selected', String(b.dataset.view === local.view));
@@ -1281,13 +1304,15 @@ function render() {
   drawAlert(view);
   drawFinished(view);
   drawDetail(view);
-  drawRemote();
+  if (!SOLO) drawRemote();
   if (menuOpen) drawMenu();
   const el = viewEls[local.view];
+  if (!el) return;
   try {
     if (local.view === 'cards') renderCards(el, view, ui);
     else if (local.view === 'wall') renderWall(el, view, ui);
     else if (local.view === 'projects') renderProjects(el, view, ui);
+    else if (local.view === 'chats') renderChats(el, view, ui);
     else if (renderMap) { el.classList.remove('map-missing'); renderMap(el, replay ? replayView(replay) : view, ui); }
     else if (mapMissing) { el.classList.add('map-missing'); el.textContent = 'The map view (map.js) is not available yet.'; }
   } catch (e) {
@@ -1524,7 +1549,7 @@ const PANEL_RESTORE_MS = 30e3;
 let panelSaved = null, panelKey = null, panelSince = 0;
 try { const v = JSON.parse(localStorage.getItem('fv.panelOpen') || 'null'); if (v && typeof v.id === 'string') panelSaved = v; } catch {}
 function restorePanel(v) {
-  if (!panelSaved) return;
+  if (!panelSaved || SOLO) return;
   if (!panelSince) panelSince = Date.now();
   const p = panelSaved;
   if (ui.detailId || ui.selectedId || multi.size || Date.now() - panelSince > PANEL_RESTORE_MS) { panelSaved = null; return; }
@@ -1541,13 +1566,14 @@ function restorePanel(v) {
 }
 function savePanel(id) {
   const key = id ? JSON.stringify({ id, multi: [...multi] }) : '';
-  if (key === panelKey || panelSaved) return; // unchanged, or not put back yet
+  if (key === panelKey || panelSaved || SOLO) return; // unchanged, or not put back yet (the pop-out keeps none)
   panelKey = key;
   try { if (key) localStorage.setItem('fv.panelOpen', key); else localStorage.removeItem('fv.panelOpen'); } catch {}
 }
 function drawDetail(v) {
   restorePanel(v);
-  const shut = local.view === 'projects' && !projPanel;
+  // Projects and Chats show the chat themselves: the panel opens there only when asked, pinned or not
+  const shut = (local.view === 'projects' || local.view === 'chats') && !projPanel;
   let s = ui.detailId && !shut ? v.allSessions.find((x) => x.id === ui.detailId) : null;
   // 2+ selected: their chats share the panel (detail.js drawSplits, SPLIT_MAX at most); with none shown, or one shown
   // that isn't in the selection (a pinned panel keeps its last chat; Ctrl+click took the shown one out), the first leads it
@@ -1628,7 +1654,7 @@ function openPeekFor(forId, kind) {
   if (!p || !p.id) return;
   openPeek({ for: s.id, kind, id: p.id, name: p.name, file: p.file || null });
   tabWant = { id: s.id, tab: 'chat' };
-  if (local.view === 'projects') projPanel = true;
+  if (local.view === 'projects' || local.view === 'chats') projPanel = true;
   ui.showDetail(s.id);
 }
 // a picked-up conversation's "Previous conversation ▸": its chat (read only) and the handoff summary, under its chat
@@ -1681,6 +1707,7 @@ const KEYS = {
   map: [['v', 'view'], ['click', 'select'], ['ctrl+click', 'select more'], ['ctrl+a', 'select all'], ['double-click', 'open'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['wheel', 'zoom'], ['drag', 'pan'], ['0', 'recenter'], ['n/N', 'needs you'], ['k', 'lens'], ['t', 'replay'], ['l', 'legend'], ['/', 'filter'], ['r', 'workspace']],
   wall: [['v', 'view'], ['↑↓←→', 'pick'], ['enter/o', 'open'], ['double-click', 'open'], ['ctrl+click', 'select more'], ['shift+click', 'select range'], ['ctrl+a', 'select all'], ['right-click', 'menu'], ['ctrl+c', 'copy'], ['ctrl+v', 'paste a copy'], ['ctrl+z', 'undo'], ['s', 'ORDER'], ['/', 'filter'], ['r', 'workspace'], ['w', 'since you looked'], ['esc', 'clear']],
   projects: [['v', 'view'], ['↑↓', 'pick'], ['enter', 'type'], ['ctrl+click', 'select more'], ['shift+click', 'select range'], ['ctrl+a', 'select all'], ['right-click', 'menu'], ['/', 'filter'], ['r', 'workspace'], ['esc', 'clear']],
+  chats: [['v', 'view'], ['i', 'chats'], ['↑↓', 'pick'], ['enter', 'type'], ['right-click', 'menu'], ['/', 'search'], ['esc', 'back']],
 };
 const MOUSE = new Set(['click', 'double-click', 'right-click', 'wheel', 'drag', 'ctrl+click', 'shift+click']);
 const keyHtml = ([keys, label]) => {
@@ -1694,7 +1721,7 @@ function drawFooter() {
   // while the live terminal has the keyboard, every key goes to Claude; say how to get the shortcuts back
   const keys = (termFocused() ? [['click', 'outside the terminal or chat box for the shortcuts'], ['ctrl+c', 'copy a selection']]
     : KEYS[local.view].map(([k, l]) => [k, l === 'ORDER' ? order : l])
-      .concat(isDesktop() ? [['m', 'mini']] : [], ui.detailId && !pinned ? [['esc', 'close panel']] : [])).map(keyHtml).join('');
+      .concat(isDesktop() && !SOLO ? [['m', 'mini']] : [], ui.detailId && !pinned ? [['esc', 'close panel']] : [])).map(keyHtml).join('');
   if (keys !== footKeys) { $('keys').innerHTML = keys; footKeys = keys; }
   const bits = [];
   if (local.query) bits.push(`<span class="note">filter: ${esc(local.query)} (esc clears)</span>`);
@@ -1715,12 +1742,13 @@ function toggleSteady() {
 // ---------- mini window (desktop only, key m) ----------
 const isDesktop = () => !!(window.fleetDesktop && window.fleetDesktop.isDesktop);
 function toggleMini() {
+  if (SOLO) return;
   if (isDesktop() && typeof window.fleetDesktop.toggleMini === 'function') window.fleetDesktop.toggleMini();
 }
 // the header button is the header's last item: before the native window buttons, outside the drag region
 function placeMiniButton() {
   const old = $('mini-btn');
-  if (!isDesktop()) { old?.remove(); return; }
+  if (!isDesktop() || SOLO) { old?.remove(); return; }
   if (old) { if (!old._ic && iconsReady) { old.innerHTML = icon('open', 15); old._ic = true; } return; }
   const b = document.createElement('button');
   b.id = 'mini-btn'; b.type = 'button'; b.className = 'mini-btn';
@@ -1748,7 +1776,7 @@ window.fvSelect = fvSelect;
 
 // ---------- views ----------
 function setView(v) {
-  if (!VIEWS.includes(v) || v === local.view) return;
+  if (SOLO || !VIEWS.includes(v) || v === local.view) return;
   projPanel = false;
   saveSettings({ view: v });
   render();
@@ -2300,7 +2328,7 @@ function pickKeys(e) {
   if (e.target.closest?.('.term-host')) return;
   // Ctrl+A: every conversation the view shows; in the chat box and other text it selects the text, as usual
   if (k === 'a') {
-    if (e.target.closest?.('.chat-compose, input, textarea, select, [contenteditable]') || !$('confirm').hidden || menuOpen) return;
+    if (local.view === 'chats' || e.target.closest?.('.chat-compose, input, textarea, select, [contenteditable]') || !$('confirm').hidden || menuOpen) return;
     e.preventDefault();
     if (!e.repeat) selectAllShown();
     return;
@@ -2402,7 +2430,12 @@ document.addEventListener('keydown', (e) => {
   if (k === 'Escape' && ui.detailId && !pinned) { e.preventDefault(); ui.showDetail(null); return; }
   // arrows and paging inside the panel scroll it instead of moving the pick
   if (e.target.closest?.('#detail') && /^(Arrow|Page|Home|End)/.test(k)) return;
+  // Chats: / is its own search box, Esc goes back to its list (narrow layout) before it clears the pick
+  if ((k === '/' || k === 'Escape') && local.view === 'chats' && ui.keys.chats && ui.keys.chats(e)) { e.preventDefault(); return; }
+  // the pop-out window (SOLO) has no other views, header, filter, repo menu, "Since you looked" or mini view
+  if (SOLO && ['v', 'Tab', '/', 'r', 'w', 'm', 's', 'i'].includes(k)) return;
   if (k === 'v' || k === 'Tab') { e.preventDefault(); setView(VIEWS[(VIEWS.indexOf(local.view) + (e.shiftKey && k === 'Tab' ? VIEWS.length - 1 : 1)) % VIEWS.length]); return; }
+  if (k === 'i') { e.preventDefault(); setView('chats'); return; }
   if (k === '/') { e.preventDefault(); openFilter(); return; }
   if (k === 'r') { e.preventDefault(); openMenu(); return; }
   if (k === 'w') { e.preventDefault(); since.toggle(); return; }
@@ -2415,7 +2448,7 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
-  if (local.view === 'projects' && ui.keys.projects && ui.keys.projects(e)) { e.preventDefault(); return; }
+  if ((local.view === 'projects' || local.view === 'chats') && ui.keys[local.view] && ui.keys[local.view](e)) { e.preventDefault(); return; }
   if ((k === 'Enter' || k === 'o') && ui.selectedId) {
     if (local.view === 'map' && ui.keys.map && ui.keys.map(e)) return;
     e.preventDefault();
@@ -2427,7 +2460,7 @@ document.addEventListener('keydown', (e) => {
   const handler = ui.keys[local.view];
   if (handler && handler(e)) { e.preventDefault(); return; }
   if (k === 's') { e.preventDefault(); toggleSteady(); return; }
-  if (local.view === 'map' || local.view === 'projects') return;
+  if (local.view === 'map' || local.view === 'projects' || local.view === 'chats') return;
   const moves = { ArrowLeft: [-1, 0], h: [-1, 0], ArrowRight: [1, 0], l: [1, 0], ArrowUp: [0, -1], k: [0, -1], ArrowDown: [0, 1], j: [0, 1] };
   if (moves[k]) { e.preventDefault(); movePick(...moves[k]); return; }
   if (k === 'c' && local.view === 'cards') { saveSettings({ compact: !local.compact }); render(); }
@@ -2470,7 +2503,7 @@ const SELF_BOUNDS = navigator.userAgent.includes('Electron');
 const bounds = () => ({ x: window.screenX, y: window.screenY, w: window.outerWidth, h: window.outerHeight });
 let lastBounds = bounds(), boundsTimer = null;
 function checkBounds() {
-  if (SELF_BOUNDS) return;
+  if (SELF_BOUNDS || SOLO) return;
   const b = bounds();
   if (b.x === lastBounds.x && b.y === lastBounds.y && b.w === lastBounds.w && b.h === lastBounds.h) return;
   lastBounds = b;
@@ -2480,7 +2513,7 @@ function checkBounds() {
 setInterval(checkBounds, 2000);
 window.addEventListener('resize', checkBounds);
 window.addEventListener('beforeunload', () => {
-  if (!SELF_BOUNDS) Object.assign(pendingSave, { webBounds: bounds() });
+  if (!SELF_BOUNDS && !SOLO) Object.assign(pendingSave, { webBounds: bounds() });
   flushSettings(true);
 });
 
@@ -3348,11 +3381,23 @@ async function setLead(t, s) {
   const got = bad ? `${s.name} did not get its brief (${b.message || 'not sent'})` : s && b && b.queued ? `${s.name} gets its brief once its question is answered` : null;
   toast([s ? `★ ${s.name} leads "${t.name}"` : `"${t.name}" has no lead: peers again`, toldN(r.told), got].filter(Boolean).join(' · '), bad ? C.red : C.mint, null, bad ? 9000 : 0);
 }
+// "Message the team": every member not removed from the map, each on its own, under the team's name (the menu item
+// and the Chats view's group chat box, ui.messageTeam)
+const teamMembers = (t) => sessionsOf(t.members).filter((s) => !isHidden(s));
+const teamMsgOpts = (t) => ({ team: false, prefix: `[Fleet View · team "${t.name}"]`, placeholder: `A message to every conversation in "${t.name}"` });
+// why the team can't be messaged from here (orderItem's checks), or null
+function teamReach(t) {
+  if (!t) return 'that team is gone';
+  if (!termApi()) return noTermMsg('Messaging the team');
+  const list = teamMembers(t);
+  if (!list.length) return 'no conversation in the team to reach';
+  return list.some((s) => !unreachable(s)) ? null : `none of them can be reached here: ${unreachable(list[0])}`;
+}
 function teamMenuItems(t, full) {
   // members removed from the map are left out of what goes to them
-  const all = sessionsOf(t.members), members = all.filter((s) => !isHidden(s));
+  const all = sessionsOf(t.members), members = teamMembers(t);
   const sel = ui.selectedId && !t.members.includes(ui.selectedId) ? sessionsOf([ui.selectedId])[0] : null;
-  const items = [orderItem('Message the team', members, { team: false, prefix: `[Fleet View · team "${t.name}"]`, placeholder: `A message to every conversation in "${t.name}"` }), leadItem(t),
+  const items = [orderItem('Message the team', members, teamMsgOpts(t)), leadItem(t),
     teamRenameItem(t), selectAllItem(shownOf(members), 'none of them is shown now')];
   if (full) {
     const why = !sel ? (ui.selectedId ? 'it is in this team already' : 'pick one first') : joinWhy(sel, t);
@@ -3647,18 +3692,20 @@ async function getJson(url) {
   if (FIXTURE) return null; // no server behind fixture pages: since.js falls back to sinceFromState
   try { const r = await fetch(url, { cache: 'no-store' }); return r.ok ? await r.json() : null; } catch { return null; }
 }
-const since = mountSince({ fetchJson: getJson, onPick: (id) => pickFromAnywhere(id), fallback: (t) => sinceFromState(state, t) });
+const since = SOLO ? { isOpen: () => false, close() {}, toggle() {} }
+  : mountSince({ fetchJson: getJson, onPick: (id) => pickFromAnywhere(id), fallback: (t) => sinceFromState(state, t) });
 $('since-btn')?.addEventListener('click', (e) => { e.stopPropagation(); since.toggle(); });
 
 // ---------- plan usage: this PC vs. elsewhere (usage.js; usage-watch.js on the server) ----------
-usageUi = mountUsage({
+if (!SOLO) usageUi = mountUsage({
   post, notifyOn: () => local.notify !== false, focusWindow: () => window.fleetDesktop?.focus?.(),
   // the Accounts list: read /state again soon after a change, and end this window's sessions on an account it removes
   refreshSoon: () => { setTimeout(poll, 400); setTimeout(poll, 2500); }, isHosted,
   endSessions: (ids) => { for (const id of ids) if (isHosted(id)) endSession(id); },
 });
-if (state) usageUi.update(state);
+if (state) usageUi?.update(state);
 const usagePill = (e) => {
+  if (!usageUi) return false;
   if (e.target.closest('.count.week')) { usageUi.toggle(); return true; }
   if (e.target.closest('.count.accts')) { if (usageUi.isOpen()) usageUi.close(); else usageUi.openAccounts(); return true; }
   return false;
@@ -3667,10 +3714,10 @@ $('counts')?.addEventListener('click', (e) => { if (usagePill(e)) e.stopPropagat
 $('counts')?.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && usagePill(e)) e.preventDefault(); });
 
 // ---------- Housekeeping (housekeeping.js; the header's broom button) ----------
-mountHousekeeping({ button: $('hk-btn') });
+if (!SOLO) mountHousekeeping({ button: $('hk-btn') });
 
 // ---------- "Update available" (update.js; updater.js on the server) ----------
-if (!FIXTURE) mountUpdate({ pill: $('update-pill'), verBtn: $('ver-btn'), getJson });
+if (!FIXTURE && !SOLO) mountUpdate({ pill: $('update-pill'), verBtn: $('ver-btn'), getJson });
 
 // ---------- desktop notifications ----------
 // New entries in state.alerts (n only grows) of these kinds raise a Notification while the window is not
@@ -3692,7 +3739,7 @@ function notifyAlerts(st) {
   const fresh = list.filter((a) => a && Number(a.n) > alertN && NOTIFY_KINDS.has(a.kind)).sort((a, b) => a.n - b.n);
   if (top === alertN) return;
   alertN = top; save();
-  if (!fresh.length || local.notify === false || document.hasFocus()) return;
+  if (!fresh.length || local.notify === false || document.hasFocus() || SOLO) return;
   for (const a of fresh.filter(notifyOnce).slice(-3)) raise(a);
 }
 // a 'message' notification: one per sender and receiver every 10 minutes (the server raises its alert that
@@ -3722,6 +3769,7 @@ function raise(a) {
   } catch (e) { console.warn(e); }
 }
 function askNotify() {
+  if (SOLO) return;
   if (!('Notification' in window) || Notification.permission !== 'default' || local.notify === false) return;
   try { if (localStorage.getItem('fv.notifyAsked')) return; localStorage.setItem('fv.notifyAsked', '1'); } catch {}
   try { Promise.resolve(Notification.requestPermission()).catch(() => {}); } catch {}

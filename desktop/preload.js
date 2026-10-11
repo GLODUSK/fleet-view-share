@@ -1,6 +1,6 @@
 // Fleet View desktop: the few things a page may ask of the window, exposed as window.fleetDesktop.
 // Sandboxed with context isolation on: the page gets only these functions, never Node or ipcRenderer.
-// Both windows (the main view and the mini view) load it; main.js checks every message's sender.
+// Every window (the main view, the mini view and the Chats window) loads it; main.js checks every message's sender.
 //   fleetDesktop.isDesktop       true (the page runs in the desktop window, not Edge or a browser)
 //   fleetDesktop.toggleMini()    go into the mini view (the main window hides), or back out of it
 //   fleetDesktop.showMain(id?)   bring the main window up (the mini view gives way) and focus it; with an id, pick that conversation
@@ -8,6 +8,11 @@
 //   fleetDesktop.hideMini()      leave the mini view: the main window comes back
 //   fleetDesktop.fitMini(h)      mini view only: the height its content needs, in CSS pixels
 //   fleetDesktop.onMiniChange(cb)  cb(open) now and whenever the mini view opens or closes
+//   fleetDesktop.popChats()      pop the Chats tab out into its own window (desktop/main.js), or show and focus it
+//   fleetDesktop.dockChats()     close the Chats window (the tab is back in the main window, which comes up)
+//   fleetDesktop.setChatsOnTop(on)  keep the Chats window above other windows, or not (saved: settings.chatsOnTop)
+//   fleetDesktop.onChatsPopped(cb) -> unsubscribe   cb(popped) now (once known) and whenever the Chats window
+//                                opens or closes; both the main window and the Chats window get it
 //   fleetDesktop.pickFolder() -> Promise<{ ok, path?, canceled? }>   main view only: the system folder picker
 //                                ("Add workspace…"); the page then posts the path to the server (POST /repos/add)
 //   fleetDesktop.pathForFile(file) -> string   main view only: where a dropped, picked or pasted File is on disk
@@ -18,7 +23,9 @@
 //                                in a frame of the page, see main.js previewFrames) went to url by itself
 //   fleetDesktop.keepAwake(on)   main view only: true while the chat box's mic listens, so the page keeps full
 //                                speed behind other windows (main.js turns Chromium's background slow-down off)
-//   fleetDesktop.term            main view only (absent in the mini view): live Claude sessions hosted in the window
+//   fleetDesktop.term            main view only (absent in the mini view): live Claude sessions hosted in the window.
+//                                The Chats window (?solo=chats) gets the object, but main.js refuses its calls: term.js
+//                                uses the server's /live WebSocket there instead (web/remote-term.js)
 //     term.open({ id, cwd, account, cols?, rows? }) -> Promise<{ ok, message, pid? }>   starts the interactive
 //         `claude --resume <id>` in a pty (rejects a bad id; cwd falls back to home; account: one letter, 'A', 'B', 'C', ...;
 //         120x32 by default). Already running: ok without starting another. Ended: starts it again.
@@ -54,6 +61,12 @@ let miniOpen = null;
 ipcRenderer.on('fv:mini-open', (_e, open) => {
   miniOpen = !!open;
   for (const cb of miniListeners) { try { cb(miniOpen); } catch {} }
+});
+const chatsListeners = new Set();
+let chatsPopped = null;
+ipcRenderer.on('fv:chats-popped', (_e, popped) => {
+  chatsPopped = !!popped;
+  for (const cb of chatsListeners) { try { cb(chatsPopped); } catch {} }
 });
 
 const dataListeners = new Set(), exitListeners = new Set(), rekeyListeners = new Set();
@@ -131,6 +144,15 @@ contextBridge.exposeInMainWorld('fleetDesktop', {
     miniListeners.add(cb);
     if (miniOpen !== null) { try { cb(miniOpen); } catch {} }
     return () => miniListeners.delete(cb);
+  },
+  popChats: () => ipcRenderer.send('fv:pop-chats'),
+  dockChats: () => ipcRenderer.send('fv:dock-chats'),
+  setChatsOnTop: (on) => ipcRenderer.send('fv:chats-on-top', !!on),
+  onChatsPopped: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    chatsListeners.add(cb);
+    if (chatsPopped !== null) { try { cb(chatsPopped); } catch {} }
+    return () => { chatsListeners.delete(cb); };
   },
   ...(isMini ? {} : { term, pickFolder: () => ipcRenderer.invoke('fv:pick-folder'), pathForFile, capture, onPreviewNav: listen(navListeners), keepAwake: (on) => ipcRenderer.send('fv:keep-awake', !!on) }),
 });

@@ -1,0 +1,206 @@
+/* Chats view (chats.js): a phone messenger. The contact list on the left (mascot, name, time, one-line preview),
+   the picked chat on the right; under 640px of its own width the list only, the chat sliding over it. The pop-out
+   window (html.solo, ?solo=chats) shows only this view under a 36px header that drags the window.
+   Steady colours: nothing blinks or pulses; the only motion is the chat sliding in, held still with reduced motion. */
+.view-chats { padding: 4px 18px 18px; overflow: hidden; }
+.ch { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: var(--gap); height: 100%; min-height: 0; position: relative; }
+.ch[hidden] { display: none; }
+.ch-side, .ch-main {
+  min-height: 0; background: var(--glass-bg); border: 1px solid var(--glass-edge); border-radius: var(--radius);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+.ch-side { display: flex; flex-direction: column; overflow: hidden; }
+.ch-main { display: flex; flex-direction: column; overflow: hidden; position: relative; }
+
+/* ---- the list's top bar: title, account dots, pop-out, + ---- */
+.ch-top { flex: none; display: flex; align-items: center; gap: 8px; height: 52px; padding: 0 10px 0 16px; }
+.ch-title { font: 650 17px/1 var(--font-display); letter-spacing: 0.01em; color: var(--text); }
+.ch-accts { display: inline-flex; gap: 4px; margin-left: 2px; }
+.ch-acct {
+  display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%;
+  color: #0a0c13; font: 700 9.5px/1 var(--font-ui); opacity: 0.9;
+}
+.ch-ib {
+  flex: none; display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 9px;
+  background: none; color: var(--dim); cursor: pointer; transition: background-color 140ms var(--ease), color 140ms var(--ease);
+}
+.ch-ib:hover { background: var(--hover); color: var(--text); }
+.ch-ib:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.ch-ib[hidden] { display: none; }
+.ch-new { background: rgba(63, 216, 255, 0.1); color: var(--cyan); }
+.ch-new:hover { background: rgba(63, 216, 255, 0.18); color: var(--cyan); }
+.ch-search {
+  flex: none; display: flex; align-items: center; gap: 8px; height: 36px; margin: 0 12px 8px; padding: 0 12px;
+  background: rgba(255, 255, 255, 0.045); border: 1px solid var(--glass-edge); border-radius: 999px; color: var(--faint);
+}
+.ch-search:focus-within { border-color: rgba(63, 216, 255, 0.4); color: var(--dim); }
+.ch-search input { flex: 1 1 auto; min-width: 0; background: none; border: 0; outline: none; color: var(--text); font: 13px var(--font-ui); }
+.ch-search input::placeholder { color: var(--faint); }
+.ch-search input::-webkit-search-cancel-button { filter: grayscale(1) opacity(0.6); }
+
+/* ---- rows ---- */
+.ch-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.ch-list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box; }
+.ch-row {
+  flex: none; display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0; height: 64px; padding: 0 10px; border: 0; border-radius: 12px;
+  background: none; color: var(--text); font: 13px/1.3 var(--font-ui); cursor: pointer; text-align: left;
+  transition: background-color 140ms var(--ease), box-shadow 140ms var(--ease);
+}
+.ch-row:hover { background: var(--hover); }
+.ch-row:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+.ch-row.on, .ch-row.on:hover { background: rgba(63, 216, 255, 0.1); box-shadow: inset 0 0 0 1px rgba(63, 216, 255, 0.26), inset 3px 0 0 var(--cyan); }
+.ch-row.needs { background: rgba(255, 194, 74, 0.055); }
+.ch-row.needs:hover { background: rgba(255, 194, 74, 0.09); }
+.ch-row.needs.on { background: rgba(255, 194, 74, 0.1); box-shadow: inset 0 0 0 1px rgba(255, 194, 74, 0.3), inset 3px 0 0 var(--gold); }
+.ch-av { flex: none; display: grid; place-items: center; width: 44px; height: 44px; }
+.ch-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ch-l1, .ch-l2 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ch-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 14px/1.25 var(--font-ui); }
+.ch-l1 .acct { flex: none; width: 15px; height: 15px; font-size: 9.5px; }
+.ch-time { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--faint); font: 11.5px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
+.ch-pin { display: inline-flex; color: var(--gold); opacity: 0.8; }
+.ch-prev { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: 12.5px; }
+.ch-row.unread .ch-name { font-weight: 700; }
+.ch-row.unread .ch-prev { color: var(--text); }
+.ch-row.unread .ch-time { color: var(--cyan); }
+.ch-row.needs .ch-prev { color: var(--gold); }
+.ch-row.needs .ch-time { color: var(--gold); }
+.ch-row.ghost .ch-name { color: var(--dim); }
+.ch-row.ghost .ch-prev { color: var(--faint); font-style: italic; }
+.ch-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--cyan); }
+.ch-flag {
+  flex: none; display: inline-grid; place-items: center; width: 17px; height: 17px; border-radius: 50%;
+  background: var(--gold); color: #1a1406; font: 800 11px/1 var(--font-ui);
+}
+.ch-none { padding: 22px 12px; color: var(--dim); text-align: center; }
+
+/* a team's avatar: 2-3 member mascots on small round tiles, overlapping */
+.ch-cluster { position: relative; display: block; width: var(--cb); height: var(--cb); flex: none; }
+.ch-cm {
+  position: absolute; display: grid; place-items: center; width: var(--cs); height: var(--cs); border-radius: 50%;
+  background: #1a1f30; box-shadow: 0 0 0 2px rgba(12, 14, 22, 0.92);
+}
+.ch-cluster.n1 .m0 { inset: 0; margin: auto; }
+.ch-cluster.n2 .m0 { top: 0; left: 0; }
+.ch-cluster.n2 .m1 { bottom: 0; right: 0; }
+.ch-cluster.n3 .m0 { top: 0; left: 0; }
+.ch-cluster.n3 .m1 { top: 0; right: 0; }
+.ch-cluster.n3 .m2 { bottom: 0; left: 50%; transform: translateX(-50%); }
+
+/* ---- the chat side ---- */
+.ch-head { flex: none; display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 14px 10px 16px; border-bottom: 1px solid var(--line); }
+.ch-head[hidden] { display: none; }
+.ch-back { margin-left: -6px; }
+.ch-back svg { transform: rotate(180deg); }
+.ch-head-av { flex: none; display: grid; place-items: center; }
+.ch-head-t { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.ch-head-n { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ch-head-n .name { font: 600 15.5px/1.2 var(--font-display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-head-m { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--dim); font-size: 12px; overflow: hidden; }
+.ch-head-m .chip { flex: none; }
+.ch-head .chip, html.glass .ch-head .chip {
+  padding: 1px 9px 1px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.045); border: 1px solid var(--glass-edge);
+  color: var(--text); font: 500 11.5px/1.45 var(--font-ui);
+}
+.ch-goal { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-mems { flex-wrap: wrap; gap: 4px 10px; }
+.ch-mem { display: inline-flex; align-items: center; gap: 5px; color: var(--dim); white-space: nowrap; }
+.ch-mem.lead { color: var(--gold); }
+.ch-head-b { flex: none; display: flex; gap: 6px; }
+.ch-head-b .btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; }
+.ch-chat { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.ch-chat[hidden], .ch-team[hidden], .ch-blank[hidden] { display: none; }
+.ch-blank { flex: 1 1 auto; display: grid; place-items: center; padding: 24px; }
+.ch-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; max-width: 340px; text-align: center; }
+.ch-empty-t { font: 600 16px/1.2 var(--font-display); color: var(--text); margin-top: 4px; }
+.ch-empty-s { color: var(--dim); font-size: 13px; line-height: 1.5; }
+
+/* a team's thread: bubbles, the sender's mascot beside the first of a run */
+.ch-team { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.ch-thread { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px 18px 18px; display: flex; flex-direction: column; }
+.ch-tempty { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--dim); text-align: center; }
+.ch-day {
+  align-self: center; margin: 14px 0 6px; padding: 2px 10px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05); color: var(--dim); font: 600 11px/1.6 var(--font-ui); letter-spacing: 0.02em;
+}
+.ch-msg { display: flex; align-items: flex-end; gap: 8px; margin-top: 3px; }
+.ch-msg.first { margin-top: 12px; }
+.ch-msg.mine { justify-content: flex-end; }
+.ch-bav { flex: none; width: 28px; display: grid; place-items: center; align-self: flex-start; }
+.ch-bub {
+  max-width: min(72%, 620px); padding: 7px 12px 6px; border-radius: 16px; border-top-left-radius: 6px;
+  background: rgba(255, 255, 255, 0.06); border: 1px solid var(--glass-edge);
+}
+.ch-msg.mine .ch-bub { border-radius: 16px; border-top-right-radius: 6px; background: rgba(63, 216, 255, 0.13); border-color: rgba(63, 216, 255, 0.24); }
+.ch-msg:not(.first) .ch-bub { border-radius: 16px; }
+.ch-from { font: 600 12px/1.3 var(--font-ui); color: var(--gold); margin-bottom: 2px; }
+.ch-to { color: var(--faint); font-weight: 500; }
+.ch-text { color: var(--text); font-size: 13.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ch-at { margin-top: 2px; text-align: right; color: var(--faint); font: 10.5px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
+.ch-tcomp { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--line); }
+.ch-tcomp textarea {
+  display: block; width: 100%; min-height: 40px; max-height: 160px; resize: none; padding: 10px 14px; margin: 0;
+  background: rgba(255, 255, 255, 0.045); border: 1px solid var(--glass-edge); border-radius: 20px;
+  color: var(--text); font: 13.5px/1.4 var(--font-ui); outline: none;
+}
+.ch-tcomp textarea:focus { border-color: rgba(63, 216, 255, 0.45); }
+.ch-tcomp textarea:disabled { opacity: 0.6; cursor: not-allowed; }
+.ch-tcomp textarea::placeholder { color: var(--faint); }
+.ch-send {
+  display: inline-grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%;
+  background: var(--cyan); color: #04121a; cursor: pointer;
+}
+.ch-send:hover { background: #6be2ff; }
+.ch-send:disabled { background: rgba(255, 255, 255, 0.08); color: var(--faint); cursor: not-allowed; }
+.ch-send:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.ch-tnote { grid-column: 1 / -1; padding: 0 6px; color: var(--dim); font-size: 12px; }
+.ch-tnote.bad { color: var(--red); }
+
+/* ---- Chats is in its own window: a calm placeholder in the main window ---- */
+.ch-popped { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; }
+.ch-popped[hidden] { display: none; }
+.ch-popped-in { display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
+.ch-popped-t { font: 600 16px/1.3 var(--font-display); color: var(--text); }
+.ch-popped-b { display: flex; gap: 8px; }
+.ch-popped-b .btn { height: 32px; padding: 0 14px; }
+
+/* ---- narrow (the view under 640px): the list, and the chat sliding over it ---- */
+.view-chats.ch-narrow { padding: 4px 10px 10px; }
+.ch-narrow .ch { grid-template-columns: minmax(0, 1fr); }
+.ch-narrow .ch-main {
+  position: absolute; inset: 0; z-index: 2; background: #10131d; /* solid: the list must not show through */
+  transform: translateX(calc(100% + 24px)); visibility: hidden;
+  transition: transform 220ms var(--ease), visibility 0s linear 220ms;
+}
+html.glass .ch-narrow .ch-main { background: #10131d; }
+.ch-narrow.ch-open .ch-main { transform: none; visibility: visible; transition: transform 220ms var(--ease), visibility 0s; }
+.ch-narrow .ch-head { padding-left: 10px; gap: 10px; }
+.ch-narrow .ch-head-b .btn span, .ch-mid .ch-head-b .btn span { display: none; }
+.ch-narrow .ch-head-b .btn, .ch-mid .ch-head-b .btn { padding: 0 8px; }
+.ch-narrow .ch-bub { max-width: 84%; }
+
+/* ---- the pop-out window (?solo=chats): only this view, a 36px header that drags the window ---- */
+html.solo .top, html.solo .rule, html.solo #alert, html.solo #finished, html.solo .foot, html.solo .tabs { display: none !important; }
+html.solo .view-chats { display: flex; flex-direction: column; padding: 0; }
+html.solo .view-chats > .ch { flex: 1 1 auto; height: auto; padding: 0 10px 10px; }
+html.solo .view-chats.ch-narrow > .ch { padding: 0 6px 6px; }
+.ch-solo-top {
+  flex: none; display: flex; align-items: center; gap: 8px; height: 36px;
+  /* the window's own minimize / maximize / close sit over the right end */
+  padding: 0 calc(var(--wco-right, 140px) + 8px) 0 12px;
+  -webkit-app-region: drag; app-region: drag; -webkit-user-select: none; user-select: none;
+}
+/* no native buttons over the page (macOS keeps its title bar; a browser has none): no room kept for them */
+html:not(.titlebar) .ch-solo-top { padding-right: 12px; }
+html.glass .ch-solo-top { background: rgba(10, 12, 19, 0.16); }
+.ch-solo-top button { -webkit-app-region: no-drag; app-region: no-drag; }
+.ch-solo-top .ch-ib { width: 28px; height: 28px; border-radius: 7px; }
+.ch-solo-top .ch-ontop.on { color: var(--gold); background: rgba(255, 194, 74, 0.12); }
+.ch-solo-m { display: inline-grid; place-items: center; }
+.ch-solo-t { font: 650 13px/1 var(--font-display); letter-spacing: 0.04em; color: var(--text); }
+html.solo .ch-title { display: none; } /* the window's header says Chats already */
+html.solo .ch-top { padding-left: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ch-row, .ch-ib, .ch-narrow .ch-main, .ch-narrow.ch-open .ch-main { transition: none; }
+}

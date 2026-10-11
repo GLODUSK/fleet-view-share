@@ -8,21 +8,25 @@
 // needs you, what is working and what just finished, and a tray icon (Show Fleet View, Mini view, Close window,
 // Quit everything). The two
 // take turns: opening the mini view hides the main window, and leaving it (its expand button, a row, Esc) brings
-// the main window back as it was. Closing the main window quits the app, mini view and tray included, except
+// the main window back as it was. A third window, the Chats window (the Chats tab popped out of the main window,
+// ?solo=chats), is a normal window of its own next to the main one: see "Chats window" below. Closing the main
+// window quits the app, mini view, Chats window and tray included, except
 // while remote access is on (settings.remote.enabled, read from GET /state with the tray's counts): then closing
 // it only hides it to the tray, so the server keeps answering the other computer, and the PC is kept from
 // sleeping (powerSaveBlocker) for as long as it is the host. "Show Fleet View" or a tray click brings it back;
 // "Quit everything" and an update's relaunch still quit.
 //
 // Window places: main.js is the source of truth. It keeps both windows' places in its own profile folder
-// (window-state.json) and also posts them to the server (POST /settings: webBounds, miniBounds, miniOpen),
+// (window-state.json) and also posts them to the server (POST /settings: webBounds, miniBounds, miniOpen,
+// chatsBounds, chatsOpen, chatsOnTop),
 // so the Edge fallback and the next start-up see the same place. The page never saves bounds in Electron.
 //
 // Live sessions (terms.js, host.js): the detail panel can host the real interactive `claude --resume <id>` in a
 // pseudo-terminal. The ptys live in the session host, a separate process this window starts when it is not
 // running and connects to before the page loads, so page and server reloads, and closing the window, never end
 // them: the next window reconnects and replays each screen. Only the main window's page may use them
-// (fleetDesktop.term). Closing the window just closes it (no question any more). The tray's "Quit everything"
+// (fleetDesktop.term); the Chats window reaches them through the server's /live WebSocket, as a browser does
+// (web/term.js, live.js). Closing the window just closes it (no question any more). The tray's "Quit everything"
 // asks whether to move the sessions to Windows Terminal tabs (console windows on a PC without it) or close them, then has the host save the restore
 // list, end every session and exit; the next start resumes the closed ones. Updating desktop/ restarts only the window; a changed host.js takes effect when
 // the host next starts (it logs that a newer one is on disk).
@@ -83,6 +87,7 @@ if (!P.isMac) START.searchParams.set('titlebar', 'overlay');
 const ORIGIN = START.origin;
 const PORT = Number(START.port);
 const MINI_URL = `${ORIGIN}/mini.html?glass=1`;
+const CHATS_URL = `${ORIGIN}/?glass=1&solo=chats`;
 const PRELOAD = path.join(__dirname, 'preload.js');
 
 // one window per port: its own profile folder, which is also what the single-instance lock is keyed on,
@@ -108,14 +113,15 @@ function brand(w) {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  let win = null, mini = null, tray = null;
+  let win = null, mini = null, chats = null, tray = null;
   const fvServer = serverOwner.create({ port: PORT, log: (m) => hlog(m) });
   let quitting = false;
 
   // FV_TEST_HIDDEN=1 (tests only, driven through --remote-debugging-port): the main window is created but never
   // shown or focused, with no mini view, no tray icon and no blur helper, and the "Quit everything" question
-  // is answered yes by itself, so a test run never puts anything on the screen. global.__fvTest then offers
-  // quitEverything() and closeWindow() to a test attached to the main process (--inspect).
+  // is answered yes by itself, so a test run never puts anything on the screen. The Chats window is made (so a test
+  // can drive its page) but never shown either. global.__fvTest then offers quitEverything(), closeWindow(),
+  // popChats(), dockChats() and chatsWindow() to a test attached to the main process (--inspect).
   const HIDDEN = process.env.FV_TEST_HIDDEN === '1';
 
   // ---------- live sessions (in the session host, host.js) ----------
@@ -305,7 +311,8 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => showMain(null));
 
   // ---------- saved places: window-state.json in the profile folder ----------
-  // { webBounds: {x,y,w,h}, maximized, miniBounds: {x,y,w,h}, miniOpen }, all in DIPs (Electron's own units)
+  // { webBounds: {x,y,w,h}, maximized, miniBounds: {x,y,w,h}, miniOpen, chatsBounds: {x,y,w,h}, chatsMaximized,
+  //   chatsOpen, chatsOnTop }, all in DIPs (Electron's own units)
   const STATE_FILE = path.join(app.getPath('userData'), 'window-state.json');
   const okRect = (r) => r && typeof r === 'object' && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(r[k]));
   const toRect = (b) => ({ x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) });
@@ -495,6 +502,18 @@ if (!app.requestSingleInstanceLock()) {
     wc.on('did-navigate-in-page', (_e, url, isMain, pid, rid) => nav(url, isMain, pid, rid));
   }
 
+  // Electron shows no right-click menu by itself: give text boxes (the chat box) and selected text the usual
+  // edit menu. The page keeps its own menus elsewhere (it cancels the event before it gets here).
+  function editMenu(w) {
+    w.webContents.on('context-menu', (_e, p) => {
+      const items = p.isEditable
+        ? [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut', enabled: p.editFlags.canCut }, { role: 'copy', enabled: p.editFlags.canCopy },
+          { role: 'paste', enabled: p.editFlags.canPaste }, { type: 'separator' }, { role: 'selectAll' }]
+        : p.selectionText && p.selectionText.trim() ? [{ role: 'copy' }] : null;
+      if (items && !w.isDestroyed()) Menu.buildFromTemplate(items).popup({ window: w });
+    });
+  }
+
   // hidden test mode: keep timers and animation frames running in the never-shown window
   const webPreferences = { nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false, preload: PRELOAD, ...(HIDDEN ? { backgroundThrottling: false } : {}) };
 
@@ -544,16 +563,8 @@ if (!app.requestSingleInstanceLock()) {
     const wc = win.webContents;
     guardContents(wc, () => { if (win && !win.isDestroyed()) win.loadURL(START.href); });
     previewFrames(wc);
-    wc.on('did-finish-load', () => sendMiniOpen());
-    // Electron shows no right-click menu by itself: give text boxes (the chat box) and selected text the usual
-    // edit menu. The page keeps its own menus elsewhere (it cancels the event before it gets here).
-    wc.on('context-menu', (_e, p) => {
-      const items = p.isEditable
-        ? [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut', enabled: p.editFlags.canCut }, { role: 'copy', enabled: p.editFlags.canCopy },
-          { role: 'paste', enabled: p.editFlags.canPaste }, { type: 'separator' }, { role: 'selectAll' }]
-        : p.selectionText && p.selectionText.trim() ? [{ role: 'copy' }] : null;
-      if (items) Menu.buildFromTemplate(items).popup({ window: win });
-    });
+    wc.on('did-finish-load', () => { sendMiniOpen(); sendChatsPopped(); });
+    editMenu(win);
 
     win.on('move', saveMainSoon);
     win.on('resize', saveMainSoon);
@@ -567,6 +578,7 @@ if (!app.requestSingleInstanceLock()) {
     win.on('close', (e) => {
       if (closing) return;
       // macOS: closing a window never quits an app there; Cmd+Q (before-quit) does
+      // (while it only hides, the Chats window stays where it is)
       if ((remoteOn || P.isMac) && !quitting && !quittingAll && !HIDDEN) {
         e.preventDefault();
         clearTimeout(saveTimer);
@@ -580,12 +592,18 @@ if (!app.requestSingleInstanceLock()) {
       e.preventDefault();
       clearTimeout(saveTimer);
       clearTimeout(miniSaveTimer);
+      clearTimeout(chatsSaveTimer);
       const body = {};
       const r = placing ? null : mainRect();
       if (r) { local.webBounds = r; local.maximized = win.isMaximized(); body.webBounds = r; }
       if (mini && !mini.isDestroyed()) local.miniBounds = toRect(mini.getBounds());
       if (okRect(local.miniBounds)) body.miniBounds = local.miniBounds;
       body.miniOpen = !!local.miniOpen;
+      // the Chats window goes with the app and opens again at the next start (chatsOpen stays as it is)
+      keepChatsPlace();
+      if (okRect(local.chatsBounds)) body.chatsBounds = local.chatsBounds;
+      body.chatsOpen = !!local.chatsOpen;
+      body.chatsOnTop = !!local.chatsOnTop;
       writeLocal();
       const t = setTimeout(() => { if (!win.isDestroyed()) win.destroy(); }, 1200);
       let left = 2;
@@ -740,12 +758,162 @@ if (!app.requestSingleInstanceLock()) {
     if (!sameBounds(b, next)) mini.setBounds(next);
   }
 
+  // ---------- Chats window ----------
+  // The Chats tab popped out (fleetDesktop.popChats): the same page as the main window's (?solo=chats shows only the
+  // Chats tab), in a normal window of its own: frameless with the native buttons over the right end of the page's
+  // 36 px header (as the main window's 44 px one), acrylic, resizable, its own taskbar button ("Fleet View Chats",
+  // its own app id so Windows never folds it into the main window's), always on top when chatsOnTop. It does not
+  // take turns with the main window the way the mini view does: both stay up. It saves its place (chatsBounds, plus
+  // whether it was maximized), is put back on a screen when its old place is on none, and opens again at start-up
+  // when it was open when the app quit (chatsOpen). Closing it docks it: chatsOpen false, and the main window comes
+  // up (unless the mini view stands in for it). Quitting the app, or closing the main window (which quits it), closes
+  // it but keeps chatsOpen, so it comes back next time. Its page reaches live sessions through /live (web/term.js).
+  const CHATS_W = 440, CHATS_H = 720, CHATS_MIN_W = 340, CHATS_MIN_H = 420, CHATS_BAR_H = 36;
+  let chatsSaveTimer = null;
+  const chatsAlive = () => !!(chats && !chats.isDestroyed());
+  const chatsPopped = () => !!local.chatsOpen && chatsAlive();
+  // a new window: at the right of the main window's display, nearly its full height
+  function chatsDefault() {
+    const d = win && !win.isDestroyed() ? screen.getDisplayMatching(win.getBounds()) : screen.getPrimaryDisplay();
+    const a = d.workArea;
+    const width = Math.min(CHATS_W, a.width), height = Math.min(CHATS_H, a.height - 32);
+    return { x: a.x + a.width - width - 16, y: a.y + Math.max(0, Math.round((a.height - height) / 2)), width, height };
+  }
+  function chatsStart() {
+    const r = local.chatsBounds;
+    if (okRect(r) && r.w >= CHATS_MIN_W && r.h >= CHATS_MIN_H) {
+      const b = toBounds(r);
+      if (isVisible(b)) return inside(b);
+    }
+    return chatsDefault();
+  }
+  // its restored (normal) place into local, as the main window's is kept (not while minimized)
+  function keepChatsPlace() {
+    if (!chatsAlive() || chats.isMinimized()) return;
+    local.chatsBounds = toRect(chats.getNormalBounds());
+    local.chatsMaximized = chats.isMaximized();
+  }
+  function saveChats() {
+    clearTimeout(chatsSaveTimer);
+    keepChatsPlace();
+    writeLocal();
+    const body = { chatsOpen: !!local.chatsOpen, chatsOnTop: !!local.chatsOnTop };
+    if (okRect(local.chatsBounds)) body.chatsBounds = local.chatsBounds;
+    postSettings(body);
+  }
+  function saveChatsSoon() { clearTimeout(chatsSaveTimer); chatsSaveTimer = setTimeout(saveChats, 800); }
+
+  function createChats() {
+    const want = chatsStart();
+    chats = new BrowserWindow({
+      ...want,
+      minWidth: CHATS_MIN_W, minHeight: CHATS_MIN_H,
+      title: 'Fleet View Chats',
+      resizable: true,
+      alwaysOnTop: !!local.chatsOnTop,
+      backgroundColor: '#00000000',
+      ...(P.isMac ? { vibrancy: 'under-window', visualEffectState: 'active' } : {
+        icon: ICON,
+        backgroundMaterial: 'acrylic',
+        autoHideMenuBar: true,
+        titleBarStyle: 'hidden',
+        titleBarOverlay: { color: '#00000000', symbolColor: '#c9cee6', height: CHATS_BAR_H },
+      }),
+      show: false,
+      webPreferences,
+    });
+    const w = chats;
+    if (local.chatsOnTop) w.setAlwaysOnTop(true, 'floating');
+    if (!sameBounds(w.getBounds(), want)) w.setBounds(want);
+    // its own taskbar button: an app id of its own (the main window's is FleetView); right-click > Fleet View
+    // starts the app as the main window's does
+    if (process.platform === 'win32') {
+      try {
+        w.setAppDetails({
+          appId: 'FleetView.Chats', appIconPath: ICON, appIconIndex: 0, relaunchDisplayName: 'Fleet View',
+          relaunchCommand: `"${path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')}" //nologo "${FV_VBS}"`,
+        });
+      } catch (e) { hlog(`chats window app details: ${e.message}`); }
+    }
+    if (!HIDDEN) keepBlurWhenInactive(w);
+    const wc = w.webContents;
+    guardContents(wc, () => { if (!w.isDestroyed()) w.loadURL(CHATS_URL); });
+    editMenu(w);
+    wc.on('did-finish-load', () => sendChatsPopped());
+    let shown = false;
+    const showIt = () => {
+      if (shown || w.isDestroyed() || HIDDEN || !local.chatsOpen) return;
+      shown = true;
+      if (!sameBounds(w.getBounds(), want)) w.setBounds(want);
+      if (local.chatsMaximized) w.maximize();
+      w.show();
+    };
+    w.once('ready-to-show', showIt);
+    setTimeout(showIt, 3000);
+    w.on('move', saveChatsSoon);
+    w.on('resize', saveChatsSoon);
+    w.on('maximize', saveChatsSoon);
+    w.on('unmaximize', saveChatsSoon);
+    w.on('close', () => {
+      clearTimeout(chatsSaveTimer);
+      keepChatsPlace();
+      // the app is quitting: it opens again at the next start, so chatsOpen stays
+      if (quitting || quittingAll) { writeLocal(); return; }
+      local.chatsOpen = false;
+      saveChats();
+      mainUp();
+    });
+    w.on('closed', () => { if (chats === w) chats = null; chatsChanged(); });
+    w.on('page-title-updated', (e) => e.preventDefault()); // keep "Fleet View Chats"
+    w.loadURL(CHATS_URL);
+  }
+  // after docking: the main window comes up, unless the mini view is standing in for it
+  function mainUp() {
+    if (local.miniOpen && miniIsOpen()) return;
+    showMain(null);
+  }
+  function popChats() {
+    local.chatsOpen = true;
+    if (!chatsAlive()) createChats(); // shows itself once its page is ready
+    else if (!HIDDEN) {
+      if (chats.isMinimized()) chats.restore();
+      if (!chats.isMaximized() && !isVisible(chats.getBounds())) chats.setBounds(inside(chatsDefault()));
+      chats.show();
+      chats.moveTop();
+      chats.focus();
+    }
+    saveChats();
+    chatsChanged();
+  }
+  function dockChats() {
+    if (chatsAlive()) { chats.close(); return; } // its close handler docks it
+    local.chatsOpen = false;
+    saveChats();
+    chatsChanged();
+    mainUp();
+  }
+  function setChatsOnTop(on) {
+    local.chatsOnTop = !!on;
+    if (chatsAlive()) { if (on) chats.setAlwaysOnTop(true, 'floating'); else chats.setAlwaysOnTop(false); }
+    saveChats();
+  }
+  function sendChatsPopped() {
+    const v = chatsPopped();
+    for (const w of [win, chats]) if (w && !w.isDestroyed() && !w.webContents.isDestroyed()) w.webContents.send('fv:chats-popped', v);
+  }
+  function chatsChanged() { sendChatsPopped(); updateTrayMenu(); }
+  // keep it on a screen when screens come and go (a window still partly on one is left where it is)
+  function keepChatsOnScreen() {
+    if (!chatsAlive() || chats.isMaximized() || chats.isMinimized()) return;
+    if (!isVisible(chats.getBounds())) chats.setBounds(inside(chatsDefault()));
+  }
+
   // ---------- messages from the pages (preload.js) ----------
   // only from our own windows' top frames, on the local page
   function senderOk(e, onlyMini = false) {
     const wc = e.sender;
-    const ours = onlyMini ? (mini && !mini.isDestroyed() && wc === mini.webContents)
-      : ((win && !win.isDestroyed() && wc === win.webContents) || (mini && !mini.isDestroyed() && wc === mini.webContents));
+    const mine = (w) => !!(w && !w.isDestroyed() && wc === w.webContents);
+    const ours = onlyMini ? mine(mini) : (mine(win) || mine(mini) || mine(chats));
     if (!ours) return false;
     if (e.senderFrame && e.senderFrame !== wc.mainFrame) return false;
     try { return new URL(wc.getURL()).origin === ORIGIN; } catch { return false; }
@@ -755,18 +923,25 @@ if (!app.requestSingleInstanceLock()) {
   // an update changed desktop/ (updater.js): start the window again the way the Start menu does, after this one
   // quits (the server goes with it and comes back with the new one; the sessions live in the host and stay)
   // (macOS and Linux: the same binary with the same arguments)
+  // (both the main window's page and the Chats window's may ask; only the first is acted on)
+  let relaunching = false;
   ipcMain.on('fv:relaunch', (e) => {
-    if (!senderOk(e)) return;
+    if (!senderOk(e) || relaunching) return;
+    relaunching = true;
     if (P.isWin) app.relaunch({ execPath: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe'), args: ['//nologo', FV_VBS] });
     else app.relaunch();
     app.quit();
   });
   ipcMain.on('fv:show-main', (e, id) => { if (senderOk(e)) showMain(typeof id === 'string' ? id : null); });
   ipcMain.on('fv:fit-mini', (e, h) => { if (senderOk(e, true)) fitMini(Number(h)); });
+  // the Chats window: pop it out (or show and focus it), dock it back, keep it on top
+  ipcMain.on('fv:pop-chats', (e) => { if (senderOk(e)) popChats(); });
+  ipcMain.on('fv:dock-chats', (e) => { if (senderOk(e)) dockChats(); });
+  ipcMain.on('fv:chats-on-top', (e, on) => { if (senderOk(e) && typeof on === 'boolean') setChatsOnTop(on); });
   // the chat box's mic is on: the page keeps full speed while the window is behind another one or minimized
   // (Chromium otherwise slows a hidden page down, and the speech model on the GPU with it); off again after
   ipcMain.on('fv:keep-awake', (e, on) => {
-    if (!senderOk(e) || HIDDEN || e.sender !== win?.webContents) return;
+    if (!pageSenderOk(e) || HIDDEN) return;
     try { e.sender.setBackgroundThrottling(!on); } catch {}
   });
 
@@ -774,6 +949,13 @@ if (!app.requestSingleInstanceLock()) {
   function termSenderOk(e) {
     const wc = e.sender;
     if (!win || win.isDestroyed() || wc !== win.webContents) return false;
+    if (e.senderFrame && e.senderFrame !== wc.mainFrame) return false;
+    try { return new URL(wc.getURL()).origin === ORIGIN; } catch { return false; }
+  }
+  // the main window's page or the Chats window's (the same page): the folder picker and keep-awake
+  function pageSenderOk(e) {
+    const wc = e.sender;
+    if (!((win && !win.isDestroyed() && wc === win.webContents) || (chats && !chats.isDestroyed() && wc === chats.webContents))) return false;
     if (e.senderFrame && e.senderFrame !== wc.mainFrame) return false;
     try { return new URL(wc.getURL()).origin === ORIGIN; } catch { return false; }
   }
@@ -810,18 +992,19 @@ if (!app.requestSingleInstanceLock()) {
     if (!isDir) return { ok: false, message: `the folder is gone: ${o.cwd}` };
     return terms.create({ cwd: o.cwd, account: acctId(o.account), cols: o.cols, rows: o.rows, forkFrom });
   });
-  // "Add workspace…": the system folder picker, over the main window (main window only). FV_TEST_PICK_FOLDER, honoured
+  // "Add workspace…": the system folder picker, over the window that asked (the main or the Chats window). FV_TEST_PICK_FOLDER, honoured
   // only in a hidden test run (FV_TEST_HIDDEN=1), answers with that path instead of showing the dialog.
   // The server checks the folder again (POST /repos/add); this only picks it.
   let picking = false;
   ipcMain.handle('fv:pick-folder', async (e) => {
-    if (!termSenderOk(e)) throw new Error('not allowed');
+    if (!pageSenderOk(e)) throw new Error('not allowed');
     if (HIDDEN && process.env.FV_TEST_PICK_FOLDER) return { ok: true, path: process.env.FV_TEST_PICK_FOLDER };
     if (HIDDEN) return { ok: false, canceled: true };
     if (picking) return { ok: false, canceled: true, message: 'the folder picker is already open' };
     picking = true;
     try {
-      const r = await dialog.showOpenDialog(win, { title: 'Add a workspace to Fleet View', properties: ['openDirectory'] });
+      const parent = BrowserWindow.fromWebContents(e.sender) || win;
+      const r = await dialog.showOpenDialog(parent, { title: 'Add a workspace to Fleet View', properties: ['openDirectory'] });
       const p = !r.canceled && Array.isArray(r.filePaths) ? r.filePaths[0] : null;
       return p ? { ok: true, path: p } : { ok: false, canceled: true };
     } finally { picking = false; }
@@ -888,6 +1071,7 @@ if (!app.requestSingleInstanceLock()) {
     return [
       { label: 'Show Fleet View', click: () => showMain(null) },
       { label: 'Mini view', type: 'checkbox', checked: !!local.miniOpen && miniIsOpen(), click: (item) => (item.checked ? openMini() : hideMini()) },
+      { label: 'Chats window', type: 'checkbox', checked: chatsPopped(), click: (item) => (item.checked ? popChats() : dockChats()) },
       { type: 'separator' },
       ...(remoteOn ? [{ label: 'Remote access is on (closing hides the window)', enabled: false }, { type: 'separator' }] : []),
       { label: remoteOn || P.isMac ? 'Hide window (Fleet View keeps running)' : 'Close window (sessions keep running)', click: () => { if (win && !win.isDestroyed()) win.close(); else app.quit(); } },
@@ -1042,21 +1226,36 @@ if (!app.requestSingleInstanceLock()) {
     }
     create();
     win.webContents.once('did-finish-load', () => setTimeout(restoreSelection, 1500));
-    if (HIDDEN) global.__fvTest = { quitEverything, closeWindow: () => { if (win && !win.isDestroyed()) win.close(); }, terms };
+    if (HIDDEN) global.__fvTest = { quitEverything, closeWindow: () => { if (win && !win.isDestroyed()) win.close(); }, terms, popChats, dockChats, chatsWindow: () => chats };
     if (!HIDDEN) createTray();
     if (SELFTEST) selfTest();
-    screen.on('display-removed', keepMiniOnScreen);
-    screen.on('display-metrics-changed', keepMiniOnScreen);
+    screen.on('display-removed', () => { keepMiniOnScreen(); keepChatsOnScreen(); });
+    screen.on('display-metrics-changed', () => { keepMiniOnScreen(); keepChatsOnScreen(); });
+    // the Chats window opens again when it was open when the app quit (main.js's own record; with none yet, the
+    // server's settings below)
+    if (local.chatsOpen === true) popChats();
     // the app starts on the main window; the mini view keeps only its place from last time (main.js's own
     // record first, else the server's settings)
     if (HIDDEN) return;
     if (local.miniOpen) { local.miniOpen = false; writeLocal(); }
-    if (okRect(local.miniBounds)) return;
+    const chatsKnown = () => typeof local.chatsOpen === 'boolean' && okRect(local.chatsBounds) && typeof local.chatsOnTop === 'boolean';
+    if (okRect(local.miniBounds) && chatsKnown()) return;
     let tries = 0;
     const ask = () => getState((st) => {
       const s = st && st.settings;
       if (!s) { if (++tries < 5) setTimeout(ask, 1500); return; }
-      if (okRect(s.miniBounds) && !okRect(local.miniBounds)) { local.miniBounds = s.miniBounds; writeLocal(); }
+      if (okRect(s.miniBounds) && !okRect(local.miniBounds)) local.miniBounds = s.miniBounds;
+      // the Chats window's record, from the server when this profile has none (a new profile folder, an older main.js)
+      if (okRect(s.chatsBounds) && !okRect(local.chatsBounds)) local.chatsBounds = s.chatsBounds;
+      if (typeof local.chatsOnTop !== 'boolean' && typeof s.chatsOnTop === 'boolean') {
+        local.chatsOnTop = s.chatsOnTop;
+        if (chatsAlive() && s.chatsOnTop) chats.setAlwaysOnTop(true, 'floating');
+      }
+      if (typeof local.chatsOpen !== 'boolean') {
+        local.chatsOpen = s.chatsOpen === true;
+        if (local.chatsOpen && !chatsAlive()) popChats();
+      }
+      writeLocal();
     });
     ask();
   });

@@ -14,15 +14,19 @@
 <link rel="stylesheet" href="viewer.css" onerror="this.remove()">
 <link rel="stylesheet" href="usage.css" onerror="this.remove()">
 <link rel="stylesheet" href="housekeeping.css" onerror="this.remove()">
+<link rel="stylesheet" href="mascot.css" onerror="this.remove()">
+<link rel="stylesheet" href="chats.css" onerror="this.remove()">
 <script>
   // glass: the desktop window (Electron, ?glass=1) has acrylic behind the page, so the page goes see-through.
   // titlebar: that window has no title bar of its own (titlebar=overlay from desktop/main.js); the header is
   // the drag region and leaves room on the right for the native min / max / close buttons.
+  // solo: the Chats pop-out window (?solo=chats): only the Chats view, under its own small header (chats.css).
   (function () {
     var q = location.search, h = document.documentElement, electron = navigator.userAgent.indexOf('Electron') >= 0;
     if (/[?&]glass=1(&|$)/.test(q) || electron) h.classList.add('glass');
     var wco = navigator.windowControlsOverlay;
     if (electron && (/[?&]titlebar=overlay(&|$)/.test(q) || (wco && wco.visible))) h.classList.add('titlebar');
+    if (/[?&]solo=chats(&|$)/.test(q)) h.classList.add('solo');
   })();
 </script>
 </head>
@@ -42,6 +46,7 @@
     <button type="button" data-view="map" role="tab">Map</button>
     <button type="button" data-view="wall" role="tab">Wall</button>
     <button type="button" data-view="projects" role="tab">Projects</button>
+    <button type="button" data-view="chats" role="tab" title="Chats (i)">Chats</button>
   </nav>
   <div id="filter-box" class="filter" hidden>
     <span class="filter-k">/</span><input id="filter-input" type="text" spellcheck="false" autocomplete="off" placeholder="filter by name, goal or workspace">
@@ -49,9 +54,11 @@
   <div class="grow"></div>
   <button type="button" id="update-pill" class="count update-pill" hidden></button>
   <button type="button" id="replay-pill" class="count replay-pill" title="the map shows a replay: click to go back to live" hidden></button>
-  <button type="button" id="since-btn" class="since-btn" title="Since you looked (w)" aria-label="Since you looked"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></button>
-  <button type="button" id="notify-btn" class="since-btn notify-btn" aria-pressed="true"></button>
-  <button type="button" id="hk-btn" class="since-btn hk-hdr" title="Housekeeping: old worktrees and branches" aria-label="Housekeeping" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 3l-7.5 7.5"/><path d="M9.5 9.5l5 5"/><path d="M9.5 9.5c-2.5 0-4.5 1.5-5.5 4l-1 7 7-1c2.5-1 4-3 4-5.5"/><path d="M7 15.5l-1.5 4"/></svg></button>
+  <div class="hdr-tools" role="group" aria-label="tools">
+    <button type="button" id="since-btn" class="since-btn" title="Since you looked (w)" aria-expanded="false" aria-label="Since you looked"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></button>
+    <button type="button" id="hk-btn" class="since-btn hk-hdr" title="Housekeeping: old worktrees and branches" aria-label="Housekeeping" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 3l-7.5 7.5"/><path d="M9.5 9.5l5 5"/><path d="M9.5 9.5c-2.5 0-4.5 1.5-5.5 4l-1 7 7-1c2.5-1 4-3 4-5.5"/><path d="M7 15.5l-1.5 4"/></svg></button>
+    <button type="button" id="notify-btn" class="since-btn notify-btn" aria-pressed="true"></button>
+  </div>
   <div id="counts" class="counts"></div>
   <div id="clock" class="clock"></div>
 </header>
@@ -70,6 +77,7 @@
     <section id="view-map" class="view view-map" hidden></section>
     <section id="view-wall" class="view" hidden></section>
     <section id="view-projects" class="view view-projects" hidden></section>
+    <section id="view-chats" class="view view-chats" hidden></section>
   </main>
   <aside id="detail" class="detail" aria-label="conversation details" aria-hidden="true"></aside>
 </div>

@@ -2,9 +2,6 @@
    (.uw-pop, .uw-top, .uw-x from usage.css) and adds the groups, rows, the in-card confirm and the nightly switch.
    Calm by rule: it drops in once, nothing blinks, and a fixed height keeps redraws from moving the page. */
 
-html.titlebar .top.fit-3 .hk-hdr { display: none; }
-.hk-hdr[aria-expanded="true"] { color: var(--text); border-color: rgba(255, 255, 255, 0.18); }
-
 .hk-pop { width: min(620px, calc(100vw - 32px)); height: min(720px, calc(100vh - var(--top-h) - 70px)); }
 .hk-pop.hk-short { height: auto; max-height: calc(100vh - var(--top-h) - 70px); }
 .hk-pop .uw-top { gap: 8px; }

@@ -24,7 +24,9 @@
 // the usual "Open in terminal" (a Windows Terminal tab, or a console window) instead. When the socket comes back,
 // or the host does, every view the page holds is drawn again from a fresh snapshot (hostChanged), since output
 // sent meanwhile never reached it. The desktop window's mini view (fleetDesktop without term) and ?fixture=1
-// (made-up conversations) have no live sessions at all.
+// (made-up conversations) have no live sessions at all. The popped-out Chats window (?solo=chats, desktop/main.js)
+// takes the browser's way though it is a desktop window: the window's term IPC serves only the main window, so
+// there it ignores fleetDesktop.term and talks to /live like Edge on this PC (its Origin is this PC's own page).
 //
 // Opening by itself: a click on a conversation (renderSessionPane's o.auto) starts its session here, unless a
 // live claude process elsewhere has it open (/state's openElsewhere, ignored for the ones this window hosts):
@@ -65,8 +67,10 @@ export const isNewKey = (id) => /^new-\d{1,9}$/.test(String(id || ''));
 // not the fixture) the WebSocket one, made on first use
 let remote = null;
 const FIXTURE_PAGE = (() => { try { return new URLSearchParams(location.search).has('fixture'); } catch { return false; } })();
+// the Chats window: the WebSocket API even in the desktop window (fixture pages keep the fake fleetDesktop.term)
+const SOLO_CHATS = (() => { try { return new URLSearchParams(location.search).get('solo') === 'chats'; } catch { return false; } })();
 function liveApi() {
-  const d = window.fleetDesktop;
+  const d = SOLO_CHATS && !FIXTURE_PAGE ? null : window.fleetDesktop;
   if (d) {
     const t = d.term;
     return t && typeof t.open === 'function' && typeof t.list === 'function' && typeof t.write === 'function' ? t : null;

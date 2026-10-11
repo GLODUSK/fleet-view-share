@@ -369,6 +369,7 @@ function describe(p, info, ctx) {
     endedAt: info ? info.endedAt || null : null,
     cwd: (info && info.cwd) || p.cwd || null, account: /^[A-Z]$/.test(p.account) ? p.account : 'B',
     temp: !!(ctx && ctx.isTemp && ctx.isTemp(p.id)),
+    role: p.role === 'chief' ? 'chief' : null,
   };
 }
 const infoOf = (p, ctx) => (convId(p.id) ? ctx.sessionInfo(convId(p.id)) : null);
@@ -627,9 +628,9 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
 const ENDPOINTS = [
   { method: 'GET', path: '/api', does: 'this list, and fleetView: the Fleet View version (1.0.12; "" when unknown)' },
   { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive' },
-  { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status and latest reply' },
-  { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends' },
-  { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, its turn; tail: the last characters of its screen' },
+  { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("chief" or null)' },
+  { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, role?: "chief", wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends; role "chief": the Chief (one at a time), which may also run fv start, open, hosted, wait and menu without asking' },
+  { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, role, its turn; tail: the last characters of its screen' },
   { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
   { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|other), title, context, options, sig; or null' },
@@ -656,7 +657,9 @@ function describeApi() {
     notes: 'ids: a conversation id, or the new-<n> key POST /api/sessions gave. wait: true (30 min), false, or seconds 1..3600. A reply is { ok, message?, ... }; 400 bad input, 401 token, 403 refused, 404 no such session, 409 state conflict, 503 the desktop app is not running.' }];
 }
 
-// POST /api/sessions { repo, account, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }
+// POST /api/sessions { repo, account, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, role?, wait? }
+// role "chief" (the only role; anything else but null is 400) starts the Chief (chief/BRIEF.md): the session host
+// lets its claude run fv start, open, hosted, wait and menu too without asking. One live Chief at a time (409).
 // the Claude accounts on this machine (ctx.accounts from fleet-view.js: B plus one per ~/.claude-<x>), else A and B
 const acctsOf = (ctx) => { try { const a = typeof ctx.accounts === 'function' ? ctx.accounts() : null; if (Array.isArray(a) && a.length) return a; } catch {} return ['A', 'B']; };
 const acctOk = (a, ctx) => typeof a === 'string' && acctsOf(ctx).includes(a);
@@ -672,6 +675,8 @@ async function startSession(b, ctx, gone) {
   if (b.model != null && (typeof b.model !== 'string' || !MODEL_RE.test(b.model))) return [400, { ok: false, message: 'model must be a model name like opus, sonnet, haiku or claude-opus-5-5[1m] (letters, digits, . - [ ])' }];
   if (b.effort != null && !EFFORTS.includes(b.effort)) return [400, { ok: false, message: `effort must be one of ${EFFORTS.join(', ')}` }];
   if ('temp' in b && typeof b.temp !== 'boolean') return [400, { ok: false, message: 'temp must be true or false' }];
+  if (b.role != null && b.role !== 'chief') return [400, { ok: false, message: 'role must be "chief" (or left out)' }];
+  const chief = b.role === 'chief';
   let fork = null;
   if (b.forkFrom != null) {
     fork = convId(b.forkFrom);
@@ -687,18 +692,26 @@ async function startSession(b, ctx, gone) {
   if (!isDir) return [400, { ok: false, message: `the folder is gone: ${repo}` }];
 
   return withHost(async (host) => {
+    if (chief) {
+      const live = ((await host.call('list')) || []).find((x) => x && x.alive && x.role === 'chief');
+      if (live) return [409, { ok: false, id: live.id, message: `the Chief is running already (${live.id})` }];
+    }
     const o = { cwd: repo, account: b.account };
     if (typeof b.chrome === 'boolean') o.chrome = b.chrome;
     if (fork) o.forkFrom = fork;
     if (b.model != null) o.model = b.model;
     if (b.effort != null) o.effort = b.effort;
+    if (chief) o.role = 'chief';
     const r = await host.call('create', o);
+    // the host's own check, which nothing can get between: another start may have got in since the list above
+    if (r && !r.ok && typeof r.chiefRunning === 'string') return [409, { ok: false, id: r.chiefRunning, message: r.message }];
     if (!r || !r.ok || typeof r.key !== 'string') return [502, { ok: false, message: (r && r.message) || 'the session host could not start it' }];
     const key = r.key;
-    // an older host ignores forkFrom, model and effort: a fresh conversation without the history, or on the default
-    // model, so it goes again (typing /model or /effort instead would save them as the default for every session)
+    // an older host ignores forkFrom, model, effort and role: a fresh conversation without the history, on the default
+    // model, or without the Chief's commands, so it goes again (typing /model or /effort instead would save them as
+    // the default for every session)
     const missing = [fork && r.forkFrom !== fork && 'fork a conversation', b.model != null && r.model !== b.model && 'set the model',
-      b.effort != null && r.effort !== b.effort && 'set the effort'].filter(Boolean);
+      b.effort != null && r.effort !== b.effort && 'set the effort', chief && r.role !== 'chief' && 'start the Chief'].filter(Boolean);
     if (missing.length) {
       await host.call('kill', key).catch(() => {});
       return [502, { ok: false, key, message: `the session host is too old to ${missing.join(' or ')} (restart it: node desktop/restart-host.js); the session it started was stopped` }];
@@ -706,7 +719,7 @@ async function startSession(b, ctx, gone) {
     // an older host ignores chrome and does not echo it back: say so instead of failing
     const chromeApplied = typeof b.chrome === 'boolean' ? r.chrome === b.chrome : null;
     // what every reply from here on carries
-    const out = { key, id: null, chromeApplied, ...(b.model != null ? { model: b.model } : {}), ...(b.effort != null ? { effort: b.effort } : {}) };
+    const out = { key, id: null, chromeApplied, ...(b.model != null ? { model: b.model } : {}), ...(b.effort != null ? { effort: b.effort } : {}), ...(chief ? { role: 'chief' } : {}) };
     if (fork) out.forkFrom = fork;
     if (b.temp) out.temp = true;
     if (b.name != null) out.nameSet = false;
@@ -758,6 +771,14 @@ async function startSession(b, ctx, gone) {
     const w = await afterSend(host, now, sentAt, 'idle', ms, ctx, gone);
     return reply(200, { ok: true, promptSent: true, ...w, message: doneText(w, ms, 'started, and the prompt was sent') });
   });
+}
+
+// The server's own way to start the Chief, without an HTTP request: POST /api/sessions with role "chief", the same
+// checks and the same reply. b: { repo, account, prompt, name?, model?, effort?, chrome?, wait? }; ctx: what handle()
+// gets. -> Promise of [code, json] (503 when the session host is not running; 409 with id when a Chief runs already)
+function startChief(b, ctx) {
+  const body = { ...(b && typeof b === 'object' ? b : {}), role: 'chief' };
+  return startSession(body, ctx, () => false).catch((e) => (e instanceof HostDown ? [503, { ok: false, message: e.message }] : [500, { ok: false, message: String((e && e.message) || e) }]));
 }
 
 // POST /api/sessions/:id/message { text, wait?, from?, queue?, open? }
@@ -1593,5 +1614,5 @@ function handle(req, res, pathname, ctx) {
 }
 
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
-module.exports = { ensureToken, handle, hostList, plainText, cleanText, pasteWrites, deliverText, startQueue, queuedIds, TOKEN_FILE, ENDPOINTS,
+module.exports = { ensureToken, handle, startChief, hostList, plainText, cleanText, pasteWrites, deliverText, startQueue, queuedIds, TOKEN_FILE, ENDPOINTS,
   askParts: { asks, summaryText, laterText, answerLines, flushAsk, settleAnswer, askJson } };

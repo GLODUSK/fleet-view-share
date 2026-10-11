@@ -30,18 +30,18 @@
 // line is { t: 'hello', token }, with the random token from %LOCALAPPDATA%\fleet-view\host.json
 // ({ pid, pipe, token, startedAt, version }); anything else, or a wrong token, closes the connection. Then:
 //   { t: 'req', n?, op, a: [args] }  ->  { t: 'res', n, v } or { t: 'res', n, err }   (no n: no reply)
-//   ops: open(o), create(o) (o.chrome, o.forkFrom, o.model, o.effort: see create below), write(id, data), resize(id, cols, rows), kill(id), list(), snapshot(id),
+//   ops: open(o), create(o) (o.chrome, o.forkFrom, o.model, o.effort, o.role: see create below), write(id, data), resize(id, cols, rows), kill(id), list(), snapshot(id),
 //        endAll(graceMs), killAll(), setUi(ui), quitAll({ ui }), restart({ now, by }) (see Restart), log(text)
 //   events: { t: 'ev', e: 'data', id, d } / { e: 'exit', id, code } / { e: 'rekey', from, id } / { e: 'sessions', list }
 // list() gives each session: id, pid, alive, exitCode, startedAt, pending, created, forkFrom, cwd, handoffFrom,
 // pickingUp, account, status, waitingFor (what its pid file says it waits for, while waiting), claudePid,
 // interrupted, restored, autoContinue (a note is due, see below), slashPanel (the "/" command whose panel is
-// open, see Panels), cols, rows.
+// open, see Panels), role ('chief' or null, see Roles), cols, rows.
 // The pipe is the lock: a second host finds the name taken and exits. The pipe keeps the default ACL (the
 // user, SYSTEM and administrators), and the token keeps out anything that did not read the user's own folder.
 //
 // Restore list: %LOCALAPPDATA%\fleet-view\sessions.json is rewritten on every change:
-//   { reason, sessions: [{ id, cwd, account, startedAt, busy, interrupted, cols, rows, pendingKey?, pickup?, handoffFrom?, restartBy? }],
+//   { reason, sessions: [{ id, cwd, account, startedAt, busy, interrupted, cols, rows, pendingKey?, pickup?, handoffFrom?, restartBy?, role? }],
 //     ui: { selectedId, wide } }   (pickup / handoffFrom: a handoff's pickup that had no id yet, see Handoffs)
 // busy: working, or waiting on a prompt mid-turn (anything but an open "/" panel). "Quit everything" (the tray)
 // writes it with every running session and freezes it, then ends them all and the host exits. A reboot leaves
@@ -84,13 +84,23 @@
 // restore list with the handoff file, and a host that restores it resumes the picked-up conversation when the
 // handoff names it (next_session), else runs the pickup again.
 //
+// Roles: create({ role: 'chief' }) starts the Chief (../chief/BRIEF.md), the session that oversees the others for the
+// user. 'chief' is the only role; any other value is ignored. A chief's claude may also run fv start, open, hosted,
+// wait and menu without asking (FV_CHIEF below); fv answer, stop, rm (remove) and interrupt are blocked outright
+// (FV_CHIEF_DENIED), since a session with every tool allowed would never ask. One Chief at a time: create() refuses
+// a second (chiefRunning: the running one's id), and anything else that would start one while another runs (open,
+// sendTo, a pickup, a restore) starts it without the role. The role stays with the session: through a re-key, in the
+// restore list (a host that resumes it gives it back), when it is opened again after it ended, sent to another
+// account, and when it hands off (the pickup gets it). A /clear keeps it; a /resume of an older conversation (one
+// begun more than CHIEF_NEW_MS ago) drops it, so an old conversation never becomes the Chief by being resumed there.
+//
 // It logs to %LOCALAPPDATA%\fleet-view\host.log, and exits by itself only after 10 minutes with no session and
 // no client. A changed host.js on disk takes effect when the host next starts; until then it logs that once.
 // `node desktop/restart-host.js` asks it to restart (see Restart).
 //
 // Tests only: FV_HOST_PIPE=\\.\pipe\fleet-view-host-<name> uses another pipe, and its files go in
 // %LOCALAPPDATA%\fleet-view\test-<name> (or FV_HOST_DIR); only with such a pipe does it honour FV_TERM_CMD (a
-// harmless command instead of claude), FV_HOST_SESSIONS_DIR (one more folder of pid files),
+// harmless command in place of `claude`, given the same arguments), FV_HOST_SESSIONS_DIR (one more folder of pid files),
 // FV_HOST_IDLE_MS, FV_HOST_SETTINGS (another settings file), FV_HOST_PROJECTS_DIR (where transcripts are, instead
 // of ~/.claude*/projects), FV_HOST_NUDGE_GIVEUP_MS and FV_HOST_PANEL_CLOSE_MS. desktop/host-test.js uses them.
 'use strict';
@@ -222,6 +232,24 @@ function findTranscript(id, cwd, roots = projectRoots()) {
   }
   return null;
 }
+// when a conversation began: the first timestamp in its transcript's first 8 KB, else the file's birth time; null
+// when it has no transcript yet
+function transcriptStart(id, cwd) {
+  const hit = findTranscript(id, cwd);
+  if (!hit) return null;
+  let fd = null;
+  try {
+    fd = fs.openSync(hit.file, 'r');
+    const buf = Buffer.alloc(8192);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    for (const line of buf.toString('utf8', 0, n).split('\n')) {
+      const m = /^\{.*?"timestamp"\s*:\s*"([^"]+)"/.exec(line);
+      const at = m ? Date.parse(m[1]) : NaN;
+      if (Number.isFinite(at)) return at;
+    }
+  } catch {} finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
+  try { return fs.statSync(hit.file).birthtimeMs || null; } catch { return null; }
+}
 
 // What the resume wrote to a transcript (from `offset`): 'tasks' when a background task stopped or was killed
 // (a user entry that is a <task-notification> with that status), 'interrupted' when a tool call was cut off
@@ -285,7 +313,18 @@ const FV_DIR = path.resolve(__dirname, '..');
 // "--allowedTools=a,b,…" in quotes (the commas split the list; a comma inside parentheses would be kept): as two
 // words the flag would take every word after it as one more tool, a prompt after it too.
 const FV_ALLOWED = ['send', 'status', 'ask', 'read', 'ls', 'teams', 'team', 'transcript'];
-const ALLOW_FV = `"--allowedTools=${FV_ALLOWED.map((c) => `Bash(fv ${c}:*)`).join(',')}"`;
+// the Chief (see Roles) also starts and resumes sessions and watches them. It never answers another session's
+// prompt, stops, removes or interrupts one: those are blocked, the same one-argument form (remove is rm's alias)
+const FV_CHIEF = [...FV_ALLOWED, 'start', 'open', 'hosted', 'wait', 'menu'];
+const FV_CHIEF_DENIED = ['answer', 'stop', 'rm', 'remove', 'interrupt'];
+const toolsArg = (flag, cmds) => `"--${flag}=${cmds.map((c) => `Bash(fv ${c}:*)`).join(',')}"`;
+const allowArg = (cmds) => toolsArg('allowedTools', cmds);
+const ALLOW_FV = allowArg(FV_ALLOWED), ALLOW_CHIEF = `${allowArg(FV_CHIEF)} ${toolsArg('disallowedTools', FV_CHIEF_DENIED)}`;
+// a chief whose claude goes on in a conversation begun longer ago than this resumed an old one: no longer the Chief
+const CHIEF_NEW_MS = 10 * 60 * 1000;
+// a role as create takes it: 'chief', else none
+const roleOf = (v) => (v === 'chief' ? 'chief' : null);
+const allowFor = (role) => (role === 'chief' ? ALLOW_CHIEF : ALLOW_FV);
 
 function childEnv(account, launchKey) {
   const env = {};
@@ -435,16 +474,18 @@ function spawnHelperExecutable(name) {
   }
 }
 
-// opts: { send(event, ...args): to every client, changed(): the set or a status changed, command(id) -> command
-//         line (test override), newCommand (test override), pickupCommand(file) (test override),
+// opts: { send(event, ...args): to every client, changed(): the set or a status changed, program: what runs in
+//         place of `claude`, with the same arguments (test override),
 //         sessionDirs: more folders to read, log(text), settings() -> the settings file's keys,
 //         panelCloseMs / nudgeGiveUpMs (test overrides) }
 function createPtys(opts = {}) {
   const send = opts.send || (() => {});
   const changed = opts.changed || (() => {});
-  const commandFor = opts.command || ((id) => `claude ${ALLOW_FV} --resume ${id}`);
-  const newCommand = opts.newCommand || `claude ${ALLOW_FV}`;
-  const pickupFor = opts.pickupCommand || ((file) => HO.pickupCommand(file).replace(/^claude /, `claude ${ALLOW_FV} `));
+  const program = opts.program || 'claude';
+  // each command line: claude, the fv commands its role may run without asking, then the rest
+  const commandFor = (id, role) => `${program} ${allowFor(role)} --resume ${id}`;
+  const newCommand = (role) => `${program} ${allowFor(role)}`;
+  const pickupFor = (file, role) => HO.pickupCommand(file).replace(/^claude /, () => `${program} ${allowFor(role)} `);
   const log = opts.log || (() => {});
   const dirs = () => sessionDirs(opts.sessionDirs);
   const getSettings = opts.settings || (() => settings());
@@ -462,7 +503,8 @@ function createPtys(opts = {}) {
   //          of the claude this pty started said idle), idleSince (when that idle stretch began; 0 when not idle),
   //          outAt (its last output), inputAt (its last key), line / inPaste (what is typed into the prompt since
   //          the last Enter), slash (a "/" command sent with Enter, until its panel closes: see panelTick),
-  //          nudge (the note due after a restore: see nudgeTick), restartBy (it asked for the host restart) }
+  //          nudge (the note due after a restore: see nudgeTick), restartBy (it asked for the host restart),
+  //          role ('chief' or null: see Roles) }
   const terms = new Map();
   let newSeq = 0;
   let screenLib = null;
@@ -484,6 +526,15 @@ function createPtys(opts = {}) {
   }
 
   const aliveCount = () => [...terms.values()].filter((t) => t.alive).length;
+  // the live Chief other than the session under `key`, if any (see Roles: one at a time)
+  const otherChief = (key) => [...terms.values()].find((t) => t.alive && t.role === 'chief' && String(t.id).toLowerCase() !== String(key).toLowerCase()) || null;
+  // the role a session under `key` starts with: not 'chief' while another Chief runs
+  function soleRole(role, key, what) {
+    const c = role === 'chief' ? otherChief(key) : null;
+    if (!c) return role;
+    log(`chief: ${what} ${key} starts without the role: ${c.id} is the Chief`);
+    return null;
+  }
   const noPty = () => ({ ok: false, message: `No pty module: ${ptyError ? ptyError.message : 'not installed'}` });
 
   // starts `command` in a pty under `key`; extra fields go onto the entry
@@ -514,8 +565,9 @@ function createPtys(opts = {}) {
       id: key, pty: p, pid: p.pid, alive: true, exitCode: null, startedAt: Date.now(), chunks: [], size: 0, pending: '', timer: null, dismissed: false,
       cwd, account: acctId(o.account), cols, rows, isNew: false, created: false, claudePid: null, status: null, known: null,
       interrupted: false, restored: false, launchKey, pickup: null, handoffFrom: null, waitingFor: null, seenIdle: false, idleSince: 0,
-      outAt: 0, inputAt: 0, line: '', inPaste: false, slash: null, nudge: null, restartBy: false, ...extra,
+      outAt: 0, inputAt: 0, line: '', inPaste: false, slash: null, nudge: null, restartBy: false, role: null, ...extra,
     };
+    t.role = roleOf(t.role);
     terms.set(key, t);
     p.onData((data) => {
       if (terms.get(t.id) !== t) return;
@@ -544,7 +596,7 @@ function createPtys(opts = {}) {
   }
 
   // A session handed off: start `claude [--effort <level>] "/pickup <file>"` in its place, under its key, in the request's folder
-  // (else its own) and its account, keeping its output so far. Returns false when it could not start (then the
+  // (else its own) and its account, with its role, keeping its output so far. Returns false when it could not start (then the
   // exit goes out as usual).
   function handoff(t, req) {
     let cwd = t.cwd;
@@ -552,7 +604,7 @@ function createPtys(opts = {}) {
     flush(t);
     const from = req.session || (ID_RE.test(t.id) ? t.id.toLowerCase() : t.handoffFrom);
     const r = startPickup(t.id, req.file, { cwd, account: t.account, cols: t.cols, rows: t.rows },
-      { chunks: t.chunks.slice(), size: t.size, created: t.created, handoffFrom: from });
+      { chunks: t.chunks.slice(), size: t.size, created: t.created, handoffFrom: from, role: t.role });
     log(`handoff: ${t.id} -> ${r.ok ? `pickup of ${path.basename(req.file)} (pid ${r.pid})` : `could not start the pickup: ${r.message}`}`);
     if (!r.ok) return false;
     const n = terms.get(t.id);
@@ -562,14 +614,18 @@ function createPtys(opts = {}) {
     return true;
   }
   // the pickup itself (also what a restore runs for one that never got its id): a new claude, keyed like a
-  // new session (key, or new-<n> when null) until its pid file says which conversation it is
+  // new session (key, or new-<n> when null) until its pid file says which conversation it is. extra.role: the
+  // role of the session it carries on
   function startPickup(key, file, o, extra) {
     if (!loadPty()) return noPty();
     const known = new Set(readPidFiles(dirs()).map((f) => f.pid));
-    return spawnPty(key || `new-${++newSeq}`, pickupFor(file), o || {}, { isNew: true, known, pickup: file, ...(extra || {}) });
+    const k = key || `new-${++newSeq}`;
+    const role = soleRole(roleOf(extra && extra.role), k, 'pickup');
+    return spawnPty(k, pickupFor(file, role), o || {}, { isNew: true, known, pickup: file, ...(extra || {}), role });
   }
 
-  // extra: { interrupted, restored, nudge } when the host resumes it after a shutdown
+  // extra: { interrupted, restored, nudge, role } when the host resumes it after a shutdown. o.role 'chief' opens it
+  // as the Chief; one that ended here keeps the role it had
   function open(o, extra) {
     const { id } = o || {};
     if (typeof id !== 'string' || !ID_RE.test(id)) throw new Error('bad conversation id');
@@ -577,7 +633,8 @@ function createPtys(opts = {}) {
     const old = terms.get(id);
     if (old && old.alive) return { ok: true, message: 'already running', pid: old.pid };
     if (old) terms.delete(id); // ended: start it again
-    const r = spawnPty(id, commandFor(id), o, { ...(extra || {}) });
+    const role = soleRole(roleOf(extra && extra.role) || roleOf(o.role) || (old ? old.role : null), id, 'open');
+    const r = spawnPty(id, commandFor(id, role), o, { ...(extra || {}), role });
     delete r.key;
     return r;
   }
@@ -602,7 +659,8 @@ function createPtys(opts = {}) {
       if (terms.get(id) === old) terms.delete(id);
       if (terms.get(id)?.alive) return { ok: false, message: 'it was started again meanwhile' };
       const note = `The user sent this conversation to account ${account} from Fleet View; the pickup carries on there`;
-      const r = spawnPty(id, `${commandFor(id)} "/handoff ${note}"`, { ...o, account, cwd: o.cwd || old?.cwd || null }, {});
+      const role = soleRole(old ? old.role : null, id, `send to ${account}:`);
+      const r = spawnPty(id, `${commandFor(id, role)} "/handoff ${note}"`, { ...o, account, cwd: o.cwd || old?.cwd || null }, { role });
       log(`send to ${account}: ${id} ${r.ok ? `resumed with /handoff (pid ${r.pid})` : `failed: ${r.message}`}`);
       delete r.key;
       return r;
@@ -618,9 +676,17 @@ function createPtys(opts = {}) {
   // o.model (letters, digits, . - [ ] only) adds --model <m>, and o.effort (a level) --effort <e> in place of the set
   // one: for this session only, where /model and /effort typed in it would save them as the default for every new
   // session. The reply echoes both.
+  // o.role 'chief' starts the Chief (see Roles): the same command with the Chief's allowed fv commands. The reply
+  // echoes role. While another Chief runs it starts nothing: { ok: false, chiefRunning: <its id> }. The check is
+  // here, where nothing else runs between it and the start.
   function create(o) {
     if (!loadPty()) return noPty();
     o = o || {};
+    const running = roleOf(o.role) === 'chief' ? otherChief(null) : null;
+    if (running) {
+      log(`chief: a second Chief was refused: ${running.id} is the Chief`);
+      return { ok: false, chiefRunning: running.id, message: `the Chief is running already (${running.id})` };
+    }
     const fork = typeof o.forkFrom === 'string' && ID_RE.test(o.forkFrom) ? o.forkFrom.toLowerCase() : null;
     const key = `new-${++newSeq}`;
     const flag = o.chrome === true ? ' --chrome' : o.chrome === false ? ' --no-chrome' : '';
@@ -630,12 +696,14 @@ function createPtys(opts = {}) {
     const model = typeof o.model === 'string' && MODEL_RE.test(o.model) ? o.model : null;
     const asked = EFFORT_LEVELS.has(o.effort) ? o.effort : null;
     const effort = asked || (fork ? '' : newEffort(getSettings().newSessionEffort));
-    const cmd = (fork ? `${commandFor(fork)} --fork-session` : newCommand) + (model ? ` --model ${P.isWin ? model : `'${model}'`}` : '') + (effort ? ` --effort ${effort}` : '');
-    const r = spawnPty(key, cmd + flag, o, { isNew: true, created: true, known, forkFrom: fork });
+    const role = roleOf(o.role);
+    const cmd = (fork ? `${commandFor(fork, role)} --fork-session` : newCommand(role)) + (model ? ` --model ${P.isWin ? model : `'${model}'`}` : '') + (effort ? ` --effort ${effort}` : '');
+    const r = spawnPty(key, cmd + flag, o, { isNew: true, created: true, known, forkFrom: fork, role });
     if (r.ok && flag) r.chrome = o.chrome;
     if (r.ok && fork) r.forkFrom = fork;
     if (r.ok && model) r.model = model;
     if (r.ok && asked) r.effort = asked;
+    if (r.ok && role) r.role = role;
     return r;
   }
 
@@ -670,6 +738,12 @@ function createPtys(opts = {}) {
       mine.sort((x, y) => y.updatedAt - x.updatedAt);
       // its claude is on another conversation now (/clear, /resume): the pty follows, unless that one is hosted
       if (t.claudePid && !t.isNew && mine.length && mine[0].sessionId !== t.id.toLowerCase() && !terms.has(mine[0].sessionId)) {
+        // a chief carries on as the Chief in a new conversation (/clear), not in an older one it resumed
+        const began = t.role === 'chief' ? transcriptStart(mine[0].sessionId, t.cwd) : null;
+        if (began !== null && now - began > CHIEF_NEW_MS) {
+          t.role = null;
+          log(`chief: ${t.id} went on in an older conversation (${mine[0].sessionId}), which is not the Chief`);
+        }
         rekey(t, mine[0]);
         continue; // rekey sent the status with the move
       }
@@ -942,7 +1016,7 @@ function createPtys(opts = {}) {
       pending: !!t.isNew && !t.pickup, created: !!t.created, forkFrom: t.forkFrom || null, cwd: t.cwd, handoffFrom: t.handoffFrom || null, pickingUp: !!(t.isNew && t.pickup), account: t.account, status: t.alive ? t.status : null, claudePid: t.claudePid,
       waitingFor: t.alive && t.status === 'waiting' ? t.waitingFor : null, autoContinue: !!(t.alive && t.nudge),
       slashPanel: t.alive && t.slash && t.slash.seen && t.status === 'waiting' && t.waitingFor === 'dialog open' ? t.slash.cmd : null,
-      interrupted: !!(t.alive && t.interrupted), restored: !!t.restored, cols: t.cols, rows: t.rows,
+      interrupted: !!(t.alive && t.interrupted), restored: !!t.restored, role: t.role || null, cols: t.cols, rows: t.rows,
     }));
   }
 
@@ -959,6 +1033,7 @@ function createPtys(opts = {}) {
       interrupted: !!t.interrupted, cols: t.cols, rows: t.rows, ...(t.isNew ? { pendingKey: t.id } : {}),
       ...(t.isNew && t.pickup ? { pickup: t.pickup, handoffFrom: t.handoffFrom || null } : {}),
       ...(t.restartBy ? { restartBy: true } : {}),
+      ...(t.role ? { role: t.role } : {}),
     }));
   }
 
@@ -1042,9 +1117,7 @@ function runHost() {
       else if (e === 'rekey') sendAll({ t: 'ev', e, from: a, id: b });
     },
     changed,
-    command: TEST_CMD ? () => TEST_CMD : undefined,
-    newCommand: TEST_CMD || undefined,
-    pickupCommand: TEST_CMD ? () => TEST_CMD : undefined,
+    program: TEST_CMD || undefined,
     sessionDirs: EXTRA_DIRS,
     log,
     panelCloseMs: testMs('FV_HOST_PANEL_CLOSE_MS'),
@@ -1072,6 +1145,7 @@ function runHost() {
     let n = 0;
     for (const s of list) {
       if (!s || typeof s !== 'object') continue;
+      const role = roleOf(s.role);
       // a pickup that had no id yet: the conversation it started when the handoff names it, else the pickup again
       if (typeof s.pickup === 'string' && (typeof s.id !== 'string' || !ID_RE.test(s.id))) {
         const from = typeof s.handoffFrom === 'string' && ID_RE.test(s.handoffFrom) ? s.handoffFrom.toLowerCase() : null;
@@ -1081,7 +1155,7 @@ function runHost() {
           const file = HO.safeFile(s.pickup);
           let r = { ok: false, message: 'the handoff file is gone' };
           if (file) {
-            try { r = ptys.startPickup(from, file, { cwd: s.cwd, account: acctId(s.account), cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: from }); } catch (e) { r = { ok: false, message: e.message }; }
+            try { r = ptys.startPickup(from, file, { cwd: s.cwd, account: acctId(s.account), cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: from, role }); } catch (e) { r = { ok: false, message: e.message }; }
           }
           log(`restore: pickup of ${s.pickup} ${r.ok ? `started again (pid ${r.pid})` : `failed: ${r.message}`}`);
           if (r.ok) n++;
@@ -1104,9 +1178,9 @@ function runHost() {
       }
       let r;
       try {
-        r = ptys.open({ id, cwd: s.cwd, account: acctId(s.account), cols: s.cols, rows: s.rows }, { interrupted, restored: true, nudge });
+        r = ptys.open({ id, cwd: s.cwd, account: acctId(s.account), cols: s.cols, rows: s.rows }, { interrupted, restored: true, nudge, role });
       } catch (e) { r = { ok: false, message: e.message }; }
-      log(`restore: ${id} ${r.ok ? `resumed (pid ${r.pid})${interrupted ? ', was interrupted' : ''}${nudge ? `, note due (${nudge.kind})` : ''}` : `failed: ${r.message}`}`);
+      log(`restore: ${id} ${r.ok ? `resumed (pid ${r.pid})${role ? `, as the ${role}` : ''}${interrupted ? ', was interrupted' : ''}${nudge ? `, note due (${nudge.kind})` : ''}` : `failed: ${r.message}`}`);
       if (r.ok) n++;
     }
     log(`restore: ${n} of ${list.length} resumed`);
@@ -1206,7 +1280,7 @@ function runHost() {
       switch (msg.op) {
         case 'open': {
           const o = a[0] && typeof a[0] === 'object' ? a[0] : {};
-          return reply(ptys.open({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: acctId(o.account), cols: o.cols, rows: o.rows }));
+          return reply(ptys.open({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: acctId(o.account), cols: o.cols, rows: o.rows, role: roleOf(o.role) }));
         }
         case 'sendTo': {
           const o = a[0] && typeof a[0] === 'object' ? a[0] : {};
@@ -1217,7 +1291,8 @@ function runHost() {
           if (typeof o.cwd !== 'string' || !o.cwd) return reply({ ok: false, message: 'no folder given' });
           return reply(ptys.create({ cwd: o.cwd, account: acctId(o.account), cols: o.cols, rows: o.rows, chrome: typeof o.chrome === 'boolean' ? o.chrome : undefined,
             forkFrom: typeof o.forkFrom === 'string' && ID_RE.test(o.forkFrom) ? o.forkFrom : undefined,
-            model: typeof o.model === 'string' && MODEL_RE.test(o.model) ? o.model : undefined, effort: EFFORT_LEVELS.has(o.effort) ? o.effort : undefined }));
+            model: typeof o.model === 'string' && MODEL_RE.test(o.model) ? o.model : undefined, effort: EFFORT_LEVELS.has(o.effort) ? o.effort : undefined,
+            role: roleOf(o.role) || undefined }));
         }
         case 'write': if (typeof a[0] === 'string' && KEY_RE.test(a[0])) ptys.write(a[0], a[1]); return reply(true);
         case 'resize': if (typeof a[0] === 'string' && KEY_RE.test(a[0])) ptys.resize(a[0], Number(a[1]), Number(a[2])); return reply(true);
@@ -1356,7 +1431,7 @@ function runHost() {
 
 module.exports = {
   createPtys, sessionDirs, readPidFiles, normDir, pipeName, dataDir, hostFile, sessionsFile, logFile, fileHash, readJson,
-  HOST_JS, ID_RE, KEY_RE, NEW_RE, PROTO, ptyName: () => ptyName, ptyError: () => ptyError,
+  HOST_JS, ID_RE, KEY_RE, NEW_RE, PROTO, FV_ALLOWED, FV_CHIEF, FV_CHIEF_DENIED, ptyName: () => ptyName, ptyError: () => ptyError,
 };
 
 // `host.js --selfcheck`: what a restart runs before it ends anything. Getting here means this file and
