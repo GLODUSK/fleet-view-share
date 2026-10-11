@@ -1,5 +1,5 @@
-// sync-run-test.js: sync-run.js starts the two loops and the mover only when all three gates are open, and stops them
-// when one closes. The mover gets the uploader, the materializer, the host and isOpen; the materializer's isOpen is
+// sync-run-test.js: sync-run.js starts the two loops and the mover only when all the gates are open (the mode is not
+// local, set up, signed in, the key, the Claude accounts matching Blackbox's), and stops them when one closes. The mover gets the uploader, the materializer, the host and isOpen; the materializer's isOpen is
 // isOpen or the host's last list; move / moveStatus / cancelMove / owners / device go to the mover, and say so when
 // sync is not running; away.json goes on a gate halt and stays on stop(). A fake sync-api object, fake loops, a fake
 // mover and a fake host; a temp data folder for the key. Run: node scripts/sync-run-test.js
@@ -210,6 +210,49 @@ function fakeMover(args, made) {
       try { r5.move('6f1c2b8e-0d3a-4c5b-9e7f-1a2b3c4d5e6f'); } catch (e) { code = e.code; message = e.message; }
       ok(r5.status().running && code === 'not_running' && /can't move between devices/.test(message) && logs5.some((t) => /boom/.test(t)), 'a mover that can\'t be made: sync runs without it, and move() says why');
       await r5.stop();
+    }
+
+    // ---------- gate 0, the mode, and gate 4, the Claude accounts ----------
+    {
+      const s6 = fakeSync();
+      s6.on = true; s6.signedIn = true;
+      const dir6 = path.join(dir, 'six');
+      await C.saveKey(S.syncDir(dir6), crypto.randomBytes(32));
+      let mode = 'local';
+      let answer = { ok: false, reason: 'sign in Claude A to match Blackbox\'s accounts' };
+      const asked = [];
+      const made6 = [];
+      const r6 = createSyncRunner({
+        sync: s6, dataDir: dir6, checkMs: 1e6, mode: () => mode,
+        accounts: { reconcile: async (a) => { asked.push(a); return answer; } },
+        makeUploader: () => fakeLoop('up', made6), makeMaterializer: () => fakeLoop('down', made6), makeMover: (a) => fakeMover(a, []),
+      });
+      await r6.start();
+      ok(!made6.length && /works locally/.test(r6.status().reason) && !asked.length, 'mode local: nothing runs and the accounts are not even read');
+      mode = null;
+      await r6.check();
+      ok(!made6.length && r6.status().reason === answer.reason, 'accounts not matching: nothing runs, and it says why');
+      ok(asked.length === 1 && asked[0].api === s6 && asked[0].key.length === 32, 'the accounts get the api and the key');
+      answer = { ok: true };
+      await r6.check();
+      ok(made6.length === 2 && r6.status().running, 'accounts matching: sync runs');
+      answer = { ok: false, error: true, reason: 'Blackbox\'s account list could not be read (offline)' };
+      await r6.check();
+      ok(r6.status().running && made6.length === 2, 'a list that could not be read leaves a running sync alone');
+      answer = { ok: false, reason: 'sign in Claude B to match Blackbox\'s accounts' };
+      await r6.check();
+      ok(!r6.status().running && made6.every((l) => l.stopped === 1), 'accounts that stop matching stop sync');
+      answer = { ok: false, error: true, reason: 'offline' };
+      await r6.check();
+      ok(!r6.status().running && made6.length === 2, 'a list that could not be read keeps a stopped sync stopped');
+      answer = { ok: true };
+      mode = 'sync';
+      await r6.check();
+      ok(r6.status().running && made6.length === 4, 'mode sync and matching: runs again');
+      mode = 'local';
+      await r6.check();
+      ok(!r6.status().running && made6[2].stopped === 1 && made6[3].stopped === 1, 'switching to local stops it');
+      await r6.stop();
     }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

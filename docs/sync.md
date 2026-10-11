@@ -28,7 +28,47 @@ download side (S3) and the page's sync card (S5) are built on it. Its test is `n
   the Keychain under account `<name>`, or `<dir>/<name>.json` at `0600`. It returns `{ read, write, clear, stamp }`
   over plain text. The name is 1 to 41 of `[a-z0-9-]`, and `session` is refused because that is the sign-in's own.
 
+## The start screen: work locally, or sync with Blackbox (Henry's machines)
+
+Henry's own checkouts have `private.json` (`{ "syncName": "Blackbox" }`; `scripts/publish-share.js` leaves it out of
+the share repo, so a friend's install never asks and its sync stays off). On them, before the page shows anything, a
+start screen (`web/setup.js`, `sync-setup.js`) asks once: **Work locally** or **Sync with Blackbox**. Sync then goes
+step by step, each one done before the next opens:
+
+1. **Connect**: Blackbox's address and its publishable key, once per machine (`POST /sync/connect`, the same checks
+   as `node sync-api.js setup`; a secret or `service_role` key is refused and the key never comes back to the page).
+2. **Google**: Sign in with Google, on the members list.
+3. **Passphrase**: chosen (twice) on the first machine, the same one on every other.
+4. **Claude accounts**: each letter Blackbox has (A and B, the only ones a conversations row knows) signed in here as
+   the same login. A login that is here under another letter (the C an old bug handed out instead of A) is moved to
+   its letter by itself; a letter holding a login Blackbox does not want there is moved aside to a free letter first,
+   so no login is lost. A missing one has a **Sign in as ...** button (the claude.ai link and a field for its code
+   too, for a browser signed in to another claude.ai account). Claude B's folder (`~/.claude`) is never renamed: when
+   B is in the way the screen says what to do by hand.
+5. **First sync**: what is on Blackbox comes here and what is here goes up; the screen closes by itself when both
+   sides have looked once (**Open now** skips the wait).
+
+**Work locally instead** closes it at any step. The choice is kept in `<dataDir>/sync/mode.json`
+(`{ mode: 'sync' | 'local', done }`); a machine that had sync set up before this existed counts as syncing and is
+not asked. The Sync card switches it later (**Sync with Blackbox** opens the start screen again; **Work locally
+instead** stops sync here) and, while syncing, says whether the Claude accounts match.
+
+**Which login is which letter.** Blackbox keeps the list as one sealed settings row, `accounts`
+(`sync-accounts.js`): `{ v: 1, letters: { A: { id, email }, B: { id, email } } }`, id being the login's account
+uuid. The first machine to sync writes it from its own letters (and, when it has no A, a login it has on C, D, ...);
+later machines only fill a letter it has no login for, never change one. Sync does not run until every letter
+Blackbox has matches here (`sync-run.js` gate 4), so nothing is uploaded or laid down under the wrong account. On a
+Mac the login itself is in the Keychain; after a letter moves, `claude auth status` checks it is still signed in,
+and if not the start screen asks for that sign-in again.
+
+Routes (`sync-setup.js`): `GET /sync/setup`, and on this PC's own page only `POST /sync/mode { mode }`,
+`POST /sync/done`, `POST /sync/connect { url, key }` (private checkouts only) and `POST /sync/accounts/check`.
+`POST /accounts/add` takes `{ letter }` to sign in a given free letter. Tests: `node scripts/sync-setup-test.js`,
+`node scripts/sync-accounts-test.js`, `node scripts/accounts-test.js` (parts 11 to 13), `node scripts/sync-run-test.js`.
+
 ## Turning sync on (Henry's machines)
+
+The start screen above does all of this. By hand:
 
 1. Once per machine, with the project's URL and its **publishable** key (Supabase dashboard, Settings, API keys):
 

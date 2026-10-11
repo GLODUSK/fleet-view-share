@@ -1,17 +1,22 @@
 // sync-run.js: runs conversation sync inside the server. It starts the uploader (sync-up.js), the materializer
-// (sync-down.js) and the mover (sync-move.js, "Continue here") when all three gates are open, and stops them when any
+// (sync-down.js) and the mover (sync-move.js, "Continue here") when all the gates are open, and stops them when any
 // one closes:
+//   0. this machine did not choose to work locally (o.mode(), sync-setup.js: the first-start choice)
 //   1. sync is set up on this PC (<dataDir>/sync/config.json, sync-api.js enabled())
 //   2. someone is signed in, and the server has not said they are off the members list (sync-api.js status())
 //   3. the sync key is on this PC (sync-crypto.js loadKey: the page's Sync card or `node sync-crypto.js passphrase`
 //      saves it)
+//   4. the Claude account letters here are Blackbox's (o.accounts.reconcile, sync-accounts.js: it moves a login to
+//      its letter by itself and says which letters still need a sign-in). Looked at on every check, so a sign-in
+//      done in the page starts sync within a minute (at once when the page asks for a check). While sync runs, a
+//      list that could not be read (the network) does not stop it; a mismatch does.
 // The gates are looked at when sync-api.js reports a sign-in, a sign-out or a key saved from the page (onChange,
 // 'key-saved'), and once a minute (a key saved
 // from a terminal, a config written by `sync-api.js setup`). Off by default: a PC with none of the three runs no loop,
 // sets no timer beyond the minute check and reaches no network.
 //
-//   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, intervalMs, checkMs, makeUploader,
-//                      makeMaterializer, makeMover })
+//   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, intervalMs, checkMs,
+//                      makeUploader, makeMaterializer, makeMover })
 //     -> { start(), stop(), check(), status(), move(id, { force }), moveStatus(id), cancelMove(id), owners(), device() }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
 //   are one (by default each side's own: ~/.claude and ~/.claude-a); roots: () => [repo folders] (the
@@ -56,6 +61,9 @@ function createSyncRunner(o = {}) {
   const makeMover = o.makeMover || ((a) => M.createMover(a));
   const host = o.host && typeof o.host.list === 'function' ? o.host : null;
   const isOpenOpt = typeof o.isOpen === 'function' ? o.isOpen : null;
+  // mode() -> 'local' stops sync here (null / 'sync': the other gates decide); accounts: sync-accounts.js's object
+  const modeOf = typeof o.mode === 'function' ? o.mode : () => null;
+  const accounts = o.accounts && typeof o.accounts.reconcile === 'function' ? o.accounts : null;
 
   let run = null; // { uid, keyId, up, down, mover }
   let why = 'not started'; // why it is not running, for status()
@@ -99,6 +107,9 @@ function createSyncRunner(o = {}) {
   }
   async function checkOnce() {
     if (stopped) return halt('stopped');
+    let mode = null;
+    try { mode = modeOf(); } catch {}
+    if (mode === 'local') return halt('this machine works locally (chosen at the start; the Sync card can switch it)', true);
     if (!sync.enabled()) return halt('sync is not set up on this PC', true);
     const st = await sync.status();
     if (!st.signedIn) return halt('not signed in', true);
@@ -107,6 +118,11 @@ function createSyncRunner(o = {}) {
     const key = await C.loadKey(S.syncDir(dataDir));
     if (!key) return halt('no sync key on this PC (set the passphrase in the Sync card, or node sync-crypto.js passphrase)', true);
     const kid = keyId(key);
+    if (accounts) {
+      const r = await accounts.reconcile({ api: sync, key });
+      // a list that could not be read leaves a running sync alone, and keeps a stopped one stopped
+      if (!r || (!r.ok && !(r.error && run))) return halt((r && r.reason) || 'the Claude accounts could not be checked', true);
+    }
     if (run && run.uid === uid && run.keyId === kid) return;
     if (run) await halt(run.uid !== uid ? 'another account signed in' : 'the sync key changed');
     if (stopped) return;

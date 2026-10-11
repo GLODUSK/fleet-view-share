@@ -16,7 +16,12 @@
 //                        passphrase never leaves it and is cleared from the field at once
 // A remote browser (the phone, another computer) sees the same card read-only: sign-in is done on the PC.
 //
-//   mountSync({ post, isRemote, fixture }) -> { open(), close(), toggle(), isOpen() }
+// On Henry's own machines (GET /sync/setup says private) it also says whether this machine syncs with Blackbox or
+// works locally, and switches it: "Sync with Blackbox" sets the mode and opens the start screen (setup.js, through
+// openSetup), which walks through the steps; "Work locally" stops sync here (POST /sync/mode). While syncing, it says
+// whether the Claude accounts match Blackbox's. With sync not set up, the start screen sets it up (no terminal).
+//
+//   mountSync({ post, isRemote, fixture, openSetup }) -> { open(), close(), toggle(), isOpen() }
 import { esc } from './cards.js';
 import { icon } from './icons.js';
 
@@ -31,9 +36,11 @@ const ago = (iso) => {
   return s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 360) / 10} h ago`;
 };
 
-export function mountSync({ post, isRemote = () => false, fixture = false } = {}) {
+export function mountSync({ post, isRemote = () => false, fixture = false, openSetup = () => {} } = {}) {
   let card = null, timer = null, gen = 0;
   let status = null, activity = null, key = null; // the last answers (null: none yet or no answer)
+  let setup = null; // GET /sync/setup: { private, name, mode, accounts, ... } (Henry's machines only say private)
+  let confirmLocal = false;
   let firstDevice = null; // asked once per card opening, when the key is missing
   let waiting = false; // a sign-in was started from this card
   let confirmOut = false, busy = false;
@@ -48,7 +55,8 @@ export function mountSync({ post, isRemote = () => false, fixture = false } = {}
 
   async function refresh() {
     const my = gen;
-    const [st, act] = await Promise.all([get('/sync/status'), get('/sync/activity')]);
+    const [st, act, su] = await Promise.all([get('/sync/status'), get('/sync/activity'), get('/sync/setup')]);
+    setup = su && su.private ? su : null;
     let k = null;
     if (st && st.configured && st.signedIn && !remote()) {
       k = await get('/sync/passphrase');
@@ -74,6 +82,14 @@ export function mountSync({ post, isRemote = () => false, fixture = false } = {}
     const st = status;
     if (!answered) return '<div class="sy-line sy-dim">Reading…</div>';
     if (!st) return '<div class="sy-line sy-bad">Fleet View did not answer.</div>';
+    if (setup && setup.mode === 'local') {
+      return `<div class="sy-line">This machine works locally: nothing syncs with ${esc(setup.name)}.</div>`
+        + (remote() ? '' : `<div class="sy-btns"><button type="button" data-c="to-sync" class="sy-go"${busy ? ' disabled' : ''}>Sync with ${esc(setup.name)}</button></div>`);
+    }
+    if (!st.configured && setup && !remote()) {
+      return `<div class="sy-line">Sync with ${esc(setup.name)} is not set up on this machine yet.</div>`
+        + `<div class="sy-btns"><button type="button" data-c="setup" class="sy-go">Set it up</button></div>`;
+    }
     if (!st.configured) {
       return `<div class="sy-line">Sync is not set up on this PC${st.problem ? ` (${esc(st.problem)})` : ''}.</div>`
         + (remote() ? '<div class="sy-line sy-dim">It is set up in a terminal on the PC.</div>'
@@ -101,7 +117,24 @@ export function mountSync({ post, isRemote = () => false, fixture = false } = {}
   function activityHtml() {
     const st = status, a = activity;
     if (!st || !st.configured) return '';
-    if (!a) return '<div class="sy-line sy-dim">Whether it runs: no answer.</div>';
+    if (!a) return '<div class="sy-line sy-dim">Whether it runs: no answer.</div>' + modeHtml();
+    return activityLines(a) + modeHtml();
+  }
+  // Henry's machines: whether the Claude accounts match Blackbox's, and the switch to working locally
+  function modeHtml() {
+    if (!setup || setup.mode !== 'sync') return '';
+    const acc = setup.accounts;
+    let html = '';
+    if (acc && acc.ok) html += `<div class="sy-line sy-dim">Claude accounts match ${esc(setup.name)}'s (${(acc.letters || []).map((l) => esc(l.letter)).join(', ')}).</div>`;
+    else if (acc && !remote()) html += `<div class="sy-line sy-warn">Claude accounts: ${esc(acc.reason || 'not checked yet')}.</div><div class="sy-btns"><button type="button" data-c="setup">Fix them</button></div>`;
+    if (remote()) return html;
+    if (confirmLocal) {
+      return `${html}<div class="sy-confirm"><div>Work locally on this machine? Sync stops here; what is on ${esc(setup.name)} stays there.</div>`
+        + `<div class="sy-btns"><button type="button" data-c="do-local" class="sy-danger"${busy ? ' disabled' : ''}>Work locally</button><button type="button" data-c="keep-sync">Keep syncing</button></div></div>`;
+    }
+    return `${html}<div class="sy-btns"><button type="button" data-c="to-local"${busy ? ' disabled' : ''}>Work locally instead</button></div>`;
+  }
+  function activityLines(a) {
     if (!a.running) return `<div class="sy-line"><span class="sy-dot off"></span>Not running: ${esc(a.reason || 'not started')}.</div>`;
     const lines = ['<div class="sy-line"><span class="sy-dot on"></span>Running.</div>'];
     const up = a.up && typeof a.up === 'object' && !a.up.error ? a.up : null;
@@ -191,6 +224,21 @@ export function mountSync({ post, isRemote = () => false, fixture = false } = {}
       const r = await act('/sync/open-signin', {});
       if (r && r.ok) { waiting = true; note = { text: r.message || 'Your browser is opening the Google sign-in.' }; schedule(); }
       else if (r) note = { text: r.message || 'The sign-in did not start.', bad: true };
+    } else if (c === 'setup') { close(); openSetup(); return; }
+    else if (c === 'to-sync') {
+      if (busy) return;
+      const r = await act('/sync/mode', { mode: 'sync' });
+      if (r && r.ok) { close(); openSetup(); return; }
+      if (r) note = { text: r.message || 'It did not switch.', bad: true };
+    } else if (c === 'to-local') { confirmLocal = true; note = null; }
+    else if (c === 'keep-sync') confirmLocal = false;
+    else if (c === 'do-local') {
+      if (busy) return;
+      const r = await act('/sync/mode', { mode: 'local' });
+      confirmLocal = false;
+      if (r && r.ok) note = { text: 'This machine works locally now; sync stopped.' };
+      else if (r) note = { text: r.message || 'It did not switch.', bad: true };
+      await refresh();
     } else if (c === 'signout') { confirmOut = true; note = null; }
     else if (c === 'keep') confirmOut = false;
     else if (c === 'do-out') {
@@ -267,7 +315,11 @@ export function mountSync({ post, isRemote = () => false, fixture = false } = {}
   const escKey = (ev) => { if (ev.key === 'Escape' && card) { ev.stopPropagation(); ev.preventDefault(); close(); } };
 
   // the header button shows only where sync is set up (a friend's install has no config): asked once at start
-  if (!fixture) get('/sync/status').then((st) => { if (st && st.configured) document.body.classList.add('sync-on'); });
+  // and on Henry's own machines (private), where it is how to switch between Blackbox and working locally
+  if (!fixture) {
+    get('/sync/status').then((st) => { if (st && st.configured) document.body.classList.add('sync-on'); });
+    get('/sync/setup').then((su) => { if (su && su.private) document.body.classList.add('sync-on'); });
+  }
 
   return { open, close, isOpen: () => !!card, toggle: () => (card ? close() : open()) };
 }

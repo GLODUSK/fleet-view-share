@@ -1,4 +1,4 @@
-// Updates: Fleet View's folder is a git checkout (the share repo for people it was shared with). Every 30 minutes,
+// Updates: Fleet View's folder is a git checkout (the share repo for people it was shared with). Every 5 minutes,
 // and once a minute after start, it fetches its upstream and says how far behind it is; the page shows an
 // "Update available" pill with what changed (the commit messages), and "Update now" pulls it in:
 //   git pull --ff-only, refused when files were changed here (a desktop/package-lock.json that `npm install`
@@ -17,7 +17,7 @@
 // itself then, so the reply says relaunch: false and hostRestart: false. "Update automatically" still leaves
 // package changes for a click (they end the open sessions for a moment), and that click must say { confirm: true }:
 // without it the reply is { ok: false, confirm: true, busy, message } and the page asks first.
-// With "update automatically" on (update.json in Fleet View's data folder, platform.js dataDir), an update found is put in once no
+// With "update automatically" on (the default; off only when update.json says auto: false; update.json in Fleet View's data folder, platform.js dataDir), an update found is put in once no
 // conversation is working.
 // Versions are numbers (version.js: 1.0.12, the same on every PC for the same code); the short commits stay
 // alongside (current, upstream) for when there is no version.json.
@@ -40,7 +40,7 @@ const VERSION = require('./version.js');
 const P = require('./platform');
 
 const DIR = __dirname;
-const CHECK_MS = 30 * 60e3, FIRST_MS = 60e3, AUTO_EVERY_MS = 60e3;
+const CHECK_MS = 5 * 60e3, FIRST_MS = 60e3, AUTO_EVERY_MS = 60e3;
 const DATA = P.dataDir();
 const PREFS = path.join(DATA, 'update.json');
 const HOST_FILES = /^(?:desktop\/host\.js|handoff\.js)$/;
@@ -63,6 +63,8 @@ let last = null; // the last update put in: { at, from, to, fromVersion, toVersi
 let checking = null, applying = false, ctx = null;
 
 function readPrefs() { try { return JSON.parse(fs.readFileSync(PREFS, 'utf8')) || {}; } catch { return {}; } }
+// on unless switched off: an update goes in by itself once no conversation is working
+const autoOn = () => readPrefs().auto !== false;
 function writePrefs(p) { try { fs.mkdirSync(DATA, { recursive: true }); fs.writeFileSync(PREFS, JSON.stringify(p, null, 2)); } catch {} }
 
 // what changed between HEAD and its upstream: the commit messages, newest first, at most 40 lines. A share commit
@@ -147,7 +149,7 @@ function check() {
 }
 
 const busyNow = () => { try { return ctx ? ctx.busy() : 0; } catch { return 0; } };
-const status = () => ({ ok: true, version: VERSION.current().version, ...state, auto: !!readPrefs().auto, busy: busyNow(), applying, ...(last ? { last } : {}) });
+const status = () => ({ ok: true, version: VERSION.current().version, ...state, auto: autoOn(), busy: busyNow(), applying, ...(last ? { last } : {}) });
 
 // opts.confirm: the user agreed that Fleet View quits and opens again (an update that restartsAll)
 async function apply(opts = {}) {
@@ -226,7 +228,7 @@ function finishInstall(from) {
 
 // once an update is found and nothing is working: put it in (only what needs no install, never over local edits)
 async function autoTick() {
-  if (!readPrefs().auto || applying || !state.behind || state.dirty || state.needsInstall || state.restartsAll || busyNow()) return;
+  if (!autoOn() || applying || !state.behind || state.dirty || state.needsInstall || state.restartsAll || busyNow()) return;
   const r = await apply();
   if (!r.ok && ctx) ctx.log(`update: automatic update not done: ${r.message}`);
   // the desktop window can't be told from here; it asks on its next poll of /update (relaunchWanted). Kept on

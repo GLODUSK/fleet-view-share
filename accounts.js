@@ -4,12 +4,18 @@
 // a folder ~/.claude-<x> with its own .claude.json and .credentials.json. fleet-view.js lists them from the folders,
 // so adding or removing one here is all it takes; nothing else keeps a list.
 //
-//   add({ email })      a new letter (A, then C, D, ...; B again when B has no login), its folder made like B's
-//                       (below), and a sign-in started for it
+//   add({ email, letter }) a new letter (A, then C, D, ...; B again when B has no login; or the free letter asked
+//                       for), its folder made like B's (below), and a sign-in started for it
 //   login(a, { email }) sign that letter in again, to the same login or another ("Switch login"): sessions running
 //                       on it carry on with the new login when claude next reads its credentials
 //   code(a, text)       the code claude.ai shows when the sign-in finished in another browser, typed into it
 //   cancel(a)           stop a sign-in; a letter added for it goes again
+//   relabel(from, to)   the login of letter `from` becomes letter `to` (sync-accounts.js matches the letters to
+//                       Blackbox's): ~/.claude-<from> is renamed ~/.claude-<to> (a link is made again to the same
+//                       folder). Neither may be B (~/.claude is the default login, never renamed), `to` must be free,
+//                       and nothing may run on `from`. { ok, signedIn } where signedIn is `claude auth status` for the
+//                       new letter: on a Mac the login is in the Keychain, and if it did not follow the folder the
+//                       letter needs a sign-in again (its .claude.json still names the account)
 //   remove(a)           sign the letter out: its login and account file are backed up first (BACKUP_DIR), then B is
 //                       signed out (claude auth logout) and any other letter's folder is moved aside
 //                       (~/.claude-x.removed-<time>, or the folder ~/.claude-x links to). Refused while a claude
@@ -62,6 +68,7 @@ function createAccounts(o = {}) {
   const log = o.log || (() => {});
   const changed = o.changed || (() => {});
   const liveOn = o.liveOn || (() => []);
+  const relabeled = o.relabeled || (() => {}); // (from, to) after relabel: what the server keeps by letter follows it
   const claudeCmd = o.claudeCmd || 'claude';
   const jobs = new Map(); // letter -> { status, url, message, email, at, child, fresh, before, out }
 
@@ -111,10 +118,13 @@ function createAccounts(o = {}) {
   }
 
   // ---------- a new letter's folder ----------
+  // only a sign-in still going on holds its letter: a finished one is kept for the page for 3 minutes, and a letter it
+  // gave back (a new letter whose login was another letter's) is free again at once (it handed out C after A once)
+  const signingIn = (x) => { const j = jobs.get(x); return !!j && j.status === 'waiting'; };
+  const freeLetter = (x) => x !== 'B' && LETTERS.includes(x) && !letters().includes(x) && !exists(dirOf(x)) && !signingIn(x);
   function nextLetter() {
-    if (!loginOf('B') && !jobs.has('B')) return 'B';
-    const have = new Set(letters());
-    return [...LETTERS].find((x) => !have.has(x) && !exists(dirOf(x)) && !jobs.has(x)) || null;
+    if (!loginOf('B') && !signingIn('B')) return 'B';
+    return [...LETTERS].find(freeLetter) || null;
   }
   function makeFolder(a) {
     const link = dirOf(a), bHome = dirOf('B');
@@ -244,7 +254,11 @@ function createAccounts(o = {}) {
   function add(b = {}) {
     const email = cleanEmail(b.email);
     if (email === false) return [400, { ok: false, message: 'That is not an email address.' }];
-    const a = nextLetter();
+    const want = typeof b.letter === 'string' && /^[a-z]$/i.test(b.letter) ? b.letter.toUpperCase() : null;
+    if (b.letter != null && !want) return [400, { ok: false, message: 'letter is one letter.' }];
+    if (want && want === 'B' && (loginOf('B') || signingIn('B'))) return [409, { ok: false, message: 'Claude B is signed in already: sign it in again instead.' }];
+    if (want && want !== 'B' && !freeLetter(want)) return [409, { ok: false, message: `Claude ${want} is there already.` }];
+    const a = want || nextLetter();
     if (!a) return [409, { ok: false, message: 'Every letter is taken.' }];
     if (a !== 'B') {
       try { makeFolder(a); } catch (e) { log(`accounts: could not make ${a}: ${e.message}`); return [500, { ok: false, message: `Could not make the folder for Claude ${a}: ${e.message}` }]; }
@@ -277,6 +291,54 @@ function createAccounts(o = {}) {
     if (j.child) treeKill(j.child.pid);
     finish(a, j, false, 'Sign-in stopped.');
     return [200, { ok: true }];
+  }
+  // `claude auth status` for a letter: true / false, or null when it could not tell (claude missing, a timeout)
+  function authStatus(a) {
+    return new Promise((resolve) => {
+      let out = '';
+      let child;
+      try { child = spawn(...claudeLine(`${claudeCmd} auth status`, a, { stdio: ['ignore', 'pipe', 'ignore'] })); } catch { return resolve(null); }
+      const t = setTimeout(() => { try { treeKill(child.pid); } catch {} resolve(null); }, 20e3);
+      if (t.unref) t.unref();
+      child.stdout.on('data', (d) => { out = (out + d).slice(-20000); });
+      child.on('error', () => { clearTimeout(t); resolve(null); });
+      child.on('exit', () => {
+        clearTimeout(t);
+        try { const j = JSON.parse(out); resolve(typeof j.loggedIn === 'boolean' ? j.loggedIn : null); } catch { resolve(null); }
+      });
+    });
+  }
+  async function relabel(from, to) {
+    from = String(from || '').toUpperCase(); to = String(to || '').toUpperCase();
+    if (!/^[A-Z]$/.test(from) || !/^[A-Z]$/.test(to) || from === to) return [400, { ok: false, message: 'Two different letters are needed.' }];
+    if (from === 'B' || to === 'B') return [409, { ok: false, message: 'Claude B is the default login and keeps its letter: sign it in again as the other account instead.' }];
+    if (!letters().includes(from)) return [404, { ok: false, message: `There is no Claude ${from}.` }];
+    if (!freeLetter(to)) return [409, { ok: false, message: `Claude ${to} is there already.` }];
+    if (signingIn(from)) return [409, { ok: false, message: `Claude ${from} is signing in; stop that first.` }];
+    const live = liveOn(from);
+    if (live.length) return [409, { ok: false, live, message: `${live.length === 1 ? '1 session runs' : `${live.length} sessions run`} on Claude ${from}.` }];
+    const l = loginOf(from);
+    const oldDir = dirOf(from), newDir = dirOf(to);
+    try {
+      if (fs.lstatSync(oldDir).isSymbolicLink()) {
+        // a link (a junction on Windows) to a folder elsewhere: the same folder under the new name, then the old link goes
+        const real = fs.realpathSync(oldDir);
+        fs.symlinkSync(real, newDir, 'junction');
+        try { fs.unlinkSync(oldDir); } catch { if (P.isWin) spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'rmdir', oldDir], { windowsHide: true, timeout: 10e3 }); }
+        if (exists(oldDir)) { try { fs.unlinkSync(newDir); } catch {} throw new Error(`could not remove the link ${oldDir}`); }
+      } else fs.renameSync(oldDir, newDir);
+    } catch (e) {
+      log(`accounts: could not move ${from} to ${to}: ${e.message}`);
+      return [500, { ok: false, message: `Could not move Claude ${from} to ${to}: ${e.message}` }];
+    }
+    jobs.delete(from);
+    log(`accounts: ${from} is now ${to}${l && l.email ? ' (' + l.email + ')' : ''}`);
+    relabeled(from, to);
+    changed(from); changed(to);
+    const signedIn = await authStatus(to);
+    if (signedIn === false) log(`accounts: ${to} needs a sign-in again after the move (its login stayed with the old folder)`);
+    return [200, { ok: true, from, to, email: l ? l.email : null, signedIn, message: signedIn === false
+      ? `Claude ${from} is now ${to}; sign it in again${l && l.email ? ` as ${l.email}` : ''}.` : `Claude ${from} is now ${to}.` }];
   }
   function remove(a) {
     if (!letters().includes(a)) return [404, { ok: false, message: `There is no Claude ${a}.` }];
@@ -320,7 +382,7 @@ function createAccounts(o = {}) {
     return [404, { ok: false, message: 'no such thing' }];
   }
 
-  return { view, add, login, code, cancel, remove, route, letters, loginOf, _jobs: jobs };
+  return { view, add, login, code, cancel, remove, relabel, authStatus, route, letters, loginOf, _jobs: jobs };
 }
 
 module.exports = { createAccounts, configDir };

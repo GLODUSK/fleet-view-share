@@ -28,6 +28,7 @@ const dir = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.TEST_HOME, '.
 const file = process.env.CLAUDE_CONFIG_DIR ? path.join(dir, '.claude.json') : path.join(process.env.TEST_HOME, '.claude.json');
 const j = JSON.parse(fs.readFileSync(file, 'utf8'));
 const cmd = process.argv.slice(2).join(' ');
+if (cmd.startsWith('auth status')) { console.log(JSON.stringify({ loggedIn: !!j.oauthAccount && fs.existsSync(path.join(dir, '.credentials.json')) })); process.exit(0); }
 if (cmd.startsWith('auth logout')) { fs.unlinkSync(path.join(dir, '.credentials.json')); delete j.oauthAccount; fs.writeFileSync(file, JSON.stringify(j)); process.exit(0); }
 console.log('Opening browser to sign in...');
 console.log("If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=abc");
@@ -131,6 +132,50 @@ const job = (a) => A.view().jobs[a] || {};
   // 10. what the page sends is checked
   ok(A.route('/accounts/add', { email: 'nope' })[0] === 400, '10a: bad email');
   ok(A.route('/accounts/remove', {})[0] === 400 && A.route('/accounts/remove', { account: 'Q' })[0] === 404, '10b: bad account');
+
+  // 11. a letter asked for (the start screen signs in the letter Blackbox has for a login)
+  const free = () => [...'ACDEFGHIJ'].find((x) => !fs.existsSync(path.join(home, `.claude-${x.toLowerCase()}`)));
+  const d = free();
+  process.env.TEST_EMAIL = 'd@x.com';
+  [code, out] = A.route('/accounts/add', { email: 'd@x.com', letter: d.toLowerCase() });
+  ok(code === 200 && out.account === d, `11a: add gives the letter asked for (${d})`);
+  ok(await until(() => job(d).status === 'done') && (A.loginOf(d) || {}).email === 'd@x.com', '11b: that letter is signed in');
+  ok(A.route('/accounts/add', { letter: d })[0] === 409, '11c: a letter that is there is refused');
+  ok(A.route('/accounts/add', { letter: 'B' })[0] === 409, '11d: B while it is signed in is refused');
+  ok(A.route('/accounts/add', { letter: 'bad' })[0] === 400, '11e: a letter is one letter');
+
+  // 12. relabel: the login of one letter becomes another letter's (sync-accounts.js); B never moves
+  const relabeled = [];
+  const R = createAccounts({ home, backupDir: path.join(tmp, 'backups'), claudeCmd: `node "${fake}"`, liveOn: () => live, relabeled: (f, t) => relabeled.push(`${f}>${t}`) });
+  const dFolder = fs.realpathSync(path.join(home, `.claude-${d.toLowerCase()}`));
+  const to = [...'GHIJKLMN'].find((x) => !fs.existsSync(path.join(home, `.claude-${x.toLowerCase()}`)));
+  let r = await R.relabel(d, to);
+  ok(r[0] === 200 && r[1].signedIn === true, `12a: ${d} -> ${to} is done and still signed in`);
+  ok(!fs.existsSync(path.join(home, `.claude-${d.toLowerCase()}`)) && fs.realpathSync(path.join(home, `.claude-${to.toLowerCase()}`)) === dFolder, '12b: the new name links to the same folder, the old one is gone');
+  ok((R.loginOf(to) || {}).email === 'd@x.com' && !R.letters().includes(d) && relabeled.join() === `${d}>${to}`, '12c: the login is the new letter\'s, and the server is told');
+  ok((await R.relabel('B', 'Q'))[0] === 409 && (await R.relabel(to, 'B'))[0] === 409, '12d: B never moves and nothing becomes B');
+  ok((await R.relabel(to, 'B'.toLowerCase()))[0] === 409, '12e: lower case is the same letter');
+  ok((await R.relabel('Q', 'R'))[0] === 404, '12f: a letter that is not there');
+  const other = R.letters().find((x) => x !== 'B' && x !== to);
+  if (other) ok((await R.relabel(to, other))[0] === 409, '12g: onto a letter that is there');
+  live = [{ id: 'x', name: 'busy' }];
+  ok((await R.relabel(to, 'S'))[0] === 409 && R.letters().includes(to), '12h: not while a session runs on it');
+  live = [];
+  // a plain folder (not a link) is renamed
+  const plain = path.join(home, '.claude-t');
+  fs.mkdirSync(plain);
+  fs.writeFileSync(path.join(plain, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'u-t', emailAddress: 't@x.com' } }));
+  fs.writeFileSync(path.join(plain, '.credentials.json'), '{}');
+  r = await R.relabel('T', 'U');
+  ok(r[0] === 200 && fs.existsSync(path.join(home, '.claude-u', '.claude.json')) && !fs.existsSync(plain), '12i: a plain folder is renamed');
+
+  // 13. a finished sign-in does not hold its letter (it once gave out C after A had just been given back)
+  const next = free();
+  A._jobs.set(next, { status: 'same', at: Date.now(), message: 'x' });
+  process.env.TEST_EMAIL = 'n@x.com';
+  [code, out] = A.route('/accounts/add', { email: 'n@x.com' });
+  ok(code === 200 && out.account === next, `13: add gives ${next}, the letter a finished sign-in had (got ${out.account})`);
+  await until(() => job(out.account).status !== 'waiting');
 
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log(`${passed} passed, ${failed} failed`);

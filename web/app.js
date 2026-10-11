@@ -167,6 +167,7 @@ import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { mountUsage } from './usage.js';
 import { mountSync } from './sync.js';
+import { mountSetup } from './setup.js';
 import { mountPhone } from './phone.js';
 import { mountHousekeeping } from './housekeeping.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults } from './compose.js';
@@ -3415,7 +3416,10 @@ if (!SOLO) usageUi = mountUsage({
 });
 if (state) usageUi?.update(state);
 // ---------- conversation sync: the header's "sync" button opens the Sync card (sync.js; sync-api.js on the server) ----------
-const syncUi = SOLO ? null : mountSync({ post, isRemote: remotePage, fixture: !!FIXTURE });
+const syncUi = SOLO ? null : mountSync({ post, isRemote: remotePage, fixture: !!FIXTURE, openSetup: () => setupUi?.open() });
+// ---------- the start screen: work locally or sync with Blackbox, asked before anything else on Henry's machines (setup.js; sync-setup.js) ----------
+const setupUi = SOLO ? null : mountSetup({ post, isRemote: remotePage, fixture: !!FIXTURE });
+setupUi?.check();
 // ---------- the phone relay: the header's "iPhone" button opens the Pair an iPhone card (phone.js; relay.js on the server) ----------
 const phoneUi = SOLO ? null : mountPhone({ post, isRemote: remotePage, fixture: !!FIXTURE, openSync: () => syncUi?.open() });
 const usagePill = (e) => {

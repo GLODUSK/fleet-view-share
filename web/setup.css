@@ -1,0 +1,65 @@
+/* the start screen (setup.js): work locally or sync with Blackbox, then the steps of sync. Over everything, opaque,
+   until it is done; its top strip drags the window like the header does */
+body.su-open { overflow: hidden; }
+.su-screen {
+  position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center;
+  padding: 48px 16px 24px; overflow-y: auto; background: var(--bg); color: var(--text); font: 14px/1.5 var(--font-ui);
+}
+.su-drag { position: fixed; top: 0; left: 0; right: 0; height: 36px; -webkit-app-region: drag; app-region: drag; }
+.su-card {
+  width: min(560px, 100%); margin: auto; display: flex; flex-direction: column; gap: 16px;
+  background: var(--panel); border: 1px solid var(--glass-edge); border-radius: 16px; padding: 24px;
+}
+.su-title { font: 600 20px/1.3 var(--font-display); }
+.su-sub, .su-dim { color: var(--dim); font-size: 12.5px; }
+.su-steps { display: flex; gap: 6px; flex-wrap: wrap; }
+.su-steps:empty { display: none; }
+.su-step { display: inline-flex; align-items: center; gap: 6px; color: var(--faint); font-size: 12px; padding: 3px 9px 3px 4px;
+  border: 1px solid var(--line); border-radius: 999px; }
+.su-step.now { color: var(--text); border-color: var(--cyan); }
+.su-step.done { color: var(--dim); }
+.su-n { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--hover); font-size: 11px; }
+.su-step.now .su-n { background: var(--cyan); color: var(--bg); }
+.su-step.done .su-n { color: var(--mint); }
+.su-p { overflow-wrap: anywhere; }
+.su-choices { display: grid; gap: 10px; }
+.su-choice {
+  display: flex; flex-direction: column; gap: 4px; text-align: left; cursor: pointer; padding: 14px 16px; border-radius: 12px;
+  background: var(--hover); border: 1px solid var(--glass-edge); color: var(--text); font: inherit;
+}
+.su-choice b { font-size: 15px; }
+.su-choice span { color: var(--dim); font-size: 12.5px; }
+.su-choice:hover { border-color: var(--cyan); background: var(--press); }
+.su-choice:focus-visible, .su-screen button:focus-visible, .su-screen input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.su-form { display: flex; flex-direction: column; gap: 10px; }
+.su-form label { display: flex; flex-direction: column; gap: 4px; color: var(--dim); font-size: 12px; }
+.su-screen input {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; color: var(--text); padding: 8px 10px;
+  font: 13px/1.3 var(--font-mono); min-width: 0;
+}
+.su-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+.su-screen button:not(.su-choice):not(.su-link) {
+  background: var(--hover); border: 1px solid var(--glass-edge); border-radius: 8px; color: var(--text);
+  font: 500 13px/1.2 var(--font-ui); padding: 8px 14px; cursor: pointer;
+}
+.su-screen button.su-go:not(.su-choice):not(.su-link) { background: var(--cyan); border-color: transparent; color: var(--bg); }
+.su-screen button:disabled { opacity: 0.55; cursor: default; }
+.su-link { background: none; border: none; color: var(--dim); font: 12.5px var(--font-ui); cursor: pointer; padding: 0; text-decoration: underline; }
+.su-link:hover { color: var(--text); }
+.su-foot:empty, .su-status:empty { display: none; }
+.su-bad { color: var(--rose); }
+.su-warn { color: var(--gold); }
+.su-ok { color: var(--mint); }
+.su-accts { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.su-acct { display: grid; grid-template-columns: 20px auto 1fr; gap: 4px 8px; align-items: baseline; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 10px; }
+.su-acct > .su-why, .su-acct > .su-btns, .su-acct > .su-code, .su-acct > .su-dim { grid-column: 2 / -1; }
+.su-acct.ok .su-mark { color: var(--mint); }
+.su-acct.bad .su-mark { color: var(--rose); }
+.su-email { color: var(--dim); overflow-wrap: anywhere; min-width: 0; }
+.su-why { font-size: 12.5px; overflow-wrap: anywhere; }
+.su-why a { color: var(--cyan); }
+.su-code { display: flex; gap: 6px; flex-wrap: wrap; }
+.su-code input { flex: 1 1 160px; }
+@media (max-width: 480px) { .su-card { padding: 18px; } .su-screen { padding: 40px 12px 16px; } }
+.su-live .su-btns, .su-form .su-btns { margin-top: 6px; }

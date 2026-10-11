@@ -24,6 +24,8 @@ const HOUSEKEEPING = require(path.join(__dirname, 'housekeeping.js'));
 const SYNC_API = require(path.join(__dirname, 'sync-api.js'));
 const RELAY_JS = require(path.join(__dirname, 'relay.js'));
 const SYNC_RUN = require(path.join(__dirname, 'sync-run.js'));
+const SYNC_ACCOUNTS = require(path.join(__dirname, 'sync-accounts.js'));
+const SYNC_SETUP_JS = require(path.join(__dirname, 'sync-setup.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
@@ -1344,6 +1346,10 @@ const ACCTS = ACCOUNTS.createAccounts({
   log: (t) => logLine(t),
   liveOn: (a) => [...liveProcs.keys()].filter((id) => liveFolder.get(id) === a || liveAccount.get(id) === a).map((id) => ({ id, name: nameNow(id) || id.slice(0, 8) })),
   changed: (a) => { acctListAt = 0; delete weekLeft[a]; weekDue[a] = 0; },
+  // a login moved to another letter (sync-accounts.js): an account turned off stays off under its new letter
+  relabeled: (from, to) => {
+    if (offAccounts.includes(from)) { offAccounts = cleanOffAccounts(offAccounts.map((a) => (a === from ? to : a))) || []; saveSettings(); }
+  },
 });
 
 function ingestMain(s, recs) {
@@ -6054,9 +6060,16 @@ const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, l
 // the materializer finds a synced repo here among the repos the page lists
 // host: the session host (api.js), for "Continue here": its list, and kill to end a conversation moving to another
 // device; isOpen: a live claude has it open (a pid file), so the materializer never writes under it
+// accounts: the Claude account letters must be Blackbox's before anything syncs (sync-accounts.js moves a login to its
+// letter by itself); mode: 'local' (the start screen's "Work locally", sync-setup.js) keeps sync off here
+const ACCOUNT_SYNC = SYNC_ACCOUNTS.createAccountSync({ accounts: ACCTS, log: (t) => logOnce(t, t) });
 const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, log: (t) => logOnce(t, t), roots: () => pageRepos(),
   host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
-  isOpen: (id) => liveProcs.has(String(id).toLowerCase()) });
+  isOpen: (id) => liveProcs.has(String(id).toLowerCase()),
+  mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC });
+// the start screen on Henry's machines (private.json): work locally or sync with Blackbox, then the steps of sync
+const SYNC_SETUP = SYNC_SETUP_JS.createSyncSetup({ dataDir: LOG_DIR, sync: DEMO ? null : SYNC, runner: SYNC_RUNNER, accountSync: ACCOUNT_SYNC,
+  accountsView: () => ACCTS.view(), private: DEMO ? null : undefined, log: (t) => logOnce(t, t) });
 // /sync/move: "Continue here" brings a conversation another device has to this one (sync-run.js move, moveStatus,
 // cancelMove; sync-move.js does the work). This PC's page and approved remote browsers, as /sync/activity, and
 // never a request another site's page sent.
@@ -6161,6 +6174,7 @@ function handleRequest(req, res) {
   if (pathname === '/upload') return FILES.upload(req, res, pageCtx);
   if (pathname === '/update' || pathname.startsWith('/update/')) return UPDATER.handle(req, res, pathname, pageCtx);
   if (pathname === '/housekeeping' || pathname.startsWith('/housekeeping/')) return HK.handle(req, res, pathname, pageCtx);
+  if (SYNC_SETUP.handle(req, res, pathname, pageCtx)) return;
   if (pathname === '/sync/activity' && (req.method === 'GET' || req.method === 'HEAD')) {
     // a remote browser gets the conflicts without their paths on this PC
     const st = SYNC_RUNNER.status();

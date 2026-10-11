@@ -848,7 +848,7 @@ async function cli(argv, io = {}) {
 }
 
 module.exports = {
-  createSync, cli, checkUrl, checkKey, readConfig, configPath, pkceVerifier, pkceChallenge, objectPath, checkRel,
+  createSync, cli, checkUrl, checkKey, readConfig, writeConfig, readSmallJson, configPath, pkceVerifier, pkceChallenge, objectPath, checkRel,
   dpapiStore, keychainStore, fileStore, protectedStore, syncDir, SyncError, SCHEMA, BUCKET,
 };
 
