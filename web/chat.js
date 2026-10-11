@@ -603,14 +603,17 @@ function renderItem(it, c) {
 // A reply that offers options as a task list with every box unticked ("- [ ] …", which CLAUDE.md asks for) gets
 // live boxes and a Launch button: it sends the ticked options with the line that otherwise gets typed by hand.
 // A list with a ticked box is progress, not a choice, and stays as it is. c.picks: key -> { on: Set, sent }
+// An option marked "(recommended)" (CLAUDE.md asks for at least one) shows a Recommended badge on a lit row and
+// starts ticked, so Launch takes the recommendation in one click.
 // The launch line is one line: it opens with the old words, then says how to run, check and ship the picks.
 const LAUNCH_LINE = 'Launch subagents accordingly with model and effort: first check which items touch the same files and run those one after another (the rest in parallel), one subagent per item at its stated model and effort, each in its own worktree; then review every diff yourself, run the checks, and ship.';
 function pickList(el, md, it, c) {
   const boxes = [...md.querySelectorAll('li > input[type="checkbox"]')];
   if (!boxes.length || boxes.some((b) => b.checked)) return;
   const key = String(it.key);
+  const rec = boxes.map((b) => markRecommended(b.parentElement));
   let p = c.picks.get(key);
-  if (!p) c.picks.set(key, p = { on: new Set(), sent: false });
+  if (!p) c.picks.set(key, p = { on: new Set(rec.flatMap((r, n) => (r ? [n] : []))), sent: false });
   boxes.forEach((b, n) => {
     b.disabled = p.sent;
     b.tabIndex = 0;
@@ -622,6 +625,21 @@ function pickList(el, md, it, c) {
   el.insertAdjacentHTML('beforeend', '<div class="cpk"><button type="button" class="btn primary cpk-go" data-launch></button><span class="cpk-n"></span></div>');
   drawPick(el, p);
 }
+// an option's "(recommended)" (any case, in its own text, not in a nested list) becomes a badge and lights its
+// row -> whether it had one
+function markRecommended(li) {
+  const walk = document.createTreeWalker(li, NodeFilter.SHOW_TEXT, { acceptNode: (t) => (t.parentElement.closest('li') === li ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT) });
+  for (let t; (t = walk.nextNode());) {
+    const m = /\s*\(recommended\)/i.exec(t.data);
+    if (!m) continue;
+    const after = t.splitText(m.index);
+    after.data = after.data.slice(m[0].length);
+    after.before(Object.assign(document.createElement('span'), { className: 'cpk-rec', textContent: 'Recommended' }));
+    li.classList.add('rec');
+    return true;
+  }
+  return false;
+}
 function drawPick(el, p) {
   const go = el.querySelector('[data-launch]');
   if (!go) return;
@@ -630,14 +648,17 @@ function drawPick(el, p) {
   go.textContent = p.sent ? 'Launched' : k ? `Launch ${k} selected` : 'Launch selected';
   // the hint stays short; hovering it shows the whole launch line
   const n = el.querySelector('.cpk-n');
-  n.textContent = p.sent ? '' : k ? 'Sends them with the launch instructions' : 'Tick the options you want';
+  const recOnly = k && [...el.querySelectorAll('.chat-md li > input[data-pick]')].every((b) => b.checked === b.parentElement.classList.contains('rec'));
+  n.textContent = p.sent ? '' : recOnly ? 'The recommended ones are ticked' : k ? 'Sends them with the launch instructions' : 'Tick the options you want';
   n.title = !p.sent && k ? LAUNCH_LINE : '';
 }
 // the ticked options, numbered as they stand in the list, then the launch line
 function pickText(el, p) {
   const lis = [...el.querySelectorAll('.chat-md li > input[data-pick]')].map((b) => b.parentElement);
   const lines = [...p.on].sort((a, b) => a - b).map((n) => {
-    const t = (lis[n]?.textContent || '').replace(/\s+/g, ' ').trim();
+    const li = lis[n]?.cloneNode(true);
+    li?.querySelector('.cpk-rec')?.remove(); // the badge is for you, not part of the option
+    const t = (li?.textContent || '').replace(/\s+/g, ' ').trim();
     return `${n + 1}. ${t.length > 400 ? `${t.slice(0, 399)}…` : t}`;
   });
   return `Go with these:\n${lines.join('\n')}\n\n${LAUNCH_LINE}`;
