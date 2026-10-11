@@ -3,8 +3,10 @@ import type { EngineInterface, Register } from 'claude-code'
 // Fleet View's live feed. Fleet View reads each session's state from its log and from Claude Code's
 // sessions/<pid>.json, and has to guess whether a turn is still open: a turn that went quiet for 5 minutes
 // may be a long command or a stuck one (STALLED?). This mod knows. On every turn start and end and every
-// tool call it writes %LOCALAPPDATA%\fleet-view\live\<sessionId>.json, which Fleet View reads with the pid
-// files. The file is the whole state each time, so a missed write is healed by the next one.
+// tool call it writes <Fleet View's folder>/live/<sessionId>.json (feedDir below), which Fleet View reads with the
+// pid files. The file is the whole state each time, so a missed write is healed by the next one.
+// Bump .claude-plugin/plugin.json's version with every change here: each Claude login keeps its own copy of this
+// mod, and Fleet View (feed-mod.js) refreshes those copies only when the version differs.
 
 const VERSION = 1
 
@@ -30,7 +32,26 @@ const whatOf = (e: Record<string, unknown>): string => {
   return ''
 }
 
-let dir: string | null = null
+// Fleet View's folder, as platform.js dataDir() picks it, + live: %LOCALAPPDATA%\fleet-view\live on Windows,
+// ~/Library/Application Support/fleet-view/live on macOS, ${XDG_STATE_HOME:-~/.local/state}/fleet-view/live
+// elsewhere. There is no platform call here: Windows is told by its variables, macOS by its Library folder. null
+// when nothing gives an absolute folder, as a relative one would land in the session's working directory
+const winAbs = (p?: string): p is string => !!p && /^([A-Za-z]:[\\/]|\\\\)/.test(p)
+const trim = (p: string) => p.replace(/[\\/]+$/, '')
+async function feedDir($: EngineInterface): Promise<string | null> {
+  const local = await $.env.get('LOCALAPPDATA')
+  if (winAbs(local)) return `${trim(local)}\\fleet-view\\live`
+  const profile = await $.env.get('USERPROFILE')
+  if (winAbs(profile)) return `${trim(profile)}\\AppData\\Local\\fleet-view\\live`
+  const home = await $.env.get('HOME')
+  if (!home || !home.startsWith('/')) return null
+  const h = trim(home)
+  if (await $.fs.exists(`${h}/Library/Application Support`)) return `${h}/Library/Application Support/fleet-view/live`
+  const state = await $.env.get('XDG_STATE_HOME')
+  return `${state && state.startsWith('/') ? trim(state) : `${h}/.local/state`}/fleet-view/live`
+}
+
+let dir: string | null | undefined // undefined until looked up once; null: nowhere to write
 let chain: Promise<void> = Promise.resolve()
 
 // writes in order, one at a time; a failed write (a full disk, a locked file) never touches the session
@@ -39,13 +60,11 @@ function publish($: EngineInterface) {
   chain = chain.then(async () => {
     if (n !== seq) return // a newer state is queued behind this one: write that instead
     try {
-      if (!dir) {
-        const local = (await $.env.get('LOCALAPPDATA')) || `${(await $.env.get('USERPROFILE')) || ''}\\AppData\\Local`
-        dir = `${local}\\fleet-view\\live`
-      }
+      if (dir === undefined) dir = await feedDir($)
+      if (!dir) return
       const sessionId = await $.session.id()
       const tools = [...running.values()]
-      await $.fs.write(`${dir}\\${sessionId}.json`, JSON.stringify({
+      await $.fs.write(`${dir}${dir.startsWith('/') ? '/' : '\\'}${sessionId}.json`, JSON.stringify({
         v: VERSION, sessionId, loadedAt, at: Date.now(),
         turnOpen, turnAt: turnOpen ? turnAt : null, lastTurn,
         tools: tools.slice(-8),

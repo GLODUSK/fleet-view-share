@@ -31,6 +31,7 @@ const SYNC_SETUP_JS = require(path.join(__dirname, 'sync-setup.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
+const FEED_MOD = require(path.join(__dirname, 'feed-mod.js'));
 
 // ---------- options ----------
 const argv = process.argv.slice(2);
@@ -6801,6 +6802,8 @@ function startWeb() {
     // the phone relay: it opens a socket only once a phone is paired (Supabase: and sync is signed in)
     if (!DEMO) RELAY.start();
     if (!DEMO) SYNC_RUNNER.start();
+    // the fleet-view-feed mod in each Claude login: refreshed when this folder's version differs (feed-mod.js)
+    FEED_MOD.start({ log: logLine, off: DEMO ? 'a demo' : null });
     if (DEMO) {
       demoInit();
       every(1500, 'demo', demoTick);

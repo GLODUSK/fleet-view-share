@@ -236,7 +236,9 @@ main() {
   fi
 
   # ---------- the fleet-view-feed mod: each claude tells Fleet View when a turn starts and ends and what runs ----------
-  # The mod folder is a marketplace read in place, so a git pull updates it; new sessions load the new copy.
+  # The mod folder is a directory marketplace. Claude copies the mod into each login at install and records its
+  # version; a Claude that runs that copy misses a git pull, so where the mod is already installed this updates it
+  # (as Fleet View's server does at each start, feed-mod.js, when the version moves). New sessions load the new one.
   if [ -f "$DIR/mod/.claude-plugin/marketplace.json" ] && command -v claude >/dev/null 2>&1; then
     for login in "$HOME/.claude" "$HOME"/.claude-[a-z]; do
       [ -d "$login" ] || continue
@@ -249,7 +251,10 @@ main() {
         *fleet-view*) ;;
         *) in_login "$cfg" claude plugin marketplace add "$DIR/mod" >/dev/null 2>&1 || true ;;
       esac
-      if in_login "$cfg" claude plugin install fleet-view-feed@fleet-view --scope user >/dev/null 2>&1; then say "Live feed mod installed in ~/$name"
+      # update fails when it is not installed in this login yet: then it is installed
+      in_login "$cfg" claude plugin marketplace update fleet-view >/dev/null 2>&1 || true
+      if in_login "$cfg" claude plugin update fleet-view-feed@fleet-view --scope user >/dev/null 2>&1; then say "Live feed mod up to date in ~/$name"
+      elif in_login "$cfg" claude plugin install fleet-view-feed@fleet-view --scope user >/dev/null 2>&1; then say "Live feed mod installed in ~/$name"
       else warn "Could not install the live feed mod in ~/$name (claude plugin install fleet-view-feed@fleet-view); Fleet View works without it."; fi
     done
   fi

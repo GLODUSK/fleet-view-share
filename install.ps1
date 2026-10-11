@@ -177,7 +177,9 @@ foreach ($login in Get-ClaudeLogins) {
 }
 
 # ---------- the fleet-view-feed mod: each claude tells Fleet View when a turn starts and ends and what runs ----------
-# The mod folder is a marketplace read in place, so a git pull updates it; new sessions load the new copy.
+# The mod folder is a directory marketplace. Claude copies the mod into each login at install and records its
+# version; a Claude that runs that copy misses a git pull, so where the mod is already installed this updates it
+# (as Fleet View's server does at each start, feed-mod.js, when the version moves). New sessions load the new one.
 # claude's own warnings on stderr must not stop this script: PowerShell 5.1 turns a redirected stderr line into an
 # error, which 'Stop' would make fatal
 $mods = Join-Path $dir 'mod'
@@ -190,9 +192,15 @@ if ((Test-Path (Join-Path $mods '.claude-plugin\marketplace.json')) -and (Get-Co
       $env:CLAUDE_CONFIG_DIR = $(if ($cfg -eq '.claude') { $null } else { $login.FullName })
       $known = (& claude plugin marketplace list 2>$null) -join "`n"
       if ($known -notmatch '\bfleet-view\b') { & claude plugin marketplace add $mods *> $null }
-      & claude plugin install fleet-view-feed@fleet-view --scope user *> $null
-      if ($LASTEXITCODE -eq 0) { Say "Live feed mod installed in ~/$cfg" }
-      else { Warn "Could not install the live feed mod in ~/$cfg (claude plugin install fleet-view-feed@fleet-view); Fleet View works without it." }
+      # update fails when it is not installed in this login yet: then it is installed
+      & claude plugin marketplace update fleet-view *> $null
+      & claude plugin update fleet-view-feed@fleet-view --scope user *> $null
+      if ($LASTEXITCODE -eq 0) { Say "Live feed mod up to date in ~/$cfg" }
+      else {
+        & claude plugin install fleet-view-feed@fleet-view --scope user *> $null
+        if ($LASTEXITCODE -eq 0) { Say "Live feed mod installed in ~/$cfg" }
+        else { Warn "Could not install the live feed mod in ~/$cfg (claude plugin install fleet-view-feed@fleet-view); Fleet View works without it." }
+      }
     }
   } finally { $env:CLAUDE_CONFIG_DIR = $prevCfg; $ErrorActionPreference = $prevEap }
 }
