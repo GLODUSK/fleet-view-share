@@ -173,6 +173,8 @@ import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner
 import { forkAt } from './forkat.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects', 'chats'];
+// the views the tabs offer (Henry, 2026-10-11: no Map or Projects tab); the others still open with ?view=
+const TAB_VIEWS = ['cards', 'wall', 'chats'];
 const params = new URLSearchParams(location.search);
 const SOLO = params.get('solo') === 'chats';
 const FIXTURE = params.has('fixture');
@@ -457,7 +459,7 @@ async function poll() {
     if (!settingsLoaded && st.settings) {
       settingsLoaded = true;
       const s = st.settings;
-      if (!SOLO && !params.has('view') && VIEWS.includes(s.view)) local.view = s.view;
+      if (!SOLO && !params.has('view') && TAB_VIEWS.includes(s.view)) local.view = s.view;
       if (s.zoom > 0) local.zoom = s.zoom;
       if (typeof s.query === 'string') local.query = s.query;
       local.repo = typeof s.repo === 'string' ? s.repo : null;
@@ -1744,7 +1746,7 @@ window.fvSelect = fvSelect;
 
 // ---------- views ----------
 function setView(v) {
-  if (SOLO || !VIEWS.includes(v) || v === local.view) return;
+  if (SOLO || !TAB_VIEWS.includes(v) || v === local.view) return;
   projPanel = false;
   saveSettings({ view: v });
   render();
@@ -1816,7 +1818,7 @@ function workspaceItems() {
   const list = all.filter((r) => r.live > 0 || isCurrent(r));
   const total = all.reduce((n, r) => n + (r.live || 0), 0);
   return [
-    { label: 'All workspaces', icon: shownSel().length ? null : 'check', badge: `${total} live`, run: () => pickRepo({ root: null }) },
+    { label: 'All projects', icon: shownSel().length ? null : 'check', badge: `${total} live`, run: () => pickRepo({ root: null }) },
     { sep: true },
     ...(list.length ? list.map((r) => ({ label: r.name, icon: isCurrent(r) ? 'check' : null, badge: `${r.live || 0} live`, run: () => pickRepo(r) }))
       : [{ label: 'No workspace has live conversations', disabled: true }]),
@@ -1827,22 +1829,24 @@ const workspaceMenuItem = () => ({ label: 'Show workspace', icon: 'repo', note: 
 function openWorkspaceList(anchor = null) {
   if (!state) return;
   const r = (anchor || document.querySelector('.tabs')).getBoundingClientRect();
-  openCtxMenu({ x: r.left - 2, y: r.bottom + 4, title: 'Show workspace', items: workspaceItems() });
+  openCtxMenu({ x: r.left - 2, y: r.bottom + 4, title: 'Show project', items: workspaceItems() });
 }
-// the chip right of the tabs while a filter is on: a colour dot per shown workspace (3 at most) and shownTitle();
-// hidden with none on, so the filter never goes unseen
+// the project picker right of the tabs, always there: "All projects" with none picked, else a colour dot per
+// shown workspace (3 at most), shownTitle() and its ✕
 function drawWsChip() {
   const sel = shownSel(), chip = $('ws-chip');
-  chip.hidden = SOLO || !sel.length;
+  chip.hidden = SOLO;
   if (chip.hidden) return;
   const repos = repoList(state);
   const dots = sel.slice(0, 3).map((x) => repos.find((r) => selMatches(x, r))?.color || C.dim);
   const key = `${shownTitle()}|${dots.join()}`;
   if (chip._key === key) return;
   chip._key = key;
+  chip.classList.toggle('all', !sel.length);
+  $('ws-x').hidden = !sel.length;
   chip.querySelector('.ws-dots').innerHTML = dots.map((c) => `<span class="dot" style="background:${esc(c)}"></span>`).join('');
-  chip.querySelector('.ws-t').textContent = shownTitle();
-  $('ws-pick').title = `${sel.length === 1 ? 'only this workspace shows' : 'only these workspaces show'}: click for the list (r)`;
+  chip.querySelector('.ws-t').textContent = sel.length ? shownTitle() : 'All projects';
+  $('ws-pick').title = `${!sel.length ? 'every project shows' : sel.length === 1 ? 'only this project shows' : 'only these projects show'}: click to pick (r)`;
 }
 $('ws-pick').addEventListener('click', (e) => { e.stopPropagation(); openWorkspaceList($('ws-chip')); });
 $('ws-x').addEventListener('click', (e) => { e.stopPropagation(); pickRepo({ root: null }); });
@@ -2123,7 +2127,7 @@ document.addEventListener('keydown', (e) => {
   if ((k === '/' || k === 'Escape') && local.view === 'chats' && ui.keys.chats && ui.keys.chats(e)) { e.preventDefault(); return; }
   // the pop-out window (SOLO) has no other views, header, filter, workspace list, "Since you looked" or mini view
   if (SOLO && ['v', 'Tab', '/', 'r', 'w', 'm', 's', 'i'].includes(k)) return;
-  if (k === 'v' || k === 'Tab') { e.preventDefault(); setView(VIEWS[(VIEWS.indexOf(local.view) + (e.shiftKey && k === 'Tab' ? VIEWS.length - 1 : 1)) % VIEWS.length]); return; }
+  if (k === 'v' || k === 'Tab') { e.preventDefault(); setView(TAB_VIEWS[(Math.max(0, TAB_VIEWS.indexOf(local.view)) + (e.shiftKey && k === 'Tab' ? TAB_VIEWS.length - 1 : 1)) % TAB_VIEWS.length]); return; }
   if (k === 'i') { e.preventDefault(); setView('chats'); return; }
   if (k === '/') { e.preventDefault(); openFilter(); return; }
   if (k === 'r') { e.preventDefault(); openWorkspaceList(); return; }

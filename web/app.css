@@ -95,6 +95,10 @@ button { font: inherit; color: inherit; }
 .ws-pick:hover .ws-t { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--faint); }
 .ws-pick:focus-visible, .ws-x:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .ws-dots { display: inline-flex; gap: 3px; flex: none; }
+.ws-dots:empty { display: none; }
+.ws-chev { flex: none; color: var(--dim); }
+.ws-chip.all .ws-pick { padding-right: 10px; color: var(--dim); }
+.ws-chip.all .ws-pick:hover { color: var(--text); }
 .ws-dots .dot { width: 8px; height: 8px; }
 .ws-t { min-width: 0; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-x {
