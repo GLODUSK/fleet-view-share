@@ -19,7 +19,8 @@
 //       finds the box empty), busy (what it says while submit runs, e.g. "sending…"), allowEmpty (Enter on an
 //       empty box calls submit('') instead: Rename, where empty goes back to Claude Code's own title)
 //       stay (a submenu item): picking it runs it and keeps the menu open; the parent item's refresh() returns
-//       the parent item anew (label, badge, children) to redraw both menus with (toggles: Accounts ▸ ✓ A)
+//       the parent item anew (label, badge, children) to redraw both menus with (toggles: Accounts ▸ ✓ A); in a
+//       drilled-in level the drilled item's refresh() redraws that level (a checklist: Team ▸ Start team ▸)
 //   closeCtxMenu()   ctxMenuOpen()
 //
 // Frosted like the repo menu (same .menu surface and tokens). Keys while it is open: ↑↓ (and Home / End)
@@ -262,8 +263,26 @@ function pickSub(j) {
   if (it.stay) {
     keepUntil = Date.now() + 2500; // the page redraws (cards come and go) and may scroll: not a reason to close
     try { it.run && it.run(); } catch (e) { console.error(e); }
+    // drilled in (Team ▸ Start team ▸ ✓ x): the drilled item's refresh() redraws this level, under its back row
+    const up = subStack[subStack.length - 1];
+    if (up) {
+      const d = up.items[up.sel];
+      const next = d && typeof d.refresh === 'function' ? d.refresh() : null;
+      if (next && Array.isArray(next.children)) {
+        up.items = [...up.items];
+        up.items[up.sel] = next;
+        subItems = [{ label: next.label, icon: 'reply', back: true }, { sep: true }, ...next.children.filter(Boolean)];
+        subSel = j;
+        level = 'sub';
+        const top = subEl.scrollTop;
+        drawSub();
+        subEl.scrollTop = top;
+        scrollSubTo(subSel);
+      }
+      return;
+    }
     const p = items[subOf];
-    if (p && typeof p.refresh === 'function' && !subStack.length) {
+    if (p && typeof p.refresh === 'function') {
       const next = p.refresh();
       if (next && Array.isArray(next.children)) {
         items[subOf] = next;

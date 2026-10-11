@@ -2691,14 +2691,15 @@ function joinWhy(s, t) {
   if (t.members.length >= TEAM_MAX) return `a team has at most ${TEAM_MAX} conversations`;
   return unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
 }
-// a conversation's menu: "Add to team ▸" (one row per team it isn't in), "Lead team ▸" (make it the lead of its
-// own team, or join another team as its lead) and, when it is in one, 'Team "x" ▸' (Message the team, Lead ▸,
-// Leave team, Disband team: a second step asks first)
+// a conversation's menu: one "Team ▸" row (Henry, 2026-10-10: few rows on the right-click, more in sub and
+// sub-submenus) holding "Start team ▸" (tick who joins from its workspace), "Add to team ▸" (one row per team it
+// isn't in), "Lead team ▸" (make it the lead of its own team, or join another team as its lead) and, when it is in
+// one, 'Team "x" ▸' (Message the team, Lead ▸, Leave team, Disband team: a second step asks first)
 function teamItems(s) {
   if (s.pending || s.demo) return [];
   const mine = teamById(s.team), others = (state?.teams || []).filter((t) => t !== mine);
-  const out = [];
   const why = unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
+  const out = [startTeamItem(s, why)];
   if (others.length) {
     out.push(why ? { label: 'Add to team', icon: 'plus', disabled: true, note: why }
       : { label: 'Add to team', icon: 'plus', children: others.map((t) => {
@@ -2730,7 +2731,41 @@ function teamItems(s) {
       { label: 'Disband team', icon: 'close', danger: true, children: [{ label: `Disband "${mine.name}": each is told`, icon: 'close', danger: true, run: () => disbandTeam(mine) }] },
     ] });
   }
-  return out;
+  return [{ label: 'Team', icon: 'merge', note: mine ? `in "${mine.name}"${leadOf(mine) === s.id ? ', leads it' : ''}` : null, children: out }];
+}
+// "Start team ▸": a checklist of the other conversations in its workspace (ticking keeps the menu open), "<it>
+// leads" (on: it gets the order and the others report to it; off: one team of peers), then "Start team" opens the
+// box for the order. The ticks live as long as the menu.
+function startTeamItem(s, why) {
+  const label = 'Start team';
+  if (why) return { label, icon: 'plus', disabled: true, note: why };
+  if (!termApi()) return { label, icon: 'plus', disabled: true, note: noTermNote() };
+  const folder = s.repo && s.repo.root;
+  const repo = s.repo ? s.repo.name || repoName(folder) : null;
+  const cands = folder ? repoSessions(folder).filter((c) => c.id !== s.id && !c.demo) : [];
+  if (!cands.length) return { label, icon: 'plus', disabled: true, note: repo ? `no other conversation in ${repo}` : 'no workspace known for it' };
+  const picked = new Set();
+  let lead = true;
+  const build = () => {
+    const n = picked.size;
+    const rows = [{ label: `${s.name} leads`, icon: lead ? 'check' : null, note: lead ? 'the others report to it' : 'off: they work as peers', stay: true, run: () => { lead = !lead; } }, { sep: true }];
+    for (const c of cands) {
+      const on = picked.has(c.id);
+      const off = unreachable(c) || (isConvId(c.id) ? null : 'not started yet') || (!on && n + 1 >= TEAM_MAX ? `a team has at most ${TEAM_MAX}` : null);
+      const t = teamById(c.team);
+      rows.push({ label: c.name, icon: on ? 'check' : null, disabled: !!off, note: off || (t ? `in "${t.name}": it leaves it` : c.label || c.state || null),
+        stay: true, run: () => { if (on) picked.delete(c.id); else picked.add(c.id); } });
+    }
+    rows.push({ sep: true });
+    const list = [s, ...cands.filter((c) => picked.has(c.id))];
+    rows.push(!n ? { label, icon: 'send', disabled: true, note: 'tick who joins first' }
+      : orderItem(`${label} · ${n + 1}`, list, { team: true, lead: lead ? s : null, icon: 'send', name: (text) => `${repo} · ${firstWords(text, 4, 34)}`,
+        subnote: lead ? `★ ${s.name} leads · ${n} report to it` : `${n + 1} peers`,
+        placeholder: lead ? `${s.name} gets the order and directs ${n === 1 ? list[1].name : `the ${n} others`}; they report to it. The order:`
+          : 'The order for all of them. They become a team of peers and can message each other.' }));
+    return { label, icon: 'plus', badge: n ? `${n + 1}` : null, note: repo ? `from ${repo}` : null, refresh: build, children: rows };
+  };
+  return build();
 }
 // a multi-selection's "Add to team ▸": every selected one that can join, into the team picked
 function addManyItem(list) {
