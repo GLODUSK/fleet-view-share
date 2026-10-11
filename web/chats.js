@@ -1,4 +1,5 @@
-// Chats view: Fleet View as a phone messenger. On the left, one row per contact (chats-model.js): the Chief
+// Bots view (the tab users see as Bots; its id, file, storage keys and ?solo=chats keep the old name "chats"):
+// Fleet View as a phone messenger. On the left, one row per contact (chats-model.js): the Chief
 // pinned on top, then every bot (one row per chain of handoffs) and every team as a group chat, each with its
 // blob mascot (mascot.js), name, time and a one-line preview; on the right, the picked one's chat: a bot's or the
 // Chief's is the same chat pane and chat box as the Projects view (chat.js), a team's is its thread as bubbles with
@@ -13,7 +14,7 @@
 // Narrow (the view itself under 640px wide, measured on the element: the pop-out window can be narrow): the list
 // only; a pick slides the chat over it, with a back arrow.
 // Pop-out (desktop window; every call feature-detected): a button in the list's top bar calls
-// fleetDesktop.popChats(); fleetDesktop.onChatsPopped(cb) says when Chats is in its own window, and this view then
+// fleetDesktop.popChats(); fleetDesktop.onChatsPopped(cb) says when Bots is in its own window, and this view then
 // shows a calm placeholder with "Bring it back" (dockChats) and "Show it" (popChats). The pop-out window's page is
 // this one with ?solo=chats (SOLO): only this view, under a small 36px header that drags the window, with a
 // pin-on-top toggle (setChatsOnTop) and a dock-back button (dockChats); Session and Details there open the
@@ -49,7 +50,7 @@ let seen = (() => { const s = store.get(SEEN_KEY, {}); return s && typeof s === 
 let chains = null; // the model's chain store, made once
 let query = '';
 let open = false; // narrow layout: the chat is over the list
-let popped = false; // Chats is in its own window (main window only)
+let popped = false; // Bots is in its own window (main window only)
 let onTop = !!store.get(TOP_KEY, false);
 let syncedSel = null; // the last ui.selectedId this view followed
 let selLast = null; // the last copy of the picked bot's conversation, kept if it leaves the lists
@@ -144,14 +145,14 @@ function rowHtml(state, c, now) {
   return `<button type="button" class="ch-row${on ? ' on' : ''}${c.needsYou ? ' needs' : ''}${un ? ' unread' : ''}${c.kind === 'chief' && !c.id ? ' ghost' : ''}" role="option" aria-selected="${on}"`
     + ` data-key="${esc(c.key)}"${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''} style="--rc:${esc(colorOf(c))}" title="${esc(c.name || '')}">`
     + `<span class="ch-av">${avatar(state, c, 40)}</span>`
-    + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${esc(c.name || 'chat')}</span>${c.kind === 'team' ? '' : acctTag(c.account)}`
+    + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${esc(c.name || 'bot')}</span>${c.kind === 'team' ? '' : acctTag(c.account)}`
     + `<span class="ch-time">${pin}${esc(when(c.at, now))}</span></span>`
     + `<span class="ch-l2"><span class="ch-prev">${esc(previewOf(c))}</span>${c.needsYou ? '<span class="ch-flag" title="needs you">!</span>' : un ? '<span class="ch-dot" aria-label="unread"></span>' : ''}</span>`
     + `</span></button>`;
 }
 
 function listHtml(state, list, now) {
-  if (!list.length) return query ? `<div class="ch-none">No chats match “${esc(query)}”.</div>` : '<div class="ch-none">No chats yet. Start one with +.</div>';
+  if (!list.length) return query ? `<div class="ch-none">No bots match “${esc(query)}”.</div>` : '<div class="ch-none">No bots yet. Start one with +.</div>';
   return list.map((c) => rowHtml(state, c, now)).join('');
 }
 
@@ -164,19 +165,19 @@ function acctDots(state, contacts) {
 // ---------- build ----------
 function build(el, ui) {
   el.innerHTML = `${SOLO ? `<header class="ch-solo-top"><span class="ch-solo-m">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 20 })}</span>`
-    + `<span class="ch-solo-t">Chats</span><span class="grow"></span>`
+    + `<span class="ch-solo-t">Bots</span><span class="grow"></span>`
     + `<button type="button" class="ch-ib ch-ontop" aria-pressed="false" title="Keep on top">${icon('pin', 14)}</button>`
     + `<button type="button" class="ch-ib ch-dock" title="Back into the main window">${icon('open', 14)}</button></header>` : ''}`
     + `<div class="ch-popped" hidden><div class="ch-popped-in">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 56 })}`
-    + `<div class="ch-popped-t">Chats is open in its own window</div><div class="ch-popped-b">`
+    + `<div class="ch-popped-t">Bots is open in its own window</div><div class="ch-popped-b">`
     + `<button type="button" class="btn" data-dock="1">Bring it back</button><button type="button" class="btn primary" data-show="1">Show it</button></div></div></div>`
-    + `<div class="ch"><nav class="ch-side" aria-label="chats">`
-    + `<div class="ch-top"><span class="ch-title">Chats</span><span class="ch-accts"></span><span class="grow"></span>`
-    + `<button type="button" class="ch-ib ch-pop" title="Open Chats in its own window" hidden>${icon('external', 15)}</button>`
-    + `<button type="button" class="ch-ib ch-new" title="New chat: pick a workspace" aria-haspopup="menu">${icon('plus', 16)}</button></div>`
-    + `<label class="ch-search">${icon('search', 14)}<input type="search" spellcheck="false" autocomplete="off" placeholder="Search chats" aria-label="Search chats"></label>`
-    + `<div class="ch-list" role="listbox" aria-label="chats"></div></nav>`
-    + `<section class="ch-main"><header class="ch-head" hidden><button type="button" class="ch-ib ch-back" title="Back to the chats (Esc)" aria-label="Back">${icon('chevron', 16)}</button>`
+    + `<div class="ch"><nav class="ch-side" aria-label="bots">`
+    + `<div class="ch-top"><span class="ch-title">Bots</span><span class="ch-accts"></span><span class="grow"></span>`
+    + `<button type="button" class="ch-ib ch-pop" title="Open Bots in its own window" hidden>${icon('external', 15)}</button>`
+    + `<button type="button" class="ch-ib ch-new" title="New bot: pick a workspace" aria-haspopup="menu">${icon('plus', 16)}</button></div>`
+    + `<label class="ch-search">${icon('search', 14)}<input type="search" spellcheck="false" autocomplete="off" placeholder="Search bots" aria-label="Search bots"></label>`
+    + `<div class="ch-list" role="listbox" aria-label="bots"></div></nav>`
+    + `<section class="ch-main"><header class="ch-head" hidden><button type="button" class="ch-ib ch-back" title="Back to the bots (Esc)" aria-label="Back">${icon('chevron', 16)}</button>`
     + `<span class="ch-head-av"></span><div class="ch-head-t"></div><div class="ch-head-b"></div></header>`
     + `<div class="ch-chief" hidden></div><div class="ch-chat" hidden></div>`
     + `<div class="ch-team" hidden><div class="ch-thread" role="log" aria-live="polite"></div>`
@@ -309,9 +310,9 @@ function newMenu(el, ui) {
   const repos = (st.repoAnchors || []).filter((r) => r && r.root);
   const x = Math.max(8, b.right - 240), y = b.bottom + 4;
   openCtxMenu({
-    x, y, title: 'New chat', sub: repos.length ? 'pick the workspace it works in' : null,
+    x, y, title: 'New bot', sub: repos.length ? 'pick the workspace it works in' : null,
     items: repos.length ? repos.map((r) => ({ label: r.name || r.root, icon: 'repo', run: () => ui.contextMenu({ kind: 'repo', root: r.root, name: r.name, color: r.color }, x, y) }))
-      : [{ label: 'No workspaces listed', icon: 'repo', disabled: true, note: 'add one from the workspace menu (r)' }],
+      : [{ label: 'No workspaces listed', icon: 'repo', disabled: true, note: 'add one: right-click empty space on the map, Add workspace' }],
   });
 }
 
@@ -570,7 +571,7 @@ function blankHtml(state, c) {
       + `<button type="button" class="btn primary ch-start-btn"${wait ? ' disabled' : ''}>${wait ? 'Starting...' : 'Start the Chief'}</button>`
       + `${chief.err ? `<div class="ch-start-err" role="alert">${esc(chief.err)}</div>` : ''}</div>`;
   }
-  return `<div class="ch-empty">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 72 })}<div class="ch-empty-t">Pick a chat</div>`
+  return `<div class="ch-empty">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 72 })}<div class="ch-empty-t">Pick a bot</div>`
     + `<div class="ch-empty-s">Every bot, team and the Chief are on the left.</div></div>`;
 }
 

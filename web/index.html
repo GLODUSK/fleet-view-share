@@ -21,7 +21,7 @@
   // glass: the desktop window (Electron, ?glass=1) has acrylic behind the page, so the page goes see-through.
   // titlebar: that window has no title bar of its own (titlebar=overlay from desktop/main.js); the header is
   // the drag region and leaves room on the right for the native min / max / close buttons.
-  // solo: the Chats pop-out window (?solo=chats): only the Chats view, under its own small header (chats.css).
+  // solo: the Bots pop-out window (?solo=chats): only the Bots view, under its own small header (chats.css).
   (function () {
     var q = location.search, h = document.documentElement, electron = navigator.userAgent.indexOf('Electron') >= 0;
     if (/[?&]glass=1(&|$)/.test(q) || electron) h.classList.add('glass');
@@ -33,22 +33,18 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand-wrap">
-    <button id="brand" class="brand" type="button" aria-haspopup="listbox" aria-expanded="false" title="pick a workspace (r)">
-      <svg class="brand-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><defs><linearGradient id="bm" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6a2b"/><stop offset=".55" stop-color="#ffc24a"/><stop offset="1" stop-color="#ff4d8d"/></linearGradient></defs><path d="M8 1.2l6.8 6.8L8 14.8 1.2 8z" fill="url(#bm)"/></svg>
-      <span class="brand-text"><span id="brand-name">ALL WORKSPACES</span></span>
-      <svg id="brand-caret" class="brand-caret" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-    </button>
-    <div id="repo-menu" class="menu" role="listbox" hidden></div>
-  </div>
   <nav class="tabs" role="tablist">
     <span class="tab-ind" aria-hidden="true"></span>
     <button type="button" data-view="cards" role="tab">Cards</button>
     <button type="button" data-view="map" role="tab">Map</button>
     <button type="button" data-view="wall" role="tab">Wall</button>
     <button type="button" data-view="projects" role="tab">Projects</button>
-    <button type="button" data-view="chats" role="tab" title="Chats (i)">Chats</button>
+    <button type="button" data-view="chats" role="tab" title="Bots (i)">Bots</button>
   </nav>
+  <div id="ws-chip" class="ws-chip" hidden>
+    <button type="button" id="ws-pick" class="ws-pick" aria-haspopup="menu" title="the workspace shown: click for the list (r)"><span class="ws-dots"></span><span class="ws-t"></span></button>
+    <button type="button" id="ws-x" class="ws-x" title="Show all workspaces" aria-label="Show all workspaces"><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
   <div id="filter-box" class="filter" hidden>
     <span class="filter-k">/</span><input id="filter-input" type="text" spellcheck="false" autocomplete="off" placeholder="filter by name, goal or workspace">
   </div>

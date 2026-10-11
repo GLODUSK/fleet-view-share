@@ -52,27 +52,9 @@ button { font: inherit; color: inherit; }
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 8px var(--side); min-height: var(--top-h);
 }
-.brand-wrap { position: relative; display: flex; align-items: center; gap: 10px; flex: none; }
-.brand {
-  display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px 0 9px; margin-left: -9px;
-  background: none; border: 1px solid transparent; border-radius: var(--radius-sm); cursor: pointer; min-width: 0;
-  transition: background-color 180ms var(--ease), border-color 180ms var(--ease);
-}
-.brand:hover { background: var(--hover); }
-.brand[aria-expanded="true"] { background: var(--press); border-color: var(--glass-edge); }
-.brand:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
-.brand-mark { flex: none; }
-.brand-text {
-  font: 650 14px/1.2 var(--font-display); letter-spacing: 0.07em; white-space: nowrap;
-  background: linear-gradient(90deg, var(--ember), var(--gold) 50%, var(--rose));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-}
-.brand-caret { flex: none; color: var(--dim); transition: transform 220ms var(--ease); }
-.brand[aria-expanded="true"] .brand-caret { transform: rotate(180deg); }
-
-/* view switch: a segmented control whose selection glides between the tabs */
+/* view switch, first in the header: a segmented control whose selection glides between the tabs */
 .tabs {
-  position: relative; display: flex; gap: 2px; padding: 3px; margin-left: 6px; flex: none;
+  position: relative; display: flex; gap: 2px; padding: 3px; flex: none;
   background: rgba(255, 255, 255, 0.035); border: 1px solid var(--glass-edge); border-radius: 10px;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
 }
@@ -98,6 +80,30 @@ button { font: inherit; color: inherit; }
 .tab-ind.glide { transition: transform 220ms var(--ease), width 220ms var(--ease); }
 /* without the sliding piece (no layout yet), the picked tab still shows */
 .tabs:not(.has-ind) button.on { background: rgba(255, 255, 255, 0.10); }
+/* the workspace filter, right of the tabs while one is on: its colour dot(s) and name (a click opens the list), and
+   an × that shows every workspace again. Hidden with no filter on. */
+.ws-chip {
+  display: inline-flex; align-items: center; height: 28px; flex: 0 1 auto; min-width: 0; border-radius: 999px;
+  background: var(--glass-bg); border: 1px solid var(--glass-edge); box-shadow: inset 0 1px 0 var(--glass-highlight);
+  animation: fade-in 180ms var(--ease);
+}
+.ws-pick {
+  display: inline-flex; align-items: center; gap: 7px; height: 100%; min-width: 0; padding: 0 4px 0 11px;
+  background: none; border: 0; border-radius: 999px 0 0 999px; cursor: pointer; color: var(--text);
+  font: 600 12.5px/1 var(--font-ui);
+}
+.ws-pick:hover .ws-t { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--faint); }
+.ws-pick:focus-visible, .ws-x:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+.ws-dots { display: inline-flex; gap: 3px; flex: none; }
+.ws-dots .dot { width: 8px; height: 8px; }
+.ws-t { min-width: 0; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-x {
+  display: inline-grid; place-items: center; flex: none; width: 24px; height: 22px; margin-right: 3px; padding: 0;
+  background: none; border: 0; border-radius: 999px; cursor: pointer; color: var(--dim);
+  transition: color 160ms var(--ease), background-color 160ms var(--ease);
+}
+.ws-x:hover { color: var(--text); background: var(--hover); }
+.ws-x svg { display: block; }
 
 .filter {
   display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; min-width: 120px; flex: 0 1 auto;
@@ -155,9 +161,9 @@ button { font: inherit; color: inherit; }
 @keyframes drop-in { from { opacity: 0; translate: 0 -4px; } }
 @keyframes rise-in { from { opacity: 0; translate: 0 8px; } }
 
-/* repo menu: a frosted dropdown */
+/* the frosted menu surface (the right-click menu and its submenus, ctxmenu.js) */
 .menu {
-  position: absolute; top: calc(100% + 8px); left: -9px; z-index: 30; min-width: 300px; max-width: min(520px, calc(100vw - 32px));
+  z-index: 30; min-width: 300px; max-width: min(520px, calc(100vw - 32px));
   padding: 6px; border-radius: var(--radius);
   background: rgba(15, 18, 28, 0.9); border: 1px solid var(--glass-edge); /* --glass-bg-strong, a little more cover for a list */
   -webkit-backdrop-filter: blur(28px) saturate(1.4); backdrop-filter: blur(28px) saturate(1.4);
@@ -171,92 +177,14 @@ button { font: inherit; color: inherit; }
 }
 .menu-item:hover { background: var(--hover); }
 .menu-item.sel { background: var(--press); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05); }
-.mi-n { color: var(--faint); font: 600 11px/1 var(--font-ui); font-variant-numeric: tabular-nums; text-align: center; }
-.mi-name { overflow-wrap: anywhere; min-width: 0; color: var(--text); }
-.mi-live { color: var(--dim); white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
-.mi-cur { color: var(--mint); font-size: 12px; }
-/* the row's ×: shown on hover, on the row the keys picked, and when it has focus */
-.mi-x {
-  width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: none; cursor: pointer;
-  color: var(--dim); font: 400 15px/1 var(--font-ui); opacity: 0; transition: opacity 120ms var(--ease), background 120ms var(--ease);
-}
-.menu-item:hover .mi-x, .menu-item.sel .mi-x, .mi-x:focus-visible { opacity: 1; }
-.mi-x:hover { background: var(--press); color: var(--text); }
-.mi-x:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
-@media (hover: none) { .mi-x { opacity: 1; } }
-/* ticking rows to remove several at once: the number turns into a box on hover, and stays one while any row is ticked */
-.mi-tick { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; cursor: pointer; }
-.mi-box {
-  display: none; width: 14px; height: 14px; border: 1px solid var(--dim); border-radius: 4px;
-  align-items: center; justify-content: center; color: var(--bg, #0b0e16); font: 700 10px/1 var(--font-ui);
-}
-.menu-item:hover .mi-tick .mi-num, .mi-list.picking .mi-num { display: none; }
-.menu-item:hover .mi-box, .mi-list.picking .mi-box { display: inline-flex; }
-.menu-item.ticked { background: color-mix(in srgb, var(--cyan) 14%, transparent); }
-.menu-item.ticked .mi-box { background: var(--cyan); border-color: var(--cyan); }
-/* dragging a row to reorder the list: the held row dims, a line shows where it goes */
-#repo-menu.dragging { cursor: grabbing; user-select: none; }
-#repo-menu.dragging .menu-item:hover { background: none; }
-.menu-item.mi-held { opacity: 0.45; }
-.menu-item.drop-before { box-shadow: inset 0 2px 0 var(--cyan); }
-.menu-item.drop-after { box-shadow: inset 0 -2px 0 var(--cyan); }
-.mi-bulk { display: flex; gap: 6px; align-items: center; padding: 6px 4px 2px; margin-top: 4px; border-top: 1px solid var(--line); }
-.mi-bulk button {
-  padding: 5px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: none; cursor: pointer;
-  color: var(--dim); font: 12.5px/1.2 var(--font-ui);
-}
-.mi-bulk button:hover { background: var(--hover); color: var(--text); }
-.mi-bulk .mi-bulk-rm { color: var(--red, #ff6b6b); border-color: color-mix(in srgb, var(--red, #ff6b6b) 45%, transparent); }
-.mi-bulk .mi-bulk-rm:hover { background: color-mix(in srgb, var(--red, #ff6b6b) 16%, transparent); color: var(--red, #ff6b6b); }
-.mi-bulk .mi-bulk-all { margin-left: auto; }
-.menu-hint { color: var(--faint); padding: 8px 10px 4px; margin-top: 4px; border-top: 1px solid var(--line); font-size: 11.5px; }
-/* the repo menu's last row, "Add repo", and the three ways it opens into (paste a path, new scratchpad, browse) */
-.menu-item.mi-add { grid-template-columns: 16px 10px minmax(0, 1fr); color: var(--dim); margin-top: 4px; }
-.mi-ways { margin-top: 4px; }
-.menu-item.mi-way { grid-template-columns: 16px 10px minmax(0, 1fr) auto; margin-top: 0; }
-.menu-item.mi-way .mi-name { color: var(--text); }
-.menu-item.mi-way.off { cursor: default; }
-.menu-item.mi-way.off .mi-name, .menu-item.mi-way.off .mi-add-ic { color: var(--faint); }
-.menu-item.mi-way.off:hover { background: none; }
-.mi-key { color: var(--faint); font: 11px var(--font-mono); }
-.menu-item.mi-add .mi-name { color: var(--dim); }
-.mi-add-ic { display: inline-flex; align-items: center; justify-content: center; color: var(--dim); }
-.mi-add-box { padding: 6px 4px 2px; margin-top: 4px; }
-.mi-add-msg { color: var(--faint); font-size: 11.5px; padding: 4px 6px 0; overflow-wrap: anywhere; }
-.mi-add-msg.err, .ctx-in-msg.err { color: var(--red); }
-/* type-to-filter: the typed text above the rows, with a caret and how many rows it leaves */
-.mi-filter {
-  display: grid; grid-template-columns: 16px auto 1fr auto; align-items: center; gap: 0 8px;
-  padding: 6px 10px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--line); color: var(--dim);
-}
-.mi-filter-ic { display: inline-flex; align-items: center; justify-content: center; color: var(--cyan); }
-.mi-filter-q { color: var(--text); font: 13px/1.3 var(--font-mono); overflow-wrap: anywhere; min-width: 0; }
-.mi-filter-q.empty { color: var(--faint); font-family: var(--font-ui); }
-.mi-caret { width: 1.5px; height: 14px; background: var(--cyan); animation: mi-blink 1s steps(1) infinite; }
-.mi-filter-n { grid-column: 4; color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-@keyframes mi-blink { 50% { opacity: 0; } }
-.mi-none { color: var(--faint); padding: 8px 10px; font-size: 12.5px; }
-/* "Removed workspaces (N) ▸" and what it opens into: each removed one with "Add back", then Add back all / Clear list */
-.menu-item.mi-rm-head { grid-template-columns: 16px 10px minmax(0, 1fr) auto; }
-.menu-item.mi-rm-head[aria-expanded="true"] { background: var(--hover); }
-.mi-rm-list { max-height: 240px; overflow-y: auto; padding: 2px 0; }
-.mi-rm-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 4px 6px 4px 36px; border-radius: var(--radius-sm); }
-.mi-rm-row:hover { background: var(--hover); }
-.mi-rm-row .mi-name { color: var(--dim); overflow-wrap: normal; word-break: keep-all; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mi-rm-ago { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
-.mi-rm-back {
-  padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: none; cursor: pointer;
-  color: var(--dim); font: 12px/1.2 var(--font-ui);
-}
-.mi-rm-back:hover { background: var(--press); color: var(--text); }
-@media (prefers-reduced-motion: reduce) { .mi-caret { animation: none; } }
+.ctx-in-msg.err { color: var(--red); }
 /* the right-click path box's message line, with an optional small link on its right */
 .ctx-in-foot { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }
 .ctx-in-foot .ctx-in-msg { flex: 1 1 auto; min-width: 0; }
 .link-btn { flex: none; background: none; border: 0; padding: 4px 6px 0; margin: 0; font: 11.5px/1.45 var(--font-ui); color: var(--dim); cursor: pointer; text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 2px; }
 .link-btn:hover { color: var(--text); text-decoration-color: var(--dim); }
 .ctx-in-foot .link-btn { padding-top: 6px; }
-/* a one-line path box (the repo menu's and the right-click menu's "Paste path") */
+/* a one-line path box (the right-click menu's "Paste path") */
 .path-input {
   display: block; width: 100%; box-sizing: border-box; height: 30px; padding: 0 10px;
   background: rgba(255, 255, 255, 0.045); border: 1px solid var(--glass-edge); border-radius: var(--radius-sm);
@@ -639,8 +567,8 @@ kbd {
 .toast.gone { opacity: 0; translate: 0 4px; }
 
 @media (prefers-reduced-motion: reduce) {
-  .tab-ind.glide, .fin-body, .fin-chev, .brand-caret, .toast, .mi-x { transition: none; }
-  .menu, .filter, .al, .toast, .confirm, .reconnecting, .fin-peek { animation: none; }
+  .tab-ind.glide, .fin-body, .fin-chev, .toast, .ws-x { transition: none; }
+  .menu, .filter, .al, .toast, .confirm, .reconnecting, .fin-peek, .ws-chip { animation: none; }
 }
 
 @media (max-width: 700px) {
@@ -693,20 +621,22 @@ html.titlebar .top {
   height: 44px; min-height: 44px; flex-wrap: nowrap; padding: 0 calc(var(--wco-right, 140px) + 12px) 0 16px;
   -webkit-app-region: drag; app-region: drag; -webkit-user-select: none; user-select: none;
 }
-html.titlebar .top button, html.titlebar .top input, html.titlebar .filter, html.titlebar .menu,
+html.titlebar .top button, html.titlebar .top input, html.titlebar .filter, html.titlebar .menu, html.titlebar .tabs, html.titlebar .ws-chip,
 html.titlebar .top a, html.titlebar .top [data-act], html.titlebar .count { -webkit-app-region: no-drag; app-region: no-drag; }
 html.titlebar .counts, html.titlebar .clock { flex: none; }
 html.titlebar .counts { flex-wrap: nowrap; }
 /* narrower windows (or the filter open): the header keeps one row. app.js steps through fit-1..fit-6 until
-   everything fits: labels go first (each pill keeps its tooltip), then the name tail, the clock, pills, tighter tabs */
+   everything fits: labels go first (each pill keeps its tooltip), then the workspace chip's name tail, the clock, pills,
+   tighter tabs */
 html.titlebar .top.fit-1 .count-k { display: none; }
 html.titlebar .top.fit-1 .count { padding: 0 9px; }
+html.titlebar .top.fit-2 .ws-t { max-width: 110px; }
 html.titlebar .top.fit-3 .clock { display: none; }
 html.titlebar .top.fit-4 .count:nth-child(n+3) { display: none; }
 html.titlebar .top.fit-5 .counts { display: none; }
 html.titlebar .top.fit-6 .tabs button { padding: 0 9px; }
 
-/* ---------- the right-click menu (ctxmenu.js): the repo menu's frosted surface, at the pointer ---------- */
+/* ---------- the right-click menu (ctxmenu.js): the frosted .menu surface, at the pointer ---------- */
 .menu.ctx-menu {
   position: fixed; top: 0; left: 0; z-index: 60; min-width: 230px; max-width: min(360px, calc(100vw - 16px));
   -webkit-app-region: no-drag; app-region: no-drag; outline: none;

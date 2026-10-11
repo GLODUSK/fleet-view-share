@@ -758,10 +758,10 @@ if (!app.requestSingleInstanceLock()) {
     if (!sameBounds(b, next)) mini.setBounds(next);
   }
 
-  // ---------- Chats window ----------
-  // The Chats tab popped out (fleetDesktop.popChats): the same page as the main window's (?solo=chats shows only the
-  // Chats tab), in a normal window of its own: frameless with the native buttons over the right end of the page's
-  // 36 px header (as the main window's 44 px one), acrylic, resizable, its own taskbar button ("Fleet View Chats",
+  // ---------- Chats window (users see it as the Bots window) ----------
+  // The Bots tab popped out (fleetDesktop.popChats): the same page as the main window's (?solo=chats shows only the
+  // Bots tab), in a normal window of its own: frameless with the native buttons over the right end of the page's
+  // 36 px header (as the main window's 44 px one), acrylic, resizable, its own taskbar button ("Fleet View Bots",
   // its own app id so Windows never folds it into the main window's), always on top when chatsOnTop. It does not
   // take turns with the main window the way the mini view does: both stay up. It saves its place (chatsBounds, plus
   // whether it was maximized), is put back on a screen when its old place is on none, and opens again at start-up
@@ -808,7 +808,7 @@ if (!app.requestSingleInstanceLock()) {
     chats = new BrowserWindow({
       ...want,
       minWidth: CHATS_MIN_W, minHeight: CHATS_MIN_H,
-      title: 'Fleet View Chats',
+      title: 'Fleet View Bots',
       resizable: true,
       alwaysOnTop: !!local.chatsOnTop,
       backgroundColor: '#00000000',
@@ -864,7 +864,7 @@ if (!app.requestSingleInstanceLock()) {
       mainUp();
     });
     w.on('closed', () => { if (chats === w) chats = null; chatsChanged(); });
-    w.on('page-title-updated', (e) => e.preventDefault()); // keep "Fleet View Chats"
+    w.on('page-title-updated', (e) => e.preventDefault()); // keep "Fleet View Bots"
     w.loadURL(CHATS_URL);
   }
   // after docking: the main window comes up, unless the mini view is standing in for it
@@ -1071,7 +1071,7 @@ if (!app.requestSingleInstanceLock()) {
     return [
       { label: 'Show Fleet View', click: () => showMain(null) },
       { label: 'Mini view', type: 'checkbox', checked: !!local.miniOpen && miniIsOpen(), click: (item) => (item.checked ? openMini() : hideMini()) },
-      { label: 'Chats window', type: 'checkbox', checked: chatsPopped(), click: (item) => (item.checked ? popChats() : dockChats()) },
+      { label: 'Bots window', type: 'checkbox', checked: chatsPopped(), click: (item) => (item.checked ? popChats() : dockChats()) },
       { type: 'separator' },
       ...(remoteOn ? [{ label: 'Remote access is on (closing hides the window)', enabled: false }, { type: 'separator' }] : []),
       { label: remoteOn || P.isMac ? 'Hide window (Fleet View keeps running)' : 'Close window (sessions keep running)', click: () => { if (win && !win.isDestroyed()) win.close(); else app.quit(); } },

@@ -1,4 +1,4 @@
-/* Chats view (chats.js): a phone messenger. The contact list on the left (mascot, name, time, one-line preview),
+/* Bots view (chats.js; the tab users see as Bots): a phone messenger. The contact list on the left (mascot, name, time, one-line preview),
    the picked chat on the right; under 640px of its own width the list only, the chat sliding over it. The pop-out
    window (html.solo, ?solo=chats) shows only this view under a 36px header that drags the window.
    Steady colours: nothing blinks or pulses; the only motion is the chat sliding in, held still with reduced motion. */
@@ -215,7 +215,7 @@ button.ch-br-row:hover { background: var(--hover); }
 .ch-wnote.bad { color: var(--red); }
 .ch-narrow .ch-chief { padding: 8px 10px 4px; }
 
-/* ---- Chats is in its own window: a calm placeholder in the main window ---- */
+/* ---- Bots is in its own window: a calm placeholder in the main window ---- */
 .ch-popped { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; }
 .ch-popped[hidden] { display: none; }
 .ch-popped-in { display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
@@ -257,7 +257,7 @@ html.glass .ch-solo-top { background: rgba(10, 12, 19, 0.16); }
 .ch-solo-top .ch-ontop.on { color: var(--gold); background: rgba(255, 194, 74, 0.12); }
 .ch-solo-m { display: inline-grid; place-items: center; }
 .ch-solo-t { font: 650 13px/1 var(--font-display); letter-spacing: 0.04em; color: var(--text); }
-html.solo .ch-title { display: none; } /* the window's header says Chats already */
+html.solo .ch-title { display: none; } /* the window's header says Bots already */
 html.solo .ch-top { padding-left: 12px; }
 
 @media (prefers-reduced-motion: reduce) {

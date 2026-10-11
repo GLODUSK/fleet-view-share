@@ -144,12 +144,12 @@ jobs:
             const waiting = new Map();
             ws.onmessage = (e) => { const m = JSON.parse(e.data); if (waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); } };
             const call = (method, params) => new Promise((r) => { const id = ++n; waiting.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
-            const js = "JSON.stringify({ url: location.href, brand: !!document.getElementById('brand'), nodes: document.querySelectorAll('*').length, desktop: typeof window.fleetDesktop })";
+            const js = "JSON.stringify({ url: location.href, tabs: !!document.querySelector('.tabs button'), nodes: document.querySelectorAll('*').length, desktop: typeof window.fleetDesktop })";
             let last = null;
             while (Date.now() < until) {
               const r = await call('Runtime.evaluate', { expression: js, returnByValue: true });
               last = JSON.parse((r.result && r.result.result && r.result.result.value) || '{}');
-              if (last.brand && last.nodes > 50 && last.desktop === 'object') { console.log('page DOM:', JSON.stringify(last)); process.exit(0); }
+              if (last.tabs && last.nodes > 50 && last.desktop === 'object') { console.log('page DOM:', JSON.stringify(last)); process.exit(0); }
               await sleep(1000);
             }
             throw new Error(`the page never showed its DOM: ${JSON.stringify(last)}`);
