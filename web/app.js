@@ -65,6 +65,7 @@
 // sessions and state.feed only their tool calls. In steady order (the default, key s) the conversations that
 // need you come first (ASKING, QUESTION, ERROR, STALLED, then longest waiting) and the rest keep the order they
 // first appeared in; in live order everything is sorted by today's activity. state.allSessions and state.allClashes are unfiltered.
+// The overseers (the Chief and the bots: /state tags them bot) are in no list but allSessions: only Bots shows them.
 // state.settings.zoom is the saved map zoom.
 //
 // Test without the server: ?fixture=1 loads ./fixtures/state-sample.json (timestamps moved to now);
@@ -394,6 +395,7 @@ function rebase(st) {
   for (const e of st.feed || []) e.t = sh(e.t);
   for (const a of st.alerts || []) a.t = sh(a.t);
   for (const t of st.teams || []) { t.at = sh(t.at); for (const m of t.messages || []) m.t = sh(m.t); }
+  for (const b of st.bots || []) b.createdAt = sh(b.createdAt);
   for (const x of st.deploys || []) { x.createdAt = sh(x.createdAt); x.readyAt = sh(x.readyAt); }
   for (const w of st.worktrees || []) w.lastCommit = sh(w.lastCommit);
   for (const h of st.settings?.hidden || []) if (h && typeof h === 'object') h.at = sh(h.at);
@@ -660,7 +662,7 @@ function removeRepos(list) { askRemoveRepos(list, () => dropRepos(list)); }
 function askRemoveRepos(list, go) {
   const items = (list || []).filter((it) => it && it.root);
   const keys = new Set(items.map((it) => normRoot(repoRootOf(it))));
-  const live = (state?.sessions || []).filter((s) => !s.pending && s.state !== 'DONE' && !hidden.has(s.id) && s.repo && keys.has(normRoot(s.repo.root)));
+  const live = (state?.sessions || []).filter((s) => !s.pending && !s.bot && s.state !== 'DONE' && !hidden.has(s.id) && s.repo && keys.has(normRoot(s.repo.root)));
   if (!live.length) { go(); return; }
   const n = live.length, convs = n === 1 ? '1 live conversation' : `${n} live conversations`;
   const reposWith = new Set(live.map((s) => normRoot(s.repo.root))).size;
@@ -1005,7 +1007,7 @@ const CONTINUED_MS = 15 * 60e3;
 // the removed ones the menus offer, optionally only a repo's (folder: a repo root or one of its checkouts)
 function removedFor(folder = null) {
   const keys = folder ? new Set([normRoot(folder), normRoot(repoForFolder(state || {}, folder).root)]) : null;
-  return (state?.removed || []).filter((r) => r && typeof r.id === 'string' && hidden.has(r.id) && !continued.has(r.id) && !forgotten.has(r.id)
+  return (state?.removed || []).filter((r) => r && typeof r.id === 'string' && !r.bot && hidden.has(r.id) && !continued.has(r.id) && !forgotten.has(r.id)
     && (!keys || (r.repo && keys.has(normRoot(r.repo.root)))));
 }
 const removedAgo = (ms) => (ms < 60e3 ? 'just now' : ms < 3600e3 ? `${Math.round(ms / 60e3)}m ago` : ms < 48 * 3600e3 ? `${Math.round(ms / 3600e3)}h ago` : `${Math.round(ms / 86400e3)}d ago`);
@@ -1151,9 +1153,11 @@ const pasteNames = new Map();
 function pendingSessions(st) {
   const listed = new Set((st.sessions || []).map((s) => s.id));
   const out = [];
+  // an overseer's (its role, or the pickup of one's handoff) is never a stand-in: it waits for /state in the Bots tab
+  const over = new Set((st.sessions || []).filter((s) => s.bot).map((s) => s.id));
   for (const h of hosts.values()) {
     // started here, or the pickup of a handoff (re-keyed from the conversation it took over: the panel follows it)
-    if (!(h.created || h.handoffFrom) || !h.alive || listed.has(h.id) || !h.cwd) continue;
+    if (!(h.created || h.handoffFrom) || !h.alive || listed.has(h.id) || !h.cwd || h.role || over.has(h.handoffFrom)) continue;
     const color = acctColor(h.account);
     out.push({
       id: h.id, pending: true, name: pasteNames.get(h.id)?.name || (h.forkFrom ? 'forked session' : h.handoffFrom && !h.created ? 'picked-up session' : 'new session'), account: h.account, state: 'NEW', label: 'NEW SESSION', stateColor: color, hue: color,
@@ -1200,7 +1204,10 @@ function handoffView(all) {
 
 function derive(st) {
   const q = queryRe();
-  const all = st.sessions || [];
+  // the overseers (the Chief and the bots: /state tags them bot) are the Bots tab's alone: out of every list the map,
+  // cards, wall, Projects, the strip and the counts read; allSessions keeps them, so their chats and panels open
+  const over = (st.sessions || []).filter((s) => s && s.bot);
+  const all = (st.sessions || []).filter((s) => !(s && s.bot));
   const cont = continuedSessions(st);
   const contIds = new Set(cont.map((s) => s.id));
   // conversations in a removed repo are out of every view, like the repo
@@ -1228,12 +1235,12 @@ function derive(st) {
   // (its successor's "picked up from" link still opens it)
   // (one still handing off is on the board as its stand-in, not in the strip)
   const replaced = new Set(all.filter((s) => (s.state === 'DONE' && s.handoff && s.handoff.next) || ho.stand.has(s.id)).map((s) => s.id));
-  const finished = (st.finished || []).filter((f) => f && !replaced.has(f.id) && !(hidden.has(f.id) && all.some((s) => s.id === f.id && isHidden(s))) && !offRepo(f));
+  const finished = (st.finished || []).filter((f) => f && !f.bot && !replaced.has(f.id) && !(hidden.has(f.id) && all.some((s) => s.id === f.id && isHidden(s))) && !offRepo(f));
   // the map shows the strip's conversations too, so removing one from either takes it off both
   const finIds = new Set(finishedRows(finished).map((f) => f.id));
   return {
     ...st, settings: { ...(st.settings || {}), ...local }, sessions: shown,
-    allSessions: all.filter((s) => !contIds.has(s.id)).concat(cont, pending),
+    allSessions: all.filter((s) => !contIds.has(s.id)).concat(cont, pending, over),
     pending: pending.filter((s) => inRepo(s.repo)), clashes, allClashes: st.clashes || [], feed, filterNote,
     // handoffs in the last few minutes: old id -> its pickup's id (the views' hand-over motion)
     handoffPairs: ho.pairs,
@@ -2156,7 +2163,7 @@ function deleteKey(e) {
   if (p && p.kind === 'repo' && p.root) { removeRepo({ root: p.root, name: p.name }); return true; }
   const id = list.length === 1 ? list[0].id : ui.selectedId;
   const s = id && view?.allSessions.find((x) => x.id === id);
-  if (!s) return false;
+  if (!s || s.bot) return false; // an overseer goes from its own menu in Bots, never by a key
   const st = isHosted(id) ? hostStatus(id) : null;
   const busy = isHosted(id) && (st ? st === 'busy' : s.state === 'WORKING' || s.state === 'AGENTS');
   if (busy) askConfirm(`<b>${esc(s.name)}</b>: ${BUSY_Q}`, 'Remove anyway', () => removeFromMenu(id));
@@ -2698,7 +2705,7 @@ function waitingOrderItem(s) {
 function repoSessions(folder) {
   const st = state || {};
   const k = normRoot(repoForFolder(st, folder).root || folder);
-  const inIt = (s) => s.repo && normRoot(s.repo.root) === k && !isHidden(s) && !handedOff(s);
+  const inIt = (s) => s.repo && normRoot(s.repo.root) === k && !s.bot && !isHidden(s) && !handedOff(s);
   const listed = (st.sessions || []).filter(inIt);
   return [...listed.filter((s) => s.state !== 'DONE'), ...listed.filter((s) => s.state === 'DONE'), ...pendingSessions(st).filter(inIt)];
 }
@@ -3337,7 +3344,7 @@ function exitReplay() {
 // the replay state with the shell's filters (workspace filter, / filter), shaped like derive()'s output
 function replayView(rs) {
   const q = queryRe();
-  const all = (rs.sessions || []).filter((s) => s && inRepo(s.repo));
+  const all = (rs.sessions || []).filter((s) => s && !s.bot && inRepo(s.repo)); // overseers: never on the map
   const shown = all.filter((s) => s.state !== 'DONE' && (!q || q.test(`${s.name} ${s.goal || ''} ${s.repo?.name || ''} ${s.repo?.root || ''} ${s.branch || ''}`)));
   const ids = new Set(all.map((s) => s.id));
   const shownIds = new Set(shown.map((s) => s.id));

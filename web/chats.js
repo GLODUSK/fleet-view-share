@@ -1,15 +1,25 @@
 // Bots view (the tab users see as Bots; its id, file, storage keys and ?solo=chats keep the old name "chats"):
-// Fleet View as a phone messenger. On the left, one row per contact (chats-model.js): the Chief
-// pinned on top, then every bot (one row per chain of handoffs) and every team as a group chat, each with its
-// blob mascot (mascot.js), name, time and a one-line preview; on the right, the picked one's chat: a bot's or the
+// Fleet View as a phone messenger for the overseers only: the Chief and Henry's bots (bots.js), never a conversation
+// of the map's. On the left, one row per contact (chats-model.js): the Chief pinned on top, then every bot (one row
+// however many conversations it went through) and every team of overseers as a group chat, each with its blob
+// mascot (mascot.js), name, time and a one-line preview; on the right, the picked one's chat: a running bot's or the
 // Chief's is the same chat pane and chat box as the Projects view (chat.js), a team's is its thread as bubbles with
 // a box that sends to every member the way the team menu's "Message the team" does (ui.messageTeam in app.js).
 //
+// Bots: "+" opens the New bot form in the chat side (name, what it does, account, model, effort; the Chief's defaults),
+// which POSTs /bots: the server makes its folder ~/Bots/<slug> with its CLAUDE.md and starts it, and the new row is
+// picked. A bot that is not running (state.bots live false) shows Start in its header, its last chat read only (or,
+// never started, a card with its instructions and a Start button) and a box of its own: what you type there starts
+// it (POST /bots/:id/start: its running conversation, else its last one resumed, else a new one), and goes in once
+// its session is up (handto.js hands it to that conversation's chat box, which sends it). Right-click a bot: Start,
+// Rename and Edit instructions (POST /bots/:id), Remove bot (asks first; POST /bots/:id/remove). With no bot yet, the
+// list says what bots are for, with a New bot button.
+//
 // Built once and patched on each render; the list's HTML is rewritten only when what it shows changed. The pick
 // (a contact key) is kept in this window's storage (fv.chats.sel; the pop-out window keeps its own), and when each
-// contact was last opened in fv.chats.seen (the unread dots; shared by both windows). A pick made in another view
-// (ui.selectedId) carries over to the contact that holds it. Keys: ↑↓ (or j/k) move, Enter puts the cursor in
-// the chat box, / the search box, Esc goes back to the list in the narrow layout.
+// contact was last opened in fv.chats.seen (the unread dots; shared by both windows). Picking a contact clears the
+// shell's pick (ui.selectedId): an overseer is no conversation of the other views'. Keys: ↑↓ (or j/k) move, Enter
+// puts the cursor in the chat box, / the search box, Esc goes back to the list in the narrow layout.
 //
 // Narrow (the view itself under 640px wide, measured on the element: the pop-out window can be narrow): the list
 // only; a pick slides the chat over it, with a back arrow.
@@ -24,13 +34,16 @@
 // /api/chief/start). Once there is one, its pane is a bot's chat with a strip above the thread: the briefing card
 // (GET /chief/briefing when the pane opens and at most every 60 s while it shows; free, it sends the Chief nothing)
 // and the Watch mode switch (POST /settings { chief: { watch } }). With ?fixture=1 nothing is posted: Start fakes
-// a Chief from a fixture conversation and the briefing is built here from the fixture sessions.
+// a Chief from a fixture conversation and the briefing is built here from the fixture sessions; a bot made with the
+// form is kept in the page, and Start, Rename, Edit instructions and Remove bot only record their POSTs.
 import { C, esc, setHTML, badge, acctTag, acctColor, isAcct, repoChip } from './cards.js';
 import { icon } from './icons.js';
 import { renderChatPane } from './chat.js';
-import { onRekey } from './term.js';
+import { onRekey, hosts, termApi } from './term.js';
 import { openCtxMenu } from './ctxmenu.js';
 import { mascotSVG, mascotState } from './mascot.js';
+import { MODEL_IDS, EFFORTS, modelLabel } from './compose.js';
+import { handToChat } from './handto.js';
 import { buildContacts, sortContacts, teamThread, createChainStore, unread } from './chats-model.js';
 
 export const SOLO = new URLSearchParams(location.search).get('solo') === 'chats';
@@ -68,6 +81,16 @@ const chief = {
   watchSet: null, watchAt: 0, watchErr: '', // the switch as just flipped, until /state agrees
   brief: null, briefAt: 0, briefBusy: false, briefOn: false, more: false,
 };
+const BOT_WAIT = 90000; // a start with a message: how long the message waits for the bot's session to be up
+const MADE_MS = 15000; // a bot just made shows from POST /bots's answer until /state lists it, at most this long
+const DEF = { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium' }; // a new bot's: the Chief's (chief.js DEFAULTS)
+// bot id -> what this page is doing with it: { starting (its POST), wait ({ text, id, at }: a message waiting for it to
+// be up), err, note, draft (its box), restore (the draft goes back in the box) }
+const botUi = new Map();
+const bu = (id) => { let u = botUi.get(id); if (!u) botUi.set(id, (u = { starting: false, wait: null, err: '', note: '', draft: '', restore: false })); return u; };
+let form = null; // the New bot form while it shows: { busy, err, fresh }
+const made = new Map(); // bot id -> { bot, at }: made here, until /state lists it (?fixture=1: for good)
+const botOf = (state, id) => (state.bots || []).find((b) => b && b.id === id) || null;
 
 onRekey((oldKey, id) => {
   if (selKey === oldKey) { selKey = id; store.set(SEL_KEY, id); }
@@ -129,6 +152,8 @@ const previewOf = (c) => {
   const p = typeof c.preview === 'string' ? c.preview : '';
   if (c.kind === 'chief') return c.id ? p || 'Ready' : chief.starting || Date.now() - chief.startedAt < START_WAIT ? 'Starting...' : p || 'Not started yet';
   if (c.kind === 'team' && !p) return 'Group chat';
+  const u = c.botId ? botUi.get(c.botId) : null;
+  if (u && (u.starting || u.wait)) return 'Starting...';
   return p;
 };
 
@@ -142,8 +167,8 @@ function rowHtml(state, c, now) {
   const on = c.key === selKey;
   const un = !on && unread(c, seen);
   const pin = c.pinned ? `<span class="ch-pin" title="pinned">${icon('pin', 11)}</span>` : '';
-  return `<button type="button" class="ch-row${on ? ' on' : ''}${c.needsYou ? ' needs' : ''}${un ? ' unread' : ''}${c.kind === 'chief' && !c.id ? ' ghost' : ''}" role="option" aria-selected="${on}"`
-    + ` data-key="${esc(c.key)}"${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''} style="--rc:${esc(colorOf(c))}" title="${esc(c.name || '')}">`
+  return `<button type="button" class="ch-row${on ? ' on' : ''}${c.needsYou ? ' needs' : ''}${un ? ' unread' : ''}${c.kind !== 'team' && !c.id ? ' ghost' : ''}" role="option" aria-selected="${on}"`
+    + ` data-key="${esc(c.key)}"${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''}${c.botId ? ` data-bot="${esc(c.botId)}"` : ''} style="--rc:${esc(colorOf(c))}" title="${esc(c.name || '')}">`
     + `<span class="ch-av">${avatar(state, c, 40)}</span>`
     + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${esc(c.name || 'bot')}</span>${c.kind === 'team' ? '' : acctTag(c.account)}`
     + `<span class="ch-time">${pin}${esc(when(c.at, now))}</span></span>`
@@ -151,9 +176,13 @@ function rowHtml(state, c, now) {
     + `</span></button>`;
 }
 
-function listHtml(state, list, now) {
-  if (!list.length) return query ? `<div class="ch-none">No bots match “${esc(query)}”.</div>` : '<div class="ch-none">No bots yet. Start one with +.</div>';
-  return list.map((c) => rowHtml(state, c, now)).join('');
+// with no bot yet (the Chief aside): what bots are for, and the New bot button
+const BOTS_FOR = 'Bots are overseers you give standing tasks, away from the map.';
+const newBotBtn = () => `<button type="button" class="btn primary ch-newbot" data-newbot="1">${icon('plus', 14)}<span>New bot</span></button>`;
+function listHtml(state, list, now, noBots) {
+  const intro = noBots && !query ? `<div class="ch-none ch-intro"><div>${esc(BOTS_FOR)}</div>${newBotBtn()}</div>` : '';
+  if (!list.length) return query ? `<div class="ch-none">No bots match “${esc(query)}”.</div>` : intro || '<div class="ch-none">No bots yet. Make one with +.</div>';
+  return list.map((c) => rowHtml(state, c, now)).join('') + intro;
 }
 
 function acctDots(state, contacts) {
@@ -174,7 +203,7 @@ function build(el, ui) {
     + `<div class="ch"><nav class="ch-side" aria-label="bots">`
     + `<div class="ch-top"><span class="ch-title">Bots</span><span class="ch-accts"></span><span class="grow"></span>`
     + `<button type="button" class="ch-ib ch-pop" title="Open Bots in its own window" hidden>${icon('external', 15)}</button>`
-    + `<button type="button" class="ch-ib ch-new" title="New bot: pick a workspace" aria-haspopup="menu">${icon('plus', 16)}</button></div>`
+    + `<button type="button" class="ch-ib ch-new" title="New bot" aria-label="New bot">${icon('plus', 16)}</button></div>`
     + `<label class="ch-search">${icon('search', 14)}<input type="search" spellcheck="false" autocomplete="off" placeholder="Search bots" aria-label="Search bots"></label>`
     + `<div class="ch-list" role="listbox" aria-label="bots"></div></nav>`
     + `<section class="ch-main"><header class="ch-head" hidden><button type="button" class="ch-ib ch-back" title="Back to the bots (Esc)" aria-label="Back">${icon('chevron', 16)}</button>`
@@ -183,13 +212,20 @@ function build(el, ui) {
     + `<div class="ch-team" hidden><div class="ch-thread" role="log" aria-live="polite"></div>`
     + `<div class="ch-tcomp"><textarea rows="1" spellcheck="true" placeholder="Message the team"></textarea>`
     + `<button type="button" class="ch-send" title="Send to every member (Enter)" aria-label="Send">${icon('send', 16)}</button><div class="ch-tnote" hidden></div></div></div>`
+    // a bot that is not running: its last chat (read only) or its card, and a box that starts it, then sends
+    + `<div class="ch-bot" hidden><div class="ch-bot-chat" hidden></div><div class="ch-bot-intro" hidden></div>`
+    + `<div class="ch-tcomp ch-bcomp"><textarea rows="1" spellcheck="true"></textarea>`
+    + `<button type="button" class="ch-send" title="Start it, then send this (Enter)" aria-label="Start and send">${icon('send', 16)}</button><div class="ch-tnote" hidden></div></div></div>`
+    + `<div class="ch-form" hidden></div>`
     + `<div class="ch-blank"></div></section></div>`;
   const q = (s) => el.querySelector(s);
   Object.assign(el, {
     _ch: q('.ch'), _side: q('.ch-side'), _list: q('.ch-list'), _accts: q('.ch-accts'), _pop: q('.ch-pop'), _new: q('.ch-new'),
     _search: q('.ch-search input'), _head: q('.ch-head'), _headAv: q('.ch-head-av'), _headT: q('.ch-head-t'), _headB: q('.ch-head-b'),
-    _chat: q('.ch-chat'), _chief: q('.ch-chief'), _team: q('.ch-team'), _thread: q('.ch-thread'), _ta: q('.ch-tcomp textarea'), _send: q('.ch-send'),
-    _tnote: q('.ch-tnote'), _blank: q('.ch-blank'), _popped: q('.ch-popped'), _onTop: q('.ch-ontop'),
+    _chat: q('.ch-chat'), _chief: q('.ch-chief'), _team: q('.ch-team'), _thread: q('.ch-thread'), _ta: q('.ch-team textarea'), _send: q('.ch-team .ch-send'),
+    _tnote: q('.ch-team .ch-tnote'), _blank: q('.ch-blank'), _popped: q('.ch-popped'), _onTop: q('.ch-ontop'),
+    _bot: q('.ch-bot'), _bchat: q('.ch-bot-chat'), _bintro: q('.ch-bot-intro'), _bta: q('.ch-bcomp textarea'), _bsend: q('.ch-bcomp .ch-send'),
+    _bnote: q('.ch-bcomp .ch-tnote'), _form: q('.ch-form'),
   });
   el._built = true;
   el._ui = ui;
@@ -206,6 +242,7 @@ function build(el, ui) {
   } catch {}
 
   el._list.addEventListener('click', (e) => {
+    if (e.target.closest('[data-newbot]')) { openForm(el, ui); return; }
     const r = e.target.closest('.ch-row');
     if (!r) return;
     pick(r.dataset.key, ui, true);
@@ -215,6 +252,7 @@ function build(el, ui) {
     if (!r) return;
     const st = el._state;
     if (r.dataset.team) { e.preventDefault(); ui.contextMenu({ kind: 'team', id: r.dataset.team }, e.clientX, e.clientY); return; }
+    if (r.dataset.bot && botOf(st || {}, r.dataset.bot)) { e.preventDefault(); botMenu(el, ui, r.dataset.bot, e.clientX, e.clientY); return; }
     if (r.dataset.id && inState(st, r.dataset.id)) { e.preventDefault(); ui.contextMenu({ kind: 'session', id: r.dataset.id }, e.clientX, e.clientY); return; }
     e.preventDefault(); // the Chief stand-in and gone conversations: no menu
   });
@@ -231,7 +269,7 @@ function build(el, ui) {
       else focusCompose(el);
     }
   });
-  el._new.addEventListener('click', (e) => { e.stopPropagation(); newMenu(el, ui); });
+  el._new.addEventListener('click', (e) => { e.stopPropagation(); openForm(el, ui); });
   el._pop.addEventListener('click', (e) => { e.stopPropagation(); desk()?.popChats?.(); });
   el._popped.addEventListener('click', (e) => {
     if (e.target.closest('[data-dock]')) desk()?.dockChats?.();
@@ -239,6 +277,7 @@ function build(el, ui) {
   });
   el._head.addEventListener('click', (e) => {
     if (e.target.closest('.ch-back')) { back(ui); return; }
+    if (e.target.closest('[data-start]')) { if (el._cur && el._cur.botId) startBot(ui, el._cur.botId); return; }
     const b = e.target.closest('[data-pane]');
     const c = el._cur;
     if (!b || !c || !c.id) return;
@@ -257,12 +296,42 @@ function build(el, ui) {
     else if (e.key === 'Escape') { e.preventDefault(); el._ta.blur(); if (el.classList.contains('ch-narrow')) back(ui); }
   });
   el._send.addEventListener('click', () => sendTeam(el, ui));
-  el._blank.addEventListener('click', (e) => { if (e.target.closest('.ch-start-btn')) startChief(el, ui); });
+  // a bot that is not running: its box starts it, then sends (Enter), Shift+Enter starts a new line; its draft is kept per bot
+  const growB = () => { const t = el._bta; t.style.height = 'auto'; t.style.height = `${Math.min(160, t.scrollHeight)}px`; };
+  el._growB = growB;
+  el._bta.addEventListener('input', () => {
+    growB();
+    const c = el._cur;
+    if (c && c.botId) { const u = bu(c.botId); u.draft = el._bta.value; if (u.err || u.note) { u.err = ''; u.note = ''; el._bnote.hidden = true; } }
+  });
+  el._bta.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendBot(el, ui); }
+    else if (e.key === 'Escape') { e.preventDefault(); el._bta.blur(); if (el.classList.contains('ch-narrow')) back(ui); }
+  });
+  el._bsend.addEventListener('click', () => sendBot(el, ui));
+  el._bintro.addEventListener('click', (e) => { if (e.target.closest('[data-start]') && el._cur && el._cur.botId) startBot(ui, el._cur.botId); });
+  el._blank.addEventListener('click', (e) => {
+    if (e.target.closest('[data-newbot]')) openForm(el, ui);
+    else if (e.target.closest('.ch-start-btn')) startChief(el, ui);
+  });
+  // the New bot form: Enter in the name (or Ctrl+Enter anywhere) makes it, Esc or Cancel closes it
+  el._form.addEventListener('submit', (e) => { e.preventDefault(); submitForm(el, ui); });
+  el._form.addEventListener('click', (e) => { if (e.target.closest('[data-cancel]')) closeForm(ui); });
+  el._form.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // the page's one-key shortcuts stay out of the form
+    if (e.key === 'Escape') { e.preventDefault(); closeForm(ui); }
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitForm(el, ui); }
+  });
   el._chief.addEventListener('click', (e) => {
     const o = e.target.closest('[data-open]');
     if (o) {
-      const t = (el._contacts || []).find((x) => x.id === o.dataset.open || (x.ids || []).includes(o.dataset.open));
+      // a bot's row here; a conversation of the map's opens in the side panel (the main window's, from the pop-out)
+      const id = o.dataset.open;
+      const t = (el._contacts || []).find((x) => x.id === id || (x.ids || []).includes(id));
       if (t) pick(t.key, ui, true);
+      else if (SOLO && typeof desk()?.showMain === 'function') desk().showMain(id);
+      else if (inState(el._state || {}, id)) ui.panel(id, 'chat');
     } else if (e.target.closest('.ch-more')) { chief.more = !chief.more; ui.refresh(); }
     else if (e.target.closest('.ch-ask')) askBrief(el);
   });
@@ -285,6 +354,7 @@ function build(el, ui) {
   ui.keys.chats = (e) => {
     if (popped && !SOLO) return false;
     const k = e.key;
+    if (form && k === 'Escape') { closeForm(ui); return true; }
     if (k === '/') { el._search.focus(); el._search.select(); return true; }
     if (k === 'Escape') { if (el.classList.contains('ch-narrow') && open) { back(ui); return true; } return false; }
     if (k === 'Enter' || k === 'o') { if (!el._cur) return false; if (el.classList.contains('ch-narrow')) { open = true; ui.refresh(); } focusCompose(el); return true; }
@@ -303,17 +373,146 @@ function setOnTop(on, el) {
   if (b) { b.setAttribute('aria-pressed', String(onTop)); b.classList.toggle('on', onTop); b.title = onTop ? 'Kept on top: click to let other windows cover it' : 'Keep on top'; }
 }
 
-// "+": the workspaces, each opening its own menu (New session · A / B, ...), the one Projects' + opens
-function newMenu(el, ui) {
-  const st = el._state || {};
-  const b = el._new.getBoundingClientRect();
-  const repos = (st.repoAnchors || []).filter((r) => r && r.root);
-  const x = Math.max(8, b.right - 240), y = b.bottom + 4;
+// ---------- bots: + New bot, Start, the right-click menu ----------
+// "+": the New bot form, in place of the chat (over the list in the narrow layout)
+function openForm(el, ui) {
+  form = { busy: false, err: '', fresh: true };
+  if (el.classList.contains('ch-narrow')) open = true;
+  ui.refresh();
+}
+function closeForm(ui) {
+  if (!form) return;
+  form = null;
+  if (pane && pane.classList.contains('ch-narrow')) open = false;
+  ui.refresh();
+}
+function drawForm(el, state) {
+  if (form.fresh) {
+    form.fresh = false;
+    const accts = Array.isArray(state.accounts) && state.accounts.some(isAcct) ? state.accounts.filter(isAcct) : ['A', 'B'];
+    const acct = accts.includes(DEF.account) ? DEF.account : accts[0];
+    const opt = (v, label, on) => `<option value="${esc(v)}"${on ? ' selected' : ''}>${esc(label)}</option>`;
+    el._form.innerHTML = `<form class="ch-nb" novalidate autocomplete="off">`
+      + `<div class="ch-nb-h">${mascotSVG('new-bot', { state: 'new', color: C.cyan, size: 44 })}<div><div class="ch-nb-t">New bot</div>`
+      + `<div class="ch-nb-s">An overseer you give standing tasks. It works in a folder of its own (~/Bots), never on the map, and starts once it is made.</div></div></div>`
+      + `<label class="ch-f"><span>Name</span><input name="name" maxlength="40" spellcheck="false" placeholder="e.g. Deploy watch"></label>`
+      + `<label class="ch-f"><span>What it does</span><textarea name="brief" maxlength="4000" rows="6" placeholder="Its standing instructions: what it watches, what it does, when it tells you"></textarea></label>`
+      + `<div class="ch-f-row"><label class="ch-f"><span>Account</span><select name="account">${accts.map((a) => opt(a, a, a === acct)).join('')}</select></label>`
+      + `<label class="ch-f"><span>Model</span><select name="model">${MODEL_IDS.map((m) => opt(m, modelLabel(m), m === DEF.model)).join('')}</select></label>`
+      + `<label class="ch-f"><span>Effort</span><select name="effort">${EFFORTS.map((x) => opt(x, x, x === DEF.effort)).join('')}</select></label></div>`
+      + `<div class="ch-nb-err" role="alert" hidden></div>`
+      + `<div class="ch-nb-b"><button type="button" class="btn" data-cancel="1">Cancel</button><button type="submit" class="btn primary" data-make="1"></button></div></form>`;
+    requestAnimationFrame(() => el._form.querySelector('input[name="name"]')?.focus());
+  }
+  const f = el._form.querySelector('form');
+  const er = f.querySelector('.ch-nb-err');
+  er.textContent = form.err;
+  er.hidden = !form.err;
+  const mk = f.querySelector('[data-make]');
+  mk.disabled = form.busy;
+  mk.textContent = form.busy ? 'Making it...' : 'Make it';
+}
+async function submitForm(el, ui) {
+  if (!form || form.busy) return;
+  const f = el._form.querySelector('form');
+  const v = (n) => String((f && f.elements[n] && f.elements[n].value) || '');
+  const body = { name: v('name').trim(), brief: v('brief').trim(), account: v('account'), model: v('model'), effort: v('effort') };
+  if (!body.name) { form.err = 'Give it a name.'; ui.refresh(); f.elements.name.focus(); return; }
+  form.busy = true;
+  form.err = '';
+  ui.refresh();
+  const r = await postJson('/bots', body);
+  if (!form) return; // closed meanwhile
+  let bot = r.body && r.body.bot;
+  // ?fixture=1: nothing was made; this page keeps one for good
+  if (FIXTURE) bot = { id: [...crypto.getRandomValues(new Uint8Array(6))].map((x) => x.toString(16).padStart(2, '0')).join(''), ...body, folder: `~/Bots/${body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, createdAt: Date.now(), convId: null, live: false };
+  // made but not started: ok false, with the bot; its pane says why
+  if (!bot || typeof bot.id !== 'string') { form.busy = false; form.err = failText(r, 'Could not make the bot'); ui.refresh(); return; }
+  made.set(bot.id, { bot, at: Date.now() });
+  if (!r.ok) bu(bot.id).err = (r.body && r.body.message) || 'It was made, but did not start.';
+  form = null;
+  pick(`bot:${bot.id}`, ui, true);
+}
+
+// Start, and with text: the text goes in once its session is up (pumpBots). The text is back in its box when it fails
+async function startBot(ui, botId, text = '') {
+  const u = bu(botId);
+  if (u.starting || u.wait) return;
+  u.starting = true;
+  u.err = '';
+  u.note = '';
+  if (text) u.draft = '';
+  ui.refresh();
+  const r = await postJson(`/bots/${botId}/start`, {});
+  u.starting = false;
+  const back = () => { if (text) { u.draft = text; u.restore = true; } };
+  if (FIXTURE) { u.note = 'Fixture data: nothing starts here.'; back(); }
+  else if (!r.ok) { u.err = failText(r, 'Could not start it'); back(); }
+  else if (text) u.wait = { text, id: (r.body && typeof r.body.id === 'string' && r.body.id) || null, at: Date.now() };
+  ui.refresh();
+}
+function sendBot(el, ui) {
+  const c = el._cur;
+  const text = el._bta.value.trim();
+  if (!c || !c.botId || !text) return;
+  el._bta.value = '';
+  el._growB();
+  startBot(ui, c.botId, text);
+}
+// each render: a message waiting for its bot goes to that conversation's chat box once the session is up (the box
+// sends it: handto.js), or comes back to the bot's box after BOT_WAIT
+function pumpBots(state) {
+  for (const [bid, u] of botUi) {
+    const w = u.wait;
+    if (!w) continue;
+    const b = botOf(state, bid);
+    const id = (b && b.live && b.convId) || w.id;
+    const s = id ? findSession(state, id) : null;
+    const h = id ? hosts.get(id) : null;
+    // the desktop window: the host runs it and Claude says how it is; a browser can't type into it anyway
+    const up = !!(b && s && (termApi() ? h && h.alive && h.status : b.live));
+    if (up) { u.wait = null; handToChat(id, { text: w.text, send: true }); continue; }
+    if (b && Date.now() - w.at < BOT_WAIT) continue;
+    u.wait = null;
+    if (b && s && b.live) handToChat(id, { text: w.text }); // it runs but never said it is ready: the text waits in its chat box
+    else { u.draft = w.text; u.restore = true; u.err = b ? `${b.name} did not come up within ${BOT_WAIT / 1000} s; your message is back in the box.` : 'This bot is gone.'; }
+  }
+}
+
+// the right-click menu of a bot's row: Start, Rename, Edit instructions, Remove bot (the Chief keeps the conversation menu)
+function botMenu(el, ui, botId, x, y) {
+  const b = botOf(el._state || {}, botId);
+  if (!b) return;
+  const c = (el._contacts || []).find((k) => k.botId === botId);
+  const u = bu(botId);
   openCtxMenu({
-    x, y, title: 'New bot', sub: repos.length ? 'pick the workspace it works in' : null,
-    items: repos.length ? repos.map((r) => ({ label: r.name || r.root, icon: 'repo', run: () => ui.contextMenu({ kind: 'repo', root: r.root, name: r.name, color: r.color }, x, y) }))
-      : [{ label: 'No workspaces listed', icon: 'repo', disabled: true, note: 'add one: right-click empty space on the map, Add workspace' }],
+    x, y, title: b.name, dot: colorOf(c), sub: b.live ? 'running' : 'not running',
+    items: [
+      ...(b.live ? [] : [u.starting || u.wait ? { label: 'Start', icon: 'shell', disabled: true, note: 'starting...' }
+        : { label: 'Start', icon: 'shell', note: b.convId ? 'goes on in its last conversation' : 'its first conversation', run: () => startBot(ui, botId) }]),
+      { label: 'Rename', icon: 'edit', input: { value: b.name, placeholder: 'its name: 1 to 40 characters', hint: 'Enter saves · Esc', empty: 'a bot needs a name', busy: 'saving…', submit: (t) => saveBot(ui, botId, { name: t.trim() }) } },
+      { label: 'Edit instructions', icon: 'plan', input: {
+        value: b.brief || '', multiline: true, allowEmpty: true, placeholder: 'What it does: its standing instructions', busy: 'saving…',
+        hint: 'Enter saves · Shift+Enter new line · Esc · a running bot reads them again at once', submit: (t) => saveBot(ui, botId, { brief: t }),
+      } },
+      { sep: true },
+      { label: 'Remove bot', icon: 'trash', danger: true, note: 'its folder and chats are kept', confirm: { text: `Remove ${b.name}? Its session ends. Its folder and its conversations are kept.`, yes: 'Remove' }, run: () => removeBot(ui, botId, b.name) },
+    ],
   });
+}
+// POST /bots/:id -> null when it is saved (the menu's box closes), else why not
+async function saveBot(ui, botId, body) {
+  const r = await postJson(`/bots/${botId}`, body);
+  if (FIXTURE) { const m = made.get(botId); if (m) Object.assign(m.bot, body); ui.refresh(); return null; }
+  if (!r.ok) return failText(r, 'Could not save it');
+  ui.refresh();
+  return null;
+}
+async function removeBot(ui, botId, name) {
+  const r = await postJson(`/bots/${botId}/remove`, {});
+  made.delete(botId);
+  if (!FIXTURE && !r.ok) bu(botId).err = failText(r, `Could not remove ${name}`);
+  ui.refresh();
 }
 
 function sendTeam(el, ui) {
@@ -333,18 +532,21 @@ function sendTeam(el, ui) {
 const focusCompose = (el) => requestAnimationFrame(() => {
   const c = el._cur;
   if (c && c.kind === 'team') el._ta.focus();
+  else if (!el._bot.hidden) el._bta.focus();
   else el._chat.querySelector('.chat-compose textarea')?.focus();
 });
 
 function pick(key, ui, byHand) {
   const el = pane;
   if (!el) return;
+  if (byHand) form = null;
   selKey = key;
   store.set(SEL_KEY, key);
   const c = (el._contacts || []).find((x) => x.key === key);
   markSeen(c);
-  // the shell's pick follows a listed conversation, so the menus and the other views agree; the panel stays shut
-  if (c && c.id && inState(el._state || {}, c.id)) { ui.selectedId = c.id; syncedSel = c.id; }
+  // an overseer is never the other views' pick: the shell's goes, so their keys (Delete, Enter) never act on one
+  // picked there, and Projects doesn't take this one up; the panel stays shut
+  if (c && ui.selectedId) { ui.selectedId = null; syncedSel = null; }
   if (byHand && el.classList.contains('ch-narrow')) open = true;
   ui.refresh();
   if (byHand && !el.classList.contains('ch-narrow')) focusCompose(el);
@@ -374,13 +576,18 @@ function drawHead(el, state, c, s) {
     return;
   }
   setHTML(el._headAv, avatar(state, c, 36));
+  // a bot that is not running: Start, nothing that would open its conversation without its role
+  const u = c.botId ? bu(c.botId) : null;
+  const start = c.kind === 'bot' && c.live === false
+    ? `<button type="button" class="btn primary" data-start="1"${u.starting || u.wait ? ' disabled' : ''} title="Start it: its running conversation, else its last one, else a new one in its folder">${icon('shell', 14)}<span>${u.starting || u.wait ? 'Starting...' : 'Start'}</span></button>` : null;
   if (!s) {
     setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || 'Chief')}</span></div><div class="ch-head-m">${esc(previewOf(c))}</div>`);
-    setHTML(el._headB, '');
+    setHTML(el._headB, start || '');
     return;
   }
-  setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.kind === 'chief' ? c.name : s.name || c.name)}</span>${acctTag(s.account)}${badge(s)}</div>`
+  setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || s.name)}</span>${acctTag(s.account)}${badge(s)}</div>`
     + `<div class="ch-head-m">${repoChip(s)}${s.goal ? `<span class="ch-goal" title="${esc(s.goal)}">${esc(s.goal)}</span>` : ''}</div>`);
+  if (start) { setHTML(el._headB, start); return; }
   const live = !s.past && inState(state, s.id);
   const where = SOLO && typeof desk()?.showMain === 'function' ? 'in the main window' : 'in the side panel';
   setHTML(el._headB, (live ? `<button type="button" class="btn" data-pane="session" title="the live session, ${where}">${icon('shell', 14)}<span>Session</span></button>`
@@ -560,7 +767,7 @@ function drawChief(el, state) {
     + `<div class="ch-wnote${chief.watchErr ? ' bad' : ''}">${esc(chief.watchErr || 'Off: the Chief acts only when you tell it. On: it checks in every 15 min at most and may nudge stalled bots.')}</div>`);
 }
 
-function blankHtml(state, c) {
+function blankHtml(state, c, noBots) {
   if (c && c.kind === 'chief') {
     const mas = mascotSVG('chief', { state: 'new', color: C.gold, size: 72 });
     if (c.id) return `<div class="ch-empty">${mas}<div class="ch-empty-t">The Chief</div><div class="ch-empty-s">Opening its chat...</div></div>`;
@@ -571,13 +778,60 @@ function blankHtml(state, c) {
       + `<button type="button" class="btn primary ch-start-btn"${wait ? ' disabled' : ''}>${wait ? 'Starting...' : 'Start the Chief'}</button>`
       + `${chief.err ? `<div class="ch-start-err" role="alert">${esc(chief.err)}</div>` : ''}</div>`;
   }
+  if (c && c.kind === 'bot') {
+    return `<div class="ch-empty">${mascotSVG(c.key, { state: 'new', color: colorOf(c), size: 72 })}<div class="ch-empty-t">${esc(c.name)}</div>`
+      + `<div class="ch-empty-s">Starting: its chat shows once Fleet View lists its conversation.</div></div>`;
+  }
+  if (noBots) {
+    return `<div class="ch-empty">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 72 })}<div class="ch-empty-t">Bots</div>`
+      + `<div class="ch-empty-s">${esc(BOTS_FOR)}</div>${newBotBtn()}</div>`;
+  }
   return `<div class="ch-empty">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 72 })}<div class="ch-empty-t">Pick a bot</div>`
-    + `<div class="ch-empty-s">Every bot, team and the Chief are on the left.</div></div>`;
+    + `<div class="ch-empty-s">The Chief, your bots and their teams are on the left.</div></div>`;
+}
+
+// a bot that is not running: its last chat to read (or, none yet, a card with its instructions and Start), and its box
+function introHtml(c, b, u) {
+  const busy = u.starting || !!u.wait;
+  const defs = b ? [b.model ? modelLabel(b.model) : '', b.effort || '', b.account ? `account ${b.account}` : ''].filter(Boolean).join(' · ') : '';
+  return `<div class="ch-empty ch-start">${mascotSVG(c.key, { state: 'new', color: colorOf(c), size: 72 })}<div class="ch-empty-t">${esc(c.name)}</div>`
+    + (b && b.brief ? `<div class="ch-brief">${esc(b.brief)}</div>` : '<div class="ch-empty-s">No instructions yet: right-click it, Edit instructions.</div>')
+    + (defs ? `<div class="ch-defaults" title="What it starts with">${esc(defs)}</div>` : '')
+    + `<button type="button" class="btn primary ch-start-btn" data-start="1"${busy ? ' disabled' : ''}>${busy ? 'Starting...' : `Start ${esc(c.name)}`}</button></div>`;
+}
+function drawBot(el, state, c, s, visible) {
+  const u = bu(c.botId);
+  const busy = u.starting || !!u.wait;
+  el._bchat.hidden = !s;
+  el._bintro.hidden = !!s;
+  if (s) renderChatPane(el._bchat, s, { readOnly: true, visible });
+  else setHTML(el._bintro, introHtml(c, botOf(state, c.botId), u));
+  if (el._bta._for !== c.botId || u.restore) { el._bta.value = u.draft || ''; el._bta._for = c.botId; u.restore = false; el._growB(); }
+  el._bta.disabled = busy;
+  el._bsend.disabled = busy;
+  el._bta.placeholder = busy ? `Starting ${c.name}...` : `Message ${c.name}: it starts, then gets it`;
+  const msg = u.err || u.note || (u.wait ? 'Starting it: your message goes in once it is up.' : '');
+  el._bnote.textContent = msg;
+  el._bnote.classList.toggle('bad', !!u.err);
+  el._bnote.hidden = !msg;
 }
 
 // ---------- render ----------
-export function renderChats(el, state, ui) {
+// state.bots and the bots made here that /state does not list yet (?fixture=1: every one made here)
+function withMade(state) {
+  const now = Date.now();
+  const listed = new Set((state.bots || []).map((b) => b && b.id));
+  const extra = [];
+  for (const [id, m] of made) {
+    if (listed.has(id) || (!FIXTURE && now - m.at > MADE_MS)) { if (!FIXTURE) made.delete(id); continue; }
+    extra.push(m.bot);
+  }
+  return extra.length ? { ...state, bots: [...extra, ...(state.bots || [])] } : state;
+}
+
+export function renderChats(el, view, ui) {
   if (!el._built) build(el, ui);
+  const state = withMade(view);
   el._ui = ui;
   el._state = state;
   const now = Date.now();
@@ -593,31 +847,44 @@ export function renderChats(el, state, ui) {
     contacts = sortContacts(buildContacts(state, { chiefId: state.settings?.chief?.id || (FIXTURE ? chief.fakeId : null), chiefPlaceholder: true, chains: chains || undefined }));
   } catch (e) { console.error('chats: contacts', e); }
   el._contacts = contacts;
-  // a pick made in another view (a card, the map) carries over to the row that holds it
+  try { pumpBots(state); } catch (e) { console.error('chats: bots', e); }
+  // an overseer's conversation picked from outside (?select=, the mini window) carries over to its row
   if (ui.selectedId && ui.selectedId !== syncedSel) {
     syncedSel = ui.selectedId;
     const c = contacts.find((x) => x.id === ui.selectedId || (x.ids || []).includes(ui.selectedId));
     if (c && c.key !== selKey) { selKey = c.key; store.set(SEL_KEY, selKey); markSeen(c); }
   }
+  const noBots = !contacts.some((x) => x.kind === 'bot');
   const shown = contacts.filter((c) => matches(c, query));
   el._shown = shown;
   setHTML(el._accts, acctDots(state, contacts));
-  setHTML(el._list, listHtml(state, shown, now));
+  setHTML(el._list, listHtml(state, shown, now, noBots));
 
   const c = contacts.find((x) => x.key === selKey) || null;
   // the open chat stays read: new activity in it is not "unread"
-  if (c && (!el.classList.contains('ch-narrow') || open)) markSeen(c);
-  el._cur = c;
+  if (c && !form && (!el.classList.contains('ch-narrow') || open)) markSeen(c);
+  el._cur = form ? null : c;
   const narrow = el.classList.contains('ch-narrow');
-  el.classList.toggle('ch-open', narrow && open && !!c);
-  if (!c) open = false;
+  el.classList.toggle('ch-open', narrow && open && (!!c || !!form));
+  if (!c && !form) open = false;
 
+  // + New bot: its form in place of the chat
+  el._form.hidden = !form;
+  if (form) {
+    for (const x of [el._head, el._chat, el._chief, el._team, el._bot, el._blank]) x.hidden = true;
+    chief.briefOn = false;
+    drawForm(el, state);
+    return;
+  }
   let s = c && c.kind !== 'team' ? findSession(state, c.id) : null;
   if (c && c.kind !== 'team' && !s && selLast && selLast.id === c.id) s = selLast;
   if (s) selLast = s;
   const team = c && c.kind === 'team';
+  // a bot that is not running: Start, its last chat read only, and a box that starts it
+  const off = !!(c && c.kind === 'bot' && c.live === false);
   el._head.hidden = !c;
-  el._chat.hidden = !s;
+  el._chat.hidden = !s || off;
+  el._bot.hidden = !off;
   // the Chief's strip (briefing + Watch mode) sits above its thread, scrolling inside itself when it is tall; the briefing reads only while that pane shows
   const isChief = !!(s && c.kind === 'chief' && c.id);
   el._chief.hidden = !isChief;
@@ -629,8 +896,9 @@ export function renderChats(el, state, ui) {
     drawChief(el, state);
   } else chief.briefOn = false;
   el._team.hidden = !team;
-  el._blank.hidden = !!(s || team);
-  if (!s && !team) { setHTML(el._blank, blankHtml(state, c)); if (c) drawHead(el, state, c, null); return; }
+  el._blank.hidden = !!(s || team || off);
+  if (off) { drawHead(el, state, c, s); drawBot(el, state, c, s, !narrow || open); return; }
+  if (!s && !team) { setHTML(el._blank, blankHtml(state, c, noBots)); if (c) drawHead(el, state, c, null); return; }
   drawHead(el, state, c, s);
   if (team) { drawTeam(el, state, c); return; }
   renderChatPane(el._chat, s, { visible: !narrow || open });

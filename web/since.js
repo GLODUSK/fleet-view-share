@@ -199,7 +199,7 @@ export function mountSince({ fetchJson, onPick, fallback } = {}) {
 export function sinceFromState(st, t) {
   const now = Date.now();
   const al = (st?.alerts || []).filter((a) => a && a.t > t);
-  const ses = st?.sessions || [];
+  const ses = (st?.sessions || []).filter((s) => !s.bot); // the overseers are the Bots tab's
   const NEED = new Set(['ASKING', 'QUESTION', 'ERROR', 'STALLED']);
   const total = ses.reduce((n, s) => n + (Number(s.cost) || 0), 0);
   const byAccount = Object.fromEntries((Array.isArray(st?.accounts) && st.accounts.length ? st.accounts : ['A', 'B']).map((a) => [a, 0]));
