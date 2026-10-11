@@ -69,15 +69,30 @@ html:not(.glass) .cu-bubble { background: #1c2131; box-shadow: inset 0 1px 0 rgb
 .cu-quote::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; border-radius: 2px; background: rgba(164, 123, 255, 0.6); }
 .cu-quote:last-child { margin-bottom: 1px; }
 .cu-text + .cu-quote { margin-top: 7px; }
+.cu-text + .cu-text { margin-top: 0.55em; } /* paragraphs */
+/* a long message folds to its first lines, fading out; a click on them (or the pill under them) opens it */
 .cu-bubble.clamp:not(.expanded) .cu-body {
-  max-height: 7.5em; overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent); mask-image: linear-gradient(to bottom, #000 70%, transparent);
+  max-height: 8em; overflow: hidden; cursor: pointer;
+  -webkit-mask-image: linear-gradient(to bottom, #000 45%, transparent); mask-image: linear-gradient(to bottom, #000 45%, transparent);
 }
 .cu-more {
-  display: block; margin: 4px 0 0 auto; padding: 0; background: none; border: 0; cursor: pointer;
-  color: var(--cyan); font: 600 11.5px/1.4 var(--font-ui);
+  position: relative; z-index: 1; display: flex; align-items: center; gap: 4px; width: max-content;
+  margin: -6px auto 0; padding: 3px 11px 3px 8px; border-radius: 999px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.06); border: 1px solid var(--glass-edge);
+  color: var(--dim); font: 600 11.5px/1.4 var(--font-ui);
+  transition: color 140ms var(--ease), background 140ms var(--ease), border-color 140ms var(--ease);
 }
-.cu-more:hover { text-decoration: underline; }
+.cu-more:hover { color: var(--text); background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.14); }
+.cu-more > svg { transform: rotate(90deg); transition: transform 180ms var(--ease); }
+/* open: "Show less" sits under the text, and stays at the bottom of the feed while a tall one scrolls by */
+.cu-bubble.expanded .cu-more {
+  position: sticky; bottom: 8px; margin-top: 8px;
+  background: rgba(40, 46, 66, 0.92); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+}
+html:not(.glass) .cu-bubble.expanded .cu-more { background: #232a3d; }
+.cu-bubble.expanded .cu-more:hover { background: rgba(52, 60, 84, 0.96); }
+.cu-bubble.expanded .cu-more > svg { transform: rotate(-90deg); }
 .cu-imgs { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px; justify-content: flex-end; }
 .cu-imgs:last-child { margin-bottom: 0; }
 .cu-img {

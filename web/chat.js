@@ -28,7 +28,8 @@
 // and queues the others again; the reply's `queue` says what is queued). Fork and New chat take it out the same way
 // and hand it to a new conversation instead ('fv-chat-fork' on window, app.js): a fork of this one (its history) or
 // a fresh one in its folder, which gets the message once it is up.
-// A long message (yours, sent or shown) folds to a few lines behind "Show more", like Claude Code's pasted text.
+// A long message (yours, sent or shown) folds to a few lines behind a "Show all N lines" pill (or a click on its
+// faded text), like Claude Code's pasted text; open, its "Show less" stays at the feed's bottom while it scrolls by.
 // Rewind on one of your messages ('fv-chat-rewind') runs Claude Code's /rewind back to just before it; the
 // conversation then drops what came after (the reply's `cut` changes, and the list loads again). Edit opens the
 // message in place; its Send is a Rewind that then sends the edited text instead (the event's `edit`). Fork on
@@ -64,8 +65,8 @@ const WRITE_LINES = 60; // lines of a Write shown before "Show all"
 const LONG_USER = 400; // characters (or LONG_LINES lines) after which your message folds behind "Show more"
 const LONG_LINES = 6;
 const isLong = (text) => text.length > LONG_USER || lineCount(text) > LONG_LINES;
-const moreBtn = (text) => `<button type="button" class="cu-more" data-more>${moreLabel(text)}</button>`;
-const moreLabel = (text) => { const n = lineCount(text); return n > LONG_LINES ? `Show more · ${n} lines` : 'Show more'; };
+const moreBtn = (text) => `<button type="button" class="cu-more" data-more aria-expanded="false">${icon('chevron', 12)}<span>${moreLabel(text)}</span></button>`;
+const moreLabel = (text) => { const n = lineCount(text); return n > LONG_LINES ? `Show all ${n} lines` : 'Show more'; };
 
 // ---------- libraries: vendored, loaded the first time the tab shows ----------
 const LANGS = ['typescript', 'javascript', 'json', 'bash', 'powershell', 'python', 'css', 'xml', 'diff', 'markdown', 'sql', 'yaml'];
@@ -514,7 +515,9 @@ function userTextHtml(text) {
   return runs.map((r) => {
     const s = r.lines.join('\n').replace(/^\n+|\s+$/g, '');
     if (!s) return '';
-    return r.q ? `<div class="cu-quote">${esc(s)}</div>` : `<div class="cu-text">${esc(s)}</div>`;
+    if (r.q) return `<div class="cu-quote">${esc(s)}</div>`;
+    // a blank line starts a paragraph: a small gap between them, not a whole empty line
+    return s.split(/\n[ \t]*\n\s*/).map((p) => `<div class="cu-text">${esc(p)}</div>`).join('');
   }).join('');
 }
 
@@ -1008,11 +1011,19 @@ function wire(c) {
     else if ((b = t.closest('[data-rewind]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) rewind(c, el); }
     else if ((b = t.closest('[data-edit]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) editMsg(c, el); }
     else if ((b = t.closest('[data-img]'))) { e.preventDefault(); const src = b.closest('.ci')?._images?.[+b.dataset.img]; if (okImage(src)) showImage(src); }
-    else if ((b = t.closest('[data-more]'))) {
+    else if ((b = t.closest('[data-more]')) || ((b = t.closest('.cu-bubble.clamp:not(.expanded) .cu-body')) && window.getSelection()?.isCollapsed !== false)) {
+      // the button, or a click on the folded text itself (not when text was selected)
       e.preventDefault();
       const bub = b.closest('.cu-bubble');
+      const btn = bub.querySelector('[data-more]');
       const open = bub.classList.toggle('expanded');
-      b.textContent = open ? 'Show less' : moreLabel(bub.closest('.ci')?._text || b.closest('.ci')?.querySelector('.cu-body')?.textContent || '');
+      if (btn) {
+        btn.setAttribute('aria-expanded', String(open));
+        btn.lastElementChild.textContent = open ? 'Show less' : moreLabel(bub.closest('.ci')?._text || bub.querySelector('.cu-body')?.textContent || '');
+      }
+      // folding a long one back from far down: bring its top back into view, so you stay where you were
+      const top = bub.getBoundingClientRect().top - c.feed.getBoundingClientRect().top;
+      if (!open && top < 0) c.feed.scrollTop += top - 12;
     } else if ((b = t.closest('.cu-quote')) && window.getSelection()?.isCollapsed !== false) {
       b.classList.toggle('open'); // a long quote shows its first lines; a click shows it all (not when text was selected)
     } else if ((b = t.closest('[data-write-all]'))) {
