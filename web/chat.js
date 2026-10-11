@@ -124,6 +124,11 @@ function mdFragment(L, text, c) {
   for (const inp of frag.querySelectorAll('input')) {
     if (inp.getAttribute('type') !== 'checkbox') inp.remove(); else { inp.disabled = true; inp.tabIndex = -1; }
   }
+  // a loose list (blank lines between items) wraps each item in <p>: lift a task item's first one into its <li>, so
+  // the box is the li's own child like in a tight list (pickList and chat.css look for li > input)
+  for (const p of frag.querySelectorAll('li > p:first-child')) {
+    if (p.firstElementChild?.matches('input[type="checkbox"]') && !p.firstChild.textContent.trim()) p.replaceWith(...p.childNodes);
+  }
   for (const t of frag.querySelectorAll('table')) {
     const w = document.createElement('div');
     w.className = 'cm-table';
