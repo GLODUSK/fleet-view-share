@@ -22,7 +22,7 @@
 // conversation that isn't running here is started first (term.js ensureLive: like the Session tab's explicit
 // open, then wait until Claude is idle). Images go to the server first (POST /chat/image saves them under
 // %LOCALAPPDATA%\fleet-view\chat-images and answers the path); the message then carries their paths after the
-// text, and Claude Code turns a pasted image path into [Image #N]. Any other file (dropped, picked with the clip,
+// text, each on a line of its own (messageText), and Claude Code turns a pasted image path into [Image #N]. Any other file (dropped, picked with the clip,
 // or pasted from Explorer) goes in as its own path, which the desktop window knows (fleetDesktop.pathForFile). A
 // browser (Edge, or the Mac through Tailscale) knows no path for it, so it is sent to the PC at once (POST /upload,
 // pcfiles.js; its chip shows how far it got) and the path the PC saved it at goes in the message instead; Send waits
@@ -148,10 +148,16 @@ export function rewindMatches(sel, text) {
 // \r\n made \n, then nothing but printable text, \n and \t: no control character can end the paste early or
 // press a key (the same rule as the API's)
 export const cleanText = (v) => String(v ?? '').replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
-// the text, then each image's path, separated by spaces (a path with a space in it is quoted)
+// The text, then the paths: other files' after it, separated by spaces, and each image's on a line of its own (a
+// path with a space in it is quoted). Claude Code turns a pasted image path into [Image #N] only when the path is
+// a whole paste (outer quotes taken off), or follows a space and starts with / or a drive letter (it splits a paste
+// there). Each line is a paste of its own (term.js pasteWrites), so an image path on its own line always is one,
+// whereas "text \"/Users/…/Application Support/…/a.png\"" (a Mac's chat-images folder) stayed plain text.
+const IMAGE_PATH = /\.(png|jpe?g|gif|webp)$/i; // the image files Claude Code reads from a pasted path
 export function messageText(text, paths = []) {
-  const ps = paths.filter(Boolean).map((p) => (/\s/.test(p) ? `"${p}"` : p));
-  return [text.trim(), ...ps].filter(Boolean).join(' ');
+  const ps = paths.filter(Boolean), q = (p) => (/\s/.test(p) ? `"${p}"` : p);
+  const first = [text.trim(), ...ps.filter((p) => !IMAGE_PATH.test(p)).map(q)].filter(Boolean).join(' ');
+  return [first, ...ps.filter((p) => IMAGE_PATH.test(p)).map(q)].filter(Boolean).join('\n');
 }
 
 // ---------- reading Claude Code's screen (plain functions over screenText's lines) ----------
