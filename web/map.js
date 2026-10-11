@@ -1751,7 +1751,9 @@ const buildEdge = (alpha) => (c, a, b) => {
   g.addColorStop(0, rgba(a, alpha)); g.addColorStop(1, rgba(b, alpha));
   return g;
 };
-const EDGE_LIVE = buildEdge(0.3), EDGE_DONE = buildEdge(0.1);
+// finished chats' links stay at 20% so one pinned far from its repo still reads as linked
+const EDGE_LIVE_A = 0.3, EDGE_DONE_A = 0.2;
+const EDGE_LIVE = buildEdge(EDGE_LIVE_A), EDGE_DONE = buildEdge(EDGE_DONE_A);
 
 // transforms: unit space at (x, y) scaled by s, an edge's own frame, and back to plain screen pixels
 function unit(ctx, x, y, s) { const d = I.dpr; ctx.setTransform(d * s, 0, 0, d * s, d * x, d * y); }
@@ -1945,7 +1947,7 @@ function draw() {
     if (!a || !b) continue;
     if (b.kind === 'repo') {
       const L = I.look.get(a.id), lv = L ? L.live : a.s.state === 'DONE' ? 0 : 1;
-      if (lv > 0.01 && lv < 0.99) { ctx.globalAlpha = (0.1 + 0.2 * lv) / 0.3; gradCurve(ctx, a, b, a.s.hue, b.color, 1.1, false); ctx.globalAlpha = 1; }
+      if (lv > 0.01 && lv < 0.99) { ctx.globalAlpha = (EDGE_DONE_A + (EDGE_LIVE_A - EDGE_DONE_A) * lv) / EDGE_LIVE_A; gradCurve(ctx, a, b, a.s.hue, b.color, 1.1, false); ctx.globalAlpha = 1; }
       else gradCurve(ctx, a, b, a.s.hue, b.color, 1.1, lv <= 0.01);
     }
     else if (b.kind === 'pr') {
