@@ -1,0 +1,26 @@
+/* the Pair an iPhone card (phone.js): the Sync card's frame and rows (.uw-pop in usage.css, .sy-* in sync.css) */
+
+/* the header button */
+.count.phone { cursor: pointer; }
+body:not(.phone-on) .count.phone { display: none; } /* not this PC, or sync not set up (phone.js) */
+.count.phone:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.18); }
+.count.phone:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+/* the QR code: white with its quiet zone, big enough to scan off a screen */
+.ph-qr { align-self: center; width: min(280px, 100%); aspect-ratio: 1; border-radius: 10px; overflow: hidden; background: #fff; margin: 4px 0; }
+.ph-qr svg { display: block; width: 100%; height: 100%; }
+.ph-say { text-align: center; }
+.ph-left, .ph-prog { text-align: center; }
+.ph-left b { color: var(--text); font-variant-numeric: tabular-nums; }
+.ph-prog:empty { display: none; }
+.ph-done { display: flex; align-items: center; gap: 8px; color: var(--mint); font-size: 14px; }
+.ph-done b { color: var(--text); }
+
+/* the phones list */
+.ph-item { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
+.ph-item + .ph-item { border-top: 1px solid var(--line); padding-top: 8px; }
+.ph-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ph-dev { display: inline-flex; align-items: center; gap: 7px; min-width: 0; flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ph-dev svg { color: var(--dim); flex: none; }
+.ph-dev .sy-dim { overflow: hidden; text-overflow: ellipsis; }
+.ph-row button { flex: none; }

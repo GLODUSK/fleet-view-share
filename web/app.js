@@ -167,6 +167,7 @@ import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { mountUsage } from './usage.js';
 import { mountSync } from './sync.js';
+import { mountPhone } from './phone.js';
 import { mountHousekeeping } from './housekeeping.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults } from './compose.js';
 import { forkAt } from './forkat.js';
@@ -1333,7 +1334,9 @@ function drawHeader(v) {
   ].join('') + (c.cost ? pill(fmtCost(c.cost), 'API cost', C.text, 'cost', `${fmtCost(c.cost)} at API prices, every conversation seen since Fleet View started`) : '')
     + weekPill(v.week)
     // conversation sync: who is signed in, sign in / out, the passphrase (sync.js)
-    + (SOLO ? '' : `<span class="count sync" role="button" tabindex="0" title="Conversation sync: sign in or out, the sync passphrase, what it is doing"><span class="pill-ic" style="color:${C.cyan}">${icon('sync', 13)}</span><span class="count-k">sync</span></span>`);
+    + (SOLO ? '' : `<span class="count sync" role="button" tabindex="0" title="Conversation sync: sign in or out, the sync passphrase, what it is doing"><span class="pill-ic" style="color:${C.cyan}">${icon('sync', 13)}</span><span class="count-k">sync</span></span>`)
+    // the phone relay: pair an iPhone, the paired phones (phone.js); this PC only
+    + (SOLO ? '' : `<span class="count phone" role="button" tabindex="0" title="Pair an iPhone with the Fleet View app, and the phones paired with this PC"><span class="pill-ic" style="color:${C.cyan}">${icon('phone', 13)}</span><span class="count-k">iPhone</span></span>`);
   if ($('counts')._html !== html) { $('counts').innerHTML = html.replace(/<span class="pill-ic"[^>]*><\/span>/g, ''); $('counts')._html = html; }
 }
 
@@ -3390,8 +3393,11 @@ if (!SOLO) usageUi = mountUsage({
 if (state) usageUi?.update(state);
 // ---------- conversation sync: the header's "sync" button opens the Sync card (sync.js; sync-api.js on the server) ----------
 const syncUi = SOLO ? null : mountSync({ post, isRemote: remotePage, fixture: !!FIXTURE });
+// ---------- the phone relay: the header's "iPhone" button opens the Pair an iPhone card (phone.js; relay.js on the server) ----------
+const phoneUi = SOLO ? null : mountPhone({ post, isRemote: remotePage, fixture: !!FIXTURE, openSync: () => syncUi?.open() });
 const usagePill = (e) => {
   if (syncUi && e.target.closest('.count.sync')) { syncUi.toggle(); return true; }
+  if (phoneUi && e.target.closest('.count.phone')) { phoneUi.toggle(); return true; }
   if (!usageUi) return false;
   if (e.target.closest('.count.week')) { usageUi.toggle(); return true; }
   return false;
