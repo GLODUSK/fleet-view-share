@@ -82,8 +82,15 @@ async function main() {
   const rB = await C.fetchKey(api, dirB);
   ok(rB.created === false && rB.fetched === true && (await C.loadKey(dirB)).equals(keyA), 'a second machine fetches the same key');
   ok(C.openText(C.sealText('across', keyA, 'x'), await C.loadKey(dirB), 'x') === 'across', 'what one machine seals the other opens');
-  const quiet = { rest: async () => { throw new Error('asked Blackbox'); } };
-  ok((await C.fetchKey(quiet, dirB)).fetched === false, 'a key already here asks Blackbox nothing');
+  const quiet = { rest: async () => { throw new Error('Blackbox does not answer'); } };
+  const rQ = await C.fetchKey(quiet, dirB);
+  ok(rQ.fetched === false && rQ.key.equals(keyA), 'Blackbox not answering: the key here is kept');
+  ok((await C.fetchKey(api, dirB)).fetched === false, 'the same key here as Blackbox\'s: nothing changes');
+  // a key here that is not Blackbox's (Blackbox's was made again since): Blackbox's replaces it
+  const dirE = path.join(T, 'e', 'sync');
+  await C.saveKey(dirE, crypto.randomBytes(32));
+  const rE = await C.fetchKey(api, dirE);
+  ok(rE.replaced === true && rE.fetched === true && rE.key.equals(keyA) && (await C.loadKey(dirE)).equals(keyA), 'a key here that is not Blackbox\'s is replaced by it');
   // two machines at once: the other one's row lands first, this one keeps that
   const race = fakeApi(), theirs = crypto.randomBytes(32);
   const get = race.rest;

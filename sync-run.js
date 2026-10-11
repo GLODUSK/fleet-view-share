@@ -118,7 +118,7 @@ function createSyncRunner(o = {}) {
     try {
       const r = await C.fetchKey(sync, S.syncDir(dataDir));
       key = r.key;
-      if (r.fetched) log(r.created ? 'sync: made the sync key and put it in Blackbox' : 'sync: fetched the sync key from Blackbox');
+      if (r.fetched) log(r.created ? 'sync: made the sync key and put it in Blackbox' : r.replaced ? 'sync: the sync key here was not Blackbox\'s: using Blackbox\'s now' : 'sync: fetched the sync key from Blackbox');
     } catch (e) {
       return halt(`no sync key on this PC (it could not be fetched from Blackbox: ${(e && e.message) || e})`, true);
     }

@@ -18,8 +18,9 @@
 //   sealText(string, key, label) -> base64 / openText(base64, key, label) -> string   (titles, settings)
 //   loadKey(dir) -> Promise<Buffer|null>   saveKey(dir, key)   forgetKey(dir)   the key on this machine
 //   hasKey(dir) -> boolean   whether one is stored (a file check, nothing decrypted)
-//   fetchKey(api, dir) -> { key, created, fetched }   the key on this machine, else Blackbox's (saved here), else a new one
-//     made here and put in Blackbox (created). Two machines at once: the first row wins and both keep that one
+//   fetchKey(api, dir) -> { key, created, fetched, replaced? }   Blackbox's key (saved here; one here that differs from it is
+//     replaced), else the one here when Blackbox has none or does not answer, else a new one made here and put in
+//     Blackbox (created). Two machines at once: the first row wins and both keep that one
 //   sha256(buf) -> hex
 //
 // CLI:  node sync-crypto.js key   (fetches it from Blackbox now; sync does this by itself once signed in)
@@ -102,7 +103,15 @@ async function readSharedKey(api) {
 }
 async function fetchKey(api, dir) {
   const have = await loadKey(dir);
-  if (have) return { key: have, created: false, fetched: false };
+  if (have) {
+    // Blackbox's key is the one every machine seals with: a different one here (kept from before Blackbox's was made
+    // again) is swapped for it, or nothing the other machines wrote would open. Blackbox not answering keeps this one
+    let shared = null;
+    try { shared = await readSharedKey(api); } catch { return { key: have, created: false, fetched: false }; }
+    if (!shared || shared.equals(have)) return { key: have, created: false, fetched: false };
+    await saveKey(dir, shared);
+    return { key: shared, created: false, fetched: true, replaced: true };
+  }
   let key = await readSharedKey(api), created = false;
   if (!key) {
     // ignore-duplicates: two machines making it at once, the first one wins and both keep what Blackbox has

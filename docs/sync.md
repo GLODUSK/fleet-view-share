@@ -120,8 +120,10 @@ Everything that leaves a machine is sealed with one 32-byte key (`sync-crypto.js
 that signs in makes it at random and puts it in Blackbox itself: `fleet_sync.settings`, key `sync-key`,
 `{ v: 1, key: <base64> }`. Every other machine fetches it on its first gate check after the sign-in
 (`sync-crypto.js` `fetchKey`, called by `sync-run.js`) and keeps it in the protected store (`sync-key`, DPAPI /
-Keychain / `0600`), so later checks ask Blackbox nothing. Two machines making it at once: the first row wins and
-both keep that one.
+Keychain / `0600`). Each later check reads Blackbox's `sync-key` again (one small GET): a key here that differs from
+it (kept from before Blackbox's was made again) is replaced by Blackbox's and the loops restart with it, so a machine
+never sits on a key nothing else opens; Blackbox not answering keeps the one here. Two machines making it at once:
+the first row wins and both keep that one.
 
 The trade-off (Henry, 2026-10-11: "remove passphrase step"): the key is guarded by the Google sign-in (only
 `syncEmail` on Henry's machines) and the members list (RLS), not by a passphrase only Henry knows. Anyone who can

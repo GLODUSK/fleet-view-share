@@ -75,10 +75,11 @@ function fakeMover(args, made) {
 
     // Blackbox has the key (another machine made it): the next check fetches it, saves it here and starts
     const key = crypto.randomBytes(32), settings = [];
+    let shared = key;
     sync.rest = async (method, table, o = {}) => {
       if (table !== 'settings') throw new Error(`unexpected table ${table}`);
       settings.push(method);
-      return method === 'GET' ? [{ value_enc: JSON.stringify({ v: 1, key: key.toString('base64') }) }] : null;
+      return method === 'GET' ? [{ value_enc: JSON.stringify({ v: 1, key: shared.toString('base64') }) }] : null;
     };
     await runner.check();
     ok(made.length === 2 && made.every((l) => l.started === 1), 'both loops start when every gate is open');
@@ -86,7 +87,7 @@ function fakeMover(args, made) {
     ok(logs.some((t) => /fetched the sync key from Blackbox/.test(t)), 'the log says it was fetched');
     ok(runner.status().running === true && runner.status().up.kind === 'up', 'status shows them running');
     await runner.check();
-    ok(made.length === 2 && settings.length === 1, 'a second check with nothing changed starts nothing new (and asks Blackbox nothing)');
+    ok(made.length === 2 && settings.join() === 'GET,GET', 'a second check with nothing changed starts nothing new (it only reads Blackbox\'s key)');
 
     sync.signedIn = false;
     sync.fire();
@@ -99,9 +100,15 @@ function fakeMover(args, made) {
     sync.who = 'u2';
     await runner.check();
     ok(made.length === 6 && made[2].stopped === 1 && made[3].stopped === 1, 'another account restarts them');
+    // a key here that is not Blackbox's: put back to Blackbox's, nothing restarts
     await C.saveKey(S.syncDir(dir), crypto.randomBytes(32));
     await runner.check();
-    ok(made.length === 8 && made[4].stopped === 1, 'a changed key restarts them');
+    ok(made.length === 6 && (await C.loadKey(S.syncDir(dir))).equals(key), 'a key here that is not Blackbox\'s is put back');
+    ok(logs.some((t) => /using Blackbox's now/.test(t)), 'the log says the key here was replaced');
+    // Blackbox's key made again: this machine takes it and the loops restart with it
+    shared = crypto.randomBytes(32);
+    await runner.check();
+    ok(made.length === 8 && made[4].stopped === 1 && (await C.loadKey(S.syncDir(dir))).equals(shared), 'a changed key on Blackbox restarts them');
 
     await runner.stop();
     ok(made[6].stopped === 1 && made[7].stopped === 1 && sync.listeners.size === 0, 'stop() stops the loops and the listener');
