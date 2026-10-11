@@ -184,7 +184,12 @@ if (FIXTURE && params.has('fakeTerm')) installFakeTerm();
 
 // icons for the header pills and toasts; the page works without them (no icons) if icons.js is missing
 let icon = () => '', iconsReady = false;
-import('./icons.js').then((m) => { if (typeof m.icon === 'function') { icon = m.icon; iconsReady = true; render(); } }).catch(() => {});
+import('./icons.js').then((m) => { if (typeof m.icon === 'function') { icon = m.icon; iconsReady = true; fillStaticIcons(); render(); } }).catch(() => {});
+// static markup (the view tabs in index.html) names its icon in data-icon; fill them in once icons.js is here
+function fillStaticIcons() {
+  for (const el of document.querySelectorAll('[data-icon]')) if (!el.firstChild) el.innerHTML = icon(el.dataset.icon, 14);
+  tabPos = ''; fitHeader(true); // the tabs just got wider
+}
 
 let renderMap = null, mapRekey = null, mapPins = null, mapMod = null;
 let mapMissing = false;
@@ -1402,8 +1407,8 @@ wco?.addEventListener?.('geometrychange', () => { placeWindowControls(); fitHead
 window.addEventListener('resize', () => { placeWindowControls(); fitHeader(true); });
 
 // there the header is one row of fixed height: when its contents don't fit (a narrow window, the filter box
-// open, a long workspace name in the chip), it drops the least needed parts, one step at a time (fit-1 .. fit-6 in app.css)
-const FIT_STEPS = 6;
+// open, a long workspace name in the chip), it drops the least needed parts, one step at a time (fit-1 .. fit-7 in app.css)
+const FIT_STEPS = 7;
 let fitKey = '';
 function fitHeader(force = false) {
   if (!document.documentElement.classList.contains('titlebar')) return;

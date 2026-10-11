@@ -62,7 +62,12 @@ button { font: inherit; color: inherit; }
   position: relative; z-index: 1; height: 26px; padding: 0 14px; border: 0; border-radius: 7px; cursor: pointer;
   background: none; color: var(--dim); font: 600 12.5px/26px var(--font-ui); letter-spacing: 0.01em;
   transition: color 180ms var(--ease);
+  display: inline-flex; align-items: center; gap: 6px;
 }
+/* each tab's line icon (icons.js, filled in by app.js from data-icon), before its label, in the label's colour */
+.tabs .tab-ic { display: inline-flex; flex: none; width: 14px; height: 14px; }
+.tabs .tab-ic:empty { display: none; }
+.tabs .tab-ic svg { display: block; }
 .tabs button:hover { color: var(--text); }
 .tabs button.on { color: var(--text); }
 .tabs button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
@@ -631,7 +636,7 @@ html.titlebar .counts, html.titlebar .clock { flex: none; }
 html.titlebar .counts { flex-wrap: nowrap; }
 /* narrower windows (or the filter open): the header keeps one row. app.js steps through fit-1..fit-6 until
    everything fits: labels go first (each pill keeps its tooltip), then the workspace chip's name tail, the clock, pills,
-   tighter tabs */
+   tighter tabs, and last the tabs' labels (icons only) */
 html.titlebar .top.fit-1 .count-k { display: none; }
 html.titlebar .top.fit-1 .count { padding: 0 9px; }
 html.titlebar .top.fit-2 .ws-t { max-width: 110px; }
@@ -639,6 +644,9 @@ html.titlebar .top.fit-3 .clock { display: none; }
 html.titlebar .top.fit-4 .count:nth-child(n+3) { display: none; }
 html.titlebar .top.fit-5 .counts { display: none; }
 html.titlebar .top.fit-6 .tabs button { padding: 0 9px; }
+/* last: the tabs keep only their icons (each keeps its title tooltip) */
+html.titlebar .top.fit-7 .tabs button:has(.tab-ic svg) .tab-t { display: none; }
+html.titlebar .top.fit-7 .tabs button { padding: 0 8px; }
 
 /* ---------- the right-click menu (ctxmenu.js): the frosted .menu surface, at the pointer ---------- */
 .menu.ctx-menu {

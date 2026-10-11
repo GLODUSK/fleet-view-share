@@ -64,8 +64,15 @@ const P = {
   mic: '<rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5v4"/><path d="M8.5 21.5h7"/>',
   sync: '<path d="M20.5 12A8.5 8.5 0 0 1 6 18"/><path d="M3.5 12A8.5 8.5 0 0 1 18 6"/><path d="M18 2.5V6h-3.5"/><path d="M6 21.5V18h3.5"/>',
   key: '<circle cx="7.5" cy="15.5" r="4"/><path d="m10.4 12.6 9.6-9.6"/><path d="m16.5 6.5 3 3"/><path d="m14 9 2 2"/>',
+  // the view tabs (index.html's .tabs, and the phone app's tab bar)
+  cards: '<path d="M8 7V5a1.5 1.5 0 0 1 1.5-1.5h10A1.5 1.5 0 0 1 21 5v10a1.5 1.5 0 0 1-1.5 1.5h-2"/><rect x="3" y="7" width="14.5" height="13.5" rx="1.5"/><path d="M6.5 11.5h7.5"/><path d="M6.5 15h5"/>',
+  map: '<circle cx="5.5" cy="6.5" r="2.5"/><circle cx="18.5" cy="5.5" r="2.5"/><circle cx="12" cy="18.5" r="2.5"/><path d="M8 6.3 16 5.7"/><path d="m6.8 8.7 4 7.6"/><path d="m17.3 7.7-4.1 8.6"/>',
+  wall: '<rect x="3" y="3" width="5" height="9" rx="1"/><rect x="3" y="14" width="5" height="7" rx="1"/><rect x="9.5" y="3" width="5" height="5" rx="1"/><rect x="9.5" y="10" width="5" height="11" rx="1"/><rect x="16" y="3" width="5" height="12" rx="1"/><rect x="16" y="17" width="5" height="4" rx="1"/>',
+  bots: '<rect x="4" y="7" width="16" height="13.5" rx="4"/><path d="M12 7V4.5"/><circle cx="12" cy="3.3" r="1.2"/><circle cx="9" cy="12.5" r="1.1"/><circle cx="15" cy="12.5" r="1.1"/><path d="M9.5 16.3c1.5 1.1 3.5 1.1 5 0"/><path d="M2 12.5v3"/><path d="M22 12.5v3"/>',
+  settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/>',
   trash: '<path d="M3.5 6h17"/><path d="M8.5 6V4.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5V6"/><path d="M18.5 6l-.9 13.6a1.5 1.5 0 0 1-1.5 1.4H7.9a1.5 1.5 0 0 1-1.5-1.4L5.5 6"/><path d="M10 10.5v6"/><path d="M14 10.5v6"/>',
 };
+P.projects = P.folder; // the Projects tab
 
 export function icon(name, size = 14) {
   const p = P[name];
