@@ -168,7 +168,7 @@ import { mountUpdate } from './update.js';
 import { mountUsage } from './usage.js';
 import { mountSync } from './sync.js';
 import { mountHousekeeping } from './housekeeping.js';
-import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText } from './compose.js';
+import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults } from './compose.js';
 import { forkAt } from './forkat.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects', 'chats'];
@@ -444,6 +444,7 @@ async function poll() {
     applyRenames(st);
     state = st;
     setAccounts(st.accounts);
+    setLaunchDefaults(st.launch);
     setServerQueued(st.queuedText);
     online = true;
     if (st.settings) syncHiddenRepos(st.settings.hiddenRepos);

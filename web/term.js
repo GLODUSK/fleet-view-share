@@ -117,7 +117,7 @@ export const noTermMsg = (what) => ({
 export const noTermNote = () => ({ nodesk: 'desktop window only', host: 'the session host is not running on the PC', away: "can't reach Fleet View on the PC" })[whyNoTerm()];
 
 // ---------- which conversations Fleet View hosts (term.list, every 2 s, and onExit at once) ----------
-export const hosts = new Map(); // id -> { id, pid, alive, exitCode, startedAt, pending, created, cwd, account, status, interrupted,
+export const hosts = new Map(); // id -> { id, pid, alive, exitCode, startedAt, pending, created, forked, cwd, account, status, interrupted,
 //                                        waitingFor, autoContinue, slashPanel (null/false from an older host),
 //                                        handoffFrom (it picked up a handoff of that conversation, desktop/host.js),
 //                                        role ('chief' or 'bot:<id>': an overseer, never on the map; else null) }
@@ -153,7 +153,7 @@ function applyList(list) {
     if (dismissed.has(p.id) && !p.alive && dismissed.get(p.id) === p.startedAt) continue;
     hosts.set(p.id, {
       id: p.id, pid: p.pid ?? null, alive: !!p.alive, exitCode: p.exitCode ?? null, startedAt: p.startedAt ?? 0,
-      pending: !!p.pending, created: !!p.created, cwd: typeof p.cwd === 'string' ? p.cwd : null, account: acctOf(p.account),
+      pending: !!p.pending, created: !!p.created, forked: !!p.forkFrom, cwd: typeof p.cwd === 'string' ? p.cwd : null, account: acctOf(p.account),
       status: typeof p.status === 'string' ? p.status : null, interrupted: !!p.interrupted,
       waitingFor: typeof p.waitingFor === 'string' ? p.waitingFor.slice(0, 300) : null, autoContinue: !!p.autoContinue,
       slashPanel: typeof p.slashPanel === 'string' && /^\/[\w:-]{1,39}$/.test(p.slashPanel) ? p.slashPanel : null,

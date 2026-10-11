@@ -795,6 +795,24 @@ function defaultModelOf(projRoot) {
   }
   return c.model;
 }
+// What a conversation Fleet View just started runs before its screen draws the footer, so the chat box shows its mode,
+// model and effort at once: per account its settings.json permissions.defaultMode (as the box names modes; null for
+// one it has no name for) and model, and the effort desktop/host.js starts a new one at (newSessionEffort, "medium"
+// when unset; "last" adds no flag: null). Read at most every 10 s.
+const MODE_NAMES = { default: 'default', acceptEdits: 'acceptEdits', plan: 'plan', auto: 'auto', bypassPermissions: 'bypass' };
+let launchCache = null;
+function launchDefaults() {
+  if (launchCache && Date.now() - launchCache.at < 10e3) return launchCache.v;
+  const accounts = {};
+  for (const a of accountsHere()) {
+    const m = ((readJson(path.join(acctDir(a), 'settings.json')) || {}).permissions || {}).defaultMode;
+    accounts[a] = { mode: m == null ? 'default' : MODE_NAMES[m] || null, model: defaultModelOf(path.join(acctDir(a), 'projects')) };
+  }
+  const e = (readJson(SETTINGS_FILE) || {}).newSessionEffort;
+  const v = { effort: e === 'last' ? null : ['low', 'medium', 'high', 'xhigh', 'max'].includes(e) ? e : 'medium', accounts };
+  launchCache = { at: Date.now(), v };
+  return v;
+}
 
 // ---------- model ----------
 const sessions = new Map(); // id -> session
@@ -5475,6 +5493,8 @@ function buildState() {
     usage: DEMO ? {} : onlyListed(USAGE.view(now)),
     // the Claude accounts here: B plus one per ~/.claude-<x> folder, sorted (just ['B']: the page shows no letters)
     accounts: DEMO ? ['A', 'B'] : accountsHere(),
+    // what a just-started conversation runs until its screen says (launchDefaults)
+    launch: DEMO ? null : launchDefaults(),
     // every account folder with who it is signed in as, and the sign-ins going on (accounts.js), for the Accounts list
     accountList: DEMO ? { list: [{ a: 'A', email: 'a@example.com', signedIn: true }, { a: 'B', email: 'b@example.com', signedIn: true }], jobs: {} } : ACCTS.view(),
     alert: al ? { t: al.t, sid: al.s.id, name: nameNow(al.s.id, al.s.name), text: al.text, color: toHex(al.color) } : null,

@@ -466,6 +466,14 @@ export function defaultModelKey(setting) {
   return id ? modelKey(id, big) : null;
 }
 
+// ---------- what a just-started conversation runs (/state's launch, from app.js) ----------
+// Claude Code takes a few seconds to draw the footer the mode and effort are read from; until it does, a session
+// the host started moments ago shows what it was started with: its account's default mode, and for a new one (not a
+// fork or resume) the effort the host gave it
+let launch = null; // { effort, accounts: { A: { mode, model } } } or null
+export function setLaunchDefaults(v) { launch = v && typeof v === 'object' && v.accounts ? v : null; }
+const STARTING_MS = 90e3;
+
 // ---------- drafts, per conversation ----------
 // quote: what Reply took from the feed, as "> " lines; it shows as a bubble above the text and goes in first.
 // shell: the box is in bash mode (the text is a shell command, without its "!")
@@ -1575,19 +1583,26 @@ export function mountCompose(slot, s) {
   }
 
   // ----- the mode picker -----
+  // a session started here moments ago whose screen may not show its footer yet: what it was started with, else null
+  function starting() {
+    const h = hosts.get(st.id);
+    if (!launch || !h?.alive || !(Date.now() - h.startedAt < STARTING_MS)) return null;
+    return { mode: launch.accounts[h.account]?.mode || null, effort: h.created && !h.forked ? launch.effort || null : null };
+  }
   function drawMode() {
     const alive = !!hosts.get(st.id)?.alive;
-    const label = alive && st.mode ? modeShort(st.mode) : 'Mode';
-    const key = `${label}|${alive}|${st.switching}|${st.mode}|${!!(st.menu || st.panel)}`;
+    const cur = st.mode || (alive ? starting()?.mode : null) || null;
+    const label = alive && cur ? modeShort(cur) : 'Mode';
+    const key = `${label}|${alive}|${st.switching}|${cur}|${!!(st.menu || st.panel)}`;
     if (st.drawn.mode === key) return;
     st.drawn.mode = key;
     modeBtn.querySelector('.cmp-model-t').textContent = label;
     // not while Claude asks something: Shift+Tab there answers it ("allow all edits during this session")
     modeBtn.disabled = !alive || st.switching || !!st.menu || !!st.panel;
-    modeBtn.dataset.cur = st.mode || '';
+    modeBtn.dataset.cur = cur || '';
     modeBtn.title = alive ? 'Permission mode (Shift+Tab in the session)' : 'The mode shows once the session runs here';
-    modeMenu.innerHTML = MODES.map((m) => `<button type="button" role="menuitemradio" class="cmp-mi${m.k === st.mode ? ' on' : ''}" data-mode="${m.k}" aria-checked="${m.k === st.mode}">`
-      + `<span class="cmp-mi-c">${m.k === st.mode ? ic('check', 13) : ''}</span><span>${esc(m.label)}</span></button>`).join('');
+    modeMenu.innerHTML = MODES.map((m) => `<button type="button" role="menuitemradio" class="cmp-mi${m.k === cur ? ' on' : ''}" data-mode="${m.k}" aria-checked="${m.k === cur}">`
+      + `<span class="cmp-mi-c">${m.k === cur ? ic('check', 13) : ''}</span><span>${esc(m.label)}</span></button>`).join('');
   }
   function openModeMenu(open) {
     modeMenu.hidden = !open;
@@ -1713,11 +1728,11 @@ export function mountCompose(slot, s) {
   }
 
   // ----- the model and effort picker -----
-  // what the session runs: the screen's effort when it shows, else the last reply's; what was picked here wins
+  // what the session runs: the screen's effort when it shows, else the last reply's, else what it was started with; what was picked here wins
   // until the session shows it (the model shows with the next reply) or 10 minutes pass
   function current() {
     const s = st.s, big = !!(s.context && s.context.limit >= 1000000);
-    let model = s.model ? modelKey(s.model, big) : defaultModelKey(s.defaultModel), effort = st.effort || s.effort || null;
+    let model = s.model ? modelKey(s.model, big) : defaultModelKey(s.defaultModel !== undefined ? s.defaultModel : launch?.accounts[s.account]?.model), effort = st.effort || s.effort || starting()?.effort || null;
     const w = st.want;
     if (w && Date.now() - w.at > 10 * 60e3) st.want = null;
     else if (w) {
