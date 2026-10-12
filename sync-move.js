@@ -81,7 +81,7 @@
 //               until a materializer listing that began after it (its status().listedAt), however long that takes.
 //               Written (temp + rename) when it changes; until the materializer has listed the rows once, the file
 //               from before is kept. desktop/host.js refuses to open the ids in it. sync-run.js deletes it when sync
-//               stops for a gate (dropAway).
+//               is turned off here (dropAway: not set up, or Work locally), never for a lost sign-in.
 //   watcher     every 15 s: a hosted, running session whose row the materializer lists as another device's (and that
 //               is not held or just claimed here) is checked again, and ended once idle (a forced takeover, a device
 //               that woke up later).

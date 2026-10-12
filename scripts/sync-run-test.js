@@ -2,7 +2,8 @@
 // local, set up, signed in, the key (fetched from Blackbox), the Claude accounts matching Blackbox's), and stops them when one closes. The mover gets the uploader, the materializer, the host and isOpen; the materializer's isOpen is
 // isOpen or the host's last list; the uploader alone gets accountOf; move / moveStatus / cancelMove / owners (with the
 // row's account) / device go to the mover, and say so when
-// sync is not running; away.json goes on a gate halt and stays on stop(). A fake sync-api object, fake loops, a fake
+// sync is not running; away.json goes when sync is turned off (not set up, Work locally) and stays otherwise (signed
+// out, no key, not a member, stop()). A fake sync-api object, fake loops, a fake
 // mover and a fake host; a temp data folder for the key. Run: node scripts/sync-run-test.js
 'use strict';
 const fs = require('fs');
@@ -166,27 +167,25 @@ function fakeMover(args, made) {
       eq(code, 'bad_id', 'the mover\'s bad_id comes through');
       ok(r3.moveStatus('c1').phase === 'waiting' && r3.cancelMove('c1') === true, 'moveStatus and cancelMove go to the mover');
       ok(r3.owners().get('c1').name === 'mac' && r3.owners().get('c1').account === 'a' && r3.device().name === 'pc', 'owners (with the row\'s account) and device go to the mover');
-      // away.json: a gate halt deletes it
+      // away.json: a lost sign-in keeps it (the host must go on refusing the other devices' chats); only sync turned
+      // off here (not set up) deletes it
       SC.writeState(M.awayPath(dir3), { v: 1, at: 'x', ids: { c1: { device: 'mac', why: 'owned' } } });
       s3.signedIn = false;
       await r3.check();
-      ok(m.stopped === 1 && !fs.existsSync(M.awayPath(dir3)), 'signed out: the mover stops and away.json is gone');
+      ok(m.stopped === 1 && fs.existsSync(M.awayPath(dir3)), 'signed out: the mover stops and away.json stays');
       try { r3.move('c1'); } catch (e) { code = e.code; message = e.message; }
       ok(code === 'not_running' && message === 'not signed in', 'move() while signed out: not_running, not signed in');
-      SC.writeState(M.awayPath(dir3), { v: 1, at: 'x', ids: {} });
-      await r3.check();
-      ok(!fs.existsSync(M.awayPath(dir3)), 'a gate still closed: an away.json written meanwhile is deleted too');
-      for (const [what, set, unset] of [
-        ['no key', async () => C.forgetKey(S.syncDir(dir3)), async () => C.saveKey(S.syncDir(dir3), crypto.randomBytes(32))],
-        ['not a member', async () => { s3.member = false; }, async () => { s3.member = true; }],
-        ['not set up', async () => { s3.on = false; }, async () => { s3.on = true; }],
+      for (const [what, set, unset, gone] of [
+        ['no key', async () => C.forgetKey(S.syncDir(dir3)), async () => C.saveKey(S.syncDir(dir3), crypto.randomBytes(32)), false],
+        ['not a member', async () => { s3.member = false; }, async () => { s3.member = true; }, false],
+        ['not set up', async () => { s3.on = false; }, async () => { s3.on = true; }, true],
       ]) {
         s3.signedIn = true;
         await r3.check();
         SC.writeState(M.awayPath(dir3), { v: 1, at: 'x', ids: {} });
         await set();
         await r3.check();
-        ok(!fs.existsSync(M.awayPath(dir3)) && !r3.status().running, `${what}: away.json is gone`);
+        ok(fs.existsSync(M.awayPath(dir3)) === !gone && !r3.status().running, `${what}: away.json ${gone ? 'is gone' : 'stays'}`);
         await unset();
       }
       // a restart for another account keeps it (the new run writes it again); stop() keeps it (the host still needs it)

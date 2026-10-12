@@ -49,8 +49,9 @@
 // The link between machines (link.js, docs/link.md), beside the mover and only with it (it names this machine by the
 // mover's device id) and only when a relay is given (relay.js: link.js keeps the other machine there as a computer):
 //   link() -> link.js's object while sync runs, else null. Stopped with sync: no socket, no timer, no key read
-// <dataDir>/sync/away.json (what the session host refuses to open, sync-move.js) is deleted when sync stops for a
-// gate (not set up, signed out, not a member, no key), and kept when the server stops: the host still needs it.
+// <dataDir>/sync/away.json (what the session host refuses to open, sync-move.js) is deleted when sync is turned off
+// here (not set up, or Work locally chosen), and kept when it stops for any other reason: signed out (a lost sign-in
+// too), not a member, no key, or the server stopping. The other devices' chats stay theirs until sync runs again.
 'use strict';
 const path = require('path');
 const S = require(path.join(__dirname, 'sync-api.js'));
@@ -105,7 +106,7 @@ function createSyncRunner(o = {}) {
   };
 
   const keyId = (key) => C.sha256(key).slice(0, 16); // tells a changed key apart, never shown
-  // gate: it stopped because a gate closed (not because the server stops): nothing is away any more
+  // gate: sync is off here now (not set up, Work locally): nothing is away any more
   async function halt(reason, gate = false) {
     why = reason;
     if (run) {
@@ -134,8 +135,11 @@ function createSyncRunner(o = {}) {
     if (mode === 'local') return halt('this machine works locally (chosen at the start; the Sync card can switch it)', true);
     if (!sync.enabled()) return halt('sync is not set up on this PC', true);
     const st = await sync.status();
-    if (!st.signedIn) return halt('not signed in', true);
-    if (st.member === false) return halt('this account is not on the sync members list', true);
+    // signed out, not a member, no key: away.json stays (halt without the gate), so the session host still refuses the
+    // other devices' conversations: a lost sign-in (a restart that could not read it) must never let this machine run
+    // a stale copy of a chat another machine owns. Only sync turned off (not set up, or Work locally) frees them.
+    if (!st.signedIn) return halt('not signed in');
+    if (st.member === false) return halt('this account is not on the sync members list');
     const uid = await sync.uid();
     let key = null;
     try {
@@ -143,7 +147,7 @@ function createSyncRunner(o = {}) {
       key = r.key;
       if (r.fetched) log(r.created ? 'sync: made the sync key and put it in Blackbox' : r.replaced ? 'sync: the sync key here was not Blackbox\'s: using Blackbox\'s now' : 'sync: fetched the sync key from Blackbox');
     } catch (e) {
-      return halt(`no sync key on this PC (it could not be fetched from Blackbox: ${(e && e.message) || e})`, true);
+      return halt(`no sync key on this PC (it could not be fetched from Blackbox: ${(e && e.message) || e})`);
     }
     const kid = keyId(key);
     if (accounts) {
