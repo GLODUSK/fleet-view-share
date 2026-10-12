@@ -31,13 +31,20 @@
 //   replyLine(text) -> string   the first line of a reply that says something: no heading, code fence, table or
 //       rule, list and quote marks and * _ ` stripped; '' for none. A bot's reaction at its start (reactionOf) is
 //       left out, and a reply that is only a reaction reads as its emoji
-//   botFeed(items) -> items   a bot's or the Chief's chat items (chat.js, GET /conversation) as the Bots tab shows
-//       them: a message of Fleet View's own (its text starts "[Fleet View]": the start prompt, the id note, the
-//       instructions-changed note) becomes { ...it, kind: 'setup', text: without that header }, drawn as a small
-//       grey note, not your bubble; the bare "ok" the bot answers one with (its steps between allowed) is left out; every
-//       model or effort switch note ("/model x", "Set model to …", "/effort y", …: switchNote) is left out, so the
-//       chat stays clean; a reply that starts with a reaction ("[react:👍]", reactionOf) puts reaction: '👍' on your
-//       last message before it (chat.js draws it on the bubble's corner) and shows the rest, or nothing when that is all
+//   botFeed(items) -> items   a bot's or the Chief's chat items (chat.js, GET /conversation; its earlier
+//       conversations' items first, as one chat) as the Bots tab shows them, kept simple (Henry, 2026-10-12: "super
+//       normie friendly", no noise). A message of Fleet View's own (its text starts "[Fleet View]") becomes
+//       { ...it, kind: 'setup', text: without that header }, drawn as a small grey note, not your bubble; the ones
+//       that are only plumbing (quietNote: the start prompt, an id note, "your instructions changed", "you were cut
+//       off") are left out, and so is the bot's answer to one (the bare "ok"; the one short line to "instructions
+//       changed", with the steps before it). Left out too: every model or effort switch note ("/model x", "Set model
+//       to …", "/effort y", …: switchNote), "Conversation compacted", a background task's "finished" note (bg), and
+//       a handoff from one conversation to the next: from the /handoff skill (or command) to the end of that turn,
+//       the "/pickup <file>" note and the "Picked up: …" reply (with the steps before it). A reply that starts with a
+//       reaction ("[react:👍]", reactionOf) puts reaction: '👍' on your last message before it (chat.js draws it on
+//       the bubble's corner) and shows the rest, or nothing when that is all
+//   quietNote(text) -> 'ack' | 'one' | 'skip' | null   a setup note's text (setupNote) that botFeed leaves out, and
+//       what it leaves out after it: 'ack' the bare "ok", 'one' the one reply, 'skip' nothing; null: it shows
 //   reactionOf(text) -> { emoji, text } | null   a reply's leading "[react:<emoji>]" (bot/BRIEF.md says when a bot
 //       uses one) and the text after it; null when it does not start with one, or the tag holds no emoji
 //   setupNote(text) -> string|null   that text without "[Fleet View] ", or null for any other message
@@ -47,9 +54,10 @@
 //       size 'keep' (a go-ahead: "ok", "yes do it", "2 and 3": nothing switches), 'quick' (sonnet, low), 'normal'
 //       (a question: sonnet, medium; a task: opus, medium), 'big' (a plan, build, bug hunt or several parts: opus,
 //       high) or 'huge' (a big plan, a hard bug or a long brief: opus, xhigh); label says which
-//   dynamicSwitch(dyn, size, cur, modelIds) -> { model?, effort? }   what to switch before that message: only what
-//       is dynamic (dyn { model, effort } booleans) and differs from cur { model, effort } (a model of the same family
-//       stays); model is the first of modelIds of the family that is not a 1M one
+//   dynamicSwitch(dyn, size, cur, modelIds, long) -> { model?, effort? }   what to switch before that message: only
+//       what is dynamic (dyn { model, effort } booleans) and differs from cur { model, effort } (a model of the same
+//       family stays); model is the family's 1M-context one in modelIds when long (a bot keeps its whole chat: bots.js
+//       longModel), else its 200k one; failing that its first
 //   DYNAMIC   'dynamic', a bot's model or effort sized per message
 //   doingOf(contact, face) -> string   what a bot or the Chief is doing now, in a few words, for its avatar's hover:
 //       face is mascot.js mascotState(contact) ('thinking': "Thinking about your message"; working: the tool running
@@ -380,36 +388,65 @@ export function reactionOf(text) {
   const m = REACT.exec(String(text == null ? '' : text));
   return m && EMOJI.test(m[1]) ? { emoji: m[1], text: String(text).slice(m[0].length) } : null;
 }
+// Fleet View's notes that are only plumbing (bots.js startPrompt, idNote, CHANGED_NOTE; chief.js idNote; the host's
+// cut-off note), and what botFeed leaves out after each
+export function quietNote(text) {
+  const t = String(text == null ? '' : text);
+  if (/^You are (?:the Chief\b|.{1,80}?, one of Henry's bots\b)/.test(t)) return /Greet Henry/.test(t) ? 'skip' : 'ack';
+  if (/^Your instructions changed\b/.test(t)) return 'one';
+  if (/^You were cut off mid-turn\b/.test(t)) return 'skip';
+  return null;
+}
+// a handoff: the skill (or the command typed) that writes the summary, and the command that picks it up
+const isHandoff = (it) => (it.kind === 'tool' && it.name === 'Skill' && /(?:^|:)handoff$/.test(String((it.input && it.input.skill) || '')))
+  || (it.kind === 'note' && /^\/handoff(?:\s|$)/.test(String(it.text || '')));
+const PICKUP = /^\/pickup(?:\s|$)/;
+const PICKED = /^\s*Picked up\b/i;
+// notes that are noise in a chat with a bot: a compaction (Claude Code goes on in the same conversation) and a
+// /clear or /compact typed
+const NOISE = /^(?:Conversation compacted\b|\/(?:clear|compact)(?:\s|$))/;
 export function botFeed(items) {
   const out = [];
-  let after = false; // the last message was a setup note (thinking and tool steps since then don't count)
+  // what is being left out: 'ack' the bare "ok" to a setup note (thinking and tool steps since then don't count),
+  // 'one' the next reply and the steps before it, 'pickup' a pickup's steps and its "Picked up" reply, 'handoff'
+  // everything until the next message
+  let skip = null;
   let mine = -1; // where your last message is in out: a reaction goes on it
   // _j is chat.js's cached JSON of the item as it came: a changed copy must not reuse it
   const copy = (it, more) => { const { _j, ...rest } = it; return { ...rest, ...more }; };
   for (const it of items || []) {
     if (!it) continue;
-    // model and effort switches (Dynamic's, or the model menu's) are left out: the chat stays clean
-    if (it.kind === 'note' && switchNote(it.text)) continue;
+    if (it.kind !== 'user' && skip === 'handoff') continue;
+    if (isHandoff(it)) { skip = 'handoff'; continue; }
+    if (it.kind === 'note') {
+      // model and effort switches (Dynamic's, or the model menu's) are left out: the chat stays clean
+      if (switchNote(it.text) || it.bg || NOISE.test(String(it.text || ''))) continue;
+      if (PICKUP.test(String(it.text || ''))) { skip = 'pickup'; continue; }
+    }
+    if ((it.kind === 'thinking' || it.kind === 'tool') && (skip === 'one' || skip === 'pickup')) continue;
     if (it.kind === 'user') {
       const note = it.images && it.images.length ? null : setupNote(it.text);
       if (note != null) {
-        out.push(copy(it, { kind: 'setup', text: note }));
-        after = true;
+        const q = quietNote(note);
         mine = -1;
+        if (q) { skip = q === 'skip' ? null : q; continue; }
+        out.push(copy(it, { kind: 'setup', text: note }));
+        skip = 'ack';
         continue;
       }
-      after = false;
+      skip = null;
       mine = out.length;
     } else if (it.kind === 'assistant') {
-      if (after && ACK.test(String(it.text || ''))) continue;
-      after = false;
+      const was = skip;
+      skip = null;
+      if (was === 'one' || (was === 'ack' && ACK.test(String(it.text || ''))) || (was === 'pickup' && PICKED.test(String(it.text || '')))) continue;
       const r = reactionOf(it.text);
       if (r) {
         if (mine >= 0 && !out[mine].reaction) out[mine] = copy(out[mine], { reaction: r.emoji });
         if (r.text.trim()) out.push(copy(it, { text: r.text }));
         continue;
       }
-    } else if (it.kind === 'note') after = false;
+    } else if (it.kind === 'note' && skip === 'ack') skip = null;
     out.push(it);
   }
   return out;
@@ -498,15 +535,16 @@ export function sizeTask(text) {
 }
 // what to type before a message to a dynamic bot: dyn { model, effort } (which of the two are dynamic), size from
 // sizeTask, cur { model, effort } the session runs now (compose.js current(): a model id like 'claude-opus-5-5[1m]',
-// an effort or null when unknown), ids the model ids on offer (compose.js MODEL_IDS; the first of the family that is
-// not the 1M one is taken). -> { model?, effort? }: only what differs; a model of the same family (Opus 1M for Opus)
-// is not switched, and nothing is for a follow-up
-export function dynamicSwitch(dyn, size, cur, ids = []) {
+// an effort or null when unknown), ids the model ids on offer (compose.js MODEL_IDS), long true for a bot (the
+// family's 1M-context one is taken, so its long chat still fits; any other chat takes the 200k one, else the first).
+// -> { model?, effort? }: only what differs; a model of the same family (Opus 1M for Opus) is not switched, and
+// nothing is for a follow-up
+export function dynamicSwitch(dyn, size, cur, ids = [], long = false) {
   const out = {};
   if (!dyn || !size || size.size === 'keep') return out;
   const fam = (m) => (/^claude-([a-z]+)-/.exec(String(m || '')) || /^([a-z]+)$/.exec(String(m || '')) || [])[1] || null;
   if (dyn.model && size.model && fam(cur && cur.model) !== size.model) {
-    const id = ids.find((k) => fam(k) === size.model && !/\[1m\]$/i.test(k));
+    const id = ids.find((k) => fam(k) === size.model && /\[1m\]$/i.test(k) === !!long) || ids.find((k) => fam(k) === size.model);
     if (id) out.model = id;
   }
   if (dyn.effort && size.effort && (cur && cur.effort) !== size.effort) out.effort = size.effort;

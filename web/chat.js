@@ -52,6 +52,10 @@
 // (chats-model.js botFeed). Only the drawing changes: c.items keeps them as they came. Kept simple: no model or
 // effort switch notes (botFeed), no Fork (on a message, a selection or a queued one), and a reaction the bot gave your
 // message (botFeed: reaction) sits on its bubble's corner, like a messenger's.
+// The whole chat (opts.history, the Bots tab: Henry, 2026-10-12): a bot's earlier conversations (a handoff's, a
+// /clear's) come before this one as one chat. Scrolled near the top, earlier messages load by themselves (this
+// conversation's, then the one before it, and so on: loadPast), and the handoffs between them never show (botFeed).
+// Their messages have Copy only: Edit and Rewind act on the conversation that runs now.
 //
 // ?fixture=1 reads ./fixtures/conversation-sample.json instead of the server (same JSON); with it,
 // ?chatWindow=<n> shrinks the first page (to try "Show earlier") and ?chatRepeat=<n> repeats the sample n times
@@ -567,7 +571,8 @@ function renderItem(it, c) {
         : `<span class="cu-noimg">${icon('image', 13)}<span>image too large to show</span></span>`)).join('');
       const long = isLong(text);
       el.innerHTML = `<div class="cu-bubble${long ? ' clamp' : ''}"${timeTitle(it.t)}>${imgs ? `<div class="cu-imgs">${imgs}</div>` : ''}${text ? `<div class="cu-body">${userTextHtml(text)}</div>` : ''}${long ? moreBtn(text) : ''}${reactionHtml(it)}</div>`
-        + (text ? `<div class="ci-acts">${copyBtn('msg', 'Copy message')}<button type="button" class="cp" data-edit title="Edit: change this message and send it again (goes back to just before it first)" aria-label="edit and resend this message">${icon('edit', 14)}</button><button type="button" class="cp" data-rewind title="Rewind: go back to just before this message (Claude Code's /rewind)" aria-label="rewind to before this message">${icon('rewind', 14)}</button>${c.bubbles ? '' : `<button type="button" class="cp" data-fork-at title="Fork from here: a new conversation with the history before this message, and this message in its chat box to edit and send. This one stays as it is" aria-label="fork the conversation from this message">${icon('branch', 14)}</button>`}</div>` : '');
+        + (text && it.past ? `<div class="ci-acts">${copyBtn('msg', 'Copy message')}</div>` : '')
+        + (text && !it.past ? `<div class="ci-acts">${copyBtn('msg', 'Copy message')}<button type="button" class="cp" data-edit title="Edit: change this message and send it again (goes back to just before it first)" aria-label="edit and resend this message">${icon('edit', 14)}</button><button type="button" class="cp" data-rewind title="Rewind: go back to just before this message (Claude Code's /rewind)" aria-label="rewind to before this message">${icon('rewind', 14)}</button>${c.bubbles ? '' : `<button type="button" class="cp" data-fork-at title="Fork from here: a new conversation with the history before this message, and this message in its chat box to edit and send. This one stays as it is" aria-label="fork the conversation from this message">${icon('branch', 14)}</button>`}</div>` : '');
       el._text = text;
       el._images = (it.images || []).map((im) => im?.src);
       break;
@@ -682,6 +687,7 @@ function launchedOptions(c) {
       else if (line.trim()) break; // the launch line after the list
     }
   };
+  for (const it of c.past) if (it.kind === 'user') read(it.text);
   for (const it of c.items) if (it.kind === 'user') read(it.text);
   for (const s of c.sent) read(s.raw);
   return out;
@@ -845,6 +851,9 @@ function buildPane(pane) {
     picks: new Map(), // options ticked in a reply (pickList)
     cwd: '', // the conversation's folder: relative paths in it are read against it
     expandAll: false, openBefore: null, xall: pane.querySelector('.chat-xall'), // Expand all, and what was open before it
+    // the earlier conversations (opts.history): their ids oldest first, the one loadPast reads next (-1: none left),
+    // where its loaded part starts (null: none of it yet), and their items so far, oldest first
+    hist: [], histKey: null, hi: -1, hfrom: null, hgen: 0, past: [],
   };
   pane._chat = c;
   panes.add(c);
@@ -1113,6 +1122,7 @@ function wire(c) {
     if (c.stick) c.pill.hidden = true;
     c.reply.hidden = true;
     drawTopSoon(c);
+    fillUp(c);
   }, { passive: true });
   // the pane changes height (the compose box grows, the window resizes): stay at the bottom if you were
   new ResizeObserver(() => { if (c.stick) feed.scrollTop = feed.scrollHeight; }).observe(feed);
@@ -1252,7 +1262,7 @@ async function fixtureConv(q) {
 
 async function fetchConv(c, q) {
   if (FIXTURE) return fixtureConv(q);
-  let u = `/conversation?id=${encodeURIComponent(c.id)}`;
+  let u = `/conversation?id=${encodeURIComponent(q.of || c.id)}`;
   if (q.before != null) u += `&before=${q.before}&limit=${q.limit}`;
   else if (q.since != null) u += `&since=${q.since}`;
   const ctl = new AbortController();
@@ -1307,7 +1317,8 @@ async function poll(c, force = false) {
 }
 
 async function loadEarlier(c) {
-  if (c.busy || c.from <= 0) return;
+  if (c.busy) return;
+  if (c.from <= 0) return loadPast(c);
   const gen = c.gen;
   c.busy = true;
   c.earlierBtn.disabled = true;
@@ -1321,6 +1332,46 @@ async function loadEarlier(c) {
   } catch {} finally {
     if (gen === c.gen) { c.busy = false; c.earlierBtn.disabled = false; }
   }
+}
+
+// ---------- the earlier conversations (opts.history) ----------
+// the one before the conversation shown so far: its last page first, then a page before that each time. Their
+// items go in c.past with their keys made unique ('h:<id>:<key>') and past: true
+async function loadPast(c) {
+  if (c.busy || c.hi < 0 || !c.loaded) return;
+  const gen = c.gen, hgen = c.hgen, id = c.hist[c.hi];
+  c.busy = true;
+  c.earlierBtn.disabled = true;
+  try {
+    const res = await fetchConv(c, c.hfrom == null ? { of: id } : { of: id, before: c.hfrom, limit: EARLIER });
+    if (gen !== c.gen || hgen !== c.hgen) return;
+    if (res.missing) { c.hi--; c.hfrom = null; } // gone: the one before it
+    else {
+      const items = Array.isArray(res.items) ? res.items : [];
+      const from = Math.max(0, Number(res.from) || 0);
+      const mine = c.hfrom == null ? items : items.slice(0, Math.max(0, c.hfrom - from));
+      c.past = mine.map((it) => ({ ...it, key: `h:${id}:${it.key}`, past: true })).concat(c.past);
+      c.hfrom = from;
+      if (from <= 0) { c.hi--; c.hfrom = null; }
+    }
+    draw(c, 'before');
+  } catch {} finally {
+    if (gen === c.gen) { c.busy = false; c.earlierBtn.disabled = false; }
+  }
+}
+// opts.history: the earlier conversations' ids, oldest first (the one shown is left out of them)
+function setHistory(c, ids) {
+  const h = FIXTURE || !Array.isArray(ids) ? [] : [...new Set(ids.filter((x) => typeof x === 'string' && x && x !== c.id))];
+  const k = h.join(',');
+  if (k === c.histKey) return;
+  c.histKey = k; c.hist = h; c.hi = h.length - 1; c.hfrom = null; c.hgen++;
+  if (c.past.length) { c.past = []; if (c.loaded) draw(c, 'since'); }
+}
+// the Bots tab: near the top (or all of it fits), the earlier messages load by themselves
+const moreEarlier = (c) => c.from > 0 || (c.hi >= 0 && c.loaded);
+function fillUp(c) {
+  if (!c.bubbles || c.busy || !c.visible || !moreEarlier(c) || !c.feed.isConnected) return;
+  if (c.feed.scrollTop < 400) loadEarlier(c);
 }
 
 // fold a response into the list. init: it is the list. since: it replaces everything from its "from" on.
@@ -1352,7 +1403,7 @@ function draw(c, how) {
   const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
   const keys = new Set();
   const seq = []; // { it } or { steps: [...] }
-  for (const it of c.bubbles ? botFeed(c.items) : c.items) {
+  for (const it of c.bubbles ? botFeed(c.past.length ? c.past.concat(c.items) : c.items) : c.items) {
     const k = String(it.key);
     if (keys.has(k)) continue; // a repeated key would fight over one element
     keys.add(k);
@@ -1410,12 +1461,13 @@ function draw(c, how) {
   else if (how === 'before') { if (anchor?.isConnected) feed.scrollTop += anchor.getBoundingClientRect().top - anchorTop; }
   else if (c.stick) feed.scrollTop = feed.scrollHeight;
   else if (added && added === lastKey) c.pill.hidden = false;
+  if (c.bubbles) setTimeout(() => fillUp(c), 0); // after the poll that drew lets go of c.busy
 }
 
 function drawState(c) {
-  const n = c.items.length + c.sent.length;
-  c.earlier.hidden = !(c.from > 0 && n);
-  if (!c.earlier.hidden) c.earlierBtn.textContent = `Show earlier (${c.from})`;
+  const n = c.items.length + c.sent.length + c.past.length;
+  c.earlier.hidden = !(moreEarlier(c) && (n || c.hist.length));
+  if (!c.earlier.hidden) c.earlierBtn.textContent = c.bubbles ? 'Show earlier messages' : `Show earlier (${c.from})`;
   let html = '';
   if (c.error && !n) html = `<div class="chat-empty">${icon('error', 16)}<span>Couldn't load the conversation</span><button type="button" class="btn chat-retry" data-retry>Retry</button></div>`;
   else if (!c.loaded) html = '<div class="chat-empty faint"><span>Loading the conversation…</span></div>';
@@ -1483,6 +1535,7 @@ function reset(c, s) {
   c.busy = false;
   c.id = s.id;
   c.items = []; c.from = 0; c.total = 0; c.loaded = false; c.missing = false; c.error = ''; c.queue = []; c.cut = 0; c.src = null;
+  c.past = []; c.hist = []; c.histKey = null; c.hi = -1; c.hfrom = null; c.hgen++;
   c.els.clear(); c.groups.clear(); c.open.clear(); c.picks.clear();
   c.expandAll = false; c.openBefore = null; drawXall(c);
   c.io?.disconnect(); c.io = null;
@@ -1508,6 +1561,7 @@ export function renderChatPane(pane, s, opts = {}) {
   c.cwd = String(s.cwd || '');
   if (fresh) reset(c, s);
   else { try { c.compose?.update(s); } catch (e) { console.error('chat: compose', e); } }
+  if (c.bubbles) setHistory(c, opts.history);
   c.visible = opts.visible !== false;
   c.seen = Date.now();
   if (!c.visible) return;

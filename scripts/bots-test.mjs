@@ -63,8 +63,27 @@ test('account, model and effort: the defaults, or what POST /api/sessions takes'
   // Dynamic: either may be 'dynamic'; a session of the bot starts on the dynamic base for that part
   assert.deepEqual(B.checkOpts({ model: 'dynamic', effort: 'dynamic' }, C.DEFAULTS, ['A', 'B']), { account: 'B', model: 'dynamic', effort: 'dynamic' });
   assert.ok(B.checkOpts({ model: 'Dynamic' }, C.DEFAULTS, ['A', 'B']).err === undefined); // a name MODEL_RE takes, not Dynamic
-  assert.deepEqual(B.runOpts({ model: 'dynamic', effort: 'high' }), { model: B.DYNAMIC_START.model, effort: 'high' });
-  assert.deepEqual(B.runOpts({ model: 'opus', effort: 'dynamic' }), { model: 'opus', effort: B.DYNAMIC_START.effort });
+  // long context: a session runs on the model's 1M-context version, where it has one
+  assert.deepEqual(B.runOpts({ model: 'dynamic', effort: 'high' }), { model: `${B.DYNAMIC_START.model}[1m]`, effort: 'high' });
+  assert.deepEqual(B.runOpts({ model: 'opus', effort: 'dynamic' }), { model: 'opus[1m]', effort: B.DYNAMIC_START.effort });
+  assert.deepEqual(['claude-opus-5-5', 'claude-sonnet-5-5[1m]', 'claude-haiku-5-5', 'haiku', 'claude-fable-5-1'].map(B.longModel),
+    ['claude-opus-5-5[1m]', 'claude-sonnet-5-5[1m]', 'claude-haiku-5-5', 'haiku', 'claude-fable-5-1']);
+});
+test("the bot's model in its folder's .claude/settings.json: only model set, the rest kept, a file that is not JSON left alone", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fv-botmodel-'));
+  try {
+    const bot = { folder: dir, model: 'dynamic', effort: 'dynamic' };
+    const file = path.join(dir, '.claude', 'settings.json');
+    assert.equal(B.writeModel(bot), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { model: `${B.DYNAMIC_START.model}[1m]` });
+    assert.equal(B.writeModel(bot), false); // the same: not written again
+    fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ['Bash(ls)'] }, model: 'haiku' }));
+    assert.equal(B.writeModel({ ...bot, model: 'claude-opus-5-5' }), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { permissions: { allow: ['Bash(ls)'] }, model: 'claude-opus-5-5[1m]' });
+    fs.writeFileSync(file, '{ not json');
+    assert.equal(B.writeModel(bot), false);
+    assert.equal(fs.readFileSync(file, 'utf8'), '{ not json');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ---------- the folder and its CLAUDE.md ----------
@@ -155,7 +174,7 @@ test('state.bots: not the removed ones, newest first, convId the running one els
   const bots = [mk(BID, T, { ids: [id(1), id(2)] }), mk(BID2, T + 1), mk('cccccccccccc', T + 2, { removed: true })];
   const v = B.listView(bots, new Map([[BID2, { id: id(7) }]]));
   assert.deepEqual(v.map((x) => x.id), [BID2, BID]);
-  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'color', 'convId', 'createdAt', 'effort', 'folder', 'id', 'live', 'model', 'name', 'shape']);
+  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'color', 'convId', 'createdAt', 'effort', 'folder', 'id', 'ids', 'live', 'model', 'name', 'shape']);
   assert.equal(v[0].shape, null); assert.equal(v[0].color, null);
   assert.deepEqual(B.listView([mk(BID, T, { shape: 'heart', color: '#ff6b80' })], new Map()).map((x) => [x.shape, x.color]), [['heart', '#ff6b80']]);
   assert.equal(v[0].convId, id(7)); assert.equal(v[0].live, true);
@@ -273,7 +292,8 @@ await (async () => {
     assert.ok(md.startsWith('# Web Watcher\n') && md.includes('Watch the web deploys.'));
     assert.deepEqual(h.calls.trust, [bot.folder]);
     const sb = h.calls.startBot[0];
-    assert.deepEqual({ ...sb, prompt: null }, { repo: bot.folder, account: 'B', model: B.DYNAMIC_START.model, effort: B.DYNAMIC_START.effort, prompt: null, name: 'Web Watcher', role: `bot:${bot.id}` });
+    assert.deepEqual({ ...sb, prompt: null }, { repo: bot.folder, account: 'B', model: `${B.DYNAMIC_START.model}[1m]`, effort: B.DYNAMIC_START.effort, prompt: null, name: 'Web Watcher', role: `bot:${bot.id}` });
+    assert.equal(JSON.parse(fs.readFileSync(path.join(bot.folder, '.claude', 'settings.json'), 'utf8')).model, `${B.DYNAMIC_START.model}[1m]`); // a resume runs on it too
     assert.equal(sb.prompt, "[Fleet View] You are Web Watcher, one of Henry's bots. Your standing instructions are in CLAUDE.md in this folder. Your conversation id comes in the next message: reply to this one with just \"ok\".");
     assert.deepEqual(h.saved()[0].ids, [out.id]);
     // the same name in another case is refused; a clash of folders gets -2; a folder that is there already is left alone
@@ -285,7 +305,7 @@ await (async () => {
     const [, o3] = await h.bots.create({ name: 'Notes', account: 'A', model: 'opus', effort: 'high' });
     assert.equal(o3.bot.folder, path.join(h.base, 'notes-2'));
     assert.equal(fs.readFileSync(path.join(h.base, 'notes', 'CLAUDE.md'), 'utf8'), 'mine');
-    assert.deepEqual([h.calls.startBot[2].account, h.calls.startBot[2].model, h.calls.startBot[2].effort], ['A', 'opus', 'high']);
+    assert.deepEqual([h.calls.startBot[2].account, h.calls.startBot[2].model, h.calls.startBot[2].effort], ['A', 'opus[1m]', 'high']);
     // state.bots: newest first
     assert.deepEqual(h.bots.view().map((x) => x.name), ['Notes', 'Web watcher!', 'Web Watcher']);
     assert.deepEqual(h.bots.list()[1].bots.map((x) => x.id), h.bots.view().map((x) => x.id));

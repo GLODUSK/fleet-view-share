@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Tests conversation.js's queue (the messages typed while Claude works, from the log's queue-operation lines): a
-// log is written to a temp file a few lines at a time and read as the server reads it. Prints PASS/FAIL per check
-// and exits 1 on any failure.
+// log is written to a temp file a few lines at a time and read as the server reads it. Also: a background task's
+// notice is a note marked bg (the Bots tab leaves those out). Prints PASS/FAIL per check and exits 1 on any failure.
 //   node scripts/conversation-queue-test.js
 'use strict';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { transcriptOf } = require('../conversation.js');
+const { transcriptOf, _test } = require('../conversation.js');
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'conversation-queue-test-'));
 const FILE = path.join(DIR, 'log.jsonl');
@@ -34,6 +34,11 @@ const queue = async () => (await transcriptOf(FILE)).queue;
     check('absorbed mid-turn: out of the queue', await queue(), ['second one']);
     add(op('dequeue'));
     check('a dequeue with no content takes the oldest', await queue(), []);
+    add({ type: 'user', uuid: 'u2', timestamp: new Date().toISOString(), message: { role: 'user', content: '<task-notification><task-id>b1</task-id><status>completed</status><summary>Background command "Wait" completed (exit code 0)</summary></task-notification>' } },
+      { type: 'user', uuid: 'u3', timestamp: new Date().toISOString(), message: { role: 'user', content: 'thanks' } });
+    const L = await _test.load(FILE), rd = _test.lineReader(L.file);
+    const notes = L.items.filter((it) => it.kind === 'note').map((it) => _test.build(it, rd, 's'));
+    check('a background task notice is a note marked bg', notes.map((n) => [n.text, !!n.bg]), [['Background command "Wait" completed (exit code 0)', true]]);
   } finally {
     fs.rmSync(DIR, { recursive: true, force: true });
   }

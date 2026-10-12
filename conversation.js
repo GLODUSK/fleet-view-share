@@ -312,7 +312,8 @@ function ingestRecord(L, d, off, len) {
   if (/^<task-notification>/.test(u.text)) {
     bgNotice(L, u.text);
     const s = /<summary>([\s\S]*?)<\/summary>/.exec(u.text);
-    addNote(L, 'n:' + uid, t, s ? unescapeXml(s[1]) : 'background task update');
+    const n = addNote(L, 'n:' + uid, t, s ? unescapeXml(s[1]) : 'background task update');
+    if (n) n.bg = true; // a background task's notice (the Bots tab leaves these out: web/chats-model.js botFeed)
     return;
   }
   add(L, { kind: 'user', key: 'u:' + uid, t, refs: [[off, len, -1]] });
@@ -401,7 +402,7 @@ const blockOf = (d, i) => { const c = d && d.message && d.message.content; retur
 
 function build(it, rd, id) {
   const base = { kind: it.kind, key: it.key, t: it.t };
-  if (it.kind === 'note') return { ...base, text: it.text };
+  if (it.kind === 'note') return { ...base, text: it.text, ...(it.bg ? { bg: true } : {}) };
   if (it.kind === 'assistant') return { ...base, text: it.refs.map(([o, n, i]) => (blockOf(rd.get(o, n), i) || {}).text || '').filter(Boolean).join('\n\n') };
   if (it.kind === 'thinking') { const [o, n, i] = it.refs[0]; return { ...base, text: String((blockOf(rd.get(o, n), i) || {}).thinking || '') }; }
   if (it.kind === 'user') {

@@ -2359,7 +2359,7 @@ export function mountCompose(slot, s) {
     if (!dyn || (!dyn.model && !dyn.effort)) return null;
     const size = sizeTask(msg);
     let cur = current();
-    let want = dynamicSwitch(dyn, size, cur, MODEL_IDS);
+    let want = dynamicSwitch(dyn, size, cur, MODEL_IDS, !!dyn.botId);
     const pick = { model: cur.model || null, effort: cur.effort || null, label: size.label, switched: false, at: Date.now() };
     if (!want.model && !want.effort) return pick;
     const say = (w) => [w.model && modelLabel(w.model, true), w.effort && `${w.effort} effort`].filter(Boolean).join(', ');
@@ -2369,7 +2369,7 @@ export function mountCompose(slot, s) {
       if (st.id === id) { st.step = simple ? 'Sending…' : `Waiting for it to settle, then switching to ${say(want)}…`; drawNotes(); }
       for (const end = Date.now() + DYN_WAIT_MS; st.busy && st.alive && st.id === id && Date.now() < end;) await sleep(POLL_MS);
       cur = current();
-      want = dynamicSwitch(dyn, size, cur, MODEL_IDS);
+      want = dynamicSwitch(dyn, size, cur, MODEL_IDS, !!dyn.botId);
       Object.assign(pick, { model: cur.model || null, effort: cur.effort || null });
       if (!want.model && !want.effort) return pick;
     }

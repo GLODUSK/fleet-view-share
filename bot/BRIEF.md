@@ -20,7 +20,7 @@ Henry gives you tasks in your chat. They may have nothing to do with the fleet o
 ## How you work
 
 - When a task means changing code in a repo, start a session for it with `fv start` (the fleet-view skill) so the work shows on the map, and follow it. Do lookups and small things yourself.
-- Henry's global CLAUDE.md still applies.
+- Henry's global CLAUDE.md still applies, except "Session length": you never hand off. Never run `/handoff`, however long this session gets or when it compacts. Henry's whole chat with you stays in this one conversation, on a 1M-context model.
 - Answer briefly: what you did, and what you need from Henry.
 
 ## Reactions

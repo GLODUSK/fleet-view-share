@@ -2,9 +2,10 @@
 // Fleet View as a phone messenger for the overseers only: the Chief and Henry's bots (bots.js), never a conversation
 // of the map's. On the left, one row per contact (chats-model.js): the Chief pinned on top, then every bot (one row
 // however many conversations it went through) and every team of overseers as a group chat, each with its blob
-// mascot (mascot.js), name, time and a one-line preview; on the right, the picked one's chat: a running bot's or the
-// Chief's is the same chat pane and chat box as the Projects view (chat.js), in its messenger look (opts.bubbles: the
-// replies in bubbles on the left, Fleet View's setup notes as small grey lines), a team's is its thread as bubbles with
+// mascot (mascot.js), name, time and a one-line preview; on the right, the picked one's chat (all its conversations as
+// one chat, the oldest first: historyOf, chat.js opts.history): a running bot's or the Chief's is the same chat pane
+// and chat box as the Projects view (chat.js), in its messenger look (opts.bubbles: the replies in bubbles on the
+// left, Fleet View's setup notes as small grey lines), a team's is its thread as bubbles with
 // a box that sends to every member the way the team menu's "Message the team" does (ui.messageTeam in app.js).
 //
 // Bots: "+" opens the New bot form in the chat side (name, what it does, account, model, effort, its shape and colour;
@@ -13,9 +14,9 @@
 // Account, model, effort, shape and colour are styled pickers (picker.js, in the chat box's model-menu look), not
 // browser dropdowns; their choices come from chats-model.js botChoices. Model and effort may each be Dynamic (a new
 // bot's are): every message you send it is sized from its words and the session switched first when it needs to
-// (compose.js, which asks this view which conversations are a dynamic bot's: setDynamicBots); the message then wears a
-// chip saying what it ran on (chat.js). A bot's Edit bot panel is the same form filled in (from the settings button in
-// its chat header, its card's Edit bot button or its right-click menu): Save POSTs /bots/:id with only what changed
+// (compose.js, which asks this view which conversations are a dynamic bot's: setDynamicBots). A bot's Edit bot panel
+// is the same form filled in (from the settings button in its chat header, its card's Edit bot button or its
+// right-click menu): Save POSTs /bots/:id with only what changed
 // (chats-model.js botEdits) and goes back to its chat. A bot that is not running (state.bots live false) shows Start in
 // its header, its last chat read only (or, never started, a card with its instructions and a Start button) and a box of
 // its own: what you type there starts it (POST /bots/:id/start: its running conversation, else its last one resumed,
@@ -65,7 +66,7 @@ import { openCtxMenu } from './ctxmenu.js';
 import { mascotSVG, mascotState, mascotAck, SHAPES } from './mascot.js';
 import { MODEL_IDS, EFFORTS, modelLabel, setDynamicBots } from './compose.js';
 import { handToChat } from './handto.js';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead } from './chats-model.js';
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote } from './chats-model.js';
 import { mountPicker } from './picker.js';
 import { ASK_TEXT, WATCH_NOTE, BRIEF_MS, watchOn as watchFrom, watchBody, briefLines, briefSections, briefTime, fixtureBriefing } from './chief-model.js';
 
@@ -124,6 +125,15 @@ let form = null;
 const made = new Map(); // bot id -> { bot, at }: made here, until /state lists it (?fixture=1: for good)
 // a bot of this machine's; another machine's (elsewhere: bots.js) has no Start, Edit, menu or Tasks here
 const botOf = (state, id) => (state.bots || []).find((b) => b && b.id === id && !b.elsewhere) || null;
+// a bot's or the Chief's conversations before the one its chat shows, oldest first (chat.js opts.history: they show as
+// one chat): the bot's own list (state.bots ids, another machine's bot's too) and the ones /state tags with it
+function historyOf(state, c) {
+  if (!c || !c.id) return [];
+  const b = c.botId ? (state.bots || []).find((x) => x && x.id === c.botId) : null;
+  const all = [...new Set([...(b && Array.isArray(b.ids) ? b.ids : []), ...(c.ids || [])])];
+  const at = all.indexOf(c.id);
+  return at >= 0 ? all.slice(0, at) : all;
+}
 const elsewhereBot = (state, id) => (state.bots || []).some((b) => b && b.id === id && b.elsewhere);
 // a bot's look as just picked here (bot id -> { shape?, color?, at }), worn until /state agrees or LOOK_MS passes
 const looks = new Map();
@@ -797,7 +807,7 @@ function drawHead(el, state, c, s) {
     return;
   }
   setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || s.name)}</span>${acctTag(s.account)}${badge(s)}</div>`
-    + `<div class="ch-head-m">${repoChip(s)}${s.goal ? `<span class="ch-goal" title="${esc(s.goal)}">${esc(s.goal)}</span>` : ''}</div>`);
+    + `<div class="ch-head-m">${repoChip(s)}${s.goal && setupNote(s.goal) == null ? `<span class="ch-goal" title="${esc(s.goal)}">${esc(s.goal)}</span>` : ''}</div>`);
   if (start) { setHTML(el._headB, edit + start); return; }
   const live = !s.past && inState(state, s.id);
   const solo = SOLO && typeof desk()?.showMain === 'function';
@@ -993,7 +1003,7 @@ function drawBot(el, state, c, s, visible) {
   const busy = u.starting || !!u.wait;
   el._bchat.hidden = !s;
   el._bintro.hidden = !!s;
-  if (s) renderChatPane(el._bchat, s, { readOnly: true, visible, bubbles: true });
+  if (s) renderChatPane(el._bchat, s, { readOnly: true, visible, bubbles: true, history: historyOf(state, c) });
   else setHTML(el._bintro, introHtml(c, botOf(state, c.botId), u));
   if (el._bta._for !== c.botId || u.restore) { el._bta.value = u.draft || ''; el._bta._for = c.botId; u.restore = false; el._growB(); }
   el._bta.disabled = busy;
@@ -1210,5 +1220,5 @@ export function renderChats(el, view, ui) {
   if (!s && !team) { setHTML(el._blank, blankHtml(state, c, noBots)); if (c) drawHead(el, state, c, null); return; }
   drawHead(el, state, c, s);
   if (team) { drawTeam(el, state, c); return; }
-  renderChatPane(el._chat, s, { visible: !narrow || open, bubbles: true });
+  renderChatPane(el._chat, s, { visible: !narrow || open, bubbles: true, history: historyOf(state, c) });
 }

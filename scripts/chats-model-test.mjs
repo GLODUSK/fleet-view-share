@@ -3,11 +3,11 @@
 // fallbacks, hidden ones, teams of overseers only, sorting, unread, a storage that throws and raw GET /state (the
 // phone app), a row's moment and look (turnStart, lastAction, running, shape, color), doingOf (the avatar's hover), botChoices and
 // botEdits (the New bot and Edit bot forms), mascot.js (thinking, the shapes, the same markup for the same call) and Dynamic
-// (sizeTask, dynamicSwitch, the pick store, the switch notes folded into a message's chip) and a bot's Tasks strip (taskSchedule,
+// (sizeTask, dynamicSwitch, the switch notes left out) and a bot's Tasks strip (taskSchedule,
 // taskWhen, taskLine, tasksHead). Plain asserts, no dependencies:
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, rawToContactsState, previewOf, replyLine, botFeed, setupNote, doingOf, botChoices, botEdits,
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, rawToContactsState, previewOf, replyLine, botFeed, setupNote, quietNote, doingOf, botChoices, botEdits,
   sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
@@ -387,11 +387,14 @@ test('dynamicSwitch: only what is dynamic and differs; the same family stays; no
   const ids = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5-5[1m]', 'claude-sonnet-5-5', 'claude-sonnet-5-5[1m]'];
   const both = { model: true, effort: true };
   const plan = sizeTask('plan the migration'), quick = sizeTask('what is the status?');
-  assert.deepEqual(dynamicSwitch(both, plan, { model: 'claude-sonnet-5-5', effort: 'low' }, ids), { model: 'claude-opus-5-5', effort: 'high' });
+  assert.deepEqual(dynamicSwitch(both, plan, { model: 'claude-sonnet-5-5', effort: 'low' }, ids, true), { model: 'claude-opus-5-5[1m]', effort: 'high' }); // a bot: the 1M one, its long chat fits
+  assert.deepEqual(dynamicSwitch(both, plan, { model: 'claude-sonnet-5-5', effort: 'low' }, ids), { model: 'claude-opus-5-5', effort: 'high' }); // any other chat: the 200k one
+  assert.deepEqual(dynamicSwitch(both, plan, { model: 'claude-sonnet-5-5', effort: 'low' }, ['claude-opus-5-5[1m]']), { model: 'claude-opus-5-5[1m]', effort: 'high' }); // only a 1M one on offer: that
   assert.deepEqual(dynamicSwitch(both, plan, { model: 'claude-opus-5-5[1m]', effort: 'high' }, ids), {}); // Opus 1M is Opus
-  assert.deepEqual(dynamicSwitch(both, quick, { model: 'claude-opus-5-5', effort: null }, ids), { model: 'claude-sonnet-5-5', effort: 'low' }); // unknown effort: set
+  assert.deepEqual(dynamicSwitch(both, quick, { model: 'claude-opus-5-5', effort: null }, ids, true), { model: 'claude-sonnet-5-5[1m]', effort: 'low' }); // unknown effort: set
+  assert.deepEqual(dynamicSwitch(both, quick, { model: 'claude-opus-5-5', effort: 'low' }, ['claude-sonnet-5-5'], true), { model: 'claude-sonnet-5-5' }); // a bot, no 1M one on offer: its first
   assert.deepEqual(dynamicSwitch({ model: false, effort: true }, plan, { model: 'claude-sonnet-5-5', effort: 'low' }, ids), { effort: 'high' });
-  assert.deepEqual(dynamicSwitch({ model: true, effort: false }, plan, { model: 'claude-sonnet-5-5', effort: 'low' }, ids), { model: 'claude-opus-5-5' });
+  assert.deepEqual(dynamicSwitch({ model: true, effort: false }, plan, { model: 'claude-sonnet-5-5', effort: 'low' }, ids, true), { model: 'claude-opus-5-5[1m]' });
   assert.deepEqual(dynamicSwitch(both, sizeTask('ok go'), { model: 'claude-sonnet-5-5', effort: 'low' }, ids), {});
   assert.deepEqual(dynamicSwitch(both, plan, { model: null, effort: 'high' }, ids), { model: 'claude-opus-5-5' }); // model unknown: set
   assert.deepEqual(dynamicSwitch(both, plan, { model: 'claude-sonnet-5-5', effort: 'high' }, []), {}); // no id on offer for it
@@ -416,11 +419,58 @@ test('botFeed: model and effort switch notes are all left out', () => {
     { key: 9, kind: 'note', text: 'Conversation compacted' },
   ];
   const out = botFeed(items);
-  assert.deepEqual(out.map((it) => it.key), [1, 6, 7, 9]);
+  assert.deepEqual(out.map((it) => it.key), [1, 6, 7]);
   assert.equal('switched' in out[1], false);
   // a setup note after a switch is still one
   const s2 = botFeed([{ key: 1, kind: 'note', text: '/effort low' }, { key: 2, kind: 'user', text: '[Fleet View] x' }]);
   assert.deepEqual(s2.map((it) => [it.key, it.kind]), [[2, 'setup']]);
+});
+
+test('botFeed: no plumbing: quiet setup notes, handoffs, pickups, compactions and background notes are left out', () => {
+  assert.equal(quietNote("You are Pan, one of Henry's bots. Your standing instructions are in CLAUDE.md in this folder."), 'ack');
+  assert.equal(quietNote("You are Pan DetailForge, one of Henry's bots. Your id: x. Reply with just \"ok\"."), 'ack');
+  assert.equal(quietNote("You are Pan, one of Henry's bots. Your id: x. Greet Henry in one short line, nothing more."), 'skip');
+  assert.equal(quietNote('You are the Chief. Your id: x. Read chief/BRIEF.md in the Fleet View folder.'), 'ack');
+  assert.equal(quietNote('Your instructions changed: read CLAUDE.md again, then say so in one short line.'), 'one');
+  assert.equal(quietNote('You were cut off mid-turn: the session host restarted for an update. Check what finished, then carry on.'), 'skip');
+  assert.equal(quietNote('Scheduled task: Watch the map (hourly at :00, task t-map)'), null);
+  // two conversations as one chat: the first ends in a handoff, the second starts with its pickup
+  const items = [
+    { key: 1, kind: 'user', text: "[Fleet View] You are Pan, one of Henry's bots. Your standing instructions are in CLAUDE.md in this folder. Your conversation id comes in the next message: reply to this one with just \"ok\"." },
+    { key: 2, kind: 'assistant', text: 'ok' },
+    { key: 3, kind: 'user', text: "[Fleet View] You are Pan, one of Henry's bots. Your id: a. Greet Henry in one short line, nothing more." },
+    { key: 4, kind: 'assistant', text: 'Hi Henry, Pan here.' },
+    { key: 5, kind: 'user', text: 'watch the deploys' },
+    { key: 6, kind: 'tool', name: 'Bash', input: { command: 'fv ls' } },
+    { key: 7, kind: 'note', text: 'Background command "Wait for it" completed (exit code 0)', bg: true },
+    { key: 8, kind: 'assistant', text: 'On it.' },
+    { key: 9, kind: 'tool', name: 'Skill', input: { skill: 'handoff' } },
+    { key: 10, kind: 'tool', name: 'Write', input: { file_path: 'draft.md' } },
+    { key: 11, kind: 'assistant', text: 'Handoff saved: x.md\nRestarting as a fresh conversation in a few seconds.' },
+    { key: 'p1', kind: 'note', text: '/pickup C:\\Users\\h\\.claude-handoffs\\x.md' },
+    { key: 'p2', kind: 'tool', name: 'Read', input: { file_path: 'x.md' } },
+    { key: 'p3', kind: 'assistant', text: 'Picked up: deploy watch. Next: nothing pending.' },
+    { key: 'p4', kind: 'user', text: "[Fleet View] You are Pan, one of Henry's bots. Your id: b. Reply with just \"ok\"." },
+    { key: 'p5', kind: 'assistant', text: 'ok' },
+    { key: 'p6', kind: 'user', text: '[Fleet View] Scheduled task: Watch the deploys (hourly at :00, task t-d)' },
+    { key: 'p7', kind: 'assistant', text: 'Nothing new.' },
+    { key: 'p8', kind: 'user', text: '[Fleet View] Your instructions changed: read CLAUDE.md again, then say so in one short line.' },
+    { key: 'p9', kind: 'tool', name: 'Read', input: { file_path: 'CLAUDE.md' } },
+    { key: 'p10', kind: 'assistant', text: 'Read the new CLAUDE.md.' },
+    { key: 'p11', kind: 'note', text: 'Conversation compacted\n\nsummary' },
+    { key: 'p12', kind: 'user', text: '[Fleet View] You were cut off mid-turn: the session host restarted for an update. Check what finished, then carry on.' },
+    { key: 'p13', kind: 'assistant', text: 'The deploy finished fine.' },
+    { key: 'p14', kind: 'user', text: 'thanks' },
+  ];
+  const out = botFeed(items);
+  assert.deepEqual(out.map((it) => it.key), [4, 5, 6, 8, 'p6', 'p7', 'p13', 'p14']);
+  assert.equal(out[4].kind, 'setup');
+  // a handoff that did not end the conversation (it was resumed): your next message shows again, and its reply
+  assert.deepEqual(botFeed([{ key: 1, kind: 'note', text: '/handoff' }, { key: 2, kind: 'assistant', text: 'Handoff saved' }, { key: 3, kind: 'user', text: 'hi' }, { key: 4, kind: 'assistant', text: 'Hi' }]).map((it) => it.key), [3, 4]);
+  // a pickup whose first reply is real work: it shows
+  assert.deepEqual(botFeed([{ key: 1, kind: 'note', text: '/pickup x.md' }, { key: 2, kind: 'assistant', text: 'Done: the tests pass.' }]).map((it) => it.key), [2]);
+  // "instructions changed" leaves out one reply only
+  assert.deepEqual(botFeed([{ key: 1, kind: 'user', text: '[Fleet View] Your instructions changed: read it.' }, { key: 2, kind: 'assistant', text: 'Read it.' }, { key: 3, kind: 'assistant', text: 'Also, the deploy is done.' }]).map((it) => it.key), [3]);
 });
 
 test('reactions: a reply starting "[react:<emoji>]" puts the emoji on your last message', () => {

@@ -32,6 +32,10 @@
 //   shows it; POST /bots/:id/tasks/:taskId { action: pause | resume | run | delete } (the page only) changes it, run
 //   delivering it now. The first schedule() after a start also writes every bot's CLAUDE.md again when bot/BRIEF.md
 //   changed (a Fleet View update) and tells a running bot to read it, so bots made before a change learn it too.
+// - Long context (Henry, 2026-10-12): a bot keeps its whole chat in context instead of handing off at 200k. Its
+//   sessions run on the 1M-context version of their model (longModel, runOpts), named in its folder's
+//   .claude/settings.json too (writeModel) so a resume does as well; ~/.claude/hooks/session-length.py leaves sessions
+//   in ~/Bots alone. The Bots tab shows all its conversations as one chat anyway (state.bots ids).
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -114,8 +118,27 @@ function checkOpts(b, base, accounts) {
   }
   return out;
 }
-// what a session of the bot starts on: its model and effort, a dynamic one's base (DYNAMIC_START)
-const runOpts = (bot) => ({ model: bot.model === DYNAMIC ? DYNAMIC_START.model : bot.model, effort: bot.effort === DYNAMIC ? DYNAMIC_START.effort : bot.effort });
+// Long context (Henry, 2026-10-12): a bot keeps its whole chat with Henry in context. It never hands off at 200k
+// (~/.claude/hooks/session-length.py leaves sessions in ~/Bots alone), and runs on a model's 1M-context version:
+// opus and sonnet have one ('claude-sonnet-5-5' -> 'claude-sonnet-5-5[1m]'); any other model is left as it is
+const longModel = (m) => (typeof m === 'string' && /^(?:claude-)?(?:opus|sonnet)(?:-[\w.-]*)?$/i.test(m) ? `${m}[1m]` : m);
+// what a session of the bot starts on: its model (its 1M-context version) and effort, a dynamic one's base (DYNAMIC_START)
+const runOpts = (bot) => ({ model: longModel(bot.model === DYNAMIC ? DYNAMIC_START.model : bot.model), effort: bot.effort === DYNAMIC ? DYNAMIC_START.effort : bot.effort });
+// The same model in the bot's folder's .claude/settings.json, so a resume (which names no model: api.js openBot, the
+// host's restore after a restart) runs on it too and its long chat still fits. Only "model" is set; the rest of the
+// file is kept. -> true when the file was written
+function writeModel(bot) {
+  const model = runOpts(bot).model;
+  if (typeof model !== 'string' || !model) return false;
+  const dir = path.join(bot.folder, '.claude'), file = path.join(dir, 'settings.json');
+  let j = {};
+  try { j = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') return false; } // not JSON: left alone
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return false;
+  if (j.model === model) return false;
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ ...j, model }, null, 2) + '\n');
+  return true;
+}
 
 // shape and color, as POST /bots and /bots/:id take them: one from SHAPES, a #rrggbb colour (kept in lower case);
 // null or "" clears it (the page picks again), one left out stays as it is. -> { shape?, color? } (a key only for
@@ -217,11 +240,12 @@ function elsewhereBots(convs, base = BOTS_DIR, bots = []) {
 }
 // one of those as state.bots shows it: it never runs here and has nothing to change here
 const elsewhereView = (e) => ({ id: e.id, name: e.name, brief: '', account: e.account, model: null, effort: null, folder: e.folder,
-  createdAt: e.at, convId: e.convId, live: false, shape: null, color: null, tasks: [], elsewhere: true });
-// one bot as state.bots and the answers show it; l: its running session from the host's list ({ id }), if any
+  createdAt: e.at, convId: e.convId, ids: [...e.ids], live: false, shape: null, color: null, tasks: [], elsewhere: true });
+// one bot as state.bots and the answers show it; l: its running session from the host's list ({ id }), if any. ids:
+// every conversation it went through, oldest first (the Bots tab shows them as one chat: web/chat.js opts.history)
 function viewOf(b, l) {
   return { id: b.id, name: b.name, brief: b.brief, account: b.account, model: b.model, effort: b.effort, folder: b.folder, createdAt: b.createdAt,
-    convId: (l && l.id) || b.ids[b.ids.length - 1] || null, live: !!l, shape: b.shape || null, color: b.color || null };
+    convId: (l && l.id) || b.ids[b.ids.length - 1] || null, ids: [...b.ids], live: !!l, shape: b.shape || null, color: b.color || null };
 }
 // state.bots: the bots not removed, newest first (of two made the same millisecond, the later). live: bot id -> its
 // running session
@@ -337,6 +361,7 @@ function createBots(deps) {
     }
     // its task list, empty, so the bot finds the file and its format there (CLAUDE.md says how to keep it)
     try { TASKS.writeFile(folder, { version: TASKS.VERSION, tasks: [] }); } catch (e) { log(`could not write ${TASKS.fileOf(folder)}: ${e.code || e.message}`); }
+    try { writeModel(bot); } catch (e) { log(`could not write ${bot.name}'s .claude/settings.json: ${e.code || e.message}`); }
     // a new folder would open on "Do you trust the files in this folder?", and the start prompt could not go in
     try { if (d.trustFolder) d.trustFolder(folder); } catch (e) { log(`could not trust ${folder}: ${e.message}`); }
     bots.push(bot);
@@ -423,6 +448,7 @@ function createBots(deps) {
     Object.assign(bot, next);
     applyLook(bot, lk);
     save();
+    try { writeModel(bot); } catch (e) { log(`could not write ${bot.name}'s .claude/settings.json: ${e.code || e.message}`); }
     const now = (live.get(bot.id) || {}).id || bot.ids[bot.ids.length - 1];
     if (renamed && now && d.rename) { try { d.rename(now, bot.name); } catch {} }
     let told = false;
@@ -676,6 +702,7 @@ function createBots(deps) {
     const stale = [];
     for (const b of bots) {
       if (b.removed) continue;
+      try { if (writeModel(b)) log(`${b.name} runs on ${runOpts(b).model} (its .claude/settings.json)`); } catch (e) { log(`could not write ${b.name}'s .claude/settings.json: ${e.code || e.message}`); }
       const file = path.join(b.folder, 'CLAUDE.md');
       const text = fillBrief(tpl, b);
       let before = null;
@@ -763,5 +790,5 @@ function createBots(deps) {
   };
 }
 
-module.exports = { createBots, elsewhereBots, elsewhereView, checkName, checkBrief, checkOpts, checkLook, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
+module.exports = { createBots, elsewhereBots, elsewhereView, checkName, checkBrief, checkOpts, checkLook, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
   startPrompt, idNote, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX };
