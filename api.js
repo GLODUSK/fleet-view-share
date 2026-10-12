@@ -302,6 +302,48 @@ async function closePanel(host, p) {
 const MENU_UP = 'Claude is asking something: answer it first';
 const MENU_LATE = `${MENU_UP} (a menu came up just before Enter: the text is in its prompt box, not sent)`;
 
+// Claude Code's one-time "Claude in Chrome extension detected" offer, which a fresh claude can open on (screen.js kind
+// 'chrome'): answered "Yes, use my browser", as Henry's PC accounts did (Claude Code saves it for that account, so it
+// does not come again). Not when the start asked for chrome: false (one session's ask is no reason to turn it off for
+// every later one), and never any other menu. A digit in a numbered menu, else ↑/↓ until the pointer is on it, then
+// Enter; it ignores keys for a moment after it opens, so it is tried up to three times. -> true once it went away
+async function passChromeOffer(host, p, chrome, ctx) {
+  if (chrome === false) return false;
+  const yes = (m) => m.options.find((o) => /^Yes, use my browser$/i.test(o.label));
+  const done = () => { if (ctx && ctx.log) ctx.log(`api: ${p.id}: answered Claude Code's Claude in Chrome offer: Yes, use my browser`); return true; };
+  let sent = false;
+  for (let t = 0; t < 3; t++) {
+    await sleep(SETTLE_MS);
+    const m = await menuNow(host, p);
+    if (!m) return sent && done(); // gone: the keys before took, late
+    const want = m.kind === 'chrome' && yes(m);
+    if (!want) return false;
+    if (!want.on && !m.unnumbered && want.n <= 9) await host.call('write', p.id, String(want.n));
+    else {
+      const from = m.options.findIndex((o) => o.on), to = m.options.indexOf(want);
+      if (from < 0) return false;
+      let on = from === to;
+      if (!on) {
+        await host.call('write', p.id, (to > from ? '\x1b[B' : '\x1b[A').repeat(Math.abs(to - from)));
+        for (const end = Date.now() + POINT_MS; !on && Date.now() < end;) {
+          await sleep(POLL_MS / 4);
+          const x = await menuNow(host, p);
+          on = !!(x && x.kind === 'chrome' && yes(x)?.on);
+        }
+      }
+      if (!on) continue;
+      await host.call('write', p.id, '\r');
+    }
+    sent = true;
+    for (const end = Date.now() + ANSWER_MS; Date.now() < end;) {
+      await sleep(POLL_MS / 2);
+      const x = await menuNow(host, p);
+      if (!x || x.kind !== 'chrome') return done();
+    }
+  }
+  return false;
+}
+
 // "wait": false or absent -> 0, true -> the default, a number of seconds -> that many (1..WAIT_MAX_S); else null
 function waitMs(v) {
   if (v === undefined || v === false) return 0;
@@ -615,16 +657,22 @@ async function resumeIn(host, id, where, account, ctx, gone) {
     if (!r || !r.ok) return { err: [502, { ok: false, id, message: (r && r.message) || 'the session host could not open it' }] };
     if (r.message === 'already running') alreadyRunning = true; // it started meanwhile
   }
-  // one already running is taken as it is (a message to a busy one is queued, as message does)
+  // one already running is taken as it is (a message to a busy one is queued, as message does). One that opens on
+  // the Claude in Chrome offer has it answered (passChromeOffer), its screen read every MENU_EVERY_MS while not idle
   const until = Date.now() + START_MS;
+  let chromeOffer = null, menuAt = Date.now();
   for (;;) {
     p = hosted(await host.call('list'), id);
     if (!p || !p.alive) return { err: [502, { ok: false, id, alreadyRunning, message: `the session ended before it was ready${p ? ` (code ${p.exitCode})` : ''}` }] };
     if (alreadyRunning || p.status === 'idle' || Date.now() >= until) break;
     if (gone()) return { p, alreadyRunning, ready: false, stopped: true };
+    if (!chromeOffer && Date.now() - menuAt >= MENU_EVERY_MS) {
+      menuAt = Date.now();
+      if ((await menuNow(host, p))?.kind === 'chrome' && await passChromeOffer(host, p, undefined, ctx)) chromeOffer = 'accepted';
+    }
     await sleep(POLL_MS);
   }
-  return { p, alreadyRunning, ready: p.status === 'idle' };
+  return { p, alreadyRunning, ready: p.status === 'idle', ...(chromeOffer ? { chromeOffer } : {}) };
 }
 
 // ---------- text for a conversation: teams and messages between conversations ----------
@@ -670,6 +718,7 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
       if (where.err) return [where.err[0], { ...where.err[1], ...extra, message: `${name} is not running in Fleet View and can't be resumed: ${where.err[1].message}` }];
       const r = await resumeIn(host, cid, where, null, ctx, gone);
       if (r.err) return [r.err[0], { ...r.err[1], ...extra }];
+      if (r.chromeOffer) extra.chromeOffer = r.chromeOffer;
       if (!r.ready) return [409, { ok: false, id: cid, ...extra, resumed: true, message: `${name} was resumed, but it was not idle within ${START_MS / 1000} s; nothing was typed` }];
       p = r.p;
       extra.resumed = !r.alreadyRunning;
@@ -709,7 +758,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. An overseer\'s: Henry only (his phone)' },
   { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code)' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
-  { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|other), title, context, options, sig; or null' },
+  { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|chrome|other), title, context, options, sig; or null' },
   { method: 'POST', path: '/api/sessions/:id/answer', body: '{ option: n | "submit" | "esc", sig?, text?, allowPermission?, wait? }', does: 'answer the menu (text: for a "Type something." option; "submit": a multiple-choice question\'s Submit); any menu but a question needs allowPermission (esc never does)' },
   { method: 'POST', path: '/api/sessions/:id/interrupt', does: 'press Esc once to stop Claude mid-turn (not while a menu is up)' },
   { method: 'POST', path: '/api/sessions/:id/open', body: '{ account?, prompt?, wait? }', does: 'resume a conversation Fleet View knows as a hosted session; prompt: then send it' },
@@ -734,6 +783,8 @@ function describeApi() {
 }
 
 // POST /api/sessions { repo, account, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, role?, wait? }
+// A fresh claude that opens on the Claude in Chrome offer has it answered Yes (passChromeOffer; chromeOffer: 'accepted'
+// in the reply), unless chrome is false; any other startup dialog keeps the prompt from being sent, as before.
 // role "chief" (the only role a caller may give, a bot's is startBot's; anything else but null is 400) starts the Chief (chief/BRIEF.md): the session host
 // lets its claude run fv start, open, hosted, wait and menu too without asking. One live Chief at a time (409).
 // the Claude accounts on this machine (ctx.accounts from fleet-view.js: B plus one per ~/.claude-<x>), else A and B
@@ -819,8 +870,15 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
     // wait for Claude Code to say which conversation it is, and to be ready for input. The entry is found by its
     // pty's pid, which stays the same when the host re-keys it from new-<n> to the conversation id.
     const byPid = (list) => (list || []).find((x) => x && (Number.isInteger(r.pid) ? x.pid === r.pid : x.id === key)) || null;
+    // A startup dialog keeps it from going idle: the Claude in Chrome offer is answered (passChromeOffer, its screen
+    // read every MENU_EVERY_MS until then), any other is left for a person
     const until = Date.now() + START_MS;
-    let p = null;
+    const chromeOffer = async (m) => {
+      if (out.chromeOffer || !m || m.kind !== 'chrome' || !(await passChromeOffer(host, p, b.chrome, ctx))) return false;
+      out.chromeOffer = 'accepted';
+      return true;
+    };
+    let p = null, menuAt = Date.now();
     while (Date.now() < until) {
       await sleep(POLL_MS);
       p = byPid(await host.call('list'));
@@ -828,6 +886,7 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
       if (!p.alive) { out.id = convId(p.id); return reply(502, { ok: false, message: `the session ended before it was ready (code ${p.exitCode})` }); }
       if (H.ID_RE.test(p.id) && !p.pending) { out.id = p.id; keyToId.set(key, p.id); label(p.id); }
       if (out.id && p.status === 'idle') break;
+      if (!out.chromeOffer && Date.now() - menuAt >= MENU_EVERY_MS) { menuAt = Date.now(); await chromeOffer(await menuNow(host, p)); }
     }
     const id = out.id;
     if (!id || !p || p.status !== 'idle') {
@@ -836,7 +895,8 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
     }
     await sleep(SETTLE_MS);
     // a fresh session can open on a question (trusting the folder, a setting): nothing goes into it
-    const m0 = await menuNow(host, p);
+    let m0 = await menuNow(host, p);
+    if (await chromeOffer(m0)) { await sleep(SETTLE_MS); m0 = await menuNow(host, p); }
     if (m0) return reply(200, { ok: false, promptSent: false, menu: m0, message: `${MENU_UP}; the prompt was not sent, and the session is still running in the panel` });
     const sentAt = Date.now();
     const sent = await sendText(host, id, typedPrompt, () => menuNow(host, p));
@@ -853,7 +913,7 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
       out.id = now; keyToId.set(key, now); label(now);
     }
     const w = await afterSend(host, now, sentAt, 'idle', ms, ctx, gone);
-    return reply(200, { ok: true, promptSent: true, ...w, message: doneText(w, ms, 'started, and the prompt was sent') });
+    return reply(200, { ok: true, promptSent: true, ...w, message: doneText(w, ms, `started${out.chromeOffer ? ' (its Claude in Chrome offer answered Yes)' : ''}, and the prompt was sent`) });
   });
 }
 
@@ -885,7 +945,7 @@ function openBot(id, ctx) {
   return withHost(async (host) => {
     const r = await resumeIn(host, cid, where, null, ctx, () => false);
     if (r.err) return r.err;
-    return [200, { ok: true, id: cid, alreadyRunning: r.alreadyRunning, ready: r.ready, message: r.alreadyRunning ? 'it was already running' : r.ready ? 'resumed; Claude is idle' : 'resumed, but it is not idle yet' }];
+    return [200, { ok: true, id: cid, alreadyRunning: r.alreadyRunning, ready: r.ready, ...(r.chromeOffer ? { chromeOffer: r.chromeOffer } : {}), message: r.alreadyRunning ? 'it was already running' : r.ready ? 'resumed; Claude is idle' : 'resumed, but it is not idle yet' }];
   }).catch(serverFail);
 }
 function endHosted(key) {
@@ -1412,7 +1472,7 @@ async function answerMenu(key, b, ctx, gone, via = null) {
     // approval (its options turn on auto-accept or bypass) and any menu not recognised all need allowPermission;
     // Esc (deny, cancel) never does
     if (!esc && m.kind !== 'question' && b.allowPermission !== true) {
-      const what = { permission: 'a permission prompt', trust: 'the folder trust question', plan: 'the plan approval' }[m.kind] || 'not a question';
+      const what = { permission: 'a permission prompt', trust: 'the folder trust question', plan: 'the plan approval', chrome: 'the Claude in Chrome offer' }[m.kind] || 'not a question';
       return [403, { ok: false, id: p.id, menu: m, message: `that is ${what}: only a question may be answered without allowPermission (Esc is always allowed)` }];
     }
     // the same question as m: its title and options, whatever the pointer, the ticks and the typed text say
@@ -1916,14 +1976,14 @@ async function openSession(key, b, ctx, gone, via = null) {
   return withHost(async (host) => {
     const r = await resumeIn(host, id, where, b.account, ctx, gone);
     if (r.err) return r.err;
-    const { p, alreadyRunning } = r;
+    const { p, alreadyRunning } = r, co = r.chromeOffer ? { chromeOffer: r.chromeOffer } : {};
     if (r.stopped) return [200, { ok: true, id, alreadyRunning, ready: false, message: 'stopped waiting' }];
     const ready = r.ready;
-    if (!prompt) return [200, { ok: true, id, alreadyRunning, ready, status: p.status || null, message: alreadyRunning ? 'it was already running' : ready ? 'opened; Claude is idle' : 'opened, but it is not idle yet' }];
-    if (!ready && !alreadyRunning) return [200, { ok: false, id, alreadyRunning, ready, promptSent: false, message: `opened, but it was not idle within ${START_MS / 1000} s; the prompt was not sent` }];
+    if (!prompt) return [200, { ok: true, id, alreadyRunning, ready, ...co, status: p.status || null, message: alreadyRunning ? 'it was already running' : ready ? 'opened; Claude is idle' : 'opened, but it is not idle yet' }];
+    if (!ready && !alreadyRunning) return [200, { ok: false, id, alreadyRunning, ready, ...co, promptSent: false, message: `opened, but it was not idle within ${START_MS / 1000} s; the prompt was not sent` }];
     if (!alreadyRunning) await sleep(SETTLE_MS);
     const typed = isOverseer(p.role) ? CHIEF.frame(prompt, via === 'henry' ? 'henry' : 'unsigned') : prompt;
-    const [code, out] = await deliver(host, p, typed, ms, ctx, gone, null, { alreadyRunning, ready });
+    const [code, out] = await deliver(host, p, typed, ms, ctx, gone, null, { alreadyRunning, ready, ...co });
     return [code, { ...out, promptSent: !!out.ok }];
   });
 }

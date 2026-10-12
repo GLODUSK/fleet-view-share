@@ -255,6 +255,8 @@ function plainRun(L, raw, start) {
 //                options, or its last step ("Ready to submit your answers?")
 //   'trust'      the folder trust question at startup ("Do you trust the files in this folder?", and 2.1.296's
 //                "Accessing workspace: … Is this a project you created or one you trust?" with "Yes, I trust this folder")
+//   'chrome'     Claude Code's one-time "Claude in Chrome extension detected" offer at startup: its "Yes, use my
+//                browser" option, with its title or its "No, keep browser tools off" option (api.js answers it Yes)
 //   'plan'       the plan approval ("Would you like to proceed?" with auto-accept edits / keep planning)
 //   'permission' a tool's permission prompt ("Do you want to proceed?", "Do you want to make this edit to x?",
 //                "Do you want to create x?", or a "Yes, and don't ask again" / "Yes, allow" option)
@@ -266,6 +268,8 @@ function kindOf(title, context, options, above) {
   // permission, plan and trust first: a question is the one kind answered without allowPermission, so a doubt fails closed
   if (/trust the files in this folder|do you trust|a project you created or one you trust|^\s*Accessing workspace:/im.test(all)
     || labels.some((l) => /\btrust this folder\b/i.test(l))) return 'trust';
+  if (labels.some((l) => /^Yes, use my browser$/i.test(l))
+    && (labels.some((l) => /^No, keep browser tools off$/i.test(l)) || /Claude in Chrome extension detected/i.test(all))) return 'chrome';
   if (/would you like to proceed\?/i.test(title)
     && (labels.some((l) => /auto-accept|keep planning|manually approve|bypass permissions|clear context/i.test(l)) || /\bplan\b/i.test(all))) return 'plan';
   if (/^Do you want to (?:proceed|make this edit|create|allow|run|write|delete|overwrite|fetch|use)\b/i.test(title)

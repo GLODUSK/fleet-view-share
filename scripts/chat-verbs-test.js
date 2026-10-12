@@ -105,6 +105,37 @@ const TRUST_RAW_YES = TRUST_RAW.replace('\x1b[2G\x1b[38;2;177;185;249m❯\x1b[4G
   ok('screen.js: the unnumbered trust question (kind, title, pointer, sig), not a reply, the numbered one as before; plainText\'s CSI G');
 }
 
+// ---------- menus: the Claude in Chrome offer ----------
+// RECONSTRUCTED, not captured: Claude Code 2.1.x's ChromeAutoEnableDialog (its strings and layout from the binary:
+// title "Claude in Chrome extension detected", two notes, a Select with hideIndexes, cancelFirst and the focus on
+// cancel, so "❯ No, keep browser tools off" over "  Yes, use my browser", no numbers, then "Enter to confirm · Esc to
+// keep browser tools off"), drawn the way the Mac draws TRUST_RAW above (every space a CSI n G, cols 120)
+const CHROME_RAW = "\u001b7\u001b[r\u001b8\u001b[?25h\u001b[?25l\u001b[?2004h\u001b[?2031h\u001b[?1004h\r\r\n\u001b[38;2;255;193;7m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\u001b[39m\r\r\n\u001b[2G\u001b[38;2;255;193;7m\u001b[1mClaude\u001b[9Gin\u001b[12GChrome\u001b[19Gextension\u001b[29Gdetected\u001b[22m\u001b[39m\r\r\n\r\r\n\u001b[2GClaude\u001b[9Gwill\u001b[14Guse\u001b[18Gyour\u001b[23GChrome\u001b[30Gbrowser\u001b[38Gby\u001b[41Gdefault\u001b[49G—\u001b[51Gnavigating\u001b[62Gsites,\u001b[69Gfilling\u001b[77Gforms,\u001b[84Gand\u001b[88Gcapturing\u001b[98Gscreenshots\u001b[110Gin\u001b[113Gyour\r\r\n\u001b[2Gexisting\u001b[11Gsession.\r\r\n\r\r\n\u001b[2G\u001b[2mBrowser\u001b[10Gactions\u001b[18Gstill\u001b[24Ggo\u001b[27Gthrough\u001b[35GClaude's\u001b[44Gregular\u001b[52Gpermission\u001b[63Gprompts\u001b[71Gbefore\u001b[78Gthey\u001b[83Grun.\u001b[88GTurn\u001b[93Gbrowser\u001b[101Gtools\u001b[107Goff\u001b[111Gfor\r\r\n\u001b[2G\u001b[2mfuture\u001b[9Gsessions\u001b[18Gwith\u001b[23G/chrome.\u001b[22m\r\r\n\r\r\n\u001b[2G\u001b[38;2;177;185;249m❯\u001b[4GNo,\u001b[8Gkeep\u001b[13Gbrowser\u001b[21Gtools\u001b[27Goff\u001b[39m\r\r\n\u001b[4GYes,\u001b[9Guse\u001b[13Gmy\u001b[16Gbrowser\r\r\n\r\r\n\u001b[2G\u001b[38;2;153;153;153mEnter\u001b[8Gto\u001b[11Gconfirm\u001b[19G·\u001b[21GEsc\u001b[25Gto\u001b[28Gkeep\u001b[33Gbrowser\u001b[41Gtools\u001b[47Goff\u001b[39m\r\r\n\u001b[1C\u001b[4A";
+// the same with the ❯ moved down to "Yes, use my browser"
+const CHROME_RAW_YES = CHROME_RAW.replace('\x1b[2G\x1b[38;2;177;185;249m❯\x1b[4GNo,\x1b[8Gkeep\x1b[13Gbrowser\x1b[21Gtools\x1b[27Goff\x1b[39m\r\r\n\x1b[4GYes,',
+  '\x1b[4GNo,\x1b[8Gkeep\x1b[13Gbrowser\x1b[21Gtools\x1b[27Goff\r\r\n\x1b[2G\x1b[38;2;177;185;249m❯\x1b[4GYes,');
+{
+  assert.notEqual(CHROME_RAW_YES, CHROME_RAW);
+  const m = SCREEN.menuDetailsShown(CHROME_RAW, 120, 30);
+  assert.equal(m.kind, 'chrome');
+  assert.equal(m.unnumbered, true);
+  assert.deepEqual(m.options.map(({ n, label, on }) => ({ n, label, on })), [{ n: 1, label: 'No, keep browser tools off', on: true }, { n: 2, label: 'Yes, use my browser', on: false }]);
+  assert.ok(m.context.includes('Claude in Chrome extension detected'));
+  assert.deepEqual(SCREEN.menuDetailsShown(CHROME_RAW_YES, 120, 30).options.map((o) => o.on), [false, true]);
+  assert.equal(SCREEN.menuDetailsShown(CHROME_RAW, 80, 30)?.kind, 'chrome');
+  // numbered (should a later build show its indexes), with or without the title
+  assert.equal(SCREEN.menuDetails([RULE, ' Claude in Chrome extension detected', '', ' Browser actions still go through Claude\'s regular permission prompts before they run.', '',
+    ' ❯ 1. No, keep browser tools off', '   2. Yes, use my browser', '', ' Enter to confirm · Esc to keep browser tools off']).kind, 'chrome');
+  assert.equal(SCREEN.menuDetails([RULE, ' Pick one', '', ' ❯ 1. Yes, use my browser', '   2. No, keep browser tools off', '', ' Enter to confirm']).kind, 'chrome');
+  // only "Yes, use my browser", without the title or the other option: not the offer
+  assert.equal(SCREEN.menuDetails([RULE, ' Pick one', '', ' ❯ 1. Yes, use my browser', '   2. Something else', '', ' Enter to confirm']).kind, 'other');
+  // the other kinds keep theirs
+  assert.equal(SCREEN.menuDetailsShown(TRUST_RAW, 120, 30).kind, 'trust');
+  assert.equal(SCREEN.menuDetails([RULE, ' Which layout?', '', ' ❯ 1. Grid', '   2. List', '   3. Type something.', '', ' Enter to select · Esc to cancel']).kind, 'question');
+  assert.equal(SCREEN.menuDetails([RULE, ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel']).kind, 'permission');
+  ok('screen.js: the Claude in Chrome offer reads as kind chrome (unnumbered or numbered); trust, question and permission keep theirs');
+}
+
 // ---------- the fake session host ----------
 const fake = { list: [], screen: '', writes: [], onWrite: null };
 const screenOf = (rows) => rows.join('\r\n');
@@ -126,6 +157,7 @@ const server = net.createServer((sock) => {
       if (msg.op === 'list') v = fake.list;
       else if (msg.op === 'snapshot') v = fake.screen;
       else if (msg.op === 'write') { fake.writes.push(msg.a[1]); if (fake.onWrite) fake.onWrite(msg.a[1]); v = true; }
+      else if (msg.op === 'create' || msg.op === 'open') { fake.opened = msg.a[0]; v = fake.onOpen ? fake.onOpen(msg.a[0]) : { ok: false }; }
       sock.write(JSON.stringify({ t: 'res', n: msg.n, v }) + '\n');
     }
   });
@@ -449,6 +481,85 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     assert.equal(c4, 200, o4.message);
     assert.equal(o4.changed, false);
     ok('answer: the unnumbered trust question picked with ↓ and Enter (no digit), only with allowPermission; parseMenu agrees');
+  }
+
+  // ---------- start and open: the Claude in Chrome offer answered Yes, nothing else ----------
+  {
+    // compose.js's parseMenu reads it the same (everything but kind)
+    const { parseMenu } = await import('../web/compose.js');
+    for (const raw of [CHROME_RAW, CHROME_RAW_YES]) {
+      const rows = SCREEN.render(raw, 120, 30, 40, false);
+      const { kind, ...rest } = SCREEN.menuDetails(rows);
+      assert.equal(kind, 'chrome');
+      assert.deepEqual(parseMenu(rows), rest);
+    }
+    const repo = path.join(dir, 'repo');
+    fs.mkdirSync(repo, { recursive: true });
+    const logs = [];
+    Object.assign(ctx, { log: (s) => logs.push(s), UNSAFE_PATH: /["%^&|<>\x00-\x1f]/, allowedFolders: () => [repo],
+      whereIs: () => ({ known: true, cwd: repo, account: 'A' }), rename: () => [200], markTemp: () => {} });
+    const entry = (o) => { fake.list = [{ id: ID, pid: 777, alive: true, pending: false, account: 'A', cols: 120, rows: 30, ...o }]; };
+    // the screen and status its claude opens on; onWrite: what the keys do
+    const opening = (screen, status, onWrite = null) => {
+      reset(); logs.length = 0; fake.list = []; fake.opened = null; fake.onWrite = onWrite;
+      fake.onOpen = (o) => { fake.screen = screen; entry({ status }); return { ok: true, key: 'new-1', pid: 777, ...('chrome' in o ? { chrome: o.chrome } : {}) }; };
+    };
+    const start = (b) => call('POST', '/api/sessions', { repo, account: 'A', prompt: 'hello there', ...b });
+    // ↓ onto Yes, Enter: the dialog goes and its claude idles; the prompt's Enter makes it busy
+    const keys = (w) => {
+      if (w === '\x1b[B' && fake.screen === CHROME_RAW) fake.screen = CHROME_RAW_YES;
+      else if (w === '\r' && fake.screen === CHROME_RAW_YES) { fake.screen = screenOf(['', ...box()]); entry({ status: 'idle' }); }
+      else if (w === '\r') entry({ status: 'busy' });
+    };
+
+    // a startup dialog: its claude says waiting while it is up
+    opening(CHROME_RAW, 'waiting', keys);
+    const [c1, o1] = await start({});
+    assert.equal(c1, 200, o1.message);
+    assert.equal(o1.ok, true, o1.message);
+    assert.equal(o1.promptSent, true);
+    assert.equal(o1.chromeOffer, 'accepted');
+    assert.match(o1.message, /Claude in Chrome offer answered Yes/);
+    assert.deepEqual(fake.writes.slice(0, 2), ['\x1b[B', '\r']);
+    assert.ok(!fake.writes.some((w) => /^[0-9]$/.test(w)), 'no digit in a menu drawn without numbers');
+    assert.equal(pasted(), 'hello there');
+    assert.equal(fake.writes[fake.writes.length - 1], '\r');
+    assert.ok(logs.some((l) => /Claude in Chrome offer/.test(l)), logs.join('\n'));
+    // up while it says idle: answered at the last look before typing
+    opening(CHROME_RAW, 'idle', keys);
+    const [c2, o2] = await start({ chrome: true });
+    assert.equal(c2, 200, o2.message);
+    assert.equal(o2.promptSent, true, o2.message);
+    assert.equal(o2.chromeOffer, 'accepted');
+    assert.equal(fake.opened.chrome, true);
+    assert.equal(pasted(), 'hello there');
+    // chrome: false asked for: left alone, the prompt not sent, the menu given back
+    opening(CHROME_RAW, 'idle', keys);
+    const [c3, o3] = await start({ chrome: false });
+    assert.equal(c3, 200, o3.message);
+    assert.equal(o3.ok, false);
+    assert.equal(o3.promptSent, false);
+    assert.equal(o3.menu.kind, 'chrome');
+    assert.equal(o3.chromeOffer, undefined);
+    assert.deepEqual(fake.writes, []);
+    // the folder trust question at start: never answered
+    opening(TRUST_RAW, 'idle', keys);
+    const [c4, o4] = await start({});
+    assert.equal(c4, 200, o4.message);
+    assert.equal(o4.promptSent, false);
+    assert.equal(o4.menu.kind, 'trust');
+    assert.deepEqual(fake.writes, []);
+    // a conversation resumed (open) onto the offer: answered, then ready
+    opening(CHROME_RAW, 'waiting', keys);
+    const [c5, o5] = await call('POST', `${S}/open`, {});
+    assert.equal(c5, 200, o5.message);
+    assert.equal(o5.ready, true, o5.message);
+    assert.equal(o5.chromeOffer, 'accepted');
+    assert.deepEqual(fake.writes, ['\x1b[B', '\r']);
+    for (const k of ['UNSAFE_PATH', 'allowedFolders', 'whereIs', 'rename', 'markTemp']) delete ctx[k];
+    ctx.log = () => {};
+    fake.onOpen = null;
+    ok('start and open: the Claude in Chrome offer answered Yes (↓, Enter) and the prompt sent; not with chrome: false; trust never');
   }
 
   // ---------- Fleet View's own queue ----------
