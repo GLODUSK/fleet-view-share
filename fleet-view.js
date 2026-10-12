@@ -2569,14 +2569,16 @@ function pollOne(s, now, budget) {
   s.running = fd ? fd.tools : null;
   s.bgList = s.demo ? [] : bgLiveList(s, lp, now);
   s.bgLive = s.bgList.filter((b) => !b.server).length;
-  // only DONE is hidden; a turn that went quiet mid-way may be a permission prompt, so it stays (STALLED)
+  // only DONE is hidden; a turn that went quiet mid-way may be a permission prompt, so it stays (STALLED). A turn
+  // that ended on a question while its background tasks still run is WORKING, not ASKED YOU: their notice starts
+  // the next turn by itself ("I'll tell you what it finds. Which app was it?")
   s.state = s.wf && !s.wf.done && s.wf.agents.some((a) => a.state === 'run') ? 'AGENTS'
     : s.asking ? 'ASKING'
     : s.apiError ? 'ERROR'
     : (fd ? fd.turnOpen : s.turnOpen) ? (quiet < 5 * 60e3 || (fd && (fd.tools.length || quiet < 15 * 60e3)) ? 'WORKING' : 'STALLED')
     : s.liveAgents > 0 ? 'AGENTS'
-    : s.endedOnQuestion ? 'QUESTION'
-    : s.bgLive > 0 ? 'WORKING' : 'DONE';
+    : s.bgLive > 0 ? 'WORKING'
+    : s.endedOnQuestion ? 'QUESTION' : 'DONE';
   // its live claude (sessions/<pid>.json) knows sooner than the log. A prompt ("approve Bash(…)", a question)
   // needs you now, not as STALLED? 5 minutes later, and beats a running plan, whose agents wait on it too. A
   // panel left open (/usage, /config) holds back background updates, so it only matters once the turn or plan
