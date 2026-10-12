@@ -45,8 +45,10 @@
 //                          setMapSelection(ids). ui.multi: that list (read only). ui.toggleMulti(id) / ui.clearMulti():
 //                          the cards' and tiles' Ctrl+click and plain click (cards.js wirePick); ui.selectMany(ids): their
 //                          Shift+click (the range from the last card or tile clicked) and the Projects list's. Ctrl+A
-//                          selects every conversation the current view shows (selectAllShown); a workspace's and a team's
-//                          right-click menu have "Select all conversations"; Ctrl+click on a finished row adds it too
+//                          selects every conversation the current view shows (selectAllShown); ui.selectRepo(root): a
+//                          double-click on a workspace (the map's repo, the Projects list's header) selects its
+//                          conversations; a team's right-click menu has "Select all conversations"; Ctrl+click on a
+//                          finished row adds it too
 //   ui.takeTab(id)         detail.js: the panel tab asked for once ('details' from the menu), or null
 //   ui.panel(id, tab)      the Projects and Bots views' Session / Details buttons: the side panel on that tab
 //   ui.messageTeam(teamId, text)   the Bots view's group chat box: the same as the team menu's "Message the team"
@@ -2408,8 +2410,8 @@ function openContextMenu(target, x, y) {
     const rIt = { root: repoRootOf({ root: folder }), name: target.name || repo.name || repoName(folder) };
     items.push({ sep: true }, ...(local.view === 'chats' ? [] : [...showOnlyItems(rIt), ...showTooItems(rIt)]), repoRenameItem(folder), repoColorItem(folder));
     // orders for every conversation in it, idle and new ones too (one team), or the same text to each
+    // (selecting them all is a double-click on the workspace, ui.selectRepo, Henry 2026-10-12)
     items.push({ sep: true }, ...repoOrderItems(folder, target.name || repo.name || repoName(folder)));
-    items.push(selectAllItem(repoSessions(folder).filter((s) => !s.pending), `no conversation in ${target.name || repo.name || repoName(folder)}`));
     // its removed conversations (only when it has any), all of them: continue, show again or forget each
     const rm = removedMenuItem(removedFor(folder), false);
     if (rm) items.push({ sep: true }, rm);
@@ -2783,7 +2785,9 @@ function selectAll(ids) {
   setMulti(ids, 'keys');
   toast(`Selected ${ids.length === 1 ? 'one conversation' : `${ids.length} conversations`} · Esc clears`, C.dim);
 }
-// "Select all conversations" on a workspace's and a team's menu: the ones shown into the multi-selection
+// a double-click on a workspace (map.js, projects.js): its conversations into the multi-selection
+ui.selectRepo = (root) => { if (state && root) selectAll(repoSessions(String(root)).filter((s) => !s.pending).map((s) => s.id)); };
+// "Select all conversations" on a team's menu: the ones shown into the multi-selection
 function selectAllItem(list, none) {
   if (!list.length) return { label: 'Select all conversations', icon: 'check', disabled: true, note: none };
   return { label: 'Select all conversations', icon: 'check', note: `${list.length}`, run: () => selectAll(list.map((s) => s.id)) };

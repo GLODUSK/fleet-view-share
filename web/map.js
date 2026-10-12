@@ -60,14 +60,15 @@
 //     el    container that fills the area under the header; the canvas lives inside it
 //     state GET /state JSON
 //     ui    { selectedId, setSelected(id), open(id), saveSettings(obj), keys, reveal(req), openUrl(url),
-//           contextMenu(target, x, y), setMulti(ids) }:
+//           contextMenu(target, x, y), setMulti(ids), selectRepo(root) }:
 //           the map sets ui.keys.map. reveal / openUrl may be missing (older shell); the map then falls back
-//           to POST /reveal and window.open itself. setMulti may be missing too.
+//           to POST /reveal and window.open itself. setMulti and selectRepo may be missing too.
 //   also exported: mapSelection, setMapSelection, mapLens, setMapLens, setMapReplay (see "Command center")
 //
 // Acting on nodes: a click picks (a conversation's pick opens the shell's detail panel through
 // ui.setSelected). Double-click, a click on the node already picked, or Enter acts on it: a conversation or
-// agent opens the conversation, a PR opens on GitHub, a file opens in VS Code, a repo opens in Explorer.
+// agent opens the conversation, a PR opens on GitHub, a file opens in VS Code. A repo's double-click or Enter
+// selects all its conversations (ui.selectRepo); its folder opens from its right-click menu.
 // A right-click on a conversation, an agent or a repo calls ui.contextMenu(target, clientX, clientY) with
 // { kind: 'session', id } or { kind: 'repo', root, name, color } (the shell's menu, app.js).
 //
@@ -3410,9 +3411,10 @@ function wireMouse(cv) {
     // in between (a pick opens the shell's detail panel, which can narrow the map and shift every node)
     if (e.detail >= 2) n = recentClick() || n;
     else I.lastClick = n ? { id: n.id, t: performance.now() } : null;
-    // a second, separate click on a picked PR, file or repo acts on it (a conversation's second click
-    // only keeps it picked: opening a terminal tab takes a double-click or Enter)
-    if (n && n.id === I.sel && e.detail === 1 && n.kind !== 'session' && n.kind !== 'agent' && act(n)) return;
+    // a second, separate click on a picked PR or file acts on it (a conversation's second click only keeps it
+    // picked: opening a terminal tab takes a double-click or Enter; a repo's selects its conversations only on a
+    // double-click or Enter)
+    if (n && n.id === I.sel && e.detail === 1 && n.kind !== 'session' && n.kind !== 'agent' && n.kind !== 'repo' && act(n)) return;
     if (e.detail >= 2 && n && n.id === I.sel) return; // already picked: don't re-pick (no extra redraw)
     // (a file dot only gets picked: it opens from its right-click menu, a double-click or Enter)
     select(n, false);
@@ -3557,7 +3559,8 @@ function nodeAction(n) {
     const f = Array.isArray(n.k.files) && n.k.files.find((x) => x && x.abs);
     return f ? { hint: 'open the migration in VS Code', run: () => reveal({ kind: 'file', path: f.abs }) } : null;
   }
-  if (n.kind === 'repo') return n.root ? { hint: 'open the folder in Explorer', run: () => reveal({ kind: 'folder', path: n.root }) } : null;
+  // (its folder opens from its right-click menu)
+  if (n.kind === 'repo') return n.root ? { hint: 'select all its conversations', run: () => { try { I.ui.selectRepo && I.ui.selectRepo(n.root); } catch (err) { console.error(err); } } } : null;
   if ((n.kind === 'session' || n.kind === 'agent') && n.sid) return { hint: 'open the conversation', run: () => openSid(n.sid) };
   return null;
 }
@@ -3992,7 +3995,7 @@ function buildLegend() {
   act('conversation: open it (one click shows details)');
   act('PR: open it on GitHub');
   act('file: click to open it (VS Code, or its own app for images and documents)');
-  act('repo: open the folder in Explorer');
+  act('repo: select all its conversations (double-click)');
   act('right-click a conversation, a repo, a team or a conflict: its menu');
   sec('Accounts');
   const small = accs.length > 2;

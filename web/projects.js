@@ -188,6 +188,9 @@ function build(el, ui) {
       if (folded.has(r)) folded.delete(r); else folded.add(r);
       store.set('fv.projects.folded', [...folded]);
       ui.refresh();
+      // a double-click on a workspace's header: its two clicks fold it and back, and all its conversations go into
+      // the multi-selection (the first click's refresh redraws the header, so the browser sends no dblclick)
+      if (e.detail === 2 && r && ui.selectRepo) ui.selectRepo(r);
     } else if (t.dataset.older) {
       const r = t.dataset.older, o = older.get(r) || { items: [] };
       o.open = !o.open; o.all = false;
