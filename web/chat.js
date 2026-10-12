@@ -650,7 +650,8 @@ function renderItem(it, c) {
 // starts ticked, so Launch takes the recommendation in one click.
 // An option already launched (in any "Go with these:" message of the conversation, sent from here or typed) is
 // greyed with a Launched tag and can't be ticked again; the rest stay live, so Launch counts only what's left.
-// It is read from the transcript, so it holds after a reload too.
+// It is read from the transcript, so it holds after a reload too. An option is known by its name (the words before
+// its first ": "), so a launch that words the rest differently still counts.
 // The launch line is one line: it opens with the old words, then says how to run, check and ship the picks.
 const LAUNCH_LINE = 'Launch subagents accordingly with model and effort: first check which items touch the same files and run those one after another (the rest in parallel), one subagent per item at its stated model and effort, each in its own worktree; then review every diff yourself, run the checks, and ship.';
 const LAUNCH_HEAD = 'Go with these:';
@@ -672,6 +673,12 @@ function pickList(el, md, it, c) {
   el.insertAdjacentHTML('beforeend', '<div class="cpk"><button type="button" class="btn primary cpk-go" data-launch></button><span class="cpk-n"></span></div>');
   drawPick(el, p, launchedOptions(c));
 }
+// what an option is known by in a launch: its name before the first ": " (else all of it), case and spaces folded
+function launchKey(t) {
+  const s = String(t || '').replace(/\s+/g, ' ').trim();
+  const at = s.indexOf(': ');
+  return (at > 0 && at <= 160 ? s.slice(0, at) : s).toLowerCase();
+}
 // an option's words on one line, without the badges (they are for you, not part of the option)
 function optionText(li) {
   const x = li.cloneNode(true);
@@ -689,7 +696,7 @@ function launchedOptions(c) {
     if (!at && !s.startsWith(LAUNCH_HEAD)) return; // indexOf -1 + 1: no head anywhere
     for (const line of s.slice(at).split('\n').slice(1)) {
       const m = /^\s*\d+[.)]\s+(.+)$/.exec(line);
-      if (m) out.add(m[1].replace(/\s+/g, ' ').trim());
+      if (m) out.add(launchKey(m[1]));
       else if (line.trim()) break; // the launch line after the list
     }
   };
@@ -730,7 +737,7 @@ function drawPick(el, p, launched) {
   let left = 0;
   for (const b of el.querySelectorAll('.chat-md li > input[data-pick]')) {
     const i = +b.dataset.pick;
-    const done = p.mine.has(i) || launched.has(el._opts?.[i]);
+    const done = p.mine.has(i) || launched.has(launchKey(el._opts?.[i]));
     if (done) p.on.delete(i); else left++;
     b.disabled = done;
     b.checked = !done && p.on.has(i);
