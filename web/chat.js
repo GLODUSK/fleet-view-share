@@ -21,9 +21,9 @@
 // Above the compose box, a tray lists what the session runs in the background (shells, async agents, workflows,
 // monitors: the reply's `bg`, see conversation.js), like the task list under a Claude Code terminal. Folded it is
 // one line with a count; a click opens a row per task with how long it has run.
-// A message you send shows at once ('fv-chat-sent' from compose.js) as a bubble marked "Sending" (or "Queued"
-// while Claude is mid-turn, which writes it to the transcript only when it reads it); the mark goes once Claude
-// Code's prompt lets go of it ('fv-chat-taken'), and the transcript's own copy replaces it (looked for every 200 ms
+// A message you send shows at once ('fv-chat-sent' from compose.js) as a plain bubble, with no "Sending" mark (Henry
+// 2026-10-12: only a problem says anything), or marked "Queued" while Claude is mid-turn (it writes it to the
+// transcript only when it reads it); Claude Code's prompt letting go of it ('fv-chat-taken') marks it taken, and the transcript's own copy replaces it (looked for every 200 ms
 // until then, FAST_POLL_MS: Claude Code writes it a second or so after the Enter). A queued one has an Interrupt button: Claude stops the step it is on and takes your message now
 // (compose.js presses Claude Code's own "send now" keys, which send every queued message at once). Unsend takes
 // it back out of Claude Code's queue ('fv-chat-unsend': compose.js pulls the queue into the prompt, clears it,
@@ -961,7 +961,7 @@ function addSent(c, d) {
   el.innerHTML = `<div class="cu-bubble${long ? ' clamp' : ''}">${imgs ? `<div class="cu-imgs">${imgs}</div>` : ''}${d.text ? `<div class="cu-body">${userTextHtml(d.text)}</div>` : ''}${long ? moreBtn(String(d.text)) : ''}</div>`
     + `<div class="cu-status">${d.busy ? `<span>Queued: Claude reads it after this step</span><button type="button" class="cu-now" data-unsend title="Take it back out of the queue">${icon('close', 11)}<span>Unsend</span></button><button type="button" class="cu-now" data-now title="Stop what Claude is doing and send this now">${icon('stop', 11)}<span>Interrupt</span></button>`
       + (d.text && !c.bubbles ? `<button type="button" class="cu-now cu-new" data-fork="fork" title="Take it out of the queue and send it to a fork of this conversation: a new one with its history so far">${icon('branch', 11)}<span>Fork</span></button>`
-        + `<button type="button" class="cu-now cu-new" data-fork="new" title="Take it out of the queue and send it to a new conversation in this folder">${icon('plus', 11)}<span>New chat</span></button>` : '') : 'Sending…'}</div>`;
+        + `<button type="button" class="cu-now cu-new" data-fork="new" title="Take it out of the queue and send it to a new conversation in this folder">${icon('plus', 11)}<span>New chat</span></button>` : '') : ''}</div>`;
   // used: the user messages and notes already in the feed (or matched to another sent one), which can't be this one
   const used = new Set(c.items.filter((it) => it.kind === 'user' || it.kind === 'note').map((it) => String(it.key)));
   const text = norm(d.text), cmd = /^\/[^\s/]+/.exec(text)?.[0] || null;
@@ -988,7 +988,7 @@ function enterAgain(c, stEl) {
   c.pane.dispatchEvent(ev);
   if (!ev.detail.ok || !stEl) return;
   stEl.classList.remove('stuck');
-  stEl.textContent = 'Sending…';
+  stEl.textContent = '';
 }
 // Unsend on a queued message: compose.js takes it out of Claude Code's queue (the rest stay queued).
 // fork: 'fork' | 'new' (its Fork / New chat): out of the queue, then to a new conversation (app.js)
@@ -1183,7 +1183,7 @@ function wire(c) {
     drawPick(el, p, launchedOptions(c));
   });
   pane.addEventListener('fv-chat-sent', (e) => { if (e.detail && e.detail.id === c.id) addSent(c, e.detail); });
-  // Claude Code's prompt let go of it (compose.js): sent, so no "Sending…" while the transcript catches up
+  // Claude Code's prompt let go of it (compose.js): sent, so it waits quietly for the transcript's copy
   pane.addEventListener('fv-chat-taken', (e) => {
     const d = e.detail;
     if (!d || d.id !== c.id) return;

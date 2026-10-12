@@ -69,9 +69,7 @@
 .ci-user { display: flex; flex-direction: column; align-items: flex-end; }
 /* sent from here, not in the transcript yet */
 .ci-user.sending { flex-direction: column; align-items: flex-end; gap: 3px; animation: chat-fade 160ms var(--ease); }
-.ci-user.sending .cu-bubble { opacity: 0.72; }
-.ci-user.sending.taken .cu-bubble { opacity: 1; } /* Claude Code took it: it only waits for the transcript's copy */
-.ci-user.taken .cu-status:empty { display: none; }
+.ci-user.sending .cu-status:empty { display: none; } /* nothing to say while it goes: only Queued or a problem shows */
 .ci-user.sending .cu-img { cursor: default; }
 .cu-status { color: var(--faint); font: 500 11px/1.3 var(--font-ui); padding-right: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .cu-status.stuck { color: var(--gold); }
