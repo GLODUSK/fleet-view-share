@@ -53,7 +53,8 @@
 //      this machine (laid down before, or its log in any slug folder of the account's projects folder: one this
 //      machine started) stays in that slug folder while its file is there, so it never ends up in two.
 //   5. Skipped while a Claude Code process on this machine has it open (sessions/<pid>.json), or isOpen(id) says so.
-//   6. main: the chunk rows of the row's generation, ordered by seq, must cover [0, size) with no gap; each object's
+//   6. The conversation's chunk rows, read in pages of 1000 (chunkRows). main: the rows of the row's generation,
+//      ordered by seq, must cover [0, size) with no gap; each object's
 //      path must be the one objectPath() names for its row, it is opened with that path as the label (so an object
 //      copied to another path does not open), and its sha256 and then the whole file's are checked. Side files
 //      (subagents/, tool-results/, workflows/) the same way under <slug>/<id>/, from their newest generation; a side
@@ -67,9 +68,10 @@
 //      whose last line was cut off (its writer ended mid-line, so that part never went up) counts by its whole lines,
 //      and the new bytes replace the cut line.
 //      Every path is checked to stay inside the projects folder, with no link on the way, before anything is written.
-//   8. What was laid down goes in <dataDir>/sync/down-state.json after each conversation. A conversation that fails
-//      (a missing object, a gap, a bad sha256, the network) writes nothing, leaves no .part, and is tried again after
-//      a back-off (30 s, doubling up to 30 minutes).
+//   8. What was laid down goes in <dataDir>/sync/down-state.json (compact, once at the end of each scan, and after a
+//      pull, a move and a stop). An unchanged row whose log is gone from here (Claude Code deletes old logs) is laid
+//      down again. A conversation that fails (a missing object, a gap, a bad sha256, the network) writes nothing,
+//      leaves no .part, and is tried again after a back-off (30 s, doubling up to 30 minutes).
 //
 // status() holds counts, times and the last error's message: never the key, a token or a title.
 'use strict';
@@ -243,8 +245,14 @@ function createMaterializer(opts = {}) {
       conflicts: s && s.conflicts && typeof s.conflicts === 'object' ? s.conflicts : {},
     };
   }
-  let state = loadState();
-  const saveState = () => { try { C.writeState(statePath, state); } catch (e) { log(`sync-down: down-state.json could not be saved: ${e.message}`); } };
+  let state = loadState(), dirty = false;
+  // compact, and only when something changed: at the end of each scan, after a pull, a move and a stop (it is MBs).
+  // A crash loses at most that scan's: those rows are looked at again, and what is here already is not fetched again
+  const changed = () => { dirty = true; };
+  const saveState = () => {
+    if (!dirty) return;
+    try { C.writeState(statePath, state, { compact: true }); dirty = false; } catch (e) { log(`sync-down: down-state.json could not be saved: ${e.message}`); }
+  };
   const sigOf = (row) => `${row.updated_at}|${row.generation}|${row.size}|${row.sha256 || ''}`;
   const stampOf = (p) => { const st = lstatOr(p); return st ? `${st.size}:${st.mtimeMs}` : 'none'; };
 
@@ -555,6 +563,34 @@ function createMaterializer(opts = {}) {
     return r;
   }
 
+  // ---------- chunk rows ----------
+  // Every chunk row of a conversation, in pages of PAGE (PostgREST answers at most 1000 rows, and cuts the rest off
+  // silently), ordered by file, generation and seq: one key, so the order is total. Each page after the first starts
+  // on the last row of the one before; a different row there means rows came or went before it meanwhile (an upload,
+  // an old generation dropped), so the listing starts again (a third time throws 'changed': the next scan tries again).
+  const CHUNK_COLS = 'file,generation,seq,byte_offset,byte_length,object_path,sha256';
+  const rowKey = (r) => (r ? `${r.file}|${r.generation}|${r.seq}` : '');
+  async function chunkRows(id) {
+    for (let tries = 0; tries < 3; tries++) {
+      const out = [];
+      let shifted = false;
+      for (;;) {
+        const from = out.length ? out.length - 1 : 0;
+        const rows = await api.rest('GET', 'chunks', {
+          query: { select: CHUNK_COLS, conversation_id: `eq.${id}`, order: 'file.asc,generation.asc,seq.asc', limit: String(PAGE), offset: String(from) },
+        });
+        if (!Array.isArray(rows)) break;
+        if (out.length) {
+          if (rowKey(rows[0]) !== rowKey(out[out.length - 1])) { shifted = true; break; }
+          out.push(...rows.slice(1));
+        } else out.push(...rows);
+        if (rows.length < PAGE) break;
+      }
+      if (!shifted) return out;
+    }
+    return fail('the chunk rows kept changing while they were read', 'changed');
+  }
+
   // ---------- one conversation ----------
   // -> { outcome: 'done' | 'same' | 'conflict' | 'skip' | 'pending', reason, folder, dir }; throws when it failed
   // (tried again later). folder (the resume folder X) and dir (its slug folder) come once they are known.
@@ -611,10 +647,7 @@ function createMaterializer(opts = {}) {
     if (makeFirst && P.foldCase(path.basename(dir)) !== P.foldCase(C.slugOf(folder))) makeFirst = makeFolder = false;
     if (live(id)) return { outcome: 'skip', reason: 'open on this machine', folder, dir };
 
-    // every chunk row of the conversation, at once
-    const rows = await api.rest('GET', 'chunks', {
-      query: { select: 'file,generation,seq,byte_offset,byte_length,object_path,sha256', conversation_id: `eq.${id}`, order: 'file.asc,generation.asc,seq.asc' },
-    });
+    const rows = await chunkRows(id);
     const byFile = new Map();
     for (const c of Array.isArray(rows) ? rows : []) {
       if (!c || typeof c.file !== 'string') continue;
@@ -634,7 +667,7 @@ function createMaterializer(opts = {}) {
     const conflict = (file, target, r) => {
       state.conflicts[`${id}|${file}`] = { id, file, path: target, reason: r.reason, localSize: r.localSize, remoteSize: file === 'main' ? size : null, at: new Date(now()).toISOString() };
       state.convos[id] = { sig: sigOf(row), dir: slugDir, files: prev ? prev.files || {} : {}, conflict: true, localStamp: stampOf(path.join(slugDir, `${id}.jsonl`)), at: now() };
-      saveState();
+      changed();
       log(`sync-down: ${id} ${file}: ${r.reason}; left alone`);
       return { outcome: 'conflict', reason: r.reason, folder, dir };
     };
@@ -677,7 +710,7 @@ function createMaterializer(opts = {}) {
     }
     for (const k of Object.keys(state.conflicts)) if (k.startsWith(`${id}|`)) delete state.conflicts[k];
     state.convos[id] = { sig: pending ? null : sigOf(row), dir: slugDir, files, conflict: false, at: now() };
-    saveState();
+    changed();
     if (pending) return { outcome: 'pending', reason: 'a side file is mid-upload', folder, dir };
     return { outcome: wroteAny ? 'done' : 'same', folder, dir };
   }
@@ -705,7 +738,7 @@ function createMaterializer(opts = {}) {
     const me = await C.ensureDevice(api, dataDir);
     try { await C.touchDevice(api, me, { now: now() }); } catch (e) { log(`sync-down: last_seen_at not sent: ${e.message}`); }
     await slot(null, false);
-    try { state = loadState(); } finally { unslot(null); } // not under a pull's feet
+    try { saveState(); state = loadState(); } finally { unslot(null); } // not under a pull's feet
     const ctx = newCtx(me);
     const tally = { rows: 0, unchanged: 0, done: 0, same: 0, conflict: 0, skip: 0, pending: 0, failed: 0, waiting: 0 };
     const reasons = {};
@@ -737,7 +770,9 @@ function createMaterializer(opts = {}) {
         if (!usable(row)) continue;
         tally.rows++;
         const id = row.id.toLowerCase(), prev = state.convos[id];
-        if (prev && prev.sig === sigOf(row) && (!prev.conflict || prev.localStamp === stampOf(path.join(prev.dir || '', `${id}.jsonl`)))) { tally.unchanged++; continue; }
+        // unchanged, and its log still where it was laid down (Claude Code deletes old logs: one gone comes again)
+        if (prev && prev.sig === sigOf(row) && (!prev.conflict || prev.localStamp === stampOf(path.join(prev.dir || '', `${id}.jsonl`)))
+          && (prev.conflict || Number(row.size) === 0 || (typeof prev.dir === 'string' && !!lstatOr(path.join(prev.dir, `${id}.jsonl`))))) { tally.unchanged++; continue; }
         const b = backoff.get(id);
         if (b && now() < b.until) { tally.waiting++; continue; }
         await slot(id, false); // a pull() waiting goes first
@@ -774,6 +809,7 @@ function createMaterializer(opts = {}) {
       }
     } catch (e) { if (!fatal) fatal = e; } // anything else thrown between rows: the ones under way still settle first
     await Promise.allSettled([...going]);
+    saveState();
     if (fatal) throw fatal;
     if (!only) {
       const newest = (r) => r.newest || '';
@@ -811,7 +847,7 @@ function createMaterializer(opts = {}) {
     } catch (e) {
       log(`sync-down: ${id}: pull: ${(e && e.message) || e}`);
       throw e;
-    } finally { unslot(id); }
+    } finally { saveState(); unslot(id); }
   }
   // a copy: the caller cannot change this side's map
   const owners = () => new Map([...ownersMap].map(([id, o]) => [id, { ...o }]));
@@ -856,6 +892,7 @@ function createMaterializer(opts = {}) {
     if (timer) { clearTimeout(timer); timer = null; }
     if (current) { try { await current; } catch {} }
     await Promise.allSettled([...flights]);
+    saveState();
   }
   function status() {
     return {
@@ -872,6 +909,7 @@ function createMaterializer(opts = {}) {
     const e = state.convos[k];
     if (!e || typeof dir !== 'string' || !dir) return false;
     e.dir = path.resolve(dir);
+    changed();
     saveState();
     return true;
   }

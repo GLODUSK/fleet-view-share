@@ -137,7 +137,10 @@ three are true: the config is there, a member is signed in, and the sync key is 
 a sign-out, and restarts them when another account signs in or the key changes. It looks again on every sign-in
 change and once a minute. `GET /sync/activity` shows whether they run (or why not) and their counts, never a
 title, a path inside a conversation, a token or the key. Conflicts (a local copy longer than, or different from,
-the synced one) are listed there and left alone. The wire format is `docs/sync-format.md`. Tests:
+the synced one) are listed there and left alone. The wire format is `docs/sync-format.md`.
+Claude Code deletes logs older than `cleanupPeriodDays` (30 days by default), and a log laid down here keeps its last
+entry's time, so on every gate check `sync-accounts.js` `keepLogs` makes sure Claude A's and B's `settings.json` say
+at least 36500 (raised only, the rest of the file as it was; a file that is not JSON is left alone and logged). Tests:
 `node scripts/sync-common-test.js`, `sync-up-test.js`, `sync-down-test.js`, `sync-run-test.js` (all in `scripts/`).
 
 **Portable and bound.** A chat whose folder every machine has, or can clone (a GitHub checkout, a folder under home in

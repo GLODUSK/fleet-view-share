@@ -382,7 +382,7 @@ function createAccounts(o = {}) {
     return [404, { ok: false, message: 'no such thing' }];
   }
 
-  return { view, add, login, code, cancel, remove, relabel, authStatus, route, letters, loginOf, _jobs: jobs };
+  return { view, add, login, code, cancel, remove, relabel, authStatus, route, letters, loginOf, dirOf, _jobs: jobs };
 }
 
 module.exports = { createAccounts, configDir };

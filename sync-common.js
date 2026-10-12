@@ -22,7 +22,7 @@
 //   homeCwd(mainPath, lastCwd, o)      the cwd of the folder a log lives in (where it resumes), or null
 //   ensureDevice(api, dataDir), touchDevice(api, id, o)   this machine's devices row
 //   isLive(id, o)                      true while a Claude Code process on this machine has that conversation open
-//   readState(file, fallback), writeState(file, obj)      the JSON state files under <dataDir>/sync
+//   readState(file, fallback), writeState(file, obj, { compact })   the JSON state files under <dataDir>/sync
 //
 // Every function that looks at this machine's Claude folders takes { home } (the folder holding .claude and
 // .claude-a; os.homedir() by default), so a test points it at a temp folder and never at the real ones.
@@ -610,9 +610,9 @@ function readState(file, fallback = null) {
 }
 // Written whole or not at all: a temp file beside it (mode 0600), then a rename over it. On Windows a rename can
 // fail for a moment while something else has the file open (an antivirus scan, a reader); it is tried again a few
-// times before giving up.
-function writeState(file, obj) {
-  const data = `${JSON.stringify(obj, null, 2)}\n`;
+// times before giving up. compact: no indentation (the big state files: up-state.json, down-state.json).
+function writeState(file, obj, o = {}) {
+  const data = `${o.compact ? JSON.stringify(obj) : JSON.stringify(obj, null, 2)}\n`;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try {

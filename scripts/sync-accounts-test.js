@@ -3,7 +3,11 @@
 // wrong login, a letter with no login), then createAccountSync against an in-memory settings table and a fake
 // accounts.js: it writes the list once, moves logins by itself, never overwrites a letter Blackbox has, and a list
 // sealed with another key is an error. Run: node scripts/sync-accounts-test.js
+// keepLogs: each synced letter's settings.json gets cleanupPeriodDays 36500 (raised only, its layout kept, not JSON
+// left alone), in a temp folder.
 'use strict';
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const SA = require(path.join(__dirname, '..', 'sync-accounts.js'));
@@ -208,6 +212,78 @@ function fakeAccounts(init, o = {}) {
     const [x, y] = await Promise.all([s.reconcile({ api, key }), s.reconcile({ api, key })]);
     ok(x === y && acc.calls.length === 1, 'sync 7: one at a time');
   }
+  // ---------- keepLogs: cleanupPeriodDays raised, never lowered, the file's layout kept ----------
+  const T = fs.mkdtempSync(path.join(process.env.SYNC_TEST_DIR || os.tmpdir(), 'sync-accounts-test-'));
+  try {
+    const K_ = 'cleanupPeriodDays', D = SA.KEEP_DAYS;
+    const acct = (name, text) => { const d = path.join(T, name); fs.mkdirSync(d, { recursive: true }); if (text !== null) fs.writeFileSync(path.join(d, 'settings.json'), text); return d; };
+    const read = (d) => fs.readFileSync(path.join(d, 'settings.json'), 'utf8');
+    const logs = [];
+    const lg = (t) => logs.push(t);
+    {
+      const d = acct('two', '{\n  "model": "opus",\n  "env": { "A": "1" }\n}\n');
+      eq(SA.keepLogs(d, lg), 'added', 'keepLogs: a file without it gets it');
+      eq(read(d), `{\n  "${K_}": ${D},\n  "model": "opus",\n  "env": { "A": "1" }\n}\n`, 'keepLogs: put first, in the file\'s indent, the rest as it was');
+      eq(SA.keepLogs(d, lg), 'kept', 'keepLogs: a second look changes nothing');
+    }
+    {
+      const d = acct('crlf', '{\r\n\t"model": "opus",\r\n\t"cleanupPeriodDays": 30,\r\n\t"x": [1, 2]\r\n}');
+      eq(SA.keepLogs(d, lg), 'raised', 'keepLogs: 30 is raised');
+      eq(read(d), `{\r\n\t"model": "opus",\r\n\t"${K_}": ${D},\r\n\t"x": [1, 2]\r\n}`, 'keepLogs: raised in place, tabs and CRLF kept');
+      ok(logs.some((t) => /raised from 30/.test(t)), 'keepLogs: logged');
+    }
+    {
+      const d = acct('more', `{ "${K_}": 99999, "a": 1 }`);
+      const before = fs.statSync(path.join(d, 'settings.json')).mtimeMs;
+      eq([SA.keepLogs(d, lg), read(d), fs.statSync(path.join(d, 'settings.json')).mtimeMs], ['kept', `{ "${K_}": 99999, "a": 1 }`, before], 'keepLogs: a higher value is never lowered, the file not written');
+    }
+    {
+      const d = acct('line', '{"a":1,"b":{"c":2}}');
+      SA.keepLogs(d, lg);
+      eq(read(d), `{"${K_}":${D},"a":1,"b":{"c":2}}`, 'keepLogs: a one-line file stays one line');
+    }
+    {
+      const d = acct('nested', '{\n  "deep": { "cleanupPeriodDays": 5 },\n  "cleanupPeriodDays": "30"\n}\n');
+      SA.keepLogs(d, lg);
+      eq(JSON.parse(read(d)), { deep: { [K_]: 5 }, [K_]: D }, 'keepLogs: the top-level key changed, a deeper one of that name left alone');
+    }
+    {
+      const d = acct('bom', '﻿{\n    "a": 1\n}\n');
+      SA.keepLogs(d, lg);
+      eq(read(d), `﻿{\n    "${K_}": ${D},\n    "a": 1\n}\n`, 'keepLogs: a BOM and a four-space indent kept');
+    }
+    {
+      const d = acct('empty', '{}');
+      SA.keepLogs(d, lg);
+      eq(JSON.parse(read(d)), { [K_]: D }, 'keepLogs: an empty object');
+    }
+    {
+      const bad = '{ "a": 1, // a comment\n}';
+      const d = acct('bad', bad);
+      logs.length = 0;
+      eq([SA.keepLogs(d, lg), read(d)], ['bad', bad], 'keepLogs: not JSON: left alone');
+      ok(logs.some((t) => /not a JSON object/.test(t)), 'keepLogs: not JSON: logged');
+    }
+    {
+      const d = acct('none', null);
+      eq([SA.keepLogs(d, lg), JSON.parse(read(d))], ['made', { [K_]: D }], 'keepLogs: no settings.json: made with it');
+      eq(SA.keepLogs(path.join(T, 'no-such-folder'), lg), 'none', 'keepLogs: no account folder: nothing made');
+      ok(!fs.existsSync(path.join(T, 'no-such-folder')), 'keepLogs: no account folder: none made');
+    }
+    eq(fs.readdirSync(T).flatMap((n) => fs.readdirSync(path.join(T, n))).filter((n) => n.endsWith('.tmp')), [], 'keepLogs: no temp file left');
+    {
+      // reconcile does it for each synced letter here (A and B), not for another letter, and only with dirOf
+      const dirs = { A: acct('acc-a', '{\n  "a": 1\n}\n'), B: acct('acc-b', `{ "${K_}": 7 }`), C: acct('acc-c', '{ "c": 1 }') };
+      const api = fakeApi(), acc = fakeAccounts({ B: work, A: art, C: other });
+      acc.dirOf = (L) => dirs[L];
+      await SA.createAccountSync({ accounts: acc, log: () => {} }).reconcile({ api, key });
+      eq([JSON.parse(read(dirs.A))[K_], JSON.parse(read(dirs.B))[K_], JSON.parse(read(dirs.C))[K_]], [D, D, undefined], 'reconcile: A and B keep their logs, C is not touched');
+      const d2 = acct('acc-x', '{ "a": 1 }');
+      const acc2 = fakeAccounts({ B: work });
+      await SA.createAccountSync({ accounts: { ...acc2, dirOf: undefined } }).reconcile({ api: fakeApi(), key });
+      eq(read(d2), '{ "a": 1 }', 'reconcile: without dirOf (a test\'s fake) nothing is touched');
+    }
+  } finally { fs.rmSync(T, { recursive: true, force: true }); }
   console.log(`${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

@@ -136,7 +136,11 @@ chunks.
 ## The uploader's rules (S2)
 
 1. Per file it remembers `{ generation, seq, offset, tailSha }` in `<dataDir>/sync/up-state.json` (`tailSha`: sha256
-   of the last up to 4096 bytes before `offset`).
+   of the last up to 4096 bytes before `offset`). It is written compact, once at the end of each scan (and after a
+   flush, a forget and a stop), so after a crash the server may be ahead of it: a row that disagrees is checked
+   against the server's chunks and taken over, and before the first append to a file's generation in a process the
+   chunk rows from the next `seq` on (and their objects) are deleted, so a `seq` sent again never leaves an old one
+   after it.
 2. The file grew and those bytes are unchanged: upload `[offset, size)` as the next chunk(s) of the same generation.
 3. It shrank, or the tail changed, or it is a whole file that changed: `generation + 1`, upload it from byte 0 as
    `seq` 0..n. Once every chunk of the new generation is up and the conversation row points at it, delete the old
@@ -167,7 +171,8 @@ chunks.
    A bound row needs no checkout: `X` is its placeholder here (see [Portable and bound](#portable-and-bound)), made
    empty right before its log is laid down (never through a link, nothing in its place); the device that hosted it
    (this one, after another device took the row) uses the folder `rel_cwd` names when that is still here.
-2. Read its chunk rows for the current generation, ordered by `seq`; check they cover `[0, size)` with no gap; fetch
+2. Read its chunk rows (in pages of 1000, PostgREST's cap: each page starts on the last row of the one before, and a
+   different row there starts the listing again) for the current generation, ordered by `seq`; check they cover `[0, size)` with no gap; fetch
    and open each, check each `sha256`, then the whole file's against the conversation row.
 3. Lay it down per the recipe: write `<id>.jsonl.part`, rename. If a local copy exists, replace it only when it is a
    byte prefix of the new file; if it is longer or different, leave it, write nothing, and report a conflict. A local
@@ -175,7 +180,9 @@ chunks.
    by its whole lines: the new bytes replace the cut line.
 4. Side files the same way, under `<slug>/<id>/`.
 5. Never touch a conversation that is running on this machine (the session host or a live Claude process has it open).
-6. Remember what it laid down (`<dataDir>/sync/down-state.json`), so an unchanged row costs one cheap compare.
+6. Remember what it laid down (`<dataDir>/sync/down-state.json`, compact, written once a scan and after a pull, a
+   move and a stop), so an unchanged row costs one cheap compare, unless its log is gone from here (Claude Code's
+   cleanup): then it is laid down again.
 
 ## Moving a conversation (S4)
 

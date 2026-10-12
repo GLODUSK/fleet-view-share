@@ -26,8 +26,18 @@
 //     reconcile reads the row (writing what mergeMap adds), plans, makes the moves when nothing is blocked, plans again
 //     and remembers the result: { ok, reason, first, letters, moves, local: [{ letter, email }], at }. Nothing in it is
 //     secret except the emails, which only this PC's page is given (sync-setup.js).
-//   accounts: accounts.js createAccounts()'s object (letters, loginOf, relabel).
+//   accounts: accounts.js createAccounts()'s object (letters, loginOf, relabel, dirOf).
+//
+//   keepLogs(dir, log) -> 'kept' | 'raised' | 'added' | 'made' | 'bad' | 'none'
+//     Claude Code deletes logs older than settings.json's cleanupPeriodDays (30 by default), and sync-down.js gives a
+//     log it lays down its last entry's time, so an old chat that came from another machine would be deleted here and
+//     never come back. So each synced letter's settings.json (A and B, accounts.js dirOf) gets cleanupPeriodDays of at
+//     least KEEP_DAYS on every reconcile (sync turned on, sync starting, each gate check), before anything else: only
+//     raised, never lowered; every other key and the file's own layout kept (the number replaced where it is, or the
+//     key put first with the file's indent and line ends); written atomically, through the link when it is one. A
+//     file that is not a JSON object is left alone and logged. 'none': no such account folder here.
 'use strict';
+const fs = require('fs');
 const path = require('path');
 const K = require(path.join(__dirname, 'sync-crypto.js'));
 
@@ -35,6 +45,8 @@ const SETTING = 'accounts';
 const LABEL = `setting:${SETTING}`;
 const SYNC_LETTERS = ['A', 'B']; // the letters a conversations row knows
 const SPARE = 'CDEFGHIJKLMNOPQRSTUVWXYZ';
+const KEEP_DAYS = 36500; // a hundred years: Claude Code never deletes a synced log
+const KEEP_KEY = 'cleanupPeriodDays';
 
 const lower = (s) => (typeof s === 'string' ? s.trim().toLowerCase() : '');
 const login = (l) => (l && (l.id || l.email) ? { id: l.id || null, email: l.email || null } : null);
@@ -138,6 +150,61 @@ function plan(map, local) {
 }
 const originalLetter = (local, x) => { const o = local.find((l) => same(l, x)); return o ? o.letter : x.letter; };
 
+// ---------- logs kept for good ----------
+function writeAtomic(file, text) {
+  const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  let mode = null;
+  try { mode = fs.statSync(file).mode & 0o777; } catch {}
+  try {
+    fs.writeFileSync(tmp, text, mode === null ? undefined : { mode });
+    for (let i = 0; ; i++) {
+      try { fs.renameSync(tmp, file); break; } catch (e) {
+        if (i >= 5 || !e || !['EPERM', 'EACCES', 'EBUSY'].includes(e.code)) throw e;
+        const until = Date.now() + 20 * (i + 1);
+        while (Date.now() < until) { /* a short wait: something (an antivirus scan, Claude Code) had it open */ }
+      }
+    }
+  } catch (e) { try { fs.rmSync(tmp, { force: true }); } catch {} throw e; }
+}
+const NUMBERISH = '-?[0-9][0-9.eE+-]*|"(?:[^"\\\\]|\\\\.)*"|null|true|false'; // a JSON scalar where the value is
+function keepLogs(dir, log = () => {}) {
+  try { if (!fs.statSync(dir).isDirectory()) return 'none'; } catch { return 'none'; }
+  let file = path.join(dir, 'settings.json');
+  try { file = fs.realpathSync(file); } catch {} // a link: the file it names is changed, the link stays
+  let raw = null;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch (e) {
+    if (!e || e.code !== 'ENOENT') { log(`sync: ${file} could not be read, so Claude Code may delete old logs: ${e && e.message}`); return 'bad'; }
+  }
+  if (raw === null) {
+    writeAtomic(file, `{\n  "${KEEP_KEY}": ${KEEP_DAYS}\n}\n`);
+    log(`sync: ${file} made with ${KEEP_KEY} ${KEEP_DAYS}, so Claude Code keeps synced logs`);
+    return 'made';
+  }
+  const bom = raw.startsWith('﻿') ? '﻿' : '';
+  const text = raw.slice(bom.length);
+  let j;
+  try { j = JSON.parse(text); } catch { j = undefined; }
+  if (!j || typeof j !== 'object' || Array.isArray(j)) { log(`sync: ${file} is not a JSON object: left alone, so Claude Code may delete old logs`); return 'bad'; }
+  if (typeof j[KEEP_KEY] === 'number' && j[KEEP_KEY] >= KEEP_DAYS) return 'kept';
+  const had = Object.prototype.hasOwnProperty.call(j, KEEP_KEY);
+  const want = had ? { ...j, [KEEP_KEY]: KEEP_DAYS } : { [KEEP_KEY]: KEEP_DAYS, ...j };
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const indent = (/\{[ \t]*\r?\n([ \t]+)"/.exec(text) || [])[1] || '  ';
+  let next;
+  if (had) next = text.replace(new RegExp(`("${KEEP_KEY}"\\s*:\\s*)(${NUMBERISH})`), `$1${KEEP_DAYS}`);
+  else if (!Object.keys(j).length) next = text.replace(/\{\s*\}/, `{${eol}${indent}"${KEEP_KEY}": ${KEEP_DAYS}${eol}}`);
+  else if (!text.trim().includes('\n')) next = text.replace('{', `{"${KEEP_KEY}":${KEEP_DAYS},`); // one line stays one line
+  else next = text.replace(/\{[ \t]*/, `{${eol}${indent}"${KEEP_KEY}": ${KEEP_DAYS},`);
+  // the edit in place must give exactly the object wanted (a key of that name deeper down, an odd layout): else the
+  // whole file is written again, in its indent and line ends
+  let good = false;
+  try { good = JSON.stringify(JSON.parse(next)) === JSON.stringify(want); } catch {}
+  if (!good) next = `${JSON.stringify(want, null, indent).split('\n').join(eol)}${/\r?\n$/.test(text) ? eol : ''}`;
+  writeAtomic(file, bom + next);
+  log(`sync: ${file}: ${KEEP_KEY} ${had ? `raised from ${JSON.stringify(j[KEEP_KEY])}` : 'set'} to ${KEEP_DAYS}, so Claude Code keeps synced logs`);
+  return had ? 'raised' : 'added';
+}
+
 function createAccountSync(o = {}) {
   const accounts = o.accounts;
   if (!accounts || typeof accounts.letters !== 'function') throw new Error('createAccountSync needs accounts.js');
@@ -145,6 +212,24 @@ function createAccountSync(o = {}) {
   const now = typeof o.now === 'function' ? o.now : Date.now;
   let last = null;
   let running = null;
+  // each synced letter's settings.json as it was when last looked at (size and time): not read again until it
+  // changes, so a file that is not JSON is logged once a change too
+  const seen = new Map();
+  function keepAll() {
+    if (typeof accounts.dirOf !== 'function') return;
+    let have = [];
+    try { have = accounts.letters(); } catch {}
+    for (const L of SYNC_LETTERS) {
+      if (!have.includes(L)) continue;
+      try {
+        const dir = accounts.dirOf(L);
+        const stamp = () => { try { const st = fs.statSync(path.join(dir, 'settings.json')); return `${st.size}:${st.mtimeMs}`; } catch { return 'none'; } };
+        if (seen.get(dir) === stamp()) continue;
+        keepLogs(dir, log);
+        seen.set(dir, stamp());
+      } catch (e) { log(`sync: Claude ${L}'s settings.json could not be changed to keep old logs: ${e && e.message}`); }
+    }
+  }
 
   const localNow = () => accounts.letters().map((letter) => {
     const l = accounts.loginOf(letter);
@@ -205,6 +290,7 @@ function createAccountSync(o = {}) {
     // one at a time; a call while one runs gets that one's answer
     reconcile(args) {
       if (running) return running;
+      keepAll();
       running = once(args).then((r) => { last = r; return r; }, (e) => {
         last = { ok: false, reason: `Blackbox's account list could not be read (${e && e.message})`, error: true, at: new Date(now()).toISOString() };
         return last;
@@ -216,4 +302,4 @@ function createAccountSync(o = {}) {
   };
 }
 
-module.exports = { createAccountSync, mergeMap, plan, same, cleanMap, SETTING, SYNC_LETTERS };
+module.exports = { createAccountSync, mergeMap, plan, same, cleanMap, keepLogs, SETTING, SYNC_LETTERS, KEEP_DAYS };

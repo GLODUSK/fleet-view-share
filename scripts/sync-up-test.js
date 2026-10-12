@@ -30,6 +30,10 @@
 //   'bound:<device id>' repos row, rel_cwd their full path, no repo_paths row; the ones that synced before stay as they
 //   were (P4V's Perforce folder and a folder under a P4CONFIG file, under home: the home row); one in the temp folder,
 //   a Claude account's folder or Fleet View's data folder is not synced; boundFor.
+// A crash: up-state.json is written compact, once a scan; with chunk rows past the seq it says comes next (two appends
+//   up, the row never caught up, the file from before them), the next process drops them before it appends, so the
+//   subagent log and main come back with no gap and no object is left without its row. The fake answers 1000 rows at
+//   most, as PostgREST does.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders, the real Supabase or claude.
 // Exit 0 = all pass.
@@ -122,8 +126,9 @@ function restCall(table, req, u, body) {
   const wantRows = /return=representation/.test(prefer);
   if (req.method === 'GET') {
     let out = order(rows.filter((r) => match(r, params)), u.searchParams.get('order'));
+    // PostgREST's max-rows: never more than 1000 rows in one answer, whatever limit asks
     const off = Number(u.searchParams.get('offset') || 0), lim = u.searchParams.get('limit');
-    out = out.slice(off, lim == null ? undefined : off + Number(lim));
+    out = out.slice(off, off + Math.min(lim == null ? Infinity : Number(lim), 1000));
     return [200, out.map((r) => ({ ...r }))];
   }
   if (req.method === 'POST') {
@@ -660,6 +665,67 @@ async function main() {
   eq(U.boundFor(bOut, dev), { origin: C.boundOrigin(dev), mainRoot: null, relCwd: C.boundRel(bOut), bound: true }, 'boundFor: this device\'s bound row and the full path');
   eq(U.boundFor(P.isWin ? '/Users/henry/x' : 'C:\\x', dev), null, 'boundFor: another platform\'s path: none');
   await upB.stop();
+
+  // ---------- a crash between chunk rows and up-state.json: the rows past the saved seq go, no gap ----------
+  // Two appends went up in two scans (seq 1 and 2 of main and of a subagent log) but the conversation row never caught
+  // up (its PATCH failed), and up-state.json is the one from before them (the crash). The next process sends seq 1
+  // again, now covering both appends and one more: the old seq 2 must not stay behind it.
+  const projX = path.join(T, 'crash'), dataX = path.join(T, 'data-crash');
+  const X1 = newId('X1'), X2 = newId('X2');
+  const xMain = mainOf(projX, repo1, X1), xSub = path.join(slugDir(projX, repo1), X1, 'subagents', 'agent-x.jsonl');
+  write(xMain, lines(repo1, 4));
+  write(xSub, lines(repo1, 4));
+  write(mainOf(projX, repo1, X2), lines(repo1, 3));
+  const xLogs = [];
+  const mkX = () => U.createUploader({ api, dataDir: dataX, key: SYNC_KEY, log: (t) => xLogs.push(t), now: () => clock, home, projects: [{ account: 'b', dir: projX }], chunkBytes: 4096, rateBytesPerSec: 50 * 1024 * 1024 });
+  const xState = path.join(S.syncDir(dataX), 'up-state.json');
+  const realRename = fs.renameSync;
+  let xSaves = 0;
+  fs.renameSync = function (from, to, ...a) { if (typeof to === 'string' && same(to, xState)) xSaves++; return realRename.call(this, from, to, ...a); };
+  const upX1 = mkX();
+  try { await upX1.scanOnce(); } finally { fs.renameSync = realRename; }
+  eq(xSaves, 1, 'up-state.json: written once for a scan of two conversations');
+  ok(!fs.readFileSync(xState, 'utf8').includes('\n '), 'up-state.json: written compact, no indentation');
+  sameAsLocal(X1, 'subagents/agent-x.jsonl', xSub, true, 'crash: before');
+  const savedX = fs.readFileSync(xState);
+  const xSize0 = Number(conv(X1).size);
+  const realRest = api.rest;
+  api.rest = async (m, t, o) => {
+    if (m === 'PATCH' && t === 'conversations' && o && o.query && o.query.id === `eq.${X1.toLowerCase()}`) throw new S.SyncError('the fake PATCH broke on purpose', 0, 'network');
+    return realRest(m, t, o);
+  };
+  try {
+    for (let i = 0; i < 2; i++) {
+      append(xMain, lines(repo1, 2));
+      append(xSub, lines(repo1, 2));
+      clock += 3600e3; // past the back-off
+      await upX1.scanOnce();
+    }
+  } finally { api.rest = realRest; }
+  const xSubRows = () => db.chunks.filter((r) => r.conversation_id === X1.toLowerCase() && r.file === 'subagents/agent-x.jsonl');
+  eq(xSubRows().map((r) => r.seq).sort(), [0, 1, 2], 'crash: two appends went up as seq 1 and 2');
+  eq(Number(conv(X1).size), xSize0, 'crash: the row never caught up');
+  await upX1.stop();
+  fs.writeFileSync(xState, savedX); // the crash: up-state.json from before the two appends
+  append(xMain, lines(repo1, 1));
+  append(xSub, lines(repo1, 1));
+  clock += 3600e3;
+  const upX2 = mkX();
+  await upX2.scanOnce();
+  eq(upX2.status().lastError, null, 'crash: no error after it');
+  sameAsLocal(X1, 'subagents/agent-x.jsonl', xSub, true, 'crash: the subagent log after it (no gap)');
+  sameAsLocal(X1, 'main', xMain, true, 'crash: main after it');
+  rowMatchesMain(X1, xMain, 'crash: main after it');
+  eq(xSubRows().map((r) => r.seq).sort(), [0, 1], 'crash: the old seq 2 is gone, seq 1 covers all three appends');
+  const xRows = new Set(db.chunks.filter((r) => r.conversation_id === X1.toLowerCase()).map((r) => `${UID}/${r.object_path}`));
+  eq(objectsOf(X1).filter((k) => !xRows.has(k)), [], 'crash: no object left without its row');
+  ok(xLogs.some((t) => /dropped 2 chunk row\(s\) from seq 1 on/.test(t)), `crash: logged (${xLogs.filter((t) => /dropped/.test(t)).join(' | ')})`);
+  const callsX = fake.calls.length;
+  append(xSub, lines(repo1, 1));
+  await upX2.scanOnce();
+  ok(!fake.calls.slice(callsX).some((c) => c.method === 'DELETE' || (c.method === 'GET' && /seq=gte/.test(decodeURIComponent(c.search)))), 'crash: the next append in the same process asks nothing more');
+  sameAsLocal(X1, 'subagents/agent-x.jsonl', xSub, true, 'crash: a later append');
+  await upX2.stop();
 }
 
 function short(id) { return String(id).slice(0, 8); }

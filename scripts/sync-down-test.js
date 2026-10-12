@@ -31,6 +31,9 @@
 // Many chunks: fetched more than one and at most FETCH_AHEAD at once, answered out of order, laid down byte-identical;
 // a fetch that fails or a bad sha256 mid-way writes nothing, starts nothing past the window and leaves no unhandled
 // rejection; a partly-here local copy fetches only what it lacks; one that differs mid-chunk is a conflict.
+// Pages: the fake answers 1000 rows at most (PostgREST's max-rows); a conversation of 1181 chunk rows is laid down
+// whole, side files after row 1000 too, and a row gone between two pages starts the listing again; down-state.json is
+// compact; an unchanged row whose log was deleted here is laid down again.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders or the real Supabase. Exit 0 = all pass.
 'use strict';
@@ -78,7 +81,7 @@ const ORIGIN = 'https://github.com/glodusk/proj';
 // ---------- the fake Supabase ----------
 const fake = {
   tables: { devices: [{ id: OTHER, name: 'mac', platform: 'darwin' }], repos: [{ id: REPO_ID, origin: ORIGIN }, { id: REPO2_ID, origin: 'https://github.com/glodusk/elsewhere' }, { id: HOME_ID, origin: C.HOME_ORIGIN }], repo_paths: [], conversations: [], chunks: [] },
-  objects: new Map(), calls: [], onGet: null,
+  objects: new Map(), calls: [], onGet: null, onPage: null,
 };
 const json = (res, code, o) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
 function restCall(req, u, body, res) {
@@ -97,9 +100,10 @@ function restCall(req, u, body, res) {
   // SQL's way: a null never equals and never differs
   const match = (r) => filters.every(([k, op, val]) => (r[k] == null ? false : op === 'eq' ? String(r[k]) === val : op === 'neq' ? String(r[k]) !== val : false));
   if (req.method === 'GET') {
+    if (fake.onPage && table === 'chunks') fake.onPage(offset); // rows that come or go between two pages
     let out = rows.filter(match);
     out.sort((a, b) => { for (const [c, d] of order) { if (a[c] < b[c]) return -d; if (a[c] > b[c]) return d; } return 0; });
-    out = out.slice(offset, offset + limit).map((r) => (select ? Object.fromEntries(select.map((c) => [c, r[c] === undefined ? null : r[c]])) : r));
+    out = out.slice(offset, offset + Math.min(limit, 1000)) // PostgREST's max-rows: never more than 1000 in one answer.map((r) => (select ? Object.fromEntries(select.map((c) => [c, r[c] === undefined ? null : r[c]])) : r));
     return json(res, 200, out);
   }
   const b = body.length ? JSON.parse(body.toString()) : null;
@@ -328,6 +332,40 @@ async function main() {
   fs.rmSync(mainOf(k4.id));
   r = await m.scanOnce();
   ok(same(mainOf(k4.id), k4.main) && !m.conflicts().some((x) => x.id === k4.id), 'cut: laid down once that copy is gone');
+
+  // ---------- past 1000 chunk rows: read in pages (PostgREST answers 1000 at most), side files after them too ----------
+  const bigPieces = [];
+  for (let i = 0; i < 1150; i++) bigPieces.push(line({ type: 'user', i, text: `big ${i}` }));
+  const bigSub = [];
+  for (let i = 0; i < 30; i++) bigSub.push(line({ type: 'assistant', i, text: `sub ${i}` }));
+  const bigTool = Buffer.from('the tool result that sorts last\n');
+  const big = putConvo({ pieces: bigPieces, side: { 'subagents/agent-big.jsonl': bigSub, 'tool-results/toolu_big.txt': bigTool } });
+  const bigSide = path.join(slugDir(rootDir), big.id);
+  eq(chunkRows(big.id).length + chunkRows(big.id, 'subagents/agent-big.jsonl').length + 1, 1181, 'pages: the conversation has 1181 chunk rows');
+  cg = restGets('chunks');
+  r = await m.scanOnce();
+  ok(same(mainOf(big.id), big.main), 'pages: main of 1150 chunks laid down whole');
+  ok(same(path.join(bigSide, 'subagents', 'agent-big.jsonl'), Buffer.concat(bigSub)), 'pages: the subagent log past row 1000 laid down whole');
+  ok(same(path.join(bigSide, 'tool-results', 'toolu_big.txt'), bigTool), 'pages: the file that sorts last laid down');
+  eq(restGets('chunks') - cg, 2, 'pages: two pages read');
+  ok(!fs.readFileSync(D.downStatePath(dataDir), 'utf8').includes('\n '), 'down-state.json: written compact, no indentation');
+  // rows that go between two pages (an old generation dropped): the listing starts again, nothing is cut
+  const shiftC = putConvo({ pieces: bigPieces.slice(0, 1005), side: { 'subagents/agent-s.jsonl': bigSub.slice(0, 3) } });
+  putFile(shiftC.id, 'main', 7, [line({ old: 1 })]);
+  const shiftOld = fake.tables.chunks.find((c) => c.conversation_id === shiftC.id && c.generation === 7);
+  shiftOld.file = 'agents-old'; // a row that sorts first: its going shifts every later row up by one
+  let shifts = 0;
+  cg = restGets('chunks');
+  fake.onPage = (offset) => {
+    if (offset > 0 && !shifts++) fake.tables.chunks.splice(fake.tables.chunks.indexOf(shiftOld), 1);
+  };
+  try { r = await m.scanOnce(); } finally { fake.onPage = null; }
+  ok(same(mainOf(shiftC.id), shiftC.main) && same(path.join(slugDir(rootDir), shiftC.id, 'subagents', 'agent-s.jsonl'), Buffer.concat(bigSub.slice(0, 3))), 'pages: a row gone between two pages, nothing cut');
+  eq(restGets('chunks') - cg, 4, 'pages: the second page saw the shift and the listing started again (2 + 2 pages)');
+  // its log deleted here (Claude Code's cleanup): the unchanged row lays it down again
+  fs.rmSync(mainOf(big.id));
+  r = await m.scanOnce();
+  ok(same(mainOf(big.id), big.main), 'gone: a log deleted here comes again though its row did not change');
 
   // ---------- broken uploads write nothing ----------
   const broken = [];

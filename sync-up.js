@@ -73,7 +73,10 @@
 // the up to 4096 bytes before it; size and mtimeMs are what the file was when last looked at (unchanged: no read at
 // all); sha is a whole file's sha256. It moves only after the server has what it says. When it is missing or does
 // not match the server (another install, a lost file), the server's chunk rows are checked against the local bytes
-// and taken over when they match, so nothing is sent twice; when they don't, the file starts a new generation.
+// and taken over when they match, so nothing is sent twice; when they don't, the file starts a new generation. It is
+// written compact, once at the end of each scan (and after flush, forget and stop), so a crash loses at most that
+// scan's progress: the server is then ahead of it, which the take-over above and trimTail (rows past the next seq
+// go before an append) make safe.
 //
 // A failure on one conversation is logged and that conversation waits (30 s, doubling, at most 30 min) while the
 // scan goes on; a signed-out account ends the scan. Nothing here starts a process; the only timer is start()'s.
@@ -99,7 +102,6 @@ const IDLE_LIST_MS = 60e3; // ...this often (a background subagent can still wri
 const PAGE = 1000; // chunk rows per GET
 const REMOVE_MAX = 1000; // storage.remove takes at most this many paths
 const HASHES_KEPT = 200; // running sha256s of 'main' kept in memory, so an append does not read the log again
-const SAVE_EVERY_MS = 5e3; // up-state.json at most this often while one conversation is going up
 const READ_BLOCK = 64 * 1024;
 const LOG_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 const FATAL = new Set(['signed_out', 'off', 'bad_key']); // these end a scan: every other conversation would fail too
@@ -252,7 +254,7 @@ function createUploader(opts = {}) {
 
   // ---------- memory ----------
   let state = null; // up-state.json as loaded
-  let dirty = false, savedAt = 0;
+  let dirty = false;
   const memo = new Map(); // id -> { fails, backoffUntil, skip: { sig, until, why }, listedAt }
   const pendingOf = new Map(); // id -> bytes still to go up
   const hashes = new Map(); // id -> { generation, offset, hash }: the running sha256 of 'main' (oldest first)
@@ -271,13 +273,16 @@ function createUploader(opts = {}) {
     else {
       if (s) log('up-state.json is from another device or damaged: starting again from what the server has');
       state = { v: 1, device, conversations: {} };
+      trimmed.clear();
       dirty = true;
     }
   }
-  function saveState(force) {
+  // once a scan (at its end), and after a flush, a forget and a stop: never per conversation or chunk (it is MBs).
+  // A crash loses at most one scan's progress, which is safe: the server is then ahead of the file, a pass takes over
+  // what the row and the chunk rows say (adopt), and an append first drops the rows past where the file says (trimTail)
+  function saveState() {
     if (!dirty || !state) return;
-    if (!force && Date.now() - savedAt < SAVE_EVERY_MS) return;
-    try { C.writeState(statePath, state); dirty = false; savedAt = Date.now(); } catch (e) { log(`up-state.json could not be saved: ${clip(e.message)}`); }
+    try { C.writeState(statePath, state, { compact: true }); dirty = false; } catch (e) { log(`up-state.json could not be saved: ${clip(e.message)}`); }
   }
   const setError = (e) => { totals.lastError = { at: new Date(now()).toISOString(), message: clip(e && e.message ? e.message : e) }; };
 
@@ -383,6 +388,26 @@ function createUploader(opts = {}) {
   const postChunks = (rows) => api.rest('POST', 'chunks', {
     query: { on_conflict: 'conversation_id,file,generation,seq' }, body: rows, prefer: 'resolution=merge-duplicates,return=minimal',
   });
+  // A crash after chunk rows went up but before up-state.json was saved leaves rows past the seq the file says comes
+  // next: that seq sent again covers a longer range, and the old next one would stay behind it (a gap for a reader of
+  // a side .jsonl, for ever). So before the first append to a file's generation in this process, the rows from that
+  // seq on go, then their objects. Once a file moved in this process its state is the server's: never asked again.
+  const trimmed = new Set(); // `${id}|${file}|${generation}` with no rows past what the state says
+  async function trimTail(w, file, generation, seq) {
+    const k = `${w.id}|${file}|${generation}`;
+    if (trimmed.has(k)) return;
+    const filter = { file: `eq.${file}`, generation: `eq.${generation}`, seq: `gte.${seq}` };
+    const extra = await chunkRows(w.id, filter);
+    if (extra.length) {
+      await guard(w);
+      await api.rest('DELETE', 'chunks', { query: { conversation_id: `eq.${w.id}`, ...filter }, prefer: 'return=minimal' });
+      const paths = extra.map((r) => r.object_path).filter((p) => typeof p === 'string' && p);
+      for (let i = 0; i < paths.length; i += REMOVE_MAX) await api.storage.remove(paths.slice(i, i + REMOVE_MAX));
+      log(`${short(w.id)} ${file}: dropped ${extra.length} chunk row(s) from seq ${seq} on, left by a pass cut short`);
+    }
+    trimmed.add(k);
+  }
+  const untrim = (id) => { for (const k of trimmed) if (k.startsWith(`${id}|`)) trimmed.delete(k); };
 
   // ---------- the running sha256 of 'main' ----------
   function mainHash(id, fd, generation, offset) {
@@ -448,6 +473,7 @@ function createUploader(opts = {}) {
     if (mine.some((r) => Number(r.generation) !== gen)) w.st.deletes.push({ file: f.fileKey, below: gen });
     const fst = { generation: gen, seq: rows.length, offset: off, tailSha: tailShaAt(fd, off), size: -1, mtimeMs: -1 };
     if (!f.appendOnly) fst.sha = h.copy().digest('hex');
+    trimmed.add(`${w.id}|${f.fileKey}|${gen}`); // every row of its newest generation, taken over
     if (f.fileKey === 'main') keepHash(w.id, { generation: gen, offset: off, hash: h });
     log(`${short(w.id)} ${f.fileKey}: took over ${rows.length} chunk(s) already on the server`);
     return fst;
@@ -464,11 +490,12 @@ function createUploader(opts = {}) {
       const st = fs.fstatSync(fd);
       const size = st.size, mtimeMs = st.mtimeMs;
       if (!fst && w.listing) fst = adopt(w, f, fd, size);
-      const commit = (o) => { files[f.fileKey] = { ...o, size, mtimeMs }; w.changed = true; dirty = true; };
+      const commit = (o) => { files[f.fileKey] = { ...o, size, mtimeMs }; trimmed.add(`${w.id}|${f.fileKey}|${o.generation}`); w.changed = true; dirty = true; };
       if (f.appendOnly && fst && size >= fst.offset && tailShaAt(fd, fst.offset) === fst.tailSha) {
         // rule 2: it grew (or not), the bytes we have are still there: append whole lines
         const end = lastLineEnd(fd, fst.offset, size);
         if (end > fst.offset) {
+          await trimTail(w, f.fileKey, fst.generation, fst.seq);
           pendingOf.set(w.id, (pendingOf.get(w.id) || 0) + end - fst.offset);
           const isMain = f.fileKey === 'main';
           const h = isMain ? mainHash(w.id, fd, fst.generation, fst.offset) : null;
@@ -478,7 +505,6 @@ function createUploader(opts = {}) {
             if (h) { h.hash.update(buf); h.offset = cur.offset; }
             files[f.fileKey] = { ...cur, tailSha: tailShaAt(fd, cur.offset), size: -1, mtimeMs: -1 }; // -1: look again next time
             w.st.rowStale = true; w.changed = true; dirty = true;
-            saveState(false);
           } });
           cur.tailSha = tailShaAt(fd, cur.offset);
           commit(cur);
@@ -511,7 +537,6 @@ function createUploader(opts = {}) {
           if (h) { h.hash.update(buf); h.offset = cur.offset; }
           files[f.fileKey] = { ...cur, tailSha: tailShaAt(fd, cur.offset), size: -1, mtimeMs: -1 };
           w.st.rowStale = true; w.changed = true; dirty = true;
-          saveState(false);
         } });
         commit({ ...(cur || { generation: 0, seq: 0, offset: 0 }), tailSha: tailShaAt(fd, end) });
         return;
@@ -706,7 +731,7 @@ function createUploader(opts = {}) {
         return 'forgotten';
       }
       throw e;
-    } finally { saveState(true); }
+    }
     mem.fails = 0;
     pendingOf.set(id, 0);
     tally.synced++;
@@ -783,7 +808,7 @@ function createUploader(opts = {}) {
       } finally { unlock(); }
     }
     counts.pending = [...pendingOf.values()].filter((n) => n > 0).length;
-    saveState(true);
+    saveState();
     totals.lastScanAt = new Date(now()).toISOString();
     totals.lastScanMs = Date.now() - t0;
   }
@@ -819,7 +844,7 @@ function createUploader(opts = {}) {
     try {
       if (running) await running;
       await Promise.allSettled([...flights]);
-    } finally { stopping = false; }
+    } finally { stopping = false; saveState(); }
   }
 
   // ---------- S4: flush, forget, hold ----------
@@ -861,16 +886,16 @@ function createUploader(opts = {}) {
     } catch (e) {
       log(`${short(id)}: flush: ${clip(e && e.message)}`);
       throw e;
-    } finally { saveState(true); unlock(); }
+    } finally { saveState(); unlock(); }
   }
   // the next pass takes over what the server has: nothing of what this side remembers about it is trusted
   function forget(raw) {
     const id = idOf(raw);
     if (!ID_RE.test(id)) return false;
     epochs.set(id, (epochs.get(id) || 0) + 1);
-    memo.delete(id); hashes.delete(id); pendingOf.delete(id);
+    memo.delete(id); hashes.delete(id); pendingOf.delete(id); untrim(id);
     if (state) {
-      if (state.conversations[id]) { delete state.conversations[id]; dirty = true; saveState(true); }
+      if (state.conversations[id]) { delete state.conversations[id]; dirty = true; saveState(); }
     } else {
       const s = C.readState(statePath, null); // not loaded yet: the file on disk
       if (s && s.conversations && s.conversations[id]) {
