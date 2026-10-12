@@ -1,6 +1,6 @@
 // sync-prefs.js: what Henry decides about his conversations and workspaces, the same on every device. Hiding or
 // removing a conversation, renaming one, moving one to a workspace, hiding, adding, renaming or ordering a workspace,
-// the map's spots, the teams, where a kind of work stays (hostRules), a chat kept on or let go from a machine
+// the colours picked for workspaces and conversations (repoHues, sessHues), the map's spots, the teams, where a kind of work stays (hostRules), a chat kept on or let go from a machine
 // (pinOverrides), the chats whose model or effort is Dynamic (dynamicChats), housekeeping's keep-pins on GitHub
 // branches (keepPins) and the parity rules (parity) are intent, not
 // a view of one screen: done on the PC, the Mac does it too. What belongs to one
@@ -94,6 +94,8 @@ function cleanRoot(r) {
 }
 // the key a portable root goes by: its origin, else its folder's name (lower case)
 const rootKey = (r) => (r.origin ? 'o:' + lower(r.origin) : 'n:' + lower(r.name));
+// a colour's tone round the wheel, 0-359 (fleet-view.js cleanHue), or null
+const cleanHue = (h) => (Number.isFinite(h) ? ((Math.round(h) % 360) + 360) % 360 : null);
 // a local root -> { root (portable), known } | null
 function rootOut(tr, root) {
   if (typeof root !== 'string' || !root) return null;
@@ -167,6 +169,23 @@ const GROUPS = {
     out(x, tr) { const r = x && rootOut(tr, x.root); const p = r && this.clean({ root: r.root, name: x.name }); return p && { p, known: r.known }; },
     in(p, tr) { const root = rootIn(tr, p.root); return root ? { root, name: p.name } : null; },
     key: (p) => rootKey(p.root), lkey: (l) => spotId(l.root),
+  },
+  // workspace colours picked in Fleet View (right-click "Colour"; fleet-view.js repoHues): { root, hue, at }, hue a tone
+  // round the colour wheel (0-359), at when it was picked. "Default" takes the item out
+  repoHues: {
+    clean(x) { const root = x && cleanRoot(x.root), hue = x && cleanHue(x.hue); return root && hue !== null ? { root, hue, ...(num(x.at) > 0 ? { at: num(x.at) } : {}) } : null; },
+    out(x, tr) { const r = x && rootOut(tr, x.root); const p = r && this.clean({ root: r.root, hue: x.hue, at: x.at }); return p && { p, known: r.known }; },
+    in(p, tr) { const root = rootIn(tr, p.root); return root ? { root, hue: p.hue, ...(p.at ? { at: p.at } : {}) } : null; },
+    key: (p) => rootKey(p.root), lkey: (l) => spotId(l.root),
+  },
+  // a conversation's own colour (fleet-view.js sessHues): { id, hue, at }; it wins over its workspace's
+  sessHues: {
+    clean(x) {
+      const hue = x && cleanHue(x.hue);
+      return x && typeof x === 'object' && UUID_RE.test(lower(x.id)) && hue !== null ? { id: lower(x.id), hue, ...(num(x.at) > 0 ? { at: num(x.at) } : {}) } : null;
+    },
+    out(x) { const p = this.clean(x); return p && { p, known: true }; },
+    in: (p) => p, key: idOf, lkey: idOf,
   },
   // the workspace list's order: roots (here) / portable roots (in the row)
   repoOrder: {

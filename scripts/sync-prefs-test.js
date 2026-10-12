@@ -89,7 +89,7 @@ const trMac = P.makeTranslate({ roots: () => Object.values(MACR), originOf: (r) 
 
 // a machine's settings, as fleet-view.js's prefsGroups gives them
 function machine() {
-  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], dynamicChats: [], keepPins: [], parity: [] };
+  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoHues: [], sessHues: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], dynamicChats: [], keepPins: [], parity: [] };
 }
 const pcSet = machine(), macSet = machine();
 const T0 = Date.parse('2026-10-11T12:00:00Z');
@@ -475,6 +475,44 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     'dynamicChats: neither part, a bad id or no time is nothing');
   ok(P.GROUP_NAMES.includes('dynamicChats') && P.GROUPS.dynamicChats.key({ id: id(2) }) === id(2), 'dynamicChats: a shared group, one per chat');
 
+  // ---------- colours: a workspace's and a conversation's (repoHues, sessHues) ----------
+  const FV = { origin: ORIGIN_FV, name: 'fleet-view' };
+  eq(P.GROUPS.repoHues.clean({ root: FV, hue: 572.4, at: 9, x: 1 }), { root: FV, hue: 212, at: 9 }, 'repoHues: a tone round the wheel, a whole number');
+  eq(P.GROUPS.repoHues.clean({ root: FV, hue: -8 }), { root: FV, hue: 352 }, 'repoHues: a tone below 0 comes round, at left out when none');
+  ok([{ root: FV, hue: 'red' }, { root: { name: 'a/b' }, hue: 3 }, { root: FV }, null].every((x) => P.GROUPS.repoHues.clean(x) === null), 'repoHues: no tone or a bad root is nothing');
+  eq(P.GROUPS.sessHues.clean({ id: id(50).toUpperCase(), hue: 8, at: 4 }), { id: id(50), hue: 8, at: 4 }, 'sessHues: an id in lower case');
+  ok([{ id: 'x', hue: 3 }, { id: id(50), hue: null }, { id: id(50) }].every((x) => P.GROUPS.sessHues.clean(x) === null), 'sessHues: a bad id or no tone is nothing');
+  {
+    // the PC colours fleet-view blue and a conversation red: the Mac shows both, the workspace on its own folder
+    const t1 = pcClock.t;
+    pcSet.repoHues = [{ root: PCR.fv, hue: 212, at: t1 }];
+    pcSet.sessHues = [{ id: id(50), hue: 8, at: t1 }];
+    step(5e3); await pc.tick();
+    eq(rowOf('repoHues').items, [{ root: FV, hue: 212, at: t1 }], 'repoHues: goes up with its root made { origin, name }');
+    eq(rowOf('sessHues').items, [{ id: id(50), hue: 8, at: t1 }], 'sessHues: goes up as it is');
+    step(10e3); await mac.tick();
+    eq(macSet.repoHues, [{ root: MACR.fv, hue: 212, at: t1 }], 'a workspace coloured on the PC is that colour on the Mac, on its folder');
+    eq(macSet.sessHues, [{ id: id(50), hue: 8, at: t1 }], 'a conversation coloured on the PC is that colour on the Mac');
+    // back to Default on the Mac: the PC follows
+    macSet.sessHues = [];
+    step(5e3); await mac.tick();
+    step(10e3); await pc.tick();
+    eq(pcSet.sessHues, [], 'Default on the Mac: the conversation follows its workspace again on the PC');
+    // both at once: the Mac takes the workspace back to Default while the PC, later, picks green: the later pick stays
+    macSet.repoHues = [];
+    step(5e3); await mac.tick();
+    pcSet.repoHues = [{ root: PCR.fv, hue: 120, at: pcClock.t }];
+    step(5e3); await pc.tick();
+    eq(pcSet.repoHues.map((x) => x.hue), [120], 'a pick made after a Default elsewhere stays');
+    step(10e3); await mac.tick();
+    eq(macSet.repoHues.map((x) => [x.root, x.hue]), [[MACR.fv, 120]], '...and reaches the Mac');
+    // a workspace the Mac has no checkout of rides along, and comes back to the PC untouched
+    pcSet.repoHues = pcSet.repoHues.concat([{ root: PCR.only, hue: 44, at: pcClock.t }]);
+    step(5e3); await pc.tick();
+    step(10e3); await mac.tick();
+    ok(!macSet.repoHues.some((x) => /pc-only/.test(x.root)) && rowOf('repoHues').items.some((x) => x.root.name === 'pc-only'), 'a colour for a workspace the Mac lacks is not put in there, but stays in the row');
+  }
+
   // ---------- "Start clean" (fleet-view.js freshBeforeStart): every group emptied but its local-only items, no saved
   // state: the first join takes the rows' items as they are, keeps the local-only ones and writes nothing back ----------
   {
@@ -654,10 +692,10 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     const appSrc = fs.readFileSync(path.join(ROOT, 'web', 'app.js'), 'utf8');
     const fnSrc = (src, name) => { const i = src.indexOf(`function ${name}(`); if (i < 0) return ''; const m = /\r?\n\}/.exec(src.slice(i)); return src.slice(i, i + m.index + m[0].length) + '\n'; };
     const norm = (r) => String(r).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-    const ctx = { hiddenRepos: new Map(), hiddenReposSeen: new Map(), hiddenReposSentAt: 0, repoNames: new Map(), repoNamesSeen: new Map(), repoNamesSentAt: 0, repoOrder: [], pendingSave: {}, sent: [], normRoot: norm };
+    const ctx = { hiddenRepos: new Map(), hiddenReposSeen: new Map(), hiddenReposSentAt: 0, repoNames: new Map(), repoNamesSeen: new Map(), repoNamesSentAt: 0, repoOrder: [], repoHues: new Map(), sessHues: new Map(), pendingSave: {}, sent: [], normRoot: norm };
     ctx.saveSettings = (o) => { ctx.sent.push(JSON.parse(JSON.stringify(o))); };
     vm.createContext(ctx);
-    vm.runInContext(['saveHiddenRepos', 'syncHiddenRepos', 'saveRepoNames', 'syncRepoPrefs'].map((n) => fnSrc(appSrc, n)).join(''), ctx);
+    vm.runInContext(['saveHiddenRepos', 'syncHiddenRepos', 'saveRepoNames', 'syncHues', 'syncRepoPrefs'].map((n) => fnSrc(appSrc, n)).join(''), ctx);
     const serve = (list, body, kind) => (`${kind}Ops` in body ? P.applyOps(kind, list, body[`${kind}Ops`]) : body[kind]);
     let server = [{ root: 'Z:\\a', at: 1 }];
     vm.runInContext('syncHiddenRepos(' + JSON.stringify(server) + ')', ctx);
@@ -678,6 +716,9 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     vm.runInContext('repoNames.set(normRoot("Z:\\\\a"), { root: "Z:\\\\a", name: "A, renamed" }); saveRepoNames();', ctx);
     names = serve(names, ctx.sent[ctx.sent.length - 1], 'repoNames');
     eq(names, [{ root: 'Z:\\a', name: 'A, renamed' }, { root: 'Z:\\m', name: 'from the mac' }], 'D6: a rename from a stale page leaves the Mac\'s new name alone');
+    // a colour that came from the other machine (repoHues / sessHues in /state's settings) is the page's on its next poll
+    vm.runInContext('syncRepoPrefs({ repoHues: [{ root: "Z:\\\\a", hue: 212, at: 5 }], sessHues: [{ id: "aaaaaaaa-0000-4000-8000-000000000050", hue: 8, at: 5 }] })', ctx);
+    ok(ctx.repoHues.get(norm('Z:\\a')) === 212 && ctx.sessHues.get('aaaaaaaa-0000-4000-8000-000000000050') === 8, 'colours from /state reach the page (syncHues)');
   }
 
   // D7: the page's "worked again" for a removed workspace is the server's: a prompt after it was removed (turnStart)

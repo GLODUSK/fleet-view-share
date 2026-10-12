@@ -503,16 +503,18 @@ function cleanRepoNames(list) {
   return [...out.values()];
 }
 let repoNames = DEMO ? [] : cleanRepoNames(saved.repoNames) || [];
-// colours picked in Fleet View (right-click "Colour" on a workspace or a conversation): settings.repoHues, [{ root, hue }],
-// and settings.sessHues, [{ id, hue }]; hue is 0-359 (a tone round the colour wheel). A workspace's hue replaces its
-// family's base hue (its conversations' shades follow it); a conversation's own wins over its workspace's
+// colours picked in Fleet View (right-click "Colour" on a workspace or a conversation): settings.repoHues, [{ root, hue,
+// at }], and settings.sessHues, [{ id, hue, at }]; hue is 0-359 (a tone round the colour wheel), at when it was picked
+// (sync-prefs.js's repoHues and sessHues groups: the same on every device, a later pick winning). A workspace's hue
+// replaces its family's base hue (its conversations' shades follow it); a conversation's own wins over its workspace's
 const HUES_MAX = 500;
 const cleanHue = (h) => (Number.isFinite(h) ? ((Math.round(h) % 360) + 360) % 360 : null);
+const pickedAt = (x) => (Number.isFinite(x.at) && x.at > 0 ? { at: Math.round(x.at) } : {});
 function cleanRepoHues(list) {
   const out = new Map();
   for (const x of Array.isArray(list) ? list.slice(-HUES_MAX) : []) {
     const hue = x && cleanHue(x.hue);
-    if (x && typeof x.root === 'string' && x.root.trim() && x.root.length <= 1024 && hue !== null) out.set(rootKey(x.root), { root: x.root, hue });
+    if (x && typeof x.root === 'string' && x.root.trim() && x.root.length <= 1024 && hue !== null) out.set(rootKey(x.root), { root: x.root, hue, ...pickedAt(x) });
   }
   return out;
 }
@@ -520,7 +522,7 @@ function cleanSessHues(list) {
   const out = new Map();
   for (const x of Array.isArray(list) ? list.slice(-HUES_MAX) : []) {
     const hue = x && cleanHue(x.hue);
-    if (x && typeof x.id === 'string' && x.id && x.id.length <= 100 && hue !== null) out.set(x.id, { id: x.id, hue });
+    if (x && typeof x.id === 'string' && x.id && x.id.length <= 100 && hue !== null) out.set(x.id, { id: x.id, hue, ...pickedAt(x) });
   }
   return out;
 }
@@ -6224,12 +6226,14 @@ function applySettings(b) {
   // one colour change: repoHue { root, hue | null } or sessHue { id, hue | null } (null goes back to the default)
   if (b.repoHue && typeof b.repoHue === 'object' && typeof b.repoHue.root === 'string') {
     const k = rootKey(b.repoHue.root), h = cleanHue(b.repoHue.hue);
-    if (h === null) repoHues.delete(k); else repoHues.set(k, { root: b.repoHue.root, hue: h });
+    repoHues.delete(k); // a new pick goes last, so the cap keeps it
+    if (h !== null) repoHues.set(k, { root: b.repoHue.root, hue: h, at: Date.now() });
     for (const x of sessions.values()) x.hueAt = 0;
   }
   if (b.sessHue && typeof b.sessHue === 'object' && typeof b.sessHue.id === 'string') {
     const h = cleanHue(b.sessHue.hue);
-    if (h === null) sessHues.delete(b.sessHue.id); else sessHues.set(b.sessHue.id, { id: b.sessHue.id, hue: h });
+    sessHues.delete(b.sessHue.id);
+    if (h !== null) sessHues.set(b.sessHue.id, { id: b.sessHue.id, hue: h, at: Date.now() });
     const x = sessions.get(b.sessHue.id); if (x) x.hueAt = 0;
   }
   if ('repoOrder' in b) { const o = cleanRepoOrder(b.repoOrder); if (o) repoOrder = o; }
@@ -6734,7 +6738,7 @@ const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, l
 // relay: link.js keeps another linked machine there as a computer (docs/link.md); the link runs only while sync does
 const ACCOUNT_SYNC = SYNC_ACCOUNTS.createAccountSync({ accounts: ACCTS, log: (t) => logOnce(t, t) });
 // The shared settings (sync-prefs.js): the groups every device holds the same (hidden and removed conversations,
-// names, moves, hidden / added / renamed / ordered workspaces, the map's spots, teams, stays-on rules and choices,
+// names, moves, hidden / added / renamed / ordered workspaces, workspace and conversation colours, the map's spots, teams, stays-on rules and choices,
 // housekeeping's keep-pins on GitHub branches, the parity rules), read from and put back into the
 // settings above; per-screen ones (view, zoom, camera, bounds, filters, map views, accounts off, push targets, bots,
 // compact, finishedOpen, steady, notify) never go. settings.prefsSync is what this device last agreed on with the table.
@@ -6745,6 +6749,7 @@ function prefsGroups() {
     names: [...names].map(([id, name]) => ({ id, name })),
     moved: [...moved.values()],
     hiddenRepos, repoNames, repoOrder, mapSpots, teams, hostRules, pinOverrides: [...pinOverrides.values()], dynamicChats: [...dynamicChats.values()],
+    repoHues: [...repoHues.values()], sessHues: [...sessHues.values()],
     addedRepos: addedRepos.map((r) => ({ root: r.root, at: r.at })), keepPins: HK.remotePins(), parity: parityRules,
   };
 }
@@ -6770,7 +6775,10 @@ function applyPrefs(group, items) {
     for (const x of sessions.values()) x.hueAt = 0; // work every repo out again now
   } else if (group === 'hiddenRepos') hiddenRepos = cleanHiddenRepos(items) || [];
   else if (group === 'repoNames') repoNames = cleanRepoNames(items) || [];
-  else if (group === 'repoOrder') repoOrder = cleanRepoOrder(items) || [];
+  else if (group === 'repoHues' || group === 'sessHues') {
+    if (group === 'repoHues') repoHues = cleanRepoHues(items); else sessHues = cleanSessHues(items);
+    for (const x of sessions.values()) x.hueAt = 0; // their colours worked out again now
+  } else if (group === 'repoOrder') repoOrder = cleanRepoOrder(items) || [];
   else if (group === 'mapSpots') mapSpots = cleanMapSpots(items) || [];
   else if (group === 'hostRules') hostRules = cleanHostRules(items) || [];
   else if (group === 'pinOverrides') pinOverrides = cleanPinOverrides(items) || new Map();

@@ -122,6 +122,13 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
     - `keepPins` (since 2026-10-12): `{ repo: R, branch, at }` housekeeping's "Keep" on a GitHub branch (`housekeeping.js`
       `remotePins`, its `prefs.json` `pins` and `pinAt`). Worktrees' and local branches' pins stay on their machine.
     - `parity` (since 2026-10-12): `{ name, web, app, core }` the parity rules (`settings.parity`), one per repo name.
+    - `dynamicChats` (since 2026-10-12): `{ id, model, effort, at }` a chat's Dynamic parts (`settings.dynamicChats`,
+      POST /chat/dynamic), one per chat; see `sync-prefs.js` `cleanDynamicChat`.
+    - `repoHues` (since 2026-10-12): `{ root: R, hue, at? }` a workspace's colour picked in Fleet View
+      (`settings.repoHues`, right-click "Colour", POST /settings `repoHue`); `hue` a tone round the colour wheel (0-359),
+      `at` when it was picked (a pick after a "Default" elsewhere wins). Its conversations' shades follow it.
+    - `sessHues` (since 2026-10-12): `{ id, hue, at? }` a conversation's own colour (`settings.sessHues`, POST /settings
+      `sessHue`), one per chat; it wins over its workspace's. "Default" takes an item out of either group.
 
     Never synced (each screen's own): view, zoom, the map's camera and saved views, window bounds, query, the
     workspace filter (`repo`, `repos`), `offAccounts`, `pushTargets`, bots, compact, finishedOpen, steady, notify.
@@ -167,7 +174,8 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
     put that change back; ops cannot. The server stamps a map spot's `at` when it changes.
 
     **Compatibility** (one machine may run the older release for a while):
-    - New row field `gone`, new item field `at` on map spots, and the groups `addedRepos`, `keepPins`, `parity`: an
+    - New row field `gone`, new item field `at` on map spots, and the groups `addedRepos`, `keepPins`, `parity`,
+      `dynamicChats`, `repoHues`, `sessHues`: an
       older device ignores them (its `openRow` reads only `v, device, at, after, items`; its `GROUPS` has no such
       group, so it never lists or writes those rows; its `mapSpots` clean drops `at`). Its rows carry no `gone` and no
       spot `at`, and a newer device merges them as before (no tombstone to compare: what changed here wins).
