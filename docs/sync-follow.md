@@ -233,3 +233,20 @@ resume it as their own.
 `/api/sessions/:id/…` routes in the table above, which the page reaches through `/link/send`, `/link/answer`,
 `/link/interrupt`, `/link/now`, `/link/unsend`, `GET /link/activity`, `/link/menu`, and `/conversation` for a chat
 hosted elsewhere.
+
+As built (`link-send.js`, `web/compose.js` followPlan; docs/link.md "The Chat tab's routes"), Send in the Chat tab of a
+chat another machine runs does one of these:
+
+| The chat | What Send does |
+|---|---|
+| portable, idle there | moves it here (`POST /sync/move`, its phase in the box's status line, Cancel), opens it here in the folder the move gives, then types the message here, with the move's `[Fleet View]` note before it once (`GET /sync/note`, then `POST /sync/note { id, done: true }`) |
+| portable, busy there (working, or asking) | `/link/send`: queued there. "Sent to <host>: it's working there. This chat moves here once it's idle and you type again." |
+| portable, busy there, machines not linked | moves it here anyway: the move waits until Claude is done there (or Take over now in the Session tab) |
+| bound, or a bot or the Chief (a move would lose the role) | `/link/send`: it stays there. Not linked: "Link <host> in the Sync card to type here" |
+| host offline (the link's presence) | a card: "<host> is offline. Continue here from its last copy?" (a forced move), or for a bound one "Only on <host>, which is offline", with Continue here anyway (the conversation, not its files) |
+
+While it runs there, the box reads that machine: the activity line and the question cards from `/link/activity` and
+`/link/menu` (every 1.5 s while Claude works there, else 5 s), and the card's answers, Stop, the queue's Interrupt and
+Unsend, and images go there. Rewind and Edit, bash mode, a "/" command that opens a panel, the permission mode, the
+model and Remote Control say "Continue here to use this" with the button. The feed reads the host while the link is up
+(`source`). The Session tab's card adds "Or just type in the Chat tab: your messages go there."

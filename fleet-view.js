@@ -30,6 +30,8 @@ const SYNC_ACCOUNTS = require(path.join(__dirname, 'sync-accounts.js'));
 const SYNC_COMMON = require(path.join(__dirname, 'sync-common.js'));
 const SYNC_SETUP_JS = require(path.join(__dirname, 'sync-setup.js'));
 const SYNC_CLONE = require(path.join(__dirname, 'sync-clone.js'));
+const LINK_SEND_JS = require(path.join(__dirname, 'link-send.js'));
+const SYNC_MOVE_JS = require(path.join(__dirname, 'sync-move.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
@@ -6575,6 +6577,56 @@ function syncMove(req, res) {
   }
   return moveErr(res, 405, 'POST, GET or DELETE');
 }
+// away.json's entry for a conversation ({ device: a name, why }) or null: what the session host refuses as another
+// machine's (sync-move.js); read again only when the file changes
+let awayCache = { key: null, ids: null };
+function awayEntry(id) {
+  const f = SYNC_MOVE_JS.awayPath(LOG_DIR);
+  let st;
+  try { st = fs.statSync(f); } catch { awayCache = { key: null, ids: null }; return null; }
+  const key = `${st.mtimeMs}:${st.size}`;
+  if (awayCache.key !== key) {
+    let j = null;
+    try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+    awayCache = { key: j ? key : null, ids: j && j.ids && typeof j.ids === 'object' ? j.ids : null };
+  }
+  const e = awayCache.ids && typeof id === 'string' ? awayCache.ids[id.toLowerCase()] : null;
+  return e && typeof e === 'object' ? e : null;
+}
+// Typing into a chat another machine runs (link-send.js, docs/sync-follow.md item 6): the Chat tab's sends, answers,
+// Stop, activity, menu and images go to that machine through the link; GET /conversation reads it there while the
+// link is up (conversationRoute)
+const LINK_SEND = LINK_SEND_JS.createLinkSend({ link: () => (DEMO ? null : SYNC_RUNNER.link()), owners: () => syncOwners(), away: awayEntry });
+const LINK_CHAT = new Set(['/link/send', '/link/answer', '/link/interrupt', '/link/now', '/link/unsend', '/link/activity', '/link/menu', '/link/image']);
+// a JSON body of at most max bytes -> done(json | null); past max: 413 and nothing more is read
+function readBodyMax(req, res, max, done) {
+  const parts = [];
+  let size = 0, over = false, called = false;
+  const call = (j) => { if (called) return; called = true; try { done(j); } catch (e) { requestFailed(req, res, e); } };
+  req.on('data', (b) => {
+    if (over) return;
+    size += b.length;
+    if (size <= max) return void parts.push(b);
+    over = true; parts.length = 0;
+    called = true;
+    sendJson(res, 413, { ok: false, code: 'too_large', message: 'too large' });
+    req.resume();
+  });
+  req.on('end', () => { if (over) return; let j = null; try { j = JSON.parse(Buffer.concat(parts).toString('utf8') || '{}'); } catch {} call(j); });
+  req.on('error', () => call(null));
+}
+// GET /conversation: a chat another machine runs is read there while the link to it is up (as the phone reads it),
+// else from this machine's synced copy; the answer says which (source: the host's name, or 'local'). Only this
+// machine's page asks the other machine (Sec-Fetch-Site same-origin, which a browser sends and the relay never does),
+// so a phone's read through the relay never goes on to a third machine.
+function conversationRoute(req, res) {
+  const local = () => CONV.conversation(req, res, { ...convCtx, sendJson: (r, code, body) => sendJson(r, code, code === 200 && body && typeof body === 'object' && !Array.isArray(body) ? { ...body, source: 'local' } : body) });
+  const u = new URL(req.url, 'http://x');
+  const id = String(u.searchParams.get('id') || '');
+  if (DEMO || req.headers['sec-fetch-site'] !== 'same-origin' || !UUID_RE.test(id) || !LINK_SEND.hostOf(id)) return local();
+  const num = (k) => { const v = u.searchParams.get(k); return v != null && /^\d{1,9}$/.test(v) ? Number(v) : undefined; };
+  return LINK_SEND.conversation(id, { since: num('since'), before: num('before'), limit: num('limit') }).then((out) => (out ? sendJson(res, 200, out) : local()));
+}
 // /link/*: the link between Henry's machines (link.js, docs/link.md): this machine's own page only (never a remote
 // browser, never another site's page), POSTs with its Origin; 404 while sync is not set up here (a friend's install),
 // as /sync/* answer then.
@@ -6582,6 +6634,8 @@ function syncMove(req, res) {
 //   POST /link/request { device }  ask that machine (a sync device id) to link -> { ok, pid }
 //   POST /link/confirm { pid }     the code here matches the other machine's      POST /link/decline { pid }
 //   POST /link/unlink { device }   unlink it, here and there
+// and the Chat tab's, for a chat another machine runs (link-send.js: send, answer, interrupt, now, unsend, activity,
+// menu, image), answered with that machine's answer or { ok: false, code, message }
 function linkRoute(req, res, pathname) {
   const no = (code, message) => sendJson(res, code, { ok: false, message });
   if (DEMO || !SYNC.enabled()) return no(404, 'no such route');
@@ -6593,6 +6647,17 @@ function linkRoute(req, res, pathname) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return no(405, 'GET');
     if (!link) { const st = SYNC_RUNNER.status(); return sendJson(res, 200, { running: false, reason: st.running ? 'this machine can\'t link with the others' : st.reason || 'sync is not running' }); }
     return sendJson(res, 200, link.status());
+  }
+  if (LINK_CHAT.has(pathname)) {
+    const answer = (p) => Promise.resolve(p).then((r) => (r ? sendJson(res, r[0], r[1]) : no(404, 'no such route')), (e) => requestFailed(req, res, e));
+    if (req.method === 'GET' || req.method === 'HEAD') return answer(LINK_SEND.route('GET', pathname, { id: new URL(req.url, 'http://x').searchParams.get('id') || '' }, null));
+    if (req.method !== 'POST') return no(405, 'GET or POST');
+    const origin = req.headers.origin;
+    if (origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) return no(403, 'bad origin');
+    return readBodyMax(req, res, pathname === '/link/image' ? 22 << 20 : 1 << 20, (b) => {
+      if (!b || typeof b !== 'object') return no(400, 'bad json');
+      answer(LINK_SEND.route('POST', pathname, null, b));
+    });
   }
   const acts = { '/link/request': (b) => link.request(b.device), '/link/confirm': (b) => link.confirm(b.pid), '/link/decline': (b) => link.decline(b.pid), '/link/unlink': (b) => link.unlink(b.device) };
   if (!acts[pathname]) return no(404, 'no such route');
@@ -6831,7 +6896,7 @@ function handleRequest(req, res) {
   }
   // a bot's task list (bots.js tasks; state.bots[].tasks has the same)
   { const m = /^\/bots\/([0-9a-f]{12})\/tasks$/.exec(pathname); if (m) { const [code, out] = BOTS.tasks(m[1]); return sendJson(res, code, out); } }
-  if (pathname === '/conversation') return void CONV.conversation(req, res, convCtx).catch((e) => requestFailed(req, res, e));
+  if (pathname === '/conversation') return void Promise.resolve(conversationRoute(req, res)).catch((e) => requestFailed(req, res, e));
   if (pathname === '/chat/commands') return sendJson(res, 200, CMDS.list(new URL(req.url, 'http://x').searchParams.get('cwd')));
   if (pathname === '/chat/files') {
     const q = new URL(req.url, 'http://x').searchParams;

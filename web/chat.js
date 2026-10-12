@@ -1269,6 +1269,11 @@ async function poll(c, force = false) {
     c.bg = Array.isArray(res.bg) ? res.bg : [];
     c.queue = Array.isArray(res.queue) ? res.queue : [];
     drawBg(c);
+    // read on the other machine that runs it, or from this machine's copy (GET /conversation's 'source', docs/sync-follow.md
+    // item 6): the two may number items differently, so a change of it loads the list again from the start
+    const src = typeof res.source === 'string' && res.source ? res.source : 'local';
+    if (c.loaded && c.src && src !== c.src) { c.src = src; c.loaded = false; again = true; return; }
+    c.src = src;
     // a rewind dropped items the list holds: load it again from the end
     const cut = Number(res.cut) || 0;
     if (c.loaded && cut !== c.cut) { c.cut = cut; c.loaded = false; again = true; return; }
@@ -1296,6 +1301,8 @@ async function loadEarlier(c) {
   try {
     const res = await fetchConv(c, { before: c.from, limit: EARLIER });
     if (gen !== c.gen || res.missing) return;
+    // read from the other place than the list: the next poll loads the list again (its numbers may differ)
+    if ((typeof res.source === 'string' && res.source ? res.source : 'local') !== (c.src || 'local')) return;
     merge(c, res, 'before');
     draw(c, 'before');
   } catch {} finally {
@@ -1462,7 +1469,7 @@ function reset(c, s) {
   c.ctl = null;
   c.busy = false;
   c.id = s.id;
-  c.items = []; c.from = 0; c.total = 0; c.loaded = false; c.missing = false; c.error = ''; c.queue = []; c.cut = 0;
+  c.items = []; c.from = 0; c.total = 0; c.loaded = false; c.missing = false; c.error = ''; c.queue = []; c.cut = 0; c.src = null;
   c.els.clear(); c.groups.clear(); c.open.clear(); c.picks.clear();
   c.expandAll = false; c.openBefore = null; drawXall(c);
   c.io?.disconnect(); c.io = null;

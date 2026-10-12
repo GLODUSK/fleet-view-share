@@ -163,6 +163,34 @@ The Sync card (`web/sync.js`) lists the other machines under **Your machines**: 
 closed it reads `GET /link/status` every 5 seconds, so a request from another machine opens it once and marks the
 header's sync button. The phone card (`web/phone.js`) leaves computers out of its list.
 
+### The Chat tab's routes (typing into a chat the other machine runs)
+
+`link-send.js` (docs/sync-follow.md item 6, "Follow you"). For a chat another machine runs (sync-run.js `owners()`),
+the Chat tab sends, answers, stops and reads it through these, and each goes to that machine's own route through the
+link (`call()`), so its relay checks it and marks it as Henry's like the phone's. Only the fields listed go on.
+
+| Route | Goes to (on the host) |
+|---|---|
+| `POST /link/send { id, text }` | `POST /api/sessions/:id/message { text, queue: true, open: true }`: queued behind a menu, resumed there when it isn't running |
+| `POST /link/answer { id, option, sig?, text?, allowPermission? }` | `POST /api/sessions/:id/answer` (the page sets `allowPermission` only when Henry picks a permission prompt's option himself) |
+| `POST /link/interrupt { id }` | `POST /api/sessions/:id/interrupt` (Stop: Esc once) |
+| `POST /link/now { id }`, `POST /link/unsend { id, text }` | `POST /api/sessions/:id/now`, `/unsend` |
+| `GET /link/activity?id=`, `GET /link/menu?id=` | `GET /api/sessions/:id/activity`, `/menu` |
+| `POST /link/image { id, data, mime }` | `POST /chat/image` (`{ path }`: saved there) |
+
+The host's answer comes back as it is. When it can't be reached the answer is `{ ok: false, code, message }`: `bad_id`
+or `bad_request` 400, `not_elsewhere` 409 (this machine runs it), `moving` 409, `not_running` 409 (sync isn't running
+here), `not_linked` 409 ("Link <host> in the Sync card to type here"), `revoked` 409, `pc-restarted` 409, `too_large`
+413, `bad_answer` 502, `offline` 503, `stopped` 503, `timeout` 504.
+
+`GET /conversation?id=` for such a chat is read on the host through the link while the link to it is up (online), and
+says `source: '<host's name>'`; otherwise this machine's synced copy answers with `source: 'local'`. Only this
+machine's page goes on to the host (`Sec-Fetch-Site: same-origin`, which the relay never sends), so a phone's read
+never chains to a third machine. The feed (`web/chat.js`) loads the list again from the start when `source` changes.
+
+Tests: `node scripts/link-send-test.js` (the routes, with a fake link and owner list) and `node
+scripts/follow-plan-test.mjs` (what the Chat tab's Send does).
+
 ## Off
 
 With sync off there is no link: no socket, no timer and no key read. With sync on and nothing linked, the link reads

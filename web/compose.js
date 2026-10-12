@@ -720,6 +720,90 @@ const MODES = [
 ];
 const modeShort = (k) => (k === 'auto' ? 'Auto' : MODES.find((m) => m.k === k)?.short || 'Mode');
 
+// ---------- a chat another machine runs (docs/sync-follow.md item 6, "Follow you"; docs/link.md) ----------
+// The machine another device's chat runs on, from /state: workspace.host, else syncOwner while it isn't moving away
+// from here -> { device, name } | null
+export function hostOfChat(s) {
+  if (!s) return null;
+  const w = s.workspace && s.workspace.host;
+  if (w && w.device) return { device: String(w.device), name: w.name || 'the other machine' };
+  const o = s.syncOwner;
+  if (o && o.device && o.moving !== 'away') return { device: String(o.device), name: o.name || 'the other machine' };
+  return null;
+}
+// what the state of a chat another device runs says while no activity was read through the link yet
+const BUSY_THERE = new Set(['WORKING', 'AGENTS', 'ASKING', 'QUESTION']);
+// What Send does for a chat. o.local: it runs in this machine's session host now; o.act: the host's last GET
+// /link/activity answer (busy, waiting), or null; o.online: the link's word on the host, true | false | null (not known,
+// or not linked); o.linked: false once the link said the machines aren't linked.
+//   { how: 'local' }                       it runs here, or no other machine runs it: typed into it here, as always
+//   { how: 'moving', host }                a move here is under way: wait for it
+//   { how: 'offline', host, kind }         the host is off: a card offers Continue here (its last copy)
+//   { how: 'link', host, kind, why }       a bound chat (or a bot's) and the machines aren't linked: link them first
+//   { how: 'remote', host, kind, why }     sent to the host through the link, and it stays there: why 'bound' (its
+//                                          workspace is only there), 'bot' (a bot or the Chief: a move would lose its
+//                                          role) or 'busy' (Claude works there, or asks something: it is queued there)
+//   { how: 'move', host, kind, waits? }    portable and idle there: it moves here first, then the message goes in here
+//                                          (waits: busy there and no link to queue it with: the move waits for it)
+export function followPlan(s, o = {}) {
+  const host = hostOfChat(s);
+  if (!s || o.local || !host) return { how: 'local' };
+  if (s.syncOwner && s.syncOwner.moving === 'here') return { how: 'moving', host };
+  const bot = !!s.bot;
+  const kind = bot || (s.workspace && s.workspace.kind === 'bound') ? 'bound' : 'portable';
+  if (o.online === false) return { how: 'offline', host, kind };
+  if (kind === 'bound') return { how: o.linked === false ? 'link' : 'remote', host, kind, why: bot ? 'bot' : 'bound' };
+  const busy = o.act ? !!(o.act.busy || o.act.waiting === 'menu') : BUSY_THERE.has(String(s.state || ''));
+  if (busy) return o.linked === false ? { how: 'move', host, kind, waits: true } : { how: 'remote', host, kind, why: 'busy' };
+  return { how: 'move', host, kind };
+}
+// the host's menu (GET /link/menu's menu: api.js, screen.js menuDetails) -> the card's menu, in parseMenu's shape with
+// its kind and remote: true, or null
+export function remoteMenu(m) {
+  if (!m || typeof m !== 'object' || !Array.isArray(m.options)) return null;
+  const options = m.options.filter((o) => o && Number.isInteger(o.n)).map((o) => ({
+    n: o.n, label: String(o.label ?? ''), desc: String(o.desc ?? ''), on: !!o.on, ...(o.check != null ? { check: !!o.check } : {}), ...(o.free ? { free: true } : {}),
+  }));
+  if (!options.length) return null;
+  return {
+    kind: typeof m.kind === 'string' ? m.kind : 'other', title: String(m.title ?? ''), context: Array.isArray(m.context) ? m.context.map(String) : [],
+    more: !!m.more, options, submit: m.submit ? { on: !!m.submit.on } : null, sig: String(m.sig ?? ''), unnumbered: !!m.unnumbered, remote: true,
+  };
+}
+// a move's phase (GET /sync/move's job) in one line for the box's status line: its own note, else the phase's words
+const MOVE_TEXT = {
+  asking: (n) => `Asking ${n} to hand it over…`, waiting: (n) => `${n} hands it over when Claude is done there…`,
+  ending: (n) => `Ending the session on ${n}…`, uploading: (n) => `${n} is uploading the last lines…`,
+  downloading: () => 'Downloading the conversation…', claiming: () => 'Making this machine its owner…', ready: () => 'On this machine now',
+  offline: (n) => `${n} is offline`, noanswer: (n) => `${n} did not answer`,
+};
+export function movePhaseText(job, name) {
+  const n = (job && job.from && job.from.name) || name || 'the other machine';
+  if (job && typeof job.note === 'string' && job.note.trim()) return job.note.trim();
+  const f = MOVE_TEXT[job && job.phase];
+  return f ? f(n) : `Moving it here from ${n}…`;
+}
+// A "/" command that opens a panel in Claude Code (/usage, /config, /model with nothing after it…): the box can't show
+// or drive one on the other machine, so it says to Continue here. -> the command, or null (a plain message, or a
+// command that just runs: /compact, a skill's)
+const PANEL_CMDS = new Set(['usage', 'status', 'config', 'settings', 'mcp', 'model', 'effort', 'permissions', 'allowed-tools', 'agents', 'hooks',
+  'memory', 'resume', 'continue', 'help', 'doctor', 'context', 'plugin', 'plugins', 'login', 'logout', 'add-dir', 'rewind', 'export', 'theme',
+  'terminal-setup', 'ide', 'output-style', 'privacy-settings', 'release-notes', 'upgrade', 'bashes', 'tasks', 'todos', 'cost', 'stats', 'statusline',
+  'vim', 'fast', 'install-github-app', 'migrate-installer', 'feedback', 'bug', 'sandbox', 'remote-control', 'rc', 'exit', 'quit']);
+const ARGS_RUN = new Set(['model', 'effort', 'add-dir', 'export', 'output-style', 'theme', 'feedback', 'bug']); // with something after them they just run
+export function panelCommand(msg) {
+  const m = /^\/([A-Za-z][\w:-]*)(\s+\S)?/.exec(String(msg ?? '').trim());
+  if (!m) return null;
+  const k = m[1].toLowerCase();
+  return PANEL_CMDS.has(k) && !(m[2] && ARGS_RUN.has(k)) ? `/${m[1]}` : null;
+}
+
+// what the box knows of the machine that runs a chat (mountCompose's st.rem): its activity and menu as the link last
+// read them, whether it is online and the machines linked, when it was read, a read under way, and which reading (gen)
+const newRem = (gen = 0) => ({ act: null, menu: null, online: null, linked: null, at: 0, busy: false, gen });
+const MOVE_MAX_MS = 15 * 60e3; // a move from the Chat tab is followed this long at most
+const CONT_WORDS = 'works in a session on this machine';
+
 // ---------- the box ----------
 // slot: the element under the feed (chat.js); s: the conversation from /state. -> { update(s), destroy() }
 export function mountCompose(slot, s) {
@@ -779,6 +863,9 @@ export function mountCompose(slot, s) {
     dict: null, drain: null, // the mic: listening, and stopped but still writing out its last words: { token, ready, note, busy, live }
     sendAfter: false, // Send was pressed while the mic still had words to write out: it sends once they are in
     // (live: { text, stretch }, the preview of what is being said, drawn after the text until its final comes)
+    // a chat another machine runs (see "a chat another machine runs" below): the host's activity and menu as the link
+    // last read them; the offline card; what needs Continue here; a passing note; a Send that forces the move; a move
+    rem: newRem(), offline: null, cont: null, info: null, forceMove: null, moving: null, moveAbort: false,
     drawn: {}, timer: 0, saveTimer: 0, alive: true,
   };
   boxes.add(st);
@@ -989,9 +1076,9 @@ export function mountCompose(slot, s) {
     const h = hosts.get(st.id);
     const bits = [];
     if (!t) bits.push(`<span class="cmp-chip">${icon('info', 13)}<span>${esc(noTermMsg('Sending'))}</span></span>`);
-    else if (st.step || isStarting(st.id)) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>${esc(st.step || 'Starting session…')}</span></span>`);
+    else if (st.step || isStarting(st.id)) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>${esc(st.step || 'Starting session…')}</span>${st.moving === st.id ? '<button type="button" class="cmp-chip-b" data-c="move-x">Cancel</button>' : ''}</span>`);
     else if (st.switching) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>Switching mode…</span></span>`);
-    else if (h && !h.alive) bits.push(`<span class="cmp-chip">${icon('info', 13)}<span>The session ended${h.exitCode != null ? ` (code ${esc(h.exitCode)})` : ''}; sending starts it again</span></span>`);
+    else if (h && !h.alive && !remoteOn()) bits.push(`<span class="cmp-chip">${icon('info', 13)}<span>The session ended${h.exitCode != null ? ` (code ${esc(h.exitCode)})` : ''}; sending starts it again</span></span>`);
     // waiting with no menu or panel card here: a panel such as /usage this tab can't read (it holds back
     // background updates), a startup dialog, or a prompt this tab can't show. An older host sends no waitingFor.
     else if (h && h.status === 'waiting' && !st.menu && !st.panel) {
@@ -1002,15 +1089,29 @@ export function mountCompose(slot, s) {
       else if (!w || w === 'dialog open') bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>A dialog or panel is open in this session: answer or close it in the Session tab</span></span>`);
       else bits.push(`<span class="cmp-chip info">${icon('info', 13)}<span>Claude is waiting: ${esc(w.length > 120 ? `${w.slice(0, 119)}…` : w)} — answer it in the Session tab</span></span>`);
     }
-    // another machine runs it (sync, /state's workspace.host): this machine's session host won't open it until it moves
-    // here (Continue here, in the Session tab); a bound one's files stay on that machine even then
-    else if (!h && st.s && st.s.workspace && st.s.workspace.host) {
-      const w = st.s.workspace, n = esc(w.host.name || 'another machine');
-      bits.push(`<span class="cmp-chip info">${icon('sync', 13)}<span>${w.kind === 'bound'
-        ? `This workspace is only on ${n}: Continue here, in the Session tab, brings the conversation here but not its files`
-        : `On ${n}: to type here, use Continue here in the Session tab`}</span></span>`);
+    // another machine runs it (/state's workspace.host, syncOwner): what Send does (followPlan), and that machine's own
+    // state as the link last read it
+    else if (remoteOn()) {
+      const p = planNow(), n = esc(p.host ? p.host.name : 'the other machine'), a = st.rem.act;
+      const chip = (cls, text, btn = '') => bits.push(`<span class="cmp-chip ${cls}">${icon(cls === 'warn' ? 'alert' : 'sync', 13)}<span>${text}</span>${btn}</span>`);
+      if (a && a.waiting === 'panel') chip('warn', `A panel is open in the session on ${n}`, '<button type="button" class="cmp-chip-b" data-c="rem-esc">Close it (Esc)</button>');
+      else if (p.how === 'link') chip('warn', `Runs on ${n}: link ${n} in the Sync card to type here`);
+      else if (p.how === 'offline') { if (!st.offline) chip('info', `${n} is offline: sending offers to continue here`); }
+      else if (p.how === 'moving') chip('info', `Moving here from ${n}…`);
+      else if (p.how === 'remote') chip('info', p.why === 'busy' ? `Working on ${n}: what you send goes there` : p.why === 'bot' ? `Runs on ${n}: your messages go there` : `Its workspace is only on ${n}: your messages go there`);
+      else if (p.how === 'move') chip('info', `On ${n}: sending brings it here`);
     }
     else if (!h && openElsewhere(st.s)) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>Open in another window: sending here starts a second copy</span></span>`);
+    if (st.offline && st.offline.id === st.id) {
+      const o = st.offline, n = esc(o.name);
+      bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${o.kind === 'bound' ? `Only on ${n}, which is offline. Continue here anyway brings the conversation, not its files` : `${n} is offline. Continue here from its last copy?`}</span>`
+        + `<button type="button" class="cmp-chip-b" data-c="off-go">${o.kind === 'bound' ? 'Continue here anyway' : 'Continue here'}</button><button type="button" class="cmp-chip-x" data-c="off-x" title="Not now" aria-label="not now">${icon('close', 11)}</button></span>`);
+    }
+    if (st.cont && st.cont.id === st.id) {
+      bits.push(`<span class="cmp-chip info">${icon('sync', 13)}<span>${esc(st.cont.what)} ${CONT_WORDS}: Continue here to use this</span>`
+        + `<button type="button" class="cmp-chip-b" data-c="cont">Continue here</button><button type="button" class="cmp-chip-x" data-c="cont-x" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
+    }
+    if (st.info && st.info.id === st.id && Date.now() < st.info.until) bits.push(`<span class="cmp-chip info">${icon('sync', 13)}<span>${esc(st.info.text)}</span></span>`);
     const v = st.dict || st.drain;
     if (v && (v.note || v.busy || st.sendAfter)) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>${esc(v.note || (st.sendAfter ? 'Sending as soon as what you said is written out…' : 'Writing out what you said…'))}</span></span>`);
     for (const e of st.errs) bits.push(`<span class="cmp-chip err">${icon('error', 13)}<span>${esc(e.text)}</span><button type="button" class="cmp-chip-x" data-e="${e.key}" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
@@ -1045,9 +1146,12 @@ export function mountCompose(slot, s) {
     keepSession(st.id); // pressing keys in it is typing: a preview session becomes the user's
     return true;
   }
-  const stop = () => { writeKey('\x1b'); };
-  // Claude Code's "send now" for queued messages: Ctrl+X, then Ctrl+S on its own (a chord)
+  // Stop: Esc in the session (on the machine that runs it, through the link)
+  const stop = () => { if (remoteOn()) remoteAct('/link/interrupt'); else writeKey('\x1b'); };
+  // Claude Code's "send now" for queued messages: Ctrl+X, then Ctrl+S on its own (a chord); on another machine, its
+  // POST /api/sessions/:id/now through the link
   const sendNow = (id) => {
+    if (id === st.id && st.busy && remoteOn()) { remoteAct('/link/now'); return true; }
     if (id !== st.id || !st.busy || !writeKey('\x18')) return false;
     setTimeout(() => { if (st.id === id) writeKey('\x13'); }, CHORD_MS);
     return true;
@@ -1073,6 +1177,8 @@ export function mountCompose(slot, s) {
   // -> true when it left the queue
   async function unsendQueued(id, text, queueOf) {
     if (id !== st.id || working) return false;
+    // on another machine: its POST /api/sessions/:id/unsend through the link
+    if (remoteOn()) { const r = await remoteAct('/link/unsend', { text }); return !!r.ok; }
     if (!termApi() || !hosts.get(id)?.alive) { err('The session isn\'t running here'); return false; }
     // the others in the transcript's queue (which may lag the send by a moment)
     const want = flat(text);
@@ -1109,6 +1215,7 @@ export function mountCompose(slot, s) {
   // edit: the text to send in the message's place once Claude Code has restored (Edit in the feed)
   async function rewindTo(id, text, nth, edit = null) {
     if (id !== st.id || working) return;
+    if (remoteOn()) { contNeeded(edit != null ? 'Edit' : 'Rewind'); return; } // /rewind's list is drawn on the machine that runs it
     if (!termApi()) { err(noTermMsg('Rewinding')); return; }
     if (st.menu) { err('Answer the question above first'); return; }
     working = true;
@@ -1250,6 +1357,11 @@ export function mountCompose(slot, s) {
     const id = st.id, t = termApi();
     const v = cleanText(text).split(/\s*\n\s*/).filter(Boolean).join(' ').trim();
     if (!v) { focusFree(); return false; }
+    if (remoteOn() && st.menu?.remote) {
+      const free = st.menu.options.find((o) => o.free);
+      if (!free) { err('This question takes no typed answer: pick an option'); return false; }
+      return answerRemote(free.n, { text: v });
+    }
     if (!t || !hosts.get(id)?.alive || st.answering) return false;
     st.answering = true;
     drawCard();
@@ -1290,6 +1402,7 @@ export function mountCompose(slot, s) {
     const id = st.id;
     for (const end = Date.now() + 3000; st.answering && Date.now() < end;) await sleep(50);
     if (st.answering || id !== st.id || !st.menu?.submit) return;
+    if (remoteOn() && st.menu.remote) { await answerRemote('submit'); return; }
     st.answering = true;
     drawCard();
     try {
@@ -1325,10 +1438,12 @@ export function mountCompose(slot, s) {
     if (!text.trim() && !list.length) return false;
     if (fromBox) stopDictation(false);
     shutSlash();
-    const id = st.id, s0 = st.s;
+    const id = st.id;
+    let s0 = st.s;
     // a menu is up: text never goes in as a message (a digit would pick an option). A question with a "Type
-    // something" option takes what the box holds as that answer; any other menu is answered first
-    if (st.menu && hosts.get(id)?.alive) {
+    // something" option takes what the box holds as that answer; any other menu is answered first (here, or on the
+    // machine that runs it)
+    if (st.menu && (hosts.get(id)?.alive || (st.menu.remote && remoteOn()))) {
       if (!fromBox || shell || list.length || !st.menu.options.some((o) => o.free)) { err('Answer the question above first (or press Esc)'); return; }
       if (!(await answerFree(raw)) || st.id !== id) return;
       const d = drafts.get(id) || st.d;
@@ -1337,8 +1452,25 @@ export function mountCompose(slot, s) {
       ta.value = d.text; grow(); drawSend();
       return true;
     }
+    // another machine runs it (followPlan, see "a chat another machine runs"): sent there, moved here first, or a card
+    let plan = planNow();
+    if (st.forceMove === id && plan.how === 'offline') plan = { ...plan, how: 'move', force: true };
+    st.forceMove = null;
+    if (plan.how !== 'local') {
+      st.offline = null; st.cont = null;
+      if (shell) { contNeeded('Bash mode'); return false; }
+      if (plan.how === 'link') { err(`Link ${plan.host.name} in the Sync card to type here`); return false; }
+      if (plan.how === 'moving') { err(`It is moving here from ${plan.host.name}: wait a moment, then send`); return false; }
+      if (plan.how === 'offline') { st.offline = { id, name: plan.host.name, kind: plan.kind }; drawNotes(); return false; }
+      if (plan.how === 'remote') {
+        if (list.some((a) => a.file)) { contNeeded('Attaching files'); return false; }
+        const pc = panelCommand(text);
+        if (pc) { contNeeded(pc); return false; }
+        return sendRemote({ id, plan, text, raw, quote, list, fromBox });
+      }
+    }
     // a terminal elsewhere has it open: a second copy runs only when asked twice
-    if (!hosts.has(id) && openElsewhere(s0) && Date.now() - st.elsewhereAt > ELSEWHERE_CONFIRM_MS) {
+    if (plan.how === 'local' && !hosts.has(id) && openElsewhere(s0) && Date.now() - st.elsewhereAt > ELSEWHERE_CONFIRM_MS) {
       st.elsewhereAt = Date.now();
       err('Send again to open a second copy here');
       return;
@@ -1347,6 +1479,18 @@ export function mountCompose(slot, s) {
     st.errs = [];
     drawSend(); drawNotes();
     try {
+      // it moves here first (POST /sync/move, as Continue here), then goes on as a chat of this machine's
+      if (plan.how === 'move') {
+        const ready = await moveHere(id, !!plan.force);
+        if (!ready || st.id !== id) return;
+        s0 = { ...s0, cwd: ready.cwd || s0.cwd, account: ready.account || s0.account };
+        if (ready.trusted === false) {
+          // Claude asks whether this machine's folder is trusted: Henry answers that (the card), then sends again
+          ensureLive(s0, { sizeEl: sizeEl() }).catch(() => {});
+          err(`Claude asks whether you trust ${ready.cwd || 'its folder'} on this machine: answer it above, then send again`);
+          return;
+        }
+      }
       // the images first: a failed upload keeps the whole draft
       const paths = [];
       for (const a of list) {
@@ -1360,6 +1504,10 @@ export function mountCompose(slot, s) {
       if (fromBox && !shell && /(^|\s)\/[^\s/]/.test(text)) text = hoistCommand(text, (await commandsFor(s0.cwd)).map((c) => c.name));
       const msg = messageText(text, paths);
       if (!msg) return;
+      // a move's note for Claude (where it came from and what came with it: GET /sync/note) goes once, before a message
+      // (never before a shell command or a "/" command)
+      const note = shell || /^\/[^\s/]/.test(msg) ? null : await takeNote(id);
+      const typed = note ? `${note}\n\n${msg}` : msg;
       const r = await ensureLive(s0, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
       if (st.id === id) { st.step = ''; drawNotes(); }
       if (!r.ok) { err(r.message || 'could not start the session'); return; }
@@ -1386,11 +1534,12 @@ export function mountCompose(slot, s) {
         t.write(id, '!');
         await sleep(BANG_MS);
       }
-      await typeInto((w) => t.write(id, w), msg.replace(/\r\n?/g, '\n'));
+      await typeInto((w) => t.write(id, w), typed.replace(/\r\n?/g, '\n'));
       await sleep(ENTER_DELAY_MS);
       if (blocked()) { err('A question came up before Enter: the text is in Claude\'s prompt, not sent'); return; }
       t.write(id, '\r');
       keepSession(id);
+      if (note) noteDone(id);
       // a command: the panel it opens shows here (see tick)
       const cmdName = shell ? null : /^\/[^\s/]+/.exec(msg)?.[0];
       if (cmdName && st.id === id) { st.cmdAt = Date.now(); st.cmd = cmdName; }
@@ -1401,17 +1550,244 @@ export function mountCompose(slot, s) {
       pane.dispatchEvent(new CustomEvent('fv-chat-sent', { detail: { id, text: shown, images: shots, busy: st.busy, pick } }));
       rememberSent(id, shown);
       if (!fromBox) return true;
-      // sent: the draft goes (what was typed meanwhile stays); a bash command leaves bash mode, as Claude Code's prompt does
-      const d = drafts.get(id) || st.d;
-      if (shell) { d.shell = false; storeShell(id, false); if (st.id === id) drawShell(); }
-      for (const a of list) { dropAtt(a); const i = d.atts.indexOf(a); if (i >= 0) d.atts.splice(i, 1); }
-      d.text = d.text.startsWith(raw) ? d.text.slice(raw.length).replace(/^\s+/, '') : d.text;
-      storeText(id, d.text);
-      if (d.quote === quote) { d.quote = ''; storeQuote(id, ''); }
-      if (st.id === id) { ta.value = d.text; grow(); drawAtts(); drawQuote(); }
+      clearSent(id, raw, quote, list, shell);
       return true;
     } catch (e) {
       err(`Couldn't send: ${e?.message || e}`);
+    } finally {
+      st.sending = false;
+      st.step = '';
+      drawSend(); drawNotes();
+    }
+  }
+
+  // sent: the draft goes (what was typed meanwhile stays); a bash command leaves bash mode, as Claude Code's prompt does
+  function clearSent(id, raw, quote, list, shell) {
+    const d = drafts.get(id) || st.d;
+    if (shell) { d.shell = false; storeShell(id, false); if (st.id === id) drawShell(); }
+    for (const a of list) { dropAtt(a); const i = d.atts.indexOf(a); if (i >= 0) d.atts.splice(i, 1); }
+    d.text = d.text.startsWith(raw) ? d.text.slice(raw.length).replace(/^\s+/, '') : d.text;
+    storeText(id, d.text);
+    if (d.quote === quote) { d.quote = ''; storeQuote(id, ''); }
+    if (st.id === id) { ta.value = d.text; grow(); drawAtts(); drawQuote(); }
+  }
+
+  // ----- a chat another machine runs (docs/sync-follow.md item 6, "Follow you") -----
+  // Send does what followPlan says (see the top of that function): a portable chat idle there moves here first and
+  // then takes the message here; one busy there, or one whose workspace is only there (or a bot's), gets the message
+  // there through the link (POST /link/send: queued there behind what Claude does, resumed there when not running);
+  // an offline host gets a card. While it runs there the box reads that machine instead of this one's screen: its
+  // activity line and its menu (GET /link/activity, /link/menu, every 1.5 s while Claude works there, else every 5 s,
+  // as the phone does), the card's answers, Stop, and the queue's Interrupt and Unsend go there (/link/answer,
+  // /link/interrupt, /link/now, /link/unsend), and images too (/link/image, saved there). Rewind and Edit, bash mode,
+  // a "/" command that opens a panel, the mode, the model and Remote Control are its session's: they say Continue
+  // here, with the button. fleet-view.js and link-send.js serve the routes.
+  function remoteOn() { return !hosts.get(st.id)?.alive && !!hostOfChat(st.s); }
+  function planNow() { return followPlan(st.s, { local: !!hosts.get(st.id)?.alive, act: st.rem.act, online: st.rem.online, linked: st.rem.linked }); }
+  // one of this machine's page routes -> its JSON with status and ok (a 2xx that didn't say ok: false), message
+  async function call(method, url, body) {
+    let r, j = null;
+    const init = method === 'GET' ? { cache: 'no-store' } : { method, cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) };
+    try { r = await fetch(url, init); } catch { return { ok: false, status: 0, message: 'Fleet View did not answer' }; }
+    try { j = await r.json(); } catch {}
+    const o = j && typeof j === 'object' && !Array.isArray(j) ? j : {};
+    return { ...o, status: r.status, ok: r.ok && o.ok !== false, message: o.message || o.error || (r.ok ? '' : `Fleet View answered ${r.status}`) };
+  }
+  // what the host says now: its activity, and its menu while it asks something
+  function pollRemote() {
+    const R = st.rem;
+    if (R.busy || !shown() || document.hidden) return;
+    const every = R.act && (R.act.busy || R.act.waiting) ? 1500 : 5000;
+    if (Date.now() - R.at < every) return;
+    const id = st.id, gen = R.gen;
+    R.busy = true;
+    R.at = Date.now();
+    (async () => {
+      const a = await call('GET', `/link/activity?id=${encodeURIComponent(id)}`);
+      if (st.id !== id || st.rem.gen !== gen) return;
+      if (a.ok) { R.online = true; R.linked = true; R.act = a; }
+      else if (a.code === 'offline') { R.online = false; R.linked = true; R.act = null; }
+      else if (a.code === 'not_linked' || a.code === 'revoked' || a.code === 'not_running') { R.online = null; R.linked = false; R.act = null; }
+      else if (a.status === 404 && !a.code) { R.online = true; R.linked = true; R.act = { busy: false, alive: false, waiting: null }; } // not running there now
+      let menu = null;
+      if (R.act && R.act.waiting === 'menu') {
+        const m = await call('GET', `/link/menu?id=${encodeURIComponent(id)}`);
+        if (st.id !== id || st.rem.gen !== gen) return;
+        menu = m.ok ? remoteMenu(m.menu) : R.menu;
+      }
+      R.menu = menu;
+    })().finally(() => { R.busy = false; if (st.alive && st.id === id) tick(); });
+  }
+  function remoteTick() {
+    pollRemote();
+    const a = st.rem.act, menu = st.rem.menu;
+    st.panel = null; st.panelOwned = false; st.mode = null; st.effort = null; st.bgHint = false;
+    st.busy = !!(a && a.busy) && !menu;
+    if ((st.menu && st.menu.sig) !== (menu && menu.sig)) { st.menu = menu; st.drawn.card = null; } else st.menu = menu;
+    root.classList.add('rem');
+    root.classList.toggle('busy', st.busy);
+    root.classList.toggle('asking', !!menu);
+    drawAct(st.busy ? { verb: (a && a.verb) || 'Working', detail: (a && a.detail) || '' } : null);
+    drawCard();
+    drawPanel();
+    // the mode, the model and Remote Control are that session's: a click says Continue here (they draw again here)
+    st.drawn.mode = st.drawn.model = st.drawn.rc = null;
+    for (const b of [modeBtn, modelBtn, rcBtn]) { b.disabled = false; b.title = `Its session runs on ${hostOfChat(st.s)?.name || 'the other machine'}: Continue here to use this`; }
+    drawSend();
+    drawNotes();
+  }
+  // POST one of the /link/ routes for this chat; a failure says why -> the answer
+  async function remoteAct(path, body = {}) {
+    const id = st.id;
+    const r = await call('POST', path, { id, ...body });
+    if (!r.ok && st.id === id) err(r.message || 'It did not go through');
+    st.rem.at = 0; // read it again at once
+    return r;
+  }
+  // an answer to the host's question: Henry picked it here, so a permission prompt's is his (allowPermission); Esc
+  // needs none -> true when it went in
+  async function answerRemote(option, extra = {}) {
+    const m = st.menu, id = st.id;
+    if (!m || st.answering) return false;
+    st.answering = true;
+    drawCard();
+    try {
+      const body = { option, sig: m.sig, ...extra };
+      if (option !== 'esc' && m.kind !== 'question') body.allowPermission = true;
+      const r = await call('POST', '/link/answer', { id, ...body });
+      if (st.id !== id) return false;
+      if (!r.ok) {
+        if (r.stale && r.menu) st.rem.menu = remoteMenu(r.menu);
+        err(r.stale ? 'The question changed there: look at it again' : r.message || 'The answer did not go through');
+        return false;
+      }
+      const o = typeof option === 'number' ? m.options.find((x) => x.n === option) : null;
+      if (!(o && o.check != null)) { st.answeredSig = m.sig; st.answeredAt = Date.now(); } // a tick can be undone at once
+      if (extra.text != null) st.freeDraft = null;
+      return true;
+    } finally {
+      st.answering = false;
+      st.rem.at = 0;
+      st.drawn.card = null;
+      drawCard();
+    }
+  }
+  // Esc on a question: it cancels it (here, or on the machine that runs it)
+  function escMenu() {
+    if (remoteOn() && st.menu?.remote) { answerRemote('esc'); return; }
+    if (writeKey('\x1b')) { st.answeredSig = st.menu?.sig || null; st.answeredAt = Date.now(); drawCard(); }
+  }
+  // what only a session on this machine can do: the chip with Continue here
+  function contNeeded(what) { st.cont = { id: st.id, what }; drawNotes(); }
+  // Continue here from the Chat tab (POST /sync/move, as the Session tab's): the job every second, its phase in the
+  // status line (Cancel stops it), until it is ready -> its ready ({ cwd, account, trusted }), or null: it failed, was
+  // cancelled, or the other machine is offline (the card, whose Continue here forces it: the last copy)
+  async function moveHere(id, force = false) {
+    const host = hostOfChat(st.s), name = host ? host.name : 'the other machine';
+    const kind = st.s?.bot || st.s?.workspace?.kind === 'bound' ? 'bound' : 'portable';
+    const show = (x) => { if (st.id === id) { st.step = x; drawNotes(); } };
+    st.moving = id;
+    st.moveAbort = false;
+    try {
+      show(`Moving it here from ${name}…`);
+      let job = await call('POST', '/sync/move', force ? { id, force: true } : { id });
+      if (!job.ok) { err(job.message || 'The move did not start'); return null; }
+      for (const end = Date.now() + MOVE_MAX_MS; ;) {
+        if (!st.alive) return null;
+        if (st.moveAbort) {
+          await call('DELETE', `/sync/move?id=${encodeURIComponent(id)}`);
+          err(`Move cancelled: it stays on ${name}`);
+          return null;
+        }
+        const ph = job.phase;
+        if (ph === 'ready') { st.offline = null; st.cont = null; return job.ready || {}; }
+        if (ph === 'failed' || ph === 'cancelled') { err(job.error || job.note || 'The move did not finish'); return null; }
+        if ((ph === 'offline' || ph === 'noanswer') && !force) { st.offline = { id, name, kind }; drawNotes(); return null; }
+        if (Date.now() > end) { err(`${name} did not hand it over: try again`); return null; }
+        show(movePhaseText(job, name));
+        await sleep(1000);
+        const g = await call('GET', `/sync/move?id=${encodeURIComponent(id)}`);
+        if (g.ok) job = g;
+        else if (g.status === 404) { err('The move went away: try again'); return null; }
+      }
+    } finally {
+      if (st.moving === id) st.moving = null;
+      if (st.id === id) { st.step = ''; drawNotes(); }
+    }
+  }
+  // Continue here with no message (the chip's button, the offline card of a bound chat): move it, then open it here
+  async function continueHere(force = false) {
+    const id = st.id;
+    if (st.sending || !termApi()) return;
+    st.sending = true;
+    st.errs = [];
+    drawSend(); drawNotes();
+    try {
+      const ready = await moveHere(id, force);
+      if (!ready || st.id !== id) return;
+      st.cont = null;
+      const s1 = { ...st.s, cwd: ready.cwd || st.s.cwd, account: ready.account || st.s.account };
+      if (ready.trusted === false) {
+        ensureLive(s1, { sizeEl: sizeEl() }).catch(() => {});
+        err(`Claude asks whether you trust ${ready.cwd || 'its folder'} on this machine: answer it above`);
+        return;
+      }
+      const r = await ensureLive(s1, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
+      if (!r.ok) err(r.message || 'could not start the session');
+    } finally {
+      st.sending = false;
+      st.step = '';
+      drawSend(); drawNotes();
+    }
+  }
+  // the note a move left for Claude (GET /sync/note: { note | null }; a 404, from a Fleet View without it, is none)
+  async function takeNote(id) {
+    const r = await call('GET', `/sync/note?id=${encodeURIComponent(id)}`);
+    return r.ok && typeof r.note === 'string' && r.note.trim() ? r.note.trim() : null;
+  }
+  const noteDone = (id) => { call('POST', '/sync/note', { id, done: true }).catch(() => {}); };
+  // an image for the machine that runs it (POST /link/image: saved there) -> its path on that machine (kept on the
+  // attachment per machine, so a retry doesn't send it twice)
+  async function uploadRemote(id, a) {
+    const host = hostOfChat(st.s)?.device || '';
+    a.hostPaths = a.hostPaths || {};
+    if (a.hostPaths[host]) return a.hostPaths[host];
+    if (!a.blob) throw new Error('only images go to the other machine');
+    const data = await toBase64(a.blob);
+    const r = await call('POST', '/link/image', { id, data, mime: a.mime });
+    if (!r.ok || typeof r.path !== 'string') throw new Error(r.message || 'it was not saved there');
+    a.hostPaths[host] = r.path;
+    return r.path;
+  }
+  // Send to the machine that runs it (plan.how 'remote'): the images there first, then POST /link/send -> true when sent
+  async function sendRemote({ id, plan, text, raw, quote, list, fromBox }) {
+    const n = plan.host.name;
+    st.sending = true;
+    st.errs = [];
+    st.info = null;
+    drawSend(); drawNotes();
+    try {
+      const paths = [];
+      for (const a of list) {
+        if (st.id === id) { st.step = `Sending ${a.name} to ${n}…`; drawNotes(); }
+        try { paths.push(await uploadRemote(id, a)); } catch (e) { err(`Couldn't send ${a.name} to ${n}: ${e?.message || e}`); return false; }
+      }
+      if (st.id === id && st.step) { st.step = ''; drawNotes(); }
+      const msg = messageText(text, paths);
+      if (!msg) return false;
+      const r = await call('POST', '/link/send', { id, text: msg });
+      if (!r.ok) { err(r.message || `Couldn't send it to ${n}`); return false; }
+      const shots = list.filter((a) => !a.file).map((a) => { try { return URL.createObjectURL(a.blob); } catch { return null; } }).filter(Boolean);
+      const shown = messageText(text, []);
+      pane.dispatchEvent(new CustomEvent('fv-chat-sent', { detail: { id, text: shown, images: shots, busy: st.busy || plan.why === 'busy', pick: null } }));
+      rememberSent(id, shown);
+      st.info = { id, until: Date.now() + 15000, text: plan.why === 'busy' ? `Sent to ${n}: it's working there. This chat moves here once it's idle and you type again.` : `Sent to ${n}` };
+      st.rem.at = 0;
+      if (fromBox) clearSent(id, raw, quote, list, false);
+      return true;
+    } catch (e) {
+      err(`Couldn't send: ${e?.message || e}`);
+      return false;
     } finally {
       st.sending = false;
       st.step = '';
@@ -1582,6 +1958,12 @@ export function mountCompose(slot, s) {
     const m = st.menu;
     if (!m || st.answering || !m.options.some((o) => o.n === n)) return;
     if (st.answeredSig === m.sig && Date.now() - st.answeredAt < 1500) return; // one click, one answer
+    if (remoteOn() && m.remote) {
+      const o = m.options.find((x) => x.n === n);
+      if (o && o.free) { focusFree(); return; } // its text comes from its box
+      await answerRemote(n);
+      return;
+    }
     // the same question still on screen (a new one may have replaced it since the last poll; the ❯ may have moved)
     const now = menuNow(st.id);
     if (!sameQuestion(now, m)) { st.menu = now; st.drawn.card = null; drawCard(); return; }
@@ -2005,6 +2387,10 @@ export function mountCompose(slot, s) {
   const shown = () => slot.isConnected && slot.getClientRects().length > 0;
   function tick() {
     if (!st.alive) return;
+    // a chat another machine runs: what that machine says through the link, not this machine's screen
+    if (remoteOn()) { remoteTick(); return; }
+    if (st.rem.act || st.rem.menu || st.rem.linked !== null) st.rem = newRem(st.rem.gen + 1);
+    root.classList.remove('rem');
     const h = hosts.get(st.id);
     const alive = !!(termApi() && h?.alive);
     let lines = [];
@@ -2152,8 +2538,9 @@ export function mountCompose(slot, s) {
   ta.addEventListener('input', (e) => {
     // "!" typed as the first character of an empty box: bash mode, the "!" is the mode (a pasted one stays text)
     if (!st.d.shell && !inserting && e.inputType === 'insertText' && e.data === '!' && ta.value === '!') {
-      ta.value = '';
-      setShell(true);
+      // it runs in the session's shell: the other machine's, for a chat that runs there (the "!" stays text)
+      if (remoteOn()) contNeeded('Bash mode');
+      else { ta.value = ''; setShell(true); }
     }
     saveDraftSoon(); grow(); drawSend(); drawSlash();
   });
@@ -2214,13 +2601,21 @@ export function mountCompose(slot, s) {
     if (b.dataset.effort) { pickModel('effort', b.dataset.effort); return; }
     if (b.dataset.sl) { pickSlash(+b.dataset.sl, false); return; }
     const c = b.dataset.c;
+    // a chat another machine runs: the mode, model and Remote Control are its session's, there
+    if (remoteOn() && (c === 'mode' || c === 'model' || c === 'remote')) { contNeeded(c === 'mode' ? 'The permission mode' : c === 'model' ? 'Switching the model' : 'Remote Control'); return; }
+    if (c === 'off-go') { const o = st.offline; st.offline = null; drawNotes(); if (!o) return; if (o.kind === 'bound' || !hasDraft()) continueHere(true); else { st.forceMove = st.id; send(); } return; }
+    if (c === 'off-x') { st.offline = null; drawNotes(); return; }
+    if (c === 'cont') { continueHere(false); return; }
+    if (c === 'cont-x') { st.cont = null; drawNotes(); return; }
+    if (c === 'move-x') { st.moveAbort = true; return; }
+    if (c === 'rem-esc') { remoteAct('/link/interrupt'); return; }
     if (c === 'send') send();
     else if (c === 'bg') runInBackground();
     else if (c === 'mic') dictate();
     else if (c === 'stop') stop();
     else if (c === 'free') answerFree(card.querySelector('.cmp-free-in')?.value || '');
     else if (c === 'msubmit') submitMulti();
-    else if (c === 'esc') { if (writeKey('\x1b')) { st.answeredSig = st.menu?.sig || null; st.answeredAt = Date.now(); drawCard(); } }
+    else if (c === 'esc') escMenu();
     else if (c === 'panel-esc') writeKey('\x1b');
     else if (c === 'attach') fileIn.click();
     else if (c === 'folder') attachFolder();
@@ -2252,7 +2647,7 @@ export function mountCompose(slot, s) {
     }
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     if (/^[1-9]$/.test(e.key)) { e.preventDefault(); e.stopPropagation(); answer(+e.key); }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (writeKey('\x1b')) { st.answeredSig = st.menu?.sig || null; st.answeredAt = Date.now(); drawCard(); } }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); escMenu(); }
   });
   const menuKeys = (menu, open, btn) => (e) => {
     e.stopPropagation();
@@ -2415,6 +2810,7 @@ export function mountCompose(slot, s) {
         st.menu = null; st.mode = null; st.effort = null; st.want = null; st.busy = false; st.errs = []; st.step = ''; st.elsewhereAt = 0;
         st.freeDraft = null;
         st.rcSeen = null; st.rcConnecting = false;
+        st.rem = newRem(st.rem.gen + 1); st.offline = null; st.cont = null; st.info = null; st.forceMove = null;
         st.drawn = {};
         loadDraft();
         st.s = next;

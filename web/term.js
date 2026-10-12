@@ -774,7 +774,8 @@ function ownerHtml(s, pane, m) {
   return `<div class="s-card s-elsewhere s-move"><div class="s-ic">${icon('sync', 20)}</div><div class="s-title">On ${esc(name)} ${state}</div>`
     + (bound ? `<div class="s-text"><b>This workspace is only on ${esc(name)}.</b></div>` : '')
     + `<div class="s-text">${text}</div>` + errHtml
-    + `<div class="s-actions"><button type="button" class="btn primary s-go" data-s="move">${icon('sync', 15)}<span>${bound ? 'Continue here anyway' : 'Continue here'}</span></button></div></div>`;
+    + `<div class="s-actions"><button type="button" class="btn primary s-go" data-s="move">${icon('sync', 15)}<span>${bound ? 'Continue here anyway' : 'Continue here'}</span></button></div>`
+    + '<div class="s-text">Or just type in the Chat tab: your messages go there.</div></div>';
 }
 
 // a move on show: its phase in one line, and the buttons that phase allows
