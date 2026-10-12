@@ -29,25 +29,27 @@
 //   previewOf(session) -> string   a conversation's one-line preview: the question it asks, what it is doing now, or
 //       its last reply (Contact.preview uses it)
 //   replyLine(text) -> string   the first line of a reply that says something: no heading, code fence, table or
-//       rule, list and quote marks and * _ ` stripped; '' for none
+//       rule, list and quote marks and * _ ` stripped; '' for none. A bot's reaction at its start (reactionOf) is
+//       left out, and a reply that is only a reaction reads as its emoji
 //   botFeed(items) -> items   a bot's or the Chief's chat items (chat.js, GET /conversation) as the Bots tab shows
 //       them: a message of Fleet View's own (its text starts "[Fleet View]": the start prompt, the id note, the
 //       instructions-changed note) becomes { ...it, kind: 'setup', text: without that header }, drawn as a small
-//       grey note, not your bubble; the bare "ok" the bot answers one with (its steps between allowed) is left out; the
-//       switch notes right before one of your messages ("/model x", "Set model to …", "/effort y", …: switchNote) are
-//       left out too, and that message gets switched: { model?, effort? } (chat.js draws it as the message's chip)
+//       grey note, not your bubble; the bare "ok" the bot answers one with (its steps between allowed) is left out; every
+//       model or effort switch note ("/model x", "Set model to …", "/effort y", …: switchNote) is left out, so the
+//       chat stays clean; a reply that starts with a reaction ("[react:👍]", reactionOf) puts reaction: '👍' on your
+//       last message before it (chat.js draws it on the bubble's corner) and shows the rest, or nothing when that is all
+//   reactionOf(text) -> { emoji, text } | null   a reply's leading "[react:<emoji>]" (bot/BRIEF.md says when a bot
+//       uses one) and the text after it; null when it does not start with one, or the tag holds no emoji
 //   setupNote(text) -> string|null   that text without "[Fleet View] ", or null for any other message
 //   switchNote(text) -> { model } | { effort } | {} | null   a note a model or effort switch left: its command, or
 //       Claude Code's answer to one ({}); null for any other note
 //   sizeTask(text) -> { size, model?, effort?, label }   Dynamic's guess at how big a message is, from its words only:
 //       size 'keep' (a go-ahead: "ok", "yes do it", "2 and 3": nothing switches), 'quick' (sonnet, low), 'normal'
 //       (a question: sonnet, medium; a task: opus, medium), 'big' (a plan, build, bug hunt or several parts: opus,
-//       high) or 'huge' (a big plan, a hard bug or a long brief: opus, xhigh); label says which, for the chip
+//       high) or 'huge' (a big plan, a hard bug or a long brief: opus, xhigh); label says which
 //   dynamicSwitch(dyn, size, cur, modelIds) -> { model?, effort? }   what to switch before that message: only what
 //       is dynamic (dyn { model, effort } booleans) and differs from cur { model, effort } (a model of the same family
 //       stays); model is the first of modelIds of the family that is not a 1M one
-//   createPickStore(storage = localStorage) -> { put(convId, text, pick), get(convId, text) -> pick|null }   the
-//       Dynamic picks made for messages (pick { model, effort, label, switched, at }), so each wears its chip
 //   DYNAMIC   'dynamic', a bot's model or effort sized per message
 //   doingOf(contact, face) -> string   what a bot or the Chief is doing now, in a few words, for its avatar's hover:
 //       face is mascot.js mascotState(contact) ('thinking': "Thinking about your message"; working: the tool running
@@ -136,7 +138,8 @@ export function createChainStore(storage) {
 
 // the first line that says something: not a heading, a code fence, a table border or a rule
 export function replyLine(text) {
-  for (const raw of String(text || '').split('\n')) {
+  const r = reactionOf(text); // a bot's reaction is left out; a reaction alone reads as its emoji
+  for (const raw of String(r ? r.text.trim() || r.emoji : text || '').split('\n')) {
     const l = raw.trim();
     if (!l || /^#{1,6}(\s|$)/.test(l) || /^```/.test(l) || /^\|/.test(l) || /^[\s:|-]+$/.test(l) || /^[-*_=]{3,}$/.test(l)) continue;
     const t = l.replace(/^(?:[-*+>]|\d+[.)])\s+/, '').replace(/[*_`]+/g, '').trim();
@@ -369,44 +372,46 @@ const SETUP = /^\[Fleet View\][ \t]*/;
 export const setupNote = (text) => { const t = String(text == null ? '' : text); return SETUP.test(t) ? t.replace(SETUP, '') : null; };
 // what a bot answers a setup note with when it asks for "ok" (bots.js startPrompt, idNote)
 const ACK = /^\s*(?:ok(?:ay)?|ready|got it)[.!]?\s*$/i;
+// a reaction a bot puts at the very start of a reply (bot/BRIEF.md): "[react:👍]", then the reply or nothing
+const REACT = /^\s*\[react:\s*([^\]\s]{1,16})\s*\]\s*/i;
+const EMOJI = /\p{Extended_Pictographic}/u;
+// text -> { emoji, text: the rest } when it starts with a reaction, else null
+export function reactionOf(text) {
+  const m = REACT.exec(String(text == null ? '' : text));
+  return m && EMOJI.test(m[1]) ? { emoji: m[1], text: String(text).slice(m[0].length) } : null;
+}
 export function botFeed(items) {
   const out = [];
   let after = false; // the last message was a setup note (thinking and tool steps since then don't count)
-  let sw = []; // switch notes in a row ("/model …", "Set model to …"), until what comes next says where they go
-  const flush = () => { for (const x of sw) out.push(x); sw = []; };
+  let mine = -1; // where your last message is in out: a reaction goes on it
+  // _j is chat.js's cached JSON of the item as it came: a changed copy must not reuse it
+  const copy = (it, more) => { const { _j, ...rest } = it; return { ...rest, ...more }; };
   for (const it of items || []) {
     if (!it) continue;
-    // a switch right before your message (Dynamic's, or one from the model menu) folds into that message's chip
-    if (it.kind === 'note' && switchNote(it.text)) { sw.push(it); after = false; continue; }
+    // model and effort switches (Dynamic's, or the model menu's) are left out: the chat stays clean
+    if (it.kind === 'note' && switchNote(it.text)) continue;
     if (it.kind === 'user') {
       const note = it.images && it.images.length ? null : setupNote(it.text);
       if (note != null) {
-        flush();
-        // _j is chat.js's cached JSON of the item as it came: the setup form must not reuse it
-        const { _j, ...rest } = it;
-        out.push({ ...rest, kind: 'setup', text: note });
+        out.push(copy(it, { kind: 'setup', text: note }));
         after = true;
+        mine = -1;
         continue;
       }
       after = false;
-      if (sw.length) {
-        const switched = Object.assign({}, ...sw.map((x) => switchNote(x.text)));
-        sw = [];
-        const { _j, ...rest } = it;
-        out.push({ ...rest, switched });
-        continue;
-      }
+      mine = out.length;
     } else if (it.kind === 'assistant') {
-      flush();
       if (after && ACK.test(String(it.text || ''))) continue;
       after = false;
-    } else {
-      flush();
-      if (it.kind === 'note') after = false;
-    }
+      const r = reactionOf(it.text);
+      if (r) {
+        if (mine >= 0 && !out[mine].reaction) out[mine] = copy(out[mine], { reaction: r.emoji });
+        if (r.text.trim()) out.push(copy(it, { text: r.text }));
+        continue;
+      }
+    } else if (it.kind === 'note') after = false;
     out.push(it);
   }
-  flush();
   return out;
 }
 
@@ -506,42 +511,6 @@ export function dynamicSwitch(dyn, size, cur, ids = []) {
   }
   if (dyn.effort && size.effort && (cur && cur.effort) !== size.effort) out.effort = size.effort;
   return out;
-}
-
-// The picks the page made for messages to a dynamic bot, so each message wears a chip saying what it ran on:
-// { conversation id: [{ t (the message, spaces squeezed, at most 200 characters), m (model id or null), e (effort or
-// null), l (sizeTask's label), s (true when it switched for it), at }] }, the newest last, at most PICKS_CAP in all.
-// Kept in storage (a reload keeps them); a storage that throws keeps them for this page only.
-const PICKS_KEY = 'fv.chats.picks';
-const PICKS_CAP = 400;
-const squeeze = (t) => String(t == null ? '' : t).replace(/\s+/g, ' ').trim().slice(0, 200);
-export function createPickStore(storage) {
-  let st = storage;
-  if (st === undefined) { try { st = globalThis.localStorage; } catch { st = null; } }
-  let list = [];
-  try {
-    const j = JSON.parse(st.getItem(PICKS_KEY));
-    if (Array.isArray(j)) list = j.filter((x) => x && typeof x.id === 'string' && typeof x.t === 'string');
-  } catch {}
-  return {
-    put(id, text, p) {
-      if (!id || !p) return;
-      const t = squeeze(text);
-      list.push({ id, t, m: p.model || null, e: p.effort || null, l: p.label || '', s: !!p.switched, at: Number(p.at) || Date.now() });
-      if (list.length > PICKS_CAP) list = list.slice(-PICKS_CAP);
-      try { st.setItem(PICKS_KEY, JSON.stringify(list)); } catch {}
-    },
-    // the newest pick for that message in that conversation (the start of a long one is enough), or null
-    get(id, text) {
-      const t = squeeze(text);
-      if (!id || !t) return null;
-      for (let i = list.length - 1; i >= 0; i--) {
-        const x = list[i];
-        if (x.id === id && x.t && (x.t === t || (x.t.length >= 60 && t.startsWith(x.t.slice(0, 60))))) return { model: x.m, effort: x.e, label: x.l, switched: x.s, at: x.at };
-      }
-      return null;
-    },
-  };
 }
 
 // the notes a switch leaves in the transcript (api.js switchModel types "/model <id>" and "/effort <level>", and

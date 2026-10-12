@@ -8,7 +8,7 @@
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
 import { buildContacts, sortContacts, teamThread, createChainStore, unread, rawToContactsState, previewOf, replyLine, botFeed, setupNote, doingOf, botChoices, botEdits,
-  sizeTask, dynamicSwitch, createPickStore, switchNote, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead } from '../web/chats-model.js';
+  sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
 const KEY = 'fv.chats.chains';
@@ -397,28 +397,7 @@ test('dynamicSwitch: only what is dynamic and differs; the same family stays; no
   assert.deepEqual(dynamicSwitch(both, plan, { model: 'claude-sonnet-5-5', effort: 'high' }, []), {}); // no id on offer for it
   assert.deepEqual(dynamicSwitch(null, plan, {}, ids), {});
 });
-test('the pick store: per conversation, by the message (the start of a long one), newest wins; a storage that throws', () => {
-  const f = fake();
-  const p = createPickStore(f);
-  p.put('c1', 'plan  the\nmigration', { model: 'claude-opus-5-5', effort: 'high', label: 'Plan or build', switched: true, at: 5 });
-  assert.deepEqual(p.get('c1', 'plan the migration'), { model: 'claude-opus-5-5', effort: 'high', label: 'Plan or build', switched: true, at: 5 });
-  assert.equal(p.get('c2', 'plan the migration'), null);
-  assert.equal(p.get('c1', 'plan'), null);
-  const long = 'x'.repeat(300);
-  p.put('c1', long, { model: null, effort: 'low', label: 'Quick question', at: 6 });
-  assert.equal(p.get('c1', `${long} [Image #1]`).effort, 'low');
-  p.put('c1', 'plan the migration', { model: 'claude-sonnet-5-5', effort: 'low', at: 7 });
-  assert.equal(p.get('c1', 'plan the migration').at, 7);
-  assert.equal(createPickStore(f).get('c1', 'plan the migration').at, 7); // kept in storage
-  const bad = { getItem() { throw new Error('no'); }, setItem() { throw new Error('no'); } };
-  const q = createPickStore(bad);
-  q.put('c', 'hi', { effort: 'low' });
-  assert.equal(q.get('c', 'hi').effort, 'low');
-  for (let i = 0; i < 450; i++) p.put('c3', `m${i}`, { effort: 'low' });
-  assert.ok(JSON.parse(f.m['fv.chats.picks']).length <= 400);
-  assert.equal(p.get('c3', 'm449').effort, 'low');
-});
-test('botFeed: a switch right before your message folds into its chip; elsewhere the notes stay', () => {
+test('botFeed: model and effort switch notes are all left out', () => {
   assert.deepEqual(switchNote('/model claude-opus-5-5'), { model: 'claude-opus-5-5' });
   assert.deepEqual(switchNote('/effort high'), { effort: 'high' });
   assert.deepEqual(switchNote('Set model to Opus 5.5'), {});
@@ -431,20 +410,42 @@ test('botFeed: a switch right before your message folds into its chip; elsewhere
     { key: 3, kind: 'note', text: 'Set model to Opus 5.5' },
     { key: 4, kind: 'note', text: '/effort high' },
     { key: 5, kind: 'note', text: 'Set effort level to high' },
-    { key: 6, kind: 'user', text: 'plan it', _j: 'cached' },
+    { key: 6, kind: 'user', text: 'plan it' },
     { key: 7, kind: 'assistant', text: 'Plan: ...' },
-    { key: 8, kind: 'note', text: '/effort low' }, // a switch with no message after it: shown as it is
-    { key: 9, kind: 'assistant', text: 'ok then' },
-    { key: 10, kind: 'note', text: '/effort low' },
+    { key: 8, kind: 'note', text: '/effort low' },
+    { key: 9, kind: 'note', text: 'Conversation compacted' },
   ];
   const out = botFeed(items);
-  assert.deepEqual(out.map((it) => it.key), [1, 6, 7, 8, 9, 10]);
-  assert.deepEqual(out[1].switched, { model: 'claude-opus-5-5', effort: 'high' });
-  assert.equal('_j' in out[1], false);
-  assert.equal('switched' in items[5], false); // the items stay as they came
-  // a setup note after the switch: the notes stay, the setup note is still one
+  assert.deepEqual(out.map((it) => it.key), [1, 6, 7, 9]);
+  assert.equal('switched' in out[1], false);
+  // a setup note after a switch is still one
   const s2 = botFeed([{ key: 1, kind: 'note', text: '/effort low' }, { key: 2, kind: 'user', text: '[Fleet View] x' }]);
-  assert.deepEqual(s2.map((it) => [it.key, it.kind]), [[1, 'note'], [2, 'setup']]);
+  assert.deepEqual(s2.map((it) => [it.key, it.kind]), [[2, 'setup']]);
+});
+
+test('reactions: a reply starting "[react:<emoji>]" puts the emoji on your last message', () => {
+  assert.deepEqual(reactionOf('[react:👍] On it.'), { emoji: '👍', text: 'On it.' });
+  assert.deepEqual(reactionOf('  [React: ❤️ ]'), { emoji: '❤️', text: '' });
+  assert.equal(reactionOf('[react:yes] hi'), null); // no emoji in it
+  assert.equal(reactionOf('ok [react:👍]'), null); // only at the start
+  assert.equal(reactionOf(null), null);
+  const items = [
+    { key: 1, kind: 'user', text: 'do this now', _j: 'cached' },
+    { key: 2, kind: 'assistant', text: '[react:👍] Doing it.' },
+    { key: 3, kind: 'tool', name: 'Bash' },
+    { key: 4, kind: 'assistant', text: '[react:🎉] Done.' }, // one per message: the first stays
+    { key: 5, kind: 'user', text: 'love it' },
+    { key: 6, kind: 'assistant', text: '[react:❤️]' }, // the whole reply: nothing else shows
+  ];
+  const out = botFeed(items);
+  assert.deepEqual(out.map((it) => [it.key, it.reaction || null, it.kind === 'assistant' ? it.text : null]),
+    [[1, '👍', null], [2, null, 'Doing it.'], [3, null, null], [4, null, 'Done.'], [5, '❤️', null]]);
+  assert.equal('_j' in out[0], false); // redrawn with its reaction
+  assert.equal('reaction' in items[0], false); // the items stay as they came
+  // after a setup note there is no message of yours to react to
+  assert.deepEqual(botFeed([{ key: 1, kind: 'user', text: '[Fleet View] x' }, { key: 2, kind: 'assistant', text: '[react:👍]' }]).map((it) => it.key), [1]);
+  assert.equal(replyLine('[react:👍] Shipped it.\nmore'), 'Shipped it.');
+  assert.equal(replyLine('[react:👍]'), '👍');
 });
 
 test("a bot's tasks: the schedule's label, a run's time, the meta line, the folded strip's line", () => {

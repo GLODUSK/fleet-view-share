@@ -49,22 +49,20 @@
 // opts.bubbles (the Bots tab, chats.js; the map's panes leave it off): a messenger look. Claude's replies sit in
 // bubbles on the left (chat.css .chat-bubbles), Fleet View's own setup notes to a bot or the Chief ("[Fleet View] …")
 // are a small centred grey line instead of your bubble, and the bare "ok" the bot answers one with is left out
-// (chats-model.js botFeed). Only the drawing changes: c.items keeps them as they came. Each of your messages to a
-// bot whose model or effort is Dynamic (compose.js) wears a small chip under it: what it ran on ("Opus 5.5 · high"),
-// and why on hover (the size Dynamic gave it, and whether it switched for it). The pick comes with 'fv-chat-sent'
-// and is kept (chats-model.js createPickStore) for the transcript's copy; a switch the transcript shows right before
-// a message (botFeed: switched) gives the chip too, and its "/model" and "/effort" notes are folded into it.
+// (chats-model.js botFeed). Only the drawing changes: c.items keeps them as they came. Kept simple: no model or
+// effort switch notes (botFeed), no Fork (on a message, a selection or a queued one), and a reaction the bot gave your
+// message (botFeed: reaction) sits on its bubble's corner, like a messenger's.
 //
 // ?fixture=1 reads ./fixtures/conversation-sample.json instead of the server (same JSON); with it,
 // ?chatWindow=<n> shrinks the first page (to try "Show earlier") and ?chatRepeat=<n> repeats the sample n times
 // (to time a long conversation).
 import { esc, spinner, C, clockTime, ago, loadModule } from './cards.js';
 import { icon } from './icons.js';
-import { mountCompose, modelLabel } from './compose.js';
+import { mountCompose } from './compose.js';
 import { handToChat } from './handto.js';
 import { onRekey, termApi } from './term.js';
 import { openViewer, openInCode } from './viewer.js';
-import { botFeed, createPickStore } from './chats-model.js';
+import { botFeed } from './chats-model.js';
 
 const params = (() => { try { return new URLSearchParams(location.search); } catch { return new URLSearchParams(); } })();
 const FIXTURE = params.has('fixture');
@@ -537,24 +535,8 @@ function userTextHtml(text) {
   }).join('');
 }
 
-// ---------- Dynamic's chip under your message (opts.bubbles) ----------
-let pickStore = null; // made on first use (it reads localStorage)
-const picks = () => pickStore || (pickStore = createPickStore());
-// pick { model, effort, label, switched } -> the chip's HTML, '' with nothing to say
-function pickChip(p) {
-  if (!p || (!p.model && !p.effort)) return '';
-  const what = [p.model ? modelLabel(p.model, true) : '', p.effort || ''].filter(Boolean).join(' · ');
-  const why = `${p.label ? `Dynamic: ${p.label}. ` : ''}${p.switched ? 'Switched for this message.' : p.label && /not switched/.test(p.label) ? '' : 'It ran on this already.'}`.trim();
-  return `<div class="cu-pick"${why ? ` title="${esc(why)}"` : ''}>${icon('model', 11)}<span>${esc(what)}</span></div>`;
-}
-// the chip for a message in the transcript: the pick made when it was sent here, else a switch right before it
-function chipOf(it, c) {
-  if (!c.bubbles || !c.id) return '';
-  const p = picks().get(c.id, it.text);
-  if (p) return pickChip(p);
-  const sw = it.switched;
-  return sw && (sw.model || sw.effort) ? pickChip({ model: sw.model || null, effort: sw.effort || null, switched: true }) : '';
-}
+// a bot's reaction to your message (opts.bubbles, botFeed): its emoji on the bubble's corner
+const reactionHtml = (it) => (it.reaction ? `<span class="cu-react" title="Reacted ${esc(it.reaction)}">${esc(it.reaction)}</span>` : '');
 
 function renderItem(it, c) {
   const L = libsReady;
@@ -584,9 +566,8 @@ function renderItem(it, c) {
         ? `<button type="button" class="cu-img" data-img="${n}" title="Show the image"><img src="${esc(im.src)}" alt="attached image ${n + 1}" loading="lazy" decoding="async"></button>`
         : `<span class="cu-noimg">${icon('image', 13)}<span>image too large to show</span></span>`)).join('');
       const long = isLong(text);
-      el.innerHTML = `<div class="cu-bubble${long ? ' clamp' : ''}"${timeTitle(it.t)}>${imgs ? `<div class="cu-imgs">${imgs}</div>` : ''}${text ? `<div class="cu-body">${userTextHtml(text)}</div>` : ''}${long ? moreBtn(text) : ''}</div>`
-        + chipOf(it, c)
-        + (text ? `<div class="ci-acts">${copyBtn('msg', 'Copy message')}<button type="button" class="cp" data-edit title="Edit: change this message and send it again (goes back to just before it first)" aria-label="edit and resend this message">${icon('edit', 14)}</button><button type="button" class="cp" data-rewind title="Rewind: go back to just before this message (Claude Code's /rewind)" aria-label="rewind to before this message">${icon('rewind', 14)}</button><button type="button" class="cp" data-fork-at title="Fork from here: a new conversation with the history before this message, and this message in its chat box to edit and send. This one stays as it is" aria-label="fork the conversation from this message">${icon('branch', 14)}</button></div>` : '');
+      el.innerHTML = `<div class="cu-bubble${long ? ' clamp' : ''}"${timeTitle(it.t)}>${imgs ? `<div class="cu-imgs">${imgs}</div>` : ''}${text ? `<div class="cu-body">${userTextHtml(text)}</div>` : ''}${long ? moreBtn(text) : ''}${reactionHtml(it)}</div>`
+        + (text ? `<div class="ci-acts">${copyBtn('msg', 'Copy message')}<button type="button" class="cp" data-edit title="Edit: change this message and send it again (goes back to just before it first)" aria-label="edit and resend this message">${icon('edit', 14)}</button><button type="button" class="cp" data-rewind title="Rewind: go back to just before this message (Claude Code's /rewind)" aria-label="rewind to before this message">${icon('rewind', 14)}</button>${c.bubbles ? '' : `<button type="button" class="cp" data-fork-at title="Fork from here: a new conversation with the history before this message, and this message in its chat box to edit and send. This one stays as it is" aria-label="fork the conversation from this message">${icon('branch', 14)}</button>`}</div>` : '');
       el._text = text;
       el._images = (it.images || []).map((im) => im?.src);
       break;
@@ -883,12 +864,9 @@ function addSent(c, d) {
   el.className = 'ci ci-user sending';
   const imgs = (d.images || []).map((src, n) => `<span class="cu-img"><img src="${esc(src)}" alt="attached image ${n + 1}"></span>`).join('');
   const long = isLong(String(d.text || ''));
-  // Dynamic's pick for it (compose.js): kept for the transcript's copy, and shown on this one at once
-  if (d.pick && d.text) picks().put(c.id, d.text, d.pick);
   el.innerHTML = `<div class="cu-bubble${long ? ' clamp' : ''}">${imgs ? `<div class="cu-imgs">${imgs}</div>` : ''}${d.text ? `<div class="cu-body">${userTextHtml(d.text)}</div>` : ''}${long ? moreBtn(String(d.text)) : ''}</div>`
-    + (c.bubbles && d.pick ? pickChip(d.pick) : '')
     + `<div class="cu-status">${d.busy ? `<span>Queued: Claude reads it after this step</span><button type="button" class="cu-now" data-unsend title="Take it back out of the queue">${icon('close', 11)}<span>Unsend</span></button><button type="button" class="cu-now" data-now title="Stop what Claude is doing and send this now">${icon('stop', 11)}<span>Interrupt</span></button>`
-      + (d.text ? `<button type="button" class="cu-now cu-new" data-fork="fork" title="Take it out of the queue and send it to a fork of this conversation: a new one with its history so far">${icon('branch', 11)}<span>Fork</span></button>`
+      + (d.text && !c.bubbles ? `<button type="button" class="cu-now cu-new" data-fork="fork" title="Take it out of the queue and send it to a fork of this conversation: a new one with its history so far">${icon('branch', 11)}<span>Fork</span></button>`
         + `<button type="button" class="cu-now cu-new" data-fork="new" title="Take it out of the queue and send it to a new conversation in this folder">${icon('plus', 11)}<span>New chat</span></button>` : '') : 'Sending…'}</div>`;
   // used: the user messages and notes already in the feed (or matched to another sent one), which can't be this one
   const used = new Set(c.items.filter((it) => it.kind === 'user' || it.kind === 'note').map((it) => String(it.key)));
@@ -1210,7 +1188,7 @@ function wireReply(c) {
       if (!selected().trim()) return;
       const r = main.getBoundingClientRect();
       reply.hidden = false;
-      fork.hidden = !termApi(); // a fork needs the desktop app's session host
+      fork.hidden = c.bubbles || !termApi(); // a fork needs the desktop app's session host; none in the Bots tab
       const bw = reply.offsetWidth || 144, bh = reply.offsetHeight || 26;
       let left = clientX - r.left + 8, top = clientY - r.top + 14;
       if (top + bh > r.height) top = clientY - r.top - bh - 10;

@@ -551,12 +551,14 @@ html:not(.glass) .chat-bubbles .ci-asst > .chat-md { background: #171b28; box-sh
   font: 600 10px/1.6 var(--font-ui); letter-spacing: 0.02em;
 }
 .ci-setup .cn-row { max-width: min(100%, 560px); }
-/* Dynamic's chip under your message (a bot whose model or effort is Dynamic): what it ran on, quiet and small */
-.cu-pick {
-  display: inline-flex; align-items: center; gap: 4px; margin: 3px 4px 0 0; padding: 1px 7px; border-radius: 999px;
-  border: 1px solid var(--line); color: var(--faint); font: 500 10.5px/1.5 var(--font-mono); cursor: default;
+/* a bot's reaction to your message (botFeed: reaction): its emoji on the bubble's lower left corner, like a messenger's */
+.cu-bubble:has(> .cu-react) { margin-bottom: 9px; }
+.cu-react {
+  position: absolute; left: -9px; bottom: -11px; display: grid; place-items: center; min-width: 24px; height: 24px; padding: 0 4px;
+  border-radius: 999px; background: #232a3d; border: 1px solid var(--glass-edge); box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  font: 13px/1 var(--font-ui); cursor: default; user-select: none; animation: cu-react-in 0.28s cubic-bezier(0.3, 1.6, 0.5, 1);
 }
-.cu-pick svg { opacity: 0.8; }
-.ci-user:hover .cu-pick { color: var(--dim); }
+@keyframes cu-react-in { from { transform: scale(0.3); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .cu-react { animation: none; } }
 /* the Bots tab's narrow layout (chats.js .ch-narrow, measured on the view): wider bubbles */
 .ch-narrow .chat-bubbles .ci-asst > .chat-md { max-width: 92%; }

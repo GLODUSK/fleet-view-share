@@ -27,7 +27,9 @@
 // or pasted from Explorer) goes in as its own path, which the desktop window knows (fleetDesktop.pathForFile). A
 // browser (Edge, or the Mac through Tailscale) knows no path for it, so it is sent to the PC at once (POST /upload,
 // pcfiles.js; its chip shows how far it got) and the path the PC saved it at goes in the message instead; Send waits
-// for a file still on its way. The folder button is the desktop's Windows dialog, else pcfiles.js's in-page one.
+// for a file still on its way. A folder goes in by paste or drop (there is no folder button: attach does it).
+// In the Bots tab (chat.js opts.bubbles) the box is kept simple: no Remote Control switch, and a Dynamic switch
+// before a message shows as "Sending…", never which model it switches to.
 //
 // ↑ in an empty box (or with the caret at its start) brings back your last message, and again the one before;
 // ↓ goes forward again, back to what you had typed. The list: your messages in the feed, then the ones sent from
@@ -72,7 +74,7 @@ import { esc } from './cards.js';
 import { voiceSupported, startVoice, stopVoice, onVoice } from './voice.js';
 import { icon } from './icons.js';
 import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, noTermMsg } from './term.js';
-import { pickFolder, canPickFolder, uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
+import { uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
 import { sizeTask, dynamicSwitch, DYNAMIC } from './chats-model.js';
 import { pinText, setPin } from './keeps.js';
@@ -838,7 +840,6 @@ export function mountCompose(slot, s) {
   <div class="cmp-notes" hidden></div>
   <div class="cmp-foot">
     <button type="button" class="cmp-ib" data-c="attach" title="Attach files or images (or paste, or drop them here)" aria-label="attach files">${ic('attach', 16)}</button>
-    <button type="button" class="cmp-ib" data-c="folder" title="Attach a folder (or paste, or drop one here): Claude gets its path" aria-label="attach a folder">${ic('folder', 16)}</button>
     <span class="cmp-modew"><button type="button" class="cmp-modeb" data-c="mode" aria-haspopup="menu" aria-expanded="false" title="Permission mode (Shift+Tab in the session)">${ic('mode', 13)}<span class="cmp-model-t">Mode</span>${icon('chevron', 11)}</button><div class="cmp-menu" role="menu" hidden></div></span>
     <span class="cmp-modew cmp-modelw"><button type="button" class="cmp-modeb cmp-modelb" data-c="model" aria-haspopup="menu" aria-expanded="false" title="Model and effort">${icon('model', 13)}<span class="cmp-model-t mono">Model</span><span class="cmp-eff" hidden></span>${icon('chevron', 11)}</button><div class="cmp-menu cmp-menu-model" role="menu" hidden></div></span>
     <button type="button" class="cmp-modeb cmp-rcb" data-c="remote" aria-pressed="false" data-cur="off" aria-label="Remote Control">${ic('phone', 14)}</button>
@@ -856,6 +857,8 @@ export function mountCompose(slot, s) {
   const modeBtn = $('.cmp-modeb'), modeMenu = $('.cmp-menu'), slashEl = $('.cmp-slash');
   const modelBtn = $('.cmp-modelb'), modelMenu = $('.cmp-modelw .cmp-menu');
   const rcBtn = $('.cmp-rcb');
+  const simple = !!slot.closest('.chat-bubbles'); // the Bots tab: no Remote Control, no model talk
+  rcBtn.hidden = simple;
   const hsEl = $('.cmp-hs'), hsIn = $('.cmp-hs-in'), hsList = $('.cmp-hs-l'), hsN = $('.cmp-hs-n'), shTag = $('.cmp-shtag'), bgBtn = $('.cmp-bgb');
   const boxEl = $('.cmp-box'), ghost = $('.cmp-ghost'), ghostPad = $('.cmp-ghost-pad'), ghostT = $('.cmp-ghost-t');
   // the chat pane around us: drops anywhere on it land here, and chat.js sends its quotes to it
@@ -979,7 +982,7 @@ export function mountCompose(slot, s) {
     let list = [...(files || [])];
     if (dirs && dirs.size) {
       list = list.filter((f) => !dirs.has(f.name));
-      err(`A folder can't be sent from a browser: attach one that is on the PC with the folder button`);
+      err(`A folder can't be sent from a browser: paste the path of one that is on the PC`);
     }
     let added = 0;
     for (const f of list) {
@@ -1041,13 +1044,6 @@ export function mountCompose(slot, s) {
   // progress redraws, at most a few a second
   let upTimer = 0;
   const upDrawSoon = () => { if (!upTimer) upTimer = setTimeout(() => { upTimer = 0; drawAtts(); }, 200); };
-  async function attachFolder() {
-    let r = null;
-    try { r = await pickFolder({ title: 'Attach a folder', button: 'Attach this folder' }); } catch { r = null; }
-    if (r && r.ok && r.path && addPath(r.path, null, 0, true)) { drawAtts(); drawSend(); }
-    else if (r && r.message) err(r.message);
-    ta.focus();
-  }
   function drawAtts() {
     const list = st.d.atts;
     atts.hidden = !list.length;
@@ -2361,7 +2357,7 @@ export function mountCompose(slot, s) {
     // just started: its start notes may still be going; it is waited for a little, then switched if it went idle
     const h = hosts.get(id);
     if (st.busy && h && Date.now() - h.startedAt < DYN_START_MS) {
-      if (st.id === id) { st.step = `Waiting for it to settle, then switching to ${say(want)}…`; drawNotes(); }
+      if (st.id === id) { st.step = simple ? 'Sending…' : `Waiting for it to settle, then switching to ${say(want)}…`; drawNotes(); }
       for (const end = Date.now() + DYN_WAIT_MS; st.busy && st.alive && st.id === id && Date.now() < end;) await sleep(POLL_MS);
       cur = current();
       want = dynamicSwitch(dyn, size, cur, MODEL_IDS);
@@ -2369,7 +2365,7 @@ export function mountCompose(slot, s) {
       if (!want.model && !want.effort) return pick;
     }
     if (st.busy || st.id !== id) { pick.label += ': not switched, it was busy'; return pick; }
-    st.step = `Switching to ${say(want)} for this message…`;
+    st.step = simple ? 'Sending…' : `Switching to ${say(want)} for this message…`;
     drawNotes();
     const from = st.s.model || null;
     let r = null;
@@ -2584,9 +2580,6 @@ export function mountCompose(slot, s) {
     ta.disabled = !t;
     root.classList.toggle('nodesk', !t);
     $('[data-c="attach"]').disabled = !t;
-    const fb = $('[data-c="folder"]');
-    fb.hidden = !canPickFolder();
-    fb.disabled = !t;
     const mic = $('[data-c="mic"]');
     mic.hidden = !voiceSupported();
     mic.disabled = !t;
@@ -2763,7 +2756,6 @@ export function mountCompose(slot, s) {
     else if (c === 'esc') escMenu();
     else if (c === 'panel-esc') writeKey('\x1b');
     else if (c === 'attach') fileIn.click();
-    else if (c === 'folder') attachFolder();
     else if (c === 'remote') { openModeMenu(false); openModelMenu(false); toggleRemote(); }
     else if (c === 'mode') { openModelMenu(false); openModeMenu(modeMenu.hidden); }
     else if (c === 'model') { openModeMenu(false); openModelMenu(modelMenu.hidden); }
