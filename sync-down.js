@@ -18,9 +18,10 @@
 //     down as a scan would (steps 3 to 8) -> that outcome ('done' | 'same' | 'conflict' | 'skip' | 'pending'), the
 //     reason, dir (the slug folder its log is in, absolute), folder (the resume folder X from root + rel_cwd) and the
 //     row. A failure throws, as in a scan (no back-off is set for it).
-//   owners() -> Map<id, { device, leaseUntil }>: the active rows other devices own, from the last scan's list (device
-//     lower-case, leaseUntil = Date.parse(lease_until) or null). Empty before the first scan. status().listedAt is
-//     when that list began (ISO), so a change of owner made before then is in it.
+//   owners() -> Map<id, { device, leaseUntil, account }>: the active rows other devices own, from the last scan's list
+//     (device lower-case, leaseUntil = Date.parse(lease_until) or null, account the row's 'a' | 'b' or null: the
+//     account it ran under there). Empty before the first scan. status().listedAt is when that list began (ISO), so a
+//     change of owner made before then is in it.
 //
 // One scan:
 //   1. This machine's device row (ensureDevice; last_seen_at at most every 5 minutes).
@@ -228,7 +229,7 @@ function createMaterializer(opts = {}) {
   const stampOf = (p) => { const st = lstatOr(p); return st ? `${st.size}:${st.mtimeMs}` : 'none'; };
 
   const backoff = new Map(); // id -> { n, until }
-  let ownersMap = new Map(); // id -> { device, leaseUntil }: the last scan's rows other devices own
+  let ownersMap = new Map(); // id -> { device, leaseUntil, account }: the last scan's rows other devices own
   const onlyOf = () => (typeof opts.only === 'function' ? opts.only : null);
 
   // ---------- one conversation at a time ----------
@@ -605,7 +606,7 @@ function createMaterializer(opts = {}) {
       const owner = typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null;
       if (!owner || owner === me) continue;
       const lease = row.lease_until ? Date.parse(row.lease_until) : NaN;
-      seen.set(row.id.toLowerCase(), { device: owner, leaseUntil: Number.isFinite(lease) ? lease : null });
+      seen.set(row.id.toLowerCase(), { device: owner, leaseUntil: Number.isFinite(lease) ? lease : null, account: row.account === 'a' || row.account === 'b' ? row.account : null });
     }
     ownersMap = seen;
     st.listedAt = new Date(listStart).toISOString();

@@ -14,12 +14,14 @@
 // written by `sync-api.js setup`). Off by default: a PC with none of the three runs no loop,
 // sets no timer beyond the minute check and reaches no network.
 //
-//   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, intervalMs, checkMs,
-//                      prefs, makeUploader, makeMaterializer, makeMover, makeLive, makePrefs })
+//   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, accountOf,
+//                      intervalMs, checkMs, prefs, makeUploader, makeMaterializer, makeMover, makeLive, makePrefs })
 //     -> { start(), stop(), check(), status(), move(id, { force }), moveStatus(id), cancelMove(id), owners(), device(),
 //          live(), prefsChanged() }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
-//   are one (by default each side's own: ~/.claude and ~/.claude-a); roots: () => [repo folders] (the
+//   are one (by default each side's own: ~/.claude and ~/.claude-a); accountOf(id) -> the account a conversation ran
+//   under here or null (fleet-view.js: its claude process, or remembered), the uploader's option of that name, so its
+//   row says a when it ran on A in a folder A shares with B; roots: () => [repo folders] (the
 //   repos Fleet View lists; the materializer matches a synced repo's origin against them). host: { list() ->
 //   Promise<desktop/host.js list()'s items | null>, kill(id) -> Promise } (api.js hostList / hostKill); isOpen(id) ->
 //   true while a Claude Code process here has it open (fleet-view.js's live pid files). The materializer never lays
@@ -32,8 +34,9 @@
 //     Error with .code 'not_running' (its message says why sync is not running), 'bad_id' or 'not_elsewhere' (no
 //     other device has it). A second move() of the same id gives the same job; force: true forces it.
 //   moveStatus(id) -> the job | null      cancelMove(id) -> true when it was stopped
-//   owners() -> Map id -> { device, name, live, moving }: conversations another device owns (live: its lease is
-//     ahead), and this device's own moves (moving 'here' or 'away'); an empty Map while not running
+//   owners() -> Map id -> { device, name, live, moving, account }: conversations another device owns (live: its lease
+//     is ahead; account: its row's, 'a' | 'b' | null), and this device's own moves (moving 'here' or 'away'); an empty
+//     Map while not running
 //   device() -> { id, name } of this device | null
 // What runs where (sync-live.js), beside the mover and only with it (it needs the mover's device id): snapshot() ->
 // the conversations this device owns, as fleet-view.js's /state shows them, published for the other devices;
@@ -68,6 +71,7 @@ function createSyncRunner(o = {}) {
   const makeLive = o.makeLive || ((a) => require(path.join(__dirname, 'sync-live.js')).createLive(a));
   const makePrefs = o.makePrefs || ((a) => require(path.join(__dirname, 'sync-prefs.js')).createPrefs(a));
   const snapshot = typeof o.snapshot === 'function' ? o.snapshot : null;
+  const accountOf = typeof o.accountOf === 'function' ? o.accountOf : null;
   const prefsOpt = o.prefs && typeof o.prefs.read === 'function' && typeof o.prefs.apply === 'function' ? o.prefs : null;
   const host = o.host && typeof o.host.list === 'function' ? o.host : null;
   const isOpenOpt = typeof o.isOpen === 'function' ? o.isOpen : null;
@@ -144,7 +148,7 @@ function createSyncRunner(o = {}) {
     if (stopped) return;
     const args = { api: sync, dataDir, key, log };
     if (projects) args.projects = () => projects();
-    const up = makeUploader(args);
+    const up = makeUploader(accountOf ? { ...args, accountOf: (id) => accountOf(id) } : args);
     const down = makeMaterializer({ ...args, roots: () => roots(), isOpen });
     let mover = null;
     try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false) }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }

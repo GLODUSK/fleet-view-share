@@ -919,22 +919,23 @@ function createMover(o = {}) {
   // tests: every flush, pull, claim and row write under way, done
   async function settle() { while (tasks.size) await Promise.allSettled([...tasks]); }
 
-  // conversations another device owns (live: its lease is ahead), with this device's own moves: moving 'here' (a job
-  // here, from the owner) or 'away' (handing over to the requester)
+  // conversations another device owns (live: its lease is ahead; account: its row's 'a' | 'b', the account it ran
+  // under there, else null), with this device's own moves: moving 'here' (a job here, from the owner) or 'away'
+  // (handing over to the requester)
   function owners() {
     const out = new Map(), t = now();
     for (const [id0, v] of ownersRaw()) {
       const id = lower(id0), d = lower(v && v.device);
       if (!d || d === me) continue;
-      out.set(id, { device: d, name: nameOf(d), live: !!(v.leaseUntil && v.leaseUntil > t), moving: null });
+      out.set(id, { device: d, name: nameOf(d), live: !!(v.leaseUntil && v.leaseUntil > t), moving: null, account: v.account === 'a' || v.account === 'b' ? v.account : null });
     }
-    for (const [id, g] of gone) if (!listedSince(g.at) && !out.has(id)) out.set(id, { device: g.device, name: nameOf(g.device), live: false, moving: null });
+    for (const [id, g] of gone) if (!listedSince(g.at) && !out.has(id)) out.set(id, { device: g.device, name: nameOf(g.device), live: false, moving: null, account: null });
     for (const [id, j] of jobs) {
       if (!ACTIVE.has(j.phase)) continue;
-      const e = out.get(id) || { device: j.from.device, name: nameOf(j.from.device, j.from.name), live: false };
+      const e = out.get(id) || { device: j.from.device, name: nameOf(j.from.device, j.from.name), live: false, account: null };
       out.set(id, { ...e, moving: 'here' });
     }
-    for (const x of outs.values()) if (MOVING.has(x.phase)) out.set(x.id, { device: x.to, name: nameOf(x.to), live: false, moving: 'away' });
+    for (const x of outs.values()) if (MOVING.has(x.phase)) out.set(x.id, { device: x.to, name: nameOf(x.to), live: false, moving: 'away', account: null });
     for (const [id, at] of claimed) if (!listedSince(at)) out.delete(id);
     return out;
   }

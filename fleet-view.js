@@ -27,6 +27,7 @@ const SYNC_RUN = require(path.join(__dirname, 'sync-run.js'));
 const SYNC_LIVE = require(path.join(__dirname, 'sync-live.js'));
 const SYNC_PREFS = require(path.join(__dirname, 'sync-prefs.js'));
 const SYNC_ACCOUNTS = require(path.join(__dirname, 'sync-accounts.js'));
+const SYNC_COMMON = require(path.join(__dirname, 'sync-common.js'));
 const SYNC_SETUP_JS = require(path.join(__dirname, 'sync-setup.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
@@ -1413,9 +1414,11 @@ const ACCTS = ACCOUNTS.createAccounts({
   log: (t) => logLine(t),
   liveOn: (a) => [...liveProcs.keys()].filter((id) => liveFolder.get(id) === a || liveAccount.get(id) === a).map((id) => ({ id, name: nameNow(id) || id.slice(0, 8) })),
   changed: (a) => { acctListAt = 0; delete weekLeft[a]; weekDue[a] = 0; },
-  // a login moved to another letter (sync-accounts.js): an account turned off stays off under its new letter
+  // a login moved to another letter (sync-accounts.js): an account turned off stays off under its new letter, and the
+  // conversations that ran on it keep showing it (relabelAccounts)
   relabeled: (from, to) => {
     if (offAccounts.includes(from)) { offAccounts = cleanOffAccounts(offAccounts.map((a) => (a === from ? to : a))) || []; saveSettings(); }
+    relabelAccounts(from, to);
   },
 });
 
@@ -3918,13 +3921,77 @@ function topOf(s, root) {
 // changes who pays without changing the folder, so the running claude process is asked: every live one has a
 // <pid>.json in <config>/sessions naming its conversation, and its environment says the account
 // (CLAUDE_SWAP_PAYER from the claude-a loop, else a B token, else CLAUDE_CONFIG_DIR ~/.claude-<x> = X, else B).
-// The answer is kept per conversation for the rest of the run; one without a live process keeps its folder's.
+// The answer is kept per conversation for the rest of the run, and remembered after it (chatAccounts below); one
+// never seen running here keeps its folder's.
 // It is kept as the letter the process named and made the listed account each time it is read, so a folder that
 // becomes an alias while its sessions run (C signed in to B's login) counts as B at once: their replies' cost goes
 // to B's usage, not to a C nobody reads any more, and B's climb isn't taken for use from elsewhere.
 const procAccount = new Map(); // "pid:sessionId" -> account letter | null (unreadable)
 const liveAccount = new Map(); // sessionId -> account letter
 const liveFolder = new Map(); // sessionId -> the account whose folder its claude runs in (an account that pays by /swap aside)
+// <LOG_DIR>\chat-accounts.json: the account each conversation ran under, so one that ended still shows it after a
+// restart (its folder alone says B when A's projects folder is a link to B's), and its synced row says it too
+// (sync-up.js accountOf). { v: 1, ids: { <id>: { a: letter, row: true? } } }: row marks one learnt from the synced
+// row of a conversation another device owns (sync-down.js owners); what a process here showed is never replaced by
+// one. The newest CHAT_ACCTS_MAX are kept; written 2 s after a change, never in the demo.
+const CHAT_ACCTS_FILE = path.join(LOG_DIR, 'chat-accounts.json');
+const CHAT_ACCTS_MAX = 5000;
+let chatAccts = null, chatAcctsTimer = null; // id -> { a, row }, oldest first
+function chatAccounts() {
+  if (chatAccts) return chatAccts;
+  chatAccts = new Map();
+  const j = DEMO ? null : SYNC_COMMON.readState(CHAT_ACCTS_FILE, null);
+  if (j && j.v === 1 && j.ids && typeof j.ids === 'object') {
+    for (const [id, e] of Object.entries(j.ids)) if (UUID_RE.test(id) && e && /^[A-Z]$/.test(e.a)) chatAccts.set(id.toLowerCase(), { a: e.a, row: !!e.row });
+  }
+  return chatAccts;
+}
+function saveChatAccounts() {
+  if (DEMO || chatAcctsTimer) return;
+  chatAcctsTimer = setTimeout(() => {
+    chatAcctsTimer = null;
+    const m = chatAccounts();
+    for (const id of m.keys()) { if (m.size <= CHAT_ACCTS_MAX) break; m.delete(id); }
+    const ids = {};
+    for (const [id, e] of m) ids[id] = e.row ? { a: e.a, row: true } : { a: e.a };
+    try { SYNC_COMMON.writeState(CHAT_ACCTS_FILE, { v: 1, ids }); } catch (e) { logOnce('chat-accounts', `could not save ${CHAT_ACCTS_FILE}: ${e.message}`); }
+  }, 2000);
+  if (chatAcctsTimer.unref) chatAcctsTimer.unref();
+}
+// fromRow: the synced row's (a B there only clears an A it said before: the folder says B anyway)
+function rememberAccount(id, a, fromRow = false) {
+  if (DEMO || typeof id !== 'string' || !/^[A-Z]$/.test(a || '')) return;
+  id = id.toLowerCase();
+  const m = chatAccounts(), had = m.get(id);
+  if (fromRow && had && !had.row) return;
+  if (fromRow && a === 'B') { if (had) { m.delete(id); saveChatAccounts(); } return; }
+  if (had && had.a === a && had.row === fromRow) return;
+  m.delete(id); // newest last
+  m.set(id, { a, row: fromRow });
+  saveChatAccounts();
+}
+const rememberedAccount = (id) => { const e = typeof id === 'string' ? chatAccounts().get(id.toLowerCase()) : null; return e ? e.a : null; };
+// a login moved to another letter: what was remembered under the old one follows it
+function relabelAccounts(from, to) {
+  let n = 0;
+  for (const e of chatAccounts().values()) if (e.a === from) { e.a = to; n++; }
+  for (const map of [liveAccount, liveFolder]) for (const [id, a] of map) if (a === from) map.set(id, to);
+  if (n) saveChatAccounts();
+}
+// the rows of conversations other devices own, read every 10 s: id -> the account its row names (upper case, only
+// while another device has it), and each remembered for when it is laid down here and continued here
+const rowAccount = new Map();
+function accountsFromRows() {
+  if (DEMO) return;
+  rowAccount.clear();
+  const owners = syncOwners();
+  if (!owners) return;
+  for (const [id, o] of owners) {
+    if (!o || o.moving === 'away' || (o.account !== 'a' && o.account !== 'b')) continue;
+    rowAccount.set(id, o.account.toUpperCase());
+    rememberAccount(id, o.account.toUpperCase(), true);
+  }
+}
 let procBusy = false;
 const ENV_PS = `$cs = @'
 using System; using System.Runtime.InteropServices; using System.Text;
@@ -3958,11 +4025,18 @@ foreach ($id in $env:FV_PIDS.Split(',')) {
     if ($kv -like 'CLAUDE_CONFIG_DIR=*') { $cfg = $kv.Substring(18) } elseif ($kv -like 'CLAUDE_SWAP_PAYER=*') { $payer = $kv.Substring(18) } elseif ($kv -like 'CLAUDE_CODE_OAUTH_TOKEN=*') { $tok = 1 } } }
   "$id|$(if ($e) { 1 } else { 0 })|$cfg|$payer|$tok"
 }`;
-const liveAcct = (id, folder) => asListed(liveAccount.get(id) || acctId(folder));
+// its claude's account while one runs (or ran) here, else the one remembered, else its projects folder's
+const liveAcct = (id, folder) => asListed(liveAccount.get(id) || rememberedAccount(id) || acctId(folder));
 const accountFor = (s) => liveAcct(s.id, s.account);
+// the account it ran under as this machine knows it (its process, or remembered), else null: sync-up.js's accountOf
+const knownAccount = (id) => { const a = liveAccount.get(id) || rememberedAccount(id); return a ? asListed(a) : null; };
 // the letter it shows: the running device's when another device runs it (sync-live.js; its copy here sits in this
-// machine's folder), else accountFor. Opening it and usage stay on accountFor: they need the folder its copy is in here
-const shownAccount = (s) => (s && s.remote && s.remote.entry && s.remote.entry.account) || accountFor(s);
+// machine's folder), else its synced row's while another device has it and no claude here runs it, else accountFor.
+// Opening it and usage stay on accountFor: a remembered A opens in A's config folder, whose projects folder is B's
+// (a link) where both are one, so its log is found there
+const shownAccount = (s) => (s && s.remote && s.remote.entry && s.remote.entry.account)
+  || (s && !liveProcs.has(s.id) && rowAccount.has(String(s.id).toLowerCase()) && asListed(rowAccount.get(String(s.id).toLowerCase())))
+  || accountFor(s);
 // The live claude processes, from the same <config>/sessions/<pid>.json files: sessionId -> { pid, at, status,
 // waitingFor, statusAt }, the newest file per conversation (a conversation open twice: the one that spoke last).
 // A file whose pid is gone (claude was killed before it could remove it) does not count. Read on every poll: a few small files and a
@@ -4055,7 +4129,7 @@ function envLinesPosix(pids, cb) {
 function accountsFromProcesses() {
   if (DEMO || procBusy) return;
   const byId = liveProcs;
-  for (const [sid, p] of byId) { const a = procAccount.get(`${p.pid}:${sid}`); if (a) liveAccount.set(sid, a); }
+  for (const [sid, p] of byId) { const a = procAccount.get(`${p.pid}:${sid}`); if (a) { liveAccount.set(sid, a); rememberAccount(sid, a); } }
   const ask = [...byId].filter(([sid, p]) => !procAccount.has(`${p.pid}:${sid}`));
   if (!ask.length) return;
   procBusy = true;
@@ -4077,7 +4151,7 @@ function accountsFromProcesses() {
       if (!got.has(p.pid) && err) continue; // the helper failed: try again next round
       const a = got.get(p.pid) ?? null;
       procAccount.set(`${p.pid}:${sid}`, a);
-      if (a) liveAccount.set(sid, a);
+      if (a) { liveAccount.set(sid, a); rememberAccount(sid, a); }
       if (folderOf.has(p.pid)) liveFolder.set(sid, folderOf.get(p.pid));
     }
   });
@@ -6316,6 +6390,8 @@ const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, lo
   host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
   isOpen: (id) => liveProcs.has(String(id).toLowerCase()),
   mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot(),
+  // the account each conversation ran under here (its process, or remembered): its synced row names it
+  accountOf: (id) => knownAccount(String(id).toLowerCase()),
   prefs: { read: prefsGroups, apply: applyPrefs, translate: PREFS_ROOTS,
     load: () => saved.prefsSync, save: (s) => { saved.prefsSync = s; saveSettings(); } } });
 // the start screen on Henry's machines (private.json): work locally or sync with Blackbox, then the steps of sync
@@ -6821,6 +6897,7 @@ function startWeb() {
     pruneFeeds();
     every(3600e3, 'feeds', pruneFeeds);
     every(10000, 'accounts', accountsFromProcesses);
+    every(10000, 'row-accounts', accountsFromRows);
     const prs = () => refreshGithub().catch((e) => logOnce('github:' + (e && e.message), `GitHub lookup failed\n${errorText(e)}`));
     const deploys = () => refreshDeploys().catch((e) => logOnce('deploys:' + (e && e.message), `deploy lookup failed\n${errorText(e)}`));
     const github = () => { prs(); deploys(); };

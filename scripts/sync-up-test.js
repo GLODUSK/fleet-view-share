@@ -18,6 +18,9 @@
 //   and a hold that comes mid-pass stops it before its next write; forget(id) makes the next pass take over what the
 //   server has (and stops a pass under way); only(id); a row whose owner changes mid-upload ends the pass ('lost')
 //   with no chunk written after.
+// accountOf(id): a new row says the account it gives (a or b, any case) and not the folder's; one learnt for a settled
+//   conversation is a PATCH of the meta alone (no updated_at, size or sha256, no chunk sent again); null, another
+//   letter or a throw leave the folder's.
 // The home row: in a made-up home folder, a chat in the home folder itself, one in a bot's folder with no git, one in
 //   a git repo with no origin and one in a folder that is gone all go up under the 'home:' repos row with rel_cwd
 //   relative to home (and this device's repo_paths root for it is the home folder); a checkout with an origin under
@@ -744,6 +747,61 @@ async function s4(up) {
   append(qMain, lines(repo1, 2));
   await up.scanOnce();
   eq(fake.uploads - u0, 0, 'lost: left alone afterwards');
+
+  // ---------- accountOf: the account it ran under, not its folder's ----------
+  // X and Y sit in B's folder (A's shares it on a real machine); accountOf says which account ran them
+  await up.stop();
+  const X = newId('X'), Y = newId('Y');
+  const xMain = mainOf(projB, repo1, X), yMain = mainOf(projB, repo1, Y);
+  write(xMain, lines(repo1, 6));
+  write(yMain, lines(repo1, 6));
+  const ran = new Map([[lc(X), 'A']]); // any case
+  let threwOnce = false;
+  const upA = make({ only: (id) => id === lc(X) || id === lc(Y), accountOf: (id) => {
+    if (id === lc(Y) && ran.get(id) === 'throw') { threwOnce = true; throw new Error('accountOf broke'); }
+    return ran.has(id) ? ran.get(id) : null;
+  } });
+  await upA.scanOnce();
+  eq([conv(X) && conv(X).account, conv(Y) && conv(Y).account], ['a', 'b'], 'accountOf: a new row says the account it gives (A -> a); null leaves the folder\'s');
+  sameAsLocal(Y, 'main', yMain, true, 'Y');
+  const patchesOf = (id, from) => fake.calls.slice(from).filter((c) => c.method === 'PATCH' && c.path === '/rest/v1/conversations' && c.search.includes(`id=eq.${lc(id)}`));
+  const yRow0 = { ...conv(Y) };
+  // Y turns out to have run on A: its row is patched, its bytes are not sent again
+  ran.set(lc(Y), 'a');
+  let c0 = fake.calls.length;
+  u0 = fake.uploads;
+  await upA.scanOnce();
+  let yp = patchesOf(Y, c0);
+  eq(conv(Y).account, 'a', 'accountOf: a settled row\'s account is re-patched');
+  eq(fake.uploads - u0, 0, 'accountOf: no chunk uploaded again for it');
+  ok(!fake.calls.slice(c0).some((c) => c.method === 'POST' && c.path === '/rest/v1/chunks'), 'accountOf: no chunk row written for it');
+  eq(yp.length, 1, 'accountOf: one PATCH for it');
+  const yBody = yp.length ? JSON.parse(yp[0].body.toString()) : {};
+  eq(Object.keys(yBody).sort(), ['account', 'branch', 'rel_cwd', 'repo_id'], 'accountOf: the PATCH is the meta alone (no updated_at, size or sha256)');
+  eq([conv(Y).updated_at, conv(Y).size, conv(Y).sha256, conv(Y).generation], [yRow0.updated_at, yRow0.size, yRow0.sha256, yRow0.generation], 'accountOf: updated_at, size, sha256 and generation stay as they were');
+  c0 = fake.calls.length;
+  await upA.scanOnce();
+  eq(patchesOf(Y, c0).length + patchesOf(X, c0).length, 0, 'accountOf: settled again, nothing more written');
+  // a letter the row doesn't know, or accountOf failing: the folder's again
+  ran.set(lc(Y), 'C');
+  await upA.scanOnce();
+  eq(conv(Y).account, 'b', 'accountOf: a letter other than a or b falls back to the folder\'s (b)');
+  ran.set(lc(Y), 'a');
+  await upA.scanOnce();
+  eq(conv(Y).account, 'a', 'accountOf: and back to a');
+  ran.set(lc(Y), 'throw');
+  await upA.scanOnce();
+  ok(threwOnce && conv(Y).account === 'b' && upA.status().lastError === null, `accountOf: one that throws counts as null: the folder's (${conv(Y).account})`);
+  // a log that grew while the account changed: the full row, with size and sha256
+  ran.set(lc(X), 'b');
+  append(xMain, lines(repo1, 2));
+  c0 = fake.calls.length;
+  await upA.scanOnce();
+  const xp = patchesOf(X, c0);
+  const xBody = xp.length ? JSON.parse(xp[xp.length - 1].body.toString()) : {};
+  ok(conv(X).account === 'b' && 'updated_at' in xBody && 'sha256' in xBody, 'accountOf: with new bytes too, the whole row goes (updated_at, sha256)');
+  rowMatchesMain(X, xMain, 'X after it grew');
+  await upA.stop();
 }
 
 

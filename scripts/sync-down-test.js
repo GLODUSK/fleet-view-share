@@ -18,8 +18,8 @@
 // absolute path, and writes this device's repo_paths row for it with the home folder; no .part file is ever left behind; status() holds no key or token; start/stop.
 // S4: pull(id) -> missing (no row, or not active) / mine (this device's) / done with dir and folder / same / conflict
 // (left alone, still saying where) / skip when open here; a back-off does not hold a pull up; a pull asked for while a
-// scan is mid-way runs right after that row, never at the same time; owners() with leaseUntil (a copy, empty before
-// the first scan); only(id).
+// scan is mid-way runs right after that row, never at the same time; owners() with leaseUntil and the row's account
+// (a copy, empty before the first scan); only(id).
 // Many chunks: fetched more than one and at most FETCH_AHEAD at once, answered out of order, laid down byte-identical;
 // a fetch that fails or a bad sha256 mid-way writes nothing, starts nothing past the window and leaves no unhandled
 // rejection; a partly-here local copy fetches only what it lacks; one that differs mid-chunk is a conflict.
@@ -671,8 +671,9 @@ async function main() {
   eq(m.status().listedAt, new Date(listStart).toISOString(), 'owners: status().listedAt is when the listing began');
   const ow = m.owners();
   ok(ow instanceof Map && ow.size > 5, `owners: a Map of the rows another device owns (${ow.size})`);
-  eq(ow.get(c1.id), { device: lower(OTHER), leaseUntil: Date.parse(leaseAt) }, 'owners: device and leaseUntil');
-  eq(ow.get(c2.id), { device: lower(OTHER), leaseUntil: null }, 'owners: no lease -> null');
+  eq(ow.get(c1.id), { device: lower(OTHER), leaseUntil: Date.parse(leaseAt), account: 'b' }, 'owners: device, leaseUntil and the row\'s account');
+  eq(ow.get(c2.id), { device: lower(OTHER), leaseUntil: null, account: 'b' }, 'owners: no lease -> null');
+  eq(ow.get(inA.id) && ow.get(inA.id).account, 'a', 'owners: account a (the account it ran under there)');
   ok(!ow.has(c9.id) && !ow.has(c9b.id) && !ow.has(c9c.id), 'owners: not this device\'s, not nobody\'s, not archived');
   ow.delete(c1.id);
   ok(m.owners().has(c1.id), 'owners: a copy, the caller cannot change it');

@@ -2,7 +2,7 @@
 // Supabase, sealed, so the materializer (sync-down.js, S3) on another machine can lay them down again byte for byte.
 // docs/sync-format.md is the contract, and "The uploader's rules" there are what this file does:
 //
-//   createUploader({ api, dataDir, key, log, now, projects, home, chunkBytes, rateBytesPerSec, only })
+//   createUploader({ api, dataDir, key, log, now, projects, home, chunkBytes, rateBytesPerSec, only, accountOf })
 //     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), flush(id), forget(id), hold(id), unhold(id), held() }
 //
 //   api              sync-api.js createSync()'s object (rest() and storage are all it uses)
@@ -10,6 +10,10 @@
 //   dataDir          Fleet View's data folder; this keeps <dataDir>/sync/up-state.json and device.json there
 //   projects         [{ account, dir }] (or a function giving them) to look in; sync-common.js projectsDirs() by
 //                    default, which reads ~/.claude and ~/.claude-a. Tests hand it a temp folder.
+//   accountOf(id)    optional: the account a conversation ran under ('a', 'b', any case; else null), as fleet-view.js
+//                    learnt it from its claude process. The row's account is that when it gives a or b, else the
+//                    account of the projects folder its log is in: a folder A shares with B (a junction) is listed
+//                    once, as B's, so without it every conversation there would say b.
 //   home             the user's home folder (os.homedir() by default): what the home row stands for (step 1 below)
 //   log(text)        one line per thing worth knowing (no title, no transcript text, no token)
 //   now()            the clock for back-offs and row times (Date.now by default; tests move it)
@@ -49,8 +53,10 @@
 //        one that shrank or whose tail changed, or a whole file whose bytes changed: generation + 1 from byte 0,
 //          every object first, then all its chunk rows in one insert (so a reader sees all of it or none of it);
 //        a first upload is generation 0, chunk by chunk.
-//   5. The conversations row (size, sha256 and generation of 'main', updated_at, and the cwd, branch and sealed title)
-//      only after the chunk rows, and only while this device still owns it.
+//   5. The conversations row (size, sha256 and generation of 'main', updated_at, and the account, cwd, branch and
+//      sealed title) only after the chunk rows, and only while this device still owns it. A settled conversation whose
+//      account changed (accountOf learnt it) gets just that: a PATCH of the meta with no updated_at, size or sha256,
+//      so its log is not read again and the other devices do not lay it down again.
 //   6. Old generations: their chunk rows, then their objects, once the row points at the new one.
 // Order, always: object, then its chunk row, then the conversation row. Objects are written with upsert and chunk
 // rows with merge-duplicates, so a pass cut short (a crash between an object and up-state.json) is simply done again.
@@ -224,6 +230,13 @@ function createUploader(opts = {}) {
     if (typeof p === 'function') return C.projectsDirs({ dirs: p() });
     if (Array.isArray(p)) return C.projectsDirs({ dirs: p });
     return C.projectsDirs(p && typeof p === 'object' ? p : { home: userHome });
+  };
+  // the account its row names: accountOf's when that is a or b, else its projects folder's
+  const accountOfRow = (c) => {
+    let a = null;
+    try { a = typeof opts.accountOf === 'function' ? opts.accountOf(c.id) : null; } catch {}
+    a = typeof a === 'string' ? a.toLowerCase() : null;
+    return a === 'a' || a === 'b' ? a : c.account;
   };
 
   // ---------- memory ----------
@@ -553,7 +566,9 @@ function createUploader(opts = {}) {
     mem.skip = null;
     let st = state.conversations[id] || null;
     if (st && (!st.files || typeof st.files !== 'object')) st = null;
-    const settled = st && !st.rowStale && !(st.deletes && st.deletes.length);
+    const account = accountOfRow(c);
+    // settled: the row has it all, the account too (one accountOf learnt since goes up even while the log sleeps)
+    const settled = st && !st.rowStale && !(st.deletes && st.deletes.length) && !!st.meta && st.meta.account === account;
     // cheap: an idle conversation whose log is as it was is listed again only now and then
     const main0 = st && st.files && st.files.main;
     if (settled && main0 && main0.size === c.size && main0.mtimeMs === c.mtimeMs && Date.now() - c.mtimeMs > IDLE_MS && t - mem.listedAt < IDLE_LIST_MS) {
@@ -611,7 +626,7 @@ function createUploader(opts = {}) {
     if (!Array.isArray(st.deletes)) st.deletes = [];
     const titleSha = meta.title ? K.sha256(Buffer.from(meta.title, 'utf8')) : null;
     const sealTitle = () => (meta.title ? K.sealText(meta.title, key, `title:${id}`) : null);
-    const metaNow = { account: c.account, repo_id: rid, rel_cwd: repo.relCwd, branch: meta.branch || null };
+    const metaNow = { account, repo_id: rid, rel_cwd: repo.relCwd, branch: meta.branch || null };
     const rowExisted = !!row;
     if (!row) {
       const made = await api.rest('POST', 'conversations', {
@@ -644,10 +659,12 @@ function createUploader(opts = {}) {
       await guard(w, false);
       // rule 4: the row last, and only while it is still ours
       const metaChanged = JSON.stringify(st.meta) !== JSON.stringify(metaNow) || st.titleSha !== titleSha;
+      // only the account moved: the meta alone (no updated_at: the other devices have its bytes already)
+      const onlyAccount = !st.rowStale && st.titleSha === titleSha && !!st.meta && JSON.stringify({ ...st.meta, account }) === JSON.stringify(metaNow);
       if (st.rowStale || metaChanged) {
-        const body = { ...metaNow, updated_at: new Date(now()).toISOString() };
+        const body = onlyAccount ? { ...metaNow } : { ...metaNow, updated_at: new Date(now()).toISOString() };
         if (st.titleSha !== titleSha) body.title_enc = sealTitle();
-        const m = st.files.main;
+        const m = onlyAccount ? null : st.files.main;
         if (m) {
           let fd;
           try {

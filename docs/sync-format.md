@@ -39,7 +39,10 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
   that device's home folder (`os.homedir()`: `C:\Users\henry` on one, `/Users/henry` on another).
 - **conversations** `{ id, account, repo_id, rel_cwd, branch, title_enc, state, owner_device, lease_until, size,
   sha256, generation, updated_at }`:
-  - `account`: `a` or `b` (the Claude account whose projects folder holds it).
+  - `account`: `a` or `b`: the Claude account it ran under, as the owning device learnt it from its claude process
+    (and remembers after it ends), else the account whose projects folder holds it. A's projects folder is often a
+    link to B's, so the folder alone would say `b` for every one. A change of account alone is a PATCH of the meta
+    with no `updated_at`, `size` or `sha256`: nothing is laid down again for it.
   - `rel_cwd`: the folder the log lives in, relative to its repo root, with `/`, `''` for the root. That is the
     folder the session started in (its slug folder's), which it resumes from: a session started in the root that
     later moved into a worktree has `''`, not the worktree's path. The uploader takes the log's last `cwd`, or its

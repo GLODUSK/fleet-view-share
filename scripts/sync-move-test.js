@@ -6,7 +6,7 @@
 // sessions go from busy to idle. One shared clock, moved by hand; no timer runs.
 //   a clean move A -> B -> A -> B with lines added between (bytes equal after each move, the owner flips, no
 //   conflict, uploader.forget on the side that claimed, holds let go, the rows deleted, away.json and owners() at
-//   each step, the resume folder and its trust); A busy -> waiting -> idle -> moved (the lines written while busy
+//   each step (with the row's account), the resume folder and its trust); A busy -> waiting -> idle -> moved (the lines written while busy
 //   arrive); force while busy; a terminal outside the host refuses even with force; A offline -> offline -> force
 //   takes the last uploaded copy, and A's watcher then ends its hosted session once idle; no answer -> noanswer; B
 //   gone quiet after A let go -> A drops the stale ask, unholds and drops moving, and B asking again later still
@@ -184,7 +184,7 @@ function machine(name, letter) {
     scan() { // its listing: the rows other devices own
       m.listedAt = now();
       m.owners = new Map(db.conversations.filter((r) => r.state === 'active' && r.owner_device && lower(r.owner_device) !== m.me)
-        .map((r) => [r.id, { device: lower(r.owner_device), leaseUntil: r.lease_until ? Date.parse(r.lease_until) : null }]));
+        .map((r) => [r.id, { device: lower(r.owner_device), leaseUntil: r.lease_until ? Date.parse(r.lease_until) : null, account: r.account }]));
       m.downOk = true;
     },
   };
@@ -288,7 +288,7 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       ok(A.out(id) && A.out(id).phase === 'asked', 'A saw the ask and answered asked');
       eq(A.awayOf(id), { device: 'mac', why: 'moving' }, 'A: away.json has it as moving to mac');
       eq(B.mover.owners().get(id).moving, 'here', 'B: owners() says moving here');
-      eq(A.mover.owners().get(id), { device: B.me, name: 'mac', live: false, moving: 'away' }, 'A: owners() says moving away to mac');
+      eq(A.mover.owners().get(id), { device: B.me, name: 'mac', live: false, moving: 'away', account: null }, 'A: owners() says moving away to mac');
       await step(A);
       eq(A.out(id).phase, 'asked', 'A does nothing more until it sees the ask change (the handshake)');
       ok(await until(() => done(B, id)), 'the move ends');
@@ -521,6 +521,12 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       ok(!B.mover.owners().has(id), 'B\'s owners() has only what its materializer listed');
       B.down.scan();
       ok(B.mover.owners().get(id).live === true, 'live once B\'s materializer lists the lease');
+      eq(B.mover.owners().get(id).account, 'b', 'owners(): the row\'s account comes along');
+      rowOf(id).account = 'a';
+      B.down.scan();
+      eq(B.mover.owners().get(id).account, 'a', 'owners(): a once the row says a (the account it ran under on pc)');
+      rowOf(id).account = 'b';
+      B.down.scan();
       clock.t += 4 * 60e3;
       ok(B.mover.owners().get(id).live === false, 'not live once the lease ran out');
     }

@@ -59,8 +59,9 @@ function slugOf(folder) {
 // knows those two, so other letters are left out. accounts.js makes A's projects folder a junction to B's
 // (SHARE_DIRS), so on most machines both names are one real folder. Then it is returned once, as B's: fleet-view.js
 // roots() reads B's folder first and counts a shared folder as B's, and so does sync. (Which account a conversation
-// in a shared folder ran under is only known while it runs; on the other machine it is laid down in B's folder,
-// which on a machine that shares is A's too.) Folders that do not exist are left out.
+// in a shared folder ran under is known from its claude process: fleet-view.js remembers it and hands it to the
+// uploader as accountOf, so its row still says a. On the other machine it is laid down in A's folder, which on a
+// machine that shares is B's too.) Folders that do not exist are left out.
 // o.home: the folder holding .claude and .claude-a (tests); o.dirs: [{ account, dir }] used as they are.
 function projectsDirs(o = {}) {
   const list = Array.isArray(o.dirs) ? o.dirs : [
