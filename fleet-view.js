@@ -5645,9 +5645,10 @@ function rememberMap(all, repos, now) {
 // Live conversations (their claude still running, a panel left open) that have had a turn but that /state no longer
 // lists: they aged off it (quiet past the window, or finished more than 3 hours ago). The page draws a session it
 // started as a hollow "new session" until /state lists it; these it leaves off instead, as they aren't new.
-// Only a log quiet past the window counts, so a new conversation's first turn never takes it off before it is listed.
-// Has it had a turn: a reply or a typed prompt in its log (a new session's log can hold mode lines, or a /model,
-// before its first prompt).
+// Only a log quiet past the window counts, or one this server listed and dropped (passed: a turn that ended 3 hours
+// ago leaves whatever its log's mtime, endedLongAgo), so a new conversation's first turn never takes it off before it
+// is listed. Has it had a turn: a reply or a typed prompt in its log (a new session's log can hold mode lines, or a
+// /model, before its first prompt). A log that could not be read is asked again next time, not taken as no turn.
 const spokeSeen = new Map(); // id -> the log mtime it was read at, or true once it has had a turn
 function hadTurn(file) {
   let text = '';
@@ -5658,7 +5659,7 @@ function hadTurn(file) {
       const part = (at, n) => { const b = Buffer.alloc(n); fs.readSync(fd, b, 0, n, at); return b.toString('utf8'); };
       text = size <= 2 << 20 ? part(0, size) : part(0, 1 << 20) + '\n' + part(size - (1 << 20), 1 << 20);
     } finally { fs.closeSync(fd); }
-  } catch { return false; }
+  } catch { return null; }
   if (text.includes('"type":"assistant"')) return true;
   return text.split('\n').some((line) => {
     if (!line.includes('"user"')) return false;
@@ -5673,8 +5674,9 @@ function agedLive(listed, now) {
     const seen = spokeSeen.get(id);
     if (seen === true) { out.push(id); continue; }
     const log = conversationLog(id), m = log && log.file ? mtime(log.file) : 0;
-    if (!m || now - m <= WINDOW_MS || seen === m) continue;
+    if (!m || (now - m <= WINDOW_MS && !passed.has(id)) || seen === m) continue;
     const yes = hadTurn(log.file);
+    if (yes === null) continue;
     if (spokeSeen.size > 500) spokeSeen.clear();
     spokeSeen.set(id, yes || m);
     if (yes) out.push(id);
