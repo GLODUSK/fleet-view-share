@@ -258,7 +258,8 @@ function createSyncRunner(o = {}) {
     try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false), carry, ...(typeof o.trust === 'function' ? { trust: o.trust } : {}), ...(pinnedHere ? { mayLeave } : {}) }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
     let live = null;
     if (mover && snapshot) {
-      const liveArgs = { ...args, device: deviceId, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null), snapshot: () => snapshot() };
+      const liveArgs = { ...args, device: deviceId, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null),
+        seenAt: (d) => (typeof mover.lastSeen === 'function' ? mover.lastSeen(d) : null), snapshot: () => snapshot() };
       if (boundIds) liveArgs.bound = () => boundIds();
       try { live = makeLive(liveArgs); } catch (e) { log(`sync: what runs on the other devices can't be shown here: ${e && e.message}`); }
     }

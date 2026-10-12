@@ -10,7 +10,9 @@
 //   cleaned, and a change of it alone written, an older entry with none still valid; remoteFor's rules (listed, listed but resting, fresh and not
 //   listed, offline owner, an owner that never published, not read yet); the bound list in its own bound:<device> row
 //   (and in the live row too, for older readers; cleaned and sorted, written when it changed and only then, listed
-//   with the live rows in one request, fetched when it moved, read back, kept while its device is offline, emptied; an older device's
+//   with the live rows in one request, fetched when it moved, read back, kept while its device is offline (up to
+//   boundStaleMs by its rows' own at or its last_seen_at, D11; online again, or not known to be offline, it counts
+//   however old), emptied; an older device's
 //   live row's bound read while it has no bound row, a bound row winning over it, one that does not open falling back;
 //   the or filter refused: two lists); and sync-run.js's wiring (the mover's
 //   device id and online(), the snapshot, live(), started and stopped with the run, none without a snapshot), which on
@@ -80,8 +82,9 @@ let pcDevice = null;
 let pcBound = []; // the PC's bound conversations (bound())
 const pcLogs = [], macLogs = [];
 const isOn = new Map([[PC, true]]); // what the Mac's mover says of each device
+const seenOf = new Map(); // and each device's last_seen_at (its lastSeen())
 const pc = L.createLive({ api, key: KEY, now: () => pcClock.t, device: () => pcDevice, snapshot: () => pcList, bound: () => pcBound, log: (t) => pcLogs.push(t) });
-const mac = L.createLive({ api, key: KEY, now: () => macClock.t, device: () => ({ id: MAC.toUpperCase(), name: 'mac' }), online: (d) => (isOn.has(d) ? isOn.get(d) : false), snapshot: () => [], log: (t) => macLogs.push(t) });
+const mac = L.createLive({ api, key: KEY, now: () => macClock.t, device: () => ({ id: MAC.toUpperCase(), name: 'mac' }), online: (d) => (isOn.has(d) ? isOn.get(d) : false), seenAt: (d) => (seenOf.has(d) ? seenOf.get(d) : null), snapshot: () => [], log: (t) => macLogs.push(t) });
 const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
 
 (async () => {
@@ -281,6 +284,21 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
     eq(boundWrites(), b0 + 1, 'bound: a change of the snapshot alone does not write the bound row');
     isOn.set(PC, false);
     ok(mac.live().bound.get(PC).has(C3) && !mac.live().fresh.has(PC), 'bound: kept while the device is offline (what is bound does not change while it sleeps)');
+    // D11: a device offline for over a week (by its own rows' at) has its bound list ignored, the live row's copy too
+    const stale = L.TIMING.boundStaleMs + 2 * 24 * 3600e3 + 3600e3; // past the Mac's day of skew
+    macClock.t += stale;
+    ok(!mac.live().bound.has(PC), 'bound: a device offline for over boundStaleMs (its newest row\'s at) has no bound list here');
+    isOn.set(PC, null);
+    ok(mac.live().bound.get(PC) && mac.live().bound.get(PC).has(C3), 'bound: one not known to be offline (online() null: just started, its reads stopped) keeps its list, however old its rows');
+    isOn.set(PC, false);
+    seenOf.set(PC, macClock.t - 3600e3);
+    ok(mac.live().bound.get(PC) && mac.live().bound.get(PC).has(C3), 'bound: one offline whose last_seen_at is recent keeps its list, though its rows are old (they move only when what they hold does)');
+    seenOf.delete(PC);
+    isOn.set(PC, true);
+    ok(mac.live().bound.get(PC) && mac.live().bound.get(PC).has(C3), 'bound: ...but one that is online again counts, however old its rows');
+    isOn.set(PC, false);
+    macClock.t -= stale;
+    ok(mac.live().bound.get(PC).has(C3), 'bound: within boundStaleMs an offline device\'s list still counts');
     isOn.set(PC, true);
     pcBound = [];
     step(5e3); await pc.tick();
@@ -328,7 +346,7 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
       const sync = { enabled: () => true, status: async () => ({ configured: true, signedIn: true, member: true, email: 'a@b.c' }), uid: async () => 'u1', onChange: () => () => {} };
       const loop = () => ({ start() {}, async stop() {}, status: () => ({}), conflicts: () => [], owners: () => new Map() });
       let moverDevice = null;
-      const mover = { start() {}, async stop() {}, owners: () => new Map(), device: () => moverDevice, online: (d) => d === MAC };
+      const mover = { start() {}, async stop() {}, owners: () => new Map(), device: () => moverDevice, online: (d) => d === MAC, lastSeen: (d) => (d === MAC ? 1234 : null) };
       const lives = [];
       const fakeLive = (a) => {
         const l = { a, started: 0, stopped: 0, start() { l.started++; }, async stop() { l.stopped++; }, live: () => ({ ready: true, fresh: new Set([MAC]), sessions: new Map(), byDevice: new Map() }) };
@@ -346,6 +364,7 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
       moverDevice = { id: PC, name: 'pc' };
       ok(l.a.device() === PC, 'then the mover\'s device id');
       ok(l.a.online(MAC) === true && l.a.online(PC) === false, 'online() is the mover\'s');
+      ok(l.a.seenAt(MAC) === 1234 && l.a.seenAt(PC) === null, 'seenAt() is the mover\'s lastSeen()');
       ok(runner.live().fresh.has(MAC), 'live() gives the live loop\'s view');
       await runner.stop();
       ok(l.stopped === 1 && runner.live() === null, 'stop() stops it; live() null again');

@@ -220,7 +220,10 @@ function post(url, body, keepalive = false) {
   return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), keepalive })
     .then((r) => r.json()).catch(() => null);
 }
+// <group>Ops keys (single-item changes: hiddenReposOps, repoNamesOps, mapSpotsOps) add to the ones still waiting
+// instead of replacing them
 function saveSettings(obj) {
+  for (const k of Object.keys(obj)) if (k.endsWith('Ops') && Array.isArray(obj[k]) && Array.isArray(pendingSave[k])) obj = { ...obj, [k]: [...pendingSave[k], ...obj[k]] };
   Object.assign(pendingSave, obj);
   for (const k of ['view', 'zoom', 'query', 'repo', 'repos', 'compact', 'finishedOpen', 'steady', 'notify']) if (k in obj) local[k] = obj[k];
   clearTimeout(saveTimer);
@@ -662,22 +665,33 @@ function hideConversation(s, how = 'hidden') {
 // ---------- repos taken off the list ----------
 const hiddenRepos = new Map(); // normRoot -> { root, at }
 let hiddenReposSentAt = 0;
+// the server's list as last taken (normRoot -> { root, at }), with this page's own changes since: what its ops go against
+let hiddenReposSeen = new Map();
+// Only what changed here goes (settings.hiddenReposOps: { op: 'add', root, at } and { op: 'remove', root }), never the
+// whole list: a whole list from a page that has not had the newest /state yet would take off what another device just
+// removed, or put back what it brought back
 function saveHiddenRepos() {
   hiddenReposSentAt = Date.now();
-  // newest last, at most 200 (the server's limit)
-  saveSettings({ hiddenRepos: [...hiddenRepos.values()].sort((a, b) => a.at - b.at).slice(-200) });
+  const ops = [];
+  for (const [k, h] of hiddenRepos) { const s = hiddenReposSeen.get(k); if (!s || s.at !== h.at) ops.push({ op: 'add', root: h.root, at: h.at }); }
+  for (const [k, s] of hiddenReposSeen) if (!hiddenRepos.has(k)) ops.push({ op: 'remove', root: s.root });
+  hiddenReposSeen = new Map([...hiddenRepos].map(([k, h]) => [k, { ...h }]));
+  if (ops.length) saveSettings({ hiddenReposOps: ops });
 }
 // the server's list wins, except while a change of ours may not have reached it yet
 function syncHiddenRepos(list) {
-  if (!Array.isArray(list) || 'hiddenRepos' in pendingSave || Date.now() - hiddenReposSentAt < 3000) return;
+  if (!Array.isArray(list) || 'hiddenReposOps' in pendingSave || Date.now() - hiddenReposSentAt < 3000) return;
   hiddenRepos.clear();
   for (const h of list) if (h && typeof h.root === 'string') hiddenRepos.set(normRoot(h.root), { root: h.root, at: Number(h.at) || Date.now() });
+  hiddenReposSeen = new Map([...hiddenRepos].map(([k, h]) => [k, { ...h }]));
 }
-// off the list, unless a conversation in it worked after it was taken off (the server drops it then as well)
+// off the list, unless a conversation in it was given a prompt after it was taken off (turnStart: when its turn began,
+// the server's promptAt), as the server's pruneHiddenRepos has it: one still replying from before (active, but its
+// turn began earlier) does not bring it back
 function repoIsHidden(root) {
   const k = normRoot(root), h = hiddenRepos.get(k);
   if (!h) return false;
-  if ((state?.sessions || []).some((s) => s.repo && normRoot(s.repo.root) === k && activeAt(s) > h.at)) { hiddenRepos.delete(k); return false; }
+  if ((state?.sessions || []).some((s) => s.repo && normRoot(s.repo.root) === k && (Number(s.turnStart) || 0) > h.at)) { hiddenRepos.delete(k); return false; }
   return true;
 }
 // the hidden repos' keys, less the ones that came back (worked again); once per derive
@@ -766,15 +780,23 @@ function dropRepos(list) {
 // list, the map, cards, the header chip) instead of its folder's; nothing on disk changes. settings.repoNames
 // ([{ root, name }], at most 200); an empty name (or the folder's own) goes back to the folder's name.
 let repoNamesSentAt = 0;
+// the server's names as last taken, with this page's own changes since (as hiddenReposSeen)
+let repoNamesSeen = new Map();
+// only the names changed here go (settings.repoNamesOps: { op: 'add', root, name } and { op: 'remove', root })
 function saveRepoNames() {
   repoNamesSentAt = Date.now();
-  saveSettings({ repoNames: [...repoNames.values()].slice(-200) });
+  const ops = [];
+  for (const [k, r] of repoNames) { const s = repoNamesSeen.get(k); if (!s || s.name !== r.name) ops.push({ op: 'add', root: r.root, name: r.name }); }
+  for (const [k, s] of repoNamesSeen) if (!repoNames.has(k)) ops.push({ op: 'remove', root: s.root });
+  repoNamesSeen = new Map([...repoNames].map(([k, r]) => [k, { ...r }]));
+  if (ops.length) saveSettings({ repoNamesOps: ops });
 }
 // the server's names and order win, except while a change of ours may not have reached it yet (as hiddenRepos)
 function syncRepoPrefs(s) {
-  if (Array.isArray(s.repoNames) && !('repoNames' in pendingSave) && Date.now() - repoNamesSentAt > 3000) {
+  if (Array.isArray(s.repoNames) && !('repoNamesOps' in pendingSave) && Date.now() - repoNamesSentAt > 3000) {
     repoNames.clear();
     for (const r of s.repoNames) if (r && typeof r.root === 'string' && typeof r.name === 'string' && r.name) repoNames.set(normRoot(r.root), { root: r.root, name: r.name });
+    repoNamesSeen = new Map([...repoNames].map(([k, r]) => [k, { ...r }]));
   }
   if (Array.isArray(s.repoOrder)) repoOrder = s.repoOrder.filter((x) => typeof x === 'string' && x);
 }

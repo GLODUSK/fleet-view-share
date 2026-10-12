@@ -229,7 +229,11 @@ hostname. Everything below names a peer by that id.
 
 **Portable and bound (item 2).** `/state` gives each conversation `workspace: { kind: 'portable' | 'bound', host:
 { device, name } | null }`. A bound chat's log is synced too, so other machines list and read it, and they never
-resume it as their own.
+resume it as their own. A host known to be offline for more than 7 days (by its own `live:`/`bound:` rows' `at` and its
+`devices.last_seen_at`; `sync-live.js`
+`TIMING.boundStaleMs`) has its bound list ignored (the `bound:` row and the live row's copy): a chat only that list
+marked bound (a checkout with no origin under its home folder) reads as portable again until the host is back. A chat
+synced under the host's bound row (`bound:<device>` origin) stays bound.
 
 **Follow you (item 6).** It uses `/sync/move` (as it is today, with the work), and `link.call(host, …)` for the
 `/api/sessions/:id/…` routes in the table above, which the page reaches through `/link/send`, `/link/answer`,

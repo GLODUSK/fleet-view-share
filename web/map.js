@@ -722,7 +722,7 @@ function createInstance(state) {
     homeOrder: [],
     homeXY: loadSpots(state), // cluster id -> its spot { x, y, pin }: sticky, saved as settings.mapSpots
     spotsSeen: loadSpots(state), spotsSig: spotsSig(state && state.settings && state.settings.mapSpots), // the server's list as last applied (syncSpots)
-    spotsSent: [],            // the signatures of this screen's last few saves, so their echo is not taken as news
+    spotsSent: [],            // this screen's ops of the last 15 s ({ op, id, x, y, pin, t }), so their echo is not taken as news
     spotsDue: 0,              // a nudge's save waiting for the next /state (sendSpots)
     spotsTimer: 0,
     nodes: [], byId: new Map(), springs: [], paths: [], clashes: [],
@@ -1189,18 +1189,44 @@ function saveSpotsSoon(ms = 1500, force = false) {
     if (force) sendSpots(); else I.spotsDue = I.spotsDue || Date.now();
   }, ms);
 }
+// Only what this screen changed goes (settings.mapSpotsOps: { op: 'add', id, x, y, pin } and { op: 'remove', id },
+// against the server's list as last applied here, spotsSeen), never the whole list: a whole list from a screen that
+// has not had the newest /state yet would put back what another screen (or the other machine) just moved or unpinned
 function sendSpots() {
   I.spotsDue = 0;
   if (I.replay) return;
   const list = [...I.homeXY].map(([id, h]) => ({ id, x: Math.round(h.x), y: Math.round(h.y), pin: !!h.pin }))
     .sort((a, b) => rank(a) - rank(b)).slice(0, 300);
-  // nothing the server doesn't have already: not sent, so a screen whose spots only wobbled never overwrites
-  // a move another screen just saved
-  const sig = JSON.stringify(list);
-  if (sig === I.spotsSig) return;
-  I.spotsSent.push(sig);
-  if (I.spotsSent.length > 8) I.spotsSent.shift();
-  try { I.ui.saveSettings && I.ui.saveSettings({ mapSpots: list }); } catch { /* shell gone */ }
+  const seen = I.spotsSeen, ops = [], have = new Set();
+  for (const s of list) {
+    have.add(s.id);
+    const p = seen.get(s.id);
+    if (!p || Math.round(p.x) !== s.x || Math.round(p.y) !== s.y || !!p.pin !== s.pin) ops.push({ op: 'add', ...s });
+  }
+  for (const id of seen.keys()) if (!have.has(id)) ops.push({ op: 'remove', id });
+  // nothing the server doesn't have already: not sent, so a screen whose spots only wobbled sends nothing
+  if (!ops.length) return;
+  // the server has these once they land: spotsSeen takes them now, and spotsSent keeps them a while, so a /state
+  // from before they landed never snaps a later move here back (syncSpots)
+  const t = Date.now();
+  for (const o of ops) {
+    if (o.op === 'add') seen.set(o.id, { x: o.x, y: o.y, pin: o.pin }); else seen.delete(o.id);
+    I.spotsSent.push({ ...o, t });
+  }
+  I.spotsSent = I.spotsSent.filter((o) => t - o.t < SPOT_ECHO_MS).slice(-600);
+  try { I.ui.saveSettings && I.ui.saveSettings({ mapSpotsOps: ops }); } catch { /* shell gone */ }
+}
+const SPOT_ECHO_MS = 15e3;
+// this screen's own op on a spot, sent in the last SPOT_ECHO_MS, that a /state does not show yet (null: none)
+function spotInFlight(id, h) {
+  const t = Date.now();
+  for (let i = I.spotsSent.length - 1; i >= 0; i--) {
+    const o = I.spotsSent[i];
+    if (o.id !== id || t - o.t >= SPOT_ECHO_MS) continue;
+    const landed = o.op === 'add' ? !!h && h.x === o.x && h.y === o.y && !!h.pin === o.pin : !h;
+    return landed ? null : o;
+  }
+  return null;
 }
 const spotsSig = (list) => JSON.stringify(Array.isArray(list) ? list : []);
 // Spots another screen changed: each /state carries the server's list, and when it differs from the one last
@@ -1218,24 +1244,28 @@ function syncSpots(set) {
   if (sig === I.spotsSig) return;
   const next = loadSpots({ settings: { mapSpots: set.mapSpots } }), prev = I.spotsSeen;
   I.spotsSig = sig; I.spotsSeen = next;
-  if (I.spotsSent.includes(sig)) return;
   const d = I.drag && I.drag.moved ? I.drag : null;
   const held = new Set(d ? [d.node, ...(d.hubs || [])].filter(Boolean) : []);
   const same = (a, b) => a && b && a.x === b.x && a.y === b.y && a.pin === b.pin;
   const moved = new Map(); // repo id -> how far its spot moved here
   let convs = false;
   for (const [id, h] of next) {
-    if (same(prev.get(id), h) || held.has(id)) continue;
+    // the echo of this screen's own op, or a /state from before it landed: this screen's spot stands
+    if (same(prev.get(id), h) || held.has(id) || spotInFlight(id, h)) continue;
     const cur = I.homeXY.get(id);
     if (same(cur && { x: Math.round(cur.x), y: Math.round(cur.y), pin: !!cur.pin }, h)) continue;
     I.homeXY.set(id, { x: h.x, y: h.y, pin: h.pin });
     if (id.startsWith('s:')) convs = true; else if (cur) moved.set(id, { dx: h.x - cur.x, dy: h.y - cur.y });
   }
-  // a conversation unpinned there (its offset dropped) goes back on its repo's ring here too; repo spots are
-  // never dropped this way (a re-arrange there sends the new ones)
+  // a conversation unpinned there (its offset dropped) goes back on its repo's ring here too. A repo spot is never
+  // dropped this way (a re-arrange there sends the new ones), but one pinned before and gone from the list now was
+  // unpinned elsewhere: it is let go here too, where it is (else this screen would send it back pinned and undo the
+  // unpin on every screen)
   for (const id of prev.keys()) {
-    if (next.has(id) || held.has(id) || !id.startsWith('s:') || !I.homeXY.has(id)) continue;
-    I.homeXY.delete(id); convs = true;
+    if (next.has(id) || held.has(id) || !I.homeXY.has(id) || spotInFlight(id, null)) continue;
+    if (id.startsWith('s:')) { I.homeXY.delete(id); convs = true; continue; }
+    const cur = I.homeXY.get(id);
+    if (prev.get(id).pin && cur.pin) { I.homeXY.set(id, { ...cur, pin: false }); convs = true; }
   }
   if (!moved.size && !convs) return;
   if (moved.size) {

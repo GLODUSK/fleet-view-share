@@ -7,7 +7,8 @@
 //                                 worktrees: [...], branches: [...], remoteBranches: [...] }], totals }
 //   POST /housekeeping/refresh  start a fresh report -> { ok, busy }
 //   POST /housekeeping/run      { ids } -> { ok, results: [{ id, done, message }] }
-//   POST /housekeeping/keep     { id, on } -> { ok }   (a pinned item is always 'keep', "kept by you")
+//   POST /housekeeping/keep     { id, on } -> { ok }   (a pinned item is always 'keep', "kept by you"; a GitHub
+//                               branch's pin is shared with the other devices: remotePins / setRemotePins, ctx.prefsChanged)
 //   POST /housekeeping/auto     { on } -> { ok, auto } (the nightly clean-up, off by default)
 //   GET  /housekeeping/log      { entries: [...] } newest first
 //   POST /housekeeping/restore  { id } -> { ok, message }
@@ -818,14 +819,45 @@ function createHousekeeping(ctx) {
     }
   }
 
+  // prefs.pins: the ids kept by hand; prefs.pinAt: { id: when it was pinned } (pins from before it have none)
   function keep(id, on) {
     if (typeof id !== 'string' || !/^(wt|br|rb):/.test(id)) return false;
     const p = readPrefs();
-    const pins = new Set(p.pins || []);
-    for (const x of [...pins]) if (pinKey(x) === pinKey(id)) pins.delete(x);
-    if (on) pins.add(id);
-    writePrefs({ ...p, pins: [...pins] });
+    const pins = new Set(p.pins || []), pinAt = { ...(p.pinAt && typeof p.pinAt === 'object' ? p.pinAt : {}) };
+    for (const x of [...pins]) if (pinKey(x) === pinKey(id)) { pins.delete(x); delete pinAt[x]; }
+    if (on) { pins.add(id); pinAt[id] = now(); }
+    writePrefs({ ...p, pins: [...pins], pinAt });
+    // a GitHub branch's pin is the same on every device (fleet-view.js syncs it: sync-prefs.js keepPins)
+    if (id.startsWith('rb:') && ctx.prefsChanged) { try { ctx.prefsChanged(); } catch {} }
     return true;
+  }
+  // The GitHub branches' keep-pins, for the shared settings: [{ root, branch, at }] (a pin from before pinAt: at 1, the
+  // oldest there is). An id is rb:<repo root>|<branch>
+  function remotePins() {
+    const p = readPrefs(), pinAt = p.pinAt && typeof p.pinAt === 'object' ? p.pinAt : {}, out = [];
+    for (const id of Array.isArray(p.pins) ? p.pins : []) {
+      if (typeof id !== 'string' || !id.startsWith('rb:')) continue;
+      const i = id.indexOf('|');
+      if (i < 4 || i === id.length - 1) continue;
+      out.push({ root: id.slice(3, i), branch: id.slice(i + 1), at: Number.isFinite(pinAt[id]) && pinAt[id] > 0 ? pinAt[id] : 1 });
+    }
+    return out;
+  }
+  // another device's: they replace the GitHub branches' pins here (worktrees' and local branches' stay as they are)
+  function setRemotePins(list) {
+    const p = readPrefs(), pinAt = { ...(p.pinAt && typeof p.pinAt === 'object' ? p.pinAt : {}) };
+    const pins = (Array.isArray(p.pins) ? p.pins : []).filter((id) => typeof id === 'string' && !id.startsWith('rb:'));
+    for (const id of Object.keys(pinAt)) if (id.startsWith('rb:')) delete pinAt[id];
+    const seen = new Set();
+    for (const x of Array.isArray(list) ? list : []) {
+      if (!x || typeof x.root !== 'string' || !x.root || typeof x.branch !== 'string' || !x.branch) continue;
+      const id = `rb:${norm(x.root)}|${x.branch}`;
+      if (seen.has(pinKey(id))) continue;
+      seen.add(pinKey(id));
+      pins.push(id);
+      if (Number.isFinite(x.at) && x.at > 1) pinAt[id] = Math.round(x.at);
+    }
+    writePrefs({ ...p, pins, pinAt });
   }
   function setAuto(on) { writePrefs({ ...readPrefs(), auto: !!on }); return !!on; }
 
@@ -891,7 +923,7 @@ function createHousekeeping(ctx) {
     });
   }
 
-  return { handle, report: makeOne, view, run, restore, keep, setAuto, startNightly, stop, tick, log: readLog };
+  return { handle, report: makeOne, view, run, restore, keep, remotePins, setRemotePins, setAuto, startNightly, stop, tick, log: readLog };
 }
 
 module.exports = { createHousekeeping, defaultGh, slugOf };

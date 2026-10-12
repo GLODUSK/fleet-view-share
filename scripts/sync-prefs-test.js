@@ -15,12 +15,21 @@
 //   coming back; a saved state of another device or key is a first join; values fetched only when updated_at moved;
 //   and sync-run.js's wiring (the mover's device id, read / apply / translate / load / save, started and stopped with
 //   the run, prefsChanged() nudges it, none without prefs).
+//   The parity review's fixes, each on a fresh pair: D1 an unpin sticks (the Mac keeps the spot unpinned, its page
+//   never pins it back; a drag before the unpin loses to it, a pin after it wins), D2 a device's first join takes the
+//   row on a key both have and keeps its own other items, less those the row's tombstones say were taken out after
+//   them (a fresh join loses nothing; an old copy puts nothing back), D4 teams merged field by field (both messages and successors, in time order,
+//   capped), D6 the page's single-item ops (sync-prefs.js applyOps, and web/app.js's own save code run in a vm: a
+//   stale page never undoes the Mac's change), D7 web/app.js repoIsHidden goes by turnStart as the server goes by
+//   promptAt, D8 repoOrder keeps a repo only the other machine has in place, and the new groups addedRepos, keepPins
+//   and parity.
 // Run: node scripts/sync-prefs-test.js   (exit 0 = all pass)
 'use strict';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const vm = require('vm');
 const ROOT = path.resolve(__dirname, '..');
 const S = require(path.join(ROOT, 'sync-api.js'));
 const K = require(path.join(ROOT, 'sync-crypto.js'));
@@ -79,7 +88,7 @@ const trMac = P.makeTranslate({ roots: () => Object.values(MACR), originOf: (r) 
 
 // a machine's settings, as fleet-view.js's prefsGroups gives them
 function machine() {
-  return { hidden: [], names: [], moved: [], hiddenRepos: [], repoNames: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [] };
+  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], keepPins: [], parity: [] };
 }
 const pcSet = machine(), macSet = machine();
 const T0 = Date.parse('2026-10-11T12:00:00Z');
@@ -97,9 +106,12 @@ pcSet.mapSpots = [
 ];
 pcSet.teams = [{ id: 't00000001', name: 'parity', color: '#ff9f43', members: [id(1), id(4)], lead: id(1), order: 'ship it', at: T0, messages: [], successors: [], seenAt: T0 }];
 pcSet.pinOverrides = [{ id: id(6), mode: 'free', host: 'BlackBox', hostDevice: PC.toUpperCase(), at: T0 - 1e3 }, { id: id(7), mode: 'stay', host: 'Mac', at: T0 - 1e3 }];
-macSet.pinOverrides = [{ id: id(8), mode: 'stay', host: 'BlackBox', at: T0 - 86400e3 }];
-macSet.hidden = [{ id: id(9), at: T0 - 86400e3, forgot: false }];
-macSet.hiddenRepos = [{ root: MACR.notes, at: T0 - 86400e3 }];
+// the Mac's own: its first join keeps them (D2), whether made after the PC's first rows (T0) or long before (id(13)),
+// except id(10) and the name of id(40), which the PC had too and took out before the Mac joined (the rows' tombstones)
+macSet.pinOverrides = [{ id: id(8), mode: 'stay', host: 'BlackBox', at: T0 + 60e3 }];
+macSet.hidden = [{ id: id(9), at: T0 + 60e3, forgot: false }, { id: id(10), at: T0 - 86400e3, forgot: false }, { id: id(13), at: T0 - 86400e3, forgot: false }];
+macSet.hiddenRepos = [{ root: MACR.notes, at: T0 + 60e3 }];
+macSet.names = [{ id: id(1), name: 'mac name' }, { id: id(40), name: 'mac only' }];
 macSet.mapSpots = [{ id: 'r:\\users\\henry\\notes', x: 1, y: 2, pin: false }];
 
 const applied = { pc: [], mac: [] };
@@ -153,16 +165,29 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
   step(5e3);
   await pc.tick();
   eq(posts().length, pcWrites0, 'nothing changed: nothing written');
+  // the PC hides id(10) and names id(40), then takes both out: the rows keep their tombstones
+  pcSet.hidden = pcSet.hidden.concat([{ id: id(10), at: T0 + 1e3, forgot: false }]);
+  pcSet.names = pcSet.names.concat([{ id: id(40), name: 'old' }]);
+  step(5e3); await pc.tick();
+  pcSet.hidden = pcSet.hidden.filter((h) => h.id !== id(10));
+  pcSet.names = pcSet.names.filter((n) => n.id !== id(40));
+  step(5e3); await pc.tick();
+  ok((rowOf('hidden').gone || []).some(([k]) => k === id(10)) && (rowOf('names').gone || []).some(([k]) => k === id(40)), 'a removal leaves a tombstone in the row');
 
   // ---------- the Mac's first join ----------
+  const hrTaken = rowOf('hiddenRepos').at;
   await mac.tick();
   ok(applied.mac.includes('hidden') && applied.mac.includes('mapSpots'), 'the Mac takes the rows');
-  eq(macSet.hidden.map((h) => h.id).sort(), [id(1), id(2), id(9)], 'first join: the rows joined with the Mac\'s own');
+  eq(macSet.hidden.map((h) => h.id).sort(), [id(1), id(2), id(9), id(13)], 'first join: the rows joined with the Mac\'s own');
+  ok(macSet.hidden.some((h) => h.id === id(13)), 'D2 first join: a local-only item older than the row, that no tombstone names, is kept (a fresh join loses nothing)');
+  ok(!macSet.hidden.some((h) => h.id === id(10)), 'D2 first join: a local-only item the row\'s tombstone took out after its time is not put back');
+  eq(macSet.names, [{ id: id(1), name: 'parity work' }, { id: id(3), name: null }], 'D2 first join: the row wins on the same key, and a local item with no time that a tombstone names is the row\'s to say');
+  ok(macLogs.some((t) => /first join/.test(t)), 'D2: said as this device\'s first join');
   ok(macSet.hidden.find((h) => h.id === id(2)).forgot === true, 'forgot comes along');
   eq(macSet.moved.find((m) => m.id === id(4)).root, MACR.fv, 'a move lands on the Mac\'s folder for that repo');
   eq(macSet.pinOverrides.slice().sort((a, b) => (a.id < b.id ? -1 : 1)), [
     { id: id(6), mode: 'free', host: 'BlackBox', hostDevice: PC, at: T0 - 1e3 }, { id: id(7), mode: 'stay', host: 'Mac', at: T0 - 1e3 },
-    { id: id(8), mode: 'stay', host: 'BlackBox', at: T0 - 86400e3 },
+    { id: id(8), mode: 'stay', host: 'BlackBox', at: T0 + 60e3 },
   ], 'pinOverrides: the PC\'s choices joined with the Mac\'s own (device ids in lower case)');
   eq(macSet.repoNames, [{ root: MACR.df, name: 'DF web' }], 'a workspace name lands on the Mac\'s folder');
   eq(macSet.repoOrder, [MACR.df, MACR.fv], 'the order, on the Mac\'s folders');
@@ -170,13 +195,13 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
   ok(macSet.mapSpots.some((s) => s.id === 'r:\\users\\henry\\documents\\github\\detailforge-web' && s.x === 100 && s.pin) && macSet.mapSpots.some((s) => s.id === 'r:\\users\\henry\\notes'), 'the PC\'s spot lands under the Mac\'s root id, the Mac\'s own kept');
   v = rowOf('hiddenRepos');
   ok(v.device === MAC && v.items.some((h) => h.root.name === 'pc-only') && v.items.some((h) => h.root.name === 'notes'), 'the Mac writes the join back, the pc-only repo riding along');
-  ok(v.at > rowOf('names').at - 1, 'its at is past the row it took (never this machine\'s clock alone)');
+  ok(v.at > hrTaken, 'its at is past the row it took (never this machine\'s clock alone)');
 
   // ---------- the PC takes the Mac's join ----------
   step(10e3);
   applied.pc.length = 0;
   await pc.tick();
-  eq(pcSet.hidden.map((h) => h.id).sort(), [id(1), id(2), id(9)], 'the PC takes the Mac\'s hidden');
+  eq(pcSet.hidden.map((h) => h.id).sort(), [id(1), id(2), id(9), id(13)], 'the PC takes the Mac\'s hidden');
   eq(pcSet.hiddenRepos.map((h) => h.root), [PCR.only], 'the PC keeps its pc-only repo, and the Mac\'s notes (no folder here) is not put in');
   ok(rowOf('hiddenRepos').items.some((h) => h.root.name === 'notes'), 'but the row still has notes');
   const pcWrites1 = posts().length;
@@ -261,7 +286,13 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
   step(5e3); await mac.tick();
   step(1e3); await pc.tick();
   eq(pcSet.repoOrder, [PCR.fv, PCR.df], 'repoOrder changed on both: this machine\'s whole order wins');
-  ok(P.union('repoOrder', [{ origin: null, name: 'b' }], [{ origin: null, name: 'a' }]).map((r) => r.name).join() === 'a,b', 'union of an order: this machine\'s, then the row\'s others');
+  eq(P.union('repoOrder', [{ origin: null, name: 'a' }, { origin: null, name: 'b' }], [{ origin: null, name: 'c' }, { origin: null, name: 'a' }]).map((r) => r.name), ['c', 'a', 'b'], 'union of an order (a group new to a device that syncs): this machine\'s, the row\'s others woven in where they stand');
+  const ord = (n) => ({ origin: null, name: n }), okey = (n) => String(P.GROUPS.repoOrder.key(ord(n)));
+  eq(P.join('repoOrder', [ord('b'), ord('d')], [ord('a'), ord('b'), ord('c'), ord('e')], new Map([[okey('e'), 3]])).map((r) => r.name), ['a', 'b', 'c', 'd'],
+    'D2 join of an order: the row\'s, this machine\'s others woven in where they stand, one a tombstone names (no time) left out');
+  eq(P.join('hidden', [{ id: id(1), at: 10 }], [{ id: id(1), at: 99 }, { id: id(2), at: 4 }, { id: id(3), at: 11 }, { id: id(4), at: 2 }], new Map([[id(2), 5], [id(3), 6]])),
+    [{ id: id(1), at: 10 }, { id: id(3), at: 11 }, { id: id(4), at: 2 }], 'D2 join: the row\'s item on its key; a local one kept unless a tombstone newer than its time names it');
+  eq(P.join('hidden', [], [{ id: id(4), at: 2 }]), [{ id: id(4), at: 2 }], 'D2 join with no tombstones (a fresh sync, a new key): nothing local is lost');
 
   // ---------- sets, unpinned spots ----------
   step(10e3); await pc.tick();
@@ -435,6 +466,222 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
 
   await pc.stop();
   await mac.stop();
+
+  // ---------- the parity review's fixes: each on a fresh pair (a fresh table, the Mac's clock 2 s behind) ----------
+  const T1 = T0 + 30 * 86400e3;
+  function pair() {
+    db.length = 0;
+    const A = machine(), B = machine(), ca = { t: T1 }, cb = { t: T1 - 2e3 }, sa = { s: null }, sb = { s: null };
+    const mk = (set, clock, dev, tr, st) => P.createPrefs({ api, key: KEY, now: () => clock.t, device: () => dev, read: () => set, apply: (g, items) => { set[g] = JSON.parse(JSON.stringify(items)); },
+      translate: tr, load: () => st.s, save: (s) => { st.s = JSON.parse(JSON.stringify(s)); }, log: () => {} });
+    const step = (ms) => { ca.t += ms; cb.t += ms; };
+    return { A, B, ca, cb, a: mk(A, ca, PC, trPc, sa), b: mk(B, cb, MAC, trMac, sb), step };
+  }
+  const DFP = 'r:z:\\github\\detailforge-web', DFM = 'r:\\users\\henry\\documents\\github\\detailforge-web';
+
+  // D1: an unpin sticks
+  {
+    const X = pair();
+    X.A.mapSpots = [{ id: DFP, x: 10, y: 20, pin: true, at: X.ca.t - 1e3 }];
+    await X.a.tick(); X.step(10e3); await X.b.tick();
+    ok(X.B.mapSpots.some((s) => s.id === DFM && s.pin && s.at === T1 - 1e3), 'D1: a pinned spot reaches the Mac with its at');
+    // the Mac's page as the old web/map.js had it: a repo spot gone from the server's list is put back as the page
+    // had it, and sent again
+    const page = new Map();
+    const pageRound = () => {
+      for (const s of X.B.mapSpots) page.set(s.id, { ...s });
+      for (const [sid, s] of page) if (!X.B.mapSpots.some((x) => x.id === sid)) X.B.mapSpots.push({ ...s });
+    };
+    pageRound();
+    X.A.mapSpots = [{ id: DFP, x: 10, y: 20, pin: false, at: X.ca.t }];
+    X.step(5e3); await X.a.tick();
+    ok(rowOf('mapSpots').gone && rowOf('mapSpots').gone.some(([k]) => k === 'r:o:glodusk/detailforge-web'), 'D1: the unpin goes up as a tombstone in the row\'s gone');
+    X.step(10e3); await X.b.tick();
+    const m = X.B.mapSpots.find((s) => s.id === DFM);
+    ok(m && m.pin === false && m.x === 10 && m.y === 20, 'D1: an unpin on the PC reaches the Mac as the same spot, unpinned (not a spot gone)');
+    for (let i = 0; i < 3; i++) { pageRound(); X.step(5e3); await X.b.tick(); X.step(5e3); await X.a.tick(); }
+    ok(X.A.mapSpots.every((s) => !s.pin) && X.B.mapSpots.every((s) => !s.pin), 'D1: ...and it sticks: no later round pins it again on either machine');
+    // both at once: the Mac drags the pin (not sent yet), then the PC unpins it: the later unpin wins
+    X.A.mapSpots = [{ id: DFP, x: 30, y: 40, pin: true, at: X.ca.t }];
+    X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    ok(X.B.mapSpots.some((s) => s.id === DFM && s.pin && s.x === 30), 'D1: pinned again on the PC: the Mac has it');
+    X.B.mapSpots = X.B.mapSpots.map((s) => (s.id === DFM ? { ...s, x: 99, at: X.cb.t } : s));
+    X.step(2e3);
+    X.A.mapSpots = [{ id: DFP, x: 30, y: 40, pin: false, at: X.ca.t }];
+    await X.a.tick();
+    X.step(1e3); await X.b.tick();
+    X.step(10e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    ok(X.B.mapSpots.every((s) => !s.pin) && X.A.mapSpots.every((s) => !s.pin), `D1: a drag on the Mac before the PC's unpin loses to it (${JSON.stringify(X.B.mapSpots)})`);
+    // and the other way: a drag after the unpin wins (the pin was set again later)
+    X.B.mapSpots = X.B.mapSpots.map((s) => (s.id === DFM ? { ...s, pin: true, x: 77, at: X.cb.t + 60e3 } : s));
+    X.step(5e3); await X.b.tick(); X.step(10e3); await X.a.tick();
+    ok(X.A.mapSpots.some((s) => s.id === DFP && s.pin && s.x === 77), 'D1: pinned again later on the Mac: the PC takes the new pin');
+  }
+
+  // D8: repoOrder keeps the other machine's repos in place
+  {
+    const X = pair();
+    X.A.repoOrder = [PCR.df, PCR.fv];
+    await X.a.tick(); X.step(10e3); await X.b.tick();
+    X.B.repoOrder = [MACR.notes, MACR.df, MACR.fv];
+    X.step(5e3); await X.b.tick(); X.step(10e3); await X.a.tick();
+    eq(X.A.repoOrder, [PCR.df, PCR.fv], 'D8: the Mac-only repo is not put in on the PC');
+    X.A.repoOrder = [PCR.fv, PCR.df];
+    X.step(5e3); await X.a.tick();
+    eq(rowOf('repoOrder').items.map((r) => r.name), ['notes', 'fleet-view', 'detailforge-web'], 'D8: a reorder on the PC keeps the Mac-only repo where it stood (not pushed to the end)');
+    X.step(10e3); await X.b.tick();
+    eq(X.B.repoOrder, [MACR.notes, MACR.fv, MACR.df], 'D8: ...and the Mac has it so');
+    MACR.solo = '/Users/henry/solo';
+    X.B.repoOrder = [MACR.solo, MACR.notes, MACR.fv, MACR.df];
+    X.step(5e3); await X.b.tick();
+    X.A.repoOrder = [PCR.df, PCR.fv];
+    X.step(1e3); await X.a.tick();
+    const names = rowOf('repoOrder').items.map((r) => r.name);
+    eq(names, ['solo', 'notes', 'detailforge-web', 'fleet-view'], 'D8: reordered on both: the PC\'s order for its repos, the Mac\'s new repo kept in its place (not dropped)');
+    X.step(10e3); await X.b.tick();
+    eq(X.B.repoOrder, [MACR.solo, MACR.notes, MACR.df, MACR.fv], 'D8: ...and the Mac keeps both of its own');
+    eq(P.mergeOrder('repoOrder', [{ name: 'a' }, { name: 'b' }, { name: 'c' }].map((r) => ({ origin: null, ...r })), [{ name: 'c' }, { name: 'b' }, { name: 'a' }].map((r) => ({ origin: null, ...r })),
+      [{ name: 'a' }, { name: 'x' }, { name: 'c' }].map((r) => ({ origin: null, ...r }))).map((r) => r.name), ['c', 'a', 'x'], 'D8 mergeOrder: this order, less what the other took out (b), plus what it put in (x) after its neighbour');
+  }
+
+  // D4: team messages and successors merged field by field
+  {
+    const X = pair();
+    const team = (msgs, succ = []) => ({ id: 't00000002', name: 'merge', color: '#ff9f43', members: [id(1), id(4)], lead: null, order: 'go', at: T1, messages: msgs, successors: succ });
+    const base = Array.from({ length: 49 }, (_, i) => ({ t: T1 + i, from: id(1), to: id(4), text: `m${i}` }));
+    X.A.teams = [team(base)];
+    await X.a.tick(); X.step(10e3); await X.b.tick();
+    const m1 = { t: T1 + 100, from: id(1), to: id(4), text: 'from the pc' }, m2 = { t: T1 + 101, from: id(4), to: id(1), text: 'from the mac' };
+    const s1 = { from: id(1), to: id(5), at: T1 + 90 }, s2 = { from: id(4), to: id(6), at: T1 + 80 };
+    X.B.teams = [{ ...team([...base, m2], [s2]), order: 'mac order' }];
+    X.A.teams = [{ ...team([...base, m1], [s1]), name: 'pc name' }];
+    X.step(5e3); await X.b.tick(); // the Mac writes first
+    X.step(1e3); await X.a.tick(); // the PC lists, merges, writes
+    X.step(10e3); await X.b.tick();
+    for (const [who, set] of [['PC', X.A], ['Mac', X.B]]) {
+      const t = set.teams[0], texts = t.messages.map((m) => m.text);
+      ok(t.messages.length === 50 && texts.includes('from the pc') && texts.includes('from the mac') && !texts.includes('m0'), `D4: ${who} has both new messages, capped at 50 (the oldest out)`);
+      ok(t.messages.every((m, i) => !i || t.messages[i - 1].t <= m.t) && new Set(texts).size === texts.length, `D4: ${who}'s messages in time order, one each`);
+      eq(t.successors, [s2, s1], `D4: ${who} has both successors, in time order`);
+      ok(t.name === 'pc name' && t.order === 'mac order', `D4: ${who}: each field from the side that changed it`);
+    }
+  }
+
+  // the new shared groups: addedRepos, keepPins, parity
+  {
+    const X = pair();
+    X.A.addedRepos = [{ root: PCR.fv, at: X.ca.t - 5e3 }, { root: PCR.only, at: X.ca.t - 5e3 }];
+    X.A.keepPins = [{ root: PCR.df, branch: 'feat/keep', at: X.ca.t - 5e3 }];
+    X.A.parity = [{ name: 'detailforge-web', web: ['app/'], app: ['mobile/'], core: ['packages/core/'] }];
+    await X.a.tick(); X.step(10e3); await X.b.tick();
+    eq(X.B.addedRepos, [{ root: MACR.fv, at: T1 - 5e3 }], 'addedRepos: an added repo the Mac has is added there (its folder); one it lacks rides along');
+    ok(rowOf('addedRepos').items.some((r) => r.root.name === 'pc-only'), 'addedRepos: ...and stays in the row');
+    eq(X.B.keepPins, [{ root: MACR.df, branch: 'feat/keep', at: T1 - 5e3 }], 'keepPins: a GitHub branch kept on the PC is kept on the Mac (its folder for that repo)');
+    eq(X.B.parity, X.A.parity, 'parity: the rules reach the Mac');
+    X.A.addedRepos = X.A.addedRepos.filter((r) => r.root !== PCR.fv);
+    X.A.keepPins = [];
+    X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    ok(!X.B.addedRepos.length && !X.B.keepPins.length, 'addedRepos, keepPins: a removal on the PC goes on the Mac');
+  }
+
+  // D6: the page sends single-item ops; the server applies them per item
+  {
+    eq(P.applyOps('hiddenRepos', [{ root: 'Z:\\a', at: 1 }, { root: 'Z:\\b', at: 2 }], [{ op: 'add', root: 'z:/C/', at: 3 }, { op: 'remove', root: 'z:\\A' }, { op: 'bogus', root: 'Z:\\b' }, null]),
+      [{ root: 'Z:\\b', at: 2 }, { root: 'z:/C/', at: 3 }], 'D6 applyOps hiddenRepos: add and remove per item (roots in any case and slash), a bad op skipped');
+    eq(P.applyOps('repoNames', [{ root: 'Z:\\a', name: 'A' }], [{ op: 'add', root: 'z:\\a', name: 'A2' }, { op: 'add', root: 'Z:\\b', name: '' }]), [{ root: 'z:\\a', name: 'A2' }], 'D6 applyOps repoNames: add replaces the same root, an empty name is no op');
+    eq(P.applyOps('mapSpots', [{ id: 'r:x', x: 1, y: 2, pin: true, at: 5 }], [{ op: 'add', id: 's:1', x: 3, y: 4, pin: true }, { op: 'remove', id: 'r:x' }]), [{ id: 's:1', x: 3, y: 4, pin: true }], 'D6 applyOps mapSpots');
+    eq(P.applyOps('repoOrder', ['Z:\\a', 'Z:\\b', 'Z:\\c'], [{ op: 'move', root: 'z:\\c', before: 'Z:\\a' }, { op: 'move', root: 'Z:\\a', before: null }, { op: 'add', root: 'Z:\\b' }, { op: 'add', root: 'Z:\\d', before: 'Z:\\b' }]),
+      ['z:\\c', 'Z:\\d', 'Z:\\b', 'Z:\\a'], 'D6 applyOps repoOrder: move, add (once), add before');
+    ok(P.applyOps('hiddenRepos', [], 'x') === null, 'D6 applyOps: not a list is null (the old whole-list key still works on its own)');
+    const roots = Array.from({ length: 300 }, (_, i) => `Z:\\r${i}`);
+    const capped = P.applyOps('repoOrder', roots, [{ op: 'add', root: 'Z:\\new' }, { op: 'move', root: 'Z:\\r299', before: 'Z:\\r0' }], 300);
+    ok(capped.length === 300 && capped[capped.length - 1] === 'Z:\\new' && capped[0] === 'Z:\\r299' && !capped.includes('Z:\\r298'), 'applyOps with a cap: an add at the end of a full order is kept, the last root no op named goes');
+    eq(P.applyOps('repoOrder', roots, [{ op: 'add', root: 'Z:\\new' }]).length, 301, 'applyOps without a cap: as before');
+    const hid = Array.from({ length: 200 }, (_, i) => ({ root: `Z:\\h${i}`, at: 1000 + i }));
+    const kept = P.newest(P.applyOps('hiddenRepos', hid, [{ op: 'add', root: 'Z:\\new', at: 5000 }]), 200);
+    ok(kept.length === 200 && kept[kept.length - 1].root === 'Z:\\new' && !kept.some((h) => h.root === 'Z:\\h0') && kept[0].root === 'Z:\\h1', 'newest: a hidden repo added to a full list is kept, the oldest goes, in their order');
+    eq(P.newest([{ at: 2 }, { at: 1 }], 5), [{ at: 2 }, { at: 1 }], 'newest: under the cap, as it is');
+    // the page's own code (web/app.js), run here: a page that has not seen the Mac's newest change saves one of its own
+    const appSrc = fs.readFileSync(path.join(ROOT, 'web', 'app.js'), 'utf8');
+    const fnSrc = (src, name) => { const i = src.indexOf(`function ${name}(`); if (i < 0) return ''; const m = /\r?\n\}/.exec(src.slice(i)); return src.slice(i, i + m.index + m[0].length) + '\n'; };
+    const norm = (r) => String(r).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+    const ctx = { hiddenRepos: new Map(), hiddenReposSeen: new Map(), hiddenReposSentAt: 0, repoNames: new Map(), repoNamesSeen: new Map(), repoNamesSentAt: 0, repoOrder: [], pendingSave: {}, sent: [], normRoot: norm };
+    ctx.saveSettings = (o) => { ctx.sent.push(JSON.parse(JSON.stringify(o))); };
+    vm.createContext(ctx);
+    vm.runInContext(['saveHiddenRepos', 'syncHiddenRepos', 'saveRepoNames', 'syncRepoPrefs'].map((n) => fnSrc(appSrc, n)).join(''), ctx);
+    const serve = (list, body, kind) => (`${kind}Ops` in body ? P.applyOps(kind, list, body[`${kind}Ops`]) : body[kind]);
+    let server = [{ root: 'Z:\\a', at: 1 }];
+    vm.runInContext('syncHiddenRepos(' + JSON.stringify(server) + ')', ctx);
+    server = [...server, { root: 'Z:\\mac-hid', at: 2 }]; // the Mac's hide reaches the server; the page has not polled since
+    vm.runInContext('hiddenRepos.set(normRoot("Z:\\\\c"), { root: "Z:\\\\c", at: 3 }); saveHiddenRepos();', ctx);
+    let body = ctx.sent[ctx.sent.length - 1];
+    server = serve(server, body, 'hiddenRepos');
+    eq((server || []).map((h) => h.root).sort(), ['Z:\\a', 'Z:\\c', 'Z:\\mac-hid'], 'D6: a page that missed the Mac\'s hide adds its own without undoing the Mac\'s (single-item ops, not the whole list)');
+    vm.runInContext('hiddenRepos.delete(normRoot("Z:\\\\a")); saveHiddenRepos();', ctx);
+    server = serve(server, ctx.sent[ctx.sent.length - 1], 'hiddenRepos');
+    eq((server || []).map((h) => h.root).sort(), ['Z:\\c', 'Z:\\mac-hid'], 'D6: ...and a removal goes as one op');
+    const n0 = ctx.sent.length;
+    vm.runInContext('saveHiddenRepos();', ctx);
+    eq(ctx.sent.length, n0, 'D6: nothing changed: nothing sent');
+    let names = [{ root: 'Z:\\a', name: 'A' }];
+    vm.runInContext('syncRepoPrefs({ repoNames: ' + JSON.stringify(names) + ' })', ctx);
+    names = [...names, { root: 'Z:\\m', name: 'from the mac' }];
+    vm.runInContext('repoNames.set(normRoot("Z:\\\\a"), { root: "Z:\\\\a", name: "A, renamed" }); saveRepoNames();', ctx);
+    names = serve(names, ctx.sent[ctx.sent.length - 1], 'repoNames');
+    eq(names, [{ root: 'Z:\\a', name: 'A, renamed' }, { root: 'Z:\\m', name: 'from the mac' }], 'D6: a rename from a stale page leaves the Mac\'s new name alone');
+  }
+
+  // D7: the page's "worked again" for a removed workspace is the server's: a prompt after it was removed (turnStart)
+  {
+    const appSrc = fs.readFileSync(path.join(ROOT, 'web', 'app.js'), 'utf8');
+    const i = appSrc.indexOf('function repoIsHidden('), m = /\r?\n\}/.exec(appSrc.slice(i));
+    const norm = (r) => String(r).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+    const ctx = { hiddenRepos: new Map([[norm('Z:\\w'), { root: 'Z:\\w', at: 1000 }]]), normRoot: norm, activeAt: (s) => (Number.isFinite(s.active) ? s.active : s.last || 0), state: { sessions: [] } };
+    vm.createContext(ctx);
+    vm.runInContext(appSrc.slice(i, i + m.index + m[0].length), ctx);
+    ctx.state.sessions = [{ repo: { root: 'Z:\\w' }, active: 2000, last: 2000, turnStart: 500 }];
+    ok(vm.runInContext('repoIsHidden("Z:\\\\w")', ctx) === true, 'D7: a conversation still replying from before the removal (active later, its turn began before) keeps it removed, as the server does');
+    ctx.state.sessions = [{ repo: { root: 'Z:\\w' }, active: 2000, last: 2000, turnStart: 1500 }];
+    ok(vm.runInContext('repoIsHidden("Z:\\\\w")', ctx) === false, 'D7: a prompt after the removal brings it back');
+  }
+
+  // D2: the first join is the first full read only. A group this device could not write then (no row yet), whose row
+  // another device writes later, is joined as a device that already syncs the others joins one: its own wins on a key
+  {
+    const db2 = [];
+    let failKey = 'prefs:names';
+    const rest2 = async (method, table, o = {}) => {
+      const q = o.query || {};
+      if (method === 'GET') {
+        const inList = /^in\.\((.*)\)$/.exec(q.key || '');
+        const want = inList ? new Set(inList[1].split(',').map((k) => k.replace(/^"|"$/g, ''))) : null;
+        const cols = String(q.select || '').split(',');
+        return db2.filter((r) => !want || want.has(r.key)).map((r) => Object.fromEntries(cols.map((c) => [c, r[c]])));
+      }
+      if (o.body.key === failKey) throw new S.SyncError('Supabase is out of reach', 0, 'network');
+      const hit = db2.find((r) => r.key === o.body.key);
+      if (hit) Object.assign(hit, o.body); else db2.push({ ...o.body });
+      return null;
+    };
+    const seal = (g, row) => ({ key: `prefs:${g}`, value_enc: K.sealText(JSON.stringify(row), KEY, `setting:prefs:${g}`), updated_at: new Date(row.at).toISOString() });
+    const T1 = T0 + 30 * 86400e3, clock = { t: T1 };
+    db2.push(seal('hidden', { v: 1, device: MAC, at: T1 - 60e3, after: null, items: [{ id: id(51), at: T1 - 60e3 }] }));
+    const third = machine();
+    third.hidden = [{ id: id(52), at: T0, forgot: false }];
+    third.names = [{ id: id(1), name: 'third\'s own' }];
+    let st3 = null;
+    const p3 = P.createPrefs({ api: { rest: rest2 }, key: KEY, now: () => clock.t, device: () => THIRD, read: () => third, apply: (g, items) => { third[g] = JSON.parse(JSON.stringify(items)); },
+      translate: trPc, load: () => st3, save: (s) => { st3 = JSON.parse(JSON.stringify(s)); }, log: () => {} });
+    await p3.tick();
+    eq(third.hidden.map((h) => h.id).sort(), [id(51), id(52)], 'D2 first join: the row\'s and its own (no tombstone)');
+    ok(!db2.some((r) => r.key === 'prefs:names'), 'its names could not be written');
+    failKey = null;
+    db2.push(seal('names', { v: 1, device: MAC, at: T1 + 1e3, after: null, items: [{ id: id(1), name: 'the mac\'s' }] }));
+    clock.t += 60e3;
+    await p3.tick();
+    eq(third.names, [{ id: id(1), name: 'third\'s own' }], 'D2: a group joined after the first read goes by union(): its own wins on a key (firstEver ends with that read)');
+  }
+
   console.log(`${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

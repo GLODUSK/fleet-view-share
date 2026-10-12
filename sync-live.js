@@ -4,7 +4,7 @@
 // publishes a snapshot of the conversations IT owns, and shows the ones another device owns from that device's
 // snapshot (fleet-view.js, through sync-run.js live() and remoteFor below).
 //
-//   createLive({ api, key, log, now, device, online, snapshot, timing })
+//   createLive({ api, key, log, now, device, online, seenAt, snapshot, timing })
 //     -> { start(), stop(), tick(), live(), status() }
 //   status().health (sync-api.js createScanHealth): when a round last ran with no error, the last error and its time,
 //   the failure streak, and whether it is backing off: a round whose request hit a network error, a timeout, a 429 or
@@ -16,6 +16,8 @@
 //   online(d) -> whether device d is there: true, false, or null while that is not known (sync-move.js online(): its
 //             last_seen_at heartbeat). A snapshot counts only while its device is there; while it is not known, the
 //             conversations of that device keep this machine's own reading. Not given: every snapshot read counts
+//   seenAt(d) -> device d's last_seen_at (ms, its own clock) or null (sync-move.js lastSeen()): a sign of life for
+//             bound's 7-day rule (live()), as its rows' at are (they change only when what they hold does)
 //   snapshot() -> [{ id, state, label, stateColor, name, renamed, account, last, active, turnStart, waitingOn,
 //             agents, repo }]: the conversations this device owns, as its /state shows them. repo: { origin, name }, the
 //             repo it shows it under, portable (sync-prefs.js makeTranslate out()), or null; the other devices show it
@@ -36,7 +38,8 @@
 // one not listed shows DONE anyway), at most MAX_SESSIONS, the running ones first. bound: at most MAX_BOUND, whatever
 // their state. Each row is written only when what it holds changed (the live row: that list, any field of it but last
 // and active, which move all the time, or bound; the bound row: the list), each at most every 5 s; at (and so
-// updated_at) differs on every write and is never compared with another machine's clock. The rows are never deleted.
+// updated_at) differs on every write and is compared with another machine's clock only for the 7-day staleness of
+// bound (live() below). The rows are never deleted.
 // An older Fleet View reads bound only from the live row (and writes no bound row), so the live row carries it too, for
 // a release or two; then it goes from there (and from the live row's sig). A device's bound list is its bound row's
 // when it has one that opens, else its live row's bound (none: nothing bound).
@@ -49,7 +52,11 @@
 //             unsure, those of them not known to be there or not yet; fresh, those there; sessions and byDevice, the
 //             fresh ones' (ready: the rows were read once); bound: Map device -> Set of ids, from every known device's
 //             last bound row (or its live row's bound, an older device), online or not (what is bound does not change
-//             while a device sleeps)
+//             while a device sleeps), except a device known to be offline (online() false; not one not known yet)
+//             whose newest sign of life (its rows' own at, its last_seen_at) is more than TIMING.boundStaleMs (7 days)
+//             behind this clock: one away that long is left out of bound (the bound row and the live row's copy
+//             alike), so its old list no longer holds conversations back here. The one place another machine's clock
+//             is compared with this one's: 7 days is far past any clock skew
 //   remoteFor(view, device, id) -> what a conversation that device owns shows here:
 //     { device, entry, live }: entry from its fresh snapshot (live: its state is not DONE or IDLE), or entry null when
 //     the owner's snapshot is fresh and does not list it, or the owner is offline: it runs nowhere we can see, so it is
@@ -68,6 +75,7 @@ const TIMING = {
   minGapMs: 5e3, // at most one write this often
   readMs: 5e3, // the other devices' rows are listed this often
   doneMs: 24 * 3600e3, // a DONE conversation is listed while its last is this recent
+  boundStaleMs: 7 * 24 * 3600e3, // BOUND_STALE: a device away this long (see live()) has its bound list ignored
 };
 const MAX_SESSIONS = 300; // a snapshot carries at most this many
 const MAX_BOUND = 5000; // and at most this many bound ids (37 bytes each in the row)
@@ -162,6 +170,7 @@ function createLive(o = {}) {
   const tm = { ...TIMING, ...(o.timing || {}) };
   const deviceOf = typeof o.device === 'function' ? o.device : () => o.device;
   const online = typeof o.online === 'function' ? o.online : null;
+  const seenAt = typeof o.seenAt === 'function' ? o.seenAt : () => null;
   const snapshot = typeof o.snapshot === 'function' ? o.snapshot : () => [];
   const boundOf = typeof o.bound === 'function' ? o.bound : () => [];
   const said = new Map();
@@ -222,10 +231,11 @@ function createLive(o = {}) {
     }
     return {
       sessions: new Map(cleanList(v.sessions.slice(0, MAX_SESSIONS)).map((e) => [e.id, { ...e, device: d }])),
-      bound: new Set(cleanIds(v.bound)),
+      bound: new Set(cleanIds(v.bound)), at: v.at,
     };
   }
-  // one bound row's sealed value -> a Set of ids, or null (said once) when it does not open as that device's
+  // one bound row's sealed value -> { ids: a Set of ids, at }, or null (said once) when it does not open as that
+  // device's
   function openBound(row, d) {
     let v = null;
     try { v = JSON.parse(K.openText(row.value_enc, key, `setting:${row.key}`)); } catch {}
@@ -233,7 +243,7 @@ function createLive(o = {}) {
       logOnce(`bad|${row.key}`, `live: the bound list of ${short(d)} does not open with this key; ignored`);
       return null;
     }
-    return new Set(cleanIds(v.bound));
+    return { ids: new Set(cleanIds(v.bound)), at: v.at };
   }
   // the live:* and bound:* keys with their updated_at: one request (two when Supabase refuses the or filter)
   async function listKeys() {
@@ -277,9 +287,9 @@ function createLive(o = {}) {
         const m = row && typeof row.key === 'string' ? KEY_RE.exec(row.key) : null;
         if (!m || !here.has(row.key)) continue;
         fetched++;
-        if (m[1] === 'bound') { boundSeen.set(m[2], { stamp: String(row.updated_at || ''), ids: openBound(row, m[2]) }); continue; }
+        if (m[1] === 'bound') { const b = openBound(row, m[2]); boundSeen.set(m[2], { stamp: String(row.updated_at || ''), ids: b ? b.ids : null, at: b ? b.at : null }); continue; }
         const opened = openRow(row, m[2]);
-        seen.set(m[2], { stamp: String(row.updated_at || ''), changedAt: t2, sessions: opened ? opened.sessions : null, bound: opened ? opened.bound : new Set() });
+        seen.set(m[2], { stamp: String(row.updated_at || ''), changedAt: t2, sessions: opened ? opened.sessions : null, bound: opened ? opened.bound : new Set(), at: opened ? opened.at : null });
       }
     }
     ready = true;
@@ -328,13 +338,19 @@ function createLive(o = {}) {
   const isOnline = (d) => { if (!online) return true; try { const v = online(d); return v === true ? true : v === false ? false : null; } catch { return null; } };
   function live() {
     const known = new Set(), unsure = new Set(), fresh = new Set(), sessions = new Map(), byDevice = new Map(), when = new Map(), bound = new Map();
+    const t = now();
     for (const [d, r] of seen) {
       if (!r.sessions) continue;
       known.add(d);
-      // its bound row when it has one that opens, else its live row's (an older device's)
+      // its bound row when it has one that opens, else its live row's (an older device's); none from a device known
+      // to be offline whose newest sign of life (its rows' at, which move only when what they hold does, and its
+      // last_seen_at heartbeat) is over boundStaleMs old: a machine away that long no longer holds anything back here
       const b = boundSeen.get(d);
-      bound.set(d, b && b.ids ? b.ids : r.bound || new Set());
       const on = isOnline(d);
+      let seen = null;
+      try { seen = seenAt(d); } catch {}
+      const newest = Math.max(Number.isFinite(r.at) ? r.at : 0, b && Number.isFinite(b.at) ? b.at : 0, Number.isFinite(seen) ? seen : 0);
+      if (on !== false || !newest || t - newest <= tm.boundStaleMs) bound.set(d, b && b.ids ? b.ids : r.bound || new Set());
       if (on === null) unsure.add(d);
       if (on !== true) continue;
       fresh.add(d);

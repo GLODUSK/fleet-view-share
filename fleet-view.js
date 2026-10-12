@@ -256,13 +256,14 @@ const rootKey = (r) => P.foldCase(String(r || '').replace(/\//g, '\\').replace(/
 function cleanHiddenRepos(list, now = Date.now()) {
   if (!Array.isArray(list)) return null;
   const out = new Map();
-  for (const x of list.slice(0, HIDDEN_REPOS_MAX)) {
+  for (const x of list.slice(0, HIDDEN_REPOS_MAX * 4)) {
     const root = typeof x === 'string' ? x : x && typeof x === 'object' ? x.root : null;
     if (typeof root !== 'string' || !root.trim() || root.length > 1024) continue;
     const at = x && typeof x === 'object' && Number.isFinite(x.at) && x.at > 0 && x.at <= now + 60e3 ? Math.round(x.at) : now;
     out.set(rootKey(root), { root, at });
   }
-  return [...out.values()];
+  // over the cap (an add op appends): the newest kept
+  return SYNC_PREFS.newest([...out.values()], HIDDEN_REPOS_MAX);
 }
 // several workspaces shown at once (the page's Ctrl+click in its repo menu): settings.repos, 2 to 50 roots or bare
 // names, each checked like repo; null while one (repoSel) or every one is shown. repoSel is then the first of them,
@@ -311,16 +312,24 @@ function cleanAddedRepos(list, now = Date.now()) {
   return [...out.values()];
 }
 let addedRepos = DEMO ? [] : cleanAddedRepos(saved.addedRepos) || [];
-// the map's repo spots (web/map.js): [{ id, x, y, pin }], at most 300
+// the map's repo spots (web/map.js): [{ id, x, y, pin, at? }], at most 300 (the pinned ones kept first); at: when it
+// last changed here (stampSpots; sync-prefs.js lets a later unpin win over an earlier drag on another device with it)
+const MAP_SPOTS_MAX = 300;
 function cleanMapSpots(v) {
   if (!Array.isArray(v)) return null;
   const out = [];
-  for (const s of v.slice(0, 300)) {
+  for (const s of v.slice(0, MAP_SPOTS_MAX * 2)) {
     if (!s || typeof s.id !== 'string' || !s.id || s.id.length > 1100) continue;
     if (!Number.isFinite(s.x) || !Number.isFinite(s.y) || Math.abs(s.x) > 1e6 || Math.abs(s.y) > 1e6) continue;
-    out.push({ id: s.id, x: Math.round(s.x), y: Math.round(s.y), pin: s.pin === true });
+    out.push({ id: s.id, x: Math.round(s.x), y: Math.round(s.y), pin: s.pin === true, ...(Number.isFinite(s.at) && s.at > 0 ? { at: Math.round(s.at) } : {}) });
   }
-  return out;
+  if (out.length <= MAP_SPOTS_MAX) return out;
+  return [...out.filter((s) => s.pin), ...out.filter((s) => !s.pin)].slice(0, MAP_SPOTS_MAX);
+}
+// next's spots with at: a spot as it was keeps its at, a new or changed one is stamped now
+function stampSpots(next, prev, now = Date.now()) {
+  const old = new Map((prev || []).map((s) => [s.id, s]));
+  return next.map((s) => { const o = old.get(s.id); return { id: s.id, x: s.x, y: s.y, pin: s.pin, at: o && o.x === s.x && o.y === s.y && o.pin === s.pin && o.at ? o.at : now }; });
 }
 let mapSpots = DEMO ? [] : cleanMapSpots(saved.mapSpots) || [];
 // the map's lens (how its orbs are coloured and sized) and its saved views (Shift+1..9 on the map: { x, y, zoom })
@@ -6110,6 +6119,10 @@ function toolsHere() {
 // hiddenRepos (an array of up to 200 { root, at }, root a string of at most 1024 characters; replaces the list),
 // mapSpots (the map's repo spots, up to 300 { id, x, y, pin }; replaces the list), mapLens (one of MAP_LENSES),
 // mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), mapCamera ({ x, y, k }: the map's view), notify (bool), offAccounts (account letters turned off), parity (rules, see PARITY_BUILTIN)
+// hiddenReposOps, repoNamesOps, mapSpotsOps, repoOrderOps: single-item changes ({ op: 'add' | 'remove' | 'move', ... },
+// sync-prefs.js applyOps) applied to the list as it is here, which the page sends instead of a whole list (a whole list
+// from a page that missed another device's change would undo it); the whole-list keys stay for an older page
+// (docs/sync-format.md says until when)
 // chief ({ watch: bool }: the Chief's watch mode, chief.js; other keys in it are left alone),
 // remote ({ enabled }: remote access, remote.js) is taken from this PC's own page only, in the route itself
 function applySettings(b) {
@@ -6123,7 +6136,10 @@ function applySettings(b) {
   else if ('repo' in b) repoSels = null;
   if (repoSels && !repoSel) repoSel = repoSels[0];
   if ('repoNames' in b) { const r = cleanRepoNames(b.repoNames); if (r) repoNames = r; }
+  // the page's single-item changes (see SYNC_PREFS.applyOps), applied to this machine's list as it is now
+  if ('repoNamesOps' in b) { const r = cleanRepoNames(SYNC_PREFS.applyOps('repoNames', repoNames, b.repoNamesOps)); if (r) repoNames = r; }
   if ('repoOrder' in b) { const o = cleanRepoOrder(b.repoOrder); if (o) repoOrder = o; }
+  if ('repoOrderOps' in b) { const o = cleanRepoOrder(SYNC_PREFS.applyOps('repoOrder', repoOrder, b.repoOrderOps, REPO_ORDER_MAX)); if (o) repoOrder = o; }
   if ('hostRules' in b) { const h = cleanHostRules(b.hostRules); if (h) hostRules = h; }
   if (typeof b.compact === 'boolean') compact = b.compact;
   if (typeof b.finishedOpen === 'boolean') finishedOpen = b.finishedOpen;
@@ -6161,7 +6177,9 @@ function applySettings(b) {
   // only while on hidden: one shown again and removed later is on the Removed list again
   if (('hidden' in b || 'forgotten' in b) && forgotten.length) { const on = new Set(hidden.map((h) => h.id)); forgotten = forgotten.filter((id) => on.has(id)); }
   if ('hiddenRepos' in b) { const h = cleanHiddenRepos(b.hiddenRepos); if (h) hiddenRepos = h; }
-  if ('mapSpots' in b) { const m = cleanMapSpots(b.mapSpots); if (m) mapSpots = m; }
+  if ('hiddenReposOps' in b) { const h = cleanHiddenRepos(SYNC_PREFS.applyOps('hiddenRepos', hiddenRepos, b.hiddenReposOps)); if (h) hiddenRepos = h; }
+  if ('mapSpots' in b) { const m = cleanMapSpots(b.mapSpots); if (m) mapSpots = stampSpots(m, mapSpots); }
+  if ('mapSpotsOps' in b) { const m = cleanMapSpots(SYNC_PREFS.applyOps('mapSpots', mapSpots, b.mapSpotsOps)); if (m) mapSpots = stampSpots(m, mapSpots); }
   if (MAP_LENSES.includes(b.mapLens)) mapLens = b.mapLens;
   if ('mapViews' in b) { const v = cleanMapViews(b.mapViews); if (v) mapViews = v; }
   if ('mapCamera' in b) { const c = cleanMapCamera(b.mapCamera); if (c) mapCamera = c; }
@@ -6591,6 +6609,8 @@ const HK = HOUSEKEEPING.createHousekeeping({
   isQuiet: () => ![...sessions.values()].some((s) => inState(s) && (s.state === 'WORKING' || s.state === 'AGENTS')),
   projectsDirs: () => roots().map((r) => r.dir),
   dataDir: LOG_DIR,
+  // a GitHub branch's keep-pin changed: the shared settings carry it (sync-prefs.js keepPins)
+  prefsChanged: () => { try { SYNC_RUNNER.prefsChanged(); } catch {} },
   log: (t) => logLine('housekeeping: ' + t),
   // its own gh runner: paging ~1000 PRs needs more than the 25 s the map's lookups get
   gh: GITHUB ? undefined : () => Promise.reject(new Error('GitHub is off (--no-github)')),
@@ -6620,7 +6640,8 @@ const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, l
 // relay: link.js keeps another linked machine there as a computer (docs/link.md); the link runs only while sync does
 const ACCOUNT_SYNC = SYNC_ACCOUNTS.createAccountSync({ accounts: ACCTS, log: (t) => logOnce(t, t) });
 // The shared settings (sync-prefs.js): the groups every device holds the same (hidden and removed conversations,
-// names, moves, hidden / renamed / ordered workspaces, the map's spots, teams), read from and put back into the
+// names, moves, hidden / added / renamed / ordered workspaces, the map's spots, teams, stays-on rules and choices,
+// housekeeping's keep-pins on GitHub branches, the parity rules), read from and put back into the
 // settings above; per-screen ones (view, zoom, camera, bounds, filters, map views, accounts off, push targets, bots,
 // compact, finishedOpen, steady, notify) never go. settings.prefsSync is what this device last agreed on with the table.
 function prefsGroups() {
@@ -6630,6 +6651,7 @@ function prefsGroups() {
     names: [...names].map(([id, name]) => ({ id, name })),
     moved: [...moved.values()],
     hiddenRepos, repoNames, repoOrder, mapSpots, teams, hostRules, pinOverrides: [...pinOverrides.values()],
+    addedRepos: addedRepos.map((r) => ({ root: r.root, at: r.at })), keepPins: HK.remotePins(), parity: parityRules,
   };
 }
 // another device's group, translated: replaces this one's (each cleaned as a POST /settings would be) and is saved
@@ -6658,6 +6680,9 @@ function applyPrefs(group, items) {
   else if (group === 'mapSpots') mapSpots = cleanMapSpots(items) || [];
   else if (group === 'hostRules') hostRules = cleanHostRules(items) || [];
   else if (group === 'pinOverrides') pinOverrides = cleanPinOverrides(items) || new Map();
+  else if (group === 'addedRepos') addedRepos = cleanAddedRepos(items) || [];
+  else if (group === 'keepPins') { HK.setRemotePins(items); return; } // housekeeping's own file, not settings
+  else if (group === 'parity') { parityRules = cleanParity(items) || []; saved.parity = parityRules; }
   else if (group === 'teams') {
     const old = new Map(teams.map((t) => [t.id, t]));
     teams = cleanTeams(items.map((t) => ({ ...t, seenAt: old.has(t.id) ? old.get(t.id).seenAt : now, here: old.has(t.id) ? old.get(t.id).here : false }))) || [];

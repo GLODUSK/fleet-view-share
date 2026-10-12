@@ -469,6 +469,24 @@ async function main() {
   night.setAuto(true);
   await night.tick();
   ok(JSON.parse(fs.readFileSync(path.join(T, 'data2', 'housekeeping', 'prefs.json'), 'utf8')).lastNightly === '2026-10-10', 'nightly ran at 03:00 when on');
+
+  // ---------- keep-pins on GitHub branches: shared with the other devices (fleet-view.js, sync-prefs.js keepPins) ----------
+  {
+    let nudged = 0;
+    const R = path.join(T, 'pinrepo');
+    const hp = createHousekeeping({ repos: () => [], dataDir: path.join(T, 'data4'), gh, now: () => 5000, log: () => {}, prefsChanged: () => { nudged++; } });
+    hp.keep(`wt:${R}|${path.join(R, 'wt')}`, true);
+    ok(nudged === 0, 'keepPins: a worktree\'s pin is this machine\'s own (no nudge)');
+    hp.keep(`rb:${R}|feat/a|b`, true);
+    ok(nudged === 1, 'keepPins: a GitHub branch\'s pin nudges the shared settings');
+    ok(JSON.stringify(hp.remotePins()) === JSON.stringify([{ root: R, branch: 'feat/a|b', at: 5000 }]), `keepPins: remotePins lists the GitHub branches' pins with when (${JSON.stringify(hp.remotePins())})`);
+    hp.setRemotePins([{ root: R, branch: 'other', at: 7000 }, { root: R, branch: 'other', at: 8000 }]);
+    ok(JSON.stringify(hp.remotePins()) === JSON.stringify([{ root: R, branch: 'other', at: 7000 }]), 'keepPins: setRemotePins replaces the GitHub branches\' pins, one each');
+    const pins = JSON.parse(fs.readFileSync(path.join(T, 'data4', 'housekeeping', 'prefs.json'), 'utf8')).pins;
+    ok(pins.some((id) => id.startsWith('wt:')) && pins.filter((id) => id.startsWith('rb:')).length === 1, 'keepPins: ...and leaves the worktree\'s pin alone');
+    hp.keep(`rb:${R}|other`, false);
+    ok(hp.remotePins().length === 0 && nudged === 2, 'keepPins: an unpin goes too');
+  }
 }
 
 main().catch((e) => { failures++; console.log(`FAIL ${e.stack || e.message}`); }).finally(async () => {

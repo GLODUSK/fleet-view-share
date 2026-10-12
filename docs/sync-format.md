@@ -77,7 +77,11 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
     most 5000, sealed and stamped like the live row, written by that device only and only when the list changes (at
     most every 5 s). A reader takes a device's list from its `bound:` row when it has one that opens, else from that
     device's live row's `bound` (an older Fleet View, which writes no `bound:` row; none: nothing bound). Another
-    device keeps the last list it read while that device is offline. In a `live:` entry, `repo` is `{ origin, name }` (the portable root of the `prefs:` rows: GitHub
+    device keeps the last list it read while that device is offline, for at most 7 days (`sync-live.js`
+    `TIMING.boundStaleMs`): a device known to be offline (by the `devices` heartbeat; not one not known yet) whose
+    newest sign of life (its `live:` and `bound:` rows' `at`, its `devices.last_seen_at`) is more than 7 days behind the
+    reader's clock has no bound list there (the bound row and the live row's copy alike), so a
+    machine away for a week no longer holds conversations back. Nothing in the rows changed for this. In a `live:` entry, `repo` is `{ origin, name }` (the portable root of the `prefs:` rows: GitHub
     `owner/name` and folder name, either may be null) for the repo that device shows it under, or null; another
     device shows it under its own checkout of that repo when it has one (by origin, else a same-named folder with no
     origin), else works the repo out itself. A row from before `repo` (none on its entries) still counts. `sessions` lists the conversations it owns that are not DONE, and the DONE ones active
@@ -91,8 +95,11 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
     alert; only the owner's own DONE does.
   - `prefs:<group>` (`sync-prefs.js`): the settings every device holds the same, one row per group that every device
     writes (last writer wins), sealed with `sealText(json, key, 'setting:prefs:<group>')`, `updated_at` set to its `at`:
-    `{ v: 1, device, at, after, items }`. `after` is `{ by, at }` of the row the writer had agreed on when it wrote
-    (null on its first write), so a reader can tell a row made without its own last write. Groups and their items (a
+    `{ v: 1, device, at, after, items, gone? }`. `after` is `{ by, at }` of the row the writer had agreed on when it wrote
+    (null on its first write), so a reader can tell a row made without its own last write. `gone` (since 2026-10-12; left
+    out when empty): the group's tombstones, `[[key, at], ...]`, a key taken out of the group and when (the clock of
+    the device that took it out, noted the first round that saw it), kept 30 days, at most 500 a group, merged from
+    every row a device takes (the newest of each). Groups and their items (a
     repo root `R` is `{ origin, name }`: its GitHub `owner/name` or null, and its folder's name):
     - `hidden`: `{ id, at, forgot? }` hidden and removed conversations (`settings.hidden`; `forgot: true` for the ones
       on `settings.forgotten`). `at` is when it was hidden: it shows again once it works after that.
@@ -100,12 +107,21 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
       one cleared by hand.
     - `moved`: `{ id, root: R | null, at }` "Move to workspace" (`settings.moved`).
     - `hiddenRepos`: `{ root: R, at }`; `repoNames`: `{ root: R, name }`; `repoOrder`: `R`, in order.
-    - `mapSpots`: pinned spots only (`pin: true`): `{ repo: R, x, y, pin }` for a workspace's spot (`r:<root>` here),
-      `{ id, x, y, pin }` for any other (`s:<conversation id>`) as it is. Unpinned spots stay on each machine (the map's
-      spacing rule moves them to fit that screen) and are kept when the group comes in.
+    - `addedRepos` (since 2026-10-12): `{ root: R, at }` workspaces added by hand (`settings.addedRepos`, POST /repos/add).
+      One added on one machine is added on another that has a checkout of that repo, else it rides along.
+    - `mapSpots`: pinned spots only (`pin: true`): `{ repo: R, x, y, pin, at? }` for a workspace's spot (`r:<root>`
+      here), `{ id, x, y, pin, at? }` for any other (`s:<conversation id>`) as it is. `at` (since 2026-10-12): when the spot
+      last changed on the device that changed it (`fleet-view.js` `stampSpots`). Unpinned spots stay on each machine
+      (the map's spacing rule moves them to fit that screen) and are kept when the group comes in. A pinned workspace
+      spot the group no longer has (unpinned or dropped on another device) stays on this machine, unpinned where it is
+      (`demote`), so the page sees an unpin rather than a spot gone (which it would put back pinned).
     - `teams`: as `settings.teams` keeps them, less `seenAt` and `here` (each device its own). A team that came from
       another device and whose members this machine never listed (`here: false`) is never pruned here: the device
       that runs its members lets it go, and that reaches the others.
+    - `hostRules`, `pinOverrides`: see `sync-prefs.js` (`cleanHostRule`, `cleanPinOverride`).
+    - `keepPins` (since 2026-10-12): `{ repo: R, branch, at }` housekeeping's "Keep" on a GitHub branch (`housekeeping.js`
+      `remotePins`, its `prefs.json` `pins` and `pinAt`). Worktrees' and local branches' pins stay on their machine.
+    - `parity` (since 2026-10-12): `{ name, web, app, core }` the parity rules (`settings.parity`), one per repo name.
 
     Never synced (each screen's own): view, zoom, the map's camera and saved views, window bounds, query, the
     workspace filter (`repo`, `repos`), `offAccounts`, `pushTargets`, bots, compact, finishedOpen, steady, notify.
@@ -117,16 +133,49 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
     rides along in what that machine writes, so the machine that has the repo keeps it; one the machine already has
     under the same key stays as it is. When that repo turns up on the machine later, the item is put in there (never
     read as a delete).
-    Each device keeps what it last agreed on per group (`settings.prefsSync`: `{ at, by, base, prev, ride }`, and its
-    device id and key's id: another one means a first join). A change here (the group's items differ from `base`;
+    Each device keeps what it last agreed on per group (`settings.prefsSync`: `{ at, by, base, prev, ride, gone }`, and
+    its device id and key's id: another one means a first join). A change here (the group's items differ from `base`;
     order counts only for `repoOrder`) lists the rows first and writes the whole group, at most every 3 s a group. A row
     whose `at` or device differs from `base`'s, written by another device, is taken: it replaces this machine's items,
-    or, when this machine changed the group too, the two are merged item by item (what changed here wins, what was
-    dropped here stays dropped) and written back. When this device wrote last and the row's `after` is not that write
-    (both wrote at once), it is merged the same way against `prev` (the base before that write). First join (no
-    `base`): the row and this machine's items are joined, this machine's winning on the same item, and written. `at` is
-    only ever compared for equality, never with this machine's clock. Every device lists the `prefs:*` keys and
-    `updated_at` every 10 s and fetches a value only when its `updated_at` moved (compared as times).
+    or, when this machine changed the group too, the two are merged item by item (`merge3`: what changed here wins,
+    what was dropped here stays dropped) and written back, with three refinements:
+    - an item changed here and taken out there stays out when the row's tombstone for it is newer than the item's own
+      time (`at`; a team's newest message); one taken out here and changed there comes back when its time is past this
+      device's tombstone (an unpin after a drag wins, a pin after an unpin wins). An item with no time (names,
+      workspace names, rules) or no tombstone to compare (an older device's row) merges as before;
+    - `teams` changed on both merge field by field: a field changed here is this device's, else the other's;
+      `messages` and `successors` are both devices', one of each, in time order, the newest 50 and 10;
+    - `repoOrder` changed on both (`mergeOrder`): this device's order for what both have, less what the other took out,
+      with what the other put in woven in after its neighbour there. A repo that does not translate here rides along
+      where it stands in the order (not at the end), so a reorder here never moves or drops it.
+    When this device wrote last and the row's `after` is not that write (both wrote at once), it is merged the same way
+    against `prev` (the base before that write). First join (no `base`): a device that never agreed on any group (a new
+    machine, or another device id or key) takes the row (`join`): the row's items (the row's on a key both have, the
+    row's order), plus its own items the row lacks, less those the row's `gone` says were taken out after the item's own
+    time (or at all, for an item with no time). So a machine back with an old copy never puts back what the others
+    removed, and one joining for the first time loses nothing of its own. That first join ends with the device's first
+    full read of the rows: a group new to a device that already syncs others (one a newer release added) is joined as
+    before: both, this machine's item winning on the same key. Apart from the tombstones, `at` is only compared for
+    equality. Every device lists the `prefs:*` keys and `updated_at` every 10 s and fetches a value only when its
+    `updated_at` moved (compared as times).
+
+    **The page's ops** (POST /settings, since 2026-10-12): the page sends `hiddenReposOps`, `repoNamesOps` and
+    `mapSpotsOps`, single-item changes (`{ op: 'add', ... }` puts an item in or replaces the one of the same key,
+    `{ op: 'remove', ... }` takes it out; `repoOrderOps` also takes `{ op: 'move', root, before }`), worked out against
+    the server's list as the page last had it, and the server applies each to its list as it is now
+    (`sync-prefs.js` `applyOps`). A whole list from a page that had not polled since another device's change used to
+    put that change back; ops cannot. The server stamps a map spot's `at` when it changes.
+
+    **Compatibility** (one machine may run the older release for a while):
+    - New row field `gone`, new item field `at` on map spots, and the groups `addedRepos`, `keepPins`, `parity`: an
+      older device ignores them (its `openRow` reads only `v, device, at, after, items`; its `GROUPS` has no such
+      group, so it never lists or writes those rows; its `mapSpots` clean drops `at`). Its rows carry no `gone` and no
+      spot `at`, and a newer device merges them as before (no tombstone to compare: what changed here wins).
+    - The whole-list keys of POST /settings (`hiddenRepos`, `repoNames`, `repoOrder`, `mapSpots`) stay accepted for a
+      page from an older release (a tab left open across an update reloads itself, so this is a short window). Keep
+      them through two releases after this one (until 2026-11-01), then drop them from `applySettings`.
+    - The live row's copy of `bound` is unchanged (still written, still read for an older device); the 7-day staleness
+      applies to it too.
 - **chunks** `{ conversation_id, file, generation, seq, byte_offset, byte_length, object_path, sha256 }`: one per
   object. `sha256` is the hex sha256 of the chunk's plain bytes. A whole file is `seq` 0..n of one generation (one
   chunk unless it is over 8 MiB; an empty one is a single 0-byte chunk).

@@ -1162,11 +1162,13 @@ function createMover(o = {}) {
     if (isOffline(id)) return false;
     return d.moved ? true : null;
   };
+  // a device's last_seen_at as the table last said (ms, its own clock), or null: for sync-live.js's 7-day rule
+  const lastSeen = (id) => { const d = devices.byId.get(lower(id)); return d && Number.isFinite(d.lastSeen) ? d.lastSeen : null; };
   // the page asks every second while it shows the job; that keeps it going (unwatchedMs)
   const status = (id) => { const j = jobs.get(lower(id)); if (!j) return null; j.seenAt = now(); return jobJson(j); };
   const outgoing = () => [...outs.values()].map((x) => ({ id: x.id, to: x.to, phase: x.phase, force: x.force, held: x.held, note: x.note }));
 
-  return { start, stop, tick, settle, move, status, cancel, owners, device, online, outgoing, peer };
+  return { start, stop, tick, settle, move, status, cancel, owners, device, online, lastSeen, outgoing, peer };
 }
 
 module.exports = { createMover, awayPath, dropAway, resumeFolder, trustedIn, findLogIn, busyNow, TIMING };
