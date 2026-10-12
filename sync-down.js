@@ -8,7 +8,7 @@
 //     (projects: [{ account, dir }], or a function giving it; ~/.claude for B and ~/.claude-a for A when not given;
 //     isOpen(id): true when this machine has it open in a way sessions/<pid>.json does not show yet, such as a panel
 //     the session host is starting; only(id): a scan looks only at the conversations this says true for, live tests)
-//     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), conflicts(), pull(id), owners() }
+//     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), conflicts(), pull(id), owners(), missing() }
 //
 // For S4's moves (sync-move.js), with ids lower-case:
 //   pull(id) -> Promise<{ outcome, reason?, dir?, folder?, row? }>: lay that conversation down now. It is urgent: it
@@ -23,6 +23,13 @@
 //     (device lower-case, leaseUntil = Date.parse(lease_until) or null, account the row's 'a' | 'b' or null: the
 //     account it ran under there). Empty before the first scan. status().listedAt is when that list began (ISO), so a
 //     change of owner made before then is in it.
+//
+// For "Clone what's missing" (sync-clone.js):
+//   missing() -> { at, repos: [{ origin, name, chats, newest }] }: the repos whose conversations the last whole scan
+//     skipped as "no checkout of its repo here" (origin as the repos row has it, sync-common.js rowOrigin; name its
+//     last path segment; chats how many rows; newest the latest updated_at), newest first. at is when that scan began
+//     (ISO), null before the first whole scan; a scan cut short (Supabase out of reach) or narrowed by only() leaves
+//     the list from before.
 //
 // One scan:
 //   1. This machine's device row (ensureDevice; last_seen_at at most every 5 minutes).
@@ -83,6 +90,7 @@ const ROWS_AT_ONCE = 4;
 const BACKOFF_MIN_MS = 30e3;
 const BACKOFF_MAX_MS = 30 * 60e3;
 const BAD_SEG_RE = /[<>:"|?*\\\x00-\x1f]/; // what a rel_cwd segment may not hold (Windows names, drives, streams)
+const NO_CHECKOUT = 'no checkout of its repo here';
 
 const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const lstatOr = (p) => { try { return fs.lstatSync(p); } catch { return null; } };
@@ -235,6 +243,7 @@ function createMaterializer(opts = {}) {
 
   const backoff = new Map(); // id -> { n, until }
   let ownersMap = new Map(); // id -> { device, leaseUntil, account }: the last scan's rows other devices own
+  let missingNow = { at: null, repos: [] }; // missing(): the last whole scan's repos with no checkout here
   const onlyOf = () => (typeof opts.only === 'function' ? opts.only : null);
 
   // ---------- several conversations at once, never one twice ----------
@@ -504,7 +513,7 @@ function createMaterializer(opts = {}) {
     const id = row.id.toLowerCase();
     const prev = state.convos[id] || null;
     const root = await rootFor(row.repo_id, ctx);
-    if (!root) return { outcome: 'skip', reason: 'no checkout of its repo here' };
+    if (!root) return { outcome: 'skip', reason: NO_CHECKOUT, origin: (ctx.repos && typeof row.repo_id === 'string' && ctx.repos.get(row.repo_id.toLowerCase())) || null };
     const parts = relParts(row.rel_cwd);
     if (!parts) return { outcome: 'skip', reason: 'its rel_cwd is not a plain relative path' };
     let folder = parts.length ? path.resolve(root, ...parts) : path.resolve(root);
@@ -628,6 +637,7 @@ function createMaterializer(opts = {}) {
     const ctx = newCtx(me);
     const tally = { rows: 0, unchanged: 0, done: 0, same: 0, conflict: 0, skip: 0, pending: 0, failed: 0, waiting: 0 };
     const reasons = {};
+    const lacking = new Map(); // origin -> { origin, name, chats, newest }: repos skipped as having no checkout here
     const only = onlyOf();
     const listStart = now();
     const rows = (await listRows(me)).filter((row) => row && typeof row.id === 'string' && UUID_RE.test(row.id) && (!only || only(row.id.toLowerCase())));
@@ -663,6 +673,12 @@ function createMaterializer(opts = {}) {
             const r = await syncOne(row, ctx, key);
             tally[r.outcome]++;
             if (r.reason) reasons[r.reason] = (reasons[r.reason] || 0) + 1;
+            if (r.reason === NO_CHECKOUT && typeof r.origin === 'string' && r.origin) {
+              const was = lacking.get(r.origin) || { origin: r.origin, name: r.origin.split('/').pop() || r.origin, chats: 0, newest: null };
+              was.chats++;
+              if (typeof row.updated_at === 'string' && (!was.newest || row.updated_at > was.newest)) was.newest = row.updated_at;
+              lacking.set(r.origin, was);
+            }
             if (r.outcome === 'done') st.laidDown++;
             backoff.delete(id);
           } catch (e) {
@@ -685,6 +701,10 @@ function createMaterializer(opts = {}) {
     } catch (e) { if (!fatal) fatal = e; } // anything else thrown between rows: the ones under way still settle first
     await Promise.allSettled([...going]);
     if (fatal) throw fatal;
+    if (!only) {
+      const newest = (r) => r.newest || '';
+      missingNow = { at: new Date(listStart).toISOString(), repos: [...lacking.values()].sort((a, b) => (newest(a) < newest(b) ? 1 : newest(a) > newest(b) ? -1 : 0)) };
+    }
     return { ...tally, reasons };
   }
 
@@ -721,6 +741,7 @@ function createMaterializer(opts = {}) {
   }
   // a copy: the caller cannot change this side's map
   const owners = () => new Map([...ownersMap].map(([id, o]) => [id, { ...o }]));
+  const missing = () => ({ at: missingNow.at, repos: missingNow.repos.map((r) => ({ ...r })) });
 
   let current = null, timer = null, interval = 5000;
   function scanOnce() {
@@ -771,7 +792,7 @@ function createMaterializer(opts = {}) {
   }
   const conflicts = () => Object.values(state.conflicts).map((c) => ({ ...c }));
 
-  return { scanOnce, start, stop, status, conflicts, pull, owners };
+  return { scanOnce, start, stop, status, conflicts, pull, owners, missing };
 }
 
-module.exports = { createMaterializer, relParts, planChunks, downStatePath, FETCH_AHEAD, ROWS_AT_ONCE };
+module.exports = { createMaterializer, relParts, planChunks, downStatePath, FETCH_AHEAD, ROWS_AT_ONCE, NO_CHECKOUT };

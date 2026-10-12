@@ -168,6 +168,7 @@ import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { mountUsage } from './usage.js';
 import { mountSync } from './sync.js';
+import { mountClone } from './clone.js';
 import { mountSetup } from './setup.js';
 import { mountPhone } from './phone.js';
 import { mountHousekeeping } from './housekeeping.js';
@@ -3435,6 +3436,8 @@ if (!SOLO) usageUi = mountUsage({
 if (state) usageUi?.update(state);
 // ---------- conversation sync: the header's "sync" button opens the Sync card (sync.js; sync-api.js on the server) ----------
 const syncUi = SOLO ? null : mountSync({ post, isRemote: remotePage, fixture: !!FIXTURE, openSetup: () => setupUi?.open() });
+// repos the other machines' chats work in that this one has no checkout of: asked once, then cloned by themselves (clone.js)
+if (!SOLO) mountClone({ post, isRemote: remotePage, fixture: !!FIXTURE });
 // ---------- the start screen: work locally or sync with Blackbox, asked before anything else on Henry's machines (setup.js; sync-setup.js) ----------
 const setupUi = SOLO ? null : mountSetup({ post, isRemote: remotePage, fixture: !!FIXTURE });
 setupUi?.check();

@@ -144,6 +144,36 @@ The server decides who may sync, not this code. The `fleet_sync.members` list is
 and every storage policy. A Google account that is not on the list can sign in, but it reads and writes nothing.
 The page tells it so.
 
+## Repos this machine lacks (clone what's missing)
+
+A conversation from a repo this machine has no checkout of is skipped (`/sync/activity`: "no checkout of its repo
+here"). The materializer lists those repos (`sync-down.js` `missing()`), and `sync-clone.js` clones them, so their
+chats come over. Nothing new goes to Supabase: it only reads the repos rows sync already has.
+
+- **Ask once, then automatic** (Henry, 2026-10-11). The first time such repos exist, the page shows a card: the
+  repos (each ticked), the folder they go in, "Clone new repos automatically from now on" (ticked), **Clone** and
+  **Not now**. Not now keeps it quiet until a new repo goes missing. Once Henry clones with automatic on, each repo
+  that goes missing later is cloned by itself, once (a repo he unticked never is). The Sync card's **Repos** part
+  lists what is missing with a **Clone** button each, the switch, and the clone folder (**Change**).
+- **Where:** the folder most of this machine's checkouts live in (`Z:\Github` on the PC, `~/code` on the Mac), else
+  `~/code` on a Mac, else the home folder; the Sync card can pick another. A repo goes in `<folder>/<name>`, or
+  `<name>-2` when that name is taken: never into a folder that is there, except one already holding a checkout of
+  that very repo, which is simply added. The clone is made in a hidden folder beside it and renamed into place when
+  complete, so a failed clone leaves nothing.
+- **How:** `git clone` as the user, with no prompt: the machine's credential helper (the Keychain, gh) answers or the
+  clone fails at once. For GitHub, `gh repo clone` is tried next when gh is here. Still refused: "Sign in to GitHub on
+  this machine: gh auth login". The new checkout is added like **Add workspace…** (`POST /repos/add`), and the
+  materializer scans again at once.
+- **Dependencies**, in the background after the clone: `package-lock.json` runs `npm ci`, `pnpm-lock.yaml`
+  `pnpm install --frozen-lockfile`, `yarn.lock` `yarn install --frozen-lockfile`, `bun.lock(b)` `bun install`. A
+  missing tool or a failed install is a note, never a failed clone; the output goes to `<dataDir>/clone.log`. A
+  checkout that was already there is left as it is.
+- **Routes** (this machine's own page only; 404 while sync is not set up): `GET /sync/missing`, `POST /sync/missing
+  { notNow?, auto?, folder? }`, `POST /sync/clone { origins, folder?, auto?, skip? }` (answers at once with a job),
+  `GET /sync/clone?id=`. The policy is this machine's own (`~/.fleet-view.json` `syncClone`), never shared.
+
+Test: `node scripts/sync-clone-test.js` (local bare repos stand in for GitHub, a fake Supabase for the rows).
+
 ## Linking machines
 
 While sync runs, `sync-run.js` also runs the link (`link.js`, [link.md](link.md)) beside the mover: Henry links two of

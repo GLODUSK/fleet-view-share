@@ -18,7 +18,7 @@
 //                      intervalMs, checkMs, prefs, relay, version, makeUploader, makeMaterializer, makeMover, makeLive,
 //                      makePrefs, makeLink })
 //     -> { start(), stop(), check(), status(), move(id, { force }), moveStatus(id), cancelMove(id), owners(), device(),
-//          live(), prefsChanged(), link() }
+//          live(), prefsChanged(), link(), missing(), rescan() }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
 //   are one (by default each side's own: ~/.claude and ~/.claude-a); accountOf(id) -> the account a conversation ran
 //   under here or null (fleet-view.js: its claude process, or remembered), the uploader's option of that name, so its
@@ -233,6 +233,13 @@ function createSyncRunner(o = {}) {
     },
     prefsChanged() { if (run && run.prefs) { try { run.prefs.nudge(); } catch {} } },
     link() { return run && run.link ? run.link : null; },
+    // "Clone what's missing" (sync-clone.js): the materializer's missing() ({ at: null, repos: [] } while not running),
+    // and rescan(): a scan now, so a repo just cloned brings its conversations without waiting for the next round
+    missing() {
+      if (!run || typeof run.down.missing !== 'function') return { at: null, repos: [] };
+      try { return run.down.missing(); } catch { return { at: null, repos: [] }; }
+    },
+    rescan() { if (run && typeof run.down.scanOnce === 'function') run.down.scanOnce().catch(() => {}); },
   };
 }
 

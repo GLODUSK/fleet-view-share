@@ -29,6 +29,7 @@ const SYNC_PREFS = require(path.join(__dirname, 'sync-prefs.js'));
 const SYNC_ACCOUNTS = require(path.join(__dirname, 'sync-accounts.js'));
 const SYNC_COMMON = require(path.join(__dirname, 'sync-common.js'));
 const SYNC_SETUP_JS = require(path.join(__dirname, 'sync-setup.js'));
+const SYNC_CLONE = require(path.join(__dirname, 'sync-clone.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
@@ -6414,6 +6415,52 @@ const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, lo
   accountOf: (id) => knownAccount(String(id).toLowerCase()),
   prefs: { read: prefsGroups, apply: applyPrefs, translate: PREFS_ROOTS,
     load: () => saved.prefsSync, save: (s) => { saved.prefsSync = s; saveSettings(); } } });
+// "Clone what's missing" (sync-clone.js): a repo whose synced chats have no checkout here is cloned into this machine's
+// clone folder and added as POST /repos/add adds one, so the materializer brings its chats; asked once, then automatic
+// (its policy is this machine's own: settings.syncClone, which sync-prefs.js never shares)
+const CLONER = SYNC_CLONE.createCloner({ dataDir: LOG_DIR, log: (t) => logOnce(t, t),
+  missing: () => SYNC_RUNNER.missing(), roots: () => pageRepos(), rescan: () => SYNC_RUNNER.rescan(),
+  register: (dir) => { const [code, out] = addRepo(dir); return { ok: code === 200 && !!(out && out.ok), message: out && out.message }; },
+  settings: { read: () => saved.syncClone, write: (v) => { saved.syncClone = v; saveSettings(); } } });
+if (!DEMO) {
+  const cloneTick = setInterval(() => { CLONER.tick().catch((e) => logOnce('clone:tick', `sync-clone: ${(e && e.message) || e}`)); }, 30e3);
+  if (cloneTick.unref) cloneTick.unref();
+}
+// /sync/missing and /sync/clone: "Clone what's missing", on this machine's own page only (never a remote browser, never
+// another site's page); 404 while sync is not set up, as the other /sync routes.
+//   GET  /sync/missing   -> the cloner's view(): { ok, at, repos: [{ origin, name, chats, newest, state, fresh, message? }],
+//                           ask, auto, folder, defaultFolder, picked, jobs }
+//   POST /sync/missing { notNow?: true, auto?: boolean, folder?: string | null } -> the same view, after the change
+//   POST /sync/clone { origins: [...], folder?, auto?, skip?: [...] } -> 200 { ok, job, busy } at once, the clones
+//                           going on in the background | 400 { ok: false, message }
+//   GET  /sync/clone?id=<job id> -> 200 the job | 404
+function syncClone(req, res, pathname) {
+  if (!SYNC.enabled()) return sendJson(res, 404, { ok: false, message: 'sync is not set up on this PC' });
+  if (remoteOf(req)) return sendJson(res, 403, { ok: false, message: 'only on this machine' });
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site' || site === 'same-site') return sendJson(res, 403, { ok: false, message: 'bad origin' });
+  const fail = (e) => (e && e.code === 'bad_request' ? sendJson(res, 400, { ok: false, message: e.message }) : requestFailed(req, res, e));
+  const isGet = req.method === 'GET' || req.method === 'HEAD';
+  if (pathname === '/sync/missing') {
+    if (isGet) return void CLONER.view().then((v) => sendJson(res, 200, v), fail);
+    if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'GET or POST' });
+    return readBody(req, res, (b) => {
+      if (!b || typeof b !== 'object') return sendJson(res, 400, { ok: false, message: 'bad json' });
+      CLONER.setPolicy({ notNow: b.notNow === true, auto: typeof b.auto === 'boolean' ? b.auto : undefined, folder: b.folder })
+        .then((v) => sendJson(res, 200, v), fail);
+    });
+  }
+  if (isGet) {
+    const job = CLONER.job(new URL(req.url, 'http://x').searchParams.get('id') || '');
+    return job ? sendJson(res, 200, job) : sendJson(res, 404, { ok: false, message: 'no such clone' });
+  }
+  if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'GET or POST' });
+  return readBody(req, res, (b) => {
+    if (!b || typeof b !== 'object') return sendJson(res, 400, { ok: false, message: 'bad json' });
+    CLONER.clone(b.origins, { folder: b.folder, auto: typeof b.auto === 'boolean' ? b.auto : undefined, skip: b.skip })
+      .then((r) => sendJson(res, 200, r), fail);
+  });
+}
 // the start screen on Henry's machines (private.json): work locally or sync with Blackbox, then the steps of sync
 const SYNC_SETUP = SYNC_SETUP_JS.createSyncSetup({ dataDir: LOG_DIR, sync: DEMO ? null : SYNC, runner: SYNC_RUNNER, accountSync: ACCOUNT_SYNC,
   accountsView: () => ACCTS.view(), private: SYNC_PRIVATE, log: (t) => logOnce(t, t) });
@@ -6577,6 +6624,7 @@ function handleRequest(req, res) {
     return sendJson(res, 200, st);
   }
   if (pathname === '/sync/move') return syncMove(req, res);
+  if (pathname === '/sync/missing' || pathname === '/sync/clone') return syncClone(req, res, pathname);
   if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   // GET /relay/status, POST /relay/pair | revoke (relay.js): this PC only, never a remote device; its POSTs need this page's Origin
   if (pathname === '/relay' || pathname.startsWith('/relay/')) return RELAY.handle(req, res, pageCtx);

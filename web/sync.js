@@ -13,6 +13,8 @@
 //                        refuses embedded windows, and this page may be inside the Fleet View window); the card then
 //                        watches the status until it says signed in
 //   Sign out             POST /sync/signout, after a second click in the card
+//   Repos                clone.js cloneSection: the repos with synced chats and no checkout here, Clone, "Clone new
+//                        repos automatically" and the clone folder (this PC's own page only)
 // A remote browser (the phone, another computer) sees the same card read-only: sign-in is done on the PC.
 //
 // On Henry's own machines (GET /sync/setup says private) it also says whether this machine syncs with Blackbox or
@@ -32,6 +34,7 @@
 //   mountSync({ post, isRemote, fixture, openSetup }) -> { open(), close(), toggle(), isOpen() }
 import { esc } from './cards.js';
 import { icon } from './icons.js';
+import { cloneSection } from './clone.js';
 
 const POLL_MS = 3000;
 const LINK_WATCH_MS = 5000; // GET /link/status while the card is closed: a link request opens it
@@ -60,6 +63,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
   let answered = false;
   let link = null; // GET /link/status
   let confirmUnlink = null; // the machine whose Unlink waits for a second click
+  let cloneUi = null; // the Repos part (clone.js) while the card is open
 
   async function get(url) {
     if (fixture) return null;
@@ -326,10 +330,12 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     card.innerHTML = `<div class="uw-top"><span class="uw-title">${icon('sync', 14)}<b>Sync</b></span><span class="uw-sub">conversations across your machines</span>`
       + `<button type="button" class="uw-x" aria-label="close" title="close (Esc)">${icon('close', 13)}</button></div>`
       + '<div class="uw-scroll"><div class="sy-main"></div><div class="sy-sec sy-key" hidden></div><div class="sy-sec sy-act" hidden></div><div class="sy-sec sy-link" hidden></div>'
+      + '<div class="sy-sec sy-clone" hidden></div>'
       + '<div class="sy-note" hidden aria-live="polite"></div></div>'
       + `<div class="uw-foot">${remote() ? 'Read-only here: sign-in and sign-out are done on the PC.' : 'Chats sync through your Supabase project, encrypted with the sync key before they leave this PC.'}</div>`;
     document.body.appendChild(card);
     draw();
+    cloneUi = cloneSection(card.querySelector('.sy-clone'), { post, isRemote: remote, fixture });
     card.addEventListener('click', (ev) => { if (ev.target.closest('.uw-x')) close(); else onClick(ev); });
     card.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } });
     setTimeout(() => document.addEventListener('pointerdown', outside, true), 0);
@@ -342,6 +348,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     clearTimeout(timer);
     timer = null;
     gen++;
+    if (cloneUi) { cloneUi.stop(); cloneUi = null; }
     card.remove();
     card = null;
     waiting = false;
