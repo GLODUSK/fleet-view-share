@@ -744,6 +744,8 @@ function createBots(deps) {
     // state.bots, and GET /api/bots
     view: () => (d.demo ? [] : listView(bots, live).map(withTasks)),
     list: () => [200, { ok: true, bots: d.demo ? [] : listView(bots, live).map(withTasks) }],
+    // the conversation each bot's row opens (its convId): fleet-view.js keeps these listed however quiet they are
+    chatIds: () => (d.demo ? [] : listView(bots, live).map((v) => v.convId).filter(Boolean)),
     // ~/.fleet-view.json's bots
     saveShape: () => bots.map((b) => ({ ...b, ids: [...b.ids], told: [...b.told] })),
     create, start, update, remove, look, switchTo, tick,

@@ -411,6 +411,8 @@ await (async () => {
     await h.bots.tick();
     assert.deepEqual(h.saved()[0].ids, [first, next]);
     assert.equal(h.bots.view()[0].convId, next);
+    // the one /state keeps listed however quiet: the row's conversation, not the earlier one
+    assert.deepEqual(h.bots.chatIds(), [next]);
     assert.equal(h.calls.deliver.length, 2); assert.equal(h.calls.deliver[1].to, next);
     // a pickup is no new bot: just "ok", no second hello
     assert.equal(h.calls.deliver[1].text, `[Fleet View] You are Scout, one of Henry's bots. Your id: ${next}. Reply with just "ok".`);
@@ -477,6 +479,7 @@ await (async () => {
     assert.equal(code, 200); assert.equal(out.ok, true); assert.equal(out.bot.live, false);
     assert.deepEqual(h.calls.end, [made.id]);
     assert.deepEqual(h.bots.view(), []);
+    assert.deepEqual(h.bots.chatIds(), []); // a removed bot's chat ages off like any other
     assert.equal(h.saved()[0].removed, true);
     assert.equal(h.bots.tagOf([])(made.id), bid);
     assert.equal(h.bots.vouch(made.id), null); // not resumed through the API any more

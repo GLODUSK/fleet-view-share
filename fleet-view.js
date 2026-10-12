@@ -2256,6 +2256,17 @@ const endedLongAgo = (s, now) => s.state === 'DONE' && !s.turnOpen && !s.remote?
 const keepRemembered = (s, now) => s.state !== 'DONE' && remembered.sessions.has(s.id) && now - (s.actT || s.mtime || 0) < REMEMBER_MS;
 // its live claude waits on you (a prompt, or a panel left open): kept however long its log has been quiet
 const liveWaiting = (id) => liveProcs.get(id)?.status === 'waiting';
+// the conversations the Bots tab opens, the Chief's and each bot's (chief.js view, bots.js chatIds): kept however long
+// their logs have been quiet, as the tab draws a chat and its box only for a conversation /state lists (read once per
+// discover)
+let overseerKeep = new Set();
+function overseerIds() {
+  const out = new Set();
+  if (DEMO) return out;
+  try { const id = CHIEF && CHIEF.view().id; if (id) out.add(id); } catch {}
+  try { for (const id of (BOTS && BOTS.chatIds()) || []) out.add(id); } catch {}
+  return out;
+}
 function dropSession(s) {
   sessions.delete(s.id);
   if (remembered.sessions.delete(s.id)) saveSettings();
@@ -2270,6 +2281,7 @@ function discover() {
   const now = Date.now();
   const horizon = Math.max(WINDOW_MS, KEEP_DONE_MS);
   for (const [id, m] of passed) if (now - m > horizon) passed.delete(id);
+  overseerKeep = overseerIds();
   // every log in both accounts' projects folders; a conversation moved between accounts (/swap) can have
   // a log in each, and the one written last is the live one
   const found = new Map(); // id -> { file, pdir, m, account, root }
@@ -2279,7 +2291,7 @@ function discover() {
       for (const f of ls(pdir)) {
         if (!f.endsWith('.jsonl')) continue;
         const file = path.join(pdir, f), m = mtime(file), id = f.slice(0, -6);
-        const rem = remembered.sessions.has(id) && now - m < REMEMBER_MS * 7;
+        const rem = (remembered.sessions.has(id) && now - m < REMEMBER_MS * 7) || overseerKeep.has(id);
         if (!sessions.has(id) && !rem && !liveWaiting(id) && (now - m > horizon || passed.get(id) === m) && !ownerView(id)?.listed) continue;
         const old = found.get(id);
         if (!old || m > old.m) found.set(id, { file, pdir, m, account: r.account, root: r.dir });
@@ -2294,13 +2306,14 @@ function discover() {
       const ct = readJson(path.join(s.dir, 'custom-title.json'));
       if (ct?.customTitle) s.custom = ct.customTitle;
       // older than the window: kept only if it is a finished turn, so its PRs are read once that is known
-      s.late = now - x.m > WINDOW_MS && !remembered.sessions.has(id) && !liveWaiting(id);
+      s.late = now - x.m > WINDOW_MS && !remembered.sessions.has(id) && !liveWaiting(id) && !overseerKeep.has(id);
       if (!s.late) scanPrs(s);
       sessions.set(id, s);
     }
     if (s.file === x.file) s.mtime = x.m;
   }
   for (const s of [...sessions.values()]) {
+    if (overseerKeep.has(s.id)) continue;
     const ov = s.demo ? null : ownerView(s.id);
     if (ov) { if (!ov.listed) dropSession(s); continue; }
     if (endedLongAgo(s, now) || (s.state && now - s.mtime > WINDOW_MS && !keepDone(s, now) && !keepRemembered(s, now) && !liveWaiting(s.id))) dropSession(s);
