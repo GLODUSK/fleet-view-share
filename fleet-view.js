@@ -242,6 +242,46 @@ const API_HIDE_GUARD_MS = 30e3;
 // hiddenSync, bumped at each such list, so the page takes the server's hidden list whole (it otherwise only adds)
 const syncUnhid = new Map();
 let hiddenSync = 0;
+// conversations set aside by "Start clean" (POST /sync/fresh, docs/sync.md): the ones only this machine had when it
+// started clean, kept out of the way, never deleted. <dataDir>/sync/set-aside.json { v: 1, list: [{ id, at, size, m }] }
+// (at: when it was set aside; size and m: its log's then), written whole at each change (sync-common.js writeState),
+// never capped: one dropped would go up. This machine's own: never a shared group (prefsGroups), never uploaded
+// (sync-run.js skip), out of the session map, so out of /state, the live snapshot, the bound list and the Projects
+// view's older conversations. One used here again (its log grows past size, or a claude opens it) comes back by itself
+// (setAsideBack); POST /sync/fresh { bringBack } brings them back by hand.
+// setAsideHeld: the file is there but can't be read, or is gone after a fresh start was done here: what was set aside
+// is not known, so every upload is held (skip) until a new Start clean or POST /sync/fresh { bringBack: 'all' }
+const SET_ASIDE_FILE = path.join(SYNC_API.syncDir(P.dataDir()), 'set-aside.json');
+function cleanSetAside(list, now = Date.now()) {
+  if (!Array.isArray(list)) return null;
+  const out = new Map();
+  for (const x of list) {
+    if (!x || typeof x !== 'object' || typeof x.id !== 'string' || !UUID_RE.test(x.id)) continue;
+    const at = Number.isFinite(x.at) && x.at > 0 && x.at <= now + 60e3 ? Math.round(x.at) : now;
+    const size = Number.isFinite(x.size) && x.size >= 0 ? Math.round(x.size) : 0;
+    const m = Number.isFinite(x.m) && x.m >= 0 ? Math.round(x.m) : 0;
+    out.set(x.id.toLowerCase(), { id: x.id.toLowerCase(), at, size, m });
+  }
+  return out;
+}
+function loadSetAside() {
+  if (DEMO) return { list: new Map(), held: false };
+  let raw = null, gone = false;
+  try { raw = fs.readFileSync(SET_ASIDE_FILE, 'utf8'); } catch (e) { gone = !!e && e.code === 'ENOENT'; }
+  let j = null;
+  if (raw !== null) try { j = JSON.parse(raw.replace(/^﻿/, '')); } catch {}
+  const list = j && j.v === 1 ? cleanSetAside(j.list) : null;
+  if (list) return { list, held: false };
+  if (!gone) return { list: new Map(), held: true };
+  const f = SYNC_COMMON.readState(path.join(path.dirname(SET_ASIDE_FILE), 'fresh.json'), null);
+  return { list: new Map(), held: !!(f && f.done) };
+}
+// throws when it can't be written
+function saveSetAside() {
+  if (DEMO) return;
+  SYNC_COMMON.writeState(SET_ASIDE_FILE, { v: 1, list: [...setAside.values()] }, { compact: true });
+}
+let { list: setAside, held: setAsideHeld } = loadSetAside();
 // the API's throwaway sessions (POST /api/sessions { temp: true }): conversation ids, hidden from the map as soon
 // as they are stopped or end (sweepTemp), at most 200, kept in settings so a restart doesn't forget them
 const API_TEMP_MAX = 200;
@@ -2334,6 +2374,8 @@ function discover() {
   const horizon = Math.max(WINDOW_MS, KEEP_DONE_MS);
   for (const [id, m] of passed) if (now - m > horizon) passed.delete(id);
   overseerKeep = overseerIds();
+  // set aside by "Start clean": one a claude has open here again comes back; the rest stay out of the map
+  if (setAside.size) for (const id of liveProcs.keys()) if (setAside.has(String(id).toLowerCase())) bringBack([id], 'a claude opened it here');
   // every log in both accounts' projects folders; a conversation moved between accounts (/swap) can have
   // a log in each, and the one written last is the live one
   const found = new Map(); // id -> { file, pdir, m, account, root }
@@ -2343,6 +2385,7 @@ function discover() {
       for (const f of ls(pdir)) {
         if (!f.endsWith('.jsonl')) continue;
         const file = path.join(pdir, f), m = mtime(file), id = f.slice(0, -6);
+        if (setAside.size && setAside.has(id.toLowerCase()) && !setAsideBack(id.toLowerCase(), file, m)) continue;
         const rem = (remembered.sessions.has(id) && now - m < REMEMBER_MS * 7) || overseerKeep.has(id);
         if (!sessions.has(id) && !rem && !liveWaiting(id) && (now - m > horizon || passed.get(id) === m) && !ownerView(id)?.listed) continue;
         const old = found.get(id);
@@ -2365,6 +2408,7 @@ function discover() {
     if (s.file === x.file) s.mtime = x.m;
   }
   for (const s of [...sessions.values()]) {
+    if (!s.demo && setAside.size && setAside.has(String(s.id).toLowerCase())) { dropSession(s); continue; }
     if (overseerKeep.has(s.id)) continue;
     const ov = s.demo ? null : ownerView(s.id);
     if (ov) { if (!ov.listed) dropSession(s); continue; }
@@ -5882,7 +5926,7 @@ function repoHistory(root) {
   const keys = new Set([rootKey(root)]);
   const g = path.isAbsolute(root) ? gitInfo(path.join(root, '_')) : null;
   if (g) keys.add(rootKey(g.root));
-  const list = [...historyNewest().values()].filter((e) => e.repoRoot && keys.has(rootKey(e.repoRoot)))
+  const list = [...historyNewest().values()].filter((e) => e.repoRoot && keys.has(rootKey(e.repoRoot)) && !setAside.has(e.id))
     .sort((a, b) => b.m - a.m).slice(0, HISTORY_MAX);
   const items = list.map((e) => {
     const s = sessions.get(e.id);
@@ -6718,6 +6762,10 @@ const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, lo
   // a turn under way here (its claude alive and busy: the pid file's status, else the feed's or the log's open turn):
   // the uploader sends such a chat at most every 45 s, and at once when the turn ends (waiting on Henry counts as ended)
   busy: (id) => syncBusy(String(id).toLowerCase()),
+  // "Start clean": a conversation set aside here never goes up; a fresh start waiting is done before any loop starts
+  // (every one while the set-aside list can't be read: setAsideHeld)
+  skip: (id) => setAsideHeld || setAside.has(String(id).toLowerCase()),
+  beforeStart: (a) => freshBeforeStart(a),
   prefs: { read: prefsGroups, apply: applyPrefs, translate: PREFS_ROOTS,
     load: () => saved.prefsSync, save: (s) => { saved.prefsSync = s; saveSettings(); } } });
 // "Clone what's missing" (sync-clone.js): a repo whose synced chats have no checkout here is cloned into this machine's
@@ -6768,7 +6816,267 @@ function syncClone(req, res, pathname) {
 }
 // the start screen on Henry's machines (private.json): work locally or sync with Blackbox, then the steps of sync
 const SYNC_SETUP = SYNC_SETUP_JS.createSyncSetup({ dataDir: LOG_DIR, sync: DEMO ? null : SYNC, runner: SYNC_RUNNER, accountSync: ACCOUNT_SYNC,
-  accountsView: () => ACCTS.view(), private: SYNC_PRIVATE, log: (t) => logOnce(t, t) });
+  accountsView: () => ACCTS.view(), private: SYNC_PRIVATE, log: (t) => logOnce(t, t),
+  // Work locally drops a fresh start not done yet ("Start clean" below), so it never runs when sync is chosen later
+  chose: (mode) => { if (mode === 'local' && !DEMO) cancelFresh('this machine works locally'); } });
+
+// ---------- "Start clean" (Henry, 2026-10-12: "clear the workspace in whichever computer and mirror what i have on the other one") ----------
+// A fresh start makes this machine mirror Blackbox: the conversations only it has are set aside (setAside above: kept,
+// never deleted or moved, and back by themselves when used here again), the shared settings are Blackbox's, and the
+// other machine's repos are cloned by themselves. POST /sync/fresh { start: true } writes <dataDir>/sync/fresh.json
+// { pending: true, at }, chooses sync (sync-setup.js choose) and restarts the runner; the runner's beforeStart
+// (freshBeforeStart) then, before any loop starts, so nothing goes up first:
+//   1. lists every conversation id on Blackbox (any state, paged by id as sync-down.js does); a failure throws and the
+//      loops stay off ("starting clean: could not list ..."), fresh.json stays pending and the next gate check tries again
+//   2. sets aside every conversation in the projects folders the uploader reads (A's and B's) that Blackbox has not,
+//      except one open here now (a claude's pid file, or alive in the session host), and writes set-aside.json (a
+//      failure throws as in 1: nothing goes up while that list is not on disk)
+//   3. empties every shared group here (keeping each group's local-only items, sync-prefs.js localOnly) and forgets
+//      settings.prefsSync, so the prefs loop's first join takes Blackbox's rows as they are (a group with no row stays
+//      empty, and goes up empty)
+//   4. turns "clone new repos automatically" on (sync-clone.js; a repo declined there before stays declined)
+//   5. writes fresh.json { pending: false, at, done: { at, setAside, kept } }; pending stays true when another start
+//      was asked meanwhile (its at), and the runner runs it next (sync-run.js restart)
+// POST /sync/fresh { cancel: true }, or choosing "Work locally", drops a fresh start not done yet; one cancelled while
+// Blackbox is being listed changes nothing here
+const FRESH_FILE = path.join(SYNC_API.syncDir(LOG_DIR), 'fresh.json');
+const FRESH_PAGE = 1000; // conversation ids per request (Supabase's default max-rows)
+const syncName = () => (SYNC_PRIVATE && SYNC_PRIVATE.syncName) || 'Blackbox';
+const errMsg = (e) => String((e && e.message) || e || 'failed').replace(/\s+/g, ' ').slice(0, 200);
+function readFresh() {
+  const j = SYNC_COMMON.readState(FRESH_FILE, null);
+  if (!j || typeof j !== 'object') return null;
+  const d = j.done && typeof j.done === 'object' && Number.isFinite(j.done.at) ? { at: j.done.at, setAside: Number(j.done.setAside) || 0, kept: Number(j.done.kept) || 0 } : null;
+  return { pending: j.pending === true, at: Number.isFinite(j.at) ? j.at : null, done: d };
+}
+const writeFresh = (j) => SYNC_COMMON.writeState(FRESH_FILE, j);
+// every conversation id Blackbox has, any state -> Set (lower case); throws when it can't be listed
+async function blackboxIds(api) {
+  const out = new Set();
+  let after = null;
+  for (;;) {
+    const q = { select: 'id', order: 'id.asc', limit: String(FRESH_PAGE) };
+    if (after) q.id = `gt.${after}`;
+    const rows = await api.rest('GET', 'conversations', { query: q });
+    if (!Array.isArray(rows)) throw new Error('Supabase answered with no list');
+    for (const r of rows) if (r && typeof r.id === 'string') out.add(r.id.toLowerCase());
+    const last = rows[rows.length - 1];
+    if (rows.length < FRESH_PAGE || !last || typeof last.id !== 'string') break;
+    after = last.id;
+  }
+  return out;
+}
+// every conversation log in the projects folders the uploader reads (sync-common.js projectsDirs: A's and B's) -> Map
+// id -> { size, m } of its newest copy
+function localConversations() {
+  const out = new Map();
+  for (const { dir } of SYNC_COMMON.projectsDirs()) {
+    for (const proj of ls(dir)) {
+      const pdir = path.join(dir, proj);
+      for (const f of ls(pdir)) {
+        const mm = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(f);
+        if (!mm) continue;
+        let st;
+        try { st = fs.lstatSync(path.join(pdir, f)); } catch { continue; }
+        if (!st.isFile()) continue;
+        const id = mm[1].toLowerCase(), had = out.get(id);
+        if (!had || st.mtimeMs > had.m) out.set(id, { size: st.size, m: Math.round(st.mtimeMs) });
+      }
+    }
+  }
+  return out;
+}
+// the conversations open here now: a live claude's pid file, or alive in the session host (its list, 5 s at most)
+async function openHere() {
+  const out = new Set();
+  try { scanLiveProcs(); } catch {}
+  for (const id of liveProcs.keys()) out.add(String(id).toLowerCase());
+  let list = null;
+  try { list = await Promise.race([Promise.resolve(API.hostList()), new Promise((r) => { const t = setTimeout(() => r(null), 5e3); if (t.unref) t.unref(); })]); } catch {}
+  for (const p of Array.isArray(list) ? list : []) if (p && p.alive && typeof p.id === 'string') out.add(p.id.toLowerCase());
+  return out;
+}
+// what a fresh start would do with Blackbox's ids: { aside: [[id, { size, m }]], kept }
+function freshPlan(onBlackbox, open) {
+  const aside = [];
+  let kept = 0;
+  for (const [id, c] of localConversations()) {
+    if (onBlackbox.has(id) || open.has(id)) kept++;
+    else aside.push([id, c]);
+  }
+  return { aside, kept };
+}
+// one set aside whose log grew past what it was when set aside (it was used here again): taken off the list
+function setAsideBack(id, file, m) {
+  const x = setAside.get(id);
+  if (!x) return true;
+  if (m <= x.m) return false;
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { return false; }
+  if (size <= x.size) return false;
+  bringBack([id], 'its log grew here');
+  return true;
+}
+// takes these off the set-aside list (they show and go up as usual again) -> how many were on it
+function bringBack(ids, why) {
+  let n = 0;
+  for (const raw of ids) {
+    const id = String(raw).toLowerCase();
+    if (!setAside.delete(id)) continue;
+    passed.delete(id); // discover reads it again though its log did not change
+    n++;
+  }
+  if (n) {
+    logLine(`start clean: ${n} conversation${n === 1 ? '' : 's'} back from set aside (${why})`);
+    // not written: the file still lists them, so after a restart they are set aside again (never the other way)
+    try { saveSetAside(); } catch (e) { logLine(`start clean: the set-aside list could not be saved (${errMsg(e)})`); }
+  }
+  return n;
+}
+// drops a fresh start not done yet -> whether one was pending
+function cancelFresh(why) {
+  const f = readFresh();
+  if (!f || !f.pending) return false;
+  writeFresh({ pending: false, at: f.at, ...(f.done ? { done: f.done } : {}) });
+  logLine(`start clean: dropped (${why})`);
+  return true;
+}
+// the runner's beforeStart: the fresh start, while fresh.json says one is pending (else nothing)
+async function freshBeforeStart({ api, log, say }) {
+  if (DEMO) return;
+  const f = readFresh();
+  if (!f || !f.pending) return;
+  say(`starting clean: setting aside what is only on this machine, then mirroring ${syncName()}`);
+  let ids;
+  try { ids = await blackboxIds(api); } catch (e) { throw new Error(`starting clean: could not list ${syncName()}'s conversations (${errMsg(e)})`); }
+  const open = await openHere();
+  // cancelled while Blackbox was listed: nothing changes here
+  { const cur = readFresh(); if (!cur || !cur.pending) return; }
+  const plan = freshPlan(ids, open);
+  const now = Date.now();
+  for (const [id, c] of plan.aside) {
+    setAside.set(id, { id, at: now, size: c.size, m: c.m });
+    const s = sessions.get(id);
+    if (s && !s.demo) dropSession(s);
+  }
+  // on disk before anything else changes; a failure keeps the loops off (they hold back what is set aside meanwhile)
+  try { saveSetAside(); } catch (e) { throw new Error(`starting clean: the set-aside list could not be saved (${errMsg(e)})`); }
+  setAsideHeld = false;
+  // the shared settings: Blackbox's. Each group emptied here but for its local-only items; with what this device
+  // agreed on forgotten, the prefs loop's first join takes the rows' items as they are
+  const groups = prefsGroups();
+  for (const g of Object.keys(groups)) {
+    const G = SYNC_PREFS.GROUPS[g];
+    if (!G) continue;
+    const keep = G.localOnly ? (Array.isArray(groups[g]) ? groups[g] : []).filter((x) => { try { return G.localOnly(x); } catch { return false; } }) : [];
+    try { applyPrefs(g, keep); } catch (e) { log(`start clean: the ${g} could not be emptied here (${errMsg(e)})`); }
+  }
+  delete saved.prefsSync;
+  saveSettings();
+  // the other machine's repos come over by themselves
+  try { await CLONER.setPolicy({ auto: true }); } catch (e) { log(`start clean: clone new repos automatically could not be turned on (${errMsg(e)})`); }
+  // another start asked while this one worked (a new at): it stays pending, and runs next
+  const cur = readFresh(), next = !!(cur && cur.pending && cur.at !== f.at);
+  writeFresh({ pending: next, at: next ? cur.at : f.at || now, done: { at: Date.now(), setAside: plan.aside.length, kept: plan.kept } });
+  log(`start clean: ${plan.aside.length} conversation${plan.aside.length === 1 ? '' : 's'} only here set aside, ${plan.kept} kept; this machine now mirrors ${syncName()}`);
+}
+// the names of the other devices sync knows (fleet_sync.devices, newest seen first, one per name, not this one, none
+// unseen for 30 days unless that leaves none), read at most once a minute; [] when it can't be read
+let freshOthers = { at: 0, names: [] };
+async function syncOthers() {
+  if (Date.now() - freshOthers.at < 60e3) return freshOthers.names;
+  try {
+    const st = await SYNC.status();
+    if (!st || !st.signedIn) return freshOthers.names;
+    const rows = await SYNC.rest('GET', 'devices', { query: { select: 'id,name,last_seen_at' } });
+    const me = SYNC_COMMON.readState(SYNC_COMMON.devicePath(LOG_DIR), null);
+    const meId = me && typeof me.id === 'string' ? me.id.toLowerCase() : null, myName = os.hostname().toLowerCase();
+    const list = (Array.isArray(rows) ? rows : []).filter((d) => d && typeof d.name === 'string' && d.name.trim() && String(d.id).toLowerCase() !== meId && d.name.trim().toLowerCase() !== myName)
+      .map((d) => ({ name: d.name.trim().slice(0, 100), seen: Date.parse(d.last_seen_at) || 0 })).sort((a, b) => b.seen - a.seen);
+    const recent = list.filter((d) => Date.now() - d.seen < 30 * 86400e3);
+    const names = [];
+    for (const d of recent.length ? recent : list) if (!names.some((n) => n.toLowerCase() === d.name.toLowerCase())) names.push(d.name);
+    freshOthers = { at: Date.now(), names };
+  } catch {}
+  return freshOthers.names;
+}
+// the set-aside list as the page shows it: newest first, named as /state would (from the history index), repo the
+// folder's name (null for none, or the home folder)
+function setAsideView(limit) {
+  const hist = historyNewest();
+  return [...setAside.values()].sort((a, b) => b.at - a.at || b.m - a.m).slice(0, limit).map((x) => {
+    const e = hist.get(x.id);
+    const root = e && e.repoRoot ? e.repoRoot : null;
+    return { id: x.id, title: e ? historyName(e) : plain(names.get(x.id) || x.id.slice(0, 8), 80), repo: root && !isHomeRoot(root) ? repoName(root) : null, at: x.at };
+  });
+}
+async function freshView() {
+  const f = readFresh();
+  return { ok: true, others: await syncOthers(), pending: !!(f && f.pending), last: f && f.done ? f.done : null, setAside: setAsideView(50), count: setAside.size, held: setAsideHeld };
+}
+// /sync/fresh: "Start clean", on this machine's own page only (never a remote browser, never another site's page); 404
+// while sync is not set up and there is no private.json (a friend's install)
+//   GET  /sync/fresh -> { ok, others: [device names], pending, last: { at, setAside, kept } | null,
+//                         setAside: [{ id, title, repo, at }] (newest 50), count, held: every upload held (setAsideHeld) }
+//   GET  /sync/fresh?preview=1 -> the same and preview: { setAside, kept } (Blackbox listed now; nothing changes), or
+//                         preview: null and previewError: '<why>' (not signed in, Blackbox out of reach)
+//   POST /sync/fresh { start: true } -> { ok, message } | 409 { ok: false, message } (sync can't be set up here)
+//   POST /sync/fresh { cancel: true } -> { ok, cancelled }: a fresh start not done yet is dropped
+//   POST /sync/fresh { bringBack: [ids] | 'all' } -> { ok, count }: off the list, they show and go up as usual again
+//                         ('all' also ends held: uploads held because the list could not be read)
+function syncFresh(req, res) {
+  if (!SYNC.enabled() && !SYNC_PRIVATE) return sendJson(res, 404, { ok: false, message: 'sync is not set up on this PC' });
+  if (remoteOf(req)) return sendJson(res, 403, { ok: false, message: 'only on this machine' });
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site' || site === 'same-site') return sendJson(res, 403, { ok: false, message: 'bad origin' });
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    const preview = new URL(req.url, 'http://x').searchParams.get('preview') === '1';
+    return void (async () => {
+      const out = await freshView();
+      if (!preview) return sendJson(res, 200, out);
+      let st = null;
+      try { st = SYNC.enabled() ? await SYNC.status() : null; } catch {}
+      if (!st || !st.signedIn) return sendJson(res, 200, { ...out, preview: null, previewError: SYNC.enabled() ? `not signed in to ${syncName()}` : `sync with ${syncName()} is not set up on this machine yet` });
+      try {
+        const plan = freshPlan(await blackboxIds(SYNC), await openHere());
+        return sendJson(res, 200, { ...out, preview: { setAside: plan.aside.length, kept: plan.kept } });
+      } catch (e) {
+        return sendJson(res, 200, { ...out, preview: null, previewError: `could not list ${syncName()}'s conversations (${errMsg(e)})` });
+      }
+    })().catch((e) => requestFailed(req, res, e));
+  }
+  if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'GET or POST' });
+  return readBody(req, res, (b) => {
+    if (!b || typeof b !== 'object') return sendJson(res, 400, { ok: false, message: 'bad json' });
+    if ('bringBack' in b) {
+      const all = b.bringBack === 'all';
+      const ids = all ? [...setAside.keys()] : Array.isArray(b.bringBack) ? b.bringBack.filter((x) => typeof x === 'string' && UUID_RE.test(x)) : null;
+      if (!ids) return sendJson(res, 400, { ok: false, message: 'bringBack is a list of conversation ids, or "all"' });
+      const count = bringBack(ids, 'brought back by hand');
+      // all back: an unreadable list no longer holds the uploads (an empty one is written in its place)
+      if (all && setAsideHeld) {
+        try { saveSetAside(); setAsideHeld = false; logLine('start clean: uploads no longer held (everything brought back)'); } catch (e) { return sendJson(res, 500, { ok: false, message: `the set-aside list could not be saved: ${errMsg(e)}` }); }
+      }
+      return sendJson(res, 200, { ok: true, count });
+    }
+    if (b.cancel === true) {
+      const was = cancelFresh('cancelled by hand');
+      if (was) SYNC_RUNNER.check();
+      return sendJson(res, 200, { ok: true, cancelled: was });
+    }
+    if (b.start !== true) return sendJson(res, 400, { ok: false, message: 'send { start: true }, { cancel: true } or { bringBack }' });
+    if (!SYNC.enabled() && !(SYNC_PRIVATE && SYNC_PRIVATE.connect)) return sendJson(res, 409, { ok: false, message: `Sync with ${syncName()} is not set up on this machine: connect it first.` });
+    try {
+      // a new at each time (never the one before), so a start asked while another works is told apart from it
+      const prev = readFresh();
+      writeFresh({ pending: true, at: Math.max(Date.now(), ((prev && prev.at) || 0) + 1), ...(prev && prev.done ? { done: prev.done } : {}) });
+      SYNC_SETUP.choose('sync', { keepDone: true, check: false });
+    } catch (e) { return sendJson(res, 500, { ok: false, message: `could not start clean: ${errMsg(e)}` }); }
+    logLine(`start clean: asked; this machine will mirror ${syncName()}`);
+    SYNC_RUNNER.restart('starting clean').catch(() => {});
+    return sendJson(res, 200, { ok: true, message: `Starting clean: what is only here is set aside, then this machine mirrors ${syncName()}.` });
+  });
+}
 // /sync/move: "Continue here" brings a conversation another device has to this one (sync-run.js move, moveStatus,
 // cancelMove; sync-move.js does the work). This PC's page and approved remote browsers, as /sync/activity, and
 // never a request another site's page sent.
@@ -7173,6 +7481,7 @@ function handleRequest(req, res) {
   if (pathname === '/sync/pin') return syncPin(req, res);
   if (pathname === '/rules' || pathname.startsWith('/rules/')) return rulesRoute(req, res, pathname);
   if (pathname === '/sync/missing' || pathname === '/sync/clone') return syncClone(req, res, pathname);
+  if (pathname === '/sync/fresh') return syncFresh(req, res);
   if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   // GET /relay/status, POST /relay/pair | revoke (relay.js): this PC only, never a remote device; its POSTs need this page's Origin
   if (pathname === '/relay' || pathname.startsWith('/relay/')) return RELAY.handle(req, res, pageCtx);

@@ -1,6 +1,13 @@
 // Fleet View web: the Sync card (conversation sync, docs/sync.md). A click on the header's "sync" button opens it under
 // the header at the right, like the Usage card; Esc, its × or a click outside closes it.
 //
+// Top to bottom: a status block (one big state, Running / Not running / Working locally / Not signed in / Not set up,
+// with a ring in the health's colour: ok mint, warn gold, bad rose, off dim; then the signed-in account as a row with
+// its first letter in a circle, the membership chip and a quiet Sign out), Activity (three stat tiles, then one line
+// per loop where only an error stands out), the sync key in one row, Your machines, Repos, Set aside, and This machine
+// (the Claude accounts, Start clean, Work locally). Each section has a small-caps heading; a confirm is an inline panel
+// with a title line. Primary actions are filled cyan (sy-go), destructive ones rose (sy-danger), the rest outlined.
+//
 // It shows, read again every 3 seconds while it is open (and only then):
 //   GET /sync/status     not set up (the setup command to copy: setup needs the publishable key and stays in a
 //                        terminal) / signed out / signed in as <email>, on the members list or not
@@ -9,6 +16,9 @@
 //                        through, its last error's message and time, and whether it is backing off)
 //   GET /sync/setup      whether the sync key is on this PC (hasKey). No passphrase: once signed in, the server
 //                        fetches the key from Blackbox by itself (sync-run.js), and this only says so
+//   GET /sync/fresh      (this machine's own page only; 404 where sync isn't set up: then none of Start clean shows)
+//                        the other machines' names, whether a fresh start waits to run (pending), the last one, and
+//                        the chats set aside here (newest first, at most 50, and their count)
 // and does, on this PC's own page only:
 //   Sign in with Google  POST /sync/open-signin: the server opens the sign-in in the real default browser (Google
 //                        refuses embedded windows, and this page may be inside the Fleet View window); the card then
@@ -19,9 +29,22 @@
 // A remote browser (the phone, another computer) sees the same card read-only: sign-in is done on the PC.
 //
 // On Henry's own machines (GET /sync/setup says private) it also says whether this machine syncs with Blackbox or
-// works locally, and switches it: "Sync with Blackbox" sets the mode and opens the start screen (setup.js, through
-// openSetup), which walks through the steps; "Work locally" stops sync here (POST /sync/mode). While syncing, it says
+// works locally, and switches it. Working locally, two choice cards: "Sync with Blackbox" (keep what's here and add
+// Blackbox's) sets the mode and opens the start screen (setup.js, through openSetup), which walks through the steps;
+// "Start clean from Blackbox" (below). "Work locally" stops sync here (POST /sync/mode). While syncing, it says
 // whether the Claude accounts match Blackbox's. With sync not set up, the start screen sets it up (no terminal).
+//
+// Start clean (sync-fresh on the server): this machine mirrors the other one. Chats only on this machine are set aside,
+// never deleted: they leave this machine's map and chat list and never upload, and the Set aside list brings them
+// back. The shared settings (workspace names and order, hidden workspaces, map spots, teams, hidden chats) become the
+// other machine's, and its repos are cloned here. Opening its confirm reads GET /sync/fresh?preview=1 once (how many
+// chats would be set aside and how many stay; previewError when it could not count), never on a poll; confirming
+// posts /sync/fresh { start: true }, and the server chooses sync, restarts it and starts clean before anything
+// uploads. Working locally, the start screen then opens, as Sync with does; while syncing the card shows the message
+// and "Starting clean…" while the answer says pending, with Cancel ({ cancel: true }). held (the set-aside list could
+// not be read, so nothing uploads from here): an "Uploads held" row with Upload again ({ bringBack: 'all' }).
+// Set aside on this machine (N): five rows (title, repo, when), Show all for the rest, each with Bring back (POST
+// /sync/fresh { bringBack: [id] }), and Bring all back ({ bringBack: 'all' }) after a second click.
 //
 // Your machines (link.js, docs/link.md): the other machines sync knows, whether each is linked (and online), and:
 //   Link       POST /link/request { device }: the other machine's Sync card opens by itself with the request
@@ -49,15 +72,19 @@ const FINAL_STATES = new Set(['linked', 'declined', 'failed', 'expired', 'cancel
 const needsYou = (p) => p.state === 'confirm' || (p.role === 'answer' && p.state === 'waiting');
 const POLL_WAIT_MS = 1500; // while a sign-in is going on in the browser
 const HEALTH_WATCH_MS = 10e3; // GET /sync/activity while the card is closed: the pill's colour
+const ASIDE_SHOWN = 5; // Set aside rows before "Show all"
 const SETUP_CMD = 'node sync-api.js setup --url https://<project>.supabase.co --key <the publishable key>';
 const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
 const ago = (iso) => {
-  const t = Date.parse(iso || '');
+  const t = typeof iso === 'number' ? iso : Date.parse(iso || '');
   if (!t) return '';
   const s = Math.max(0, Math.round((Date.now() - t) / 1000));
-  return s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 360) / 10} h ago`;
+  return s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 360) / 10} h ago` : `${Math.round(s / 86400)} d ago`;
 };
 const clockOf = (iso) => { const t = Date.parse(iso || ''); return t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''; };
+const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const initial = (s) => (String(s || '').trim()[0] || '?').toUpperCase();
+const spin = '<span class="sy-spin" aria-hidden="true"></span>';
 
 export function mountSync({ post, isRemote = () => false, fixture = false, openSetup = () => {}, onHealth = () => {} } = {}) {
   let card = null, timer = null, gen = 0;
@@ -79,6 +106,10 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
   let link = null; // GET /link/status
   let confirmUnlink = null; // the machine whose Unlink waits for a second click
   let cloneUi = null; // the Repos part (clone.js) while the card is open
+  let fresh = null; // GET /sync/fresh (null: no answer, or sync not set up here)
+  let freshOpen = false; // Start clean's confirm is open
+  let freshPrev = null; // its preview: { loading } or { preview: { setAside, kept } | null, error }
+  let asideAll = false, confirmBringAll = false;
 
   async function get(url) {
     if (fixture) return null;
@@ -88,7 +119,8 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
 
   async function refresh() {
     const my = gen;
-    const [st, act, su, ln] = await Promise.all([get('/sync/status'), get('/sync/activity'), get('/sync/setup'), remote() ? null : get('/link/status')]);
+    const [st, act, su, ln, fr] = await Promise.all([get('/sync/status'), get('/sync/activity'), get('/sync/setup'),
+      remote() ? null : get('/link/status'), remote() ? null : get('/sync/fresh')]);
     link = ln && typeof ln.running === 'boolean' ? ln : null;
     setup = su && su.private ? su : null;
     keyInfo = su && typeof su.hasKey === 'boolean' ? { hasKey: su.hasKey, reason: su.reason || '' } : null;
@@ -96,6 +128,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     if (my !== gen || !card) return;
     answered = true;
     status = st; activity = act;
+    fresh = fr && fr.ok === true ? fr : null;
     if (waiting && st && st.signedIn) { waiting = false; note = { text: `Signed in as ${st.email || 'your Google account'}.` }; }
     draw();
   }
@@ -105,139 +138,238 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     timer = setTimeout(async () => { await refresh(); schedule(); }, waiting ? POLL_WAIT_MS : POLL_MS);
   }
 
+  // ---------- pieces ----------
+  // the big state with its ring (level: ok, warn, bad, off); title and sub are HTML, escaped by the caller
+  const hero = (level, title, sub) => `<div class="sy-hero"><span class="sy-ring ${level}" aria-hidden="true"><i></i></span>`
+    + `<div class="sy-hero-t"><div class="sy-state">${title}</div>${sub ? `<div class="sy-sub">${sub}</div>` : ''}</div></div>`;
+  const head = (ic, label, extra = '') => `<div class="sy-h">${icon(ic, 13)}<b>${label}</b>${extra}</div>`;
+  const btn = (c, label, { cls = '', attrs = '', off = busy } = {}) => `<button type="button" data-c="${c}"${cls ? ` class="${cls}"` : ''}${attrs}${off ? ' disabled' : ''}>${label}</button>`;
+  // a confirm: its title line, what happens, and the buttons
+  const confirmHtml = (title, body, btns, danger = false) => `<div class="sy-confirm${danger ? ' danger' : ''}" role="group">`
+    + `<div class="sy-ct">${title}</div>${body ? `<div class="sy-cb">${body}</div>` : ''}<div class="sy-btns">${btns}</div></div>`;
+
   // ---------- what the card says ----------
+  let heroLevel = 'off';
   function accountHtml() {
     const st = status;
-    if (!answered) return '<div class="sy-line sy-dim">Reading…</div>';
-    if (!st) return '<div class="sy-line sy-bad">Fleet View did not answer.</div>';
+    heroLevel = 'off';
+    if (!answered) return hero('off', 'Reading…', '');
+    if (!st) { heroLevel = 'bad'; return hero('bad', 'No answer', 'Fleet View did not answer.'); }
     if (setup && setup.mode === 'local') {
-      return `<div class="sy-line">This machine works locally: nothing syncs with ${esc(setup.name)}.</div>`
-        + (remote() ? '' : `<div class="sy-btns"><button type="button" data-c="to-sync" class="sy-go"${busy ? ' disabled' : ''}>Sync with ${esc(setup.name)}</button></div>`);
+      return hero('off', 'Working locally', `Nothing syncs with ${esc(setup.name)} here.`) + (remote() ? '' : localChoicesHtml());
     }
     if (!st.configured && setup && !remote()) {
-      return `<div class="sy-line">Sync with ${esc(setup.name)} is not set up on this machine yet.</div>`
-        + `<div class="sy-btns"><button type="button" data-c="setup" class="sy-go">Set it up</button></div>`;
+      return hero('off', 'Not set up', `Sync with ${esc(setup.name)} is not set up on this machine yet.`)
+        + `<div class="sy-btns">${btn('setup', 'Set it up', { cls: 'sy-go', off: false })}</div>`;
     }
     if (!st.configured) {
-      return `<div class="sy-line">Sync is not set up on this PC${st.problem ? ` (${esc(st.problem)})` : ''}.</div>`
+      return hero('off', 'Not set up', `Sync is not set up on this PC${st.problem ? ` (${esc(st.problem)})` : ''}.`)
         + (remote() ? '<div class="sy-line sy-dim">It is set up in a terminal on the PC.</div>'
           : '<div class="sy-line sy-dim">Set it up once in a terminal, in the Fleet View folder, with the project\'s publishable key:</div>'
-            + `<div class="sy-cmd"><code>${esc(SETUP_CMD)}</code><button type="button" data-c="copy" title="Copy the command">${icon('copy', 12)}Copy</button></div>`);
+            + `<div class="sy-cmd"><code>${esc(SETUP_CMD)}</code>${btn('copy', `${icon('copy', 12)}Copy`, { attrs: ' title="Copy the command"', off: false })}</div>`);
     }
     if (!st.signedIn) {
       // the last sign-in was lost (a renewal Supabase refused): said, never silent
       const lost = st.lost ? `<div class="sy-line sy-bad">${esc(st.lost)}${st.lostAt ? ` (${esc(ago(st.lostAt))})` : ''}</div>` : '';
-      if (remote()) return `<div class="sy-line">Not signed in.</div>${lost}<div class="sy-line sy-dim">Sign-in is done on the PC, in its Sync card.</div>`;
-      return `<div class="sy-line">Not signed in.</div>${lost}${st.refused ? `<div class="sy-line sy-bad">${esc(st.refused)} was turned away: only ${esc(st.onlyEmail || '')} can sync.</div>` : ''}`
-        + `<div class="sy-btns"><button type="button" data-c="signin" class="sy-go"${busy || waiting ? ' disabled' : ''}>${waiting ? 'Waiting for the browser…' : 'Sign in with Google'}</button>`
-        + `${waiting ? '<button type="button" data-c="signin">Open it again</button>' : ''}</div>`
-        + `<div class="sy-line sy-dim">${waiting ? 'Finish the sign-in in your browser; this card updates by itself.' : `It opens in your default browser. ${st.onlyEmail ? `Sign in as ${esc(st.onlyEmail)}: no other account can sync here.` : 'Use a Google account on the sync members list.'}`}</div>`;
+      heroLevel = st.lost ? 'bad' : 'off';
+      if (remote()) return hero(heroLevel, 'Not signed in', 'Sign-in is done on the PC, in its Sync card.') + lost;
+      return hero(heroLevel, 'Not signed in', waiting ? 'Finish the sign-in in your browser; this card updates by itself.'
+        : `It opens in your default browser. ${st.onlyEmail ? `Sign in as ${esc(st.onlyEmail)}: no other account can sync here.` : 'Use a Google account on the sync members list.'}`)
+        + lost + (st.refused ? `<div class="sy-line sy-bad">${esc(st.refused)} was turned away: only ${esc(st.onlyEmail || '')} can sync.</div>` : '')
+        + `<div class="sy-btns">${btn('signin', waiting ? `${spin}Waiting for the browser…` : 'Sign in with Google', { cls: 'sy-go', off: busy || waiting })}`
+        + `${waiting ? btn('signin', 'Open it again', { off: false }) : ''}</div>`;
+    }
+    // signed in: the state is the activity's
+    const a = activity, level = a && a.health && a.health.level;
+    let top;
+    if (!a) top = hero('off', 'Signed in', 'Whether it runs: no answer.');
+    else if (!a.running) { heroLevel = level === 'bad' ? 'bad' : 'off'; top = hero(heroLevel, 'Not running', `${esc(cap(a.reason || 'not started'))}.`); }
+    else {
+      heroLevel = level === 'warn' ? 'warn' : level === 'bad' ? 'bad' : 'ok';
+      const why = level === 'ok' ? 'All clean' : level === 'warn' || level === 'bad' ? `${a.health.name || 'sync'}: ${a.health.why || ''}` : '';
+      top = hero(heroLevel, 'Running', esc(why));
     }
     const member = st.member === true ? '<span class="uw-chip here">on the members list</span>'
       : st.member === false ? '<span class="uw-chip away">not on the members list</span>' : '<span class="uw-chip">membership not checked yet</span>';
-    let html = `<div class="sy-who"><span class="sy-email" title="${esc(st.email || '')}">Signed in as <b>${esc(st.email || 'your Google account')}</b></span>${member}</div>`;
+    let html = `${top}<div class="sy-acct"><span class="sy-av" aria-hidden="true">${esc(initial(st.email))}</span>`
+      + `<span class="sy-acct-t"><span class="sy-email" title="${esc(st.email || '')}"><span class="sy-vh">Signed in as </span>${esc(st.email || 'your Google account')}</span>${member}</span>`
+      + `${remote() || confirmOut ? '' : btn('signout', 'Sign out', { cls: 'sy-quiet' })}</div>`;
     if (st.member === false) html += '<div class="sy-line sy-bad">This account can read and write nothing: sign out and sign in with one on the list.</div>';
-    if (remote()) return `${html}<div class="sy-line sy-dim">Sign-in and sign-out are done on the PC.</div>`;
+    if (remote()) return html;
     if (confirmOut) {
-      html += '<div class="sy-confirm"><div>Sign out of sync on this PC? Syncing stops until you sign in again; the sync key stays.</div>'
-        + `<div class="sy-btns"><button type="button" data-c="do-out" class="sy-danger"${busy ? ' disabled' : ''}>Sign out</button><button type="button" data-c="keep">Keep</button></div></div>`;
-    } else html += `<div class="sy-btns"><button type="button" data-c="signout"${busy ? ' disabled' : ''}>Sign out</button></div>`;
+      html += confirmHtml('Sign out of sync on this PC?', 'Syncing stops until you sign in again; the sync key stays.',
+        btn('do-out', 'Sign out', { cls: 'sy-danger' }) + btn('keep', 'Keep', { off: false }), true);
+    }
     return html;
+  }
+  // working locally: keep what's here and add the other machine's, or start clean from it
+  function localChoicesHtml() {
+    const name = esc(setup.name);
+    const choice = (c, cls, ic, title, desc) => `<button type="button" data-c="${c}" class="sy-choice ${cls}"${busy ? ' disabled' : ''}>`
+      + `<span class="sy-cic">${icon(ic, 18)}</span><span class="sy-chx"><b>${title}</b><span class="sy-cd">${desc}</span></span><span class="sy-arrow">${icon('chevron', 15)}</span></button>`;
+    return `<div class="sy-choices">${choice('to-sync', 'main', 'sync', `Sync with ${name}`, `Keep what's here and add ${name}'s.`)}`
+      + `${choice('fresh-ask', freshOpen ? 'on' : '', 'down', `Start clean from ${name}`, `Set aside what's only here, then mirror ${name}.`)}</div>`
+      + (freshOpen ? freshConfirmHtml(setup.name, false) : '');
+  }
+  // the other machine(s) a fresh start mirrors: GET /sync/fresh's others, else the sync's name
+  function others() {
+    const o = fresh && Array.isArray(fresh.others) ? fresh.others.filter((x) => typeof x === 'string' && x) : [];
+    return o.length ? o : [(setup && setup.name) || 'Blackbox'];
+  }
+  // Start clean's confirm: what happens, with the preview's counts when it has them
+  function freshConfirmHtml(name, many) {
+    const p = freshPrev || {};
+    const whose = many ? 'the other machines\'' : `${esc(name)}'s`;
+    let aside;
+    if (p.loading) aside = `${spin}Counting the chats only on this machine…`;
+    else if (p.preview && Number.isFinite(p.preview.setAside)) {
+      aside = `<b>${esc(n(p.preview.setAside, 'chat', 'chats'))}</b> only on this machine ${p.preview.setAside === 1 ? 'gets' : 'get'} set aside (not deleted; you can bring them back).`
+        + (Number.isFinite(p.preview.kept) ? ` ${esc(n(p.preview.kept, 'chat stays', 'chats stay'))}.` : '');
+    } else aside = 'Chats only on this machine get set aside (not deleted; you can bring them back).';
+    const body = `<ul class="sy-list"><li>${aside}</li><li>Workspaces, names, map spots and teams become ${whose}.</li>`
+      + `<li>${many ? 'Their' : 'Its'} repos are cloned here.</li></ul>`
+      + (p.error && !p.loading ? `<div class="sy-line sy-dim">Couldn't count them now: ${esc(p.error)}.</div>` : '');
+    return confirmHtml(`Start clean from ${esc(name)}?`, body, btn('fresh-go', 'Start clean', { cls: 'sy-danger' }) + btn('fresh-cancel', 'Cancel', { off: false }), true);
   }
   function activityHtml() {
     const st = status, a = activity;
-    if (!st || !st.configured) return '';
-    if (!a) return '<div class="sy-line sy-dim">Whether it runs: no answer.</div>' + modeHtml();
-    return activityLines(a) + modeHtml();
+    if (!st || !st.configured || !st.signedIn || !a || !a.running) return '';
+    return activityLines(a);
   }
-  // Henry's machines: whether the Claude accounts match Blackbox's, and the switch to working locally
+  // This machine: whether the Claude accounts match Blackbox's (Henry's machines), Start clean, and the switch to
+  // working locally
   function modeHtml() {
-    if (!setup || setup.mode !== 'sync') return '';
-    const acc = setup.accounts;
+    const st = status;
+    if (!st || !st.configured) return '';
+    const syncing = !!(setup && setup.mode === 'sync');
+    const canFresh = !!fresh && !remote() && !!st.signedIn && !(setup && setup.mode === 'local');
+    if (!syncing && !canFresh) return '';
     let html = '';
-    if (acc && acc.ok) html += `<div class="sy-line sy-dim">Claude accounts match ${esc(setup.name)}'s (${(acc.letters || []).map((l) => esc(l.letter)).join(', ')}).</div>`;
-    else if (acc && !remote()) html += `<div class="sy-line sy-warn">Claude accounts: ${esc(acc.reason || 'not checked yet')}.</div><div class="sy-btns"><button type="button" data-c="setup">Fix them</button></div>`;
-    if (remote()) return html;
-    if (confirmLocal) {
-      return `${html}<div class="sy-confirm"><div>Work locally on this machine? Sync stops here; what is on ${esc(setup.name)} stays there.</div>`
-        + `<div class="sy-btns"><button type="button" data-c="do-local" class="sy-danger"${busy ? ' disabled' : ''}>Work locally</button><button type="button" data-c="keep-sync">Keep syncing</button></div></div>`;
+    const row = (ic, title, desc, right = '', cls = '') => `<div class="sy-orow${cls ? ` ${cls}` : ''}"><span class="sy-oic">${ic}</span><span class="sy-ot"><b>${title}</b>${desc ? `<span>${desc}</span>` : ''}</span>${right}</div>`;
+    const acc = syncing ? setup.accounts : null;
+    if (acc && acc.ok) html += row(icon('check', 14), 'Claude accounts match', `The same as ${esc(setup.name)}'s (${(acc.letters || []).map((l) => esc(l.letter)).join(', ')}).`, '', 'ok');
+    else if (acc) html += row(icon('alert', 14), 'Claude accounts', `${esc(cap(acc.reason || 'not checked yet'))}.`, remote() ? '' : btn('setup', 'Fix them', { off: false }), 'warn');
+    if (fresh && fresh.held && !remote()) {
+      html += row(icon('alert', 14), 'Uploads held', 'The list of chats set aside here could not be read, so nothing uploads from this machine. Start clean again, or upload everything here again.',
+        btn('do-bring-all', 'Upload again'), 'warn');
     }
-    return `${html}<div class="sy-btns"><button type="button" data-c="to-local"${busy ? ' disabled' : ''}>Work locally instead</button></div>`;
+    if (canFresh) {
+      const o = others(), name = o.length > 1 ? `${o.slice(0, -1).join(', ')} and ${o[o.length - 1]}` : o[0];
+      if (fresh.pending) html += row(spin, 'Starting clean…', `Setting aside what's only here, then mirroring ${esc(name)}.`, btn('fresh-stop', 'Cancel'), 'busy');
+      else {
+        const last = fresh.last && fresh.last.at ? `Last time ${esc(ago(fresh.last.at))}: ${esc(n(Number(fresh.last.setAside) || 0, 'chat', 'chats'))} set aside, ${esc(n(Number(fresh.last.kept) || 0, 'kept', 'kept'))}.` : '';
+        html += row(icon('down', 14), 'Start clean', `Set aside what's only here and mirror ${esc(name)}.${last ? `<br>${last}` : ''}`,
+          freshOpen ? '' : btn('fresh-ask', 'Start clean…'));
+        if (freshOpen) html += freshConfirmHtml(name, o.length > 1);
+      }
+    }
+    if (syncing && !remote()) {
+      html += row(icon('computer', 14), 'Work locally', `Stop syncing here; what is on ${esc(setup.name)} stays there.`, confirmLocal ? '' : btn('to-local', 'Work locally…'));
+      if (confirmLocal) {
+        html += confirmHtml('Work locally on this machine?', `Sync stops here; what is on ${esc(setup.name)} stays there.`,
+          btn('do-local', 'Work locally', { cls: 'sy-danger' }) + btn('keep-sync', 'Keep syncing', { off: false }), true);
+      }
+    }
+    return html;
+  }
+  // Set aside on this machine: the chats a fresh start took off this machine, each with Bring back
+  function asideHtml() {
+    if (remote() || !fresh || !(Number(fresh.count) > 0)) return '';
+    const list = Array.isArray(fresh.setAside) ? fresh.setAside.filter((x) => x && x.id) : [];
+    const shown = asideAll ? list : list.slice(0, ASIDE_SHOWN);
+    let html = shown.map((x) => `<div class="sy-arow"><span class="sy-at" title="${esc(x.title || '')}">${esc(x.title || 'Untitled chat')}</span>`
+      + `${btn('bring', 'Bring back', { attrs: ` data-id="${esc(x.id)}"` })}`
+      + `<span class="sy-as">${esc([x.repo, x.at ? `set aside ${ago(x.at)}` : ''].filter(Boolean).join(' · '))}</span></div>`).join('');
+    if (list.length > ASIDE_SHOWN) html += `<div class="sy-btns">${btn('aside-more', asideAll ? 'Show fewer' : `Show all ${list.length}`, { cls: 'sy-quiet', off: false })}</div>`;
+    if (Number(fresh.count) > list.length) html += `<div class="sy-line sy-dim">The ${list.length} newest show here.</div>`;
+    if (confirmBringAll) {
+      html += confirmHtml(`Bring all ${esc(String(fresh.count))} back?`, 'They show on this machine\'s map and chat list again, and sync from here like any other chat.',
+        btn('do-bring-all', 'Bring all back', { cls: 'sy-go' }) + btn('keep-aside', 'Keep them aside', { off: false }));
+    }
+    const all = confirmBringAll ? '' : btn('bring-all', 'Bring all back', { cls: 'sy-quiet sy-hr' });
+    return head('rewind', 'Set aside on this machine', `<span class="sy-count">${esc(String(fresh.count))}</span>${all}`)
+      + '<div class="sy-line sy-dim">Chats that were only here when this machine started clean. Nothing was deleted.</div>' + html;
   }
   // one loop's health: when it last went through, whether it backs off, and its last error with its time
-  function partLines(label, p) {
+  function partLines(label, p, extra = '') {
     const h = p && p.health;
     if (!h || typeof h !== 'object') return '';
-    const bits = [h.lastSuccessAt ? `last went through ${ago(h.lastSuccessAt)}` : 'nothing went through yet'];
+    const bits = [h.lastSuccessAt ? `went through ${ago(h.lastSuccessAt)}` : 'nothing went through yet'];
+    if (extra) bits.push(extra);
     if (h.backingOff) bits.push(`waiting until ${clockOf(h.backoffUntil)} before it tries again`);
-    let html = `<div class="sy-line sy-dim">${esc(label)}: ${esc(bits.join('; '))}.</div>`;
-    const e = h.lastError;
+    const e = h.lastError, streak = Number(h.failStreak) || 0;
+    const lvl = e && e.message ? (streak >= 3 ? 'bad' : 'warn') : h.backingOff ? 'warn' : 'ok';
+    let html = `<div class="sy-loop"><span class="sy-ldot ${lvl}" aria-hidden="true"></span><b>${esc(label)}</b><span>${esc(bits.join(' · '))}</span></div>`;
     if (e && e.message) {
-      const streak = Number(h.failStreak) || 0;
-      html += `<div class="sy-line ${streak >= 3 ? 'sy-bad' : 'sy-warn'}">${esc(label)}${streak > 1 ? ` (failed ${streak} times in a row)` : ''}: ${esc(e.message)}${e.at ? ` <span class="sy-dim">at ${esc(clockOf(e.at))}</span>` : ''}</div>`;
+      html += `<div class="sy-err ${streak >= 3 ? 'bad' : 'warn'}">${esc(label)}${streak > 1 ? ` (failed ${streak} times in a row)` : ''}: ${esc(e.message)}${e.at ? ` <span class="sy-dim">at ${esc(clockOf(e.at))}</span>` : ''}</div>`;
     }
     return html;
   }
   function activityLines(a) {
-    const level = a.health && a.health.level;
-    if (!a.running) return `<div class="sy-line"><span class="sy-dot ${level === 'bad' ? 'bad' : 'off'}"></span>Not running: ${esc(a.reason || 'not started')}.</div>`;
-    const why = level === 'ok' ? ', all clean' : level === 'warn' || level === 'bad' ? `: ${a.health.name || 'sync'}: ${a.health.why || ''}` : '';
-    const lines = [`<div class="sy-line"><span class="sy-dot ${level === 'warn' ? 'warn' : level === 'bad' ? 'bad' : 'on'}"></span>Running${esc(why)}.</div>`];
+    const num = (v) => (Number.isFinite(v) ? v : 0);
     const up = a.up && typeof a.up === 'object' && !a.up.error ? a.up : null;
     const down = a.down && typeof a.down === 'object' && !a.down.error ? a.down : null;
+    const live = a.live && typeof a.live === 'object' && !a.live.error ? a.live : null;
+    const conflicts = Array.isArray(a.conflicts) ? a.conflicts.length : down && Number.isFinite(down.conflicts) ? down.conflicts : 0;
+    const tile = (value, label, sub, title, cls = '') => `<div class="sy-tile${cls ? ` ${cls}` : ''}" title="${esc(title)}"><span class="sy-tv">${value}</span><span class="sy-tl">${esc(label)}</span><span class="sy-ts">${esc(sub)}</span></div>`;
+    const tiles = [];
     if (up) {
-      const num = (v) => (Number.isFinite(v) ? v : 0);
-      let t = `Uploading: ${num(up.synced)} of ${n(num(up.conversations), 'conversation', 'conversations')} up to date`;
-      if (num(up.pending)) t += `, ${num(up.pending)} waiting`;
-      if (up.lastScanAt) t += `; last look ${ago(up.lastScanAt)}`;
-      lines.push(`<div class="sy-line">${esc(t)}.</div>`);
-      if (up.health) lines.push(partLines('Uploads', up));
-      else if (up.lastError) lines.push('<div class="sy-line sy-bad">The last upload hit an error; it tries again by itself.</div>');
+      const t = `Uploading: ${num(up.synced)} of ${n(num(up.conversations), 'conversation', 'conversations')} up to date${num(up.pending) ? `, ${num(up.pending)} waiting` : ''}${up.lastScanAt ? `; last look ${ago(up.lastScanAt)}` : ''}`;
+      tiles.push(tile(`${num(up.synced)}<small>/${num(up.conversations)}</small>`, 'Up to date', num(up.pending) ? `${num(up.pending)} waiting` : 'all uploaded', t));
     }
     if (down) {
-      let t = `From other machines: ${n(Number(down.laidDown) || 0, 'conversation', 'conversations')} brought here since Fleet View started`;
-      if (down.lastScanAt) t += `; last look ${ago(down.lastScanAt)}`;
-      lines.push(`<div class="sy-line">${esc(t)}.</div>`);
-      if (down.health) lines.push(partLines('Downloads', down));
-      else if (down.lastError) lines.push('<div class="sy-line sy-bad">The last download hit an error; it tries again by itself.</div>');
+      const t = `From other machines: ${n(Number(down.laidDown) || 0, 'conversation', 'conversations')} brought here since Fleet View started${down.lastScanAt ? `; last look ${ago(down.lastScanAt)}` : ''}`;
+      tiles.push(tile(String(Number(down.laidDown) || 0), 'Brought here', 'since start', t));
     }
-    const live = a.live && typeof a.live === 'object' && !a.live.error ? a.live : null;
+    tiles.push(tile(String(conflicts), 'Conflicts', conflicts ? 'left alone' : 'none', conflicts ? `${n(conflicts, 'conflict', 'conflicts')}: a copy on this PC differs from the synced one, so it is left alone.` : 'No conflicts.', conflicts ? 'warn' : ''));
+    const lines = [`<div class="sy-tiles">${tiles.join('')}</div>`, '<div class="sy-loops">'];
+    if (up) {
+      if (up.health) lines.push(partLines('Uploads', up, up.lastScanAt ? `last look ${ago(up.lastScanAt)}` : ''));
+      else if (up.lastError) lines.push('<div class="sy-err bad">The last upload hit an error; it tries again by itself.</div>');
+    }
+    if (down) {
+      if (down.health) lines.push(partLines('Downloads', down, down.lastScanAt ? `last look ${ago(down.lastScanAt)}` : ''));
+      else if (down.lastError) lines.push('<div class="sy-err bad">The last download hit an error; it tries again by itself.</div>');
+    }
     if (live && live.health) lines.push(partLines('Live status', live));
-    const conflicts = Array.isArray(a.conflicts) ? a.conflicts.length : down && Number.isFinite(down.conflicts) ? down.conflicts : 0;
-    lines.push(conflicts
-      ? `<div class="sy-line sy-warn">${n(conflicts, 'conflict', 'conflicts')}: a copy on this PC differs from the synced one, so it is left alone.</div>`
-      : '<div class="sy-line sy-dim">No conflicts.</div>');
+    lines.push('</div>');
+    if (conflicts) lines.push(`<div class="sy-err warn">${n(conflicts, 'conflict', 'conflicts')}: a copy on this PC differs from the synced one, so it is left alone.</div>`);
     return lines.join('');
   }
 
   // ---------- your machines (link.js) ----------
   function pairingHtml(p) {
     const who = `<b>${esc(p.peer.name || 'the other machine')}</b>`;
-    const code = p.code ? `<div class="sy-code" aria-label="code ${esc(p.code.split('').join(' '))}">${esc(p.code.slice(0, 3))} ${esc(p.code.slice(3))}</div>` : '';
-    const btn = (c, label, cls = '') => `<button type="button" data-c="${c}" data-pid="${esc(p.pid)}"${cls ? ` class="${cls}"` : ''}${busy ? ' disabled' : ''}>${label}</button>`;
-    const btns = (...b) => (remote() ? '' : `<div class="sy-btns">${b.join('')}</div>`);
-    if (p.state === 'asking') return `<div class="sy-pair"><div class="sy-line">Asking ${who} to link…</div><div class="sy-line sy-dim">Fleet View there opens its Sync card with a code.</div>${btns(btn('link-decline', 'Cancel'))}</div>`;
-    if (p.state === 'waiting') return `<div class="sy-pair"><div class="sy-line">${who} asks to link with this machine…</div><div class="sy-line sy-dim">The code shows in a moment.</div>${btns(btn('link-decline', 'Decline'))}</div>`;
+    const digits = (s) => s.split('').map((d) => `<span>${esc(d)}</span>`).join('');
+    const code = p.code ? `<div class="sy-code" role="img" aria-label="code ${esc(p.code.split('').join(' '))}">${digits(p.code.slice(0, 3))}<i></i>${digits(p.code.slice(3))}</div>` : '';
+    const b = (c, label, cls = '') => btn(c, label, { cls, attrs: ` data-pid="${esc(p.pid)}"` });
+    const btns = (...x) => (remote() ? '' : `<div class="sy-btns">${x.join('')}</div>`);
+    if (p.state === 'asking') return `<div class="sy-pair"><div class="sy-line">${spin}Asking ${who} to link…</div><div class="sy-line sy-dim">Fleet View there opens its Sync card with a code.</div>${btns(b('link-decline', 'Cancel'))}</div>`;
+    if (p.state === 'waiting') return `<div class="sy-pair"><div class="sy-line">${spin}${who} asks to link with this machine…</div><div class="sy-line sy-dim">The code shows in a moment.</div>${btns(b('link-decline', 'Decline'))}</div>`;
     if (p.state === 'confirm') {
-      return `<div class="sy-pair sy-pair-on">${code}<div class="sy-line">Does ${who} show the same code?</div>`
-        + '<div class="sy-line sy-dim">Confirm only if you pressed Link on one of the two just now and both screens show these digits. Once linked, each machine runs what the other sends.</div>'
-        + `${btns(btn('link-confirm', 'The codes match', 'sy-go'), btn('link-decline', 'Decline'))}</div>`;
+      return `<div class="sy-pair sy-pair-on">${code}<div class="sy-line sy-center">Does ${who} show the same code?</div>`
+        + '<div class="sy-line sy-dim sy-center">Confirm only if you pressed Link on one of the two just now and both screens show these digits. Once linked, each machine runs what the other sends.</div>'
+        + `${btns(b('link-confirm', 'The codes match', 'sy-go'), b('link-decline', 'Decline'))}</div>`;
     }
-    if (p.state === 'confirmed') return `<div class="sy-pair">${code}<div class="sy-line">Confirmed here. Now confirm on ${who} too.</div>${btns(btn('link-decline', 'Cancel'))}</div>`;
+    if (p.state === 'confirmed') return `<div class="sy-pair">${code}<div class="sy-line sy-center">Confirmed here. Now confirm on ${who} too.</div>${btns(b('link-decline', 'Cancel'))}</div>`;
     const good = p.state === 'linked';
     return `<div class="sy-line ${good ? 'sy-ok' : 'sy-warn'}">${good ? `${icon('check', 12)} ` : ''}${esc(p.message || (good ? 'Linked.' : 'It did not link.'))}</div>`;
   }
   function machineHtml(m, pairing) {
-    const chip = m.linked ? `<span class="uw-chip ${m.online === true ? 'here' : m.online === false ? 'away' : ''}">${m.online === true ? 'linked · online' : m.online === false ? 'linked · offline' : 'linked'}</span>` : '';
-    const seen = !m.linked && m.lastSeenAt ? `<span class="sy-dim">seen ${esc(ago(m.lastSeenAt))}</span>` : '';
-    let act = '';
+    const pill = m.linked
+      ? `<span class="sy-pill ${m.online === true ? 'on' : m.online === false ? 'off' : ''}">${m.online === true ? 'linked · online' : m.online === false ? 'linked · offline' : 'linked'}</span>`
+      : '<span class="sy-pill off">not linked</span>';
+    const seen = !m.linked && m.lastSeenAt ? `<span class="sy-seen">seen ${esc(ago(m.lastSeenAt))}</span>` : '';
+    let action = '', conf = '';
     if (!remote() && (!pairing || FINAL_STATES.has(pairing.state))) {
       if (confirmUnlink === m.id) {
-        act = `<div class="sy-confirm"><div>Unlink ${esc(m.name)}? Neither machine can call the other until you link them again.</div>`
-          + `<div class="sy-btns"><button type="button" data-c="do-unlink" data-dev="${esc(m.id)}" class="sy-danger"${busy ? ' disabled' : ''}>Unlink</button><button type="button" data-c="keep-link">Keep</button></div></div>`;
-      } else act = `<div class="sy-btns"><button type="button" data-c="${m.linked ? 'unlink' : 'link'}" data-dev="${esc(m.id)}"${m.linked ? '' : ' class="sy-go"'}${busy ? ' disabled' : ''}>${m.linked ? 'Unlink' : 'Link'}</button></div>`;
+        conf = confirmHtml(`Unlink ${esc(m.name)}?`, 'Neither machine can call the other until you link them again.',
+          btn('do-unlink', 'Unlink', { cls: 'sy-danger', attrs: ` data-dev="${esc(m.id)}"` }) + btn('keep-link', 'Keep', { off: false }), true);
+      } else action = btn(m.linked ? 'unlink' : 'link', m.linked ? 'Unlink' : 'Link', { cls: m.linked ? '' : 'sy-go', attrs: ` data-dev="${esc(m.id)}"` });
     }
-    return `<div class="sy-mach"><div class="sy-who"><span class="sy-email">${esc(m.name)}</span>${chip}${seen}</div>${pairing ? pairingHtml(pairing) : ''}${act}</div>`;
+    return `<div class="sy-mach${m.linked ? ' linked' : ''}"><div class="sy-mrow"><span class="sy-mic">${icon('computer', 16)}</span>`
+      + `<span class="sy-mt"><b title="${esc(m.name)}">${esc(m.name)}</b><span class="sy-msub">${pill}${seen}</span></span>${action}</div>`
+      + `${pairing ? pairingHtml(pairing) : ''}${conf}</div>`;
   }
   function linkHtml() {
     const st = status;
@@ -253,14 +385,6 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     if (!rows.length) return '<div class="sy-line sy-dim">No other machine syncs with this one yet.</div>';
     return `${rows.join('')}<div class="sy-line sy-dim">Linked machines can reach each other's chats, with keys only the two of them hold.</div>`;
   }
-  function drawLink() {
-    const el = card.querySelector('.sy-link');
-    const h = linkHtml();
-    if (el._html === h) return;
-    el._html = h;
-    el.innerHTML = h ? `<div class="sy-h">${icon('shield', 13)}<b>Your machines</b></div>${h}` : '';
-    el.hidden = !h;
-  }
 
   // the sync key: here, or being fetched from Blackbox (sync-run.js says why when it can't)
   function keyStep() {
@@ -269,28 +393,34 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     if (keyInfo.hasKey) return 'have';
     return /could not be fetched/.test(keyInfo.reason) ? `bad:${keyInfo.reason}` : 'wait';
   }
-  function drawKey() {
-    const el = card.querySelector('.sy-key');
+  function keyHtml() {
     const step = keyStep();
-    if (el._step === step) return;
-    el._step = step;
-    if (!step) { el.innerHTML = ''; el.hidden = true; return; }
-    el.hidden = false;
-    const line = step === 'have' ? '<div class="sy-line">The sync key is on this PC.</div>'
-      : step === 'wait' ? `<div class="sy-line sy-dim">Getting the sync key from ${esc((setup && setup.name) || 'Blackbox')}…</div>`
-        : `<div class="sy-line sy-warn">Couldn't get it from ${esc((setup && setup.name) || 'Blackbox')} (${esc((step.match(/Blackbox: (.+)\)$/) || [])[1] || 'no answer')}); it tries again every minute.</div>`;
-    el.innerHTML = `<div class="sy-h">${icon('key', 13)}<b>Sync key</b></div>${line}`;
+    if (!step) return '';
+    const from = esc((setup && setup.name) || 'Blackbox');
+    const right = step === 'have' ? `<span class="sy-kstate ok">${icon('check', 13)}On this PC</span>`
+      : step === 'wait' ? `<span class="sy-kstate">${spin}Getting it from ${from}…</span>` : `<span class="sy-kstate warn">${icon('alert', 13)}Not here yet</span>`;
+    const why = step.startsWith('bad:') ? `<div class="sy-err warn">Couldn't get it from ${from} (${esc((step.match(/Blackbox: (.+)\)$/) || [])[1] || 'no answer')}); it tries again every minute.</div>` : '';
+    return `<div class="sy-krow"><span class="sy-oic">${icon('key', 14)}</span><b>Sync key</b>${right}</div>${why}`;
+  }
+  // one section: drawn again only when its HTML changes, hidden while empty
+  function put(sel, html, top = '') {
+    const el = card.querySelector(sel);
+    if (el._html === html) return;
+    el._html = html;
+    el.innerHTML = html ? top + html : '';
+    el.hidden = !html;
   }
   function draw() {
     if (!card) return;
     const main = card.querySelector('.sy-main');
-    const html = `<section class="sy-sec">${accountHtml()}</section>`;
+    const body = accountHtml();
+    const html = `<section class="sy-sec sy-top" data-lvl="${heroLevel}">${body}</section>`;
     if (main._html !== html) { main.innerHTML = html; main._html = html; }
-    drawKey();
-    drawLink();
-    const act = card.querySelector('.sy-act');
-    const ah = activityHtml();
-    if (act._html !== ah) { act.innerHTML = ah ? `<div class="sy-h">${icon('sync', 13)}<b>Activity</b></div>${ah}` : ''; act._html = ah; act.hidden = !ah; }
+    put('.sy-act', activityHtml(), head('sync', 'Activity'));
+    put('.sy-key', keyHtml());
+    put('.sy-link', linkHtml(), head('shield', 'Your machines'));
+    put('.sy-aside', asideHtml());
+    put('.sy-mode', modeHtml(), head('settings', 'This machine'));
     const nt = card.querySelector('.sy-note');
     const text = note ? note.text : '';
     if (nt.textContent !== text) nt.textContent = text;
@@ -306,6 +436,16 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     busy = false;
     if (!r) note = { text: 'Fleet View did not answer.', bad: true };
     return r;
+  }
+  // Start clean's preview: read once each time its confirm opens, never on a poll
+  async function loadPreview() {
+    const my = gen;
+    freshPrev = { loading: true };
+    draw();
+    const j = await get('/sync/fresh?preview=1');
+    if (my !== gen || !card || !freshOpen) return;
+    freshPrev = j && j.ok === true ? { preview: j.preview || null, error: j.previewError || '' } : { preview: null, error: (j && j.message) || 'no answer' };
+    draw();
   }
   async function onClick(ev) {
     const b = ev.target.closest('button[data-c]');
@@ -335,7 +475,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       const r = await act('/sync/mode', { mode: 'sync' });
       if (r && r.ok) { close(); openSetup(); return; }
       if (r) note = { text: r.message || 'It did not switch.', bad: true };
-    } else if (c === 'to-local') { confirmLocal = true; note = null; }
+    } else if (c === 'to-local') { confirmLocal = true; freshOpen = false; note = null; }
     else if (c === 'keep-sync') confirmLocal = false;
     else if (c === 'do-local') {
       if (busy) return;
@@ -353,13 +493,44 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       if (r && r.ok) note = { text: 'Signed out of sync on this PC.' };
       else if (r) note = { text: r.message || 'The sign-out did not work.', bad: true };
       await refresh();
-    }
+    } else if (c === 'fresh-ask') {
+      if (freshOpen) { freshOpen = false; freshPrev = null; } // the local choice card toggles it
+      else { freshOpen = true; confirmLocal = false; note = null; loadPreview(); return; }
+    } else if (c === 'fresh-cancel') { freshOpen = false; freshPrev = null; }
+    else if (c === 'fresh-go') {
+      if (busy || remote()) return;
+      const local = !!(setup && setup.mode === 'local');
+      const r = await act('/sync/fresh', { start: true });
+      if (!card) return;
+      freshOpen = false; freshPrev = null;
+      // working locally: the server chose sync too; the start screen signs in and checks the accounts
+      if (r && r.ok && local) { close(); openSetup(); return; }
+      if (r && r.ok) note = { text: r.message || 'Starting clean: sync restarts and mirrors the other machine before anything uploads.' };
+      else if (r) note = { text: r.message || 'It did not start.', bad: true };
+      await refresh();
+    } else if (c === 'fresh-stop') {
+      if (busy || remote()) return;
+      const r = await act('/sync/fresh', { cancel: true });
+      if (r && r.ok) note = { text: r.cancelled ? 'Start clean cancelled.' : 'It had already finished.' };
+      else if (r) note = { text: r.message || 'It did not cancel.', bad: true };
+      await refresh();
+    } else if (c === 'bring' || c === 'do-bring-all') {
+      if (busy || remote()) return;
+      const r = await act('/sync/fresh', { bringBack: c === 'bring' ? [b.dataset.id] : 'all' });
+      confirmBringAll = false;
+      if (r && r.ok) note = { text: !Number(r.count) && fresh && fresh.held ? 'Uploads go on again from this machine.' : `Brought back ${n(Number(r.count) || 0, 'chat', 'chats')}.` };
+      else if (r) note = { text: r.message || 'It did not come back.', bad: true };
+      await refresh();
+    } else if (c === 'bring-all') { confirmBringAll = true; note = null; }
+    else if (c === 'keep-aside') confirmBringAll = false;
+    else if (c === 'aside-more') asideAll = !asideAll;
     draw();
   }
   function open() {
     if (card) return;
     gen++;
-    answered = false; status = activity = keyInfo = link = null; note = null; confirmOut = false; busy = false; confirmUnlink = null;
+    answered = false; status = activity = keyInfo = link = fresh = freshPrev = null; note = null; confirmOut = false; busy = false; confirmUnlink = null;
+    freshOpen = false; asideAll = false; confirmBringAll = false; confirmLocal = false;
     card = document.createElement('div');
     card.className = 'uw-pop sy-pop';
     card.setAttribute('role', 'dialog');
@@ -367,8 +538,8 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     card.tabIndex = -1;
     card.innerHTML = `<div class="uw-top"><span class="uw-title">${icon('sync', 14)}<b>Sync</b></span><span class="uw-sub">conversations across your machines</span>`
       + `<button type="button" class="uw-x" aria-label="close" title="close (Esc)">${icon('close', 13)}</button></div>`
-      + '<div class="uw-scroll"><div class="sy-main"></div><div class="sy-sec sy-key" hidden></div><div class="sy-sec sy-act" hidden></div><div class="sy-sec sy-link" hidden></div>'
-      + '<div class="sy-sec sy-clone" hidden></div>'
+      + '<div class="uw-scroll"><div class="sy-main"></div><div class="sy-sec sy-act" hidden></div><div class="sy-sec sy-key" hidden></div><div class="sy-sec sy-link" hidden></div>'
+      + '<div class="sy-sec sy-clone" hidden></div><div class="sy-sec sy-aside" hidden></div><div class="sy-sec sy-mode" hidden></div>'
       + '<div class="sy-note" hidden aria-live="polite"></div></div>'
       + `<div class="uw-foot">${remote() ? 'Read-only here: sign-in and sign-out are done on the PC.' : 'Chats sync through your Supabase project, encrypted with the sync key before they leave this PC.'}</div>`;
     document.body.appendChild(card);
@@ -421,9 +592,9 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       const st = await get('/link/status');
       const waiting = st && st.running && Array.isArray(st.pairings) ? st.pairings.filter((p) => p && needsYou(p)) : [];
       document.body.classList.toggle('link-ask', waiting.length > 0);
-      const fresh = waiting.find((p) => !shown.has(p.pid));
+      const ask = waiting.find((p) => !shown.has(p.pid));
       for (const p of waiting) shown.add(p.pid);
-      if (fresh && !card) open();
+      if (ask && !card) open();
     } else document.body.classList.remove('link-ask');
     setTimeout(watchLinks, LINK_WATCH_MS);
   }

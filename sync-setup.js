@@ -21,6 +21,8 @@
 //   POST /sync/connect         { url, key }: what `node sync-api.js setup` does (the same checks: a Supabase project
 //                              address and its publishable key, never a secret one)   this PC only, private only
 //   POST /sync/accounts/check  looks at the gates again now (a sign-in just finished) and answers the accounts part
+// choose(mode, { keepDone, check }) is POST /sync/mode's work, for fleet-view.js's POST /sync/fresh ("Start clean"):
+// it chooses sync and keeps done when this machine synced already, so the start screen does not open again for it
 //   GET /sync/setup -> { private, name, mode, done, ask, configured, problem, signedIn, email, member, hasKey,
 //     accounts: sync-accounts.js last() | null, signins: accounts.js view().jobs, running, reason,
 //     progress: { up, down } | null, ready }
@@ -59,6 +61,7 @@ function createSyncSetup(o = {}) {
   const accountSync = o.accountSync || null;
   const accountsView = typeof o.accountsView === 'function' ? o.accountsView : null; // accounts.js view(): sign-ins going on
   const log = typeof o.log === 'function' ? o.log : () => {};
+  const chose = typeof o.chose === 'function' ? o.chose : null; // chose(mode): after each choice (fleet-view.js: Work locally drops a fresh start)
   const priv = o.private !== undefined ? o.private : readPrivate(o.appDir || __dirname);
 
   function readMode() {
@@ -90,6 +93,20 @@ function createSyncSetup(o = {}) {
     log(`sync: connected to ${priv.syncName} by itself (private.json)`);
     if (runner) runner.check();
     return true;
+  }
+
+  // what POST /sync/mode does: keep the choice (local is done at once; sync is done once the start screen is, unless
+  // keepDone and this machine synced and was done already), connect from private.json when sync has no config yet,
+  // and look at the gates again. check: false leaves the gate check to the caller (POST /sync/fresh restarts the runner);
+  // connecting from private.json still checks (autoConnect), which is harmless: the caller's restart follows
+  function choose(mode, { keepDone = false, check = true } = {}) {
+    if (!MODES.includes(mode)) throw new Error('mode is sync or local');
+    const was = current();
+    writeMode(mode, mode === 'local' || (keepDone && was.mode === 'sync' && was.done));
+    log(`sync: this machine ${mode === 'local' ? 'works locally' : `syncs with ${priv ? priv.syncName : 'Blackbox'}`}`);
+    if (chose) { try { chose(mode); } catch (e) { log(`sync: after choosing ${mode}: ${e && e.message}`); } }
+    if (!autoConnect() && check && runner) runner.check();
+    return current();
   }
 
   async function view(remote) {
@@ -152,9 +169,7 @@ function createSyncSetup(o = {}) {
       if (pathname === '/sync/mode') {
         const mode = b.value.mode;
         if (!MODES.includes(mode)) return send(400, { ok: false, message: 'mode is sync or local' });
-        writeMode(mode, mode === 'local');
-        log(`sync: this machine ${mode === 'local' ? 'works locally' : `syncs with ${priv.syncName}`}`);
-        if (!autoConnect() && runner) runner.check();
+        choose(mode);
         return send(200, { ok: true, mode });
       }
       // /sync/connect
@@ -174,7 +189,7 @@ function createSyncSetup(o = {}) {
     return true;
   }
 
-  return { handle, view, mode: () => current().mode, current, private: () => priv };
+  return { handle, view, choose, mode: () => current().mode, current, private: () => priv };
 }
 
 module.exports = { createSyncSetup, readPrivate };

@@ -206,6 +206,48 @@ chats come over. Nothing new goes to Supabase: it only reads the repos rows sync
 
 Test: `node scripts/sync-clone-test.js` (local bare repos stand in for GitHub, a fake Supabase for the rows).
 
+## Start clean (mirror the other machine)
+
+Henry, 2026-10-12: "clear the workspace in whichever computer and mirror what i have on the other one". **Start clean**
+makes this machine show what Blackbox has, and nothing else. Nothing is deleted: the conversation files under every
+`~/.claude*/projects` folder stay exactly where they are, untouched.
+
+- **What only this machine has is set aside.** Every conversation in A's and B's projects folders (what the uploader
+  reads) whose id Blackbox has no row for (in any state) goes on this machine's set-aside list
+  (`<dataDir>/sync/set-aside.json` `{ v: 1, list: [{ id, at, size, m }] }`, written whole at each change, never capped,
+  never shared). One open here right then (a live claude, or alive in the session host) is kept. A set-aside conversation is off the map, the chat list, the
+  Projects view's older conversations and what the other machines see of this one, and is never uploaded.
+- **It comes back by itself** when it is used here again: its log grows past what it was when it was set aside, or a
+  claude opens it. Or by hand: `POST /sync/fresh { bringBack: [ids] }` or `{ bringBack: 'all' }`. Either way it then
+  shows and uploads as usual.
+- **If that list is lost**, nothing goes up: when `set-aside.json` is there but can't be read, or is gone after a
+  start clean was done here, every upload is held (`GET /sync/fresh` says `held: true`) until a new Start clean or
+  `{ bringBack: 'all' }`.
+- **The shared settings are Blackbox's.** Each shared group (hidden and removed chats, names, moves, workspaces, the
+  map's pinned spots, teams, stays-on rules) is emptied here, keeping only what is this machine's own (unpinned map
+  spots), and what this machine last agreed on is forgotten, so the first round takes Blackbox's rows as they are.
+- **The other machine's repos come over:** "Clone new repos automatically" is turned on (see above). A repo declined
+  there before stays declined. In the workspace order a repo not cloned here yet keeps its place, so this machine never
+  reorders Blackbox's list, and a shared row this version can't open is never written over.
+
+It is done by `sync-run.js` before its loops start, so nothing goes up first: `POST /sync/fresh { start: true }`
+writes `<dataDir>/sync/fresh.json` `{ pending: true, at }`, chooses sync (as the start screen does; a machine that was
+syncing does not see the start screen again) and restarts sync. Once signed in with the key and the accounts matching,
+the runner's `beforeStart` lists Blackbox's conversation ids, sets aside (and writes `set-aside.json` before anything
+else changes), resets the settings, turns cloning on and writes `{ pending: false, at, done: { at, setAside, kept } }`.
+A second start asked meanwhile stays pending and runs next. `POST /sync/fresh { cancel: true }`, or choosing Work
+locally, drops one not done yet (the Sync card's Cancel on "Starting clean..."). While it works the pill is amber with "getting ready:
+starting clean ...". If Blackbox can't be listed, sync stays off, says so ("starting clean: could not list Blackbox's
+conversations (...)"), and tries again at the next check (within a minute).
+
+Routes (this machine's own page only; 404 while sync is not set up and there is no `private.json`):
+`GET /sync/fresh` -> `{ ok, others: [the other devices' names], pending, last: { at, setAside, kept } | null,
+setAside: [{ id, title, repo, at }] (newest 50), count, held }`; `GET /sync/fresh?preview=1` adds `preview: { setAside,
+kept }` (Blackbox listed now, nothing changed), or `preview: null` and `previewError`; `POST /sync/fresh
+{ start: true }` -> `{ ok, message }` (409 when sync can't be set up here); `POST /sync/fresh { cancel: true }` -> `{ ok, cancelled }`; `POST /sync/fresh { bringBack }` ->
+`{ ok, count }`. Tests: `node scripts/sync-run-test.js` (beforeStart, skip, restart), `node scripts/sync-prefs-test.js`
+(the first join after a start clean, a repo not here, a row that does not open), `node scripts/sync-setup-test.js` (choosing sync).
+
 ## Linking machines
 
 While sync runs, `sync-run.js` also runs the link (`link.js`, [link.md](link.md)) beside the mover: Henry links two of

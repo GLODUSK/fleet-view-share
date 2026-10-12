@@ -1,7 +1,7 @@
 // sync-setup-test.js: sync-setup.js, the start screen's server side, over a real local HTTP server with a fake
 // sync-api object and a fake runner: who is asked (only a private checkout, only this PC, only until it is done; a
 // machine that synced before is not), the mode file, /sync/connect's checks (a secret key is refused, nothing is
-// written then), what a remote browser and another site's page may do, and the accounts check.
+// written then), what a remote browser and another site's page may do, the accounts check, and choose() ("Start clean").
 // Run: node scripts/sync-setup-test.js
 'use strict';
 const fs = require('fs');
@@ -13,6 +13,7 @@ const { createSyncSetup, readPrivate } = require(path.join(__dirname, '..', 'syn
 
 let pass = 0, fail = 0;
 const ok = (c, name) => { if (c) pass++; else { fail++; console.log(`FAIL ${name}`); } };
+const eq = (a, b, name) => ok(JSON.stringify(a) === JSON.stringify(b), `${name}: got ${JSON.stringify(a)}, want ${JSON.stringify(b)}`);
 
 const sendJson = (res, code, o) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
 function serve(setup, remote) {
@@ -46,7 +47,8 @@ const SECRET = 'sb_sec' + `ret_${'x'.repeat(22)}`;
     const runner = { check: async () => { checks++; }, status: () => ({ running: false, reason: 'not signed in' }) };
     const last = { ok: false, reason: 'sign in Claude A', letters: [] };
     const remote = { on: false };
-    const setup = createSyncSetup({ dataDir: tmp, sync, runner, accountSync: { last: () => last }, private: { syncName: 'Blackbox' }, accountsView: () => ({ jobs: { A: { status: 'waiting' } } }) });
+    const chosen = [];
+    const setup = createSyncSetup({ dataDir: tmp, sync, runner, accountSync: { last: () => last }, private: { syncName: 'Blackbox' }, accountsView: () => ({ jobs: { A: { status: 'waiting' } } }), chose: (m) => chosen.push(m) });
     const srv = await serve(setup, remote);
     const modeFile = path.join(S.syncDir(tmp), 'mode.json');
 
@@ -89,6 +91,16 @@ const SECRET = 'sb_sec' + `ret_${'x'.repeat(22)}`;
     ok(r.code === 200 && r.body.accounts.reason === last.reason, 'accounts/check looks again and answers');
     ok((await call(srv, 'POST', '/sync/done')).code === 200 && setup.current().done === true, 'done is kept');
     ok((await call(srv, 'GET', '/sync/setup')).body.ask === false, 'done: not asked again');
+    // choose() (POST /sync/fresh's "Start clean"): sync again, done kept for a machine that synced and was done
+    const before = checks;
+    eq(setup.choose('sync', { keepDone: true, check: false }), { mode: 'sync', done: true }, 'choose sync, keepDone: a done machine stays done');
+    ok(checks === before, 'choose with check: false leaves the gate check to the caller');
+    setup.choose('local');
+    eq(setup.choose('sync', { keepDone: true }), { mode: 'sync', done: false }, 'choose sync from local: the start screen runs again (not done)');
+    ok(checks === before + 2, 'choose looks at the gates again by default');
+    eq(chosen.slice(-3), ['sync', 'local', 'sync'], 'chose(mode) is told each choice (Work locally drops a fresh start)');
+    ok((() => { try { setup.choose('other'); return false; } catch { return true; } })(), 'choose: a mode is sync or local');
+    await call(srv, 'POST', '/sync/done');
 
     // a machine that synced before this existed (config, no mode file): syncing, done, never asked
     fs.rmSync(modeFile);

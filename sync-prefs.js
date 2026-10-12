@@ -51,7 +51,8 @@
 // turned up here) is put in here at the start of a round, never taken for a delete.
 // Every device lists the prefs:* keys and updated_at every 10 s and fetches a value (key=in.(...)) only for the rows
 // whose updated_at moved (compared as times: PostgREST answers +00:00 where this device wrote Z). A row that does not
-// open with the key is said once and ignored until it changes.
+// open with the key is said once and ignored until it changes, and never written over by a first join. In repoOrder
+// an item that does not translate here rides at its place in the order, so such a device never reorders it.
 'use strict';
 const path = require('path');
 const K = require(path.join(__dirname, 'sync-crypto.js'));
@@ -566,6 +567,19 @@ function makeTranslate(o = {}) {
   return { out, in: into, refresh() { idx = null; } };
 }
 
+// an ordered group's list with these items of base put in, each after the nearest one before it in base that the list
+// has (first when none)
+function placeIn(G, list, add, base) {
+  const next = list.slice();
+  for (const p of add) {
+    const i = base.findIndex((b) => G.key(b) === G.key(p));
+    let pos = 0;
+    for (let j = i - 1; j >= 0; j--) { const at = next.findIndex((x) => G.key(x) === G.key(base[j])); if (at >= 0) { pos = at + 1; break; } }
+    next.splice(pos, 0, p);
+  }
+  return next;
+}
+
 function createPrefs(o = {}) {
   const api = o.api;
   if (!api || typeof api.rest !== 'function') throw new Error('createPrefs needs the sync api');
@@ -585,6 +599,7 @@ function createPrefs(o = {}) {
   let lastRead = -Infinity, ready = false, writes = 0, fetched = 0, taken = 0;
   const lastWrite = new Map(); // group -> this clock at its last write
   const stamps = new Map(); // group -> the updated_at its row had when last listed (fetched or written)
+  const unopened = new Set(); // groups whose row is there but does not open (a newer version's): never first-joined over
 
   function loadState() {
     let s = null;
@@ -781,16 +796,9 @@ function createPrefs(o = {}) {
       const clean = sigOf(g, view(g, local, gs.base)) === sigOf(g, gs.base.filter((p) => !addK.has(G.key(p))));
       if (add.length) {
         let next;
-        if (G.ordered) {
-          // each where it stands in base: after the nearest one before it that this machine lists
-          next = mine.slice();
-          for (const p of add) {
-            const i = gs.base.findIndex((b) => G.key(b) === G.key(p));
-            let pos = 0;
-            for (let j = i - 1; j >= 0; j--) { const at = next.findIndex((x) => G.key(x) === G.key(gs.base[j])); if (at >= 0) { pos = at + 1; break; } }
-            next.splice(pos, 0, p);
-          }
-        } else next = [...mine, ...add];
+        // ordered: each where it stands in base, after the nearest one before it that this machine lists
+        if (G.ordered) next = placeIn(G, mine, add, gs.base);
+        else next = [...mine, ...add];
         try { applyGroup(g, next, local); } catch (e) { logOnce(`apply|${g}`, `prefs: the ${g} could not be put in here (${errText(e)})`); continue; }
         log(`prefs: put in ${add.length} ${g} item${add.length === 1 ? '' : 's'} for a repo found here`);
       }
@@ -805,12 +813,14 @@ function createPrefs(o = {}) {
     lastRead = t;
     let rows;
     try { rows = await api.rest('GET', 'settings', { query: { select: 'key,updated_at', key: 'like.prefs:*' } }); said.delete('list'); } catch (e) { logOnce('list', `prefs: the shared settings could not be listed (${errText(e)})`); return false; }
-    const moved = [];
+    const moved = [], listed = new Set();
     for (const row of Array.isArray(rows) ? rows : []) {
       const m = row && typeof row.key === 'string' ? KEY_RE.exec(row.key) : null;
       if (!m || !GROUPS[m[1]]) continue;
+      listed.add(m[1]);
       if (stamps.get(m[1]) !== stampOf(row.updated_at)) moved.push(m[1]);
     }
+    for (const g of [...unopened]) if (!listed.has(g)) unopened.delete(g); // that row is gone
     if (moved.length) {
       let full;
       try {
@@ -823,7 +833,7 @@ function createPrefs(o = {}) {
         fetched++;
         stamps.set(m[1], stampOf(row.updated_at));
         const v = openRow(row, m[1]);
-        if (v) await take(m[1], v, now());
+        if (v) { unopened.delete(m[1]); await take(m[1], v, now()); } else unopened.add(m[1]);
       }
     }
     // the first join is this first full read: every row there was is taken by now, so a group that turns up later (a
@@ -881,6 +891,9 @@ function createPrefs(o = {}) {
       // first join with no row: this machine's items go through the translation once, which mends stale ones (a
       // spot under another machine's path is put on this machine's root for that repo, or left out)
       if (!st.groups[g]) {
+        // a row is there that does not open here: never written over with this machine's items (it may hold what only
+        // a newer version reads)
+        if (unopened.has(g)) continue;
         const all = readLocal();
         if (!all) continue;
         try { applyGroup(g, items, all[g]); } catch (e) { logOnce(`apply|${g}`, `prefs: the ${g} could not be put in here (${errText(e)})`); continue; }

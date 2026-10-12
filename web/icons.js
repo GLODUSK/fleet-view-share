@@ -70,6 +70,8 @@ const P = {
   // how a phone reaches the PC (Pair an iPhone, the phone's start screen): on this Wi-Fi, or through Blackbox
   wifi: '<path d="M2.5 9a14 14 0 0 1 19 0"/><path d="M5.5 12.5a9.5 9.5 0 0 1 13 0"/><path d="M8.6 16a5 5 0 0 1 6.8 0"/><circle cx="12" cy="19.3" r="0.9"/>',
   cloud: '<path d="M7 19h10.5a4.5 4.5 0 0 0 .7-8.95A6.5 6.5 0 0 0 5.7 9.2 5 5 0 0 0 7 19Z"/>',
+  // a computer (the Sync card's "Your machines" rows; the start screen draws the same one)
+  computer: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/>',
   // the view tabs (index.html's .tabs, and the phone app's tab bar)
   cards: '<path d="M8 7V5a1.5 1.5 0 0 1 1.5-1.5h10A1.5 1.5 0 0 1 21 5v10a1.5 1.5 0 0 1-1.5 1.5h-2"/><rect x="3" y="7" width="14.5" height="13.5" rx="1.5"/><path d="M6.5 11.5h7.5"/><path d="M6.5 15h5"/>',
   map: '<circle cx="5.5" cy="6.5" r="2.5"/><circle cx="18.5" cy="5.5" r="2.5"/><circle cx="12" cy="18.5" r="2.5"/><path d="M8 6.3 16 5.7"/><path d="m6.8 8.7 4 7.6"/><path d="m17.3 7.7-4.1 8.6"/>',

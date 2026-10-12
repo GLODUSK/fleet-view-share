@@ -3,7 +3,8 @@
 // isOpen or the host's last list; the uploader alone gets accountOf and busy, and its ownerOf is the materializer's owner(); move / moveStatus / cancelMove / owners (with the
 // row's account) / device go to the mover, and say so when
 // sync is not running; away.json goes when sync is turned off (not set up, Work locally) and stays otherwise (signed
-// out, no key, not a member, stop()). A fake sync-api object, fake loops, a fake
+// out, no key, not a member, stop()); "Start clean": skip() is the uploader's only() turned round, beforeStart runs
+// before any loop (say() and a throw show as getting ready, warn), restart() runs it again. A fake sync-api object, fake loops, a fake
 // mover and a fake host; a temp data folder for the key. Run: node scripts/sync-run-test.js
 'use strict';
 const fs = require('fs');
@@ -295,6 +296,72 @@ function fakeMover(args, made) {
       await r6.check();
       ok(!r6.status().running && made6[2].stopped === 1 && made6[3].stopped === 1, 'switching to local stops it');
       await r6.stop();
+    }
+    // ---------- "Start clean": skip (the uploader's only), beforeStart before any loop, restart ----------
+    {
+      const s7 = fakeSync();
+      s7.on = true; s7.signedIn = true;
+      const dir7 = path.join(dir, 'seven');
+      await C.saveKey(S.syncDir(dir7), crypto.randomBytes(32));
+      const made7 = [], order = [], aside = new Set(['aaaa-1']);
+      let only = null, fresh = null, failWith = null, sayWhat = null, restartInside = false;
+      const r7 = createSyncRunner({
+        sync: s7, dataDir: dir7, checkMs: 1e6, log: () => {},
+        skip: (id) => { if (id === 'throws') throw new Error('x'); return aside.has(id); },
+        beforeStart: async (a) => {
+          order.push('before');
+          ok(a.api === s7 && typeof a.log === 'function' && typeof a.say === 'function', 'beforeStart gets the api, the log and say');
+          if (sayWhat) { a.say(sayWhat); fresh = r7.status(); }
+          if (failWith) throw new Error(failWith);
+          if (restartInside) { restartInside = false; r7.restart('starting clean again'); }
+        },
+        makeUploader: (a) => { only = a.only; order.push('up'); return fakeLoop('up', made7); },
+        makeMaterializer: () => fakeLoop('down', made7), makeMover: (a) => fakeMover(a, []),
+      });
+      sayWhat = 'starting clean: setting aside what is only here';
+      failWith = 'starting clean: could not list Blackbox\'s conversations (offline)';
+      await r7.start();
+      ok(fresh && fresh.starting === true && fresh.reason === sayWhat && fresh.health.level === 'warn' && /getting ready: starting clean/.test(fresh.health.tip), 'say(): status says it is getting ready (warn, not bad) while beforeStart works');
+      let st = r7.status();
+      ok(!made7.length && !st.running && st.starting && st.reason === failWith && st.health.level === 'warn', 'beforeStart throws: no loop is made, and status says why (warn)');
+      failWith = null; sayWhat = null;
+      await r7.check();
+      st = r7.status();
+      ok(made7.length === 2 && st.running && !st.starting, 'the next check runs beforeStart again, and the loops start after it');
+      eq(order, ['before', 'before', 'up'], 'beforeStart runs before the uploader is made');
+      ok(typeof only === 'function' && only('aaaa-1') === false && only('bbbb-2') === true, 'skip: the uploader\'s only() leaves a set-aside conversation out');
+      aside.delete('aaaa-1');
+      ok(only('aaaa-1') === true, 'skip is read on every call: one taken off the list goes up');
+      ok(only('throws') === false, 'skip that throws: held back');
+      await r7.check();
+      eq(order, ['before', 'before', 'up'], 'a check with sync running does not run beforeStart again');
+      await r7.restart('starting clean');
+      ok(made7[0].stopped === 1 && made7[1].stopped === 1 && made7.length === 4 && r7.status().running, 'restart(): the loops stop and start again');
+      eq(order, ['before', 'before', 'up', 'before', 'up'], 'restart(): beforeStart runs again before the new loops');
+      // a check under way (its status slow to answer): restart() stops the loops at once, not after it
+      let release = null;
+      const slow = new Promise((r) => { release = r; });
+      const realStatus = s7.status;
+      s7.status = async () => { await slow; return realStatus(); };
+      const under = r7.check();
+      const rs = r7.restart('starting clean');
+      await new Promise((r) => setImmediate(r));
+      ok(made7[2].stopped === 1 && made7[3].stopped === 1 && !r7.status().running, 'restart() during a slow check: the loops stop at once');
+      s7.status = realStatus;
+      release();
+      await rs; await under;
+      ok(made7.length === 6 && made7[4].stopped === 0 && r7.status().running, '...and start again once the check is through');
+      eq(order, ['before', 'before', 'up', 'before', 'up', 'before', 'up'], '...with beforeStart before them');
+      // restart() while beforeStart works (a second Start clean): it runs again, and the loops are made once, after it
+      restartInside = true;
+      await r7.restart('starting clean');
+      ok(made7[4].stopped === 1 && made7.length === 8 && made7[6].stopped === 0 && r7.status().running, 'restart() during beforeStart: one set of loops, made after it ran again');
+      eq(order.slice(7), ['before', 'before', 'up'], '...beforeStart ran twice before them');
+      failWith = 'starting clean: could not list';
+      await r7.restart('starting clean');
+      ok(made7[6].stopped === 1 && made7[7].stopped === 1 && made7.length === 8 && !r7.status().running && r7.status().reason === failWith, 'restart() with beforeStart failing: stopped, nothing new made');
+      await r7.stop();
+      ok(!r7.status().starting && r7.status().health.level === 'off', 'stop(): no longer getting ready');
     }
     // ---------- health(): the header pill's colour from each loop's record (HEALTH holds the thresholds) ----------
     {

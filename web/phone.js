@@ -15,6 +15,11 @@
 //   GET /relay/status    read once when the card opens, after every action, and every 3 seconds while a pairing code
 //                        is on screen (never while the card is closed): the sync sign-in, the Wi-Fi addresses, and the
 //                        paired phones (name, Wi-Fi or Blackbox, the phone and app, last seen, connected or not)
+// Laid out as the Sync card (sync.css): the two ways as selectable cards with an icon tile and a radio mark, what the
+// picked way needs in a soft panel, the name field and Pair as one row, the QR in a framed panel with the countdown as
+// a pill under it, "Paired" as a success state, and the phones as rows (a phone icon, the name with a dot for its
+// connection, the details on a second line, Remove at the right).
+//
 // and does:
 //   Pair an iPhone       POST /relay/pair { name, mode }: the answer's QR code (the server's SVG) is shown once and
 //                        never asked for again; a countdown runs to its exp (10 minutes), then the code goes and "Make
@@ -90,7 +95,8 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
   function modesHtml() {
     const m = modeNow(), ways = canRelay() ? ['local', 'relay'] : ['local'];
     const btn = (k) => `<button type="button" data-c="mode" data-m="${k}" class="ph-mode${k === m ? ' on' : ''}" role="radio" aria-checked="${k === m}">`
-      + `${icon(MODE[k].icon, 15)}<span><b>${MODE[k].label}</b><span class="sy-dim">${esc(MODE[k].sub)}</span></span></button>`;
+      + `<span class="ph-mic">${icon(MODE[k].icon, 17)}</span><span class="ph-mt"><b>${MODE[k].label}</b><span class="sy-dim">${esc(MODE[k].sub)}</span></span>`
+      + '<span class="ph-radio" aria-hidden="true"></span></button>';
     return `<div class="ph-modes" role="radiogroup" aria-label="How the phone reaches this PC">${ways.map(btn).join('')}</div>`;
   }
   // what the picked way needs, in a line or two
@@ -99,10 +105,12 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
     if (!status) return '<div class="sy-line sy-bad">Fleet View did not answer.</div>';
     const m = modeNow();
     if (m === 'relay') {
-      return `<div class="sy-who"><span class="sy-email" title="${esc(status.email || '')}">Signed in to sync as <b>${esc(status.email || 'your Google account')}</b></span>`
-        + `<span class="uw-chip ${status.connected ? 'here' : ''}">${status.connected ? 'relay connected' : 'relay not connected'}</span></div>`;
+      const email = status.email || 'your Google account';
+      return `<div class="sy-acct"><span class="sy-av" aria-hidden="true">${esc(email.trim()[0].toUpperCase())}</span>`
+        + `<span class="sy-acct-t"><span class="sy-email" title="${esc(status.email || '')}"><span class="sy-vh">Signed in to sync as </span>${esc(email)}</span>`
+        + `<span class="uw-chip ${status.connected ? 'here' : ''}">${status.connected ? 'relay connected' : 'relay not connected'}</span></span></div>`;
     }
-    const lines = ['<div class="sy-line ph-say-wifi">The phone has to be on the same Wi-Fi as this PC.</div>',
+    const lines = [`<div class="sy-line ph-say-wifi">${icon('wifi', 13)}<span>The phone has to be on the same Wi-Fi as this PC.</span></div>`,
       '<div class="sy-line sy-dim">Windows may ask once whether Fleet View (node.exe) may use the network: allow it on <b>Private networks</b>.</div>'];
     if (!lanAddrs().length) lines.push('<div class="sy-line sy-bad">This PC is not on a home network right now (Wi-Fi or a cable). Connect it, then make the code.</div>');
     // sync set up but signed out: the other way is one sign-in away
@@ -114,25 +122,27 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
   }
   function pairHtml() {
     if (step === 'paired') {
-      return `<div class="ph-done">${icon('check', 16)}<span>Paired: <b>${esc(pairedName)}</b></span></div>`
-        + '<div class="sy-btns"><button type="button" data-c="again">Pair another</button></div>';
+      return `<div class="ph-done"><span class="ph-done-ic">${icon('check', 22)}</span><span class="ph-done-t">Paired</span>`
+        + `<span class="ph-done-n"><span class="sy-vh">Paired: </span><b>${esc(pairedName)}</b> can reach this PC now.</span>`
+        + '<div class="sy-btns"><button type="button" data-c="again">Pair another</button></div></div>';
     }
     if (step === 'code' && code) {
       const how = code.mode === 'local' ? 'Scan with the Fleet View app on a phone on this Wi-Fi.' : 'Scan with the Fleet View app.';
-      return `<div class="ph-qr">${code.svg}</div>`
+      return `<div class="ph-qrbox"><div class="ph-qr">${code.svg}</div>`
+        + `<span class="ph-left">${icon('clock', 12)}Runs out in <b class="ph-clock">${left(code.exp - Date.now())}</b></span>`
+        + '<div class="sy-line ph-prog"></div></div>'
         + `<div class="sy-line ph-say">${how} The code works once, for 10 minutes.</div>`
-        + `<div class="sy-line sy-dim ph-left">Runs out in <b class="ph-clock">${left(code.exp - Date.now())}</b></div>`
-        + '<div class="sy-line sy-dim ph-prog"></div>'
         + (code.mode === 'local' ? '<div class="sy-line sy-dim">If Windows asks whether Fleet View (node.exe) may use the network, allow it on Private networks, or the phone can\'t reach this PC.</div>' : '');
     }
     if (step === 'expired') {
-      return '<div class="sy-line">The code ran out.</div>'
-        + `<div class="sy-btns"><button type="button" data-c="new" class="sy-go">${icon('phone', 12)}Make a new code</button></div>`;
+      return `<div class="ph-done ph-gone"><span class="ph-done-ic">${icon('clock', 20)}</span><span class="ph-done-t">The code ran out</span>`
+        + '<span class="ph-done-n">Codes work for 10 minutes. Make a new one and scan it.</span>'
+        + `<div class="sy-btns"><button type="button" data-c="new" class="sy-go">${icon('phone', 12)}Make a new code</button></div></div>`;
     }
     const blocked = !status || (modeNow() === 'local' && !lanAddrs().length);
     return '<form class="sy-form ph-form" autocomplete="off">'
       + '<input type="text" class="ph-name" maxlength="60" placeholder="iPhone" autocomplete="off" spellcheck="false" aria-label="The phone\'s name">'
-      + `<button type="submit" class="sy-go"${blocked ? ' disabled' : ''}>${icon('phone', 12)}Pair an iPhone</button></form>`
+      + `<button type="submit" class="sy-go"${blocked ? ' disabled' : ''}>${icon('phone', 12)}Pair</button></form>`
       + '<div class="sy-line sy-dim">The name is only for this list. A QR code shows next, for the Fleet View app to scan; pick the same way on the phone.</div>';
   }
   function listHtml() {
@@ -148,12 +158,18 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
       const sub = d.state === 'pending'
         ? `waiting for the phone, ${left(d.exp - t)} left${d.handshakes ? ' (scanned, finishing)' : ''}`
         : [d.lastSeen ? `seen ${ago(d.lastSeen)}` : 'not seen yet', ch ? `${d.mode === 'local' ? 'Wi-Fi' : 'channel'} ${ch}${d.problem ? `: ${d.problem}` : ''}` : '', d.finished === false ? 'finishing pairing' : ''].filter(Boolean).join(' · ');
-      const head = `<div class="ph-row"><span class="ph-dev">${icon(way.icon, 13)}<b>${esc(d.name)}</b>${what ? `<span class="sy-dim">${esc(what)}</span>` : ''}</span>`
-        + (confirmId === d.id ? '' : `<button type="button" data-c="remove" data-id="${esc(d.id)}"${busy ? ' disabled' : ''}>${d.state === 'pending' ? 'Cancel' : 'Remove'}</button>`) + '</div>'
-        + `<div class="sy-line sy-dim ${d.channel === 'refused' ? 'sy-bad' : ''}">${esc(sub)}</div>`;
-      const conf = confirmId !== d.id ? '' : '<div class="sy-confirm"><div>'
-        + (d.state === 'pending' ? `Cancel the pairing for ${esc(d.name)}? Its code stops working.` : `Remove ${esc(d.name)}? The phone is told, forgets this PC, and has to pair again.`)
-        + `</div><div class="sy-btns"><button type="button" data-c="do-remove" data-id="${esc(d.id)}" class="sy-danger"${busy ? ' disabled' : ''}>${d.state === 'pending' ? 'Cancel it' : 'Remove'}</button>`
+      // the dot: connected mint, connecting or waiting gold, refused rose, else dim
+      const dot = d.state === 'pending' ? 'warn' : d.channel === 'joined' ? 'on' : d.channel === 'joining' ? 'warn' : d.channel === 'refused' ? 'bad' : 'off';
+      const dotTip = d.state === 'pending' ? 'waiting for the phone' : ch || 'not seen yet';
+      const head = `<div class="ph-row"><span class="ph-ic">${icon('phone', 16)}</span>`
+        + `<span class="ph-dt"><span class="ph-dn"><b>${esc(d.name)}</b><span class="ph-dot ${dot}" title="${esc(dotTip)}" aria-label="${esc(dotTip)}" role="img"></span></span>`
+        + `${what ? `<span class="sy-dim ph-what">${esc(what)}</span>` : ''}`
+        + `<span class="sy-dim ph-sub ${d.channel === 'refused' ? 'sy-bad' : ''}">${esc(sub)}</span></span>`
+        + (confirmId === d.id ? '' : `<button type="button" data-c="remove" data-id="${esc(d.id)}"${busy ? ' disabled' : ''}>${d.state === 'pending' ? 'Cancel' : 'Remove'}</button>`) + '</div>';
+      const conf = confirmId !== d.id ? '' : '<div class="sy-confirm danger" role="group">'
+        + (d.state === 'pending' ? `<div class="sy-ct">Cancel the pairing for ${esc(d.name)}?</div><div class="sy-cb">Its code stops working.</div>`
+          : `<div class="sy-ct">Remove ${esc(d.name)}?</div><div class="sy-cb">The phone is told, forgets this PC, and has to pair again.</div>`)
+        + `<div class="sy-btns"><button type="button" data-c="do-remove" data-id="${esc(d.id)}" class="sy-danger"${busy ? ' disabled' : ''}>${d.state === 'pending' ? 'Cancel it' : 'Remove'}</button>`
         + '<button type="button" data-c="keep">Keep</button></div></div>';
       return `<div class="ph-item">${head}${conf}</div>`;
     }).join('');
@@ -188,7 +204,8 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
     drawLive();
     const list = card.querySelector('.ph-list');
     const lh = listHtml();
-    if (list._html !== lh) { list.innerHTML = lh ? `<div class="sy-h">${icon('phone', 13)}<b>Phones</b></div>${lh}` : ''; list._html = lh; list.hidden = !lh; }
+    const many = status ? status.devices.filter((d) => d.kind !== 'computer' && d.state === 'paired').length : 0;
+    if (list._html !== lh) { list.innerHTML = lh ? `<div class="sy-h">${icon('phone', 13)}<b>Phones</b>${many ? `<span class="sy-count">${many}</span>` : ''}</div>${lh}` : ''; list._html = lh; list.hidden = !lh; }
     const nt = card.querySelector('.sy-note');
     const text = note ? note.text : '';
     if (nt.textContent !== text) nt.textContent = text;

@@ -22,7 +22,8 @@
 //   capped), D6 the page's single-item ops (sync-prefs.js applyOps, and web/app.js's own save code run in a vm: a
 //   stale page never undoes the Mac's change), D7 web/app.js repoIsHidden goes by turnStart as the server goes by
 //   promptAt, D8 repoOrder keeps a repo only the other machine has in place, and the new groups addedRepos, keepPins
-//   and parity.
+//   and parity. "Start clean": a device with every group emptied but its local-only items and no saved state takes
+//   the rows exactly, keeps its local-only items, writes nothing, and never writes over a row that does not open.
 // Run: node scripts/sync-prefs-test.js   (exit 0 = all pass)
 'use strict';
 const fs = require('fs');
@@ -395,7 +396,12 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
   applied.pc.length = 0;
   pc = mkPc();
   step(5e3); await pc.tick();
-  ok(applied.pc.length === P.GROUP_NAMES.length, 'a saved state of another device: every group joined again');
+  ok(applied.pc.length === P.GROUP_NAMES.length - 1 && !applied.pc.includes('mapSpots'), 'a saved state of another device: every group joined again, but the row that does not open');
+  ok(K.openText(db.find((r) => r.key === 'prefs:mapSpots').value_enc, BADKEY, 'setting:prefs:mapSpots'), '...which a first join never writes over');
+  // that row gone: the group goes up again
+  db.splice(db.findIndex((r) => r.key === 'prefs:mapSpots'), 1);
+  step(10e3); await pc.tick();
+  ok(rowOf('mapSpots') && rowOf('mapSpots').device === pcDevice, 'the row that did not open gone: this machine\'s go up');
 
   // ---------- fetched only when updated_at moved ----------
   const f0 = fetches();
@@ -463,6 +469,44 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     'pinOverrides: stay with no host, a bad id, an unknown mode or no time is no choice');
   eq(P.cleanPinOverride({ id: id(1), mode: 'free', hostDevice: MAC, at: 5 }), { id: id(1), mode: 'free', at: 5 }, 'pinOverrides: no hostDevice without a host');
   ok(P.GROUP_NAMES.includes('pinOverrides') && P.GROUPS.pinOverrides.key({ id: id(1) }) === id(1), 'pinOverrides: a shared group, one per chat');
+
+  // ---------- "Start clean" (fleet-view.js freshBeforeStart): every group emptied but its local-only items, no saved
+  // state: the first join takes the rows' items as they are, keeps the local-only ones and writes nothing back ----------
+  {
+    const FRESH = '44444444-4444-4444-8444-444444444444';
+    const freshSet = machine();
+    const unpinned = { id: 'r:z:\\scratch\\fresh-only', x: 3, y: 4, pin: false };
+    freshSet.mapSpots = [unpinned];
+    let freshStore = null;
+    // Blackbox's order has a repo this machine lacks (notes) in the middle: it stays there, nothing is written back
+    const seal = (g, items, k = KEY) => ({ key: `prefs:${g}`, value_enc: K.sealText(JSON.stringify({ v: 1, device: MAC, at: pcClock.t, after: null, items }), k, `setting:prefs:${g}`), updated_at: new Date(pcClock.t).toISOString() });
+    const order = [{ origin: ORIGIN_DF, name: 'detailforge-web' }, { origin: null, name: 'notes' }, { origin: ORIGIN_FV, name: 'fleet-view' }];
+    const setRow = (r) => { const i = db.findIndex((x) => x.key === r.key); if (i >= 0) db[i] = r; else db.push(r); };
+    setRow(seal('repoOrder', order));
+    // a row this key can't open (a newer version's): never written over by the first join
+    const badMoved = seal('moved', [], crypto.randomBytes(32));
+    setRow(badMoved);
+    const fr = P.createPrefs({ api, key: KEY, now: () => pcClock.t, device: () => FRESH, read: () => freshSet, apply: applier(freshSet, 'pc'), translate: trPc,
+      load: () => freshStore, save: (s) => { freshStore = JSON.parse(JSON.stringify(s)); }, log: () => {} });
+    const before = posts().length;
+    step(20e3);
+    await fr.tick();
+    const rowKeys = (g) => rowOf(g).items.map((x) => P.GROUPS[g].key(x)).map(String).sort();
+    const mineKeys = (g) => P.portable(g, freshSet[g], trPc).map((x) => P.GROUPS[g].key(x)).map(String).sort();
+    for (const g of ['hidden', 'names', 'pinOverrides', 'teams', 'hostRules']) eq(mineKeys(g), rowKeys(g), `start clean: ${g} is the row's, exactly`);
+    eq(freshSet.hidden.map((h) => h.id).sort(), rowOf('hidden').items.map((h) => h.id).sort(), 'start clean: the hidden list is Blackbox\'s');
+    ok(freshSet.mapSpots.some((s) => s.id === unpinned.id && !s.pin), 'start clean: a local-only item (an unpinned spot) stays');
+    eq(mineKeys('mapSpots'), rowOf('mapSpots').items.filter((p) => P.GROUPS.mapSpots.in(p, trPc)).map((p) => String(P.GROUPS.mapSpots.key(p))).sort(), 'start clean: the pinned spots are the row\'s that land here');
+    eq(posts().slice(before).length, 0, 'start clean: nothing written back (the rows are taken as they are)');
+    eq(freshSet.repoOrder, [PCR.df, PCR.fv], 'start clean: the order here is the row\'s, less a repo not here');
+    eq(rowOf('repoOrder').items, order, 'start clean: a repo this machine lacks keeps its place in the order');
+    eq(db.find((x) => x.key === 'prefs:moved').value_enc, badMoved.value_enc, 'a row that does not open is not written over by a first join');
+    step(20e3);
+    await fr.tick();
+    eq(posts().slice(before).length, 0, 'start clean: the next round writes nothing either');
+    ok(freshStore && Object.keys(freshStore.groups).length === P.GROUP_NAMES.length - 1 && !freshStore.groups.moved, 'start clean: every group agreed on with its row, but the one that does not open');
+    await fr.stop();
+  }
 
   await pc.stop();
   await mac.stop();

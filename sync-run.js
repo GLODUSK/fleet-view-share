@@ -13,18 +13,26 @@
 // The gates are looked at when sync-api.js reports a sign-in or a sign-out (onChange), and once a minute (a config
 // written by `sync-api.js setup`). Off by default: a PC with none of the three runs no loop,
 // sets no timer beyond the minute check and reaches no network.
+// Once every gate is open, and before any loop is made, beforeStart({ api, log, say }) runs (fleet-view.js: "Start
+// clean", a fresh start waiting in <dataDir>/sync/fresh.json; it does nothing when none is). say(reason) puts that
+// reason in status() while it works (starting: true, health 'warn', never 'bad'); a throw keeps the loops off, says its
+// message as the reason the same way, and the next gate check tries again. restart(reason) stops the loops (if they
+// run) and runs the gates again from the start, so beforeStart runs before anything goes up.
 //
 //   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, bound, accountOf,
-//                      busy, intervalMs, checkMs, prefs, relay, version, makeUploader, makeMaterializer, makeMover,
-//                      makeLive, makePrefs, makeLink, makeCarry })
-//     -> { start(), stop(), check(), status(), move(id, { force, noWork }), moveStatus(id), cancelMove(id), owners(),
-//          device(), live(), prefsChanged(), link(), missing(), rescan(), note(id), dropNote(id), peer(route, body, from) }
+//                      busy, skip, beforeStart, intervalMs, checkMs, prefs, relay, version, makeUploader,
+//                      makeMaterializer, makeMover, makeLive, makePrefs, makeLink, makeCarry })
+//     -> { start(), stop(), check(), restart(reason), status(), move(id, { force, noWork }), moveStatus(id),
+//          cancelMove(id), owners(), device(), live(), prefsChanged(), link(), missing(), rescan(), note(id),
+//          dropNote(id), peer(route, body, from) }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
 //   are one (by default each side's own: ~/.claude and ~/.claude-a); accountOf(id) -> the account a conversation ran
 //   under here or null (fleet-view.js: its claude process, or remembered), the uploader's option of that name, so its
 //   row says a when it ran on A in a folder A shares with B; busy(id) -> true while a turn of it runs here (the
 //   uploader's option of that name: such a chat goes up at most every 45 s, and at once when its turn ends); the
 //   uploader's ownerOf is the materializer's owner(id), so another device's conversation costs it no request;
+//   skip(id) -> true for a conversation that must never go up (fleet-view.js: one set aside by "Start clean"): the
+//   uploader's only(id) is its opposite, read on every scan, so one taken off the list goes up at the next;
 //   roots: () => [repo folders] (the
 //   repos Fleet View lists; the materializer matches a synced repo's origin against them). host: { list() ->
 //   Promise<desktop/host.js list()'s items | null>, kill(id) -> Promise } (api.js hostList / hostKill); isOpen(id) ->
@@ -69,6 +77,7 @@
 //   bad   signed out (or not a member, no key: sync stopped for a reason that needs Henry), a loop failed
 //         HEALTH.badStreak times in a row, or nothing went through for HEALTH.deadMs
 //   off   sync is off here (not set up, Work locally, not started)
+//   (warn, too, while beforeStart works or failed: status() says starting: true; the loops are not running yet)
 // -> { level, part, name, why, error: { at, message } | null, tip }: part / name the worst loop, tip one line for the
 // pill's title. A loop in the middle of a long scan with no error is not stale.
 // <dataDir>/sync/away.json (what the session host refuses to open, sync-move.js) is deleted when sync is turned off
@@ -97,6 +106,7 @@ const clock = (iso) => { const t = Date.parse(iso || ''); return t ? new Date(t)
 function health(st, nowMs = Date.now()) {
   if (!st || !st.running) {
     const reason = (st && st.reason) || 'not started';
+    if (st && st.starting) return { level: 'warn', part: null, name: null, why: reason, error: null, tip: `Conversation sync is getting ready: ${reason}` };
     if (st && st.off) return { level: 'off', part: null, name: null, why: reason, error: null, tip: `Conversation sync is off: ${reason}` };
     return { level: 'bad', part: null, name: null, why: reason, error: null, tip: `Conversation sync is not running: ${reason}` };
   }
@@ -152,6 +162,8 @@ function createSyncRunner(o = {}) {
   const boundIds = typeof o.bound === 'function' ? o.bound : null;
   const accountOf = typeof o.accountOf === 'function' ? o.accountOf : null;
   const busy = typeof o.busy === 'function' ? o.busy : null;
+  const skip = typeof o.skip === 'function' ? o.skip : null;
+  const beforeStart = typeof o.beforeStart === 'function' ? o.beforeStart : null;
   const prefsOpt = o.prefs && typeof o.prefs.read === 'function' && typeof o.prefs.apply === 'function' ? o.prefs : null;
   const host = o.host && typeof o.host.list === 'function' ? o.host : null;
   const isOpenOpt = typeof o.isOpen === 'function' ? o.isOpen : null;
@@ -171,6 +183,8 @@ function createSyncRunner(o = {}) {
   let run = null; // { uid, keyId, up, down, mover, live, prefs, link, startedAt }
   let why = 'not started'; // why it is not running, for status()
   let off = true; // and whether that is sync off here (health 'off') rather than stopped by a problem ('bad')
+  let starting = false; // beforeStart works, or failed and waits for the next check (health 'warn')
+  let restarts = 0; // restart() calls: one during beforeStart runs it again before any loop is made
   let timer = null, offChange = null, checking = null, again = false, stopped = true;
 
   // the host's sessions that were alive at its last list (each list the mover asks for refreshes it)
@@ -192,6 +206,7 @@ function createSyncRunner(o = {}) {
   async function halt(reason, gate = false, quiet = gate) {
     why = reason;
     off = quiet;
+    starting = false;
     if (run) {
       const r = run;
       run = null;
@@ -241,6 +256,24 @@ function createSyncRunner(o = {}) {
     if (run && run.uid === uid && run.keyId === kid) return;
     if (run) await halt(run.uid !== uid ? 'another account signed in' : 'the sync key changed', false, true);
     if (stopped) return;
+    // the step before any loop (a fresh start): until it is done nothing goes up or comes down; a failure keeps the
+    // loops off and the next check tries again
+    if (beforeStart) {
+      const wait = (reason) => { why = String(reason || 'getting ready'); off = false; starting = true; };
+      const g0 = restarts;
+      try {
+        await beforeStart({ api: sync, log, say: (reason) => wait(reason) });
+      } catch (e) {
+        const reason = String((e && e.message) || e || 'getting ready failed');
+        log(`sync: not started (${reason})`);
+        wait(reason);
+        return;
+      }
+      if (stopped) return halt('stopped', false, true);
+      // restart() asked while it worked: it runs again before any loop is made
+      if (restarts !== g0) { again = true; return; }
+      starting = false;
+    }
     const args = { api: sync, dataDir, key, log };
     if (projects) args.projects = () => projects();
     // the uploader asks the materializer's rows whose a conversation is (no request for another device's), and holds a
@@ -249,6 +282,8 @@ function createSyncRunner(o = {}) {
     const upArgs = { ...args, ownerOf: (id) => (down && typeof down.owner === 'function' ? down.owner(id) : null) };
     if (accountOf) upArgs.accountOf = (id) => accountOf(id);
     if (busy) upArgs.busy = (id) => busy(id);
+    // a conversation set aside here never goes up (one skip() can't answer for is held back too)
+    if (skip) upArgs.only = (id) => { try { return !skip(id); } catch { return false; } };
     const up = makeUploader(upArgs);
     down = makeMaterializer({ ...args, roots: () => roots(), isOpen });
     let mover = null, link = null, carry = null;
@@ -302,10 +337,17 @@ function createSyncRunner(o = {}) {
       await halt('stopped', false, true);
     },
     check,
+    // stops the loops (when they run) at once, not after a check under way, and runs the gates again from the start:
+    // beforeStart before anything goes up (one already working runs again: restarts)
+    async restart(reason = 'starting again') {
+      restarts++;
+      if (run) await halt(String(reason), false, true);
+      return check();
+    },
     // nothing secret: whether it runs, why not, and the two loops' own status
-    // health: health() of the rest (the header pill's colour and title)
+    // health: health() of the rest (the header pill's colour and title); starting: beforeStart works or failed
     status() {
-      if (!run) { const st = { running: false, reason: why, off }; return { ...st, health: health(st) }; }
+      if (!run) { const st = { running: false, reason: why, off, ...(starting ? { starting: true } : {}) }; return { ...st, health: health(st) }; }
       const safe = (f) => { try { return f(); } catch (e) { return { error: e && e.message }; } };
       const st = {
         running: true,
