@@ -1,6 +1,7 @@
 # Chats follow you between machines (plan)
 
-Status: being built, from 2026-10-11 (Henry: "do all of it"). It replaces an earlier draft that only passed
+Status: built 2026-10-11 (Henry: "do all of it"), every part below merged; not yet tried between the two real machines
+(that needs both signed in to sync, linked once in the Sync card, and the phone app's next build). It replaces an earlier draft that only passed
 messages through to the machine running a chat.
 
 What Henry asked for (2026-10-11): a chat can live on either machine and keeps its workspace. A repo that is on
@@ -153,18 +154,18 @@ same standard (detailforge's CLAUDE.md and scripts too).
 One item each, ready for "Go with these". Items 1 and 2 can start now. 3 needs 2. 4 and 7 need 1. 6 needs 1, 2 and 3.
 
 1. The link: the machines pair once (a code on both screens) and call each other through the relay, with `link.js`
-   as the phone's side in Node · Opus, high
+   as the phone's side in Node · Opus, high (done: #307)
 2. Portable and bound: sync carries every chat's log, marks each portable or bound to its host, and the list shows
-   it · Opus, medium
+   it · Opus, medium (done: #310, and #311 keeps another machine's chats its own on a lost sign-in)
 3. Carry the work: pack and unpack the branch, unpushed commits, changes, untracked files and worktree into the chat's
    own worktree, stash on the old host, upload at each turn's end, and `sync-carry-test.js` in CI on both systems (done:
-   sync-work.js #306; moves carry it: sync-carry.js)
+   sync-work.js #306; moves carry it: sync-carry.js #314)
 4. Carry the rest: `.env` files and logins (`gh`, `vercel`, `supabase`, MCP) over the link, the ready check, and the
-   `[Fleet View]` note (done: sync-carry.js, /peer/env and /peer/logins, /sync/note)
-5. Clone what's missing: ask once per repo, then automatic, and install dependencies · Sonnet, medium
+   `[Fleet View]` note (done: #314: sync-carry.js, /peer/env and /peer/logins, /sync/note)
+5. Clone what's missing: ask once per repo, then automatic, and install dependencies · Sonnet, medium (done: #308; by itself only from accounts the machine has a checkout from)
 6. Follow you: typing moves a portable chat here (queued on the host while it works), bound chats go through the
-   link, and the Chat tab shows which · Opus, high
-7. The phone follows the host: it pairs with both machines and sends each chat's messages to its host · Opus, medium
+   link, and the Chat tab shows which · Opus, high (done: #312)
+7. The phone follows the host: it pairs with both machines and sends each chat's messages to its host · Opus, medium (done: #309; ships with the app's next build)
 8. Fleet View's parity: a Mac form of every CLAUDE.md step, chosen by the machine the chat runs on (done: #301)
 
 ## Decided
