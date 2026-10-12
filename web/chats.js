@@ -1120,6 +1120,19 @@ function withMade(state) {
   return extra.length ? { ...state, bots: [...extra, ...(state.bots || [])] } : state;
 }
 
+// a bot's or the Chief's look for a note outside this tab (botnote.js): its row's name, colour and mascot, wearing
+// face ('done', 'needs', ...), for the conversation sid (raw /state or the derived one) -> { key, name, color, face,
+// preview } or null when sid is no overseer's
+export function botFace(state, sid, face, size = 34) {
+  let list;
+  try { list = buildContacts(state, { chiefId: state.settings?.chief?.id || null, chains: chains || undefined }).map(lookOf); } catch { return null; }
+  const c = list.find((x) => x.kind !== 'team' && (x.id === sid || (x.ids || []).includes(sid)));
+  if (!c) return null;
+  const color = colorOf(c);
+  return { key: c.key, name: c.name || (c.kind === 'chief' ? 'Chief' : 'Bot'), color, preview: c.preview || '',
+    face: mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: face, color, size, shape: c.shape || undefined }) };
+}
+
 export function renderChats(el, view, ui) {
   if (!el._built) build(el, ui);
   const state = withMade(view);

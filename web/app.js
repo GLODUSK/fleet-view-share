@@ -158,7 +158,8 @@
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects } from './projects.js';
-import { renderChats } from './chats.js';
+import { renderChats, botFace } from './chats.js';
+import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote } from './term.js';
@@ -503,6 +504,7 @@ async function poll() {
     }
     if (pendingSelect) { const id = pendingSelect; pendingSelect = null; queueMicrotask(() => fvSelect(id)); }
     try { notifyAlerts(st); } catch (e) { console.warn(e); }
+    try { noteBots(st); } catch (e) { console.warn(e); }
     try { usageUi?.update(st); } catch (e) { console.warn(e); }
   } catch (e) {
     // unchanged: drawn already, unless the page was showing "reconnecting…"
@@ -3523,6 +3525,28 @@ function raise(a) {
     };
   } catch (e) { console.warn(e); }
 }
+// ---------- bot notes (botnote.js): a bot or the Chief finished a turn or needs you ----------
+// A card at the top right with its face and the line it ended on, on every view but the Bots tab (Henry,
+// 2026-10-12), from the same state.alerts (their own last n, in memory: a reload announces nothing old). A click
+// opens its chat in the Bots tab.
+const BOT_NOTE_FACE = { done: 'done', question: 'needs', stalled: 'needs', error: 'error' };
+let botNoteN = null;
+const botNotes = SOLO ? null : mountBotNotes({ open: (sid) => { ui.selectedId = sid; if (local.view === 'chats') render(); else setView('chats'); } });
+function noteBots(st) {
+  const list = Array.isArray(st?.alerts) ? st.alerts : [];
+  const top = list.reduce((m, a) => Math.max(m, Number(a && a.n) || 0), 0);
+  if (botNoteN == null || top < botNoteN) { botNoteN = top; return; }
+  const fresh = list.filter((a) => a && Number(a.n) > botNoteN && BOT_NOTE_FACE[a.kind]).sort((a, b) => a.n - b.n);
+  botNoteN = top;
+  if (!botNotes || local.view === 'chats') return;
+  for (const a of fresh.slice(-3)) {
+    const face = BOT_NOTE_FACE[a.kind];
+    const f = botFace(st, a.sid, face);
+    if (!f) continue;
+    const line = face === 'done' ? f.preview : face === 'error' ? 'hit an API error' : f.preview || a.text;
+    botNotes.push({ key: f.key, sid: a.sid, name: f.name, face: f.face, kind: face, text: line || (face === 'done' ? 'Finished' : ''), color: f.color });
+  }
+}
 function askNotify() {
   if (SOLO) return;
   if (!('Notification' in window) || Notification.permission !== 'default' || local.notify === false) return;
@@ -3646,6 +3670,7 @@ if (DEBUG) {
   window.__fv = {
     ui, hosts, hidden, hiddenRepos, continued, addedLocal, multi, since, notified,
     notifyAlerts: (st) => notifyAlerts(st),
+    noteBots: (st) => noteBots(st), botNotes,
     get replay() { return replay; },
     setMulti: (ids) => setMulti(ids, 'test'),
     addRepoPath: (p) => addRepoPath(p),
