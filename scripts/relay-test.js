@@ -556,6 +556,8 @@ async function main() {
     ['GET', `/api/sessions/${SID}/activity`], ['GET', '/api/sessions/new-3/activity'], ...['now', 'unsend', 'model'].map((v) => ['POST', `/api/sessions/${SID}/${v}`]),
     // the Claude accounts screen
     ['GET', '/accounts'], ['POST', '/accounts/add'], ['POST', '/accounts/login'], ['POST', '/accounts/code'], ['POST', '/accounts/cancel'],
+    // Continue here asked of a machine that is on, for a chat whose host is off (the phone with several machines)
+    ['GET', '/sync/move'], ['POST', '/sync/move'],
   ];
   for (const [m, p] of allowed) ok(R.routeAllowed(m, p), `allowed: ${m} ${p}`);
   const refused = [
@@ -589,6 +591,9 @@ async function main() {
     ['GET', '/accounts/add'], ['GET', '/accounts/code'], ['POST', '/accounts/add/'], ['POST', '/accounts/Add'], ['POST', '/accounts/add/A'],
     ['POST', '/accounts/../accounts/add'], ['POST', '/accounts//add'], ['POST', '/accounts/%61dd'], ['POST', '/accounts/add?letter=A'], ['GET', '/accounts?x=1'],
     ['POST', '/api/accounts/add'], ['GET', '/api/accounts'], ['POST', '/sync/accounts/check'], ['POST', '/accounts/login/remove'],
+    // near misses of a move: nothing else under /sync
+    ['POST', '/sync/move/'], ['GET', '/sync/moves'], ['POST', '/sync/move/cancel'], ['DELETE', '/sync/move'], ['POST', '/sync/activity'], ['GET', '/sync/activity'],
+    ['POST', '/sync/connect'], ['POST', '/sync/Move'],
   ];
   eq(R.SIGNIN_LETTERS, require(path.join(ROOT, 'sync-accounts.js')).SYNC_LETTERS, 'the phone signs in exactly the letters sync knows (A and B)');
   for (const [m, p] of refused) ok(!R.routeAllowed(m, p), `refused: ${m} ${JSON.stringify(p)}`);
@@ -726,7 +731,7 @@ async function main() {
   devs = JSON.parse(fs.readFileSync(devicesFile, 'utf8')).devices;
   ok(devs[0].state === 'pending' && JSON.parse(A.keyStore.peek())[ph.dev].qr.next.length === 0, 'none of those paired it or made a key');
   const hs1 = await ph.handshake(ws, 'h1');
-  eq(hs1.r && { s: hs1.r.s, b: { ...hs1.r.b, epk: '-' } }, { s: 200, b: { paired: true, pcName: 'TEST-PC', version: '1.0.99', epk: '-' } }, 'the handshake\'s hello: 200 with the PC\'s epk');
+  eq(hs1.r && { s: hs1.r.s, b: { ...hs1.r.b, epk: '-' } }, { s: 200, b: { paired: true, pcName: 'TEST-PC', version: '1.0.99', device: null, platform: process.platform, epk: '-' } }, 'the handshake\'s hello: 200 with the PC\'s epk (no sync device id here yet: null)');
   ok(hs1.k && hs1.k.length === 32 && !hs1.k.equals(ph.K), 'the phone makes K\' from the answer');
   devs = JSON.parse(fs.readFileSync(devicesFile, 'utf8')).devices;
   ok(devs[0].state === 'paired' && devs[0].pairedAt === clock.t && devs[0].exp === undefined && devs[0].app === '1.0.0', 'devices.json: paired');
@@ -744,9 +749,13 @@ async function main() {
   ok((await relay.status()).devices[0].finished === false, 'status: paired, not finished');
   // the first envelope under one K' (the first one: the second answer was the lost one this time) finishes it
   ph.use(hs1.k);
+  // this machine's sync device id, once sync made one (device.json), goes with every hello's answer
+  const DEVICE_A = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  fs.mkdirSync(path.join(A.dataDir, 'sync'), { recursive: true });
+  fs.writeFileSync(path.join(A.dataDir, 'sync', 'device.json'), JSON.stringify({ id: DEVICE_A.toUpperCase() }));
   ph.send(ws, { t: 'hello', id: 'h3', at: clock.t, app: '1.0.0', device: 'Henry\'s iPhone' });
   r = await ph.answer(ws, 'h3');
-  eq(r && { s: r.s, b: r.b }, { s: 200, b: { paired: true, pcName: 'TEST-PC', version: '1.0.99' } }, 'a hello under K\': 200, no epk');
+  eq(r && { s: r.s, b: r.b }, { s: 200, b: { paired: true, pcName: 'TEST-PC', version: '1.0.99', device: DEVICE_A, platform: process.platform } }, 'a hello under K\': 200 with the sync device id (lower case) and the platform, no epk');
   eq(JSON.parse(A.keyStore.peek()), { [ph.dev]: { k: hs1.k.toString('base64url') } }, 'the key store holds K\' alone: K and the other K\' are forgotten');
   ok((await relay.status()).devices[0].finished === true, 'status: finished');
   // the QR's K now: "already paired", and the other K' opens nothing
@@ -1088,6 +1097,10 @@ async function main() {
     ['POST', '/push-target', { b: { root: KNOWN, target: 'preview' } }, 200],
     ['POST', '/push-target', { b: { root: ELSEWHERE, target: 'preview' } }, 403],
     ['GET', '/repo-history', { q: { root: KNOWN } }, 200],
+    ['POST', '/sync/move', { b: { id: SID, force: true } }, 200], ['POST', '/sync/move', { b: { id: SID } }, 200],
+    ['POST', '/sync/move', { b: { id: SID, force: 'yes' } }, 400], ['POST', '/sync/move', { b: { id: 'not-a-conversation' } }, 400],
+    ['POST', '/sync/move', { b: {} }, 400], ['POST', '/sync/move', { b: { id: SID, force: true, from: 'x' } }, 403],
+    ['GET', '/sync/move', { q: { id: SID } }, 200], ['GET', '/sync/move', { q: {} }, 400], ['GET', '/sync/move', { q: { id: '../state' } }, 400],
     ['GET', '/repo-history', { q: { root: ELSEWHERE } }, 403],
   ];
   // the phone's fence (GET /file, /chat/kind, /chat/files, /chat/commands): only inside a workspace, nothing hidden
@@ -1971,7 +1984,7 @@ async function main() {
   lp.key = lhs.k;
   lc.send(lp.env({ t: 'hello', id: 'lh2', at: clock.t, app: '1.0.0', device: 'Wi-Fi iPhone' }));
   r = await lp.answer(lc, 'lh2');
-  eq(r && { s: r.s, b: r.b }, { s: 200, b: { paired: true, pcName: 'TEST-PC', version: '1.0.99' } }, 'local: a hello under K\' finishes the pairing');
+  eq(r && { s: r.s, b: r.b }, { s: 200, b: { paired: true, pcName: 'TEST-PC', version: '1.0.99', device: null, platform: process.platform } }, 'local: a hello under K\' finishes the pairing');
   eq(JSON.parse(L.keyStore.peek()), { [lp.dev]: { k: lhs.k.toString('base64url') } }, 'local: the key store holds K\' alone');
   stL = await relayL.status();
   ok(stL.devices[0].state === 'paired' && stL.devices[0].finished === true && stL.devices[0].channel === 'joined', `status: paired, finished, connected (${JSON.stringify(stL.devices[0])})`);

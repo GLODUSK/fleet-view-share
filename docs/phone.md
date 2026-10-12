@@ -102,11 +102,14 @@ Supabase sees who is connected, when, and how big each message is, but never wha
      info = "fleet-view relay v2 paired", length 32)` (`||` joins the bytes; "none" is HKDF's zero-length salt);
    - **keeps `K'` in its key store before it answers**, next to `K` and the `K'` of any earlier handshake (4 at
      most), and marks the device `paired`;
-   - answers under `K`: `res` 200 `{ paired: true, pcName, version, epk }` with its own public key.
+   - answers under `K`: `res` 200 `{ paired: true, pcName, version, device, platform, epk }` with its own public key.
+     `device` is the machine's sync device id (`<dataDir>/sync/device.json`, lower case) while sync is set up there,
+     else `null`; `platform` is its `process.platform`. Every hello's 200 carries both (see "Several machines"); an
+     older PC sends neither.
 
    The phone makes the same `K'` from its secret and the PC's `epk`, and **saves `K'` in place of `K` in the one
    SecureStore write that holds the pairing** (`own: true` marks it), before anything goes under `K'`. The first
-   thing that does is a `hello` under `K'` (no `epk`), answered 200 `{ paired: true, pcName, version }`.
+   thing that does is a `hello` under `K'` (no `epk`), answered 200 `{ paired: true, pcName, version, device, platform }`.
 5. **The first envelope under a `K'` finishes the pairing on the PC:** that `K'` becomes the device's key, and `K`
    and every other `K'` are forgotten (deleted from the key store). After that, `K` gets `403 { ok: false, paired:
    false, message: "already paired..." }` (a `hello` or a `req`, for as long as `K` would have opened hellos, and
@@ -399,6 +402,11 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 `/teams/rename`, `/bots/:id/switch` and `/bots/:id/tasks/:taskId`, and `/accounts/add`, `/accounts/login`,
 `/accounts/code` and `/accounts/cancel` (only to sign in a missing Claude A or B, below).
 
+**GET and POST:** `/sync/move` (Continue here, asked of a machine that is on for a chat whose host is off: "Several
+machines" below). The POST takes only `{ id, force? }` (403 for any other field; 400 when `id` is not a conversation
+id or `force` is not true or false), the GET only `?id=<a conversation id>` (400). It reaches fleet-view.js's
+`/sync/move` as this machine's own page, as the other page routes do.
+
 The Claude accounts (accounts.js; the phone's "Claude accounts" step after pairing and its Settings row):
 
 - `GET /accounts` is the PC's Accounts list (fleet-view.js, this PC only). The relay passes on only
@@ -553,6 +561,42 @@ key counts as unsigned.
   that can read the server's memory (a debugger, a memory dump): that one can get the key. Every Claude session
   runs as that user, so a Chief should still weigh what a "Henry" message asks for.
 
+## Several machines
+
+Henry has two machines, the PC (BlackBox) and the Mac, and sync carries his chats between them: each chat has one
+host, the machine that runs it (docs/sync-follow.md). The phone pairs with each machine on its own (the same pairing
+as above, one QR code per machine) and talks to each over its own channel or socket.
+
+- **What it keeps.** One pairing per machine, each under its own SecureStore key, and the list of them
+  (`phone/src/pairing/pairings.ts`). Pairing another machine adds it to the list (Settings, Add a machine, or a
+  chat's "Pair <name>"); the pair screen asks for that machine's way only. Every Blackbox pairing goes through the
+  one Supabase project and account (a code for another is refused). A pairing also keeps what the machine's hello
+  says about it, `device` and `platform`, from the first answer on. An app from before this kept one pairing under
+  one key: the first launch moves it into the list as it is (its `K'` too), so nothing is paired again.
+- **Reads** (`/state` and everything not about one chat) go to one machine that is online: the one that answered
+  last while it stays online, else the first online. A machine's `/state` lists every chat it knows, its own and the
+  synced ones.
+- **A chat's requests go to its host** (`phone/src/transport/multi.ts`, `phone/src/lib/hosts.ts`): send, answer,
+  interrupt, now, unsend, model, activity, menu, the session, the transcript, `/conversation` and its pictures, and,
+  for the chat on view, the routes that read its folder (`/chat/image`, `/chat/files`, `/chat/commands`,
+  `/chat/kind`, `/file`). The host is the chat's `workspace.host` in `/state` (null: the machine that listed it), or
+  for an older machine its `syncOwner` (not one moving `away` from the lister), else the machine that listed it. A
+  host is matched to a pairing by its sync device id, and by name only when that machine sends no `device`.
+- **A host the phone can't reach.** Not paired with it: the chat says "This chat runs on <name>. Pair <name> to type
+  here." and offers the pairing. Offline: a portable chat offers **Continue on <the machine that is on>**: `POST
+  /sync/move { id, force: true }` through that machine, then `GET /sync/move?id=` every second until `ready`; when
+  the job reaches `offline` or `noanswer` and says `canForce`, it asks once more with force, which takes the last
+  copy the host uploaded (the page's "Use the cloud copy"). From then on the chat goes to its new host. A bound chat
+  (`workspace.kind: 'bound'`, a folder only its host has) says "Only on <name>, which is offline." Either way the
+  feed, its pictures and the transcript still come from the reading machine's synced copy, and nothing else is sent:
+  each such request fails at once, nothing sent, with those words.
+- **A chat started from the phone** stays on the machine that started it (its `new-<n>` key, then its id) until
+  `/state` names its host, and so does one taken over with Continue on; at most 10 minutes.
+- **Per machine:** a machine that revokes the phone, or no longer takes its pairing, drops that one pairing, with a
+  note naming it; the last one gone is the same as Unpair. The same machine paired again (the same sync device id)
+  drops the older pairing. Settings lists the machines (online or last seen, the way, the Fleet View version); a tap
+  unpairs that one only.
+
 ## The relay on the PC
 
 - `relay.js` runs inside the Fleet View server. Its Supabase side is off unless sync S1 is set up and signed in and
@@ -604,7 +648,7 @@ key counts as unsigned.
   the API token pasted into a dev field), and `MockTransport` (the fixtures in `web/fixtures/`).
 - Crypto: `@noble/ciphers` (AES-GCM), `@noble/hashes` (HKDF-SHA256), `@noble/curves` (X25519, pinned at 2.4.0)
   and `fflate` (raw DEFLATE), tested against `docs/phone-vectors.json`.
-- The pairing and the Supabase session live in SecureStore. AsyncStorage caches the last `/state` and the newest
+- The pairings (one per machine, see "Several machines") and the Supabase session live in SecureStore. AsyncStorage caches the last `/state` and the newest
   items of chats already opened, so the app still reads (but cannot send) while the PC is offline. The first launch
   after an install clears SecureStore, because the Keychain survives a reinstall.
 - Shared code comes from `web/` through Metro `watchFolders`: `web/chats-model.js` (`buildContacts` takes raw

@@ -39,9 +39,11 @@
 //             minutes, an `at` more than 5 minutes off, or one from before the relay started.
 //   hello     protocol v2 (docs/phone.md "Pairing"): a hello under the QR's K carries the phone's X25519 key (epk); the
 //             relay makes its own, keeps K' = HKDF-SHA256(K || X25519 secret, info 'fleet-view relay v2 paired')
-//             before it answers 200 { paired: true, pcName, version, epk }, and the first envelope under a K' makes
-//             it the device's key and forgets K (K then gets 403 "already paired"). A hello under the device's own
-//             key: 200 { paired: true, pcName, version }. One code makes at most 8 handshakes, one per 5 s (429
+//             before it answers 200 { paired: true, pcName, version, device, platform, epk }, and the first envelope
+//             under a K' makes it the device's key and forgets K (K then gets 403 "already paired"). A hello under the
+//             device's own key: 200 { paired: true, pcName, version, device, platform }. device is this machine's sync
+//             device id (<dataDir>/sync/device.json while sync is set up, else null), platform process.platform: a
+//             phone paired with several machines sends each chat's requests to the machine that hosts it. One code makes at most 8 handshakes, one per 5 s (429
 //             { retryAfter }; past 8, 403 { paired: false }), and a device whose K' never came before K's time ran out
 //             is dropped by the sweep, key and all
 //   req       the allowlist below, then http.request to 127.0.0.1:<port>: page POSTs with Origin
@@ -95,6 +97,9 @@
 //                       403);  POST /api/bots/:id/start and /remove  no fields at all (403). A bot id: 12 hex digits
 //   POST /repos/add     path a known root;  POST /sessions/move  root null or a known root
 //   POST /push-target   { id } or root a known root;  GET /repo-history  root a known root
+//   POST /sync/move     only id (a conversation id) and force (true or false): Continue here for a chat whose host is
+//                       off, asked of a machine that is on (403 for any other field, 400 for a bad one);  GET /sync/move
+//                       id a conversation id (400)
 //   GET /accounts       (fleet-view.js: accounts.js view(), local only) passes on only each letter's a, email and
 //                       signedIn, and the sign-ins of A and B: status, message, and the claude.ai link while one waits
 //   POST /accounts/add { letter }, /login { account }, /code { account, code }, /cancel { account }   (the Claude
@@ -337,12 +342,12 @@ const TASK = '[A-Za-z0-9][A-Za-z0-9._-]{0,63}';
 const ALLOW = {
   GET: ['/state', '/conversation', '/conversation/image', '/repo-history', '/chat/commands', '/chat/files', '/chat/kind', '/file',
     '/since', '/api/sessions', `/api/sessions/${KEY}`, `/api/sessions/${KEY}/(?:menu|transcript|activity)`, '/api/conversations',
-    '/api/teams', '/api/status', '/chief/briefing', '/accounts'],
+    '/api/teams', '/api/status', '/chief/briefing', '/accounts', '/sync/move'],
   POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
     '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)', '/api/chief/start',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/${TASK}`,
-    '/accounts/(?:add|login|code|cancel)'],
+    '/accounts/(?:add|login|code|cancel)', '/sync/move'],
 };
 const ALLOW_RE = Object.fromEntries(Object.entries(ALLOW).map(([m, list]) => [m, new RegExp(`^(?:${list.join('|')})$`)]));
 // what only a linked computer may call besides (docs/link.md): the /peer/... routes, which fleet-view.js serves to the
@@ -547,6 +552,18 @@ function createRelay(opts = {}) {
   const origin = `http://127.0.0.1:${port}`;
   const pcName = () => clip(opts.pcName || os.hostname(), 80);
   const version = () => { try { return String((typeof opts.version === 'function' ? opts.version() : opts.version) || ''); } catch { return ''; } };
+  // this machine's sync device id (opts.device in tests), or null while sync is not set up here: a phone paired with
+  // several machines matches a chat's host (/state's workspace.host, syncOwner) to the machine it should ask
+  const deviceId = () => {
+    try {
+      if (typeof opts.device === 'function') { const d = opts.device(); return typeof d === 'string' && UUID_RE.test(d) ? d.toLowerCase() : null; }
+      if (!sync.enabled()) return null;
+      const j = JSON.parse(fs.readFileSync(path.join(SYNC_API.syncDir(dataDir), 'device.json'), 'utf8'));
+      return j && typeof j.id === 'string' && UUID_RE.test(j.id) ? j.id.toLowerCase() : null;
+    } catch { return null; }
+  };
+  // what a hello answers 200 with (the handshake adds its epk)
+  const helloBody = () => ({ paired: true, pcName: pcName(), version: version(), device: deviceId(), platform: process.platform });
   if (!sync || typeof sync.enabled !== 'function') throw new Error('createRelay needs the sync instance (opts.sync)');
   let keyStore = opts.keyStore || null; // made on first use: on Windows it is DPAPI through PowerShell
   const lanPort = Number(opts.lanPort) || LAN.LAN_PORT;
@@ -756,7 +773,14 @@ function createRelay(opts = {}) {
       // the commands of a folder outside the fence are not read: the phone gets its own and the built-in ones
       if (p === '/chat/commands' && q.cwd != null && q.cwd !== '' && !(typeof q.cwd === 'string' && path.isAbsolute(q.cwd) && (await fenced(path.resolve(q.cwd))))) delete q.cwd;
       if (p === '/repo-history') return (await rootsKnown([q.root])) ? null : no('not a workspace Fleet View lists');
+      if (p === '/sync/move') return typeof q.id === 'string' && UUID_RE.test(q.id) ? null : [400, 'id must be a conversation id'];
       return null;
+    }
+    if (p === '/sync/move') {
+      const bad = Object.keys(b).filter((k) => k !== 'id' && k !== 'force');
+      if (bad.length) return no(`a move takes only id and force, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      if (!(typeof b.id === 'string' && UUID_RE.test(b.id))) return [400, 'id must be a conversation id'];
+      return b.force === undefined || typeof b.force === 'boolean' ? null : [400, 'force must be true or false'];
     }
     // the Chief is started by its own route, which passes on only what it takes (and only in its own folder)
     if (p === '/api/sessions' && 'role' in b) return no('start the Chief with /api/chief/start');
@@ -1212,7 +1236,7 @@ function createRelay(opts = {}) {
     if (msg.t === 'hello') {
       saw(dv, msg, false);
       logLine(dv.id, 'HELLO', '-', 200, 0, 0);
-      return void sendRes(dv, msg.id, { s: 200, b: { paired: true, pcName: pcName(), version: version() } }, undefined, rt);
+      return void sendRes(dv, msg.id, { s: 200, b: helloBody() }, undefined, rt);
     }
     if (msg.t === 'req') return onRequest(dv, msg, rt);
     return drop(dv);
@@ -1266,7 +1290,7 @@ function createRelay(opts = {}) {
     }
     saw(dv, msg, changed);
     logLine(dv.id, 'HELLO', '-', 200, 0, 0);
-    sendRes(dv, msg.id, { s: 200, b: { paired: true, pcName: pcName(), version: version(), epk: b64u(mine.pub) } }, down, rt);
+    sendRes(dv, msg.id, { s: 200, b: { ...helloBody(), epk: b64u(mine.pub) } }, down, rt);
   }
   // the first envelope under one of the K' (c) a handshake made: it is the device's key now, the QR's K and the other
   // K' open nothing (K still answers "already paired" until its time is up, from memory only)
