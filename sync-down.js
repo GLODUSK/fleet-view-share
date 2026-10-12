@@ -71,6 +71,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const PAGE = 1000; // conversation rows per request (Supabase's default max-rows)
 const READ_PIECE = 1024 * 1024; // local files are hashed and copied this much at a time
+// chunks fetched at once for one file: each request waits a round trip (Mac -> Supabase, 70-200 ms), not for bytes,
+// so one at a time made a backlog of thousands of chunks take an hour
+const FETCH_AHEAD = 8;
 const BACKOFF_MIN_MS = 30e3;
 const BACKOFF_MAX_MS = 30 * 60e3;
 const BAD_SEG_RE = /[<>:"|?*\\\x00-\x1f]/; // what a rel_cwd segment may not hold (Windows names, drives, streams)
@@ -388,8 +391,23 @@ function createMaterializer(opts = {}) {
       const total = crypto.createHash('sha256');
       pfd = fs.openSync(part, 'w');
       wrote = true;
+      // the chunks to fetch, FETCH_AHEAD at once: a new one starts as each is written, so at most FETCH_AHEAD are on
+      // the way or waiting their turn; they are still opened, checked and written in seq order. One still on the way
+      // when this returns (a failure, a conflict) is let go: its result or error is never used
+      const want = job.chunks.filter((c) => !have.has(c.seq));
+      const ahead = new Map(); // seq -> the download's promise
+      let next = 0;
+      const fetchMore = () => {
+        while (next < want.length && ahead.size < FETCH_AHEAD) {
+          const c = want[next++];
+          const p = api.storage.download(c.objectPath);
+          p.catch(() => {}); // its error is thrown below when its turn comes, or never: not an unhandled rejection
+          ahead.set(c.seq, p);
+        }
+      };
       let at = 0;
       for (const c of job.chunks) {
+        fetchMore();
         let buf;
         if (have.has(c.seq)) {
           for (let o = c.start; o < c.end; o += READ_PIECE) {
@@ -400,7 +418,7 @@ function createMaterializer(opts = {}) {
           }
           continue;
         }
-        const blob = await api.storage.download(c.objectPath);
+        const blob = await ahead.get(c.seq);
         buf = X.openChunk(Buffer.from(blob), key, c.objectPath);
         if (buf.length !== c.len || X.sha256(buf) !== c.sha256) fail(`${job.file}: chunk ${c.seq} is not what its row says (length or sha256)`, 'bad_sha');
         if (fd !== null && c.start < localSize) {
@@ -410,6 +428,7 @@ function createMaterializer(opts = {}) {
         total.update(buf);
         fs.writeSync(pfd, buf, 0, buf.length, at);
         at += buf.length;
+        ahead.delete(c.seq);
       }
       if (at !== job.size) fail(`${job.file}: ${at} bytes put together, ${job.size} expected`, 'gap');
       if (job.sha256 && total.digest('hex') !== job.sha256) fail(`${job.file}: the file's sha256 is not the row's`, 'bad_sha');
@@ -708,4 +727,4 @@ function createMaterializer(opts = {}) {
   return { scanOnce, start, stop, status, conflicts, pull, owners };
 }
 
-module.exports = { createMaterializer, relParts, planChunks, downStatePath };
+module.exports = { createMaterializer, relParts, planChunks, downStatePath, FETCH_AHEAD };

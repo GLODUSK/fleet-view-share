@@ -20,6 +20,9 @@
 // (left alone, still saying where) / skip when open here; a back-off does not hold a pull up; a pull asked for while a
 // scan is mid-way runs right after that row, never at the same time; owners() with leaseUntil (a copy, empty before
 // the first scan); only(id).
+// Many chunks: fetched more than one and at most FETCH_AHEAD at once, answered out of order, laid down byte-identical;
+// a fetch that fails or a bad sha256 mid-way writes nothing, starts nothing past the window and leaves no unhandled
+// rejection; a partly-here local copy fetches only what it lacks; one that differs mid-chunk is a conflict.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders or the real Supabase. Exit 0 = all pass.
 'use strict';
@@ -567,6 +570,95 @@ async function main() {
   const runs = order.filter((x) => [q1.id, q2.id, q3.id].includes(x)).filter((x, i, a) => i === 0 || a[i - 1] !== x);
   eq(runs, [q1.id, q3.id, q2.id], 'pull mid-scan: the scan finishes its row, the pull goes next, then the scan goes on');
   ok(pr.outcome === 'done' && [q1, q2, q3].every((c) => same(mainOf(c.id), c.main)), 'pull mid-scan: all three laid down');
+
+  // ---------- many chunks: fetched D.FETCH_AHEAD at once, laid down in order ----------
+  // the fake download answers each chunk after a scrambled delay; it counts the ones on the way at once
+  const N = 24;
+  const manyPieces = (tag) => Array.from({ length: N }, (_, i) => Buffer.concat(logOf(tag, 3, `${tag}${i}`)));
+  const seqOf = (p) => Number(p.split('/').pop());
+  const fetching = { now: 0, most: 0, started: [], fail: null };
+  const slowDownload = async (p, o) => {
+    if (!fetching.only || !p.includes(fetching.only)) return realDownload(p, o);
+    const seq = seqOf(p);
+    fetching.started.push(seq);
+    fetching.now++;
+    fetching.most = Math.max(fetching.most, fetching.now);
+    try {
+      await sleep(3 + ((seq * 7) % 11) * 3);
+      if (fetching.fail && fetching.fail(seq)) throw new S.SyncError(`chunk ${seq} could not be fetched`, 0, 'network');
+      return await realDownload(p, o);
+    } finally { fetching.now--; }
+  };
+  const unhandled = [];
+  const onUnhandled = (e) => { unhandled.push(e); };
+  process.on('unhandledRejection', onUnhandled);
+  api.storage.download = slowDownload;
+  try {
+    const big = putConvo({ pieces: manyPieces('big') });
+    Object.assign(fetching, { only: big.id, now: 0, most: 0, started: [] });
+    pr = await m.pull(big.id);
+    ok(pr.outcome === 'done' && same(mainOf(big.id), big.main), `many chunks: laid down byte-identical (${pr.outcome})`);
+    ok(fetching.most > 1 && fetching.most <= D.FETCH_AHEAD, `many chunks: more than one fetch at once, at most ${D.FETCH_AHEAD} (${fetching.most})`);
+    eq(fetching.started.slice().sort((a, b) => a - b), Array.from({ length: N }, (_, i) => i), 'many chunks: each chunk fetched once');
+
+    // a chunk mid-way fails (a download that throws, then a bad sha256): nothing written, the local copy untouched, no
+    // unhandled rejection from the fetches still on the way, and none started after the failure
+    const bad = putConvo({ pieces: manyPieces('bad') });
+    const local3 = Buffer.concat(chunkRows(bad.id).slice(0, 3).map((c) => bad.main.subarray(c.byte_offset, c.byte_offset + c.byte_length)));
+    write(mainOf(bad.id), local3);
+    const localStat = fs.statSync(mainOf(bad.id));
+    Object.assign(fetching, { only: bad.id, now: 0, most: 0, started: [], fail: (seq) => seq === 10 || seq === 13 });
+    let badErr = null;
+    try { await m.pull(bad.id); } catch (e) { badErr = e; }
+    await sleep(150); // the fetches still on the way settle
+    ok(badErr && /chunk 10 could not be fetched/.test(badErr.message), `a failed fetch mid-way: the pull throws it (${badErr && badErr.message})`);
+    ok(same(mainOf(bad.id), local3) && fs.statSync(mainOf(bad.id)).mtimeMs === localStat.mtimeMs && !fs.existsSync(`${mainOf(bad.id)}.part`), 'a failed fetch mid-way: the local copy untouched, no .part');
+    ok(!fetching.started.some((s) => s < 3) && Math.max(...fetching.started) < 10 + D.FETCH_AHEAD, `a failed fetch mid-way: local chunks not fetched, none started past the window (${Math.max(...fetching.started)})`);
+    eq(fetching.now, 0, 'a failed fetch mid-way: no fetch left running');
+    // a bad sha256 on chunk 10
+    const row10 = chunkRows(bad.id)[10];
+    const sha10 = row10.sha256;
+    row10.sha256 = X.sha256(Buffer.from('something else'));
+    Object.assign(fetching, { now: 0, most: 0, started: [], fail: (seq) => seq === 13 });
+    badErr = null;
+    try { await m.pull(bad.id); } catch (e) { badErr = e; }
+    await sleep(150);
+    ok(badErr && badErr.code === 'bad_sha' && /chunk 10/.test(badErr.message), `a bad chunk sha256 mid-way: the pull throws it (${badErr && badErr.code})`);
+    ok(same(mainOf(bad.id), local3) && fs.statSync(mainOf(bad.id)).mtimeMs === localStat.mtimeMs && !fs.existsSync(`${mainOf(bad.id)}.part`), 'a bad chunk sha256 mid-way: the local copy untouched, no .part');
+    ok(Math.max(...fetching.started) < 10 + D.FETCH_AHEAD, 'a bad chunk sha256 mid-way: none started past the window');
+    eq(unhandled.length, 0, 'failures mid-way: no unhandled rejection');
+    row10.sha256 = sha10;
+
+    // a local copy holding some chunks and a part of the next: those are copied, the rest fetched, all in order
+    const mix = putConvo({ pieces: manyPieces('mix') });
+    Object.assign(fetching, { only: mix.id, now: 0, most: 0, started: [], fail: null });
+    const mixRows = chunkRows(mix.id);
+    // chunks 0 to 5 and the first line of chunk 6 (a whole line, so it is not cut off)
+    const chunk6 = mix.main.subarray(mixRows[6].byte_offset, mixRows[6].byte_offset + mixRows[6].byte_length);
+    const lineEnd6 = chunk6.indexOf(0x0a) + 1;
+    const mixLocal = mix.main.subarray(0, mixRows[6].byte_offset + lineEnd6);
+    write(mainOf(mix.id), mixLocal);
+    pr = await m.pull(mix.id);
+    ok(pr.outcome === 'done' && same(mainOf(mix.id), mix.main), `a partly-here copy: laid down byte-identical (${pr.outcome})`);
+    eq(fetching.started.slice().sort((a, b) => a - b), Array.from({ length: N - 6 }, (_, i) => i + 6), 'a partly-here copy: only the chunks it lacks fetched (the cut one too)');
+    // a part of a chunk here that differs: a conflict, the copy left alone, nothing left on the way
+    const mixBad = putConvo({ pieces: manyPieces('mb') });
+    const mbRows = chunkRows(mixBad.id);
+    const mbLocal = Buffer.from(mixBad.main.subarray(0, mbRows[4].byte_offset + 10));
+    mbLocal[mbLocal.length - 3] ^= 1;
+    write(mainOf(mixBad.id), Buffer.concat([mbLocal, Buffer.from('\n')]));
+    Object.assign(fetching, { only: mixBad.id, now: 0, started: [] });
+    pr = await m.pull(mixBad.id);
+    await sleep(150);
+    ok(pr.outcome === 'conflict' && /different/.test(pr.reason) && same(mainOf(mixBad.id), Buffer.concat([mbLocal, Buffer.from('\n')])), `a partly-here copy that differs mid-chunk: conflict, left alone (${pr.outcome})`);
+    ok(fetching.started.length > 1, `a partly-here copy that differs: other fetches were on the way when it stopped (${fetching.started.length})`);
+    ok(!fs.existsSync(`${mainOf(mixBad.id)}.part`) && fetching.now === 0 && unhandled.length === 0, 'a partly-here copy that differs: no .part, nothing left running, no unhandled rejection');
+    fs.rmSync(mainOf(mixBad.id));
+  } finally {
+    api.storage.download = realDownload;
+    process.removeListener('unhandledRejection', onUnhandled);
+    fetching.only = null;
+  }
 
   // owners(): the rows other devices own, with their lease
   const fresh = D.createMaterializer({ api, dataDir, key: KEY, home, roots: [repoDir] });
