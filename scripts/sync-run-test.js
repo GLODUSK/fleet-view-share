@@ -227,6 +227,30 @@ function fakeMover(args, made) {
       await r5.stop();
     }
 
+    // ---------- stays-on rules: the carry gets stays and pinnedHere, the mover mayLeave (code 'pinned') ----------
+    {
+      const s7 = fakeSync();
+      s7.on = true; s7.signedIn = true;
+      s7.rest = async () => [];
+      const dir7 = path.join(dir, 'seven');
+      await C.saveKey(S.syncDir(dir7), crypto.randomBytes(32));
+      const kept = 'aaaaaaaa-0000-4000-8000-000000000001', free = 'aaaaaaaa-0000-4000-8000-000000000002';
+      let carryArgs = null;
+      const mv7 = [];
+      const r7 = createSyncRunner({
+        sync: s7, dataDir: dir7, checkMs: 1e6, makeUploader: () => fakeLoop('up', []), makeMaterializer: () => fakeLoop('down', []),
+        makeMover: (a) => fakeMover(a, mv7), makeCarry: (a) => { carryArgs = a; return { packOut() {} }; },
+        stays: (root) => (root === 'R' ? ['**/*.blend'] : []),
+        pinnedHere: (id) => (id === kept ? { rule: 'blender', host: 'BlackBox', note: 'Blender runs on BlackBox' } : null),
+      });
+      await r7.start();
+      const may = mv7[0].args.mayLeave;
+      ok(typeof may === 'function' && may(free) === true, 'stays-on: the mover lets a chat no rule keeps leave');
+      eq(may(kept), { code: 'pinned', message: 'Blender runs on BlackBox' },'stays-on: the mover refuses one a rule keeps here');
+      ok(carryArgs && carryArgs.stays('R')[0] === '**/*.blend' && carryArgs.pinnedHere(kept) === true && carryArgs.pinnedHere(free) === false, 'stays-on: the carry gets stays and pinnedHere');
+      await r7.stop();
+    }
+
     // ---------- gate 0, the mode, and gate 4, the Claude accounts ----------
     {
       const s6 = fakeSync();

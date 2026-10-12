@@ -27,6 +27,9 @@
 //   Promise<desktop/host.js list()'s items | null>, kill(id) -> Promise } (api.js hostList / hostKill); isOpen(id) ->
 //   true while a Claude Code process here has it open (fleet-view.js's live pid files); trust(cwd, account) -> bool,
 //   the mover's option of that name (fleet-view.js trustMoved: a moved chat's folder in a listed repo is trusted).
+//   Stays-on rules (fleet-view.js hostRules): stays(mainRoot) -> [globs] (the carry's option); pinnedHere(id) -> { rule,
+//   host, note } | null: a chat kept on this machine is never handed over (the mover's mayLeave refuses, code
+//   'pinned') and its work gets no turn's snapshot (the carry's pinnedHere).
 //   The materializer never lays down a conversation that isOpen, or the host's last list (alive), says is open. makeUploader, makeMaterializer and
 //   makeMover are for tests; by default sync-up.js createUploader, sync-down.js createMaterializer and sync-move.js
 //   createMover.
@@ -95,6 +98,15 @@ function createSyncRunner(o = {}) {
   // mode() -> 'local' stops sync here (null / 'sync': the other gates decide); accounts: sync-accounts.js's object
   const modeOf = typeof o.mode === 'function' ? o.mode : () => null;
   const accounts = o.accounts && typeof o.accounts.reconcile === 'function' ? o.accounts : null;
+  // pinnedHere(id) -> { rule, host, note? } for a chat a stays-on rule keeps on this machine, else null: the mover
+  // refuses to hand it over (mayLeave, code 'pinned'), and no turn's snapshot of its work is made
+  const pinnedHere = typeof o.pinnedHere === 'function' ? o.pinnedHere : null;
+  const mayLeave = (id) => {
+    let p = null;
+    try { p = pinnedHere(id); } catch {}
+    if (!p) return true;
+    return { code: 'pinned', message: p.note || 'a stays-on rule keeps it here' };
+  };
 
   let run = null; // { uid, keyId, up, down, mover, live, prefs, link }
   let why = 'not started'; // why it is not running, for status()
@@ -173,8 +185,8 @@ function createSyncRunner(o = {}) {
     let mover = null, link = null, carry = null;
     // the device id is the mover's (it makes the device row on its first tick): no mover, no snapshots
     const deviceId = () => { const d = mover && mover.device(); return d ? d.id : null; };
-    try { carry = makeCarry({ ...args, device: deviceId, link: () => link, roots: () => roots(), ...(typeof o.stays === 'function' ? { stays: o.stays } : {}) }); } catch (e) { log(`sync: a move carries the conversation alone here: ${e && e.message}`); }
-    try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false), carry, ...(typeof o.trust === 'function' ? { trust: o.trust } : {}) }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
+    try { carry = makeCarry({ ...args, device: deviceId, link: () => link, roots: () => roots(), ...(typeof o.stays === 'function' ? { stays: o.stays } : {}), ...(pinnedHere ? { pinnedHere: (id) => !!pinnedHere(id) } : {}) }); } catch (e) { log(`sync: a move carries the conversation alone here: ${e && e.message}`); }
+    try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false), carry, ...(typeof o.trust === 'function' ? { trust: o.trust } : {}), ...(pinnedHere ? { mayLeave } : {}) }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
     let live = null;
     if (mover && snapshot) {
       const liveArgs = { ...args, device: deviceId, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null), snapshot: () => snapshot() };

@@ -240,6 +240,12 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
   ok(L.sigOf(base) !== L.sigOf([{ ...base[0], repo: { origin: 'GLODUSK/other', name: 'fleet-view' } }])
     && L.sigOf(base) !== L.sigOf([{ ...base[0], repo: { origin: 'GLODUSK/fleet-view', name: 'other' } }])
     && L.sigOf(base) !== L.sigOf([old]), 'sigOf changes when the repo changes, or goes');
+  // pin: the owner's stays-on verdict, { rule, host } | null; left out by an older owner (no verdict)
+  const cp = (pin) => L.cleanEntry({ id: C1, state: 'WORKING', pin });
+  eq(cp({ rule: 'blender', host: 'BlackBox', extra: 1 }).pin, { rule: 'blender', host: 'BlackBox' }, 'cleanEntry keeps a pin, its two fields only');
+  ok(cp(null).pin === null && cp({ rule: 'Bad Rule', host: 'x' }).pin === null && cp({ rule: 'blender', host: ' ' }).pin === null, 'cleanEntry: no pin, a bad rule id or no host is null');
+  ok(!('pin' in old), 'an entry from an older owner has no pin at all (the other devices judge by their own rules)');
+  ok(L.sigOf([cp(null)]) !== L.sigOf([cp({ rule: 'blender', host: 'BlackBox' })]) && L.sigOf([cp(null)]) !== L.sigOf([old]), 'sigOf changes when the pin changes');
 
   // ---------- bound: the conversations whose workspace is only on their device ----------
   {

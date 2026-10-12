@@ -16,7 +16,9 @@
 //   snapshot() -> [{ id, state, label, stateColor, name, renamed, account, last, active, turnStart, waitingOn,
 //             agents, repo }]: the conversations this device owns, as its /state shows them. repo: { origin, name }, the
 //             repo it shows it under, portable (sync-prefs.js makeTranslate out()), or null; the other devices show it
-//             under their own checkout of that repo (its tool calls name this machine's paths, which they lack)
+//             under their own checkout of that repo (its tool calls name this machine's paths, which they lack). pin:
+//             { rule, host } | null, the stays-on rule that keeps it on a device by this device's reading (fleet-view.js
+//             pinOf), which the other devices take over their own for the chats this one runs
 //   bound()   -> [ids]: every conversation this device owns whose workspace is only here (sync-common.js "portable or
 //             bound"), old ones too. Only this device can tell for some: a git checkout with no origin under home syncs
 //             under the home row, as a portable folder does. Not given: none
@@ -93,7 +95,16 @@ function cleanEntry(x) {
     waitingOn: text(x.waitingOn, 300),
     agents: Number.isInteger(x.agents) && x.agents > 0 ? Math.min(x.agents, 999) : 0,
     repo: cleanRepo(x.repo),
+    // the owner's stays-on verdict (fleet-view.js pinOf): { rule, host } or null; left out by an older owner (no
+    // verdict: the other devices judge by their own rules)
+    ...('pin' in x ? { pin: cleanPin(x.pin) } : {}),
   };
+}
+// a stays-on pin: { rule: a rule's id, host: a device's name } | null
+function cleanPin(p) {
+  if (!p || typeof p !== 'object' || typeof p.rule !== 'string' || !/^[a-z0-9-]{1,40}$/.test(p.rule)) return null;
+  const host = typeof p.host === 'string' ? p.host.trim().slice(0, 100) : '';
+  return host ? { rule: p.rule, host } : null;
 }
 // a row's bound list: conversation ids, lower case, one each, sorted, at most MAX_BOUND
 function cleanIds(list) {
@@ -119,7 +130,7 @@ function pickList(list, t, doneMs = TIMING.doneMs) {
 }
 // what decides a write: everything but last and active
 const sigOf = (list) => JSON.stringify(list.map((e) => [e.id, e.state, e.label, e.stateColor, e.name, e.renamed, e.account, e.turnStart, e.waitingOn, e.agents,
-  e.repo ? [e.repo.origin, e.repo.name] : null]));
+  e.repo ? [e.repo.origin, e.repo.name] : null, e.pin ? [e.pin.rule, e.pin.host] : e.pin === null ? null : 0]));
 
 function remoteFor(view, device, id) {
   if (!view || !view.ready) return null;

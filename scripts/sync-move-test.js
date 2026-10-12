@@ -161,7 +161,7 @@ function machine(name, letter, o = {}) {
   const m = {
     name, me: crypto.randomUUID(), home, proj, folder, slugDir: path.join(proj, C.slugOf(folder)), dataDir: path.join(dir, 'data'),
     hosted: new Map(), external: new Set(), held: new Set(), holds: [], forgotten: [], kills: [], owners: new Map(), downOk: false, conflicts: [],
-    afterPull: null, logs: [], asleep: false, listedAt: null,
+    afterPull: null, logs: [], asleep: false, listedAt: null, keep: new Set(),
   };
   db.devices.push({ id: m.me, user_id: UID, name, platform: 'win32', last_seen_at: null });
   // where its log is (a carried move puts it in the slug folder of the folder it resumes in), else the repo's
@@ -234,6 +234,8 @@ function machine(name, letter, o = {}) {
   m.mover = M.createMover({
     api, dataDir: m.dataDir, key: KEY, log: (t) => m.logs.push(t), now, up: m.up, down: m.down, host: m.host, me: m.me,
     home: m.home, projects: [{ account: 'b', dir: proj }], isLive: m.isLive, carry: m.carry,
+    // fleet-view.js pinnedHere's stand-in: the ids in m.keep stay here (a stays-on rule)
+    mayLeave: (id) => (m.keep.has(id) ? { code: 'pinned', message: `it stays on ${name}: Blender runs there` } : true),
     // fleet-view.js trustMoved's stand-in: m.trustFn when a test sets it, else it does not trust
     ...(o.trust ? { trust: (cwd, account) => (m.trustFn ? m.trustFn(cwd, account) : false) } : {}),
   });
@@ -597,6 +599,28 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       await step(A);
       ok(!A.out(id) && !A.awayOf(id) && !A.kills.includes(id) && A.hosted.get(id).alive, 'cancel: A dropped it, and its session runs on');
       ok(!B.mover.owners().get(id).moving, 'cancel: B\'s owners() no longer says moving');
+    }
+
+    // ---------- 9b. A keeps a chat a stays-on rule pins there: the ask fails, forced or not, and A ends nothing ----------
+    {
+      const id = seed(A, 2);
+      A.host0(id, 'idle');
+      A.keep.add(id);
+      await step(A); await step(B);
+      const n0 = A.kills.length;
+      B.mover.move(id, { force: true });
+      ok(await until(() => done(B, id)), 'pinned: the move ends');
+      const j = jobOf(B, id);
+      ok(j.phase === 'failed' && j.pinned === true && j.error === 'pc keeps it: it stays on pc: Blender runs there', `pinned: failed, and says it stays (${j.error})`);
+      ok(A.kills.length === n0 && A.hosted.get(id).alive && rowOf(id).owner_device === A.me && !A.held.has(id), 'pinned: A ended nothing, held nothing, and still owns it');
+      await until(() => !A.out(id), { who: [A], max: 5 });
+      ok(!A.awayOf(id) && moveKeys(id).length === 0, 'pinned: nothing moving on A, and the rows are gone');
+      // the rule went: it moves as any other
+      A.keep.delete(id);
+      B.mover.move(id);
+      ok(await until(() => done(B, id)), 'unpinned: the move ends');
+      eq(phaseOf(B, id), 'ready', 'unpinned: it moves');
+      A.hosted.delete(id);
     }
 
     // ---------- 10. an ask left behind by a dead B never ends a session on A ----------

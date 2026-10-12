@@ -49,6 +49,9 @@
 //   trust     (cwd, account) -> bool: marks folder cwd trusted for that account when Fleet View may (fleet-view.js: a
 //             checkout of a repo it lists, or a folder inside one, like its .claude/worktrees/*), true when it did;
 //             none: a moved chat whose folder is not trusted yet asks, as Claude Code does
+//   mayLeave  (id) -> true, or { code, message } when this machine keeps it (fleet-view.js: a stays-on rule naming this
+//             machine, code 'pinned'): A fails the ask at once (and in judge, before ending the session), its reply's
+//             pinned: true, and B's job fails with pinned: true; none: every chat may leave
 //   now()     the clock (Date.now); timing: { ...TIMING } overrides (tests)
 //
 // The request channel is two rows of fleet_sync.settings per move, each written by one side only, sealed with
@@ -56,7 +59,7 @@
 //   move:<id>:ask    B's: { v: 1, id, to: B, from: A, at, nonce, force, carry?: 1, noWork?: true }; B writes at again
 //                    every 20 s while it waits
 //   move:<id>:reply  A's: { v: 1, id, nonce, from: A, at, phase, note, status?, waitingFor?, external?, final?,
-//                    workRefused? } phase asked | waiting | ending | uploading | released | failed; final { size,
+//                    workRefused?, pinned? } phase asked | waiting | ending | uploading | released | failed; final { size,
 //                    sha256, generation, work? } with released. A writes at again every 10 s once the ask is confirmed.
 // Freshness is judged by seeing at change, on the observer's own clock (never a clock compare across machines):
 //   - A acts on an ask only after it saw its at change once (B writes it again as soon as it sees A's first reply),
@@ -261,6 +264,12 @@ function createMover(o = {}) {
   const findLog = typeof o.findLog === 'function' ? o.findLog : (id) => findLogIn(projects(), id);
   const trusted = typeof o.trusted === 'function' ? o.trusted : (cwd, account) => trustedIn(home, cwd, account);
   const trust = typeof o.trust === 'function' ? o.trust : null;
+  // mayLeave(id) -> true, or { code, message }: this machine keeps it (a stays-on rule, code 'pinned'), so an ask for it
+  // fails here whatever the asking machine thought (forced or not)
+  const mayLeave = (id) => {
+    if (typeof o.mayLeave !== 'function') return true;
+    try { const v = o.mayLeave(id); return v === true || !v ? true : { code: String(v.code || 'refused'), message: clip(v.message || 'it stays here') }; } catch { return true; }
+  };
   // what a move carries besides the conversation (sync-carry.js): none given, a move carries the conversation alone
   const carry = o.carry && typeof o.carry.packOut === 'function' ? o.carry : null;
   let me = typeof o.me === 'string' && UUID_RE.test(o.me.toLowerCase()) ? o.me.toLowerCase() : null;
@@ -415,6 +424,7 @@ function createMover(o = {}) {
       if (x.phase === 'waiting') { r.status = x.status || null; r.waitingFor = x.waitingFor || null; if (x.external) r.external = true; }
       if (x.phase === 'released' && x.final) r.final = { ...x.final };
       if (x.phase === 'failed' && x.workRefused) r.workRefused = true;
+      if (x.phase === 'failed' && x.pinned) r.pinned = true;
       return r;
     }).then(() => { x.repliedAt = now(); }, (e) => { logOnce(`reply|${x.id}`, `${short(x.id)}: the answer could not be sent (${clip(e && e.message)})`); });
   }
@@ -429,6 +439,7 @@ function createMover(o = {}) {
   function failOut(x, why, f = {}) {
     if (x.held) { try { up.unhold(x.id); } catch {} x.held = false; }
     x.workRefused = !!f.workRefused;
+    x.pinned = !!f.pinned;
     log(`${short(x.id)}: not handed over: ${why}`);
     return setOut(x, 'failed', { note: why });
   }
@@ -445,6 +456,8 @@ function createMover(o = {}) {
     };
     outs.set(id, x);
     if (!row || lower(row.owner_device) !== me) { await failOut(x, `${myName()} does not have it any more`); return; }
+    const may = mayLeave(id);
+    if (may !== true) { await failOut(x, `${myName()} keeps it: ${may.message}`, { pinned: may.code === 'pinned' }); return; }
     x.note = `${myName()} got the request`;
     writeAway(); // moving: the host refuses to open it from now on
     log(`${short(id)}: ${nameOf(x.to)} asked to continue it there${x.force ? ' (now)' : ''}`);
@@ -467,6 +480,9 @@ function createMover(o = {}) {
   // asked or waiting: can the session end now?
   async function judge(x, list) {
     const name = myName();
+    // a stays-on rule may have come to hold since the ask (a rule changed, or the chat's last turn matched one)
+    const may = mayLeave(x.id);
+    if (may !== true) return failOut(x, `${name} keeps it: ${may.message}`, { pinned: may.code === 'pinned' });
     const p = hostedIn(list, x.id);
     if (!p && live(x.id)) return setOut(x, 'waiting', { external: true, note: `open in a terminal on ${name}: close it there` });
     if (p) {
@@ -602,6 +618,7 @@ function createMover(o = {}) {
     if (!ACTIVE.has(j.phase)) return;
     undoLaid(j);
     if (o2.workRefused) j.workRefused = true;
+    if (o2.pinned) j.pinned = true;
     j.error = why;
     j.endedAt = now();
     setJob(j, 'failed', { note: why });
@@ -850,7 +867,7 @@ function createMover(o = {}) {
       // A's reply changed since the force: A is there after all, and the ask (with force now) has it hand it over
       log(`${short(j.id)}: ${name} answered after all; it hands it over itself`);
     }
-    if (r && r.phase === 'failed') return failJob(j, r.note || `${name} could not let it go`, { workRefused: r.workRefused === true });
+    if (r && r.phase === 'failed') return failJob(j, r.note || `${name} could not let it go`, { workRefused: r.workRefused === true, pinned: r.pinned === true });
     await maybeAsk(j);
     if (j.redo) {
       if (t < j.retryAt) return;
@@ -896,7 +913,7 @@ function createMover(o = {}) {
     id: j.id, phase: j.phase, from: { device: j.from.device, name: nameOf(j.from.device, j.from.name) }, force: j.force,
     canForce: !!j.canForce && FORCEABLE.has(j.phase), note: j.note, status: j.status, waitingFor: j.waitingFor,
     ready: j.phase === 'ready' && j.ready ? { ...j.ready } : null, error: j.phase === 'failed' ? j.error : null,
-    workRefused: j.phase === 'failed' && !!j.workRefused,
+    workRefused: j.phase === 'failed' && !!j.workRefused, pinned: j.phase === 'failed' && !!j.pinned,
     startedAt: j.startedAt, at: j.at,
   });
   // the row is another device's (the materializer's last listing, or a claim seen here since), and not just claimed here

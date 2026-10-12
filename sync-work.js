@@ -37,7 +37,9 @@
 //   as secrets (item 4), and a folder that is a git repository of its own (named in notes). Refused (WorkError code
 //   'refused') for: a folder that is bound; a checkout with no commit; a merge, rebase, cherry-pick or revert under
 //   way; a changed submodule (a gitlink in either diff); a changed or new file git-lfs tracks (check-attr filter=lfs);
-//   and over the cap (o.cap, 200 MB in all).
+//   and over the cap (o.cap, 200 MB in all). o.stay: [globs] (host-rules.js) of files that stay on this machine,
+//   tracked or not, staged or not: left out of the diffs, the trees and the untracked files (the other side has them
+//   as HEAD does), named in a note, and the first 100 in the result's stayed.
 //   kind 'plain' (a home-row folder): every file under it (no node_modules, no .git, no env files) as untracked, the
 //   rest of the git fields null; at most 20,000 files.
 //
@@ -66,8 +68,8 @@
 // verify: head, both tree ids, and each untracked file (its bytes, and on macOS and Linux its mode) as the manifest
 //   says; a file untracked here and not in the manifest is a difference too (ignored ones are not looked at).
 //   -> { ok, diffs: [text] }.
-// putAway: `git stash push --include-untracked -m <note>` over the whole checkout, never env files (they stay where
-//   they are); nothing is deleted. -> the stash commit's sha, or null.
+// putAway: `git stash push --include-untracked -m <note>` over the whole checkout, never env files, o.keep's paths or
+//   o.stay's globs (they stay where they are); nothing is deleted. -> the stash commit's sha, or null.
 //
 // Every git call runs with no shell, no window, a time limit, core.hooksPath pointed at nothing (a worktree add or a
 // fast-forward must not run the repo's hooks: the PC's main checkout publishes on post-merge), GIT_TERMINAL_PROMPT=0
@@ -81,6 +83,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const P = require(path.join(__dirname, 'platform.js'));
 const C = require(path.join(__dirname, 'sync-common.js'));
+const HR = require(path.join(__dirname, 'host-rules.js'));
 
 const CAP = 200 * 1024 * 1024; // the most one pack carries in all
 const PLAIN_FILES = 20000; // files in a plain (home-row) folder
@@ -248,14 +251,17 @@ async function underway(root) {
   }
   return null;
 }
-// the tree id of the working tree's tracked files, as git sees them (a copy of the index, git add -u, write-tree)
-async function workTree(root) {
+// the tree id of the working tree's tracked files, as git sees them (a copy of the index, git add -u, write-tree).
+// stay: { pick, skip } pathspecs of the files that stay on this machine (stayOf): those are as HEAD has them, never
+// carried, in the index's tree (index: true, no add) and the working tree's alike
+async function workTree(root, stay = null, index = false) {
   const idx = await gitText(root, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
   const d = tmpDir(), copy = path.join(d, 'index');
   try {
     try { fs.copyFileSync(idx, copy); } catch {}
     const env = { GIT_INDEX_FILE: copy };
-    await git(root, ['add', '-u', '--', ':/'], { env });
+    if (stay) await git(root, ['reset', '-q', 'HEAD', '--', ...stay.pick], { env });
+    if (!index) await git(root, ['add', '-u', '--', ':/', ...(stay ? stay.skip : [])], { env });
     return await gitText(root, ['write-tree'], { env });
   } finally { rmTmp(d); }
 }
@@ -267,14 +273,13 @@ async function upstreamOf(root, branch) {
   }
   return (await maybe(root, ['rev-parse', '-q', '--verify', 'refs/remotes/origin/HEAD'])) ? 'refs/remotes/origin/HEAD' : null;
 }
-// untracked, unignored files: (entries, env paths, notes) into the bag; stay(rel) true leaves one here (pushed on
-// stayed), never in the bag, so it counts nothing against the cap
-async function untrackedOf(root, bag, notes, env, stay, stayed) {
+// untracked, unignored files: (entries, env paths, notes) into the bag; stay (stayOf): the files that stay on this
+// machine are left out, never in the bag, so they count nothing against the cap
+async function untrackedOf(root, bag, notes, env, stay) {
   const list = [];
-  for (const rel of zList(await git(root, ['ls-files', '--others', '--exclude-standard', '-z']))) {
+  for (const rel of zList(await git(root, ['ls-files', '--others', '--exclude-standard', '-z', ...(stay ? ['--', ':/', ...stay.skip] : [])]))) {
     if (rel.endsWith('/')) { notes.push(`not carried: ${rel} (a git repository of its own)`); continue; }
     if (envPath(rel)) { env.push(rel); continue; }
-    if (stay && stay(rel)) { if (stayed.length < 100) stayed.push(rel); continue; }
     const e = fileEntry(bag, fromRel(root, rel), rel);
     if (e) list.push(e);
   }
@@ -292,13 +297,17 @@ async function pack(cwd, o = {}) {
   if (busy) throw refused(`${busy} is under way here: finish it or abort it first`);
   const bag = blobBag(cap);
 
+  // o.stay: [globs] of the files that stay on this machine (fleet-view.js stays-on rules, host-rules.js), tracked or
+  // not, staged or not: left out of everything below as git pathspecs (git's own matching, so the put-away after a
+  // move leaves exactly these), and named in a note
+  const stay = stayOf(o.stay);
+  const only = stay ? ['--', ':/', ...stay.skip] : [];
+  const stayed = stay ? await stayedIn(root, stay) : [];
   // a submodule or a git-lfs file among the changes: refused
-  const staged = rawPaths(await git(root, ['diff', '--cached', '--raw', '-z', '--no-renames', '--ignore-submodules=none']));
-  const unstaged = rawPaths(await git(root, ['diff', '--raw', '-z', '--no-renames', '--ignore-submodules=none']));
+  const staged = rawPaths(await git(root, ['diff', '--cached', '--raw', '-z', '--no-renames', '--ignore-submodules=none', ...only]));
+  const unstaged = rawPaths(await git(root, ['diff', '--raw', '-z', '--no-renames', '--ignore-submodules=none', ...only]));
   if (staged.gitlink || unstaged.gitlink) throw refused('a submodule changed: commit and push it in the submodule first');
-  // o.stay(rel): an untracked file that stays on this machine (fleet-view.js stays-on rules), left out like a secret
-  const stayed = [];
-  const untracked = await untrackedOf(root, bag, notes, env, typeof o.stay === 'function' ? o.stay : null, stayed);
+  const untracked = await untrackedOf(root, bag, notes, env, stay);
   if (stayed.length) notes.push(`not carried (it stays on this machine): ${stayed.length === 1 ? stayed[0] : `${stayed.length} files, ${stayed[0]} and more`}`);
   const changed = [...new Set([...staged.paths, ...unstaged.paths, ...untracked.map((e) => e.path)])];
   if (changed.length) {
@@ -325,21 +334,32 @@ async function pack(cwd, o = {}) {
 
   // the changes
   const diffOpts = { maxBuffer: cap + 1, overMessage: `the changes are more than the ${Math.round(cap / 1048576) || cap} MB a move carries` };
-  const stagedDiff = await git(root, [...DIFF, '--cached'], diffOpts);
-  const unstagedDiff = await git(root, [...DIFF], diffOpts);
+  const stagedDiff = await git(root, [...DIFF, '--cached', ...only], diffOpts);
+  const unstagedDiff = await git(root, [...DIFF, ...only], diffOpts);
   const stagedSha = stagedDiff.length ? bag.add(stagedDiff, 'the staged changes') : null;
   const unstagedSha = unstagedDiff.length ? bag.add(unstagedDiff, 'the unstaged changes') : null;
-  const trees = { index: await gitText(root, ['write-tree']), work: await workTree(root) };
+  const trees = { index: stay ? await workTree(root, stay, true) : await gitText(root, ['write-tree']), work: await workTree(root, stay) };
 
   // files changed, as a person counts them: HEAD to the working tree with renames, plus the untracked ones
-  const files = zList(await git(root, ['diff', 'HEAD', '-M', '--name-only', '-z', '--no-ext-diff'])).length + untracked.length;
+  const files = zList(await git(root, ['diff', 'HEAD', '-M', '--name-only', '-z', '--no-ext-diff', ...only])).length + untracked.length;
   const manifest = {
     v: 1, kind: 'git', origin: info.origin, branch: info.branch, head, base, bundle, bundleRef,
     staged: stagedSha, unstaged: unstagedSha, trees, untracked, env, rel: info.rel, worktree: info.worktree,
     summary: { commits, files, bytes: bag.bytes }, notes,
   };
-  // stayed: the untracked files o.stay left here (not in the manifest: the other machine never needs them)
-  return { manifest, blobs: bag.blobs, ...(stayed.length ? { stayed } : {}) };
+  // stayed: the first 100 files o.stay left here (not in the manifest: the other machine never needs them)
+  return { manifest, blobs: bag.blobs, ...(stayed.length ? { stayed: stayed.slice(0, 100) } : {}) };
+}
+// o.stay's globs as pathspecs: { skip (all but them), pick (only them) }, or null when there are none
+function stayOf(globs) {
+  const skip = HR.excludeSpecs(globs);
+  return skip.length ? { skip, pick: HR.pickSpecs(globs) } : null;
+}
+// the changed files that stay (from HEAD, staged or not, and the untracked ones): [rel]
+async function stayedIn(root, stay) {
+  const tracked = zList(await git(root, ['diff', 'HEAD', '--name-only', '-z', '--no-renames', '--no-ext-diff', '--', ...stay.pick]));
+  const loose = zList(await git(root, ['ls-files', '--others', '--exclude-standard', '-z', '--', ...stay.pick])).filter((r) => !r.endsWith('/') && !envPath(r));
+  return [...new Set([...tracked, ...loose])];
 }
 
 // a home-row folder: every file in it
@@ -686,14 +706,15 @@ async function verify(cwd, manifest, o = {}) {
 
 // ---------- putAway ----------
 const ENV_SPECS = ['**/.env', '**/.env.*', '**/.env/**', '**/.env.*/**'].map((g) => `:(exclude,top,glob,icase)${g}`);
-// o.keep: more paths (from the top, with /) that stay where they are: the untracked files a pack left out as secrets
+// o.keep: more paths (from the top, with /) that stay where they are: the untracked files a pack left out as secrets;
+// o.stay: [globs] of the files that stay on this machine (pack's o.stay): every one of them, tracked or not
 async function putAway(cwd, note, o = {}) {
   const top = await maybe(cwd, ['rev-parse', '--show-toplevel']);
   if (!top) return null;
   const msg = clip(note || 'fleet-view: moved', 200);
   const keep = (Array.isArray(o.keep) ? o.keep : []).filter((p) => safeRel(p)).slice(0, 100).map((p) => `:(exclude,top,literal)${p}`);
   const before = await maybe(top, ['rev-parse', '-q', '--verify', 'refs/stash']);
-  await git(top, ['stash', 'push', '--quiet', '--include-untracked', '-m', msg, '--', ':/', ...ENV_SPECS, ...keep]);
+  await git(top, ['stash', 'push', '--quiet', '--include-untracked', '-m', msg, '--', ':/', ...ENV_SPECS, ...keep, ...HR.excludeSpecs(o.stay)]);
   const after = await maybe(top, ['rev-parse', '-q', '--verify', 'refs/stash']);
   if (!after || after === before) return null;
   // the stash is shared by every worktree: find ours by its message
