@@ -1362,6 +1362,17 @@ function weekPill(wk) {
     + `<span class="count-k">week left</span></span>`;
 }
 
+// the sync pill, coloured by GET /sync/activity's health (sync.js reads it; sync-run.js health() decides): green, amber
+// or red, its title naming the worst part and its error; cyan while sync is off or not read yet
+const SYNC_TINT = { ok: C.mint, warn: C.gold, bad: C.rose };
+function syncPill() {
+  let h = null;
+  try { h = syncUi ? syncUi.health() : null; } catch {} // syncUi is made further down
+  const tint = h && SYNC_TINT[h.level];
+  const tip = h && h.tip ? `${h.tip}. Click for sign-in and what sync is doing.` : 'Conversation sync: sign in or out, the sync passphrase, what it is doing';
+  return `<span class="count sync${tint ? ` sync-${h.level}` : ''}" role="button" tabindex="0" title="${esc(tip)}"><span class="pill-ic" style="color:${tint || C.cyan}">${icon('sync', 13)}</span><span class="count-k">sync</span></span>`;
+}
+
 function drawHeader(v) {
   drawWsChip();
   const list = v.sessions;
@@ -1379,7 +1390,7 @@ function drawHeader(v) {
   ].join('') + (c.cost ? pill(fmtCost(c.cost), 'API cost', C.text, 'cost', `${fmtCost(c.cost)} at API prices, every conversation seen since Fleet View started`) : '')
     + weekPill(v.week)
     // conversation sync: who is signed in, sign in / out, the sync key (sync.js)
-    + (SOLO ? '' : `<span class="count sync" role="button" tabindex="0" title="Conversation sync: sign in or out, the sync passphrase, what it is doing"><span class="pill-ic" style="color:${C.cyan}">${icon('sync', 13)}</span><span class="count-k">sync</span></span>`)
+    + (SOLO ? '' : syncPill())
     // the phone relay: pair an iPhone, the paired phones (phone.js); this PC only
     + (SOLO ? '' : `<span class="count phone" role="button" tabindex="0" title="Pair an iPhone with the Fleet View app, and the phones paired with this PC"><span class="pill-ic" style="color:${C.cyan}">${icon('phone', 13)}</span><span class="count-k">iPhone</span></span>`);
   if ($('counts')._html !== html) { $('counts').innerHTML = html.replace(/<span class="pill-ic"[^>]*><\/span>/g, ''); $('counts')._html = html; }
@@ -3452,7 +3463,8 @@ if (!SOLO) usageUi = mountUsage({
 });
 if (state) usageUi?.update(state);
 // ---------- conversation sync: the header's "sync" button opens the Sync card (sync.js; sync-api.js on the server) ----------
-const syncUi = SOLO ? null : mountSync({ post, isRemote: remotePage, fixture: !!FIXTURE, openSetup: () => setupUi?.open() });
+// onHealth: the sync pill's colour changed (sync.js): the header is drawn again with the last view
+const syncUi = SOLO ? null : mountSync({ post, isRemote: remotePage, fixture: !!FIXTURE, openSetup: () => setupUi?.open(), onHealth: () => { if (view) drawHeader(view); } });
 // repos the other machines' chats work in that this one has no checkout of: asked once, then cloned by themselves (clone.js)
 if (!SOLO) mountClone({ post, isRemote: remotePage, fixture: !!FIXTURE });
 // ---------- the start screen: work locally or sync with Blackbox, asked before anything else on Henry's machines (setup.js; sync-setup.js) ----------

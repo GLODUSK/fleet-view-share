@@ -770,7 +770,7 @@ async function main() {
   const m3 = D.createMaterializer({ api, dataDir: dataDir2, key: KEY, home, roots: [repoDir], now: () => clock, only: (id) => scanIds.has(id), log: (t) => logs.push(t) });
   const realRest = api.rest;
   const ev = [];
-  const net = { open: new Map(), most: 0, failOn: null, onGet: null };
+  const net = { open: new Map(), most: 0, failOn: null, failStatus: 0, retryAfterMs: 0, onGet: null }; // failStatus: failOn fails with that HTTP status
   const opened = (id) => { net.open.set(id, (net.open.get(id) || 0) + 1); net.most = Math.max(net.most, net.open.size); };
   const closed = (id) => { const n = net.open.get(id) - 1; if (n) net.open.set(id, n); else net.open.delete(id); };
   const watched = (s) => [...watch].find((x) => String(s).includes(x)) || null;
@@ -798,6 +798,7 @@ async function main() {
     ev.push({ k: 'get', id }); opened(id);
     try {
       if (net.onGet) net.onGet(id);
+      if (net.failOn === id && net.failStatus) throw Object.assign(new S.SyncError(`Supabase said ${net.failStatus}: ${id}`, net.failStatus), net.retryAfterMs ? { retryAfterMs: net.retryAfterMs } : {});
       if (net.failOn === id) throw new S.SyncError(`${id} could not be fetched`, 0, 'network');
       await sleep(40);
       return await realDownload(p, o);
@@ -858,11 +859,57 @@ async function main() {
     ok([0, 1, 3].every((i) => same(mainOf(wd[i].id), wd[i].main) && dsd[wd[i].id]), 'out of reach mid-scan: the rows under way finished and were saved');
     ok(!fs.existsSync(mainOf(wd[2].id)) && !dsd[wd[2].id] && !wd.slice(D.ROWS_AT_ONCE).some((c) => fs.existsSync(mainOf(c.id))), 'out of reach mid-scan: nothing for the failed row or the ones not started');
     ok(net.open.size === 0 && unhandled3.length === 0 && m3.status().lastError === dErr.message, 'out of reach mid-scan: nothing left on the way, no unhandled rejection, status says it');
+    const dh = m3.status().health;
+    ok(dh.failStreak === 1 && dh.backingOff && Date.parse(dh.backoffUntil) - Date.parse(dh.lastError.at) === 5e3 && m3.status().waiting === 0,
+      `out of reach mid-scan: the scan backs off 5 s, the row does not (${JSON.stringify(dh)}, ${m3.status().waiting} waiting)`);
     r = await m3.scanOnce();
-    ok(wd.slice(D.ROWS_AT_ONCE).every((c) => same(mainOf(c.id), c.main)) && !fs.existsSync(mainOf(wd[2].id)) && r.waiting === 1, 'out of reach mid-scan: the next scan lays down the rest, the failed row backs off');
+    ok(wd.every((c) => same(mainOf(c.id), c.main)) && r.waiting === 0, 'out of reach mid-scan: the next scan lays down the rest, the failed row included (no per-row back-off)');
+    ok(!m3.status().health.backingOff && m3.status().health.failStreak === 0 && m3.status().health.lastError === null, 'out of reach mid-scan: a clean scan resets the back-off');
+    later(); // the clock as the other cases expect it
+    // a 503 with Retry-After: the scan stops and waits as Supabase asked, no row backs off
+    fresh3();
+    const w5 = several(6, 'r5');
+    net.failOn = w5[1].id; net.failStatus = 503; net.retryAfterMs = 90e3;
+    let e5 = null;
+    try { await m3.scanOnce(); } catch (e) { e5 = e; }
+    net.failOn = null; net.failStatus = 0; net.retryAfterMs = 0;
+    await sleep(100);
+    const h5 = m3.status().health;
+    ok(e5 && e5.status === 503 && m3.status().waiting === 0 && h5.backingOff && Date.parse(h5.backoffUntil) - Date.parse(h5.lastError.at) === 90e3,
+      `a 503 mid-scan: the scan backs off for Retry-After (90 s), no row does (${JSON.stringify(h5)})`);
+    ok(!w5.slice(D.ROWS_AT_ONCE).some((c) => fs.existsSync(mainOf(c.id))), 'a 503 mid-scan: no row starts after it');
+    r = await m3.scanOnce();
+    ok(w5.every((c) => same(mainOf(c.id), c.main)) && !m3.status().health.backingOff, 'a 503 mid-scan: the next scan lays down every row');
+    // one row whose fetch always fails (out of reach, but only for it): it ends two scans, then backs off alone on the
+    // third, so the rows after it are not starved
+    fresh3();
+    const w6 = several(6, 'r6');
+    net.failOn = w6[1].id;
+    const ends6 = [];
+    for (let i = 0; i < 2; i++) { try { await m3.scanOnce(); ends6.push(false); } catch { ends6.push(true); } }
+    ok(ends6.every(Boolean) && m3.status().waiting === 0 && !fs.existsSync(mainOf(w6[1].id)),
+      `a row that keeps failing: it ends the first two scans, no row backs off yet (${ends6}, ${m3.status().waiting} waiting)`);
+    let e6 = null;
+    try { await m3.scanOnce(); } catch (e) { e6 = e; }
+    ok(!e6 && m3.status().waiting === 1 && w6.filter((c, i) => i !== 1).every((c) => same(mainOf(c.id), c.main)) && !fs.existsSync(mainOf(w6[1].id)),
+      `a row that keeps failing: the third scan backs it off alone and lays down the rest (${e6 && e6.message})`);
+    net.failOn = null;
     later();
     r = await m3.scanOnce();
-    ok(same(mainOf(wd[2].id), wd[2].main), 'out of reach mid-scan: the failed row after its back-off');
+    ok(same(mainOf(w6[1].id), w6[1].main), 'a row that keeps failing: laid down after its own back-off');
+    // a 422 (the row's own fault): that row backs off, the scan goes on and backs off nothing
+    fresh3();
+    const w4 = several(6, 'r4');
+    net.failOn = w4[1].id; net.failStatus = 422;
+    r = await m3.scanOnce();
+    net.failOn = null; net.failStatus = 0;
+    const h4 = m3.status().health;
+    ok(w4.filter((c, i) => i !== 1).every((c) => same(mainOf(c.id), c.main)) && !fs.existsSync(mainOf(w4[1].id)) && m3.status().waiting === 1,
+      'a 422 on one row: the others are laid down, that one backs off');
+    ok(!h4.backingOff && h4.failStreak === 0 && h4.lastError && h4.lastError.status === 422, `a 422 on one row: no scan-level back-off, the error shown (${JSON.stringify(h4)})`);
+    later();
+    r = await m3.scanOnce();
+    ok(same(mainOf(w4[1].id), w4[1].main) && m3.status().health.lastError === null, 'a 422 on one row: laid down after its back-off, and the error cleared');
 
     // (e) a scan starting while a pull is under way reloads down-state.json only once the pull is done
     fresh3();

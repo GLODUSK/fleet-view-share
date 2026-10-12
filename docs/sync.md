@@ -27,6 +27,15 @@ download side (S3) and the page's sync card (S5) are built on it. Its test is `n
 - **`protectedStore(dir, name)`** keeps another secret the way the sign-in is kept: `<dir>/<name>.bin` with DPAPI,
   the Keychain under account `<name>`, or `<dir>/<name>.json` at `0600`. It returns `{ read, write, clear, stamp }`
   over plain text. The name is 1 to 41 of `[a-z0-9-]`, and `session` is refused because that is the sign-in's own.
+- **A renewal survives a restart.** Each refresh token works once, so the stored one is never removed or replaced
+  before the new one is safely kept: the store writes a temp file and renames it over it (the Keychain replaces its
+  item in one step), and only after Supabase answered. A renewal the store could not keep is used from memory and
+  saved again on the next call. If Fleet View stops after Supabase answered but before the new token was kept, the
+  next start sends the old one again, which Supabase takes within its reuse interval. A token Supabase refuses
+  (already used, revoked) signs out, and says so: `GET /sync/status` gives `lost`, `lostAt` and `lostCode`
+  (`refresh_reused` or `refused`), kept in `sync/signin-lost.json` until the next sign-in or sign-out, and the
+  Sync card shows it. Before an exit (an exit-75 restart too) the server gives sync up to 2 s to stop: the uploader
+  finishes the chunk it is writing, and a renewal under way is kept.
 
 ## The start screen: work locally, or sync with Blackbox (Henry's machines)
 
@@ -138,6 +147,19 @@ a sign-out, and restarts them when another account signs in or the key changes. 
 change and once a minute. `GET /sync/activity` shows whether they run (or why not) and their counts, never a
 title, a path inside a conversation, a token or the key. Conflicts (a local copy longer than, or different from,
 the synced one) are listed there and left alone. The wire format is `docs/sync-format.md`.
+
+**Health you can see.** Each loop (uploads, downloads, live status) keeps a record, in `/sync/activity` as
+`up.health`, `down.health` and `live.health`: `lastSuccessAt` (the last scan that ran to its end),
+`lastCleanAt` (the last one with no error on any row), `lastError` (`{ at, message, code, status }`, cleared by
+a clean scan), `failStreak`, `backingOff` and `backoffUntil`. A network error, a timeout, a 408, 429 or a 5xx is
+not a conversation's fault: it ends the scan, and the next one waits (5 s, doubling to 60 s, or Supabase's
+`Retry-After` on a 429 / 503, in seconds or as a date, at most 5 min); a scan that runs to its end resets it. No
+conversation backs off for it. A 4xx for bad data is the row's own: that conversation backs off (30 s, doubling to
+30 min) and the scan goes on. `sync-run.js` `health()` turns the records into `/sync/activity`'s `health`
+(`level`: `ok`, `warn`, `bad` or `off`, the worst part, its error, and a `tip`), which colours the header's
+sync pill green, amber or red, with the tip as its title. Every threshold is in `HEALTH` there: amber for a loop
+backing off, a failed scan, an error on a row, or no clean scan for 2 min; red for signed out, 3 failed scans in a
+row, or nothing through for 5 min. The Sync card lists each part's last success and last error with its time.
 Claude Code deletes logs older than `cleanupPeriodDays` (30 days by default), and a log laid down here keeps its last
 entry's time, so on every gate check `sync-accounts.js` `keepLogs` makes sure Claude A's and B's `settings.json` say
 at least 36500 (raised only, the rest of the file as it was; a file that is not JSON is left alone and logged). Tests:

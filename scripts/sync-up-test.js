@@ -90,7 +90,8 @@ const DEFAULTS = {
   chunks: () => ({ created_at: new Date().toISOString() }),
 };
 const db = Object.fromEntries(Object.keys(PK).map((t) => [t, []]));
-const fake = { calls: [], objects: new Map(), uploads: 0, failObject: null, onObject: null, order: [] };
+// failObject(name) -> true: that upload fails with failStatus (500 when not set), with failHeaders (Retry-After)
+const fake = { calls: [], objects: new Map(), uploads: 0, failObject: null, failStatus: 0, failHeaders: null, onObject: null, order: [] };
 const keyOf = (row, cols) => JSON.stringify(cols.map((c) => (row[c] == null ? null : String(row[c]).toLowerCase())));
 function match(row, params) {
   for (const [col, v] of params) {
@@ -179,9 +180,9 @@ const server = http.createServer((req, res) => {
   req.on('end', () => {
     const body = Buffer.concat(parts), u = new URL(req.url, 'http://x');
     fake.calls.push({ method: req.method, path: u.pathname, search: u.search, body });
-    const json = (code, o) => {
+    const json = (code, o, h = null) => {
       if (o === null) { res.writeHead(code); return res.end(); }
-      res.writeHead(code, { 'Content-Type': 'application/json' });
+      res.writeHead(code, { 'Content-Type': 'application/json', ...(h || {}) });
       res.end(JSON.stringify(o));
     };
     if (req.headers.apikey !== KEY) return json(401, { message: 'No API key found in request' });
@@ -195,7 +196,10 @@ const server = http.createServer((req, res) => {
       const name = u.pathname.slice(pre.length + 1).split('/').map(decodeURIComponent).join('/');
       if (!name.startsWith(`${UID}/`)) return json(400, { statusCode: '403', error: 'Unauthorized', message: 'new row violates row-level security policy' });
       if (req.method === 'POST') {
-        if (fake.failObject && fake.failObject(name)) return json(500, { statusCode: '500', error: 'internal', message: 'the fake storage broke on purpose' });
+        if (fake.failObject && fake.failObject(name)) {
+          const st = fake.failStatus || 500;
+          return json(st, { statusCode: String(st), error: st >= 500 ? 'internal' : 'InvalidRequest', message: 'the fake storage broke on purpose' }, fake.failHeaders);
+        }
         if (fake.objects.has(name) && req.headers['x-upsert'] !== 'true') return json(400, { statusCode: '409', error: 'Duplicate', message: 'The resource already exists' });
         fake.objects.set(name, body);
         fake.uploads++;
@@ -458,16 +462,22 @@ async function main() {
   sameAsLocal(Ac, 'main', acMain, true, 'Ac after its tail changed');
   rowMatchesMain(Ac, acMain, 'Ac after its tail changed');
 
-  // ---------- a failed upload: state stays with the server, a later scan finishes it ----------
+  // ---------- a failed upload (a 4xx: the row's own fault): state stays with the server, a later scan finishes it ----------
   const G = newId('G');
   const gMain = mainOf(projB, repo1, G);
   write(gMain, lines(repo1, 80));
   let failed = 0;
+  fake.failStatus = 422;
   fake.failObject = (name) => name.startsWith(`${UID}/t/${G.toLowerCase()}/`) && name.endsWith('/0/3') && ++failed > 0;
   logs.length = 0;
+  const cleanBefore = up.status().health.lastCleanAt;
+  clock += 1000; // the times below tell this scan from the last one
   await up.scanOnce();
   st = up.status();
-  ok(st.lastError && /500|broke/.test(st.lastError.message), `the failure is in status().lastError (${st.lastError && st.lastError.message})`);
+  ok(st.lastError && /422|broke/.test(st.lastError.message), `the failure is in status().lastError (${st.lastError && st.lastError.message})`);
+  ok(st.health && st.health.lastError && st.health.failStreak === 0 && !st.health.backingOff && st.health.lastCleanAt === cleanBefore
+    && Date.parse(st.health.lastSuccessAt) > Date.parse(cleanBefore),
+    `a row's own failure: in health.lastError, no scan-level back-off (${JSON.stringify(st.health)})`);
   ok(logs.some((l) => l.includes(short(G)) && /failed/.test(l)), 'and logged');
   s = upState();
   const gs = s.conversations[G.toLowerCase()];
@@ -476,9 +486,13 @@ async function main() {
   eq(conv(G).size, 0, 'G\'s row claims nothing yet');
   ok(st.backingOff === 0 && st.pending >= 1 && st.pendingBytes > 0, `status counts it pending (${st.pending}, ${st.pendingBytes} bytes)`);
   fake.failObject = null;
+  fake.failStatus = 0;
   up0 = fake.uploads;
+  clock += 1000;
   await up.scanOnce();
   eq(fake.uploads - up0, 0, 'while it backs off, it is not tried');
+  st = up.status();
+  ok(st.lastError === null && st.health.lastError === null && Date.parse(st.health.lastCleanAt) > Date.parse(cleanBefore), 'a clean scan clears lastError (and health.lastError)');
   ok(up.status().backingOff === 1, 'status says one is backing off');
   clock += 31e3;
   await up.scanOnce();
@@ -503,6 +517,7 @@ async function main() {
   ok(sleptAt && logs.some((l) => l.includes(short(Hs)) && /cut by sleep/.test(l)), 'a sleep cut is logged');
   await up.scanOnce();
   sameAsLocal(Hs, 'main', hsMain, true, 'a sleep cut: sent by the very next scan, no back-off');
+  await scanBackoff(up, { projB, repo1, mainOf, now: () => clock, later: (ms) => { clock += ms; }, logs, sameAsLocal });
 
   // ---------- F changes hands: no upload while another device owns it ----------
   append(fMain, lines(repo1, 2));
@@ -848,6 +863,78 @@ async function main() {
 }
 
 function short(id) { return String(id).slice(0, 8); }
+
+// ---------- a 5xx, a 429 or the network: the whole scan backs off, no conversation does ----------
+async function scanBackoff(up, { projB, repo1, mainOf, now, later, logs, sameAsLocal }) {
+  // six: each one that ends STUCK_ENDS (3) scans backs off alone and the next takes its place, so every scan below
+  // still ends on a transient error
+  const Js = [1, 2, 3, 4, 5, 6].map((i) => newId(`J${i}`));
+  const js = Js.map((J) => mainOf(projB, repo1, J));
+  const J1 = Js[0];
+  const tNew = Date.now() / 1000 + 5; // the newest logs: the scan reaches them first, J1 first
+  js.forEach((f, i) => { write(f, lines(repo1, 10)); fs.utimesSync(f, tNew - i, tNew - i); });
+  const isJ = (name) => Js.some((J) => name.includes(J.toLowerCase()));
+  const tries = () => fake.calls.filter((c) => c.method === 'POST' && c.path.startsWith('/storage/') && isJ(decodeURIComponent(c.path))).length;
+  fake.failStatus = 500;
+  fake.failObject = isJ;
+  logs.length = 0;
+  let n0 = tries();
+  await up.scanOnce();
+  let st = up.status();
+  eq(tries() - n0, 1, 'a 5xx: the scan stops at the first failure (the next conversation is not tried)');
+  ok(st.backingOff === 0, `a 5xx: no conversation backs off (${st.backingOff})`);
+  ok(st.health.failStreak === 1 && st.health.backingOff && Date.parse(st.health.backoffUntil) === now() + 5e3,
+    `a 5xx: the scan backs off 5 s (${JSON.stringify(st.health)})`);
+  ok(st.health.lastError && st.health.lastError.status === 500 && st.health.lastError.at, 'a 5xx: health.lastError has the status and the time');
+  ok(logs.some((l) => /next one in 5 s/.test(l)), 'a 5xx: the back-off is logged');
+  n0 = tries();
+  await up.scanOnce(); // scanOnce goes at once; only the loop waits
+  eq(tries() - n0, 1, 'a 5xx: the same conversation is tried again by the next scan (no per-row back-off)');
+  st = up.status();
+  ok(st.health.failStreak === 2 && Date.parse(st.health.backoffUntil) === now() + 10e3, `a second 5xx: 10 s (${st.health.backoffUntil})`);
+  // a third: J1 ended 3 scans in a row, so it is stuck on its own (its upload always fails): it backs off alone, and
+  // the scan goes on to J2, which ends it
+  n0 = tries();
+  logs.length = 0;
+  await up.scanOnce();
+  st = up.status();
+  eq(tries() - n0, 2, 'a third 5xx on the same one: it backs off alone and the scan goes on to the next');
+  ok(logs.some((l) => l.includes(short(J1)) && /trying again in 30 s/.test(l)), 'J1 backs off alone (30 s, logged)');
+  ok(st.health.failStreak === 3 && Date.parse(st.health.backoffUntil) === now() + 20e3, `J2 ended that scan: still the scan-level back-off, 20 s (${st.health.backoffUntil})`);
+  for (let i = 0; i < 3; i++) await up.scanOnce();
+  st = up.status();
+  ok(Date.parse(st.health.backoffUntil) === now() + 60e3, `the back-off stops at 60 s (${st.health.backoffUntil})`);
+  // 429 with Retry-After: seconds, an HTTP date, capped at 5 min
+  fake.failStatus = 429;
+  fake.failHeaders = { 'Retry-After': '120' };
+  await up.scanOnce();
+  st = up.status();
+  ok(Date.parse(st.health.backoffUntil) === now() + 120e3, `a 429 with Retry-After: 120 waits 120 s (${st.health.backoffUntil})`);
+  fake.failHeaders = { 'Retry-After': '86400' };
+  await up.scanOnce();
+  ok(Date.parse(up.status().health.backoffUntil) === now() + 300e3, `Retry-After is capped at 5 min (${up.status().health.backoffUntil})`);
+  fake.failStatus = 503;
+  fake.failHeaders = { 'Retry-After': new Date(Date.now() + 200e3).toUTCString() };
+  await up.scanOnce();
+  const ra = Date.parse(up.status().health.backoffUntil) - now();
+  ok(ra > 190e3 && ra <= 200e3, `a 503 with Retry-After as an HTTP date (${ra} ms)`);
+  fake.failHeaders = null;
+  // the loop honours the back-off: one scan, then it waits (5 s and more), where it used to go every interval
+  fake.failStatus = 500;
+  const scans0 = up.status().scans;
+  up.start(20);
+  await wait(400);
+  await up.stop();
+  eq(up.status().scans - scans0, 1, 'the loop backs off: one failed scan, then it waits (not one every 20 ms)');
+  fake.failObject = null;
+  fake.failStatus = 0;
+  // the next clean scan resets the back-off and clears the error (past the stuck ones' own 30 s)
+  later(31e3);
+  await up.scanOnce();
+  st = up.status();
+  ok(st.health.failStreak === 0 && !st.health.backingOff && st.health.lastError === null && st.lastError === null, `a clean scan resets the back-off and clears lastError (${JSON.stringify(st.health)})`);
+  Js.forEach((J, i) => sameAsLocal(J, 'main', js[i], true, `after the back-off: J${i + 1} is up`));
+}
 
 // ---------- S4: flush, hold, forget, only, lost ----------
 const ctx = {};

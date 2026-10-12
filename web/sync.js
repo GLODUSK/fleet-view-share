@@ -5,7 +5,8 @@
 //   GET /sync/status     not set up (the setup command to copy: setup needs the publishable key and stays in a
 //                        terminal) / signed out / signed in as <email>, on the members list or not
 //   GET /sync/activity   running or why not, and the two loops' counts and the number of conflicts in plain words
-//                        (never a title, a path, a token or the key: only counts are read from it)
+//                        (never a title, a path, a token or the key: counts, and each loop's health: when it last went
+//                        through, its last error's message and time, and whether it is backing off)
 //   GET /sync/setup      whether the sync key is on this PC (hasKey). No passphrase: once signed in, the server
 //                        fetches the key from Blackbox by itself (sync-run.js), and this only says so
 // and does, on this PC's own page only:
@@ -31,7 +32,12 @@
 // GET /link/status is read with the rest while the card is open, and every 5 seconds while it is closed (this
 // machine's own page only), so a request from another machine opens the card once, and marks the header button.
 //
-//   mountSync({ post, isRemote, fixture, openSetup }) -> { open(), close(), toggle(), isOpen() }
+// The header pill's colour: GET /sync/activity's health (sync-run.js health(): ok, warn, bad or off, and a tip naming
+// the worst part and its error), read with the rest while the card is open and every 10 seconds while it is closed
+// (wherever sync is set up); health() gives the last one, and onHealth() is called when it changes (app.js draws the
+// pill again).
+//
+//   mountSync({ post, isRemote, fixture, openSetup, onHealth }) -> { open(), close(), toggle(), isOpen(), health() }
 import { esc } from './cards.js';
 import { icon } from './icons.js';
 import { cloneSection } from './clone.js';
@@ -42,6 +48,7 @@ const FINAL_STATES = new Set(['linked', 'declined', 'failed', 'expired', 'cancel
 // a pairing that waits for Henry here: its code to compare, or a request that just came in
 const needsYou = (p) => p.state === 'confirm' || (p.role === 'answer' && p.state === 'waiting');
 const POLL_WAIT_MS = 1500; // while a sign-in is going on in the browser
+const HEALTH_WATCH_MS = 10e3; // GET /sync/activity while the card is closed: the pill's colour
 const SETUP_CMD = 'node sync-api.js setup --url https://<project>.supabase.co --key <the publishable key>';
 const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
 const ago = (iso) => {
@@ -50,9 +57,17 @@ const ago = (iso) => {
   const s = Math.max(0, Math.round((Date.now() - t) / 1000));
   return s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 360) / 10} h ago`;
 };
+const clockOf = (iso) => { const t = Date.parse(iso || ''); return t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''; };
 
-export function mountSync({ post, isRemote = () => false, fixture = false, openSetup = () => {} } = {}) {
+export function mountSync({ post, isRemote = () => false, fixture = false, openSetup = () => {}, onHealth = () => {} } = {}) {
   let card = null, timer = null, gen = 0;
+  let health = null; // { level, tip } from the last /sync/activity: the pill's colour
+  function setHealth(act) {
+    const h = act && act.health && typeof act.health.level === 'string' ? { level: act.health.level, tip: String(act.health.tip || '') } : null;
+    if ((h && h.level) === (health && health.level) && (h && h.tip) === (health && health.tip)) return;
+    health = h;
+    try { onHealth(h); } catch {}
+  }
   let status = null, activity = null; // the last answers (null: none yet or no answer)
   let keyInfo = null; // GET /sync/setup's hasKey (and why sync is not running)
   let setup = null; // GET /sync/setup: { private, name, mode, accounts, ... } (Henry's machines only say private)
@@ -77,6 +92,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     link = ln && typeof ln.running === 'boolean' ? ln : null;
     setup = su && su.private ? su : null;
     keyInfo = su && typeof su.hasKey === 'boolean' ? { hasKey: su.hasKey, reason: su.reason || '' } : null;
+    setHealth(act);
     if (my !== gen || !card) return;
     answered = true;
     status = st; activity = act;
@@ -109,8 +125,10 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
             + `<div class="sy-cmd"><code>${esc(SETUP_CMD)}</code><button type="button" data-c="copy" title="Copy the command">${icon('copy', 12)}Copy</button></div>`);
     }
     if (!st.signedIn) {
-      if (remote()) return '<div class="sy-line">Not signed in.</div><div class="sy-line sy-dim">Sign-in is done on the PC, in its Sync card.</div>';
-      return `<div class="sy-line">Not signed in.</div>${st.refused ? `<div class="sy-line sy-bad">${esc(st.refused)} was turned away: only ${esc(st.onlyEmail || '')} can sync.</div>` : ''}`
+      // the last sign-in was lost (a renewal Supabase refused): said, never silent
+      const lost = st.lost ? `<div class="sy-line sy-bad">${esc(st.lost)}${st.lostAt ? ` (${esc(ago(st.lostAt))})` : ''}</div>` : '';
+      if (remote()) return `<div class="sy-line">Not signed in.</div>${lost}<div class="sy-line sy-dim">Sign-in is done on the PC, in its Sync card.</div>`;
+      return `<div class="sy-line">Not signed in.</div>${lost}${st.refused ? `<div class="sy-line sy-bad">${esc(st.refused)} was turned away: only ${esc(st.onlyEmail || '')} can sync.</div>` : ''}`
         + `<div class="sy-btns"><button type="button" data-c="signin" class="sy-go"${busy || waiting ? ' disabled' : ''}>${waiting ? 'Waiting for the browser…' : 'Sign in with Google'}</button>`
         + `${waiting ? '<button type="button" data-c="signin">Open it again</button>' : ''}</div>`
         + `<div class="sy-line sy-dim">${waiting ? 'Finish the sign-in in your browser; this card updates by itself.' : `It opens in your default browser. ${st.onlyEmail ? `Sign in as ${esc(st.onlyEmail)}: no other account can sync here.` : 'Use a Google account on the sync members list.'}`}</div>`;
@@ -146,9 +164,25 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     }
     return `${html}<div class="sy-btns"><button type="button" data-c="to-local"${busy ? ' disabled' : ''}>Work locally instead</button></div>`;
   }
+  // one loop's health: when it last went through, whether it backs off, and its last error with its time
+  function partLines(label, p) {
+    const h = p && p.health;
+    if (!h || typeof h !== 'object') return '';
+    const bits = [h.lastSuccessAt ? `last went through ${ago(h.lastSuccessAt)}` : 'nothing went through yet'];
+    if (h.backingOff) bits.push(`waiting until ${clockOf(h.backoffUntil)} before it tries again`);
+    let html = `<div class="sy-line sy-dim">${esc(label)}: ${esc(bits.join('; '))}.</div>`;
+    const e = h.lastError;
+    if (e && e.message) {
+      const streak = Number(h.failStreak) || 0;
+      html += `<div class="sy-line ${streak >= 3 ? 'sy-bad' : 'sy-warn'}">${esc(label)}${streak > 1 ? ` (failed ${streak} times in a row)` : ''}: ${esc(e.message)}${e.at ? ` <span class="sy-dim">at ${esc(clockOf(e.at))}</span>` : ''}</div>`;
+    }
+    return html;
+  }
   function activityLines(a) {
-    if (!a.running) return `<div class="sy-line"><span class="sy-dot off"></span>Not running: ${esc(a.reason || 'not started')}.</div>`;
-    const lines = ['<div class="sy-line"><span class="sy-dot on"></span>Running.</div>'];
+    const level = a.health && a.health.level;
+    if (!a.running) return `<div class="sy-line"><span class="sy-dot ${level === 'bad' ? 'bad' : 'off'}"></span>Not running: ${esc(a.reason || 'not started')}.</div>`;
+    const why = level === 'ok' ? ', all clean' : level === 'warn' || level === 'bad' ? `: ${a.health.name || 'sync'}: ${a.health.why || ''}` : '';
+    const lines = [`<div class="sy-line"><span class="sy-dot ${level === 'warn' ? 'warn' : level === 'bad' ? 'bad' : 'on'}"></span>Running${esc(why)}.</div>`];
     const up = a.up && typeof a.up === 'object' && !a.up.error ? a.up : null;
     const down = a.down && typeof a.down === 'object' && !a.down.error ? a.down : null;
     if (up) {
@@ -157,14 +191,18 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       if (num(up.pending)) t += `, ${num(up.pending)} waiting`;
       if (up.lastScanAt) t += `; last look ${ago(up.lastScanAt)}`;
       lines.push(`<div class="sy-line">${esc(t)}.</div>`);
-      if (up.lastError) lines.push('<div class="sy-line sy-bad">The last upload hit an error; it tries again by itself.</div>');
+      if (up.health) lines.push(partLines('Uploads', up));
+      else if (up.lastError) lines.push('<div class="sy-line sy-bad">The last upload hit an error; it tries again by itself.</div>');
     }
     if (down) {
       let t = `From other machines: ${n(Number(down.laidDown) || 0, 'conversation', 'conversations')} brought here since Fleet View started`;
       if (down.lastScanAt) t += `; last look ${ago(down.lastScanAt)}`;
       lines.push(`<div class="sy-line">${esc(t)}.</div>`);
-      if (down.lastError) lines.push('<div class="sy-line sy-bad">The last download hit an error; it tries again by itself.</div>');
+      if (down.health) lines.push(partLines('Downloads', down));
+      else if (down.lastError) lines.push('<div class="sy-line sy-bad">The last download hit an error; it tries again by itself.</div>');
     }
+    const live = a.live && typeof a.live === 'object' && !a.live.error ? a.live : null;
+    if (live && live.health) lines.push(partLines('Live status', live));
     const conflicts = Array.isArray(a.conflicts) ? a.conflicts.length : down && Number.isFinite(down.conflicts) ? down.conflicts : 0;
     lines.push(conflicts
       ? `<div class="sy-line sy-warn">${n(conflicts, 'conflict', 'conflicts')}: a copy on this PC differs from the synced one, so it is left alone.</div>`
@@ -361,8 +399,18 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
   // the header button shows only where sync is set up (a friend's install has no config): asked once at start
   // and on Henry's own machines (private), where it is how to switch between Blackbox and working locally
   if (!fixture) {
-    get('/sync/status').then((st) => { if (st && st.configured) { document.body.classList.add('sync-on'); watchLinks(); } });
-    get('/sync/setup').then((su) => { if (su && su.private) document.body.classList.add('sync-on'); });
+    get('/sync/status').then((st) => { if (st && st.configured) { document.body.classList.add('sync-on'); watchLinks(); watchHealth(); } });
+    get('/sync/setup').then((su) => { if (su && su.private) { document.body.classList.add('sync-on'); watchHealth(); } });
+  }
+  // the pill's colour while the card is closed (refresh() reads it while it is open)
+  let healthWatch = false;
+  async function watchHealth() {
+    if (healthWatch) return;
+    healthWatch = true;
+    for (;;) {
+      if (!card) setHealth(await get('/sync/activity'));
+      await new Promise((r) => setTimeout(r, HEALTH_WATCH_MS));
+    }
   }
   // a link request from another machine: the card opens by itself, once per request, and the header button is marked
   // while one waits for an answer here
@@ -380,5 +428,5 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     setTimeout(watchLinks, LINK_WATCH_MS);
   }
 
-  return { open, close, isOpen: () => !!card, toggle: () => (card ? close() : open()) };
+  return { open, close, isOpen: () => !!card, toggle: () => (card ? close() : open()), health: () => health };
 }

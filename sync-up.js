@@ -87,8 +87,14 @@
 // scan's progress: the server is then ahead of it, which the take-over above and trimTail (rows past the next seq
 // go before an append) make safe.
 //
-// A failure on one conversation is logged and that conversation waits (30 s, doubling, at most 30 min) while the
-// scan goes on; a signed-out account ends the scan. Nothing here starts a process; the only timer is start()'s.
+// A failure on one conversation (a 4xx: bad data, a row the server refuses) is logged and that conversation waits
+// (30 s, doubling, at most 30 min) while the scan goes on. A network error, a timeout, a 429 or a 5xx is not the
+// conversation's fault: it ends the scan, and the next one waits (the scan-level back-off, sync-api.js
+// createScanHealth: 5 s doubling to 60 s, or Supabase's Retry-After up to 5 min), reset by a scan that runs to its end.
+// A signed-out account ends the scan too. status().lastError is cleared by a clean scan (no error on any row), and
+// status().health says when the last scan ran to its end, the last error and its time, the failure streak and whether
+// it is backing off (sync-run.js health() colours the pill from it). Nothing here starts a process; the only timer is
+// start()'s.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -116,6 +122,7 @@ const HASHES_KEPT = 200; // running sha256s of 'main' kept in memory, so an appe
 const READ_BLOCK = 64 * 1024;
 const LOG_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 const FATAL = new Set(['signed_out', 'off', 'bad_key']); // these end a scan: every other conversation would fail too
+const STUCK_ENDS = 3; // a conversation whose transient error ended this many scans in a row backs off alone
 const OWNER_RECHECK_MS = 20e3; // a write asks whose the conversation is again when this long passed since the last look
 const FLUSH_REPEATS = 3; // flush goes again at most this often while the log keeps growing
 const FLUSH_COLS = 'id,owner_device,generation,size,sha256,state';
@@ -314,6 +321,11 @@ function createUploader(opts = {}) {
     try { C.writeState(statePath, state, { compact: true }); dirty = false; } catch (e) { log(`up-state.json could not be saved: ${clip(e.message)}`); }
   }
   const setError = (e) => { totals.lastError = { at: new Date(now()).toISOString(), message: clip(e && e.message ? e.message : e) }; };
+  const health = S.createScanHealth({ now }); // the scan-level back-off and what /sync/activity says of this loop
+  const scanFailed = (e) => {
+    const wait = health.failed(e);
+    if (wait) log(`scan stopped (${clip(e && e.message)}): the next one in ${Math.round(wait / 1000)} s`);
+  };
 
   // ---------- stopping and pacing ----------
   let stopping = false;
@@ -765,7 +777,7 @@ function createUploader(opts = {}) {
       }
       throw e;
     }
-    mem.fails = 0;
+    mem.fails = 0; mem.ends = 0;
     if (w.changed) mem.sentAt = now();
     pendingOf.set(id, 0);
     tally.synced++;
@@ -814,12 +826,14 @@ function createUploader(opts = {}) {
     } catch (e) {
       setError(e);
       log(`no device row: ${clip(e.message)}`);
+      scanFailed(e);
       return;
     }
     const list = listConversations();
     counts.conversations = list.length;
     const ids = new Set(list.map((c) => c.id));
     for (const id of [...pendingOf.keys()]) if (!ids.has(id)) pendingOf.delete(id);
+    let rowFailed = false, ended = null; // ended: the error that ended the scan (Supabase out of reach, signed out)
     for (const c of list) {
       if (stopping) break;
       await lock(false); // a flush() waiting goes first
@@ -830,10 +844,20 @@ function createUploader(opts = {}) {
       } catch (e) {
         if (e && e.code === 'stopped') break;
         setError(e);
-        if (e && FATAL.has(e.code)) { log(`scan stopped: ${clip(e.message)}`); break; }
+        if (e && FATAL.has(e.code)) { log(`scan stopped: ${clip(e.message)}`); ended = e; break; }
+        // Supabase out of reach, busy or failing (a request cut by sleep too): not this conversation's fault, and every
+        // other one would fail the same way: the scan ends and backs off as a whole
+        // ... unless this one ended STUCK_ENDS scans in a row (its upload always times out, say): then it is its own,
+        // and backs off alone so the conversations after it are not starved
         const mem = memo.get(c.id);
-        if (e && e.slept) log(`${short(c.id)}: ${clip(e.message)}`); // the machine slept mid-request: no back-off
-        else if (mem) {
+        if (S.isTransient(e)) {
+          const ends = mem ? (mem.ends = (mem.ends || 0) + 1) : 1;
+          if (ends < STUCK_ENDS) { log(`${short(c.id)}: ${clip(e && e.message)}`); ended = e; break; }
+          if (mem) mem.ends = 0;
+        }
+        rowFailed = true;
+        health.rowError(e);
+        if (mem) {
           mem.fails++;
           const wait = Math.min(BACKOFF_MS * 2 ** (mem.fails - 1), BACKOFF_MAX_MS);
           mem.backoffUntil = now() + wait;
@@ -843,6 +867,11 @@ function createUploader(opts = {}) {
     }
     counts.pending = [...pendingOf.values()].filter((n) => n > 0).length;
     saveState();
+    if (ended) scanFailed(ended);
+    else if (!stopping) {
+      health.done(!rowFailed);
+      if (!rowFailed) totals.lastError = null; // a clean scan: the last error is over
+    }
     totals.lastScanAt = new Date(now()).toISOString();
     totals.lastScanMs = Date.now() - t0;
   }
@@ -851,7 +880,7 @@ function createUploader(opts = {}) {
   let running = null, timer = null, started = false;
   function scanOnce() {
     if (running) return running;
-    running = scan().catch((e) => { setError(e); log(`scan failed: ${clip(e && e.message)}`); }).finally(() => { running = null; });
+    running = scan().catch((e) => { setError(e); log(`scan failed: ${clip(e && e.message)}`); scanFailed(e); }).finally(() => { running = null; });
     return running;
   }
   function start(intervalMs = INTERVAL_MS) {
@@ -864,7 +893,7 @@ function createUploader(opts = {}) {
       if (!started) return;
       await scanOnce();
       if (!started) return;
-      timer = setTimeout(tick, every);
+      timer = setTimeout(tick, Math.max(every, health.wait())); // backing off: the scan-level wait
       if (timer.unref) timer.unref();
     };
     timer = setTimeout(tick, 0);
@@ -952,6 +981,7 @@ function createUploader(opts = {}) {
       skipped: { noRepo: counts.noRepo, foreign: counts.foreign, inactive: counts.inactive, empty: counts.empty, held: counts.held }, backingOff: counts.backingOff, throttled: counts.throttled,
       uploadedBytes: totals.uploadedBytes, uploadedChunks: totals.uploadedChunks,
       lastError: totals.lastError ? { ...totals.lastError } : null,
+      health: health.status(),
     };
   }
   return { scanOnce, start, stop, status, flush, forget, hold, unhold, held };

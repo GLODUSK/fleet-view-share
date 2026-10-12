@@ -7407,7 +7407,13 @@ function versionOf() {
 // open window just reconnects). A promise nobody waited on is logged and the server keeps going.
 const EXIT_CRASH = 76, EXIT_UPDATE = 75;
 let exitReason = '';
+// Conversation sync gets this long to stop before the process exits (an exit 75 restart included): the uploader
+// finishes the chunk it is writing and saves up-state.json, and a renewal of the sign-in under way is kept
+const SYNC_STOP_MS = 2000;
+let exiting = false;
 function exitWith(code, reason) {
+  if (exiting) return void process.exit(code); // a second exit (a second Ctrl+C, a crash while sync stops) waits for nothing
+  exiting = true;
   exitReason = reason;
   try { flushSettings(); } catch {}
   try { REMOTE.flush(); } catch {}
@@ -7416,7 +7422,10 @@ function exitWith(code, reason) {
   try { RELAY.stop('pc-closing'); } catch {}
   try { if (histOn) saveHistory(); } catch {}
   try { tlFlushSync(); } catch {}
-  process.exit(code);
+  if (DEMO) return void process.exit(code);
+  const stops = [() => SYNC_RUNNER.stop(), () => (typeof SYNC.settled === 'function' ? SYNC.settled() : null)];
+  const t = setTimeout(() => process.exit(code), SYNC_STOP_MS);
+  Promise.allSettled(stops.map((f) => Promise.resolve().then(f))).then(() => { clearTimeout(t); process.exit(code); });
 }
 function guardProcess() {
   process.on('uncaughtException', (e) => {

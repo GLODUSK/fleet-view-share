@@ -61,6 +61,16 @@
 // The link between machines (link.js, docs/link.md), beside the mover and only with it (it names this machine by the
 // mover's device id) and only when a relay is given (relay.js: link.js keeps the other machine there as a computer):
 //   link() -> link.js's object while sync runs, else null. Stopped with sync: no socket, no timer, no key read
+// Sync health (status().health, health() below; GET /sync/activity, the header pill's colour and the Sync card): each
+// loop (up, down, live) keeps sync-api.js createScanHealth's record, and HEALTH holds every threshold:
+//   ok    every loop's recent scans ran clean
+//   warn  a loop is backing off, its last scan failed (once or twice) or had an error on a row, or it had no clean
+//         scan for HEALTH.staleMs
+//   bad   signed out (or not a member, no key: sync stopped for a reason that needs Henry), a loop failed
+//         HEALTH.badStreak times in a row, or nothing went through for HEALTH.deadMs
+//   off   sync is off here (not set up, Work locally, not started)
+// -> { level, part, name, why, error: { at, message } | null, tip }: part / name the worst loop, tip one line for the
+// pill's title. A loop in the middle of a long scan with no error is not stale.
 // <dataDir>/sync/away.json (what the session host refuses to open, sync-move.js) is deleted when sync is turned off
 // here (not set up, or Work locally chosen), and kept when it stops for any other reason: signed out (a lost sign-in
 // too), not a member, no key, or the server stopping. The other devices' chats stay theirs until sync runs again.
@@ -72,6 +82,52 @@ const M = require(path.join(__dirname, 'sync-move.js'));
 
 const CHECK_MS = 60e3;
 const INTERVAL_MS = 5e3;
+// every threshold of the health colours, in one place
+const HEALTH = {
+  staleMs: 2 * 60e3, // warn: a loop had no clean scan for this long
+  deadMs: 5 * 60e3, // bad: nothing went through (no scan ran to its end) for this long
+  warnStreak: 1, // warn: this many scans in a row failed
+  badStreak: 3, // bad: this many
+};
+const PARTS = [['up', 'Uploads'], ['down', 'Downloads'], ['live', 'Live status']];
+const RANK = { ok: 0, warn: 1, bad: 2 };
+const mins = (ms) => Math.max(1, Math.round(ms / 60e3));
+const clock = (iso) => { const t = Date.parse(iso || ''); return t ? new Date(t).toTimeString().slice(0, 8) : ''; };
+// a runner status() (without health) -> its health, as the header above says
+function health(st, nowMs = Date.now()) {
+  if (!st || !st.running) {
+    const reason = (st && st.reason) || 'not started';
+    if (st && st.off) return { level: 'off', part: null, name: null, why: reason, error: null, tip: `Conversation sync is off: ${reason}` };
+    return { level: 'bad', part: null, name: null, why: reason, error: null, tip: `Conversation sync is not running: ${reason}` };
+  }
+  const startedAt = Date.parse(st.startedAt || '') || nowMs;
+  const ago = (iso) => { const t = Date.parse(iso || ''); return t ? nowMs - t : nowMs - startedAt; }; // never: since it started
+  let worst = null;
+  for (const [part, name] of PARTS) {
+    const p = st[part];
+    if (!p || typeof p !== 'object') continue;
+    let level = 'ok', why = '', error = null;
+    const h = p.health;
+    if (p.error && !h) { level = 'bad'; why = 'its status could not be read'; error = { at: null, message: String(p.error) }; }
+    else if (h) {
+      error = h.lastError || null;
+      const streak = Number(h.failStreak) || 0;
+      const busyClean = !!p.scanning && !streak && !error; // a long scan under way with nothing wrong
+      const okAgo = ago(h.lastSuccessAt), cleanAgo = ago(h.lastCleanAt);
+      if (streak >= HEALTH.badStreak) { level = 'bad'; why = `failed ${streak} times in a row`; }
+      else if (!busyClean && okAgo >= HEALTH.deadMs) { level = 'bad'; why = h.lastSuccessAt ? `nothing went through for ${mins(okAgo)} min` : `nothing went through since sync started (${mins(okAgo)} min)`; }
+      else if (h.backingOff) { level = 'warn'; why = `backing off${streak ? ` after ${streak} failed ${streak === 1 ? 'scan' : 'scans'}` : ''}`; }
+      else if (streak >= HEALTH.warnStreak) { level = 'warn'; why = 'the last scan failed'; }
+      else if (error) { level = 'warn'; why = 'the last scan hit an error'; }
+      else if (!busyClean && cleanAgo >= HEALTH.staleMs) { level = 'warn'; why = `no clean scan for ${mins(cleanAgo)} min`; }
+    }
+    if (!worst || RANK[level] > RANK[worst.level]) worst = { level, part, name, why, error };
+  }
+  if (!worst || worst.level === 'ok') return { level: 'ok', part: null, name: null, why: '', error: null, tip: 'Conversation sync is healthy: every part scanned cleanly just now' };
+  const w = worst, e = w.error;
+  const tip = `Conversation sync: ${w.name}: ${w.why}${e && e.message ? ` (${e.message}${e.at ? `, at ${clock(e.at)}` : ''})` : ''}`;
+  return { ...w, tip };
+}
 
 function createSyncRunner(o = {}) {
   const sync = o.sync;
@@ -112,8 +168,9 @@ function createSyncRunner(o = {}) {
     return { code: 'pinned', message: p.note || 'a stays-on rule keeps it here' };
   };
 
-  let run = null; // { uid, keyId, up, down, mover, live, prefs, link }
+  let run = null; // { uid, keyId, up, down, mover, live, prefs, link, startedAt }
   let why = 'not started'; // why it is not running, for status()
+  let off = true; // and whether that is sync off here (health 'off') rather than stopped by a problem ('bad')
   let timer = null, offChange = null, checking = null, again = false, stopped = true;
 
   // the host's sessions that were alive at its last list (each list the mover asks for refreshes it)
@@ -131,8 +188,10 @@ function createSyncRunner(o = {}) {
 
   const keyId = (key) => C.sha256(key).slice(0, 16); // tells a changed key apart, never shown
   // gate: sync is off here now (not set up, Work locally): nothing is away any more
-  async function halt(reason, gate = false) {
+  // quiet: not a problem (sync turned off here, the server stopping, or about to start again): health 'off', not 'bad'
+  async function halt(reason, gate = false, quiet = gate) {
     why = reason;
+    off = quiet;
     if (run) {
       const r = run;
       run = null;
@@ -153,7 +212,7 @@ function createSyncRunner(o = {}) {
     return checking;
   }
   async function checkOnce() {
-    if (stopped) return halt('stopped');
+    if (stopped) return halt('stopped', false, true);
     let mode = null;
     try { mode = modeOf(); } catch {}
     if (mode === 'local') return halt('this machine works locally (chosen at the start; the Sync card can switch it)', true);
@@ -162,7 +221,7 @@ function createSyncRunner(o = {}) {
     // signed out, not a member, no key: away.json stays (halt without the gate), so the session host still refuses the
     // other devices' conversations: a lost sign-in (a restart that could not read it) must never let this machine run
     // a stale copy of a chat another machine owns. Only sync turned off (not set up, or Work locally) frees them.
-    if (!st.signedIn) return halt('not signed in');
+    if (!st.signedIn) return halt(st.lost ? `not signed in (${st.lost})` : 'not signed in');
     if (st.member === false) return halt('this account is not on the sync members list');
     const uid = await sync.uid();
     let key = null;
@@ -177,10 +236,10 @@ function createSyncRunner(o = {}) {
     if (accounts) {
       const r = await accounts.reconcile({ api: sync, key });
       // a list that could not be read leaves a running sync alone, and keeps a stopped one stopped
-      if (!r || (!r.ok && !(r.error && run))) return halt((r && r.reason) || 'the Claude accounts could not be checked', true);
+      if (!r || (!r.ok && !(r.error && run))) return halt((r && r.reason) || 'the Claude accounts could not be checked', true, false);
     }
     if (run && run.uid === uid && run.keyId === kid) return;
-    if (run) await halt(run.uid !== uid ? 'another account signed in' : 'the sync key changed');
+    if (run) await halt(run.uid !== uid ? 'another account signed in' : 'the sync key changed', false, true);
     if (stopped) return;
     const args = { api: sync, dataDir, key, log };
     if (projects) args.projects = () => projects();
@@ -211,8 +270,9 @@ function createSyncRunner(o = {}) {
     if (mover && relay) {
       try { link = makeLink({ ...args, device: deviceId, relay, version: o.version }); } catch (e) { log(`sync: this machine can't link with the others: ${e && e.message}`); }
     }
-    run = { uid, keyId: kid, up, down, mover, live, prefs, link, carry };
+    run = { uid, keyId: kid, up, down, mover, live, prefs, link, carry, startedAt: new Date().toISOString() };
     why = '';
+    off = false;
     if (hostFor) hostFor.list().catch(() => {});
     up.start(intervalMs);
     down.start(intervalMs);
@@ -238,21 +298,24 @@ function createSyncRunner(o = {}) {
       if (timer) { clearInterval(timer); timer = null; }
       if (offChange) { offChange(); offChange = null; }
       if (checking) await checking.catch(() => {});
-      await halt('stopped');
+      await halt('stopped', false, true);
     },
     check,
     // nothing secret: whether it runs, why not, and the two loops' own status
+    // health: health() of the rest (the header pill's colour and title)
     status() {
-      if (!run) return { running: false, reason: why };
+      if (!run) { const st = { running: false, reason: why, off }; return { ...st, health: health(st) }; }
       const safe = (f) => { try { return f(); } catch (e) { return { error: e && e.message }; } };
-      return {
+      const st = {
         running: true,
+        startedAt: run.startedAt,
         up: safe(() => run.up.status()),
         down: safe(() => run.down.status()),
         conflicts: safe(() => (typeof run.down.conflicts === 'function' ? run.down.conflicts() : [])),
         live: run.live ? safe(() => run.live.status()) : null,
         prefs: run.prefs ? safe(() => run.prefs.status()) : null,
       };
+      return { ...st, health: health(st) };
     },
     move(id, opts = {}) {
       if (!run || !run.mover) throw notRunning();
@@ -287,4 +350,4 @@ function createSyncRunner(o = {}) {
   };
 }
 
-module.exports = { createSyncRunner };
+module.exports = { createSyncRunner, health, HEALTH };

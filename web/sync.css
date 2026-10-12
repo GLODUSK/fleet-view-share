@@ -22,6 +22,13 @@ body:not(.sync-on) .count.sync { display: none; } /* sync not set up on this PC 
 .sy-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; }
 .sy-dot.on { background: var(--mint); }
 .sy-dot.off { background: var(--dim); opacity: 0.6; }
+.sy-dot.warn { background: var(--gold); }
+.sy-dot.bad { background: var(--rose); }
+
+/* the header button's health (app.js syncPill: sync-run.js health() through GET /sync/activity): its icon takes the
+   colour, and amber or red also tints the border so it reads at a glance */
+.count.sync.sync-warn { border-color: rgba(255, 194, 74, 0.45); }
+.count.sync.sync-bad { border-color: rgba(255, 77, 141, 0.55); }
 
 .sy-btns { display: flex; gap: 6px; flex-wrap: wrap; }
 .sy-pop button[data-c] {

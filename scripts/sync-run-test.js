@@ -14,7 +14,7 @@ const S = require(path.join(__dirname, '..', 'sync-api.js'));
 const C = require(path.join(__dirname, '..', 'sync-crypto.js'));
 const SC = require(path.join(__dirname, '..', 'sync-common.js'));
 const M = require(path.join(__dirname, '..', 'sync-move.js'));
-const { createSyncRunner } = require(path.join(__dirname, '..', 'sync-run.js'));
+const { createSyncRunner, health, HEALTH } = require(path.join(__dirname, '..', 'sync-run.js'));
 
 let pass = 0, fail = 0;
 const ok = (c, name) => { if (c) pass++; else { fail++; console.log(`FAIL ${name}`); } };
@@ -296,6 +296,42 @@ function fakeMover(args, made) {
       ok(!r6.status().running && made6[2].stopped === 1 && made6[3].stopped === 1, 'switching to local stops it');
       await r6.stop();
     }
+    // ---------- health(): the header pill's colour from each loop's record (HEALTH holds the thresholds) ----------
+    {
+      const T0 = Date.parse('2026-10-12T12:00:00Z');
+      const iso = (ms) => new Date(T0 + ms).toISOString();
+      const clean = (ago = -10e3) => ({ lastSuccessAt: iso(ago), lastCleanAt: iso(ago), lastError: null, failStreak: 0, backingOff: false, backoffUntil: null });
+      const st = (parts = {}) => ({ running: true, startedAt: iso(-3600e3), up: { health: clean(), ...parts.up }, down: { health: clean(), ...parts.down }, live: { health: clean(), ...parts.live } });
+      const H = (s) => health(s, T0);
+      eq(Object.keys(HEALTH).sort(), ['badStreak', 'deadMs', 'staleMs', 'warnStreak'], 'HEALTH: every threshold in one place');
+      ok(H(st()).level === 'ok' && /healthy/.test(H(st()).tip), 'health: every loop clean just now: ok');
+      const err = { at: iso(-5e3), message: 'Supabase said 503: down', code: null, status: 503 };
+      let h = H(st({ down: { health: { ...clean(-20e3), lastError: err, failStreak: 1, backingOff: true, backoffUntil: iso(5e3) } } }));
+      ok(h.level === 'warn' && h.part === 'down' && /Downloads: backing off/.test(h.tip) && h.tip.includes('Supabase said 503'), `health: a loop backing off: warn, its name and error in the tip (${h.tip})`);
+      h = H(st({ up: { health: { ...clean(-20e3), lastError: err, failStreak: HEALTH.warnStreak } } }));
+      ok(h.level === 'warn' && h.part === 'up' && /last scan failed/.test(h.why), `health: one failed scan: warn (${h.why})`);
+      h = H(st({ live: { health: { ...clean(-20e3), lastError: err, failStreak: HEALTH.badStreak, backingOff: true } } }));
+      ok(h.level === 'bad' && h.part === 'live' && /failed 3 times/.test(h.tip), `health: failed badStreak times: bad (${h.tip})`);
+      h = H(st({ up: { health: { ...clean(-20e3), lastError: { ...err, status: 422 } } } }));
+      ok(h.level === 'warn' && /hit an error/.test(h.why), 'health: an error on a row in the last scan: warn');
+      h = H(st({ down: { health: clean(-HEALTH.staleMs - 1e3) } }));
+      ok(h.level === 'warn' && /no clean scan for/.test(h.why), `health: no clean scan for staleMs: warn (${h.why})`);
+      h = H(st({ down: { health: { ...clean(-HEALTH.deadMs - 60e3), lastCleanAt: iso(-HEALTH.deadMs - 60e3) } } }));
+      ok(h.level === 'bad' && /nothing went through for 6 min/.test(h.why), `health: nothing through for deadMs: bad (${h.why})`);
+      h = H(st({ up: { scanning: true, health: clean(-HEALTH.deadMs - 60e3) } }));
+      ok(h.level === 'ok', 'health: a long scan under way with no error is not stale');
+      h = H({ ...st(), startedAt: iso(-30e3), up: { health: { ...clean(), lastSuccessAt: null, lastCleanAt: null } } });
+      ok(h.level === 'ok', 'health: just started, no scan through yet: ok');
+      h = H(st({ up: { health: { ...clean(-20e3), lastError: err, failStreak: 1, backingOff: true } }, down: { health: { ...clean(-20e3), lastError: err, failStreak: 3 } } }));
+      ok(h.level === 'bad' && h.part === 'down', 'health: the worst loop wins');
+      h = H({ running: false, reason: 'not signed in', off: false });
+      ok(h.level === 'bad' && /not signed in/.test(h.tip), 'health: signed out: bad');
+      h = H({ running: false, reason: 'sync is not set up on this PC', off: true });
+      ok(h.level === 'off', 'health: sync off here: off');
+      h = H({ ...st(), up: { error: 'it broke' } });
+      ok(h.level === 'bad' && h.part === 'up', 'health: a loop whose status() throws: bad');
+    }
+
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

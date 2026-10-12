@@ -95,7 +95,7 @@ const memStore = () => {
 
 // ---------- the fake Supabase ----------
 const UID = crypto.randomUUID();
-const fake = { codes: new Map(), refresh: new Map(), access: new Map(), calls: [], objects: new Map(), member: true, refreshDown: false, settings: new Map() };
+const fake = { codes: new Map(), refresh: new Map(), access: new Map(), calls: [], objects: new Map(), member: true, refreshDown: false, settings: new Map(), used: new Map(), reuseMs: 10e3, dropAnswer: 0 };
 const issue = (uid, email) => {
   const at = `at-${crypto.randomBytes(12).toString('hex')}`, rt = `rt-${crypto.randomBytes(12).toString('hex')}`;
   fake.access.set(at, uid);
@@ -122,9 +122,15 @@ const server = http.createServer((req, res) => {
       if (grant === 'refresh_token') {
         if (fake.refreshDown) return void res.destroy();
         const who = fake.refresh.get(b.refresh_token);
+        // Supabase's reuse interval: a used token is taken again for a while (the same answer), then refused as used
+        const used = fake.used.get(b.refresh_token);
+        if (!who && used) return Date.now() - used.at <= fake.reuseMs ? json(200, used.answer) : json(400, { code: 400, error_code: 'refresh_token_already_used', msg: 'Invalid Refresh Token: Already Used' });
         if (!who) return json(400, { code: 400, error_code: 'refresh_token_not_found', msg: 'Invalid Refresh Token: Refresh Token Not Found' });
         fake.refresh.delete(b.refresh_token);
-        return json(200, issue(who.uid, who.email));
+        const answer = issue(who.uid, who.email);
+        fake.used.set(b.refresh_token, { at: Date.now(), answer });
+        if (fake.dropAnswer > 0) { fake.dropAnswer--; return void res.destroy(); } // done on the server, the answer lost
+        return json(200, answer);
       }
       return json(400, { msg: 'unsupported_grant_type' });
     }
@@ -186,6 +192,8 @@ const server = http.createServer((req, res) => {
       }
     }
     if (u.pathname === '/rest/v1/slow') return; // never answers
+    if (u.pathname === '/rest/v1/busy') { res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '7' }); return res.end(JSON.stringify({ message: 'too many requests' })); }
+    if (u.pathname === '/rest/v1/down') { res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': new Date(Date.now() + 60e3).toUTCString() }); return res.end(JSON.stringify({ message: 'down for a while' })); }
     if (u.pathname === '/rest/v1/broken') return json(403, { code: '42501', details: null, hint: null, message: 'permission denied for table broken' });
     json(404, { message: 'no such thing' });
   });
@@ -558,6 +566,40 @@ async function main() {
     const loc = new URL(r1.headers.Location);
     eq([loc.searchParams.get('login_hint'), loc.searchParams.get('prompt')], [null, 'select_account'], 'no onlyEmail: the account picker, no hint');
   }
+  // ---------- scan health helpers: transient errors, Retry-After, the scan-level back-off ----------
+  {
+    ok(['network', 'timeout'].every((code) => S.isTransient({ code })) && [408, 429, 500, 503, 599].every((status) => S.isTransient({ status })),
+      'isTransient: the network, a timeout, 408, 429 and 5xx');
+    ok(![400, 401, 403, 404, 409, 422].some((status) => S.isTransient({ status })) && !S.isTransient(null), 'isTransient: not a 4xx for bad data');
+    const T0 = Date.parse('2026-10-12T12:00:00Z');
+    eq([S.parseRetryAfter('7', T0), S.parseRetryAfter('0', T0), S.parseRetryAfter(' 1.5 ', T0)], [7000, 0, 1500], 'Retry-After in seconds');
+    eq(S.parseRetryAfter(new Date(T0 + 90e3).toUTCString(), T0), 90e3, 'Retry-After as an HTTP date');
+    eq(S.parseRetryAfter(new Date(T0 - 90e3).toUTCString(), T0), 0, 'Retry-After as a date gone by: no wait');
+    eq([S.parseRetryAfter('86400', T0), S.parseRetryAfter(new Date(T0 + 3600e3).toUTCString(), T0)], [300e3, 300e3], 'Retry-After is capped at 5 min');
+    eq([S.parseRetryAfter('', T0), S.parseRetryAfter(null, T0), S.parseRetryAfter('soon', T0), S.parseRetryAfter('-5', T0)], [null, null, null, null], 'no Retry-After, or one that makes no sense: null');
+    let t = T0;
+    const h = S.createScanHealth({ now: () => t });
+    eq(h.status(), { lastSuccessAt: null, lastCleanAt: null, lastError: null, failStreak: 0, backingOff: false, backoffUntil: null }, 'scan health: nothing yet');
+    const net = new S.SyncError('could not reach Supabase', 0, 'network');
+    eq([h.failed(net), h.failed(net), h.failed(net), h.failed(net), h.failed(net), h.failed(net)], [5e3, 10e3, 20e3, 40e3, 60e3, 60e3], 'scan health: 5 s, doubling, at most 60 s');
+    ok(h.wait() === 60e3 && h.status().backingOff && h.status().failStreak === 6 && h.status().lastError.code === 'network', 'scan health: wait() and status() while backing off');
+    eq(h.failed(Object.assign(new S.SyncError('busy', 429), { retryAfterMs: 120e3 })), 120e3, 'scan health: a longer Retry-After wins');
+    eq(h.failed(Object.assign(new S.SyncError('busy', 503), { retryAfterMs: 1e3 })), 60e3, 'scan health: a shorter Retry-After does not cut the back-off');
+    t += 10e3;
+    h.done(false);
+    ok(h.wait() === 0 && h.status().failStreak === 0 && h.status().lastError && h.status().lastCleanAt === null, 'scan health: a scan through with a row error resets the back-off, keeps the error');
+    eq(h.failed(new S.SyncError('Supabase said 422: bad', 422)), 0, 'scan health: a 4xx failing the whole scan does not back off');
+    ok(h.status().failStreak === 1 && h.status().lastError.status === 422, 'scan health: but counts in the streak');
+    h.failed(net);
+    eq(h.wait(), 5e3, 'scan health: the back-off starts again at 5 s after a reset');
+    t += 1e3;
+    h.done(true);
+    const s1 = h.status();
+    ok(s1.lastError === null && s1.lastCleanAt === new Date(t).toISOString() && s1.lastSuccessAt === s1.lastCleanAt && !s1.backingOff, 'scan health: a clean scan clears the error');
+  }
+
+  // ---------- a renewal across a restart: the sign-in is never lost ----------
+  await renewals(fakeUrl);
 
   // ---------- the Sync card's routes ----------
   {
@@ -734,6 +776,94 @@ async function main() {
   }
   p = dry();
   ok(p.status === 0, 'clean again: the guard passes');
+}
+
+// A store that stands for the one on disk across restarts (each createSync() over it is a new start). failWrites:
+// the next n writes fail (a full disk, a Keychain that said no), leaving what was there.
+function diskStore() {
+  const m = memStore();
+  const d = { kind: 'memory', failWrites: 0, stamp: () => m.stamp(), read: () => m.read(), clear: () => m.clear(), peek: () => m.peek() };
+  d.write = async (t) => { if (d.failWrites > 0) { d.failWrites--; throw new Error('the disk is full'); } return m.write(t); };
+  return d;
+}
+async function renewals(fakeUrl) {
+  const dir = path.join(T, 'renew');
+  fs.mkdirSync(path.join(dir, 'sync'), { recursive: true });
+  fs.writeFileSync(S.configPath(dir), JSON.stringify({ url: fakeUrl, publishableKey: KEY }));
+  const email = 'member@example.com';
+  let clock = Date.now();
+  const logs = [];
+  const start = (store) => S.createSync({ dataDir: dir, port: 4777, fetch: realFetch, now: () => clock, store, allowLoopbackUrl: true, log: (t) => logs.push(t) });
+  const disk = diskStore();
+  const signIn = async () => {
+    const t = issue(UID, email);
+    await disk.write(JSON.stringify({ v: 1, url: fakeUrl, uid: UID, email, member: true, refreshToken: t.refresh_token, accessToken: t.access_token, expiresAt: clock + 30e3 }));
+    return t.refresh_token;
+  };
+  const onDisk = () => (disk.peek() ? JSON.parse(disk.peek()).refreshToken : null);
+  fake.member = true;
+  fake.reuseMs = 10e3;
+
+  // (a) the renewal reached Supabase, but the process stopped before its answer was kept (here: the answer never came
+  // back). The stored token is untouched, and the next start renews with it again: Supabase takes it within its reuse
+  // interval
+  const rt0 = await signIn();
+  const a1 = start(disk);
+  fake.dropAnswer = 1;
+  await rejects(a1.rest('GET', 'devices'), (e) => e.code === 'network', 'renewal: an answer that never came back fails the call');
+  ok(!fake.refresh.has(rt0) && fake.used.has(rt0), 'renewal: Supabase did rotate the token (the fake)');
+  ok(onDisk() === rt0, 'renewal: the stored refresh token is still the old one (never removed before a new one is kept)');
+  const a2 = start(disk); // the restart
+  ok(Array.isArray(await a2.rest('GET', 'devices')), 'renewal: after a restart, the old token is taken again within the reuse interval: still signed in');
+  ok(onDisk() !== rt0 && fake.refresh.has(onDisk()), 'renewal: the new refresh token is kept');
+  ok((await a2.status()).signedIn && !(await a2.status()).lost, 'renewal: signed in, nothing lost');
+
+  // (b) the store could not keep the renewed token: the old one stays on disk, the new one is used from memory and
+  // saved again on the next call
+  clock += 2 * 3600e3;
+  const rt1 = onDisk();
+  disk.failWrites = 1;
+  ok(Array.isArray(await a2.rest('GET', 'devices')), 'unsaved renewal: the call still works');
+  ok(onDisk() === rt1 && logs.some((l) => /could not be saved \(it is tried again/.test(l)), 'unsaved renewal: the old token stays on disk, and it is logged');
+  ok(Array.isArray(await a2.rest('GET', 'devices')), 'unsaved renewal: the next call works');
+  ok(onDisk() !== rt1 && fake.refresh.has(onDisk()), 'unsaved renewal: the next call saved the renewed token');
+
+  // (c) a restart with a spent token, past the reuse interval: refused as already used, and said so plainly
+  clock += 2 * 3600e3;
+  disk.failWrites = 1;
+  await a2.rest('GET', 'devices');
+  const spent = onDisk();
+  ok(fake.used.has(spent), 'spent: the token on disk was used (the renewal could not be saved, then the process stopped)');
+  fake.reuseMs = 0; // past the reuse interval
+  const a3 = start(disk);
+  logs.length = 0;
+  await rejects(a3.rest('GET', 'devices'), (e) => e.code === 'signed_out' && /already used/.test(e.message), 'spent: the call fails as signed out, saying the sign-in was already used');
+  let st = await a3.status();
+  ok(!st.signedIn && /already used/.test(st.lost || '') && st.lostCode === 'refresh_reused' && st.lostAt, `spent: status() says the sign-in was lost and why (${JSON.stringify(st)})`);
+  ok(logs.some((l) => /signed out: .*already used/.test(l)), 'spent: logged');
+  ok(fs.existsSync(path.join(dir, 'sync', 'signin-lost.json')), 'spent: kept in signin-lost.json');
+  st = await start(disk).status();
+  ok(/already used/.test(st.lost || ''), 'spent: another start still says so');
+  await a3.signOut();
+  ok(!(await a3.status()).lost && !fs.existsSync(path.join(dir, 'sync', 'signin-lost.json')), 'spent: a sign-out (or a sign-in) clears the note');
+
+  // (d) a token refused for another reason: signed out, and said so too
+  await signIn();
+  fake.refresh.clear();
+  const a4 = start(disk);
+  await rejects(a4.rest('GET', 'devices'), (e) => e.code === 'signed_out', 'refused: signed out');
+  st = await a4.status();
+  ok(st.lostCode === 'refused' && /refused to renew/.test(st.lost || ''), `refused: status() says so (${st.lost})`);
+  await a4.signOut();
+
+  // (e) a 429 / 503 carries Supabase's Retry-After for the scan-level back-off
+  await signIn();
+  const a5 = start(disk);
+  await rejects(a5.rest('GET', 'busy'), (e) => e.status === 429 && e.retryAfterMs === 7000, 'a 429 with Retry-After: 7 gives retryAfterMs 7000');
+  await rejects(a5.rest('GET', 'down'), (e) => e.status === 503 && e.retryAfterMs > 50e3 && e.retryAfterMs <= 60e3, 'a 503 with Retry-After as a date');
+  await rejects(a5.rest('GET', 'broken'), (e) => e.status === 403 && e.retryAfterMs === undefined, 'a 403 has no retryAfterMs');
+  await a5.signOut();
+  fake.reuseMs = 10e3;
 }
 
 main().catch((e) => { failures++; console.log(`FAIL the test crashed: ${e && e.stack}`); }).finally(() => {

@@ -99,6 +99,74 @@ class SyncError extends Error {
 const fail = (message, status = 0, code = '') => { throw new SyncError(message, status, code); };
 const clip = (s, n = 300) => String(s == null ? '' : s).replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, n);
 
+// ---------- what a failed request means for a scan (sync-up.js, sync-down.js, sync-live.js) ----------
+// A network error, a timeout, 408, 429 or a 5xx is Supabase (or the way to it) having a bad moment, not the row's
+// fault: the whole scan ends and the next one waits (the scan-level back-off: 5 s, doubling to 60 s, or longer when
+// Supabase sent Retry-After on a 429 / 503, at most 5 min), and a scan that runs to its end resets it. Any other error
+// is the row's own (a 4xx for bad data): that row backs off (the caller's per-row back-off) and the scan goes on.
+const SCAN_BACKOFF_MIN_MS = 5e3, SCAN_BACKOFF_MAX_MS = 60e3, RETRY_AFTER_MAX_MS = 5 * 60e3;
+const isTransient = (e) => !!e && (e.code === 'network' || e.code === 'timeout' || e.status === 408 || e.status === 429 || (e.status >= 500 && e.status < 600));
+// a Retry-After header (seconds, or an HTTP date) -> ms to wait, 0 to RETRY_AFTER_MAX_MS, or null when there is none
+function parseRetryAfter(v, nowMs = Date.now()) {
+  const t = v == null ? '' : String(v).trim();
+  if (!t) return null;
+  let ms;
+  if (/^\d+(?:\.\d+)?$/.test(t)) ms = Number(t) * 1000;
+  else {
+    if (!/[a-z]/i.test(t)) return null; // an HTTP date names its day and month ("-5" would parse as a year)
+    const at = Date.parse(t);
+    if (!Number.isFinite(at)) return null;
+    ms = at - nowMs;
+  }
+  return Math.min(Math.max(0, Math.round(ms)), RETRY_AFTER_MAX_MS);
+}
+// One loop's health (each of sync-up.js, sync-down.js and sync-live.js has one), for /sync/activity and the pill:
+//   done(clean)  a scan ran to its end: the back-off and the failure streak reset; clean (no error on any row) also
+//                clears lastError
+//   rowError(e)  one row failed and the scan goes on: lastError, nothing else
+//   failed(e)    the scan failed as a whole: lastError, the streak + 1, and a transient error backs off -> the ms
+//   wait()       ms the next scan still waits for (0: none)
+//   status()     { lastSuccessAt, lastCleanAt, lastError: { at, message, code, status? } | null, failStreak, backingOff,
+//                backoffUntil } (ISO times; never a token or the key: messages are SyncError's, which hold neither)
+function createScanHealth(o = {}) {
+  const now = typeof o.now === 'function' ? o.now : Date.now;
+  const minMs = Number(o.minMs) > 0 ? Number(o.minMs) : SCAN_BACKOFF_MIN_MS;
+  const maxMs = Number(o.maxMs) > 0 ? Number(o.maxMs) : SCAN_BACKOFF_MAX_MS;
+  const iso = (t) => (t ? new Date(t).toISOString() : null);
+  let lastSuccessAt = 0, lastCleanAt = 0, lastError = null, failStreak = 0, backoffs = 0, backoffUntil = 0;
+  const errOf = (e) => ({
+    at: iso(now()), message: clip((e && e.message) || e || 'failed', 200),
+    code: e && typeof e.code === 'string' && e.code ? e.code : null, ...(e && Number(e.status) > 0 ? { status: Number(e.status) } : {}),
+  });
+  return {
+    done(clean = true) {
+      const t = now();
+      lastSuccessAt = t; failStreak = 0; backoffs = 0; backoffUntil = 0;
+      if (clean) { lastCleanAt = t; lastError = null; }
+    },
+    rowError(e) { lastError = errOf(e); },
+    failed(e) {
+      lastError = errOf(e);
+      failStreak++;
+      if (!isTransient(e)) return 0;
+      backoffs++;
+      let wait = Math.min(minMs * 2 ** (backoffs - 1), maxMs);
+      const ra = Number(e && e.retryAfterMs);
+      if (Number.isFinite(ra) && ra > wait) wait = Math.min(ra, RETRY_AFTER_MAX_MS);
+      backoffUntil = now() + wait;
+      return wait;
+    },
+    wait() { return Math.max(0, backoffUntil - now()); },
+    status() {
+      const t = now();
+      return {
+        lastSuccessAt: iso(lastSuccessAt), lastCleanAt: iso(lastCleanAt), lastError: lastError ? { ...lastError } : null,
+        failStreak, backingOff: backoffUntil > t, backoffUntil: backoffUntil > t ? iso(backoffUntil) : null,
+      };
+    },
+  };
+}
+
 // ---------- the config ----------
 // checkUrl(u) -> { ok, url } with url as https://<project>.supabase.co (nothing after it), or { ok: false, message }.
 // o.allowLoopback (tests only, never from the config file): http://127.0.0.1:<port> too.
@@ -553,7 +621,13 @@ function createSync(opts = {}) {
       if (inBody >= 400 && inBody < 600) status = inBody;
       if (j0.error === 'not_found') status = 404;
       else if (j0.error === 'InvalidJWT' || /\bjwt expired\b/i.test(what)) status = 401;
-      throw new SyncError(`Supabase said ${status}: ${what}`, status, clip(j0.error_code || j0.code || j0.error || '', 60));
+      const err = new SyncError(`Supabase said ${status}: ${what}`, status, clip(j0.error_code || j0.code || j0.error || '', 60));
+      // busy (429) or down for a while (503): how long Supabase asked us to wait, for the scan-level back-off
+      if ([429, 503].includes(status) || [429, 503].includes(r.status)) {
+        const ra = parseRetryAfter(r.headers && typeof r.headers.get === 'function' ? r.headers.get('retry-after') : null, wallNow());
+        if (ra !== null) err.retryAfterMs = ra;
+      }
+      throw err;
     }
     if (o.raw) return { status: r.status, headers: r.headers, body: buf };
     let data = null;
@@ -568,31 +642,97 @@ function createSync(opts = {}) {
   }).then((r) => r.data);
 
   // ---------- tokens ----------
-  let refreshing = null;
+  // A restart in the middle of a renewal must not lose the sign-in. Each refresh token works once, so:
+  //   - the stored one is never removed or replaced before the new one is safely kept: the store writes a temp file and
+  //     renames it over (writeAtomic; the Keychain replaces its item in one step), and only after Supabase answered
+  //   - a renewal the store did not take (unsaved) is kept in memory and saved again on the next call, so a restart
+  //     after it does not find the spent token on disk
+  //   - a process stopped after Supabase answered and before the new token was kept: the next start sends the old one
+  //     again, which Supabase takes within its reuse interval (it answers with the same new one)
+  //   - a refused token: the store is read again first, and a newer one there (another Fleet View process renewed it)
+  //     is used; only then is it signed out, and one refused as already used says so plainly (lost, in status() and
+  //     the log, kept in <dataDir>/sync/signin-lost.json until the next sign-in), never silently
+  let refreshing = null, unsaved = null;
+  const lostPath = path.join(dir, 'signin-lost.json');
+  let lostNote; // undefined: not read yet; null: none; { at, code, message }
+  function readLost() {
+    if (lostNote !== undefined) return lostNote;
+    lostNote = null;
+    try {
+      const j = JSON.parse(fs.readFileSync(lostPath, 'utf8'));
+      if (j && typeof j.message === 'string') lostNote = { at: String(j.at || ''), code: String(j.code || ''), message: clip(j.message, 300) };
+    } catch {}
+    return lostNote;
+  }
+  function setLost(note) {
+    lostNote = note;
+    try {
+      if (note) writeAtomic(lostPath, `${JSON.stringify(note, null, 2)}\n`);
+      else fs.rmSync(lostPath, { force: true });
+    } catch {}
+  }
+  async function keep(next) {
+    try {
+      await save(next);
+      unsaved = null;
+    } catch (e) {
+      session = next;
+      unsaved = next;
+      log(`sync: the renewed sign-in could not be saved (it is tried again on the next request): ${e.message}`);
+    }
+  }
+  // the sign-in in the store, when it is a newer one of the same account than s (another process renewed it)
+  async function storedNewer(s, c) {
+    let disk = null;
+    try { disk = parseSession(await store.read()); } catch { return null; }
+    return disk && disk.url === c.url && disk.uid === s.uid && disk.refreshToken !== s.refreshToken && allowed(disk) ? disk : null;
+  }
+  async function lostSignIn(e) {
+    const used = e.code === 'refresh_token_already_used' || /already\s*used/i.test(String(e.message || ''));
+    const note = {
+      at: new Date(now()).toISOString(), code: used ? 'refresh_reused' : 'refused',
+      message: used
+        ? 'Supabase refused the saved sign-in as already used: it was renewed, but Fleet View stopped before the new one was saved. Sign in again.'
+        : `Supabase refused to renew the sign-in (${clip(e.message, 160)}). Sign in again.`,
+    };
+    setLost(note);
+    log(`sync: signed out: ${note.message}`);
+    await forget();
+    throw new SyncError(`signed out: ${note.message}`, 401, 'signed_out');
+  }
   function refresh(s, c) {
     if (refreshing) return refreshing;
     refreshing = (async () => {
-      let t;
-      try { t = await tokenCall(c, 'refresh_token', { refresh_token: s.refreshToken }); } catch (e) {
-        // Supabase refused the refresh token (revoked, used, the user gone): signed out. Unreachable, busy (429) or
-        // failing (5xx): still signed in, and the next call tries again
-        if ([400, 401, 403, 404].includes(e.status)) {
-          log(`sync: signed out: the sign-in could not be renewed (${e.message})`);
-          await forget();
-          throw new SyncError(`signed out: ${e.message}`, 401, 'signed_out');
+      let cur = s;
+      for (let tries = 0; ; tries++) {
+        let t;
+        try { t = await tokenCall(c, 'refresh_token', { refresh_token: cur.refreshToken }); } catch (e) {
+          // Supabase refused the refresh token (revoked, used, the user gone): signed out, unless the store has a newer
+          // one. Unreachable, busy (429) or failing (5xx): still signed in, and the next call tries again
+          if (![400, 401, 403, 404].includes(e.status)) throw e;
+          const disk = tries === 0 ? await storedNewer(cur, c) : null;
+          if (!disk) return lostSignIn(e);
+          log('sync: the sign-in was renewed by another Fleet View process: using that one');
+          session = disk; sessionSeen = store.stamp(); unsaved = null;
+          if (disk.accessToken && disk.expiresAt - now() > EARLY_MS) return disk;
+          cur = disk;
+          continue;
         }
-        throw e;
+        const next = sessionFrom(t, c.url, cur);
+        await keep(next);
+        emit('refreshed', next);
+        return next;
       }
-      const next = sessionFrom(t, c.url, s);
-      try { await save(next); } catch (e) { session = next; log(`sync: the renewed sign-in could not be saved: ${e.message}`); }
-      emit('refreshed', next);
-      return next;
     })().finally(() => { refreshing = null; });
     return refreshing;
   }
   // the session with an access token that has at least a minute left (o.force: a new one in any case)
   async function fresh(o = {}) {
     const c = need();
+    if (unsaved && !refreshing) {
+      const u = unsaved;
+      if (session === u) await keep(u); else unsaved = null; // signed out or in again since: that one is gone
+    }
     const s = await load();
     if (!s) fail('not signed in to sync', 401, 'signed_out');
     if (!o.force && s.accessToken && s.expiresAt - now() > EARLY_MS) return s;
@@ -740,6 +880,8 @@ function createSync(opts = {}) {
     refused = null;
     s.member = await memberCheck(c, s.accessToken);
     try { await save(s); } catch (err) { return no(`Signed in, but the sign-in could not be saved: ${err.message}`); }
+    unsaved = null;
+    setLost(null);
     emit('signed-in', s);
     log(`sync: signed in as ${s.email || s.uid}${s.member === false ? ' (not on the members list: it can reach nothing)' : ''}`);
     return { ok: true, email: s.email, member: s.member };
@@ -752,6 +894,7 @@ function createSync(opts = {}) {
         log(`sync: sign-out: the server was not told (${e.message}); its refresh token stays until it expires`);
       }
     }
+    setLost(null);
     await forget();
   }
   async function status() {
@@ -759,9 +902,12 @@ function createSync(opts = {}) {
     if (!c) return cfgProblem ? { configured: false, problem: cfgProblem } : { configured: false };
     const s = await load().catch(() => null);
     const turnedAway = !s && refused && now() - refused.at < STATE_MS ? refused.email || 'another account' : null;
+    // the last sign-in was lost (a renewal Supabase refused): what happened, until the next sign-in
+    const lost = s ? null : readLost();
     return {
       configured: true, signedIn: !!s, email: s ? s.email || null : null, member: s ? s.member : null,
       ...(onlyEmail ? { onlyEmail } : {}), ...(turnedAway ? { refused: turnedAway } : {}),
+      ...(lost ? { lost: lost.message, lostAt: lost.at || null, lostCode: lost.code || null } : {}),
       expiresAt: s && s.accessToken && s.expiresAt ? new Date(s.expiresAt).toISOString() : null,
     };
   }
@@ -856,6 +1002,8 @@ function createSync(opts = {}) {
       return m;
     },
     rest, rpc, storage,
+    // resolves once no renewal is under way (fleet-view.js waits for it, briefly, before a restart)
+    settled: () => (refreshing ? refreshing.then(() => {}, () => {}) : Promise.resolve()),
     storeKind: store.kind,
   };
   return api;
@@ -931,6 +1079,7 @@ async function cli(argv, io = {}) {
 module.exports = {
   createSync, cli, checkUrl, checkKey, readConfig, writeConfig, readSmallJson, configPath, pkceVerifier, pkceChallenge, objectPath, checkRel,
   dpapiStore, keychainStore, keychainService, fileStore, protectedStore, syncDir, SyncError, SCHEMA, BUCKET,
+  isTransient, parseRetryAfter, createScanHealth, SCAN_BACKOFF_MIN_MS, SCAN_BACKOFF_MAX_MS, RETRY_AFTER_MAX_MS,
 };
 
 if (require.main === module) {

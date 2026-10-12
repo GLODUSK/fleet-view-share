@@ -83,8 +83,13 @@
 //      Every path is checked to stay inside the projects folder, with no link on the way, before anything is written.
 //   8. What was laid down goes in <dataDir>/sync/down-state.json (compact, once at the end of each scan, and after a
 //      pull, a move and a stop). An unchanged row whose log is gone from here (Claude Code deletes old logs) is laid
-//      down again. A conversation that fails (a missing object, a gap, a bad sha256, the network) writes nothing,
+//      down again. A conversation that fails (a missing object, a gap, a bad sha256, a 4xx) writes nothing,
 //      leaves no .part, and is tried again after a back-off (30 s, doubling up to 30 minutes).
+//   A network error, a timeout, a 429 or a 5xx (sync-api.js isTransient) is not the conversation's fault: no row backs
+//   off for it; the scan starts no more rows, and the next scan waits (the scan-level back-off, sync-api.js
+//   createScanHealth: 5 s doubling to 60 s, or Supabase's Retry-After up to 5 min), reset by a scan that runs to its end.
+//   status().health: when the last scan ran to its end, the last error and its time, the failure streak, and whether
+//   it is backing off (sync-run.js health() colours the pill from it).
 //
 // status() holds counts, times and the last error's message: never the key, a token or a title.
 'use strict';
@@ -110,6 +115,7 @@ const FETCH_AHEAD = 8;
 const ROWS_AT_ONCE = 4;
 const BACKOFF_MIN_MS = 30e3;
 const BACKOFF_MAX_MS = 30 * 60e3;
+const STUCK_ENDS = 3; // a conversation whose transient error ended this many scans in a row backs off alone
 const ORIGINS_MS = 60e3; // the repos rows' origins are read again this often (and when a row names one not read yet)
 const FULL_LIST_MS = 4 * 60e3; // every active row is listed (light) this often; the scans between list the changed ones
 const OVERLAP_MS = 2 * 60e3; // the changed ones: from the newest updated_at seen less this (clock skew, writes on the way)
@@ -282,6 +288,7 @@ function createMaterializer(opts = {}) {
   const stampOf = (p) => { const st = lstatOr(p); return st ? `${st.size}:${st.mtimeMs}` : 'none'; };
 
   const backoff = new Map(); // id -> { n, until }
+  const stuck = new Map(); // id -> scans in a row its transient error ended (STUCK_ENDS: it backs off alone)
   let ownersMap = new Map(); // id -> { device, leaseUntil, account }: the last scan's rows other devices own
   let missingNow = { at: null, repos: [] }; // missing(): the last whole scan's repos with no checkout here
   const onlyOf = () => (typeof opts.only === 'function' ? opts.only : null);
@@ -317,6 +324,7 @@ function createMaterializer(opts = {}) {
     pump();
   }
   const st = { running: false, scanning: false, scans: 0, lastScanAt: null, lastOkAt: null, listedAt: null, checkedAt: null, lastError: null, last: null, laidDown: 0 };
+  const health = S.createScanHealth({ now }); // the scan-level back-off and what /sync/activity says of this loop
 
   const live = (id) => C.isLive(id, { home, fresh: true }) || (typeof opts.isOpen === 'function' && !!opts.isOpen(id));
 
@@ -1011,14 +1019,23 @@ function createMaterializer(opts = {}) {
               lacking.set(r.origin, was);
             }
             if (r.outcome === 'done') st.laidDown++;
-            backoff.delete(id);
+            backoff.delete(id); stuck.delete(id);
           } catch (e) {
-            if (e && ['network', 'timeout', 'signed_out', 'off'].includes(e.code) && !fatal) fatal = e; // Supabase is out of reach: stop this scan
+            // Supabase out of reach, busy or failing (a request cut by sleep too), or signed out: not this conversation's
+            // fault, so it gets no back-off of its own; the scan stops and backs off as a whole
+            // ... unless its transient error ended STUCK_ENDS scans in a row: then it is its own, and backs off alone so
+            // the conversations after it are not starved
+            let whole = !!e && (S.isTransient(e) || ['signed_out', 'off'].includes(e.code));
+            if (whole && S.isTransient(e)) {
+              const n = (stuck.get(id) || 0) + 1;
+              if (n < STUCK_ENDS) stuck.set(id, n); else { stuck.delete(id); whole = false; }
+            }
+            if (whole && !fatal) fatal = e;
             tally.failed++;
-            // a request cut because the machine slept is not this conversation's fault: the next scan tries it again
-            if (!(e && e.slept)) {
+            if (!whole) {
               const n = b ? b.n + 1 : 1;
               backoff.set(id, { n, until: now() + Math.min(BACKOFF_MIN_MS * 2 ** (n - 1), BACKOFF_MAX_MS) });
+              health.rowError(e);
             }
             const why = (e && e.message) || String(e);
             reasons[why] = (reasons[why] || 0) + 1;
@@ -1095,10 +1112,14 @@ function createMaterializer(opts = {}) {
         const r = await scan();
         st.lastOkAt = new Date(now()).toISOString();
         if (!r.skipped) st.lastError = null;
+        if (r.skipped) health.failed(new S.SyncError(st.lastError || r.skipped, 0, 'bad_key'));
+        else health.done(!r.failed);
         st.last = r;
         return r;
       } catch (e) {
         st.lastError = (e && e.message) || String(e);
+        const wait = health.failed(e);
+        if (wait) log(`sync-down: scan stopped (${st.lastError}): the next one in ${Math.round(wait / 1000)} s`);
         throw e;
       } finally {
         st.scans++;
@@ -1112,7 +1133,8 @@ function createMaterializer(opts = {}) {
   function tick() {
     timer = null;
     if (!st.running) return;
-    scanOnce().catch(() => {}).then(() => { if (st.running && !timer) timer = setTimeout(tick, interval); });
+    // backing off: the scan-level wait
+    scanOnce().catch(() => {}).then(() => { if (st.running && !timer) timer = setTimeout(tick, Math.max(interval, health.wait())); });
   }
   function start(intervalMs = 5000) {
     interval = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 5000;
@@ -1132,6 +1154,7 @@ function createMaterializer(opts = {}) {
       running: st.running, scanning: st.scanning, scans: st.scans, lastScanAt: st.lastScanAt, lastOkAt: st.lastOkAt, listedAt: st.listedAt, checkedAt: st.checkedAt,
       lastError: st.lastError, laidDown: st.laidDown, last: st.last ? { ...st.last, reasons: { ...st.last.reasons } } : null,
       conflicts: Object.keys(state.conflicts).length, waiting: backoff.size,
+      health: health.status(),
     };
   }
   const conflicts = () => Object.values(state.conflicts).map((c) => ({ ...c }));

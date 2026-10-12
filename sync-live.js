@@ -6,6 +6,9 @@
 //
 //   createLive({ api, key, log, now, device, online, snapshot, timing })
 //     -> { start(), stop(), tick(), live(), status() }
+//   status().health (sync-api.js createScanHealth): when a round last ran with no error, the last error and its time,
+//   the failure streak, and whether it is backing off: a round whose request hit a network error, a timeout, a 429 or
+//   a 5xx makes the next one wait (5 s doubling to 60 s, or Supabase's Retry-After), and a clean round resets it
 //
 //   api       sync-api.js createSync()'s object (rest() only)
 //   key       the 32-byte sync key: the rows are sealed with it
@@ -55,6 +58,7 @@
 'use strict';
 const path = require('path');
 const K = require(path.join(__dirname, 'sync-crypto.js'));
+const S = require(path.join(__dirname, 'sync-api.js'));
 const { cleanRoot } = require(path.join(__dirname, 'sync-prefs.js'));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -162,6 +166,10 @@ function createLive(o = {}) {
   const boundOf = typeof o.bound === 'function' ? o.bound : () => [];
   const said = new Map();
   const logOnce = (k, t) => { if (said.get(k) === t) return; said.set(k, t); log(t); };
+  const health = S.createScanHealth({ now });
+  let roundErr = null; // the first request of this round that failed (a round with one is not clean)
+  let roundDirty = false; // this round could not list this device's conversations (not a request: no back-off)
+  const failedReq = (e) => { if (!roundErr) roundErr = e || new Error('failed'); };
 
   let me = null;
   let lastSig = null, lastTry = -Infinity, at = 0, writes = 0, fetched = 0;
@@ -180,7 +188,7 @@ function createLive(o = {}) {
   });
   async function publish(t) {
     let list, bound;
-    try { list = pickList(cleanList(snapshot()), t, tm.doneMs); bound = cleanIds(boundOf()); } catch (e) { logOnce('snapshot', `live: this device's conversations could not be listed (${errText(e)})`); return; }
+    try { list = pickList(cleanList(snapshot()), t, tm.doneMs); bound = cleanIds(boundOf()); } catch (e) { logOnce('snapshot', `live: this device's conversations could not be listed (${errText(e)})`); health.rowError(e); roundDirty = true; return; }
     // bound in the live row too: an older Fleet View reads it only there (it goes in a later release)
     const sig = `${sigOf(list)}|${bound.join(',')}`;
     if (sig !== lastSig && waited(t, lastTry, tm.minGapMs)) {
@@ -190,7 +198,7 @@ function createLive(o = {}) {
         await putRow(`live:${me}`, { v: 1, device: me, at, sessions: list, bound }, at);
         lastSig = sig; writes++;
         said.delete('write');
-      } catch (e) { logOnce('write', `live: this device's snapshot could not be written (${errText(e)})`); }
+      } catch (e) { logOnce('write', `live: this device's snapshot could not be written (${errText(e)})`); failedReq(e); }
     }
     const bsig = bound.join(',');
     if (bsig !== boundSig && waited(t, boundTry, tm.minGapMs)) {
@@ -200,7 +208,7 @@ function createLive(o = {}) {
         await putRow(`bound:${me}`, { v: 1, device: me, at: boundAt, bound }, boundAt);
         boundSig = bsig; boundWrites++;
         said.delete('bound');
-      } catch (e) { logOnce('bound', `live: this device's bound conversations could not be written (${errText(e)})`); }
+      } catch (e) { logOnce('bound', `live: this device's bound conversations could not be written (${errText(e)})`); failedReq(e); }
     }
   }
   // one live row's sealed value -> { sessions: Map, bound: Set (used for an older device, which has no bound row) }, or
@@ -245,7 +253,7 @@ function createLive(o = {}) {
     if (!waited(t, lastRead, tm.readMs)) return;
     lastRead = t;
     let rows;
-    try { rows = await listKeys(); said.delete('read'); } catch (e) { logOnce('read', `live: the other devices' snapshots could not be read (${errText(e)})`); return; }
+    try { rows = await listKeys(); said.delete('read'); } catch (e) { logOnce('read', `live: the other devices' snapshots could not be read (${errText(e)})`); failedReq(e); return; }
     const here = new Map(); // key -> its updated_at, for the rows that moved
     const listed = new Set(); // keys
     for (const row of Array.isArray(rows) ? rows : []) {
@@ -263,7 +271,7 @@ function createLive(o = {}) {
       try {
         full = await api.rest('GET', 'settings', { query: { select: 'key,value_enc,updated_at', key: `in.(${[...here.keys()].map((k) => `"${k}"`).join(',')})` } });
         said.delete('fetch');
-      } catch (e) { logOnce('fetch', `live: the other devices' snapshots could not be read (${errText(e)})`); return; }
+      } catch (e) { logOnce('fetch', `live: the other devices' snapshots could not be read (${errText(e)})`); failedReq(e); return; }
       const t2 = now();
       for (const row of Array.isArray(full) ? full : []) {
         const m = row && typeof row.key === 'string' ? KEY_RE.exec(row.key) : null;
@@ -284,15 +292,17 @@ function createLive(o = {}) {
       if (!UUID_RE.test(d)) return; // the mover has not asked for its device row yet
       me = d;
     }
+    roundErr = null; roundDirty = false;
     await publish(now());
-    await read(now());
+    if (!roundErr || !S.isTransient(roundErr)) await read(now()); // Supabase out of reach: the round ends here
+    if (roundErr) health.failed(roundErr); else health.done(!roundDirty);
   }
 
   // ---------- the loop ----------
   let running = false, timer = null, ticking = null;
   function tick() {
     if (ticking) return ticking;
-    ticking = tickOnce().catch((e) => logOnce('tick', `live: a round failed (${errText(e)})`)).finally(() => { ticking = null; });
+    ticking = tickOnce().catch((e) => { logOnce('tick', `live: a round failed (${errText(e)})`); health.failed(e); }).finally(() => { ticking = null; });
     return ticking;
   }
   function schedule(ms) {
@@ -305,7 +315,7 @@ function createLive(o = {}) {
     timer = null;
     if (!running) return;
     await tick();
-    schedule(tm.tickMs);
+    schedule(Math.max(tm.tickMs, health.wait())); // backing off: the round-level wait
   }
   function start() { if (running) return; running = true; schedule(0); }
   async function stop() {
@@ -334,7 +344,7 @@ function createLive(o = {}) {
     }
     return { ready, known, unsure, fresh, sessions, byDevice, bound };
   }
-  const status = () => { const v = live(); return { device: me, writes, boundWrites, fetched, ready, devices: v.known.size, fresh: v.fresh.size }; };
+  const status = () => { const v = live(); return { device: me, writes, boundWrites, fetched, ready, devices: v.known.size, fresh: v.fresh.size, health: health.status() }; };
 
   return { start, stop, tick, live, status };
 }
