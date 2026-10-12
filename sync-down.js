@@ -11,9 +11,10 @@
 //     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), conflicts(), pull(id), owners() }
 //
 // For S4's moves (sync-move.js), with ids lower-case:
-//   pull(id) -> Promise<{ outcome, reason?, dir?, folder?, row? }>: lay that conversation down now. It is urgent: a
-//     running scan lets it go next, between two conversations; with no scan it runs at once (one lock for both, so a
-//     conversation is never laid down twice at once). Its row is read whoever owns it: none (or not active) ->
+//   pull(id) -> Promise<{ outcome, reason?, dir?, folder?, row? }>: lay that conversation down now. It is urgent: it
+//     takes the next free slot of a running scan ahead of the scan's next row; with a slot free it runs at once. Scan
+//     rows and pulls share the slots, so a conversation is never laid down twice at once (a pull of one the scan has
+//     under way waits for that row). Its row is read whoever owns it: none (or not active) ->
 //     { outcome: 'missing' }; this device's -> { outcome: 'mine', row }; else its back-off is cleared and it is laid
 //     down as a scan would (steps 3 to 8) -> that outcome ('done' | 'same' | 'conflict' | 'skip' | 'pending'), the
 //     reason, dir (the slug folder its log is in, absolute), folder (the resume folder X from root + rel_cwd) and the
@@ -26,7 +27,8 @@
 // One scan:
 //   1. This machine's device row (ensureDevice; last_seen_at at most every 5 minutes).
 //   2. Every active conversation row owned by another device, newest first. A row whose updated_at, generation, size
-//      and sha256 are what down-state.json says was laid down costs nothing more.
+//      and sha256 are what down-state.json says was laid down costs nothing more. The others start in that order, up
+//      to ROWS_AT_ONCE conversations under way at once (steps 3 to 8 for each).
 //   3. Its repo: this device's repo_paths row for the repo when that folder still has the repo's origin, else the
 //      repos Fleet View knows (the roots option; ~/.fleet-view.json's added and remembered repos when it is not
 //      given) matched by origin, and then this device's repo_paths row is written. No checkout here: skipped. The home
@@ -75,6 +77,9 @@ const READ_PIECE = 1024 * 1024; // local files are hashed and copied this much a
 // chunks fetched at once for one file: each request waits a round trip (Mac -> Supabase, 70-200 ms), not for bytes,
 // so one at a time made a backlog of thousands of chunks take an hour
 const FETCH_AHEAD = 8;
+// conversations a scan lays down at once, for the same reason: each waits round trips, not bytes. Each may have
+// FETCH_AHEAD chunk requests out, so up to ROWS_AT_ONCE x FETCH_AHEAD (32) at once: modest, for Supabase's sake
+const ROWS_AT_ONCE = 4;
 const BACKOFF_MIN_MS = 30e3;
 const BACKOFF_MAX_MS = 30 * 60e3;
 const BAD_SEG_RE = /[<>:"|?*\\\x00-\x1f]/; // what a rel_cwd segment may not hold (Windows names, drives, streams)
@@ -232,22 +237,36 @@ function createMaterializer(opts = {}) {
   let ownersMap = new Map(); // id -> { device, leaseUntil, account }: the last scan's rows other devices own
   const onlyOf = () => (typeof opts.only === 'function' ? opts.only : null);
 
-  // ---------- one conversation at a time ----------
-  // A scan takes this lock for each row and pull() for its whole run. An urgent waiter (pull) goes ahead of the scan's
-  // next row, behind any earlier urgent one.
-  let lockHeld = false;
-  const lockQ = []; // { urgent, go }
-  function lock(urgent) {
-    if (!lockHeld) { lockHeld = true; return Promise.resolve(); }
+  // ---------- several conversations at once, never one twice ----------
+  // A scan takes a slot for each row, pull() for its whole run: at most ROWS_AT_ONCE at once, and never two for one
+  // id. A pull counts against the limit (Supabase sees no more than a scan alone makes) but is urgent: it takes the
+  // next free slot ahead of the scan's next row, behind earlier pulls, waiting only for a row of its own id under way.
+  // The scan's state reload takes the whole thing (id null): no conversation under way, none starting meanwhile.
+  let inUse = 0, sole = false;
+  const busy = new Set(); // ids being laid down
+  const slotQ = []; // { urgent, id, go }
+  function pump() {
+    for (let i = 0; i < slotQ.length && !sole; i++) {
+      const w = slotQ[i];
+      if (w.id === null ? inUse > 0 : (inUse >= ROWS_AT_ONCE || busy.has(w.id))) continue; // a later waiter may go first
+      slotQ.splice(i--, 1);
+      if (w.id === null) sole = true; else { inUse++; busy.add(w.id); }
+      w.go();
+    }
+  }
+  function slot(id, urgent) {
     return new Promise((go) => {
-      const e = { urgent, go };
-      if (!urgent) { lockQ.push(e); return; }
-      let i = 0;
-      while (i < lockQ.length && lockQ[i].urgent) i++;
-      lockQ.splice(i, 0, e);
+      const w = { urgent, id, go };
+      let i = slotQ.length;
+      if (urgent) { i = 0; while (i < slotQ.length && slotQ[i].urgent) i++; }
+      slotQ.splice(i, 0, w);
+      pump();
     });
   }
-  function unlock() { const n = lockQ.shift(); if (n) n.go(); else lockHeld = false; }
+  function unslot(id) {
+    if (id === null) sole = false; else { inUse--; busy.delete(id); }
+    pump();
+  }
   const st = { running: false, scanning: false, scans: 0, lastScanAt: null, lastOkAt: null, listedAt: null, lastError: null, last: null, laidDown: 0 };
 
   const live = (id) => C.isLive(id, { home, fresh: true }) || (typeof opts.isOpen === 'function' && !!opts.isOpen(id));
@@ -276,8 +295,14 @@ function createMaterializer(opts = {}) {
     if (!Array.isArray(list)) list = settingsRoots(home);
     return list.filter((r) => typeof r === 'string' && r && path.isAbsolute(r));
   }
+  // A scan's ctx is used by several rows at once, so a lookup that waits keeps its promise in ctx[k] and they share
+  // one; a failed one is let go, so the next row asks again (as before)
+  const once = (ctx, k, fn) => {
+    if (!ctx[k]) { const p = fn(); ctx[k] = p; p.catch(() => { if (ctx[k] === p) ctx[k] = null; }); }
+    return ctx[k];
+  };
   function newCtx(me) {
-    const ctx = { me, repos: null, repoPaths: null, local: null, roots: new Map(), logs: new Map() };
+    const ctx = { me, repos: null, repoPaths: null, roots: new Map(), logs: new Map() };
     // projects folder + id -> the slug folder already holding <id>.jsonl, or null (each folder listed once a scan)
     ctx.localDir = (projects, id) => {
       const k = fold(projects);
@@ -298,29 +323,36 @@ function createMaterializer(opts = {}) {
       }
       return ctx.logs.get(k).get(id) || null;
     };
-    ctx.loadRepos = async () => {
-      if (ctx.repos) return;
+    // ctx.repos and ctx.repoPaths are set together, both or neither
+    ctx.loadRepos = () => once(ctx, 'reposP', async () => {
       const rows = await api.rest('GET', 'repos', { query: { select: 'id,origin' } });
-      ctx.repos = new Map((Array.isArray(rows) ? rows : []).filter((r) => r && typeof r.id === 'string').map((r) => [r.id.toLowerCase(), C.rowOrigin(r.origin) || null]));
       const paths = await api.rest('GET', 'repo_paths', { query: { select: 'repo_id,root', device_id: `eq.${me}` } });
+      ctx.repos = new Map((Array.isArray(rows) ? rows : []).filter((r) => r && typeof r.id === 'string').map((r) => [r.id.toLowerCase(), C.rowOrigin(r.origin) || null]));
       ctx.repoPaths = new Map((Array.isArray(paths) ? paths : []).filter((r) => r && typeof r.repo_id === 'string' && typeof r.root === 'string').map((r) => [r.repo_id.toLowerCase(), r.root]));
-    };
-    ctx.localOrigins = async () => {
-      if (ctx.local) return ctx.local;
-      ctx.local = new Map();
+    });
+    ctx.localOrigins = () => once(ctx, 'localP', async () => {
+      const local = new Map();
       for (const root of await candidateRoots()) {
         const r = await C.repoOf(root);
-        if (r && r.origin && !ctx.local.has(r.origin)) ctx.local.set(r.origin, r.mainRoot);
+        if (r && r.origin && !local.has(r.origin)) local.set(r.origin, r.mainRoot);
       }
-      return ctx.local;
-    };
+      return local;
+    });
     return ctx;
   }
-  // repo id -> this device's main checkout of it (this machine's home folder for the home row), or null
-  async function rootFor(repoId, ctx) {
-    if (typeof repoId !== 'string' || !UUID_RE.test(repoId)) return null;
+  // repo id -> this device's main checkout of it (this machine's home folder for the home row), or null. ctx.roots
+  // holds the lookup's promise, so rows of one repo under way at once share one (dropped when it fails)
+  function rootFor(repoId, ctx) {
+    if (typeof repoId !== 'string' || !UUID_RE.test(repoId)) return Promise.resolve(null);
     const id = repoId.toLowerCase();
-    if (ctx.roots.has(id)) return ctx.roots.get(id);
+    if (!ctx.roots.has(id)) {
+      const p = findRoot(id, ctx);
+      ctx.roots.set(id, p);
+      p.catch(() => { if (ctx.roots.get(id) === p) ctx.roots.delete(id); });
+    }
+    return ctx.roots.get(id);
+  }
+  async function findRoot(id, ctx) {
     await ctx.loadRepos();
     const origin = ctx.repos.get(id);
     let found = null;
@@ -345,7 +377,6 @@ function createMaterializer(opts = {}) {
         await remember();
       }
     }
-    ctx.roots.set(id, found);
     return found;
   }
   const isHomeRow = (repoId, ctx) => typeof repoId === 'string' && !!ctx.repos && ctx.repos.get(repoId.toLowerCase()) === C.HOME_ORIGIN;
@@ -592,8 +623,8 @@ function createMaterializer(opts = {}) {
     if (!key) { st.lastError = 'no sync key on this machine'; return { skipped: 'no key' }; }
     const me = await C.ensureDevice(api, dataDir);
     try { await C.touchDevice(api, me, { now: now() }); } catch (e) { log(`sync-down: last_seen_at not sent: ${e.message}`); }
-    await lock(false);
-    try { state = loadState(); } finally { unlock(); } // not under a pull's feet
+    await slot(null, false);
+    try { state = loadState(); } finally { unslot(null); } // not under a pull's feet
     const ctx = newCtx(me);
     const tally = { rows: 0, unchanged: 0, done: 0, same: 0, conflict: 0, skip: 0, pending: 0, failed: 0, waiting: 0 };
     const reasons = {};
@@ -610,35 +641,50 @@ function createMaterializer(opts = {}) {
     }
     ownersMap = seen;
     st.listedAt = new Date(listStart).toISOString();
-    for (const row of rows) {
-      const owner = typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null;
-      if (!owner || owner === me) continue; // this device's own (or nobody's): the uploader's
-      if (!usable(row)) continue;
-      tally.rows++;
-      const id = row.id.toLowerCase(), prev = state.convos[id];
-      if (prev && prev.sig === sigOf(row) && (!prev.conflict || prev.localStamp === stampOf(path.join(prev.dir || '', `${id}.jsonl`)))) { tally.unchanged++; continue; }
-      const b = backoff.get(id);
-      if (b && now() < b.until) { tally.waiting++; continue; }
-      await lock(false); // a pull() waiting goes first
-      try {
-        const r = await syncOne(row, ctx, key);
-        tally[r.outcome]++;
-        if (r.reason) reasons[r.reason] = (reasons[r.reason] || 0) + 1;
-        if (r.outcome === 'done') st.laidDown++;
-        backoff.delete(id);
-      } catch (e) {
-        tally.failed++;
-        // a request cut because the machine slept is not this conversation's fault: the next scan tries it again
-        if (!(e && e.slept)) {
-          const n = b ? b.n + 1 : 1;
-          backoff.set(id, { n, until: now() + Math.min(BACKOFF_MIN_MS * 2 ** (n - 1), BACKOFF_MAX_MS) });
-        }
-        const why = (e && e.message) || String(e);
-        reasons[why] = (reasons[why] || 0) + 1;
-        log(`sync-down: ${id}: ${why}`);
-        if (e && ['network', 'timeout', 'signed_out', 'off'].includes(e.code)) throw e; // Supabase is out of reach: stop this scan
-      } finally { unlock(); }
-    }
+    // rows start in list order, up to ROWS_AT_ONCE under way at once; Supabase out of reach (fatal) starts no more,
+    // and the ones under way finish (or fail) and count before it is thrown
+    const going = new Set();
+    let fatal = null;
+    try {
+      for (const row of rows) {
+        if (fatal) break;
+        const owner = typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null;
+        if (!owner || owner === me) continue; // this device's own (or nobody's): the uploader's
+        if (!usable(row)) continue;
+        tally.rows++;
+        const id = row.id.toLowerCase(), prev = state.convos[id];
+        if (prev && prev.sig === sigOf(row) && (!prev.conflict || prev.localStamp === stampOf(path.join(prev.dir || '', `${id}.jsonl`)))) { tally.unchanged++; continue; }
+        const b = backoff.get(id);
+        if (b && now() < b.until) { tally.waiting++; continue; }
+        await slot(id, false); // a pull() waiting goes first
+        if (fatal) { unslot(id); break; }
+        const p = (async () => {
+          try {
+            const r = await syncOne(row, ctx, key);
+            tally[r.outcome]++;
+            if (r.reason) reasons[r.reason] = (reasons[r.reason] || 0) + 1;
+            if (r.outcome === 'done') st.laidDown++;
+            backoff.delete(id);
+          } catch (e) {
+            if (e && ['network', 'timeout', 'signed_out', 'off'].includes(e.code) && !fatal) fatal = e; // Supabase is out of reach: stop this scan
+            tally.failed++;
+            // a request cut because the machine slept is not this conversation's fault: the next scan tries it again
+            if (!(e && e.slept)) {
+              const n = b ? b.n + 1 : 1;
+              backoff.set(id, { n, until: now() + Math.min(BACKOFF_MIN_MS * 2 ** (n - 1), BACKOFF_MAX_MS) });
+            }
+            const why = (e && e.message) || String(e);
+            reasons[why] = (reasons[why] || 0) + 1;
+            log(`sync-down: ${id}: ${why}`);
+          } finally { unslot(id); }
+        })();
+        going.add(p);
+        const done = () => { going.delete(p); };
+        p.then(done, (e) => { done(); if (!fatal) fatal = e; }); // only a throwing log() lands here
+      }
+    } catch (e) { if (!fatal) fatal = e; } // anything else thrown between rows: the ones under way still settle first
+    await Promise.allSettled([...going]);
+    if (fatal) throw fatal;
     return { ...tally, reasons };
   }
 
@@ -656,7 +702,7 @@ function createMaterializer(opts = {}) {
     const key = await getKey();
     if (!key) throw new S.SyncError('no sync key on this machine', 0, 'bad_key');
     const me = await C.ensureDevice(api, dataDir);
-    await lock(true);
+    await slot(id, true);
     try {
       const got = await api.rest('GET', 'conversations', { query: { select: ROW_COLS, id: `eq.${id}`, state: 'eq.active' } });
       const row = Array.isArray(got) && got[0] ? got[0] : null;
@@ -671,7 +717,7 @@ function createMaterializer(opts = {}) {
     } catch (e) {
       log(`sync-down: ${id}: pull: ${(e && e.message) || e}`);
       throw e;
-    } finally { unlock(); }
+    } finally { unslot(id); }
   }
   // a copy: the caller cannot change this side's map
   const owners = () => new Map([...ownersMap].map(([id, o]) => [id, { ...o }]));
@@ -728,4 +774,4 @@ function createMaterializer(opts = {}) {
   return { scanOnce, start, stop, status, conflicts, pull, owners };
 }
 
-module.exports = { createMaterializer, relParts, planChunks, downStatePath, FETCH_AHEAD };
+module.exports = { createMaterializer, relParts, planChunks, downStatePath, FETCH_AHEAD, ROWS_AT_ONCE };

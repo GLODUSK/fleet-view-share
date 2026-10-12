@@ -17,9 +17,12 @@
 // folder it lacks (empty, logged once; also on pull), never through a link and never for a rel_cwd with '..' or an
 // absolute path, and writes this device's repo_paths row for it with the home folder; no .part file is ever left behind; status() holds no key or token; start/stop.
 // S4: pull(id) -> missing (no row, or not active) / mine (this device's) / done with dir and folder / same / conflict
-// (left alone, still saying where) / skip when open here; a back-off does not hold a pull up; a pull asked for while a
-// scan is mid-way runs right after that row, never at the same time; owners() with leaseUntil and the row's account
-// (a copy, empty before the first scan); only(id).
+// (left alone, still saying where) / skip when open here; a back-off does not hold a pull up; owners() with leaseUntil
+// and the row's account (a copy, empty before the first scan); only(id).
+// Several at once: a scan has more than one and at most ROWS_AT_ONCE conversations under way, started in list order,
+// each saved in down-state.json; a pull asked while rows wait their turn goes before them; a pull of a row under way
+// starts only once it is done; Supabase out of reach on one row starts no more rows, lets the ones under way finish,
+// throws, leaves nothing unhandled; a scan starting while a pull is under way reloads its state only after it.
 // Many chunks: fetched more than one and at most FETCH_AHEAD at once, answered out of order, laid down byte-identical;
 // a fetch that fails or a bad sha256 mid-way writes nothing, starts nothing past the window and leaves no unhandled
 // rejection; a partly-here local copy fetches only what it lacks; one that differs mid-chunk is a conflict.
@@ -552,25 +555,6 @@ async function main() {
   pr = await mOpen.pull(pl.id);
   ok(pr.outcome === 'skip' && pr.reason === 'open on this machine' && P_same(pr.dir, slugDir(rootDir)) && !fs.existsSync(mainOf(pl.id)), 'pull: open here (isOpen) -> skip, nothing written');
 
-  // a pull asked for while a scan is mid-way runs next, not at the same time
-  const q3 = putConvo({ pieces: [Buffer.concat(logOf('q3', 2)), Buffer.concat(logOf('q3', 2, 'y')), Buffer.concat(logOf('q3', 2, 'z'))] });
-  const q2 = putConvo({ pieces: [Buffer.concat(logOf('q2', 2)), Buffer.concat(logOf('q2', 2, 'y')), Buffer.concat(logOf('q2', 2, 'z'))] });
-  const q1 = putConvo({ pieces: [Buffer.concat(logOf('q1', 2)), Buffer.concat(logOf('q1', 2, 'y')), Buffer.concat(logOf('q1', 2, 'z'))] });
-  // the scan goes newest first: q1, q2, then q3 (which the pull lays down in between)
-  const order = [];
-  let pullP = null;
-  fake.onGet = (name) => {
-    const id = name.split('/')[2];
-    order.push(id);
-    if (!pullP && id === q1.id) pullP = m.pull(q3.id);
-  };
-  r = await m.scanOnce();
-  fake.onGet = null;
-  pr = await pullP;
-  const runs = order.filter((x) => [q1.id, q2.id, q3.id].includes(x)).filter((x, i, a) => i === 0 || a[i - 1] !== x);
-  eq(runs, [q1.id, q3.id, q2.id], 'pull mid-scan: the scan finishes its row, the pull goes next, then the scan goes on');
-  ok(pr.outcome === 'done' && [q1, q2, q3].every((c) => same(mainOf(c.id), c.main)), 'pull mid-scan: all three laid down');
-
   // ---------- many chunks: fetched D.FETCH_AHEAD at once, laid down in order ----------
   // the fake download answers each chunk after a scrambled delay; it counts the ones on the way at once
   const N = 24;
@@ -658,6 +642,138 @@ async function main() {
     api.storage.download = realDownload;
     process.removeListener('unhandledRejection', onUnhandled);
     fetching.only = null;
+  }
+
+  // ---------- several conversations at once (D.ROWS_AT_ONCE), pulls first, one id never twice ----------
+  // A second materializer (its own dataDir: its own device and down-state.json) whose scans look only at scanIds. The
+  // fake api is slowed down for the ids in watch: each chunk list, row read and download waits, and each is logged in
+  // ev ('chunks' a row's chunk list: where a scan row or a pull lays it down; 'row' a pull reading its row; 'get' and
+  // 'got' a download's start and end). net.most: the most conversations with a request on the way at once.
+  const dataDir2 = path.join(T, 'data2');
+  const watch = new Set();
+  let scanIds = new Set();
+  const m3 = D.createMaterializer({ api, dataDir: dataDir2, key: KEY, home, roots: [repoDir], now: () => clock, only: (id) => scanIds.has(id), log: (t) => logs.push(t) });
+  const realRest = api.rest;
+  const ev = [];
+  const net = { open: new Map(), most: 0, failOn: null, onGet: null };
+  const opened = (id) => { net.open.set(id, (net.open.get(id) || 0) + 1); net.most = Math.max(net.most, net.open.size); };
+  const closed = (id) => { const n = net.open.get(id) - 1; if (n) net.open.set(id, n); else net.open.delete(id); };
+  const watched = (s) => [...watch].find((x) => String(s).includes(x)) || null;
+  const fresh3 = () => { ev.length = 0; net.most = 0; };
+  const at = (k, id) => ev.findIndex((e) => e.k === k && e.id === id);
+  const lastAt = (k, id) => ev.map((e, i) => (e.k === k && e.id === id ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+  const three = (tag) => putConvo({ pieces: [Buffer.concat(logOf(tag, 2)), Buffer.concat(logOf(tag, 2, 'y')), Buffer.concat(logOf(tag, 2, 'z'))] });
+  const newestFirst = (list) => list.slice().sort((a, b) => (a.row.updated_at < b.row.updated_at ? 1 : -1));
+  const several = (n, tag) => { const l = Array.from({ length: n }, (_, i) => three(`${tag}${i}`)); for (const c of l) watch.add(c.id); scanIds = new Set(l.map((c) => c.id)); return newestFirst(l); };
+  const saved2 = () => C.readState(D.downStatePath(dataDir2), {}).convos || {};
+  const unhandled3 = [];
+  const onUnhandled3 = (e) => { unhandled3.push(e); };
+  process.on('unhandledRejection', onUnhandled3);
+  api.rest = async (method, table, o = {}) => {
+    const q = o.query || {};
+    const id = method === 'GET' && (table === 'chunks' || table === 'conversations') ? watched(q.conversation_id || q.id || '') : null;
+    if (!id) return realRest(method, table, o);
+    const k = table === 'chunks' ? 'chunks' : 'row';
+    ev.push({ k, id }); opened(id);
+    try { await sleep(15); return await realRest(method, table, o); } finally { closed(id); }
+  };
+  api.storage.download = async (p, o) => {
+    const id = watched(p);
+    if (!id) return realDownload(p, o);
+    ev.push({ k: 'get', id }); opened(id);
+    try {
+      if (net.onGet) net.onGet(id);
+      if (net.failOn === id) throw new S.SyncError(`${id} could not be fetched`, 0, 'network');
+      await sleep(40);
+      return await realDownload(p, o);
+    } finally { closed(id); ev.push({ k: 'got', id }); }
+  };
+  try {
+    // (a) ten changed rows: more than one under way at once, never more than ROWS_AT_ONCE, started in list order
+    fresh3();
+    const wa = several(10, 'ra');
+    r = await m3.scanOnce();
+    ok(net.most > 1 && net.most <= D.ROWS_AT_ONCE, `rows at once: more than one, at most ${D.ROWS_AT_ONCE} (${net.most})`);
+    eq(r.done, wa.length, 'rows at once: every row laid down');
+    const ds = saved2();
+    ok(wa.every((c) => same(mainOf(c.id), c.main) && ds[c.id] && ds[c.id].sig === `${c.row.updated_at}|0|${c.row.size}|${c.row.sha256}`), 'rows at once: byte-identical, each one saved in down-state.json');
+    eq(ev.filter((e) => e.k === 'chunks').map((e) => e.id), wa.map((c) => c.id), 'rows at once: started in list order');
+
+    // (b) a pull of a conversation the scan is not on, asked while rows wait their turn: it goes before them
+    fresh3();
+    const wb = several(8, 'rb');
+    const pb = three('pb');
+    watch.add(pb.id); // not in scanIds: only the pull lays it down
+    let pullB = null;
+    net.onGet = (id) => { if (!pullB && id === wb[0].id) pullB = m3.pull(pb.id); };
+    r = await m3.scanOnce();
+    net.onGet = null;
+    const pbr = pullB ? await pullB : null;
+    ok(pbr && pbr.outcome === 'done' && same(mainOf(pb.id), pb.main) && r.done === wb.length, `pull beside a scan: it and the rows laid down (${pbr && pbr.outcome})`);
+    const pbAt = at('row', pb.id);
+    ok(wb.slice(0, D.ROWS_AT_ONCE).every((c) => at('chunks', c.id) < pbAt), 'pull beside a scan: the rows already under way started first');
+    ok(pbAt >= 0 && wb.slice(D.ROWS_AT_ONCE).every((c) => pbAt < at('chunks', c.id)), 'pull beside a scan: it starts before the rows waiting their turn');
+    ok(net.most <= D.ROWS_AT_ONCE, `pull beside a scan: it counts against ROWS_AT_ONCE (${net.most})`);
+
+    // (c) a pull of a conversation the scan has under way: it starts only once that row is done
+    fresh3();
+    const wc = several(6, 'rc');
+    const target = wc[1];
+    let pullC = null;
+    net.onGet = (id) => { if (!pullC && id === target.id) pullC = m3.pull(target.id); };
+    r = await m3.scanOnce();
+    net.onGet = null;
+    const pcr = pullC ? await pullC : null;
+    ok(pcr && pcr.outcome === 'same' && same(mainOf(target.id), target.main), `pull of a row under way: the scan laid it down, the pull found it the same (${pcr && pcr.outcome})`);
+    ok(at('row', target.id) > lastAt('got', target.id) && lastAt('got', target.id) > 0, 'pull of a row under way: it starts after that row\'s last download, never beside it');
+    eq(ev.filter((e) => e.k === 'chunks' && e.id === target.id).length, 2, 'pull of a row under way: one chunk list for the row, one for the pull');
+
+    // (d) Supabase out of reach on one row: no row starts after it, the ones under way finish and are saved, the scan
+    // throws that error, nothing unhandled; the next scans lay down the rest
+    fresh3();
+    const wd = several(8, 'rd');
+    net.failOn = wd[2].id;
+    let dErr = null;
+    try { await m3.scanOnce(); } catch (e) { dErr = e; }
+    net.failOn = null;
+    await sleep(100);
+    ok(dErr && dErr.code === 'network' && dErr.message.includes(wd[2].id), `out of reach mid-scan: the scan throws it (${dErr && dErr.message})`);
+    eq([...new Set(ev.filter((e) => e.k === 'chunks').map((e) => e.id))], wd.slice(0, D.ROWS_AT_ONCE).map((c) => c.id), 'out of reach mid-scan: no row starts after it');
+    const dsd = saved2();
+    ok([0, 1, 3].every((i) => same(mainOf(wd[i].id), wd[i].main) && dsd[wd[i].id]), 'out of reach mid-scan: the rows under way finished and were saved');
+    ok(!fs.existsSync(mainOf(wd[2].id)) && !dsd[wd[2].id] && !wd.slice(D.ROWS_AT_ONCE).some((c) => fs.existsSync(mainOf(c.id))), 'out of reach mid-scan: nothing for the failed row or the ones not started');
+    ok(net.open.size === 0 && unhandled3.length === 0 && m3.status().lastError === dErr.message, 'out of reach mid-scan: nothing left on the way, no unhandled rejection, status says it');
+    r = await m3.scanOnce();
+    ok(wd.slice(D.ROWS_AT_ONCE).every((c) => same(mainOf(c.id), c.main)) && !fs.existsSync(mainOf(wd[2].id)) && r.waiting === 1, 'out of reach mid-scan: the next scan lays down the rest, the failed row backs off');
+    later();
+    r = await m3.scanOnce();
+    ok(same(mainOf(wd[2].id), wd[2].main), 'out of reach mid-scan: the failed row after its back-off');
+
+    // (e) a scan starting while a pull is under way reloads down-state.json only once the pull is done
+    fresh3();
+    scanIds = new Set();
+    const pe = three('pe');
+    watch.add(pe.id);
+    const statePath2 = path.resolve(D.downStatePath(dataDir2));
+    const realRead = fs.readFileSync;
+    fs.readFileSync = function (f, ...a) { if (typeof f === 'string' && P_same(f, statePath2)) ev.push({ k: 'state', id: null }); return realRead.call(this, f, ...a); };
+    let scanE = null;
+    try {
+      net.onGet = (id) => { if (!scanE && id === pe.id) scanE = m3.scanOnce(); };
+      const per = await m3.pull(pe.id);
+      net.onGet = null;
+      if (scanE) await scanE;
+      ok(per.outcome === 'done' && same(mainOf(pe.id), pe.main), `reload: the pull laid it down (${per.outcome})`);
+    } finally { fs.readFileSync = realRead; net.onGet = null; }
+    const reloadAt = ev.findIndex((e) => e.k === 'state');
+    ok(scanE && reloadAt > lastAt('got', pe.id) && lastAt('got', pe.id) >= 0, `reload: the scan's state reload waited for the pull (${reloadAt} after ${lastAt('got', pe.id)})`);
+    ok(saved2()[pe.id], 'reload: the pull\'s conversation is still in down-state.json after the scan');
+    eq(unhandled3.length, 0, 'several at once: no unhandled rejection');
+  } finally {
+    api.rest = realRest;
+    api.storage.download = realDownload;
+    process.removeListener('unhandledRejection', onUnhandled3);
+    net.onGet = null; net.failOn = null;
   }
 
   // owners(): the rows other devices own, with their lease
