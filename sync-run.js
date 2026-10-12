@@ -172,7 +172,7 @@ function createSyncRunner(o = {}) {
     let mover = null, link = null, carry = null;
     // the device id is the mover's (it makes the device row on its first tick): no mover, no snapshots
     const deviceId = () => { const d = mover && mover.device(); return d ? d.id : null; };
-    try { carry = makeCarry({ ...args, device: deviceId, link: () => link, roots: () => roots() }); } catch (e) { log(`sync: a move carries the conversation alone here: ${e && e.message}`); }
+    try { carry = makeCarry({ ...args, device: deviceId, link: () => link, roots: () => roots(), ...(typeof o.stays === 'function' ? { stays: o.stays } : {}) }); } catch (e) { log(`sync: a move carries the conversation alone here: ${e && e.message}`); }
     try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false), carry }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
     let live = null;
     if (mover && snapshot) {

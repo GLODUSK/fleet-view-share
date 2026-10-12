@@ -267,12 +267,14 @@ async function upstreamOf(root, branch) {
   }
   return (await maybe(root, ['rev-parse', '-q', '--verify', 'refs/remotes/origin/HEAD'])) ? 'refs/remotes/origin/HEAD' : null;
 }
-// untracked, unignored files: (entries, env paths, notes) into the bag
-async function untrackedOf(root, bag, notes, env) {
+// untracked, unignored files: (entries, env paths, notes) into the bag; stay(rel) true leaves one here (pushed on
+// stayed), never in the bag, so it counts nothing against the cap
+async function untrackedOf(root, bag, notes, env, stay, stayed) {
   const list = [];
   for (const rel of zList(await git(root, ['ls-files', '--others', '--exclude-standard', '-z']))) {
     if (rel.endsWith('/')) { notes.push(`not carried: ${rel} (a git repository of its own)`); continue; }
     if (envPath(rel)) { env.push(rel); continue; }
+    if (stay && stay(rel)) { if (stayed.length < 100) stayed.push(rel); continue; }
     const e = fileEntry(bag, fromRel(root, rel), rel);
     if (e) list.push(e);
   }
@@ -294,7 +296,10 @@ async function pack(cwd, o = {}) {
   const staged = rawPaths(await git(root, ['diff', '--cached', '--raw', '-z', '--no-renames', '--ignore-submodules=none']));
   const unstaged = rawPaths(await git(root, ['diff', '--raw', '-z', '--no-renames', '--ignore-submodules=none']));
   if (staged.gitlink || unstaged.gitlink) throw refused('a submodule changed: commit and push it in the submodule first');
-  const untracked = await untrackedOf(root, bag, notes, env);
+  // o.stay(rel): an untracked file that stays on this machine (fleet-view.js stays-on rules), left out like a secret
+  const stayed = [];
+  const untracked = await untrackedOf(root, bag, notes, env, typeof o.stay === 'function' ? o.stay : null, stayed);
+  if (stayed.length) notes.push(`not carried (it stays on this machine): ${stayed.length === 1 ? stayed[0] : `${stayed.length} files, ${stayed[0]} and more`}`);
   const changed = [...new Set([...staged.paths, ...unstaged.paths, ...untracked.map((e) => e.path)])];
   if (changed.length) {
     const attrs = zList(await git(root, ['check-attr', '--stdin', '-z', 'filter'], { input: changed.join('\0') + '\0' }));
@@ -333,7 +338,8 @@ async function pack(cwd, o = {}) {
     staged: stagedSha, unstaged: unstagedSha, trees, untracked, env, rel: info.rel, worktree: info.worktree,
     summary: { commits, files, bytes: bag.bytes }, notes,
   };
-  return { manifest, blobs: bag.blobs };
+  // stayed: the untracked files o.stay left here (not in the manifest: the other machine never needs them)
+  return { manifest, blobs: bag.blobs, ...(stayed.length ? { stayed } : {}) };
 }
 
 // a home-row folder: every file in it

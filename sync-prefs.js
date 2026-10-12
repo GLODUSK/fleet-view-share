@@ -209,8 +209,28 @@ const GROUPS = {
     out(x) { const p = this.clean(x); return p && { p, known: true }; },
     in: (p) => p, key: idOf, lkey: idOf,
   },
+  // where a kind of work stays (fleet-view.js hostRules): { id, repo: { origin, name } | null, paths: [globs],
+  // tools: [tool names, a trailing * for a prefix], host: the device's name }. Portable as they are: the repo is
+  // already { origin, name }
+  hostRules: {
+    clean: (x) => cleanHostRule(x),
+    out(x) { const p = this.clean(x); return p && { p, known: true }; },
+    in: (p) => p, key: idOf, lkey: idOf,
+  },
 };
 const GROUP_NAMES = Object.keys(GROUPS);
+// a stays-on rule, cleaned (null when it is not one): an id, a host, and at least one path glob or tool name
+function cleanHostRule(x) {
+  if (!x || typeof x !== 'object' || typeof x.id !== 'string' || !/^[a-z0-9-]{1,40}$/.test(x.id)) return null;
+  const host = typeof x.host === 'string' ? x.host.trim().slice(0, 100) : '';
+  const strs = (v, re, n) => (Array.isArray(v) ? v.filter((s) => typeof s === 'string' && re.test(s)).slice(0, n) : []);
+  const paths = strs(x.paths, /^[^\n\r\0]{1,200}$/, 20);
+  const tools = strs(x.tools, /^[A-Za-z0-9_.*-]{1,80}$/, 20);
+  if (!host || (!paths.length && !tools.length)) return null;
+  const repo = x.repo ? cleanRoot(x.repo) : null;
+  if (x.repo && !repo) return null;
+  return { id: x.id, repo, paths, tools, host, ...(typeof x.note === 'string' && x.note ? { note: x.note.slice(0, 300) } : {}) };
+}
 
 // local items -> portable ones, one per key: a root this machine has wins over a stale one that names the same repo
 function portable(g, items, tr) {
@@ -622,4 +642,4 @@ function createPrefs(o = {}) {
   return { start, stop, tick, nudge, status };
 }
 
-module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, cleanRoot, spotId, portable, cleanItems, union, merge3 };
+module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, cleanRoot, cleanHostRule, spotId, portable, cleanItems, union, merge3 };

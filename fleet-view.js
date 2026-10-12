@@ -453,6 +453,17 @@ function cleanRepoNames(list) {
   return [...out.values()];
 }
 let repoNames = DEMO ? [] : cleanRepoNames(saved.repoNames) || [];
+// Where a kind of work stays (Henry, 2026-10-12: 3D work on the configurator's meshes happens on BlackBox, never on the
+// Mac): settings.hostRules, [{ id, repo: { origin, name } | null, paths: [globs], tools: [names, a trailing * for a
+// prefix], host: a device's name, note? }] (sync-prefs.js cleanHostRule), at most 50, the same on every device (the
+// hostRules group). A conversation that touched a path or called a tool a rule names (notePin), in that rule's repo, is
+// pinned to the rule's host: bound to it (workspaceOf), so typing into it on another machine sends the message there
+// and never moves it (nor its files). Until set, the configurator rule below.
+const DEFAULT_HOST_RULES = [{ id: 'configurator-3d', repo: { origin: 'GLODUSK/detailforge-web', name: 'detailforge-web' },
+  paths: ['assets/vehicles/**', '**/*.blend', '**/*.blend[0-9]*'], tools: ['mcp__blender*'], host: 'BlackBox',
+  note: '3D work on the configurator meshes happens on BlackBox' }];
+const cleanHostRules = (list) => (Array.isArray(list) ? list.map((x) => SYNC_PREFS.cleanHostRule(x)).filter(Boolean).slice(0, 50) : null);
+let hostRules = DEMO ? [] : cleanHostRules(saved.hostRules) || cleanHostRules(DEFAULT_HOST_RULES);
 // the repo menu's order, set by hand (Shift+↑↓ or dragging a row): settings.repoOrder, roots, at most 300;
 // the ones listed come first in that order, the rest after them, busiest first
 const REPO_ORDER_MAX = 300;
@@ -670,7 +681,7 @@ function flushSettings() {
   clearTimeout(saveTimer);
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
-  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
+  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp,
     chief: CHIEF ? CHIEF.saveShape() : saved.chief,
     bots: BOTS ? BOTS.saveShape() : saved.bots,
@@ -968,10 +979,16 @@ function workspaceOf(s, owners) {
   if (s.demo) return null;
   const id = String(s.id).toLowerCase();
   const o = owners && owners.get(id);
+  // pinned by a stays-on rule (hostRules) to the device that runs it: bound to it, so it stays there
+  const pin = pinOf(s);
+  const sameHost = (name) => !!pin && !!name && String(name).toLowerCase() === pin.host.toLowerCase();
   if (o && o.device && o.moving !== 'away') {
     const listed = pollRemote && pollRemote.live && pollRemote.live.bound instanceof Map ? pollRemote.live.bound.get(o.device) : null;
-    return { kind: o.bound || (listed && listed.has(id)) ? 'bound' : 'portable', host: { device: o.device, name: o.name || null } };
+    const kind = o.bound || (listed && listed.has(id)) || sameHost(o.name) ? 'bound' : 'portable';
+    return { kind, host: { device: o.device, name: o.name || null }, ...(sameHost(o.name) ? { pin: pin.id } : {}) };
   }
+  // runs here, and this is the host its rule names: bound here (the other devices read it in this device's bound list)
+  if (pin) { const me = SYNC_RUNNER.device(); if (me && sameHost(me.name)) return { kind: 'bound', host: null, pin: pin.id }; }
   if (boundPlaceOf(s)) return { kind: 'bound', host: null };
   const kind = folderKind(s.homeCwd || s.cwd);
   return kind ? { kind, host: null } : null;
@@ -1069,7 +1086,77 @@ function noteCommand(s, t, input) {
   for (const g of commandRepos(cmd)) vote(s, g.root, t, g.top);
 }
 
+// a path glob as a regex over a whole path or its tail ('/'-separated, any case): ** any folders, * and ? within one
+// name, [..] a character class
+function globRe(g) {
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*') {
+      if (g[i + 1] === '*') { i++; if (g[i + 1] === '/') { i++; re += '(?:.*/)?'; } else re += '.*'; } else re += '[^/]*';
+    } else if (c === '?') re += '[^/]';
+    else if (c === '[' && g.indexOf(']', i + 2) > i) { const j = g.indexOf(']', i + 2); re += '[' + g.slice(i + 1, j).replace(/[\\\]^]/g, '\\$&') + ']'; i = j; }
+    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp('(?:^|/)' + re + '$', 'i');
+}
+const ruleRes = new WeakMap(); // a rule -> its paths' regexes
+const pathResOf = (r) => { let v = ruleRes.get(r); if (!v) ruleRes.set(r, (v = r.paths.map(globRe))); return v; };
+// the paths a tool call names: its file path, and every path-like word in its other inputs (a shell command, a
+// script's arguments), with \ as /, on any platform's spelling (a log laid down from another machine names its paths)
+function callPaths(c) {
+  const out = [], seen = new Set();
+  const walk = (v, d) => {
+    if (typeof v === 'string') { for (const w of v.slice(0, 8000).split(/[\s"'`=,;()<>|&]+/)) { const p = w.replace(/\\/g, '/'); if (p.includes('/') || p.includes('.')) { if (!seen.has(p) && out.length < 400) { seen.add(p); out.push(p); } } } }
+    else if (v && typeof v === 'object' && d < 3) for (const x of Object.values(v)) walk(x, d + 1);
+  };
+  walk(c.input, 0);
+  return out;
+}
+// the first stays-on rule a tool call matches (hostRules): s.pin, kept for as long as the conversation is (its log read
+// again after a restart finds it again); the rule's repo is checked where it is used (pinOf)
+function notePin(s, c) {
+  if (s.pin || !hostRules.length || s.demo) return;
+  const name = String(c.name || '');
+  let paths = null;
+  for (const r of hostRules) {
+    if (r.tools.some((t) => (t.endsWith('*') ? name.startsWith(t.slice(0, -1)) : name === t))) { s.pin = r.id; return; }
+    if (!r.paths.length) continue;
+    if (!paths) paths = callPaths(c);
+    const res = pathResOf(r);
+    if (paths.some((p) => res.some((re) => re.test(p)))) { s.pin = r.id; return; }
+  }
+}
+// the rule a conversation is pinned by, when its repo is that rule's (by origin, else by the folder's name), else null
+function pinOf(s) {
+  if (!s || !s.pin) return null;
+  const r = hostRules.find((x) => x.id === s.pin);
+  if (!r) return null;
+  if (!r.repo) return r;
+  refreshHue(s, Date.now());
+  return repoMatches(r, s.root) ? r : null;
+}
+// a rule's repo is this checkout's: by origin when both have one, else by the folder's name (no repo: any)
+function repoMatches(r, root) {
+  if (!r.repo) return true;
+  if (!root) return false;
+  const gh = githubOf(root), slug = gh && gh.slug ? String(gh.slug).toLowerCase() : null;
+  if (r.repo.origin && slug) return slug === r.repo.origin.toLowerCase();
+  return !!r.repo.name && repoName(root).toLowerCase() === r.repo.name.toLowerCase();
+}
+// an untracked file in a checkout that stays on this machine (sync-carry.js stays): a rule names this machine as its
+// host, the checkout is that rule's repo, and one of its paths matches. A move from here (or a turn's snapshot) leaves it
+// out, so it never counts against what a move carries, and the put-away after the move leaves it where it is (Henry: the
+// Blender files never go to the Mac). A move to the rule's host carries it as before
+function staysHere(root, rel) {
+  const me = SYNC_RUNNER.device();
+  if (!me || !me.name || !root || !hostRules.length) return false;
+  const p = String(rel).replace(/\\/g, '/'), name = String(me.name).toLowerCase();
+  return hostRules.some((r) => r.host.toLowerCase() === name && r.paths.length && repoMatches(r, root) && pathResOf(r).some((re) => re.test(p)));
+}
+
 function noteTool(s, t, c) {
+  notePin(s, c);
   if (c.name === 'Bash' || c.name === 'PowerShell') { noteCommand(s, t, c.input); noteEas(s, t, c); }
   else if (c.name === 'Read' || c.name === 'Write' || c.name === 'Edit' || c.name === 'NotebookEdit') noteFile(s, t, c.input?.file_path || c.input?.notebook_path, c.name !== 'Read');
 }
@@ -5862,7 +5949,7 @@ function buildState() {
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
     // hiddenSync: bumped when another device's hidden list was put in (sync-prefs.js): the page takes hidden whole then
-    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenSync, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
+    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, hostRules, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenSync, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
       mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() },
       // the Chief: { id: the live Chief's conversation id, else the last one's while its log is there, else null; watch }
       chief: CHIEF ? CHIEF.view() : { id: null, watch: false } },
@@ -5965,6 +6052,7 @@ function applySettings(b) {
   if (repoSels && !repoSel) repoSel = repoSels[0];
   if ('repoNames' in b) { const r = cleanRepoNames(b.repoNames); if (r) repoNames = r; }
   if ('repoOrder' in b) { const o = cleanRepoOrder(b.repoOrder); if (o) repoOrder = o; }
+  if ('hostRules' in b) { const h = cleanHostRules(b.hostRules); if (h) hostRules = h; }
   if (typeof b.compact === 'boolean') compact = b.compact;
   if (typeof b.finishedOpen === 'boolean') finishedOpen = b.finishedOpen;
   const wb = b.webBounds;
@@ -6469,7 +6557,7 @@ function prefsGroups() {
     hidden: hidden.map((h) => ({ id: h.id, at: h.at, forgot: fg.has(h.id) })),
     names: [...names].map(([id, name]) => ({ id, name })),
     moved: [...moved.values()],
-    hiddenRepos, repoNames, repoOrder, mapSpots, teams,
+    hiddenRepos, repoNames, repoOrder, mapSpots, teams, hostRules,
   };
 }
 // another device's group, translated: replaces this one's (each cleaned as a POST /settings would be) and is saved
@@ -6496,6 +6584,7 @@ function applyPrefs(group, items) {
   else if (group === 'repoNames') repoNames = cleanRepoNames(items) || [];
   else if (group === 'repoOrder') repoOrder = cleanRepoOrder(items) || [];
   else if (group === 'mapSpots') mapSpots = cleanMapSpots(items) || [];
+  else if (group === 'hostRules') hostRules = cleanHostRules(items) || [];
   else if (group === 'teams') {
     const old = new Map(teams.map((t) => [t.id, t]));
     teams = cleanTeams(items.map((t) => ({ ...t, seenAt: old.has(t.id) ? old.get(t.id).seenAt : now, here: old.has(t.id) ? old.get(t.id).here : false }))) || [];
@@ -6512,6 +6601,7 @@ const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, lo
   relay: RELAY, version: () => VERSION.current().version,
   host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
   isOpen: (id) => liveProcs.has(String(id).toLowerCase()),
+  stays: (root, rel) => staysHere(root, rel),
   mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot(), bound: () => liveBound(),
   // the account each conversation ran under here (its process, or remembered): its synced row names it
   accountOf: (id) => knownAccount(String(id).toLowerCase()),
@@ -6588,6 +6678,13 @@ function syncMove(req, res) {
       const id = idOf(b && b.id);
       if (!id) return moveErr(res, 400, 'give a conversation id', { code: 'bad_id' });
       if (!has('move')) return moveErr(res, 409, 'this version of Fleet View cannot move conversations', { code: 'not_running' });
+      // pinned by a stays-on rule (hostRules) to the device that has it: it stays there, forced or not
+      const ps = sessions.get(id) || [...sessions.values()].find((x) => String(x.id).toLowerCase() === id);
+      const pin = ps ? pinOf(ps) : null;
+      const own = pin ? (syncOwners() || new Map()).get(id) : null;
+      if (pin && own && own.name && own.name.toLowerCase() === pin.host.toLowerCase()) {
+        return moveErr(res, 409, `This conversation stays on ${own.name}: ${pin.note || 'a stays-on rule keeps it there'}. Type to it here once the two machines are linked; it runs there.`, { code: 'pinned', host: own.name, rule: pin.id });
+      }
       let job;
       try { job = R.move(id, { force: b.force === true, noWork: b.noWork === true }); } catch (e) {
         const code = e && e.code;

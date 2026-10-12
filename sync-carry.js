@@ -186,6 +186,9 @@ function createCarry(o = {}) {
   // whose work changed, so a big untracked file is not sent again and again; a move still carries up to the cap
   const snapOpts = { ...packOpts, cap: Math.min(Number(o.snapCap) > 0 ? Number(o.snapCap) : SNAP_CAP, packOpts.cap || W.CAP) };
   const selfDir = typeof o.selfDir === 'string' && o.selfDir ? o.selfDir : __dirname; // the checkout Fleet View runs from
+  // o.stays(root, rel) -> true for an untracked file that stays on this machine (fleet-view.js stays-on rules): never
+  // packed (a move or a snapshot), and never put away after a move
+  const staysOf = (root) => (typeof o.stays === 'function' && root ? (rel) => { try { return !!o.stays(root, rel); } catch { return false; } } : null);
 
   // ---------- the list of a conversation's packs (the settings row work:<id>) ----------
   const chains = new Map();
@@ -343,13 +346,15 @@ function createCarry(o = {}) {
     const info = await work.inspect(cwd, packOpts);
     if (info.kind !== 'portable') return { work: { none: info.why || 'its folder stays on this machine' }, local: null };
     let packed;
-    try { packed = await work.pack(cwd, packOpts); } catch (e) {
+    const stay = staysOf(info.root);
+    try { packed = await work.pack(cwd, stay ? { ...packOpts, stay } : packOpts); } catch (e) {
       if (e && e.code === 'refused') {
         if (f.noWork) return { work: { refused: clip(e.message, 300) }, local: null };
         throw new CarryError(clip(e.message, 300), 'refused');
       }
       throw e;
     }
+    const stayed = Array.isArray(packed.stayed) ? packed.stayed : [];
     const ws = withoutSecrets(packed);
     packed = ws.packed;
     const m = packed.manifest;
@@ -363,7 +368,8 @@ function createCarry(o = {}) {
       // envPaths: the env files' paths only (what is in them goes over the link, /peer/env), for the ready check there;
       // left: untracked files that look like secrets, which stay here (never in storage)
       work: { pack: entry.pack, record: entry.record, kind: m.kind, branch: m.branch, summary: m.summary, notes: m.notes.slice(0, 10), shared, envPaths: env, left: ws.left.slice(0, 20) },
-      local: { cwd, root: info.root, kind: m.kind, envBase, env, pack: entry.pack, left: ws.left.slice() },
+      // left: kept where they are by the put-away too (the secrets, and the files that stay on this machine)
+      local: { cwd, root: info.root, kind: m.kind, envBase, env, pack: entry.pack, left: [...ws.left, ...stayed].slice(0, 100) },
     };
   }
   async function putAwayAfter(local, f = {}) {
@@ -797,7 +803,8 @@ function createCarry(o = {}) {
     }
     if (lastSig.get(id) === sig) return null;
     let packed;
-    try { packed = await work.pack(cwd, snapOpts); } catch (e) {
+    const stay = staysOf(info.root);
+    try { packed = await work.pack(cwd, stay ? { ...snapOpts, stay } : snapOpts); } catch (e) {
       if (e && e.code === 'refused') { lastSig.set(id, sig); log(`${short(id)}: no snapshot (${clip(e.message, 120)})`); return null; }
       throw e;
     }

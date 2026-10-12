@@ -79,7 +79,7 @@ const trMac = P.makeTranslate({ roots: () => Object.values(MACR), originOf: (r) 
 
 // a machine's settings, as fleet-view.js's prefsGroups gives them
 function machine() {
-  return { hidden: [], names: [], moved: [], hiddenRepos: [], repoNames: [], repoOrder: [], mapSpots: [], teams: [] };
+  return { hidden: [], names: [], moved: [], hiddenRepos: [], repoNames: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [] };
 }
 const pcSet = machine(), macSet = machine();
 const T0 = Date.parse('2026-10-11T12:00:00Z');
@@ -405,6 +405,15 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
       await r2.stop();
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   }
+
+  // ---------- hostRules: where a kind of work stays ----------
+  const rule = { id: 'configurator-3d', repo: { origin: 'GLODUSK/detailforge-web', name: 'detailforge-web' }, paths: ['assets/vehicles/**', '**/*.blend'], tools: ['mcp__blender*'], host: 'BlackBox', note: 'meshes on BlackBox' };
+  eq(P.cleanHostRule(rule), rule, 'hostRules: a whole rule is kept as it is');
+  eq(P.cleanHostRule({ ...rule, repo: null, tools: [] }), { ...rule, repo: null, tools: [] }, 'hostRules: no repo (any repo) and paths only');
+  ok([{ ...rule, host: '' }, { ...rule, paths: [], tools: [] }, { ...rule, id: 'Bad Id' }, { ...rule, repo: { origin: 'has space' } }, null, 'x'].every((x) => P.cleanHostRule(x) === null),
+    'hostRules: no host, nothing to match, a bad id or a bad repo is no rule');
+  eq(P.cleanHostRule({ ...rule, tools: ['ok_tool', 'bad tool', 'x;rm'], paths: ['a\nb', 'c/**'] }).tools, ['ok_tool'], 'hostRules: only plain tool names');
+  ok(P.GROUP_NAMES.includes('hostRules') && P.GROUPS.hostRules.in(P.GROUPS.hostRules.out(rule).p) && P.GROUPS.hostRules.out(rule).known === true, 'hostRules: a shared group, portable as it is');
 
   await pc.stop();
   await mac.stop();
