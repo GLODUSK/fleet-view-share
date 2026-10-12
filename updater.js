@@ -6,7 +6,7 @@
 //   changed (those need install.ps1, which quits Fleet View first: the window and the session host hold Electron
 //   and node-pty open);
 //   then the fleet-view skill's copies in ~/.claude* are refreshed (refreshSkill);
-//   fleet-view.js, api.js and web/ reload by themselves after the pull (watchForUpdates, the page's version poll);
+//   the server's own .js files and web/ reload by themselves after the pull (watchForUpdates, the page's version poll);
 //   host.js or handoff.js changed: desktop\restart-host.js, which waits until no session is mid-turn and resumes them;
 //   anything else in desktop/ changed: the page asks the window to restart itself (fleetDesktop.relaunch).
 // macOS and Linux: an update that changes desktop/'s packages goes in from "Update now" too. After the pull a
@@ -22,7 +22,9 @@
 // Versions are numbers (version.js: 1.0.12, the same on every PC for the same code); the short commits stay
 // alongside (current, upstream) for when there is no version.json.
 //   GET  /update          { ok, version, enabled, current, upstream, currentVersion, upstreamVersion, behind, notes[], checkedAt,
-//                           error?, dirty, dirtyLock, needsInstall, install, restartsAll, auto, busy, last? }
+//                           error?, fetchError, fetchFails, fetchOkAt, dirty, dirtyLock, needsInstall, install, restartsAll, auto, busy, last? }
+//                         fetchError: why the last fetch of the upstream failed (no credentials, offline; '' once one
+//                         works again); fetchFails: how many in a row; fetchOkAt: when one last worked (0: not known)
 //                         dirtyLock: the one clashing change is desktop/package-lock.json; install: the command that
 //                         puts in an update that needsInstall (Windows only: elsewhere Update now does it, and
 //                         restartsAll says so: Fleet View quits and opens again, its sessions resumed)
@@ -58,7 +60,7 @@ const git = (args, ms = 60e3) => new Promise((resolve) => {
     (err, out, errOut) => resolve({ ok: !err, out: String(out || '').trim(), err: String(errOut || (err && err.message) || '').trim() }));
 });
 
-let state = { enabled: false, current: '', upstream: '', currentVersion: '', upstreamVersion: '', behind: 0, notes: [], checkedAt: 0, error: '', dirty: false, dirtyLock: false, needsInstall: false, install: '', restartsAll: false };
+let state = { enabled: false, current: '', upstream: '', currentVersion: '', upstreamVersion: '', behind: 0, notes: [], checkedAt: 0, error: '', fetchError: '', fetchFails: 0, fetchOkAt: 0, dirty: false, dirtyLock: false, needsInstall: false, install: '', restartsAll: false };
 let last = null; // the last update put in: { at, from, to, fromVersion, toVersion, message }
 let checking = null, applying = false, ctx = null;
 
@@ -124,7 +126,13 @@ function check() {
     const up = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], 5000);
     if (!up.ok) { state = { ...state, currentVersion, enabled: false, checkedAt: at, error: 'this branch has no upstream to update from' }; return; }
     const remote = up.out.split('/')[0];
+    // when a fetch last worked, before any since this server started: FETCH_HEAD's time, read before this fetch (a
+    // failed one empties it)
+    let fetchOkAt = state.fetchOkAt;
+    if (!fetchOkAt) { const fh = await git(['rev-parse', '--git-path', 'FETCH_HEAD'], 5000); try { const st = fh.ok && fs.statSync(path.resolve(DIR, fh.out)); fetchOkAt = st && st.size ? st.mtimeMs : 0; } catch {} }
     const f = await git(['fetch', '--quiet', remote]);
+    const fetchError = f.ok ? '' : `could not reach ${remote}: ${f.err.split(/\r?\n/)[0].slice(0, 200)}`;
+    if (f.ok) fetchOkAt = at;
     const current = (await git(['rev-parse', '--short', 'HEAD'], 5000)).out;
     const upstream = (await git(['rev-parse', '--short', '@{u}'], 5000)).out;
     const behind = +(await git(['rev-list', '--count', 'HEAD..@{u}'], 5000)).out || 0;
@@ -140,7 +148,7 @@ function check() {
     const needsInstall = packages && P.isWin, restartsAll = packages && !P.isWin;
     state = {
       enabled: true, current, upstream, currentVersion, upstreamVersion, behind, notes: behind ? await notesFor('HEAD..@{u}') : [], checkedAt: at,
-      error: f.ok ? '' : `could not reach ${remote}: ${f.err.split(/\r?\n/)[0].slice(0, 200)}`,
+      error: fetchError, fetchError, fetchFails: f.ok ? 0 : state.fetchFails + 1, fetchOkAt: Math.round(fetchOkAt || 0),
       dirty: clash.length > 0, dirtyLock: clash.length === 1 && clash[0] === LOCK, needsInstall, install: needsInstall ? INSTALL : '', restartsAll,
     };
     if (!f.ok && ctx) ctx.log(`update: fetch from ${remote} failed: ${f.err.split(/\r?\n/)[0]}`);

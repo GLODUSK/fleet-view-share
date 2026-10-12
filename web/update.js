@@ -15,6 +15,8 @@
 // macOS and Linux: an update with new desktop packages quits Fleet View and opens it again (restartsAll). The card
 // says so, and "Update now" asks first: the server's question, with how many conversations are working, then
 // "Quit and update" or "Not now".
+// When the upstream can't be fetched (no credentials, offline) a quiet "Updates !" pill says so, and its card gives the
+// reason and when a fetch last worked; it goes once one works again.
 import { esc } from './cards.js';
 
 const POLL_MS = 60e3;
@@ -30,6 +32,15 @@ const post = async (url, body) => {
 const numbered = (st) => !!(st.currentVersion && st.upstreamVersion);
 const fromOf = (st) => (st.behind ? (numbered(st) ? st.currentVersion : st.current) : st.currentVersion || st.version || st.current) || '';
 const toOf = (st) => (numbered(st) ? st.upstreamVersion : st.upstream) || '';
+// the upstream can't be fetched (no credentials, offline): shown on the pill only once two checks in a row failed,
+// so one blip never shows; it goes once a fetch works again
+const unreachable = (st) => !!(st && st.fetchError && st.fetchFails >= 2);
+const lastReached = (st) => {
+  if (!st.fetchOkAt) return 'It has not reached it since Fleet View started.';
+  const h = (Date.now() - st.fetchOkAt) / 3600e3;
+  const when = h < 1 ? `${Math.max(1, Math.round(h * 60))} min ago` : h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h / 24)} days ago`;
+  return `It last reached it ${when} (${new Date(st.fetchOkAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}).`;
+};
 
 export function mountUpdate({ pill, verBtn, getJson }) {
   if (!pill) return { refresh() {} };
@@ -43,6 +54,7 @@ export function mountUpdate({ pill, verBtn, getJson }) {
   if (justDone) { try { localStorage.removeItem(DONE_KEY); } catch {} }
 
   function drawPill() {
+    pill.classList.toggle('unreachable', !(st && st.behind > 0) && Date.now() >= doneUntil && unreachable(st));
     if (st && st.behind > 0) {
       pill.hidden = false;
       pill.classList.add('update-pill');
@@ -54,6 +66,13 @@ export function mountUpdate({ pill, verBtn, getJson }) {
       pill.classList.add('update-pill', 'updated');
       pill.innerHTML = `<span class="count-k">Updated to</span><b>${esc(justDone.to)}</b>`;
       pill.title = 'Fleet View was updated';
+    } else if (unreachable(st)) {
+      // quiet: dim text, gold mark; a click opens the card with the reason
+      pill.hidden = false;
+      pill.classList.add('update-pill');
+      pill.classList.remove('updated');
+      pill.innerHTML = '<span class="count-k">Updates</span><b>!</b>';
+      pill.title = `Fleet View can't check for updates: ${st.fetchError}. ${lastReached(st)} Click for more.`;
     } else {
       pill.hidden = true;
     }
@@ -74,7 +93,7 @@ export function mountUpdate({ pill, verBtn, getJson }) {
   function drawCard() {
     if (!card || !st) return;
     const warn = [];
-    if (st.error) warn.push(st.error);
+    if (st.error) warn.push(st.fetchError && st.error === st.fetchError ? `Can't check for updates: ${st.error}. ${lastReached(st)} It tries again every 5 minutes.` : st.error);
     if (st.dirtyLock) warn.push('desktop\\package-lock.json was changed on this computer (npm install does that), and this update changes it too. Put it back with: git checkout -- desktop/package-lock.json, in the Fleet View folder.');
     else if (st.dirty) warn.push('Files in the Fleet View folder were changed on this computer, so it can\'t update itself. Undo those changes, or update by hand.');
     if (st.needsInstall) warn.push(`This update changes the desktop window's packages, so it goes in with install.ps1: it quits Fleet View (it asks first), updates it and starts it again, and the sessions open again. In PowerShell or Command Prompt: ${st.install || 'install.ps1 in the Fleet View folder'}`);
@@ -177,7 +196,7 @@ export function mountUpdate({ pill, verBtn, getJson }) {
     drawPill(); drawCard();
   }
 
-  pill.addEventListener('click', (e) => { e.stopPropagation(); if (card) close(); else if (st && st.behind > 0) open(pill); });
+  pill.addEventListener('click', (e) => { e.stopPropagation(); if (card) close(); else if (st && (st.behind > 0 || unreachable(st))) open(pill); });
   if (verBtn) verBtn.addEventListener('click', (e) => { e.stopPropagation(); if (card) close(); else if (st) open(verBtn); });
   drawPill();
   refresh();

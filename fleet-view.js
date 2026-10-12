@@ -7308,10 +7308,11 @@ function startWeb() {
     if (!NO_OPEN) openWindow();
     // Ctrl+C, a kill, or the console window closing (SIGHUP on Windows): a clean stop, so the loop ends
     for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => exitWith(0, sig));
-    watchForUpdates(() => { console.log('fleet-view.js changed: reloading'); logLine('fleet-view.js changed on disk: reloading (exit 75)'); server.close(); exitWith(EXIT_UPDATE, 'update'); });
+    watchForUpdates((names) => { console.log(`${names} changed: reloading`); logLine(`${names} changed on disk: reloading (exit 75)`); server.close(); exitWith(EXIT_UPDATE, 'update'); });
     // test only: FV_TEST_CRASH=1 throws an exception nothing catches 3 s after start, to check the crash log and restart
-    // updates from the folder's git upstream (updater.js): the page's "Update available" pill
-    if (!DEMO) UPDATER.start({ log: logLine, busy: () => [...sessions.values()].filter((s) => inState(s) && (s.state === 'WORKING' || s.state === 'AGENTS')).length });
+    // updates from the folder's git upstream (updater.js): the page's "Update available" pill. Busy counts only the
+    // chats this machine runs: one another device runs (s.remote, its state copied from there) never holds it back
+    if (!DEMO) UPDATER.start({ log: logLine, busy: () => [...sessions.values()].filter((s) => inState(s) && !s.remote && (s.state === 'WORKING' || s.state === 'AGENTS')).length });
     if (process.env.FV_TEST_CRASH === '1') setTimeout(() => { throw new Error('FV_TEST_CRASH: test crash 3 s after start'); }, 3000);
     const every = (ms, name, fn) => setInterval(() => { try { fn(); } catch (e) { logOnce(name + ':' + (e && e.message), `${name} failed\n${errorText(e)}`); } }, ms);
     // remote access: this PC's tailnet name, read now and every minute; with the switch on, 443 is made to point here
@@ -7452,28 +7453,43 @@ function registerLauncher() {
 }
 
 // ---------- main ----------
-// When fleet-view.js (or api.js or conversation.js, which it loads) changes on disk (a merge or pull), reload in
-// the same window: exit with 75 and let fleet-view.cmd's loop start the new code, so the window keeps its place
-// and size. A version that doesn't parse is left alone. Without the loop (started some other way) it only says an update is ready.
+// When fleet-view.js, or any other .js in this folder that the server has loaded (api.js, sync-*.js, relay.js and
+// the rest: every one in require.cache, looked at again each minute for ones loaded later), changes on disk (a merge
+// or pull), reload in the same window: exit with 75 and let fleet-view.cmd's loop start the new code, so the window
+// keeps its place and size. desktop/ and web/ are not watched here (the window and the page reload themselves). The
+// reload waits until no file has changed for 1.5 s, and a version where a changed file doesn't parse (a pull caught
+// halfway) is left alone until the next change. Without the loop (started some other way) it only says an update is ready.
 function watchForUpdates(reload) {
-  const me = path.resolve(__filename);
-  const files = [me, path.join(__dirname, 'api.js'), path.join(__dirname, 'screen.js'), path.join(__dirname, 'conversation.js'), path.join(__dirname, 'updater.js'), path.join(__dirname, 'version.js')];
+  const here = P.foldCase(path.resolve(__dirname));
+  const watched = new Set(), changed = new Set();
   let timer = null;
-  for (const file of files) {
+  const watch = (file) => {
+    if (watched.has(file)) return;
+    watched.add(file);
     let last = mtime(file);
     fs.watchFile(file, { interval: 2000 }, () => {
       const m = mtime(file);
       if (!m || m === last) return;
       last = m;
+      changed.add(file);
       clearTimeout(timer);
       timer = setTimeout(check, 1500);
     });
-  }
+  };
+  // this folder's own modules the server has loaded (not node_modules, desktop/ or web/: those are in folders below)
+  const scan = () => {
+    watch(path.resolve(__filename));
+    for (const f of Object.keys(require.cache)) if (/\.js$/i.test(f) && P.foldCase(path.dirname(f)) === here) watch(f);
+  };
+  scan();
+  setInterval(scan, 60e3).unref();
   function check() {
-    const parses = files.every((f) => require('child_process').spawnSync(process.execPath, ['--check', f], { windowsHide: true }).status === 0);
-    if (!parses) { if (WEB) console.log('an update to fleet-view.js does not parse yet; still running the old version'); notice ={ text: '  an update to fleet-view.js does not parse yet; still running the old version', color: C.gold, until: Date.now() + 8000 }; return; }
-    if (process.env.FLEET_VIEW_LOOP === '1') reload();
-    else notice = { text: '  fleet-view.js was updated: restart Fleet View to load it', color: C.cyan, until: Date.now() + 15000 };
+    const files = [...changed];
+    const names = files.map((f) => path.basename(f)).join(', ') || 'fleet-view.js';
+    const parses = files.every((f) => !fs.existsSync(f) || require('child_process').spawnSync(process.execPath, ['--check', f], { windowsHide: true }).status === 0);
+    if (!parses) { if (WEB) console.log(`an update to ${names} does not parse yet; still running the old version`); notice = { text: `  an update to ${names} does not parse yet; still running the old version`, color: C.gold, until: Date.now() + 8000 }; return; }
+    if (process.env.FLEET_VIEW_LOOP === '1') reload(names);
+    else notice = { text: `  ${names} was updated: restart Fleet View to load it`, color: C.cyan, until: Date.now() + 15000 };
   }
 }
 
