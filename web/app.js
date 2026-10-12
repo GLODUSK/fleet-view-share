@@ -159,7 +159,7 @@
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects, followProjectsPick } from './projects.js';
-import { renderChats, botFace } from './chats.js';
+import { renderChats, botFace, seenNow } from './chats.js';
 import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
@@ -1426,6 +1426,7 @@ function render() {
   drawAlert(view);
   drawFinished(view);
   drawDetail(view);
+  try { dropOpenNotes(); } catch (e) { console.warn(e); }
   if (!SOLO) drawRemote();
   const el = viewEls[local.view];
   if (!el) return;
@@ -3692,6 +3693,29 @@ function noteBots(st) {
     const line = face === 'done' ? f.preview : face === 'error' ? 'hit an API error' : f.preview || a.text;
     botNotes.push({ key: f.key, sid: a.sid, name: f.name, face: f.face, kind: face, text: line || (face === 'done' ? 'Finished' : ''), color: f.color });
   }
+  dropSeenNotes();
+}
+// a note goes once its chat is open (Henry, 2026-10-12): the Bots tab, where none show, clears them all; a
+// conversation just picked or opened in the panel on another view takes its bot's notes away, and so does its chat
+// opened (or showing) in the pop-out Bots window, which marks it seen in fv.chats.seen (a few seconds' slack: that
+// window can mark it just before this one's note comes)
+const NOTE_SEEN_SLACK_MS = 5000;
+function dropSeenNotes() {
+  if (!botNotes || !botNotes.count()) return;
+  const seen = seenNow();
+  botNotes.drop((n) => (Number(seen[n.key]) || 0) >= n.at - NOTE_SEEN_SLACK_MS);
+}
+window.addEventListener('storage', (e) => { if (e.key === 'fv.chats.seen') { try { dropSeenNotes(); } catch (err) { console.warn(err); } } });
+let notesOpenIds = [];
+function dropOpenNotes() {
+  const ids = [...new Set([ui.selectedId, ui.detailId].filter(Boolean))];
+  const opened = ids.filter((id) => !notesOpenIds.includes(id));
+  notesOpenIds = ids;
+  if (!botNotes || !botNotes.count()) return;
+  if (local.view === 'chats') { botNotes.clear(); return; }
+  if (!opened.length) return;
+  const keys = opened.map((id) => botFace(state, id, 'done')?.key).filter(Boolean);
+  botNotes.drop((n) => opened.includes(n.sid) || keys.includes(n.key));
 }
 function askNotify() {
   if (SOLO) return;

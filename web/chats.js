@@ -1125,6 +1125,12 @@ function withMade(state) {
   return extra.length ? { ...state, bots: [...extra, ...(state.bots || [])] } : state;
 }
 
+// when each contact was last opened, read afresh: the pop-out window writes it too -> { [contact key]: ms }
+export function seenNow() {
+  const s = store.get(SEEN_KEY, {});
+  return s && typeof s === 'object' && !Array.isArray(s) ? s : {};
+}
+
 // a bot's or the Chief's look for a note outside this tab (botnote.js): its row's name, colour and mascot, wearing
 // face ('done', 'needs', ...), for the conversation sid (raw /state or the derived one) -> { key, name, color, face,
 // preview } or null when sid is no overseer's

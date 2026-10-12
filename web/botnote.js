@@ -1,13 +1,16 @@
 // Bot notes: a small card at the top right when a bot or the Chief finishes a turn or needs you, on any view but the
 // Bots tab (app.js feeds it from state.alerts; Henry, 2026-10-12). Its face (mascot.js, smiling when done, the "?"
-// bubble when it needs you), its name and the line it ended on. A click opens its chat; the x (on hover) closes it.
+// bubble when it needs you), its name and the line it ended on. A click opens its chat; the x (on hover) closes it,
+// and so does opening its chat any other way (app.js drop; the Bots tab clears them all).
 // Up to three stack, newest on top; a new note from the same bot takes over its card. Each leaves after 6 s, but not
 // while the pointer is on it or while the window is in the background: it waits for you to come back. Motion is
 // transform and opacity only (botnote.css): in from the right with the mascot's hop, out to the right, and the
 // others glide to their new places; with prefers-reduced-motion it holds still.
 //
 // CONTRACT (app.js builds on it):
-//   mountBotNotes({ open(sid) }) -> { push(note), clear() }
+//   mountBotNotes({ open(sid) }) -> { push(note), clear(), drop(test), count() }
+//     drop(test): the cards whose note test({ key, sid, at }) is true leave (at: when it came, ms); count(): the cards
+//     showing
 //     note: { key, sid, name, face, kind, text, color }   key: one card per bot; face: mascotSVG markup; kind: 'done' |
 //     'needs' | 'error' (the small word by the name); text: one line, shown on at most two
 
@@ -64,6 +67,7 @@ export function mountBotNotes({ open = () => {} } = {}) {
   function fill(c, n) {
     c._key = n.key;
     c._sid = n.sid;
+    c._at = Date.now();
     c._left = SHOW_MS;
     c.style.setProperty('--bc', n.color || '#58a6ff');
     c.className = `bn bn-${WORD[n.kind] ? n.kind : 'done'}`;
@@ -103,5 +107,10 @@ export function mountBotNotes({ open = () => {} } = {}) {
     else if (e.key === 'Escape') { e.preventDefault(); leave(c); }
   });
 
-  return { push, clear: () => { for (const c of cards()) leave(c); } };
+  return {
+    push,
+    clear: () => { for (const c of cards()) leave(c); },
+    drop: (test) => { for (const c of cards()) if (test({ key: c._key, sid: c._sid, at: c._at })) leave(c); },
+    count: () => cards().length,
+  };
 }
