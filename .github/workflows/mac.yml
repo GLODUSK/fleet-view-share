@@ -116,6 +116,9 @@ jobs:
       - name: Session host (unix socket, pty)
         run: node desktop/host-test.js 2>&1 | tee "$LOGS/host-test.txt"
 
+      - name: Work carried between machines (real git, two clones)
+        run: node scripts/sync-carry-test.js 2>&1 | tee "$LOGS/sync-carry-test.txt"
+
       - name: Window, hidden (the bundle's Electron, page DOM over CDP)
         env:
           FV_TEST_HIDDEN: '1'

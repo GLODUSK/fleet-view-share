@@ -189,6 +189,50 @@ no fork; its header has the whole order. What it adds to the rows:
 - **`devices.last_seen_at`**: the mover touches it every 30 s. Another device counts it offline when it sees the value
   unchanged for 2 minutes on its own clock.
 
+## The work pack (not wired into moves yet)
+
+What `sync-work.js` gives for the code a chat was changing (docs/sync-follow.md, item 3). It is only the library for
+now: no move carries a pack yet, and nothing below is uploaded. When moves carry it, the mover seals the manifest and
+the blobs like everything else, and this section grows the object paths and the rows.
+
+- **The manifest** (plain JSON):
+
+  ```
+  { v: 1, kind: 'git' | 'plain', origin, branch, head, base, bundle, bundleRef, staged, unstaged,
+    trees: { index, work }, untracked: [{ path, mode, size, sha256 }], env: [path], rel, worktree,
+    summary: { commits, files, bytes }, notes: [text] }
+  ```
+
+  - `origin`: `normalizeOrigin`'s string, as the repos row has it (`home:` for a plain folder). `branch`: null when
+    detached. `head`: the commit. `base`: where the work leaves the origin's branch (merge-base), or null.
+  - `bundle`: a git bundle of the commits no `refs/remotes/origin/*` has, its tip `bundleRef`
+    (`refs/heads/<branch>`, or `HEAD` when detached), or null when origin has them all.
+  - `staged`, `unstaged`: `git diff --cached` and `git diff`, binary, full index, renames found, `a/` `b/` prefixes,
+    no external diff or textconv; null when empty.
+  - `trees`: the tree ids of the index and of the working tree's tracked files as git sees them (after its clean
+    filters, so CRLF on Windows and LF on the Mac compare equal). The target checks these, not the diffs' bytes.
+  - `untracked`: the files git doesn't track and doesn't ignore. Paths use `/`. `mode` is `100644`, `100755` or
+    `120000` (a symlink, whose blob is its target). Never a file or folder named `.env` or `.env.*`, in any case:
+    those are only named in `env`, and their contents travel as secrets (item 4). A folder that is a git repository
+    of its own isn't carried (named in `notes`).
+  - `rel`: the chat's folder from the checkout's top (or from the home folder, for plain). `worktree`: the linked
+    worktree's folder name, so the target makes its own with the same name.
+- **Blobs**: the bundle, both diffs and every untracked file, each named by the sha256 of its bytes (lower-case hex),
+  so a blob that two entries share is carried once and a changed or missing blob is found before anything is written.
+- **Kinds**: `git` for a checkout whose origin normalizes; `plain` for a folder under the home folder in no checkout
+  (the home row): every file in it but `node_modules`, `.git` and env files, at most 20,000. Nothing else is packed:
+  a checkout with no origin, a folder outside home, the home folder itself, an app data or Claude account folder,
+  or a Perforce workspace stays on its machine.
+- **Caps and refusals**: 200 MB in all; a checkout with no commit; a merge, rebase, cherry-pick or revert under way; a
+  changed submodule; a changed or new git-lfs file.
+- **Laying it down** (`unpack`): in the target checkout of the same origin, after `git fetch origin` (offline only
+  makes a note) and the bundle into `refs/fleet-view/incoming/<head>`, in the chat's own worktree
+  (`<checkout>/.claude/worktrees/<name>`) or a clean checkout used in place. It never loses a commit, never touches a
+  dirty checkout, and never moves a branch another worktree has checked out. Then it verifies, and undoes what it
+  made if verification fails.
+- **Putting it away** (`putAway`): the source's `git stash push --include-untracked`, env files left in place.
+  Nothing is deleted.
+
 ## Done means
 
 S2: 50 random real conversations uploaded, downloaded by S3 into a temp projects folder, byte-identical (main and
