@@ -335,6 +335,28 @@ async function main() {
   const savedY = await waitFor(() => { const l = savedList(); return l.some((x) => x.id === Y1.id) && l.some((x) => x.id === Y3.id) ? l : null; }, 5000);
   check('g. bot: sessions.json records the role (none for a malformed one)', savedY && roleIn(savedY, Y1) === BOT1 && savedY.some((x) => x.id === Y3.id && !('role' in x)), savedList());
 
+  // ===== m. mode: a resume runs in the permission mode its transcript last recorded =====
+  const modeLine = (mode, content) => jl({ type: 'user', permissionMode: mode, message: { role: 'user', content } });
+  const modeOf = (args) => { const i = (args || []).indexOf('--permission-mode'); return i >= 0 && i < args.indexOf('--resume') ? args[i + 1] : null; };
+  const M1 = session('m1'), M2 = session('m2'), M3 = session('m3'), M4 = session('m4'), M5 = session('m5'), M6 = session('m6');
+  fs.writeFileSync(transcript(M1), modeLine('auto', 'look') + asstLine('ok') + modeLine('bypassPermissions', 'ship it') + asstLine('shipped'));
+  fs.writeFileSync(transcript(M2), modeLine('default', 'hi') + asstLine('hello'));
+  fs.writeFileSync(transcript(M3), userLine('no mode recorded') + asstLine('ok'));
+  // a tool's output quoting a mode (its quotes escaped in the record) is not the conversation's mode
+  fs.writeFileSync(transcript(M4), modeLine('acceptEdits', 'grep it') + userLine([{ type: 'tool_result', tool_use_id: 't1', content: '"permissionMode":"plan"' }]) + asstLine('found'));
+  fs.writeFileSync(transcript(M5), modeLine('sudo', 'hi') + asstLine('hello'));
+  // the last prompt more than 1 MiB before the end: read back over the chunks
+  fs.writeFileSync(transcript(M6), modeLine('bypassPermissions', 'long one') + asstLine('x'.repeat(700 << 10)) + asstLine('y'.repeat(700 << 10)));
+  for (const s of [M1, M2, M3, M4, M5, M6]) {
+    const r = await cl.req('open', { id: s.id, cwd: s.cwd, account: 'B', cols: 100, rows: 30 });
+    if (!r || !r.ok) check(`open ${s.name}`, false, r);
+  }
+  await waitFor(() => [M1, M2, M3, M4, M5, M6].every((s) => argsOf(s).length), 10000);
+  const modes = [M1, M2, M3, M4, M5, M6].map((s) => modeOf(argsOf(s)[0]));
+  check('m. mode: resumed in the mode last recorded (bypass after auto; "default" as manual; the last prompt 1.4 MB back)', modes[0] === 'bypassPermissions' && modes[1] === 'manual' && modes[5] === 'bypassPermissions', [M1, M2, M6].map((s) => argsOf(s)[0]));
+  check('m. mode: no flag without a recorded mode or with one the command line does not know; a quoted one in a tool\'s output is not the mode',
+    modes[2] === null && modes[4] === null && modes[3] === 'acceptEdits' && !argsOf(M3)[0].includes('--permission-mode') && !argsOf(M5)[0].includes('--permission-mode'), [M3, M4, M5].map((s) => argsOf(s)[0]));
+
   // ===== f. restart: the host hands over to a successor, which resumes the sessions =====
   const keyA = (starts(A)[0] || '').split(' ')[1];
   for (const s of Object.values(S)) dropPidFile(s); // a live pid file would make the next host skip that conversation
@@ -367,6 +389,7 @@ async function main() {
   const gArgs = argsOf(G).slice(-1)[0] || [];
   check('g. restore: the resumed chief keeps role "chief" and its commands (an ordinary one stays ordinary)', g2 && g2.role === 'chief' && g2.restored && o2 && o2.role === null
     && sameSet(allowedFv(gArgs), [...FV_BASE, ...FV_CHIEF_EXTRA]) && gArgs.includes('--resume') && gArgs.includes(G.id) && sameSet(allowedFv(argsOf(O).slice(-1)[0]), FV_BASE), { l2, gArgs });
+  check('m. restore: a restored session resumes in its recorded mode too', modeOf(argsOf(M1).slice(-1)[0]) === 'bypassPermissions' && argsOf(M1).length >= 2, argsOf(M1));
   const gSaved = await waitFor(() => savedList().find((x) => x.id === G.id && x.role === 'chief'), 5000);
   check('g. restore: the new host\'s sessions.json still records role "chief"', gSaved, savedList());
   const y1Args = argsOf(Y1).slice(-1)[0] || [];

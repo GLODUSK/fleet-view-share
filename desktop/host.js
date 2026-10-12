@@ -259,6 +259,36 @@ function transcriptStart(id, cwd) {
   } catch {} finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
   try { return fs.statSync(hit.file).birthtimeMs || null; } catch { return null; }
 }
+// The permission mode a conversation last ran in, as `claude --permission-mode` names it: the last "permissionMode"
+// its transcript records (Claude Code writes one on each prompt), read from the end 1 MiB at a time; null when there is
+// none, and the account's default stands. `claude --resume` starts in the account's default mode, not the
+// conversation's, so a chat running in bypass on the PC came back in auto on the Mac (Henry, 2026-10-12: a chat keeps
+// its own mode on every machine). The transcript's "default" is the command line's "manual"; a mode not named here
+// gives null, so nothing but these fixed words goes into the command line.
+const RESUME_MODES = { default: 'manual', manual: 'manual', acceptEdits: 'acceptEdits', auto: 'auto', bypassPermissions: 'bypassPermissions', dontAsk: 'dontAsk', plan: 'plan' };
+function lastModeOf(id, cwd) {
+  const hit = findTranscript(id, cwd);
+  if (!hit) return null;
+  const CHUNK = 1 << 20, OVERLAP = 64; // the overlap keeps a record cut at a chunk's edge whole in the chunk before it
+  let fd = null;
+  try {
+    fd = fs.openSync(hit.file, 'r');
+    for (let end = hit.size; end > 0;) {
+      const start = Math.max(0, end - CHUNK);
+      const buf = Buffer.alloc(end - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      // a record's own key: quoted as JSON writes it (inside a tool's output text the quotes are escaped, \")
+      const re = /"permissionMode":"([A-Za-z]+)"/g;
+      let m, last = null;
+      while ((m = re.exec(buf.toString('utf8')))) last = m[1];
+      if (last) return Object.prototype.hasOwnProperty.call(RESUME_MODES, last) ? RESUME_MODES[last] : null;
+      if (start === 0) break;
+      end = start + OVERLAP;
+    }
+  } catch {} finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
+  return null;
+}
+const modeFlag = (id, cwd) => { const m = lastModeOf(id, cwd); return m ? ` --permission-mode ${m}` : ''; };
 
 // What the resume wrote to a transcript (from `offset`): 'tasks' when a background task stopped or was killed
 // (a user entry that is a <task-notification> with that status), 'interrupted' when a tool call was cut off
@@ -520,8 +550,9 @@ function createPtys(opts = {}) {
   const send = opts.send || (() => {});
   const changed = opts.changed || (() => {});
   const program = opts.program || 'claude';
-  // each command line: claude, the fv commands its role may run without asking, then the rest
-  const commandFor = (id, role) => `${program} ${allowFor(role)} --resume ${id}`;
+  // each command line: claude, the fv commands its role may run without asking, then the rest; a resume in the mode
+  // the conversation last ran in (lastModeOf; cwd: where to look for its transcript first)
+  const commandFor = (id, role, cwd) => `${program} ${allowFor(role)}${modeFlag(id, cwd)} --resume ${id}`;
   const newCommand = (role) => `${program} ${allowFor(role)}`;
   const pickupFor = (file, role) => HO.pickupCommand(file).replace(/^claude /, () => `${program} ${allowFor(role)} `);
   const log = opts.log || (() => {});
@@ -675,7 +706,7 @@ function createPtys(opts = {}) {
     if (away) { log(`open: ${id} refused: it is on ${away.device}`); return awayRefusal(away); }
     if (old) terms.delete(id); // ended: start it again
     const role = soleRole(roleOf(extra && extra.role) || roleOf(o.role) || (old ? old.role : null), id, 'open');
-    const r = spawnPty(id, commandFor(id, role), o, { ...(extra || {}), role });
+    const r = spawnPty(id, commandFor(id, role, o.cwd), o, { ...(extra || {}), role });
     delete r.key;
     return r;
   }
@@ -704,7 +735,7 @@ function createPtys(opts = {}) {
       if (terms.get(id)?.alive) return { ok: false, message: 'it was started again meanwhile' };
       const note = `The user sent this conversation to account ${account} from Fleet View; the pickup carries on there`;
       const role = soleRole(old ? old.role : null, id, `send to ${account}:`);
-      const r = spawnPty(id, `${commandFor(id, role)} "/handoff ${note}"`, { ...o, account, cwd: o.cwd || old?.cwd || null }, { role });
+      const r = spawnPty(id, `${commandFor(id, role, o.cwd || old?.cwd)} "/handoff ${note}"`, { ...o, account, cwd: o.cwd || old?.cwd || null }, { role });
       log(`send to ${account}: ${id} ${r.ok ? `resumed with /handoff (pid ${r.pid})` : `failed: ${r.message}`}`);
       delete r.key;
       return r;
@@ -741,7 +772,7 @@ function createPtys(opts = {}) {
     const asked = EFFORT_LEVELS.has(o.effort) ? o.effort : null;
     const effort = asked || (fork ? '' : newEffort(getSettings().newSessionEffort));
     const role = roleOf(o.role);
-    const cmd = (fork ? `${commandFor(fork, role)} --fork-session` : newCommand(role)) + (model ? ` --model ${P.isWin ? model : `'${model}'`}` : '') + (effort ? ` --effort ${effort}` : '');
+    const cmd = (fork ? `${commandFor(fork, role, o.cwd)} --fork-session` : newCommand(role)) + (model ? ` --model ${P.isWin ? model : `'${model}'`}` : '') + (effort ? ` --effort ${effort}` : '');
     const r = spawnPty(key, cmd + flag, o, { isNew: true, created: true, known, forkFrom: fork, role });
     if (r.ok && flag) r.chrome = o.chrome;
     if (r.ok && fork) r.forkFrom = fork;
