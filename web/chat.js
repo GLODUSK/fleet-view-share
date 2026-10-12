@@ -14,7 +14,8 @@
 // The work between two messages (the thinking and tool rows in a row) folds into one quiet line, "Ran 3 commands,
 // read 2 files", that opens to show those rows; while a step runs, the line says which. Todo lists, plans and
 // questions stay out in the open.
-// Selecting text shows a Reply button that hands the text to the compose box (the 'fv-chat-quote' event).
+// Selecting text shows a Reply button that hands the text to the compose box (the 'fv-chat-quote' event), and a
+// Fork button beside it that starts a fork of the conversation with the text quoted in the fork's box (app.js).
 // A "/pickup <file>" note has a file icon that opens that handoff summary (in the viewer, viewer.js).
 // Scrolled up past your last message, a bar at the top shows it; a click scrolls back to it.
 // Above the compose box, a tray lists what the session runs in the background (shells, async agents, workflows,
@@ -61,7 +62,7 @@ import { esc, spinner, C, clockTime, ago, loadModule } from './cards.js';
 import { icon } from './icons.js';
 import { mountCompose, modelLabel } from './compose.js';
 import { handToChat } from './handto.js';
-import { onRekey } from './term.js';
+import { onRekey, termApi } from './term.js';
 import { openViewer, openInCode } from './viewer.js';
 import { botFeed, createPickStore } from './chats-model.js';
 
@@ -845,7 +846,7 @@ function buildPane(pane) {
   <button type="button" class="chat-top" data-top hidden title="Scroll to this message">${icon('up', 13)}<span class="ct-k">You</span><span class="ct-t"></span></button>
   <button type="button" class="chat-xall" data-xall aria-pressed="false" title="Open all the work: every step, tool and thinking row (Ctrl+O)">${icon('chevron', 11)}<span>Expand all</span></button>
   <button type="button" class="chat-pill" data-pill hidden>${icon('down', 13)}<span>New messages</span></button>
-  <button type="button" class="chat-reply" hidden title="Quote the selection into your message">${icon('reply', 13)}<span>Reply</span></button>
+  <div class="chat-reply" hidden><button type="button" data-sel="reply" title="Quote the selection into your message">${icon('reply', 13)}<span>Reply</span></button><button type="button" data-sel="fork" title="Fork: a new conversation with this one's history, the selection quoted in its chat box">${icon('branch', 13)}<span>Fork</span></button></div>
 </div>
 <div class="chat-bg" hidden></div>
 <div class="chat-compose"></div>`;
@@ -1192,6 +1193,7 @@ function wire(c) {
 // ---------- Reply: select text in the feed, hand it to the compose box ----------
 function wireReply(c) {
   const { feed, reply, main, pane } = c;
+  const fork = reply.querySelector('[data-sel="fork"]');
   const hide = () => { reply.hidden = true; };
   const selected = () => {
     const sel = window.getSelection();
@@ -1208,7 +1210,8 @@ function wireReply(c) {
       if (!selected().trim()) return;
       const r = main.getBoundingClientRect();
       reply.hidden = false;
-      const bw = reply.offsetWidth || 72, bh = reply.offsetHeight || 26;
+      fork.hidden = !termApi(); // a fork needs the desktop app's session host
+      const bw = reply.offsetWidth || 144, bh = reply.offsetHeight || 26;
       let left = clientX - r.left + 8, top = clientY - r.top + 14;
       if (top + bh > r.height) top = clientY - r.top - bh - 10;
       reply.style.left = `${Math.max(4, Math.min(r.width - bw - 4, left))}px`;
@@ -1218,12 +1221,16 @@ function wireReply(c) {
   feed.addEventListener('keydown', hide);
   reply.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); }); // keep the selection
   reply.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sel]');
+    if (!b) return;
     e.preventDefault();
     const text = selected();
     hide();
     if (!text.trim()) return;
     window.getSelection()?.removeAllRanges();
-    pane.dispatchEvent(new CustomEvent('fv-chat-quote', { detail: { text }, bubbles: true }));
+    // Fork: app.js starts a fork of this conversation and hands it the selection as its quote
+    if (b.dataset.sel === 'fork') window.dispatchEvent(new CustomEvent('fv-chat-fork', { detail: { id: c.id, text, how: 'quote' } }));
+    else pane.dispatchEvent(new CustomEvent('fv-chat-quote', { detail: { text }, bubbles: true }));
   });
 }
 

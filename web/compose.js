@@ -2797,7 +2797,7 @@ export function mountCompose(slot, s) {
   // handed over from another tab (handto.js). One to send at once goes as its own message (send(text): what is
   // typed in the box, its quote and attachments stay where they are); if it can't go now (a question is up, a send
   // is under way...) it lands in the box instead. The others: the text after what is typed, the images as
-  // attachments.
+  // attachments, a quote as the Reply quote.
   async function takeHanded() {
     if (!st.alive) return;
     const items = takeHandoff(st.id);
@@ -2811,6 +2811,8 @@ export function mountCompose(slot, s) {
       boxed = true;
     };
     for (const it of items) {
+      const q = quoteSelection(it.quote);
+      if (q) { setQuote(st.d.quote ? `${st.d.quote}>\n${q}` : q); boxed = true; }
       const text = String(it.text || '').replace(/\s+$/, '');
       const imgs = (it.images || []).filter((im) => im && im.blob);
       if (it.send && text && !imgs.length) {

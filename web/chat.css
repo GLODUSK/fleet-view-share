@@ -417,7 +417,7 @@ details.ci-note[open] > .cn-row svg { transform: rotate(90deg); }
   color: var(--dim); font: 12px/1.55 var(--font-ui); user-select: text;
 }
 
-/* ---------- floating: new messages, Reply ---------- */
+/* ---------- floating: new messages, Reply and Fork ---------- */
 .chat-pill {
   position: absolute; z-index: 4; left: 50%; bottom: 12px; transform: translateX(-50%);
   display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 13px 0 10px; border-radius: 14px; cursor: pointer;
@@ -427,15 +427,16 @@ details.ci-note[open] > .cn-row svg { transform: rotate(90deg); }
 }
 @keyframes chat-pill-in { from { opacity: 0; transform: translate(-50%, 6px); } }
 .chat-pill:hover { background: rgba(63, 216, 255, 0.16); color: #fff; }
-.chat-reply {
-  position: absolute; z-index: 5; display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px 0 8px;
+.chat-reply { position: absolute; z-index: 5; display: inline-flex; gap: 4px; }
+.chat-reply > button {
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px 0 8px;
   border: 1px solid rgba(63, 216, 255, 0.6); border-radius: var(--radius-sm); cursor: pointer;
   background: #0f121c; color: var(--cyan); font: 600 12px/1 var(--font-ui);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
 }
 /* solid on hover too: it sits over the selected text, which must not show through */
-.chat-reply:hover { background: var(--cyan); border-color: var(--cyan); color: #06121a; }
-.chat-pill:focus-visible, .chat-reply:focus-visible, .chat-earlier-btn:focus-visible, .cu-more:focus-visible, .tb-more:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.chat-reply > button:hover { background: var(--cyan); border-color: var(--cyan); color: #06121a; }
+.chat-pill:focus-visible, .chat-reply > button:focus-visible, .chat-earlier-btn:focus-visible, .cu-more:focus-visible, .tb-more:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 
 /* ---------- an attached image, full size ---------- */
 .chat-lightbox {

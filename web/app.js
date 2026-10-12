@@ -176,6 +176,7 @@ import { mountPhone } from './phone.js';
 import { mountHousekeeping } from './housekeeping.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults } from './compose.js';
 import { forkAt } from './forkat.js';
+import { handToChat } from './handto.js';
 import { openKeeps, setRules } from './keeps.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects', 'chats'];
@@ -2489,6 +2490,7 @@ window.addEventListener('fv-chat-fork', async (e) => {
   const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === d.id);
   const text = String(d.text || '');
   if (d.how === 'at') { forkFromMessage(s, text, d.nth | 0); return; }
+  if (d.how === 'quote') { forkWithQuote(s, text); return; }
   const fork = d.how !== 'new';
   const why = !s ? 'that conversation is no longer listed' : !s.cwd ? 'no folder known for it' : '';
   const r = why ? { ok: false, message: why } : await createSession({ cwd: s.cwd, account: s.account, ...(fork ? { forkFrom: s.id } : {}), ...newSize() });
@@ -2503,6 +2505,16 @@ window.addEventListener('fv-chat-fork', async (e) => {
     + (d.images ? ' (without its images)' : ''), C.text);
   ui.setSelected(r.key, 'explicit');
 });
+// how 'quote' (Fork beside Reply on text selected in the feed): a fork with the whole history, the selection quoted
+// in its chat box (as Reply would) to answer there; nothing is sent
+async function forkWithQuote(s, text) {
+  const why = !s ? 'that conversation is no longer listed' : !s.cwd ? 'no folder known for it' : '';
+  const r = why ? { ok: false, message: why } : await createSession({ cwd: s.cwd, account: s.account, forkFrom: s.id, ...newSize() });
+  if (!r || !r.ok) { toast(`Could not fork it: ${(r && r.message) || 'failed'}`, C.red); return; }
+  handToChat(r.key, { quote: text });
+  toast(`Forked ${s.name}: the selection waits quoted in the fork's chat box`, C.text);
+  ui.setSelected(r.key, 'explicit');
+}
 async function forkFromMessage(s, text, nth) {
   const why = !s ? 'that conversation is no longer listed' : !s.cwd ? 'no folder known for it' : '';
   const r = why ? { ok: false, message: why } : await createSession({ cwd: s.cwd, account: s.account, forkFrom: s.id, ...newSize() });

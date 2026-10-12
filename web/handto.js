@@ -7,12 +7,23 @@
 // the Send button does; otherwise it waits in the box. images: [{ blob, name }] (image/png and the like).
 // effort: 'high' (with send) is the least effort the session should run it at: one known to be below it, or not
 // known, gets "/effort high" first; one at it or above is left as it is (a Launch from chat.js asks for high).
-const waiting = new Map(); // id -> [{ text, images, send, effort }]
+// quote: text from the feed that goes in as the box's Reply quote (a Fork from a selection, chat.js).
+// What waits for a new conversation (new-<n>) moves to its id when it gets one.
+import { onRekey } from './term.js';
+
+const waiting = new Map(); // id -> [{ text, images, send, effort, quote }]
+onRekey((oldKey, id) => {
+  const list = waiting.get(oldKey);
+  if (!list) return;
+  waiting.delete(oldKey);
+  waiting.set(id, [...(waiting.get(id) || []), ...list]);
+  window.dispatchEvent(new CustomEvent('fv-handto', { detail: { id } }));
+});
 
 export function handToChat(id, item) {
   if (!id || !item) return;
   const list = waiting.get(id) || [];
-  list.push({ text: item.text || '', images: item.images || [], send: !!item.send, effort: item.effort || null });
+  list.push({ text: item.text || '', images: item.images || [], send: !!item.send, effort: item.effort || null, quote: item.quote || '' });
   waiting.set(id, list);
   window.dispatchEvent(new CustomEvent('fv-handto', { detail: { id } }));
 }
