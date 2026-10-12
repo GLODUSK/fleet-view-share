@@ -124,8 +124,16 @@ not a script that only has the API token reaches them.
 | Route | Answer |
 |---|---|
 | `GET /peer/status` | `{ ok, device: { id, name }, version, peer }`: who answers, and who asked |
+| `POST /peer/env { id }` | `{ ok, files: [{ path, b64 }] }`: the env files of the work this machine is handing conversation id to the caller (paths from the checkout's top; plain files inside it, at most 1 MB each and 4 MB in all) |
+| `POST /peer/logins { id }` | `{ ok, logins: { gh?: { token, user }, vercel?: { token }, supabase?: { token }, npm?: [line], mcp?: { user, project, local } } }`: the sign-ins this machine has for those tools (npm: the auth lines for the registries the repo uses; mcp: the account's remote servers, and the local ones' names) |
 
-The parts the plan builds next (the work a move carries, logins) add their routes here.
+`/peer/env` and `/peer/logins` answer only while this machine hands that very conversation to that very machine (its
+move is uploading or released: `sync-move.js` `peer`), 403 at any other time, 12 calls a minute from one machine
+(429), and the relay passes on a body of `{ id }` alone. The machine that asked writes the env files into the moved
+chat's folder (never over a different one: that one stays, the new one goes beside it as `<name>.from-<machine>`) and
+signs in only where it has no sign-in (gh with `gh auth login --with-token` on stdin; Vercel's auth.json and Supabase's
+access-token file, 0600; npm's lines added to ~/.npmrc; remote MCP servers with `claude mcp add-json`). Logs name the
+files and tools, never what is in them.
 
 ## Unlinking
 

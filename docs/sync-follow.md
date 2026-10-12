@@ -157,9 +157,10 @@ One item each, ready for "Go with these". Items 1 and 2 can start now. 3 needs 2
 2. Portable and bound: sync carries every chat's log, marks each portable or bound to its host, and the list shows
    it · Opus, medium
 3. Carry the work: pack and unpack the branch, unpushed commits, changes, untracked files and worktree into the chat's
-   own worktree, stash on the old host, upload at each turn's end, and `sync-carry-test.js` in CI on both systems · Opus, xhigh
+   own worktree, stash on the old host, upload at each turn's end, and `sync-carry-test.js` in CI on both systems (done:
+   sync-work.js #306; moves carry it: sync-carry.js)
 4. Carry the rest: `.env` files and logins (`gh`, `vercel`, `supabase`, MCP) over the link, the ready check, and the
-   `[Fleet View]` note · Opus, high
+   `[Fleet View]` note (done: sync-carry.js, /peer/env and /peer/logins, /sync/note)
 5. Clone what's missing: ask once per repo, then automatic, and install dependencies · Sonnet, medium
 6. Follow you: typing moves a portable chat here (queued on the host while it works), bound chats go through the
    link, and the Chat tab shows which · Opus, high

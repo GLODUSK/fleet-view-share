@@ -27,6 +27,8 @@ const S = require(path.join(ROOT, 'sync-api.js'));
 const K = require(path.join(ROOT, 'sync-crypto.js'));
 const C = require(path.join(ROOT, 'sync-common.js'));
 const M = require(path.join(ROOT, 'sync-move.js'));
+const CARRY = require(path.join(ROOT, 'sync-carry.js'));
+const cp = require('child_process');
 
 let pass = 0, fail = 0;
 const ok = (c, name) => { if (c) pass++; else { fail++; console.log(`FAIL ${name}`); } };
@@ -37,6 +39,28 @@ fs.mkdirSync(base, { recursive: true });
 const T = fs.realpathSync(fs.mkdtempSync(path.join(base, 'sync-move-test-')));
 const KEY = crypto.randomBytes(32);
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+
+// git for the carried moves (17), isolated from this machine's own config, with origin behind a fake ssh (as
+// sync-carry-test.js), so origins normalize to https://github.com/test/<name>
+const REMOTES = path.join(T, 'remotes');
+fs.mkdirSync(REMOTES, { recursive: true });
+for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR', 'GIT_PREFIX']) delete process.env[k];
+const GCFG = path.join(T, 'gitconfig');
+fs.writeFileSync(GCFG, '[user]\n\tname = Move Test\n\temail = move@test.invalid\n[init]\n\tdefaultBranch = main\n'
+  + '[commit]\n\tgpgsign = false\n[core]\n\tautocrlf = false\n[advice]\n\tdetachedHead = false\n[safe]\n\tdirectory = *\n');
+process.env.GIT_CONFIG_GLOBAL = GCFG;
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.FV_TEST_REMOTES = REMOTES;
+const SSH = path.join(T, 'fake-ssh.sh');
+fs.writeFileSync(SSH, ['#!/bin/sh', 'repo=$(printf \'%s\' "$2" | sed -e "s/^[^\']*\'//" -e "s/\'\\$//")', 'name=$(basename "$repo")', 'case "$2" in',
+  '  git-upload-pack*) exec git upload-pack "$FV_TEST_REMOTES/$name" ;;', '  git-receive-pack*) exec git receive-pack "$FV_TEST_REMOTES/$name" ;;', 'esac', 'exit 1', ''].join('\n'));
+fs.chmodSync(SSH, 0o755);
+process.env.GIT_SSH_COMMAND = `sh '${SSH.replace(/\\/g, '/')}'`;
+process.env.GIT_SSH_VARIANT = 'simple';
+const g = (cwd, ...args) => cp.execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }).trim();
+const gitUrl = (name) => `ssh://git@github.com/test/${name}.git`;
+const write = (f, data) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, data); };
+const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
 const lower = (s) => String(s || '').toLowerCase();
 
 // ---------- the clock ----------
@@ -48,7 +72,15 @@ const iso = (ms) => new Date(ms).toISOString();
 const UID = crypto.randomUUID();
 const PK = { settings: ['user_id', 'key'], conversations: ['id'], devices: ['id'] };
 const db = { settings: [], conversations: [], devices: [] };
-const api = { calls: [], rest };
+const objects = new Map(); // the fleet-sync bucket: path -> bytes
+const api = {
+  calls: [], rest,
+  storage: {
+    async upload(rel, buf) { S.checkRel(rel); objects.set(rel, Buffer.from(buf)); return { path: rel, size: buf.length }; },
+    async download(rel) { if (!objects.has(rel)) throw new S.SyncError('Object not found', 404, 'not_found'); return objects.get(rel); },
+    async remove(rels) { for (const r of rels) objects.delete(r); return []; },
+  },
+};
 const SKIP = new Set(['select', 'order', 'limit', 'offset', 'on_conflict']);
 function inList(raw) {
   const m = /^\((.*)\)$/s.exec(raw);
@@ -119,11 +151,11 @@ const server = new Map(); // conversation id -> the uploaded bytes of its log
 
 // ---------- a machine: its folders, fake uploader, materializer and host ----------
 const boundIds = new Set(); // conversations whose repos row is a bound one (sync-common.js "portable or bound")
-function machine(name, letter) {
+function machine(name, letter, o = {}) {
   const dir = path.join(T, letter);
   const home = path.join(dir, 'home');
   const proj = path.join(home, '.claude', 'projects');
-  const folder = path.join(dir, 'repo');
+  const folder = o.folder || path.join(dir, 'repo');
   fs.mkdirSync(proj, { recursive: true });
   fs.mkdirSync(folder, { recursive: true });
   const m = {
@@ -132,7 +164,8 @@ function machine(name, letter) {
     afterPull: null, logs: [], asleep: false, listedAt: null,
   };
   db.devices.push({ id: m.me, user_id: UID, name, platform: 'win32', last_seen_at: null });
-  m.logPath = (id) => path.join(m.slugDir, `${id}.jsonl`);
+  // where its log is (a carried move puts it in the slug folder of the folder it resumes in), else the repo's
+  m.logPath = (id) => M.findLogIn([{ dir: proj }], id) || path.join(m.slugDir, `${id}.jsonl`);
   m.bytes = (id) => { try { return fs.readFileSync(m.logPath(id)); } catch { return null; } };
   m.isLive = (id) => !!(m.hosted.get(id) && m.hosted.get(id).alive) || m.external.has(id);
   // the uploader: the log up to its last whole line becomes the server's copy (a new generation when it is not an
@@ -167,7 +200,8 @@ function machine(name, letter) {
       const row = rowOf(id);
       if (!row) return { outcome: 'missing' };
       if (lower(row.owner_device) === m.me) return { outcome: 'mine', row: { ...row } };
-      const res = { dir: m.slugDir, folder: m.folder, row: { ...row } };
+      const where = M.findLogIn([{ dir: proj }], id);
+      const res = { dir: where ? path.dirname(where) : m.slugDir, folder: m.folder, row: { ...row } };
       if (m.isLive(id)) return { outcome: 'skip', reason: 'open on this machine', ...res };
       const srv = (server.get(id) || Buffer.alloc(0)).subarray(0, row.size);
       const local = m.bytes(id);
@@ -176,13 +210,14 @@ function machine(name, letter) {
         if (local.length > srv.length || !srv.subarray(0, local.length).equals(local)) return { outcome: 'conflict', reason: 'the local copy is longer', ...res };
         if (local.equals(srv)) outcome = 'same';
       }
-      if (outcome === 'done') { fs.mkdirSync(m.slugDir, { recursive: true }); fs.writeFileSync(`${m.logPath(id)}.part`, srv); fs.renameSync(`${m.logPath(id)}.part`, m.logPath(id)); }
+      if (outcome === 'done') { fs.mkdirSync(res.dir, { recursive: true }); const lp = path.join(res.dir, `${id}.jsonl`); fs.writeFileSync(`${lp}.part`, srv); fs.renameSync(`${lp}.part`, lp); }
       if (m.afterPull) await m.afterPull(id);
       return { outcome, ...res };
     },
     owners: () => m.owners,
     conflicts: () => m.conflicts.map((id) => ({ id, file: 'main', reason: 'the local copy is longer' })),
     status: () => ({ lastOkAt: m.downOk ? iso(now()) : null, listedAt: m.listedAt === null ? null : iso(m.listedAt) }),
+    moved: (id, d) => { m.movedTo = { id, dir: d }; return true; },
     scan() { // its listing: the rows other devices own
       m.listedAt = now();
       m.owners = new Map(db.conversations.filter((r) => r.state === 'active' && r.owner_device && lower(r.owner_device) !== m.me)
@@ -195,9 +230,10 @@ function machine(name, letter) {
     kill: async (id) => { m.kills.push(id); const s = m.hosted.get(id); if (s && s.alive) { s.alive = false; s.status = null; s.waitingFor = null; } },
   };
   m.host0 = (id, status, waitingFor = null) => m.hosted.set(id, { id, alive: true, status, waitingFor, cwd: m.folder, account: 'B' });
+  m.carry = o.carry ? CARRY.createCarry({ api, key: KEY, dataDir: m.dataDir, log: (t) => m.logs.push(t), now, home, device: () => m.me, ...o.carry(m) }) : undefined;
   m.mover = M.createMover({
     api, dataDir: m.dataDir, key: KEY, log: (t) => m.logs.push(t), now, up: m.up, down: m.down, host: m.host, me: m.me,
-    home: m.home, projects: [{ account: 'b', dir: proj }], isLive: m.isLive,
+    home: m.home, projects: [{ account: 'b', dir: proj }], isLive: m.isLive, carry: m.carry,
   });
   m.away = () => C.readState(M.awayPath(m.dataDir), null);
   m.awayOf = (id) => { const a = m.away(); return a && a.ids ? a.ids[id] || null : null; };
@@ -211,8 +247,8 @@ const B = machine('mac', 'B');
 fs.writeFileSync(path.join(B.home, '.claude.json'), JSON.stringify({ projects: { [B.folder.replace(/\\/g, '/')]: { hasTrustDialogAccepted: true } } }));
 
 let lineNo = 0;
-const lines = (m, n) => Array.from({ length: n }, () => `${JSON.stringify({ type: 'user', n: lineNo++, cwd: m.folder, text: `line ${lineNo} ${'pad '.repeat(lineNo % 30)}` })}\n`).join('');
-const append = (m, id, n) => { fs.mkdirSync(m.slugDir, { recursive: true }); fs.appendFileSync(m.logPath(id), lines(m, n)); };
+const lines = (m, n, cwd = m.folder) => Array.from({ length: n }, () => `${JSON.stringify({ type: 'user', n: lineNo++, cwd, text: `line ${lineNo} ${'pad '.repeat(lineNo % 30)}` })}\n`).join('');
+const append = (m, id, n, cwd) => { const lp = m.logPath(id); fs.mkdirSync(path.dirname(lp), { recursive: true }); fs.appendFileSync(lp, lines(m, n, cwd)); };
 // a conversation that m owns, with n lines uploaded
 function seed(m, n) {
   const id = crypto.randomUUID();
@@ -736,6 +772,268 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       M.dropAway(dir);
       ok(!fs.existsSync(M.awayPath(dir)), 'dropAway deletes it');
     }
+    // ---------- 17. a move carries the work, the env files and the sign-ins (sync-carry.js) ----------
+    {
+      // a repo on "GitHub" (a bare origin behind the fake ssh), cloned on both machines under their home folders
+      const seedRepo = (name, files) => {
+        g(REMOTES, 'init', '-q', '--bare', `${name}.git`);
+        const dir = path.join(T, 'seed', name);
+        g(T, 'clone', '-q', gitUrl(name), dir);
+        for (const [f, t] of Object.entries(files)) write(path.join(dir, f), t);
+        g(dir, 'add', '-A');
+        g(dir, 'commit', '-qm', 'first');
+        g(dir, 'push', '-q', 'origin', 'HEAD:main');
+      };
+      const cloneOf = (name, dir) => { g(T, 'clone', '-q', gitUrl(name), dir); return fs.realpathSync(dir); };
+      seedRepo('carry', {
+        'README.md': 'carry\n', 'src/app.js': 'export const a = 1;\n', 'pnpm-lock.yaml': 'lockfileVersion: 9\n',
+        'package.json': `${JSON.stringify({ name: 'carry', scripts: { deploy: 'vercel deploy --prod' } })}\n`,
+        'CLAUDE.md': 'Deploy with `vercel deploy`. Open PRs with `gh pr create`.\n', '.gitignore': '.env*\n!.env.example\nnode_modules/\n', '.env.example': 'SECRET=\n',
+      });
+      const pcRepo = cloneOf('carry', path.join(T, 'P', 'home', 'code', 'carry'));
+      const macRepo = cloneOf('carry', path.join(T, 'Q', 'home', 'code', 'carry'));
+      const byId = new Map();
+      // the tools are stubs (no real sign-in is ever read or written); which() knows the ones each machine has; the
+      // link calls the other machine's mover.peer, as fleet-view.js's /peer routes do
+      const tools = (m, have) => ({
+        platform: 'linux', env: { HOME: m.home }, roots: () => [m.folder],
+        which: (name) => (have.includes(name) ? `/stub/${name}` : null),
+        run: async (file, args, o2 = {}) => {
+          m.runs.push([path.basename(file), ...args.slice(0, 2)].join(' '));
+          if (file === '/stub/gh' && args[0] === 'auth' && args[1] === 'token') return m.gh ? { code: 0, out: `${m.gh}\n`, err: '' } : { code: 1, out: '', err: 'not logged in' };
+          if (file === '/stub/gh' && args[0] === 'auth' && args[1] === 'login') { m.gh = String(o2.input || '').trim(); return { code: 0, out: '', err: '' }; }
+          if (file === '/stub/claude' && args[0] === 'mcp') { m.mcpAdds.push({ scope: args[3], name: args[4], cfg: JSON.parse(args[5]), cwd: o2.cwd, dir: (o2.env || {}).CLAUDE_CONFIG_DIR }); return { code: 0, out: '', err: '' }; }
+          if (file === '/stub/pnpm' || file === '/stub/npm') { m.installs.push({ tool: path.basename(file), cwd: o2.cwd }); return { code: 0, out: '', err: '' }; }
+          return { code: 127, out: '', err: 'no such stub' };
+        },
+        link: () => ({
+          online: (dev) => { const other = byId.get(dev); return other ? !other.asleep : null; },
+          call: async (dev, method, route, o2 = {}) => {
+            const other = byId.get(dev);
+            if (!other || other.asleep) return { s: 0, b: { ok: false, code: 'offline', message: 'offline' } };
+            m.peerCalls.push(route);
+            const [st, b] = await other.mover.peer(route, o2.b, m.me);
+            return { s: st, b };
+          },
+        }),
+      });
+      const PC = machine('pc2', 'P', { folder: pcRepo, carry: (m) => tools(m, ['gh', 'claude', 'pnpm', 'node']) });
+      const MAC = machine('mac2', 'Q', { folder: macRepo, carry: (m) => tools(m, ['gh', 'claude', 'node']) });
+      for (const m of [PC, MAC]) { Object.assign(m, { runs: [], mcpAdds: [], installs: [], peerCalls: [], gh: null }); byId.set(m.me, m); }
+      const both = { who: [PC, MAC] };
+      const noteOf = (m, id) => CARRY.notesStore(m.dataDir).get(id);
+      const seedAt = (m, n, cwd) => {
+        const id = crypto.randomUUID();
+        db.conversations.push({ id, user_id: UID, account: 'b', repo_id: null, rel_cwd: '', state: 'active', owner_device: m.me, lease_until: null, size: 0, sha256: null, generation: 0, updated_at: iso(now()) });
+        append(m, id, n, cwd);
+        m.up.scan();
+        return id;
+      };
+
+      // pc2's sign-ins (made up), mac2 has none; and a chat with work on a branch
+      PC.gh = 'gho_PCTOKEN_0123456789';
+      write(path.join(PC.home, '.local', 'share', 'com.vercel.cli', 'auth.json'), JSON.stringify({ token: 'vcl_PCTOKEN_abcdef123' }));
+      write(path.join(PC.home, '.supabase', 'access-token'), 'sbp_PCTOKEN_0011223344');
+      write(path.join(PC.home, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_PCTOKEN_778899\ncolor=false\n');
+      write(path.join(PC.home, '.claude.json'), JSON.stringify({
+        mcpServers: { remote1: { type: 'http', url: 'https://mcp.example/x', headers: { Authorization: 'Bearer MCP_PCSECRET_42' } }, local1: { command: 'node', args: ['x.js'] } },
+        projects: { [pcRepo.replace(/\\/g, '/')]: { mcpServers: { proj1: { type: 'sse', url: 'https://p.example/sse' } } } },
+      }));
+      const SECRETS = ['gho_PCTOKEN_0123456789', 'vcl_PCTOKEN_abcdef123', 'sbp_PCTOKEN_0011223344', 'npm_PCTOKEN_778899', 'MCP_PCSECRET_42', 'CARRY_ENV_SECRET_99', 'PLAIN_SECRET_77', 'CRED_SECRET_55'];
+      g(pcRepo, 'switch', '-q', '-c', 'feat');
+      write(path.join(pcRepo, 'src', 'app.js'), 'export const a = 2;\n');
+      g(pcRepo, 'commit', '-qam', 'pushed one');
+      g(pcRepo, 'push', '-q', '-u', 'origin', 'feat');
+      write(path.join(pcRepo, 'src', 'lib.js'), 'export const lib = 1;\n');
+      g(pcRepo, 'add', 'src/lib.js');
+      g(pcRepo, 'commit', '-qm', 'unpushed one');
+      const pcHead = g(pcRepo, 'rev-parse', 'HEAD');
+      write(path.join(pcRepo, 'README.md'), 'carry, staged\n');
+      g(pcRepo, 'add', 'README.md');
+      write(path.join(pcRepo, 'src', 'app.js'), 'export const a = 3;\n');
+      write(path.join(pcRepo, 'notes', 'todo.md'), 'todo\n');
+      write(path.join(pcRepo, '.env.local'), 'SECRET=CARRY_ENV_SECRET_99\n');
+      write(path.join(pcRepo, 'credentials.json'), '{"token":"CRED_SECRET_55"}\n'); // untracked, not ignored, and a secret's name
+
+      const id = seed(PC, 4);
+      await step(PC); await step(MAC);
+      MAC.mover.move(id);
+      ok(await until(() => done(MAC, id), both), 'carried: the move ends');
+      const j = jobOf(MAC, id);
+      eq(j.phase, 'ready', `carried: ready (${j.error || ''})`);
+      const wt = path.join(macRepo, '.claude', 'worktrees', 'fv-feat');
+      eq(j.ready.cwd, wt, 'carried: it resumes in the chat\'s own worktree');
+      eq([g(wt, 'branch', '--show-current'), g(wt, 'rev-parse', 'HEAD')], ['feat', pcHead], 'carried: on feat, at the unpushed commit');
+      eq(read(path.join(wt, 'src', 'app.js')), 'export const a = 3;\n', 'carried: the unstaged change');
+      eq(g(wt, 'diff', '--cached', '--name-only'), 'README.md', 'carried: the staged change, staged');
+      eq(read(path.join(wt, 'notes', 'todo.md')), 'todo\n', 'carried: the new file');
+      ok(read(path.join(wt, 'credentials.json')) === null && /Not carried, as it looks like a secret \(still on pc2\): credentials\.json/.test(noteOf(MAC, id)), 'carried: an untracked file that looks like a secret stays on pc2, and the note says so');
+      ok(fs.existsSync(path.join(MAC.proj, C.slugOf(wt), `${id}.jsonl`)) && !fs.existsSync(path.join(MAC.slugDir, `${id}.jsonl`)), 'carried: the log is in the worktree\'s slug folder, nowhere else');
+      eq(MAC.movedTo && MAC.movedTo.dir, path.join(MAC.proj, C.slugOf(wt)), 'carried: the materializer was told where the log is');
+      eq(read(path.join(wt, '.env.local')), 'SECRET=CARRY_ENV_SECRET_99\n', 'carried: the ignored env file came over the link');
+      eq(fs.statSync(path.join(wt, '.env.local')).mode & 0o777, 0o600, 'carried: the env file is 0600');
+      ok(MAC.peerCalls.includes('/peer/env') && MAC.peerCalls.includes('/peer/logins'), 'carried: both peer routes were asked');
+      eq(MAC.gh, 'gho_PCTOKEN_0123456789', 'carried: gh logged in with the token, on stdin');
+      const vercelHere = path.join(MAC.home, '.local', 'share', 'com.vercel.cli', 'auth.json');
+      ok(JSON.parse(read(vercelHere)).token === 'vcl_PCTOKEN_abcdef123' && (fs.statSync(vercelHere).mode & 0o777) === 0o600, 'carried: the Vercel sign-in (auth.json, 0600)');
+      eq(read(path.join(MAC.home, '.supabase', 'access-token')), 'sbp_PCTOKEN_0011223344', 'carried: the Supabase sign-in');
+      ok(read(path.join(MAC.home, '.npmrc')).includes('//registry.npmjs.org/:_authToken=npm_PCTOKEN_778899') && !read(path.join(MAC.home, '.npmrc')).includes('color'), 'carried: only npm\'s auth line');
+      eq(MAC.mcpAdds.map((a) => `${a.scope}:${a.name}`).sort(), ['local:proj1', 'user:remote1'], 'carried: the remote MCP servers, the user\'s and the project\'s');
+      ok(MAC.mcpAdds.find((a) => a.name === 'proj1').cwd === wt && !MAC.mcpAdds.some((a) => a.dir), 'carried: the project one in the worktree, account B\'s config');
+      const miss = j.ready.missing.map((x) => x.what);
+      ok(miss.includes('pnpm') && miss.includes('vercel') && miss.includes('MCP server local1') && !miss.includes('the GitHub sign-in') && !miss.includes('the Vercel sign-in') && !miss.includes('.env.local'), `carried: the ready check (${JSON.stringify(miss)})`);
+      const note = noteOf(MAC, id);
+      ok(j.ready.note === true && /^\[Fleet View\] This chat moved from pc2 to mac2 at /.test(note) && note.includes(wt) && note.includes('on branch feat')
+        && /1 unpushed commit and 3 changed files, laid down and checked/.test(note) && /Copied from pc2: \.env\.local/.test(note) && /Missing here: .*pnpm/.test(note) && /did not move/.test(note), `carried: the note (${note})`);
+      ok(!MAC.installs.length, 'carried: no install without the lockfile\'s tool (pnpm is missing here)');
+      const said = JSON.stringify([PC.logs, MAC.logs, j, note, db.settings.map((r) => r.key)]);
+      ok(!SECRETS.some((x) => said.includes(x)), 'carried: no secret in a log, the job, the note or a row key');
+      ok(![...objects.values()].some((b) => SECRETS.some((x) => b.includes(Buffer.from(x)))), 'carried: no secret in storage (the env file and sign-ins never went there)');
+      ok(await until(() => g(pcRepo, 'status', '--porcelain') === '?? credentials.json', { who: [PC], max: 10 }), 'carried: pc2 put its changes away once mac2 claimed it');
+      ok(g(pcRepo, 'stash', 'list').includes('fleet-view: moved to mac2') && read(path.join(pcRepo, '.env.local')) !== null && read(path.join(pcRepo, 'credentials.json')) !== null, 'carried: in a stash named for the move; its env file and the secret-looking file left in place');
+      fs.rmSync(path.join(pcRepo, 'credentials.json')); // Henry puts it elsewhere
+      await MAC.mover.settle();
+      ok(!(await MAC.carry.readIndex(id)).packs.some((p) => p.kind === 'move') && ![...objects.keys()].some((k) => k.startsWith(`w/${id}/`)), 'carried: the move\'s pack is gone once laid down');
+      // the peer routes answer only while this machine hands that conversation to that machine, and only so often
+      eq((await PC.mover.peer('/peer/env', { id }, MAC.me))[0], 403, 'peer: no env files while nothing is being handed over');
+      eq((await PC.mover.peer('/peer/logins', { id }, MAC.me))[0], 403, 'peer: no sign-ins either');
+      eq((await PC.mover.peer('/peer/env', { id: 'not-an-id' }, MAC.me))[0], 400, 'peer: a bad id');
+      eq((await PC.mover.peer('/peer/env', { id }, 'not-a-device'))[0], 403, 'peer: no device id');
+      const stranger = crypto.randomUUID(), codes = [];
+      for (let i = 0; i < 13; i++) codes.push((await PC.mover.peer('/peer/logins', { id }, stranger))[0]);
+      ok(codes.slice(0, 12).every((c) => c === 403) && codes[12] === 429, `peer: 12 calls a minute from one machine, then 429 (${codes.join(',')})`);
+
+      // and back: mac2 changes a file in the worktree (its log names the worktree now), then pc2 takes it back, in place
+      write(path.join(wt, 'src', 'app.js'), 'export const a = 4;\n');
+      append(MAC, id, 2, wt);
+      await step(MAC); await step(PC);
+      PC.mover.move(id);
+      ok(await until(() => done(PC, id), both), 'back: the move ends');
+      const j2 = jobOf(PC, id);
+      eq(j2.phase, 'ready', `back: ready (${j2.error || ''})`);
+      eq(j2.ready.cwd, pcRepo, 'back: laid down in place, in the checkout it began in (on feat, clean since the put-away)');
+      eq([read(path.join(pcRepo, 'src', 'app.js')), g(pcRepo, 'rev-parse', 'HEAD'), g(pcRepo, 'diff', '--cached', '--name-only')], ['export const a = 4;\n', pcHead, 'README.md'], 'back: mac2\'s change, the same commit, the staged change');
+      ok(PC.installs.some((x) => x.tool === 'pnpm' && x.cwd === pcRepo), 'back: its dependencies install in the background (pnpm, by the lockfile)');
+      ok(await until(() => g(wt, 'status', '--porcelain') === '', { who: [MAC], max: 10 }), 'back: mac2 put its changes away');
+      ok(PC.gh === 'gho_PCTOKEN_0123456789' && JSON.parse(read(path.join(PC.home, '.local', 'share', 'com.vercel.cli', 'auth.json'))).token === 'vcl_PCTOKEN_abcdef123', 'back: no sign-in here was overwritten');
+
+      // a checkout another live chat works in: its changes stay there after the move, and the note says so
+      PC.host0(id, 'idle');
+      const id2 = seed(PC, 3);
+      await step(PC); await step(MAC);
+      MAC.mover.move(id2);
+      ok(await until(() => done(MAC, id2), both), 'shared: the move ends');
+      eq(jobOf(MAC, id2).phase, 'ready', `shared: ready (${jobOf(MAC, id2).error || ''})`);
+      ok(/also stay in pc2's checkout, where another chat works/.test(noteOf(MAC, id2)), 'shared: the note says the changes also stay on pc2');
+      await until(() => false, { who: [PC], max: 3 });
+      ok(g(pcRepo, 'status', '--porcelain').includes('src/app.js'), 'shared: pc2 did not put them away (the other chat works there)');
+      PC.hosted.delete(id);
+
+      // a pack sync-work.js refuses (a merge under way): the move fails and says so; noWork moves it without its work
+      const mergeHead = path.join(pcRepo, '.git', 'MERGE_HEAD');
+      fs.writeFileSync(mergeHead, `${pcHead}\n`);
+      const id3 = seed(PC, 2);
+      await step(PC); await step(MAC);
+      MAC.mover.move(id3);
+      ok(await until(() => done(MAC, id3), both), 'refused: the move ends');
+      let j3 = jobOf(MAC, id3);
+      ok(j3.phase === 'failed' && j3.workRefused === true && /a merge is under way/.test(j3.error), `refused: failed, and it was the work (${j3.error})`);
+      eq(rowOf(id3).owner_device, PC.me, 'refused: nothing was claimed');
+      MAC.mover.move(id3, { noWork: true });
+      ok(await until(() => done(MAC, id3), both), 'noWork: the move ends');
+      j3 = jobOf(MAC, id3);
+      eq(j3.phase, 'ready', `noWork: ready (${j3.error || ''})`);
+      ok(/Its work did not come \(a merge is under way/.test(noteOf(MAC, id3)), 'noWork: the note says the work stayed on pc2');
+      fs.rmSync(mergeHead, { force: true });
+
+      // no checkout of its repo here: the move fails before the claim, and pc2 keeps its work (no put-away)
+      seedRepo('other', { 'README.md': 'other\n' });
+      const otherPc = cloneOf('other', path.join(T, 'P', 'home', 'code', 'other'));
+      write(path.join(otherPc, 'x.txt'), 'pc2 only\n');
+      const id4 = seedAt(PC, 2, otherPc);
+      await step(PC); await step(MAC);
+      MAC.mover.move(id4);
+      ok(await until(() => done(MAC, id4), both), 'no checkout: the move ends');
+      const j4 = jobOf(MAC, id4);
+      ok(j4.phase === 'failed' && /Clone other on this machine first/.test(j4.error), `no checkout: failed, saying what to do (${j4.error})`);
+      eq(rowOf(id4).owner_device, PC.me, 'no checkout: nothing was claimed');
+      ok(await until(() => !PC.held.has(id4), { who: [PC], max: 120 }), 'no checkout: pc2 lets go of its hold');
+      ok(read(path.join(otherPc, 'x.txt')) === 'pc2 only\n' && !g(otherPc, 'stash', 'list').includes('fleet-view'), 'no checkout: pc2 keeps its work where it was');
+
+      // a bound chat (outside the home folder): only the conversation moves, and the note says the files stayed
+      const outside = path.join(T, 'P', 'outside');
+      write(path.join(outside, 'game.txt'), 'bound\n');
+      const id5 = seedAt(PC, 2, outside);
+      await step(PC); await step(MAC);
+      MAC.mover.move(id5);
+      ok(await until(() => done(MAC, id5), both), 'bound: the move ends');
+      ok(jobOf(MAC, id5).phase === 'ready' && jobOf(MAC, id5).ready.work === null, 'bound: ready, no work laid down');
+      ok(/Its files stayed on pc2 \(outside the home folder\): only the conversation moved/.test(noteOf(MAC, id5)), 'bound: the note says the files stayed');
+
+      // a plain home-row folder: its files come to the same folder under mac2's home, its env file over the link
+      const scratch = path.join(PC.home, 'scratch', 's1');
+      write(path.join(scratch, 'a.txt'), 'plain a\n');
+      write(path.join(scratch, 'sub', 'b.txt'), 'plain b\n');
+      write(path.join(scratch, '.env'), 'PLAIN=PLAIN_SECRET_77\n');
+      const id6 = seedAt(PC, 2, scratch);
+      await step(PC); await step(MAC);
+      MAC.mover.move(id6);
+      ok(await until(() => done(MAC, id6), both), 'plain: the move ends');
+      const here6 = path.join(MAC.home, 'scratch', 's1');
+      eq(jobOf(MAC, id6).ready && jobOf(MAC, id6).ready.cwd, here6, `plain: it resumes in the same folder under this home (${jobOf(MAC, id6).error || ''})`);
+      eq([read(path.join(here6, 'a.txt')), read(path.join(here6, 'sub', 'b.txt')), read(path.join(here6, '.env'))], ['plain a\n', 'plain b\n', 'PLAIN=PLAIN_SECRET_77\n'], 'plain: its files, and its env file over the link');
+      ok(fs.existsSync(path.join(MAC.proj, C.slugOf(here6), `${id6}.jsonl`)), 'plain: the log is in that folder\'s slug folder');
+
+      // the end of a turn on pc2: a snapshot of a portable chat's work (only when it changed; the newest 3 kept); with
+      // pc2 off, a forced takeover lays the newest one down, and the note says how old it is
+      const snapPc = cloneOf('carry', path.join(T, 'P', 'home', 'code', 'carry2'));
+      g(snapPc, 'switch', '-q', '-c', 'snap');
+      write(path.join(snapPc, 'src', 'snap.js'), 'snap 1\n');
+      const id7 = seedAt(PC, 3, snapPc);
+      PC.hosted.set(id7, { id: id7, alive: true, status: 'busy', waitingFor: null, cwd: snapPc, account: 'B' });
+      const turn = async () => { PC.hosted.get(id7).status = 'busy'; await step(PC); PC.hosted.get(id7).status = 'idle'; await step(PC); };
+      await step(PC); await step(MAC);
+      await turn();
+      const s1 = await PC.carry.newestSnapshot(id7, PC.me);
+      ok(s1 && s1.kind === 'snapshot' && s1.sig, 'snapshot: a turn\'s end leaves one');
+      // the guards: a turn's snapshot over its cap (50 MB; 1 byte here) is skipped, and a put-away never happens in the
+      // checkout this Fleet View runs from
+      {
+        const guard = CARRY.createCarry({ api: { rest: async () => [], storage: {} }, key: KEY, dataDir: path.join(T, 'guard'), log: () => {}, now: () => clock.t,
+          home: path.join(T, 'P', 'home'), device: () => PC.me, selfDir: snapPc, snapCap: 1 });
+        write(path.join(snapPc, 'src', 'big.txt'), 'more than one byte\n');
+        eq(await guard.snapshot({ id: id7, file: PC.logPath(id7) }), null, 'snapshot: more than a snapshot carries, skipped');
+        fs.rmSync(path.join(snapPc, 'src', 'big.txt'));
+        const pa = await guard.putAwayAfter({ kind: 'git', root: snapPc, cwd: snapPc }, { id: id7, toName: 'mac', list: [] });
+        eq([pa.stashed, pa.why], [null, 'Fleet View runs from that checkout'], 'put-away: never in the checkout Fleet View runs from');
+        eq(read(path.join(snapPc, 'src', 'snap.js')), 'snap 1\n', 'put-away: its files there stay as they were');
+      }
+      await turn();
+      eq((await PC.carry.newestSnapshot(id7, PC.me)).pack, s1.pack, 'snapshot: nothing changed, no new one');
+      for (let i = 2; i <= 5; i++) { write(path.join(snapPc, 'src', 'snap.js'), `snap ${i}\n`); clock.t += 1000; await turn(); }
+      const snaps = (await PC.carry.readIndex(id7)).packs.filter((p) => p.kind === 'snapshot');
+      eq(snaps.length, 3, 'snapshot: the newest 3 are kept');
+      eq([...objects.keys()].filter((k) => k.startsWith(`w/${id7}/p/`)).length, 3, 'snapshot: the older ones\' records are gone from storage');
+      write(path.join(snapPc, 'src', 'snap.js'), 'snap 6, never in a snapshot\n');
+      PC.asleep = true;
+      clock.t += 4 * 60e3;
+      await step(MAC);
+      MAC.mover.move(id7);
+      await step(MAC);
+      ok(await until(() => jobOf(MAC, id7).canForce === true, { who: [MAC], max: 300, stepMs: 2000 }), 'snapshot: pc2 is off, and it can be forced');
+      MAC.mover.move(id7, { force: true });
+      ok(await until(() => done(MAC, id7), { who: [MAC] }), 'snapshot: forced, it ends');
+      const j7 = jobOf(MAC, id7);
+      eq(j7.phase, 'ready', `snapshot: ready (${j7.error || ''})`);
+      const wt7 = path.join(macRepo, '.claude', 'worktrees', 'fv-snap');
+      eq([j7.ready.cwd, read(path.join(wt7, 'src', 'snap.js'))], [wt7, 'snap 5\n'], 'snapshot: the newest snapshot laid down in its own worktree');
+      ok(/last snapshot, as of .*Anything newer is still on pc2/.test(noteOf(MAC, id7)), 'snapshot: the note says how old the work is');
+      PC.asleep = false;
+      PC.hosted.delete(id7);
+      await MAC.mover.settle();
+      await PC.mover.settle();
+    }
+
   } finally {
     if (process.env.SYNC_TEST_KEEP !== '1') fs.rmSync(T, { recursive: true, force: true });
   }

@@ -6,20 +6,21 @@
 //
 //   inspect(cwd, o)   -> { kind, why, git, exists, root, mainRoot, origin, branch, head, rel, worktree, dirty }
 //   pack(cwd, o)      -> { manifest, blobs }               (throws a WorkError when it won't carry the folder)
-//   unpack(manifest, blobs, { root, into, fetch, home }) -> { cwd, into, branch, notes }
+//   unpack(manifest, blobs, { root, into, fetch, home }) -> { cwd, into, branch, notes, made, undo }
+//   undo(unpack's result)  -> what it laid down goes again (a move that failed after it)
 //   verify(cwd, manifest, o) -> { ok, diffs }
 //   putAway(cwd, note) -> the stash commit's sha, or null when there was nothing to put away
 //
-// inspect: what a chat's folder is. kind 'portable': a git checkout whose origin normalizes (sync-common.js
-//   normalizeOrigin, the same remote sync's repos rows name), or a folder under the home folder in no git checkout
-//   (sync's home row: a scratchpad, a bot's folder). 'bound', with why: everything else: a git checkout with no origin,
-//   a folder outside the home folder, an app data or Claude account folder (sync-common.js homeSkipped), the home
-//   folder itself, or a Perforce workspace (a .p4config, p4config.txt or .p4ignore file, or the file P4CONFIG names, in
-//   the folder or above it; or, with the p4 command on PATH, under the client root `p4 info` gives). root: the git
+// inspect: what a chat's folder is, by sync-common.js's rule (workspaceKind, the uploader's and /state's too, with the
+//   same why texts). kind 'portable': a git checkout whose origin normalizes (normalizeOrigin, the same remote sync's
+//   repos rows name), or a folder under the home folder in no git checkout (sync's home row: a scratchpad, a bot's
+//   folder). 'bound', with why: everything else: a placeholder for another machine's folder, a git checkout with no
+//   origin, a folder outside the home folder, an app data or Claude account folder, the home folder itself, or a
+//   Perforce workspace (sync-common.js perforceAt; the client root `p4 info` gives, p4ClientRoots). root: the git
 //   top level (a linked worktree's own folder), or the home folder for a plain folder; mainRoot: the main checkout's
 //   top level; rel: cwd from root, with '/'; worktree: the linked worktree's folder name, else null; branch: null when
 //   HEAD is detached; head: null before the first commit; dirty: `git status` lists anything. o.home: the home folder
-//   (os.homedir()); o.p4Roots: the Perforce client roots (tests; otherwise asked of p4 once every 10 minutes).
+//   (os.homedir()); o.p4Roots: the Perforce client roots (tests; otherwise sync-common.js p4ClientRoots).
 //
 // pack: the manifest (plain JSON) and the blobs it names (a Map from each blob's sha256, in hex, to its bytes).
 //   { v: 1, kind: 'git', origin, branch, head, base, bundle, bundleRef, staged, unstaged, trees: { index, work },
@@ -84,11 +85,9 @@ const C = require(path.join(__dirname, 'sync-common.js'));
 const CAP = 200 * 1024 * 1024; // the most one pack carries in all
 const PLAIN_FILES = 20000; // files in a plain (home-row) folder
 const GIT_MS = 60e3, FETCH_MS = 120e3, BUNDLE_MS = 300e3;
-const P4_MS = 5e3, P4_CACHE_MS = 10 * 60e3;
 // core.hooksPath for every call: a folder that holds no hooks (under /dev/null nothing can exist; on Windows a
 // random folder nobody made)
 const NULL_HOOKS = P.isWin ? path.join(os.tmpdir(), `fleet-view-no-hooks-${crypto.randomBytes(8).toString('hex')}`) : '/dev/null';
-const P4_FILES = ['.p4config', 'p4config.txt', '.p4ignore', '.p4ignore.txt'];
 const ENV_RE = /^\.env(?:\..*)?$/i; // .env, .env.local, .env.production: never in a pack
 const PLAIN_SKIP = new Set(['node_modules', '.git']);
 const HEX40 = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/; // a SHA-1 or SHA-256 object id
@@ -173,72 +172,36 @@ async function changesIn(dir) {
   return out;
 }
 
-// ---------- Perforce ----------
-let p4Cache = { at: 0, roots: [] };
-async function p4Roots(o) {
-  if (Array.isArray(o.p4Roots)) return o.p4Roots;
-  const now = Date.now();
-  if (now - p4Cache.at < P4_CACHE_MS) return p4Cache.roots;
-  p4Cache = { at: now, roots: [] };
-  const p4 = P.which ? P.which('p4') : null;
-  if (!p4) return p4Cache.roots;
-  const r = await new Promise((resolve) => {
-    let out = '';
-    try {
-      const c = spawn(p4, ['-ztag', '-F', '%clientRoot%', 'info'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
-      const t = setTimeout(() => { try { c.kill(); } catch {} }, P4_MS);
-      c.stdout.on('data', (d) => { out += d.toString('utf8'); });
-      c.on('error', () => { clearTimeout(t); resolve(''); });
-      c.on('close', () => { clearTimeout(t); resolve(out); });
-    } catch { resolve(''); }
-  });
-  const root = String(r).trim().split(/\r?\n/)[0];
-  if (root && root !== '*unknown*' && path.isAbsolute(root)) p4Cache.roots = [root];
-  return p4Cache.roots;
-}
-async function perforce(dir, o) {
-  const names = [...P4_FILES];
-  if (process.env.P4CONFIG && !/[\\/]/.test(process.env.P4CONFIG)) names.push(process.env.P4CONFIG);
-  for (let d = dir; ; ) {
-    if (names.some((n) => !!lst(path.join(d, n)))) return true;
-    const up = path.dirname(d);
-    if (up === d) break;
-    d = up;
-  }
-  return (await p4Roots(o)).some((r) => inside(path.resolve(r), dir) !== null || sameDir(r, dir));
-}
-
 // ---------- inspect ----------
+// The kind and its why are sync-common.js's (workspaceKind: the one rule the uploader and /state use too); this adds
+// the git facts a pack needs.
 async function inspect(cwd, o = {}) {
   const home = path.resolve(realOr(o.home || os.homedir()));
   const want = path.resolve(realOr(path.resolve(cwd)));
   const out = { kind: 'bound', why: null, git: false, exists: isDir(want), root: null, mainRoot: null, origin: null,
     branch: null, head: null, rel: null, worktree: null, dirty: false };
-  const homeRule = async () => {
-    const rel = inside(home, want);
-    if (rel === null) out.why = 'outside the home folder';
-    else if (rel === '') out.why = 'the home folder itself';
-    else if (C.homeSkipped(rel)) out.why = 'an app data or Claude account folder';
-    else if (out.exists && await perforce(want, o)) out.why = 'a Perforce workspace';
-    else Object.assign(out, { kind: 'portable', root: home, mainRoot: home, origin: C.HOME_ORIGIN, rel });
-    return out;
-  };
-  if (!out.exists) return homeRule();
-  const top = await maybe(want, ['rev-parse', '--show-toplevel']);
-  if (!top) return homeRule();
-  out.git = true;
-  out.root = path.resolve(realOr(top));
-  const common = await maybe(want, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  out.mainRoot = common ? path.resolve(realOr(path.dirname(path.resolve(common)))) : out.root;
-  if (!sameDir(out.mainRoot, out.root)) out.worktree = path.basename(out.root);
-  out.origin = C.normalizeOrigin(await maybe(want, ['remote', 'get-url', 'origin']));
-  out.branch = await maybe(want, ['symbolic-ref', '-q', '--short', 'HEAD']);
-  out.head = await maybe(want, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
-  out.rel = inside(out.root, want) || '';
-  const ch = await changesIn(out.root);
-  out.dirty = !!ch && ch.length > 0;
-  if (out.origin) out.kind = 'portable';
-  else out.why = 'a git checkout with no origin';
+  const top = out.exists ? await maybe(want, ['rev-parse', '--show-toplevel']) : null;
+  if (top) {
+    out.git = true;
+    out.root = path.resolve(realOr(top));
+    const common = await maybe(want, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    out.mainRoot = common ? path.resolve(realOr(path.dirname(path.resolve(common)))) : out.root;
+    if (!sameDir(out.mainRoot, out.root)) out.worktree = path.basename(out.root);
+    out.origin = C.normalizeOrigin(await maybe(want, ['remote', 'get-url', 'origin']));
+    out.branch = await maybe(want, ['symbolic-ref', '-q', '--short', 'HEAD']);
+    out.head = await maybe(want, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
+    out.rel = inside(out.root, want) || '';
+    const ch = await changesIn(out.root);
+    out.dirty = !!ch && ch.length > 0;
+  }
+  const roots = Array.isArray(o.p4Roots) ? o.p4Roots : await C.p4ClientRoots();
+  const perforce = !out.git && !!C.perforceAt(want, { home, roots });
+  const k = C.workspaceKind({ cwd: want, git: out.git, origin: out.origin, perforce, home });
+  if (!k) { out.why = 'not a folder of this machine'; return out; }
+  out.kind = k.kind;
+  out.why = k.why;
+  // a plain folder under home (the home row): its root is the home folder
+  if (!out.git && k.kind === 'portable') Object.assign(out, { root: home, mainRoot: home, origin: C.HOME_ORIGIN, rel: inside(home, want) });
   return out;
 }
 
@@ -507,8 +470,10 @@ function throughLink(into, dest) {
   return false;
 }
 // the files first and the symlinks last, so no entry can lead a later one out of into
+// -> the files it wrote (not the ones that were there already, the same)
 function writeUntracked(into, m, blobs, notes) {
   const order = [...m.untracked.filter((e) => e.mode !== '120000'), ...m.untracked.filter((e) => e.mode === '120000')];
+  const wrote = [];
   for (const e of order) {
     const dest = fromRel(into, e.path), b = blobOf(blobs, e.sha256);
     if (throughLink(into, dest)) throw new WorkError(`${e.path} would be written through a symlink: refused`, 'conflict');
@@ -519,6 +484,7 @@ function writeUntracked(into, m, blobs, notes) {
       throw new WorkError(`${e.path} is there already and differs`, 'conflict');
     }
     fs.mkdirSync(path.dirname(dest), { recursive: true });
+    wrote.push(dest);
     if (e.mode === '120000') {
       try { fs.symlinkSync(b.toString('utf8'), dest); continue; } catch { notes.push(`${e.path}: a symlink this machine would not make, written as a file holding its target`); }
       fs.writeFileSync(dest, b);
@@ -527,6 +493,7 @@ function writeUntracked(into, m, blobs, notes) {
     fs.writeFileSync(dest, b);
     if (!P.isWin) fs.chmodSync(dest, e.mode === '100755' ? 0o755 : 0o644);
   }
+  return wrote;
 }
 
 async function unpack(manifest, blobs, o = {}) {
@@ -618,26 +585,42 @@ async function unpack(manifest, blobs, o = {}) {
       fs.mkdirSync(cwd, { recursive: true });
       const v = await verify(cwd, m);
       if (!v.ok) throw new WorkError(`the work laid down here isn't what was packed: ${v.diffs.slice(0, 4).join('; ')}`, 'verify', { diffs: v.diffs });
-      return { cwd, into, branch, notes };
+      return { cwd, into, branch, notes, made: made.inPlace ? 'inplace' : 'worktree', undo: { root, made } };
     } catch (e) {
-      if (made.inPlace) {
-        // it was clean but for untracked env files, which clean must leave (-e keeps them, -x is never given)
-        const sw = made.switched;
-        await runGit(made.inPlace, ['reset', '--quiet', '--hard', ...(sw ? [] : [made.was])]);
-        await runGit(made.inPlace, ['clean', '-fdq', '-e', '.env', '-e', '.env.*', '-e', '.ENV', '-e', '.ENV.*']);
-        if (sw) {
-          // switched over from another branch: back onto it, then the branch it made goes and one it moved goes back
-          await runGit(made.inPlace, sw.branch ? ['switch', '--quiet', sw.branch] : ['switch', '--quiet', '--detach', made.was]);
-          if (sw.made) await runGit(root, ['branch', '-D', sw.made]);
-          if (sw.moved && sw.moved.from) await runGit(root, ['branch', '-f', sw.moved.name, sw.moved.from]);
-        }
-      } else {
-        await runGit(root, ['worktree', 'remove', '--force', made.worktree]);
-        if (made.branch) await runGit(root, ['branch', '-D', made.branch]);
-      }
+      await undoMade(root, made);
       throw e;
     }
   } finally { rmTmp(d); }
+}
+// what unpack made, undone: a worktree it added (and the branch it made) removed; a checkout used in place back to its
+// commit and clean (untracked env files stay: clean gets -e for them, never -x), back onto its own branch when it was
+// switched over, a branch the switch made deleted and one it fast-forwarded put back
+async function undoMade(root, made) {
+  if (made.inPlace) {
+    const sw = made.switched;
+    await runGit(made.inPlace, ['reset', '--quiet', '--hard', ...(sw ? [] : [made.was])]);
+    await runGit(made.inPlace, ['clean', '-fdq', '-e', '.env', '-e', '.env.*', '-e', '.ENV', '-e', '.ENV.*']);
+    if (sw) {
+      await runGit(made.inPlace, sw.branch ? ['switch', '--quiet', sw.branch] : ['switch', '--quiet', '--detach', made.was]);
+      if (sw.made) await runGit(root, ['branch', '-D', sw.made]);
+      if (sw.moved && sw.moved.from) await runGit(root, ['branch', '-f', sw.moved.name, sw.moved.from]);
+    }
+  } else {
+    await runGit(root, ['worktree', 'remove', '--force', made.worktree]);
+    if (made.branch) await runGit(root, ['branch', '-D', made.branch]);
+  }
+}
+// undo(unpack's result): what it laid down goes again (a move that failed after the unpack: the env files, the log's
+// move, the claim). A plain lay-down removes the files it wrote (none that were there already). -> true when undone
+async function undo(res) {
+  const u = res && res.undo;
+  if (!u) return false;
+  if (u.plain) {
+    for (const f of u.plain) { try { fs.rmSync(f, { force: true }); } catch {} }
+    return true;
+  }
+  await undoMade(u.root, u.made);
+  return true;
 }
 
 function unpackPlain(m, blobs, o) {
@@ -653,8 +636,8 @@ function unpackPlain(m, blobs, o) {
     if (!same) throw new WorkError(`${e.path} is in ${into} already and differs: nothing was written`, 'conflict');
   }
   fs.mkdirSync(into, { recursive: true });
-  writeUntracked(into, m, blobs, notes);
-  return { cwd: into, into, branch: null, notes };
+  const wrote = writeUntracked(into, m, blobs, notes);
+  return { cwd: into, into, branch: null, notes, made: 'plain', undo: { plain: wrote } };
 }
 
 // ---------- verify ----------
@@ -697,12 +680,14 @@ async function verify(cwd, manifest, o = {}) {
 
 // ---------- putAway ----------
 const ENV_SPECS = ['**/.env', '**/.env.*', '**/.env/**', '**/.env.*/**'].map((g) => `:(exclude,top,glob,icase)${g}`);
-async function putAway(cwd, note) {
+// o.keep: more paths (from the top, with /) that stay where they are: the untracked files a pack left out as secrets
+async function putAway(cwd, note, o = {}) {
   const top = await maybe(cwd, ['rev-parse', '--show-toplevel']);
   if (!top) return null;
   const msg = clip(note || 'fleet-view: moved', 200);
+  const keep = (Array.isArray(o.keep) ? o.keep : []).filter((p) => safeRel(p)).slice(0, 100).map((p) => `:(exclude,top,literal)${p}`);
   const before = await maybe(top, ['rev-parse', '-q', '--verify', 'refs/stash']);
-  await git(top, ['stash', 'push', '--quiet', '--include-untracked', '-m', msg, '--', ':/', ...ENV_SPECS]);
+  await git(top, ['stash', 'push', '--quiet', '--include-untracked', '-m', msg, '--', ':/', ...ENV_SPECS, ...keep]);
   const after = await maybe(top, ['rev-parse', '-q', '--verify', 'refs/stash']);
   if (!after || after === before) return null;
   // the stash is shared by every worktree: find ours by its message
@@ -713,4 +698,4 @@ async function putAway(cwd, note) {
   return after;
 }
 
-module.exports = { inspect, pack, unpack, verify, putAway, WorkError, CAP, isEnvName, checkManifest };
+module.exports = { inspect, pack, unpack, undo, verify, putAway, WorkError, CAP, isEnvName, envPath, checkManifest, safeRel };

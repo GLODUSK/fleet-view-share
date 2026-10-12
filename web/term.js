@@ -46,6 +46,9 @@
 // failed and cancelled show why and Try again. syncOwner.moving 'here' (a move this PC started, the tab reopened)
 // picks the job up again; 'away' (another PC is taking it from this one) says so with no button. When the folder
 // was never trusted for that account here (ready.trusted false) the tab says Claude will ask; it never answers.
+// A move carries the chat's work too (sync-carry.js): ready.missing (tools, sign-ins, env files this machine lacks)
+// shows in the card and then in a bar over the session until OK; a failed job whose work the other machine could not
+// pack (workRefused) offers "Move it without the work" (POST with noWork).
 //
 // The terminal is xterm.js, vendored in vendor/xterm/ and loaded the first time a session is shown. One xterm
 // per hosted conversation, kept while its pty exists, so switching between conversations keeps each one's
@@ -524,6 +527,7 @@ export function renderSessionPane(pane, s, o) {
     if (!pane._opening || pane._opening.id !== s.id) pane._opening = null;
     stopMove(pane); // a move goes on in the server; this tab only stops watching it
     if (pane._trust?.id !== s.id) pane._trust = null;
+    if (pane._missing?.id !== s.id) pane._missing = null;
   }
   if (h && pane._opening && pane._opening.id === s.id) pane._opening = null;
   // a move this PC started (or the one on show) is watched again whenever the tab shows it
@@ -552,7 +556,8 @@ export function renderSessionPane(pane, s, o) {
   const bar = ended ? `<span class="s-end-t">${icon('error', 14)}<span>Session ended${h.exitCode != null ? ` (code ${esc(h.exitCode)})` : ''}</span></span>`
     + '<span class="grow"></span><button type="button" class="btn s-btn" data-s="reopen">Reopen</button><button type="button" class="btn s-btn" data-s="dismiss">Close</button>'
     : h.interrupted ? `<span class="s-end-t s-int-t"><span>Was interrupted when Fleet View closed — ${h.autoContinue ? 'it carries on by itself once it has loaded' : 'tell it to continue'}</span></span>`
-      : pane._trust?.id === s.id ? trustBarHtml(pane._trust.cwd) : '';
+      : pane._trust?.id === s.id ? trustBarHtml(pane._trust.cwd)
+        : pane._missing?.id === s.id ? missingBarHtml(pane._missing.list) : '';
   if (pane._barHtml !== bar) { pane._bar.innerHTML = bar; pane._barHtml = bar; }
   pane._bar.hidden = !bar;
   pane._bar.classList.toggle('s-bar-note', !ended && !h.interrupted && !!bar);
@@ -625,9 +630,11 @@ function buildPane(pane) {
     else if (act === 'dismiss') dismiss(pane, s);
     else if (act === 'move' || act === 'move-retry') startMove(pane, s, false);
     else if (act === 'move-force') startMove(pane, s, true);
+    else if (act === 'move-nowork') startMove(pane, s, false, { noWork: true });
     else if (act === 'move-cancel') cancelMove(pane, s);
     else if (act === 'move-open') openReady(pane, s);
     else if (act === 'trust-hide') { pane._trust = null; rerender(pane); }
+    else if (act === 'missing-hide') { pane._missing = null; rerender(pane); }
   });
   const ro = new ResizeObserver(() => { cancelAnimationFrame(pane._fitRaf); pane._fitRaf = requestAnimationFrame(() => fitMounted(pane)); });
   ro.observe(pane._host);
@@ -698,8 +705,8 @@ function pollMove(pane, m, delay) {
 }
 
 // Continue here (force: Take over now, Use the cloud copy), and Try again: a second POST for the same move returns
-// that job (with force, upgraded)
-async function startMove(pane, s, force) {
+// that job (with force, upgraded); noWork: Move it without the work (the other machine could not pack it)
+async function startMove(pane, s, force, extra = {}) {
   if (pane._move?.id !== s.id) { stopMove(pane); pane._move = newMove(s.id); }
   const m = pane._move;
   if (m.busy) return;
@@ -710,7 +717,10 @@ async function startMove(pane, s, force) {
   m.opened = false;
   if (!force) m.job = null; // a new try starts at "asking"; a force keeps the phase on show until answered
   rerender(pane);
-  const r = await moveCall('POST', s.id, force ? { id: s.id, force: true } : { id: s.id });
+  const body = { id: s.id };
+  if (force) body.force = true;
+  if (extra.noWork) body.noWork = true;
+  const r = await moveCall('POST', s.id, body);
   if (pane._move !== m) return;
   m.busy = false;
   if (r && r.status === 200 && r.data) m.job = r.data;
@@ -746,12 +756,19 @@ function openReady(pane, s) {
   m.opened = true;
   m.want = false;
   pane._trust = rd.trusted === false && rd.cwd ? { id: s.id, cwd: rd.cwd } : null;
+  pane._missing = Array.isArray(rd.missing) && rd.missing.length ? { id: s.id, list: rd.missing } : null;
   openHere(pane, { ...s, cwd: rd.cwd || s.cwd, account: rd.account || s.account }, false);
 }
 
 const trustNoteHtml = (cwd) => `<div class="s-note">${icon('folder', 13)}<span>Claude will ask whether you trust <b>${esc(cwd)}</b>: answer it in the session.</span></div>`;
 const trustBarHtml = (cwd) => `<span class="s-note-t">${icon('folder', 13)}<span>Claude will ask whether you trust <b>${esc(cwd)}</b></span></span>`
   + '<span class="grow"></span><button type="button" class="btn s-btn" data-s="trust-hide">OK</button>';
+// what a moved chat still lacks on this machine (sync-carry.js's ready check: tools, sign-ins, env files), each with
+// how to get it (in its title)
+const missingList = (list) => list.slice(0, 8).map((x) => `<b title="${esc(x.how || '')}">${esc(x.what)}</b>`).join(', ') + (list.length > 8 ? ` and ${list.length - 8} more` : '');
+const missingNoteHtml = (list) => `<div class="s-note">${icon('error', 13)}<span>Missing here: ${missingList(list)}. Claude is told what and how.</span></div>`;
+const missingBarHtml = (list) => `<span class="s-note-t">${icon('error', 13)}<span>Missing here: ${missingList(list)}</span></span>`
+  + '<span class="grow"></span><button type="button" class="btn s-btn" data-s="missing-hide">OK</button>';
 
 // another device owns it, no move on show: where it is, and Continue here (none while it moves away from this PC)
 function ownerHtml(s, pane, m) {
@@ -817,6 +834,8 @@ function moveHtml(s, pane, m) {
   const btns = [];
   if (j && j.canForce && phase === 'waiting') btns.push(`<button type="button" class="btn primary s-go" data-s="move-force"${dis}>${icon('sync', 15)}<span>Take over now</span></button>`);
   if (j && j.canForce && (phase === 'offline' || phase === 'noanswer')) btns.push(`<button type="button" class="btn primary s-go" data-s="move-force"${dis}>${icon('sync', 15)}<span>Use the cloud copy</span></button>`);
+  // the other machine could not pack its work (a merge under way, a submodule, git-lfs, too big): it can move without it
+  if (phase === 'failed' && j && j.workRefused) btns.push(`<button type="button" class="btn s-go" data-s="move-nowork"${dis}>${icon('sync', 15)}<span>Move it without the work</span></button>`);
   if (phase === 'failed' || phase === 'cancelled') btns.push(`<button type="button" class="btn primary s-go" data-s="move-retry"${dis}>${icon('sync', 15)}<span>Try again</span></button>`);
   if (phase === 'ready') btns.push(`<button type="button" class="btn primary s-go" data-s="move-open">${icon('shell', 15)}<span>Open here</span></button>`);
   else if (j && !MOVE_FINAL.has(phase)) btns.push(`<button type="button" class="btn s-btn" data-s="move-cancel"${dis}>Cancel</button>`);
@@ -824,7 +843,8 @@ function moveHtml(s, pane, m) {
   return `<div class="s-card s-move${working ? ' working' : ''}"><div class="s-ic">${icon('sync', 20)}</div><div class="s-title">${esc(title)}</div>`
     + `<div class="s-phase">${esc(line)}</div>`
     + (detail ? `<div class="s-text">${esc(detail)}</div>` : '')
-    + whereHtml + (rd && rd.trusted === false && rd.cwd ? trustNoteHtml(rd.cwd) : '') + errHtml
+    + whereHtml + (rd && rd.trusted === false && rd.cwd ? trustNoteHtml(rd.cwd) : '')
+    + (rd && Array.isArray(rd.missing) && rd.missing.length ? missingNoteHtml(rd.missing) : '') + errHtml
     + (btns.length ? `<div class="s-actions">${btns.join('')}</div>` : '') + '</div>';
 }
 

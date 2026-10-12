@@ -23,6 +23,7 @@
 //     list (device lower-case, leaseUntil = Date.parse(lease_until) or null, account the row's 'a' | 'b' or null: the
 //     account it ran under there; bound: its repos row is a bound one, sync-common.js "portable or bound"). Empty before
 //     the first scan. status().listedAt is when that list began (ISO), so a change of owner made before then is in it.
+//   moved(id, dir): a move put the log it laid down into slug folder dir (where it resumes): it stays there
 //
 // For "Clone what's missing" (sync-clone.js):
 //   missing() -> { at, repos: [{ origin, name, chats, newest }] }: the repos whose conversations the last whole scan
@@ -864,8 +865,18 @@ function createMaterializer(opts = {}) {
     };
   }
   const conflicts = () => Object.values(state.conflicts).map((c) => ({ ...c }));
+  // a move (sync-move.js, sync-carry.js relocateLog) put the log it laid down into another slug folder of the same
+  // projects folder, where it resumes: it stays there from now on (the next scan finds it there anyway)
+  function moved(id, dir) {
+    const k = typeof id === 'string' ? id.toLowerCase() : '';
+    const e = state.convos[k];
+    if (!e || typeof dir !== 'string' || !dir) return false;
+    e.dir = path.resolve(dir);
+    saveState();
+    return true;
+  }
 
-  return { scanOnce, start, stop, status, conflicts, pull, owners, missing };
+  return { scanOnce, start, stop, status, conflicts, pull, owners, missing, moved };
 }
 
 module.exports = { createMaterializer, relParts, planChunks, downStatePath, FETCH_AHEAD, ROWS_AT_ONCE, NO_CHECKOUT };

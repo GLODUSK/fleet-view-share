@@ -236,11 +236,10 @@ home folder, which goes under the home row); a placeholder here is bound; else p
 its folder's kind, read at once (`fleet-view.js` `workspaceOf`, the facts from `sync-common.js` `checkoutAt` and
 `perforceAt`).
 
-## The work pack (not wired into moves yet)
+## The work pack
 
-What `sync-work.js` gives for the code a chat was changing (docs/sync-follow.md, item 3). It is only the library for
-now: no move carries a pack yet, and nothing below is uploaded. When moves carry it, the mover seals the manifest and
-the blobs like everything else, and this section grows the object paths and the rows.
+What `sync-work.js` gives for the code a chat was changing (docs/sync-follow.md, item 3), and how a move carries it
+(`sync-move.js` with `sync-carry.js`; see "What a move carries" below).
 
 - **The manifest** (plain JSON):
 
@@ -279,6 +278,37 @@ the blobs like everything else, and this section grows the object paths and the 
   made if verification fails.
 - **Putting it away** (`putAway`): the source's `git stash push --include-untracked`, env files left in place.
   Nothing is deleted.
+
+### What a move carries (sync-carry.js)
+
+- **In storage** (the fleet-sync bucket, under the user's folder; every object gzipped and sealed with
+  `sync-crypto.js` `sealChunk`, its label its path):
+  - `w/<conversation id>/b/<blob sha256>/<n>`: a blob's n-th piece of at most 8 MiB. A conversation keeps each blob
+    once, whatever packs name it.
+  - `w/<conversation id>/p/<pack id>`: a pack's record, `{ v: 1, id, manifest, blobs: { <sha256>: size } }`. Pack ids
+    are 16 hex digits.
+- **The list** of a conversation's packs: the settings row `work:<conversation id>`, sealed like the move rows:
+  `{ v: 1, id, packs: [{ pack, kind: 'move' | 'snapshot', by (device), at, record (sha256 of the record's JSON),
+  blobs: { <sha256>: size }, summary, sig? }] }`. A move's pack goes once the new owner laid it down (or after a day,
+  its move failed); snapshots are kept 3 to a conversation; a blob goes when no pack left names it.
+- **The move** (`move:<id>:ask` and `:reply`, above): an ask with `carry: 1` (B lays packs down; an older B never
+  says so, and A then packs nothing) and `noWork: true` (Henry's "Move it without the work"). A's released reply's
+  `final.work`: `{ pack, record, kind, branch, summary, notes, shared, envPaths }` (`shared`: another live chat on A
+  works in that checkout, so A leaves the changes there too; `envPaths`: the env files' paths, from the checkout's
+  top, ignored ones included), or `{ none: why }` (a bound folder; an older B) or `{ refused: why }` (noWork). A pack
+  sync-work.js refuses without noWork fails the reply, with `workRefused: true`.
+- **On B**, before the claim: the pack laid down (`unpack`: the chat's own worktree, or in place where it began when
+  that checkout is on its branch, clean, and no other live chat there works in it), the log moved into the slug
+  folder of the folder it resumes in (`relocateLog`; the materializer's `moved(id, dir)` keeps it there), the env
+  files and sign-ins from A over the link (`/peer/env`, `/peer/logins`: never Supabase), and the ready check. Any
+  failure fails the job: nothing is claimed, and what was laid down goes again. After the claim: the note for Claude
+  (`<dataDir>/sync/notes.json`, `GET`/`POST /sync/note`), the move's pack dropped, the dependencies installed in
+  the background by the lockfile (`<dataDir>/carry.log`). On A, once it sees B's claim: `putAway`, a stash named
+  "fleet-view: moved to <B> <time> (<id>)", unless another live chat there works in that checkout.
+- **Snapshots**: at the end of each turn of a portable chat a device hosts and owns (busy, then idle), a pack of its
+  work when it changed since the last one (HEAD, `git status`, and the listed files' sizes and times; a plain
+  folder's files' sizes and times). A forced takeover while the owner is off lays the owner's newest snapshot down,
+  and the note says how old it is.
 
 ## Done means
 

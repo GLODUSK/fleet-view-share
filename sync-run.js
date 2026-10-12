@@ -16,9 +16,9 @@
 //
 //   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, bound, accountOf,
 //                      intervalMs, checkMs, prefs, relay, version, makeUploader, makeMaterializer, makeMover, makeLive,
-//                      makePrefs, makeLink })
-//     -> { start(), stop(), check(), status(), move(id, { force }), moveStatus(id), cancelMove(id), owners(), device(),
-//          live(), prefsChanged(), link(), missing(), rescan() }
+//                      makePrefs, makeLink, makeCarry })
+//     -> { start(), stop(), check(), status(), move(id, { force, noWork }), moveStatus(id), cancelMove(id), owners(),
+//          device(), live(), prefsChanged(), link(), missing(), rescan(), note(id), dropNote(id), peer(route, body, from) }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
 //   are one (by default each side's own: ~/.claude and ~/.claude-a); accountOf(id) -> the account a conversation ran
 //   under here or null (fleet-view.js: its claude process, or remembered), the uploader's option of that name, so its
@@ -31,9 +31,14 @@
 //   createMover.
 //
 // "Continue here" (sync-move.js), each safe to call while sync is not running:
-//   move(id, { force }) -> the job (sync-move.js's job JSON) at once; the work goes on in the background. Throws an
-//     Error with .code 'not_running' (its message says why sync is not running), 'bad_id' or 'not_elsewhere' (no
-//     other device has it). A second move() of the same id gives the same job; force: true forces it.
+//   move(id, { force, noWork }) -> the job (sync-move.js's job JSON) at once; the work goes on in the background.
+//     Throws an Error with .code 'not_running' (its message says why sync is not running), 'bad_id' or
+//     'not_elsewhere' (no other device has it). A second move() of the same id gives the same job; force: true
+//     forces it; noWork: true moves it without its work when the other machine can't pack it (workRefused).
+//   A move carries what the chat needs besides the conversation (sync-carry.js, made beside the mover with this
+//   machine's device id and the link): its work, the env files and sign-ins (over the link), the ready check and a
+//   note for Claude. note(id) -> that note or null, dropNote(id) (both read <dataDir>/sync/notes.json, sync running or
+//   not); peer(route, body, from) -> [status, json] for /peer/env and /peer/logins (the mover's, 404 while not running).
 //   moveStatus(id) -> the job | null      cancelMove(id) -> true when it was stopped
 //   owners() -> Map id -> { device, name, live, moving, account, bound }: conversations another device owns (live: its
 //     lease is ahead; account: its row's, 'a' | 'b' | null; bound: its workspace is only on that device, sync-common.js
@@ -77,6 +82,8 @@ function createSyncRunner(o = {}) {
   const makeLive = o.makeLive || ((a) => require(path.join(__dirname, 'sync-live.js')).createLive(a));
   const makePrefs = o.makePrefs || ((a) => require(path.join(__dirname, 'sync-prefs.js')).createPrefs(a));
   const makeLink = o.makeLink || ((a) => require(path.join(__dirname, 'link.js')).createLink(a));
+  const makeCarry = o.makeCarry || ((a) => require(path.join(__dirname, 'sync-carry.js')).createCarry(a));
+  const notes = require(path.join(__dirname, 'sync-carry.js')).notesStore(dataDir);
   const relay = o.relay && typeof o.relay.addComputer === 'function' ? o.relay : null;
   const snapshot = typeof o.snapshot === 'function' ? o.snapshot : null;
   const boundIds = typeof o.bound === 'function' ? o.bound : null;
@@ -162,10 +169,11 @@ function createSyncRunner(o = {}) {
     if (projects) args.projects = () => projects();
     const up = makeUploader(accountOf ? { ...args, accountOf: (id) => accountOf(id) } : args);
     const down = makeMaterializer({ ...args, roots: () => roots(), isOpen });
-    let mover = null;
-    try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false) }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
+    let mover = null, link = null, carry = null;
     // the device id is the mover's (it makes the device row on its first tick): no mover, no snapshots
-    const deviceId = () => { const d = mover.device(); return d ? d.id : null; };
+    const deviceId = () => { const d = mover && mover.device(); return d ? d.id : null; };
+    try { carry = makeCarry({ ...args, device: deviceId, link: () => link, roots: () => roots() }); } catch (e) { log(`sync: a move carries the conversation alone here: ${e && e.message}`); }
+    try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false), carry }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
     let live = null;
     if (mover && snapshot) {
       const liveArgs = { ...args, device: deviceId, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null), snapshot: () => snapshot() };
@@ -177,11 +185,10 @@ function createSyncRunner(o = {}) {
       const p = prefsOpt;
       try { prefs = makePrefs({ ...args, device: deviceId, read: () => p.read(), apply: (g, items) => p.apply(g, items), translate: p.translate, load: p.load, save: p.save }); } catch (e) { log(`sync: settings can't be shared with the other devices here: ${e && e.message}`); }
     }
-    let link = null;
     if (mover && relay) {
       try { link = makeLink({ ...args, device: deviceId, relay, version: o.version }); } catch (e) { log(`sync: this machine can't link with the others: ${e && e.message}`); }
     }
-    run = { uid, keyId: kid, up, down, mover, live, prefs, link };
+    run = { uid, keyId: kid, up, down, mover, live, prefs, link, carry };
     why = '';
     if (hostFor) hostFor.list().catch(() => {});
     up.start(intervalMs);
@@ -248,6 +255,12 @@ function createSyncRunner(o = {}) {
       try { return run.down.missing(); } catch { return { at: null, repos: [] }; }
     },
     rescan() { if (run && typeof run.down.scanOnce === 'function') run.down.scanOnce().catch(() => {}); },
+    note(id) { try { return notes.get(id); } catch { return null; } },
+    dropNote(id) { try { return notes.drop(id); } catch { return false; } },
+    async peer(route, body, from) {
+      if (!run || !run.mover || typeof run.mover.peer !== 'function') return [404, { ok: false, message: 'sync is not running here' }];
+      return run.mover.peer(route, body, from);
+    },
   };
 }
 

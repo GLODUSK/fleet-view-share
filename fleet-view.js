@@ -6538,11 +6538,13 @@ const SYNC_SETUP = SYNC_SETUP_JS.createSyncSetup({ dataDir: LOG_DIR, sync: DEMO 
 // /sync/move: "Continue here" brings a conversation another device has to this one (sync-run.js move, moveStatus,
 // cancelMove; sync-move.js does the work). This PC's page and approved remote browsers, as /sync/activity, and
 // never a request another site's page sent.
-//   POST { id, force? }  -> 200 the job | 409 { error, code } (code 'not_running': sync is not running, error says
+//   POST { id, force?, noWork? }  -> 200 the job | 409 { error, code } (code 'not_running': sync is not running, error says
 //                           why; 'not_elsewhere': no other device has it) | 400 { error }
 //   GET ?id=<id>         -> 200 the job | 404 { error: 'no move for that conversation' }
 //   DELETE ?id=<id>      -> 200 { ok: true | false } (false: there was no move to cancel)
-// The job: { id, phase, from: { device, name }, force, canForce, note, status, waitingFor, ready, error, startedAt, at }.
+// The job: { id, phase, from: { device, name }, force, canForce, note, status, waitingFor, ready, error, workRefused,
+// startedAt, at }; ready: { cwd, account, trusted, missing: [{ what, how }], notes, note (a note for Claude is kept:
+// /sync/note), work } (sync-move.js, sync-carry.js). noWork: move it without its work (after workRefused).
 // A sync-run.js without moves answers as when sync is not running. Every error body also has message (= error).
 const moveErr = (res, code, error, extra) => sendJson(res, code, { ok: false, error, message: error, ...extra });
 function syncMove(req, res) {
@@ -6556,7 +6558,7 @@ function syncMove(req, res) {
       if (!id) return moveErr(res, 400, 'give a conversation id', { code: 'bad_id' });
       if (!has('move')) return moveErr(res, 409, 'this version of Fleet View cannot move conversations', { code: 'not_running' });
       let job;
-      try { job = R.move(id, { force: b.force === true }); } catch (e) {
+      try { job = R.move(id, { force: b.force === true, noWork: b.noWork === true }); } catch (e) {
         const code = e && e.code;
         if (code === 'not_running' || code === 'not_elsewhere') return moveErr(res, 409, e.message, { code });
         if (code === 'bad_id') return moveErr(res, 400, e.message, { code });
@@ -6576,6 +6578,32 @@ function syncMove(req, res) {
     return sendJson(res, 200, { ok: has('cancelMove') ? !!R.cancelMove(id) : false });
   }
   return moveErr(res, 405, 'POST, GET or DELETE');
+}
+// /sync/note: the note a move left for Claude (sync-carry.js: where the chat came from, what came with it, what is
+// missing here), which the Chat tab puts in front of the next message Henry sends there, so no extra turn runs. This
+// machine's own page only (never a remote browser, never another site's page); 404 while sync is not set up.
+//   GET  /sync/note?id=<id>          -> { ok, note: string | null }
+//   POST /sync/note { id, done: true } -> { ok, dropped }
+function syncNote(req, res) {
+  const no = (code, message) => sendJson(res, code, { ok: false, message });
+  if (DEMO || !SYNC.enabled()) return no(404, 'no such route');
+  if (remoteOf(req)) return no(403, 'only on this machine');
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site' || site === 'same-site') return no(403, 'bad origin');
+  const idOf = (v) => (typeof v === 'string' && UUID_RE.test(v) ? v.toLowerCase() : null);
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    const id = idOf(new URL(req.url, 'http://x').searchParams.get('id'));
+    if (!id) return no(400, 'give a conversation id');
+    return sendJson(res, 200, { ok: true, note: SYNC_RUNNER.note(id) });
+  }
+  if (req.method !== 'POST') return no(405, 'GET or POST');
+  const origin = req.headers.origin;
+  if (origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) return no(403, 'bad origin');
+  return readBody(req, res, (b) => {
+    const id = idOf(b && b.id);
+    if (!id || b.done !== true) return no(400, 'give { id, done: true }');
+    return sendJson(res, 200, { ok: true, dropped: SYNC_RUNNER.dropNote(id) });
+  });
 }
 // away.json's entry for a conversation ({ device: a name, why }) or null: what the session host refuses as another
 // machine's (sync-move.js); read again only when the file changes
@@ -6675,6 +6703,10 @@ function linkRoute(req, res, pathname) {
 // memory only) and X-Fleet-View-Peer: <its sync device id>. Nothing else reaches them: not this page, not a remote
 // browser, not a script that only has the API token.
 //   GET /peer/status -> { ok, device: { id, name } | null, version, peer }
+//   POST /peer/env { id }     -> { ok, files: [{ path, b64 }] }: the env files of the work this machine is handing that
+//   POST /peer/logins { id }  -> { ok, logins }: the sign-ins this machine has for the allowlisted tools
+//                                conversation over with to the calling machine (sync-move.js peer: 403 at any other time;
+//                                12 calls a minute; the log names the files and tools, never what is in them)
 function peerRoute(req, res, pathname) {
   const no = (code, message) => sendJson(res, code, { ok: false, message });
   if (remoteOf(req)) return no(403, 'only through the relay');
@@ -6685,6 +6717,13 @@ function peerRoute(req, res, pathname) {
   if (pathname === '/peer/status') {
     if (req.method !== 'GET') return no(405, 'GET');
     return sendJson(res, 200, { ok: true, device: SYNC_RUNNER.device(), version: VERSION.current().version, peer });
+  }
+  if (pathname === '/peer/env' || pathname === '/peer/logins') {
+    if (req.method !== 'POST') return no(405, 'POST');
+    return readBody(req, res, (b) => {
+      if (!b || typeof b !== 'object') return no(400, 'bad json');
+      Promise.resolve(SYNC_RUNNER.peer(pathname, b, peer)).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
+    });
   }
   return no(404, 'no such route');
 }
@@ -6758,6 +6797,7 @@ function handleRequest(req, res) {
     return sendJson(res, 200, st);
   }
   if (pathname === '/sync/move') return syncMove(req, res);
+  if (pathname === '/sync/note') return syncNote(req, res);
   if (pathname === '/sync/missing' || pathname === '/sync/clone') return syncClone(req, res, pathname);
   if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   // GET /relay/status, POST /relay/pair | revoke (relay.js): this PC only, never a remote device; its POSTs need this page's Origin

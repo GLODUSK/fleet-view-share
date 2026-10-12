@@ -10,10 +10,28 @@
 // Ownership moves only by B's claim, a PATCH conditional on owner_device = A and sha256 = the final sha256 A sent, so
 // a line A writes after it let go makes the claim fail ("it changed on <A> meanwhile; try again"), never a fork.
 //
+// A move carries what the chat needs besides the conversation (docs/sync-follow.md items 3 and 4), through carry
+// (sync-carry.js; none given: the conversation alone, as before):
+//   A, in release(), after its log is up and held: packs the chat's work (the log's last cwd: sync-work.js inspect and
+//     pack), uploads it sealed, and the released reply's final carries work { pack, record, kind, branch, summary,
+//     notes, shared, envPaths } or { none: why } (bound, or an older B that never asks for one: the ask's carry: 1)
+//     or { refused: why } (the ask's noWork: true); a pack sync-work.js refuses without noWork fails the hand-over
+//     (the reply's workRefused: true). Once B claimed it: carry.putAwayAfter (a stash, never deleted; not while
+//     another live chat here works in that checkout). peer(route, body, from) answers B's /peer/env and /peer/logins
+//     (fleet-view.js, through the link) only while it hands that conversation to that machine.
+//   B, in download() and takeLast(), after the log is laid down and checked: lays the work down (carry.unpackIn: the
+//     chat's own worktree, or in place where it began; a forced pickup takes A's newest snapshot), moves the log to the
+//     slug folder of the folder it resumes in (carry.relocateLog, down.moved), copies the env files and sign-ins over
+//     the link, runs the ready check; any failure fails the job before the claim (what it laid down goes again).
+//     ready gets cwd (that folder), missing [{ what, how }], notes, note (a [Fleet View] note for Claude is kept:
+//     <dataDir>/sync/notes.json) and work; the move's pack is dropped after the claim, and dependencies install.
+//   Every device, at the end of each turn of a portable chat it hosts and owns (busy, then idle, in the host's list):
+//     carry.snapshot, a pack of its work when it changed, for a pickup while this device is off.
+//
 //   createMover({ api, dataDir, key, log, now, up, down, host, isOpen, me, home, projects, isLive, findLog, trusted,
-//                 timing })
-//     -> { start(), stop(), tick(), settle(), move(id, { force }), status(id), cancel(id), owners(), device(),
-//          online(deviceId), outgoing() }
+//                 timing, carry })
+//     -> { start(), stop(), tick(), settle(), move(id, { force, noWork }), status(id), cancel(id), owners(), device(),
+//          online(deviceId), outgoing(), peer(route, body, from) }
 //
 //   api       sync-api.js createSync()'s object (rest() only)
 //   key       the 32-byte sync key: the ask and reply rows are sealed with it
@@ -32,10 +50,11 @@
 //
 // The request channel is two rows of fleet_sync.settings per move, each written by one side only, sealed with
 // sync-crypto.js sealText(json, key, 'setting:<key>'), upserted on (user_id, key):
-//   move:<id>:ask    B's: { v: 1, id, to: B, from: A, at, nonce, force }; B writes at again every 20 s while it waits
-//   move:<id>:reply  A's: { v: 1, id, nonce, from: A, at, phase, note, status?, waitingFor?, external?, final? }
-//                    phase asked | waiting | ending | uploading | released | failed; final { size, sha256, generation }
-//                    with released. A writes at again every 10 s once the ask is confirmed.
+//   move:<id>:ask    B's: { v: 1, id, to: B, from: A, at, nonce, force, carry?: 1, noWork?: true }; B writes at again
+//                    every 20 s while it waits
+//   move:<id>:reply  A's: { v: 1, id, nonce, from: A, at, phase, note, status?, waitingFor?, external?, final?,
+//                    workRefused? } phase asked | waiting | ending | uploading | released | failed; final { size,
+//                    sha256, generation, work? } with released. A writes at again every 10 s once the ask is confirmed.
 // Freshness is judged by seeing at change, on the observer's own clock (never a clock compare across machines):
 //   - A acts on an ask only after it saw its at change once (B writes it again as soon as it sees A's first reply),
 //     so an ask left behind by a B that died never ends a session; it drops an ask whose at has not changed for 90 s
@@ -238,6 +257,8 @@ function createMover(o = {}) {
   };
   const findLog = typeof o.findLog === 'function' ? o.findLog : (id) => findLogIn(projects(), id);
   const trusted = typeof o.trusted === 'function' ? o.trusted : (cwd, account) => trustedIn(home, cwd, account);
+  // what a move carries besides the conversation (sync-carry.js): none given, a move carries the conversation alone
+  const carry = o.carry && typeof o.carry.packOut === 'function' ? o.carry : null;
   let me = typeof o.me === 'string' && UUID_RE.test(o.me.toLowerCase()) ? o.me.toLowerCase() : null;
 
   // ---------- memory ----------
@@ -389,6 +410,7 @@ function createMover(o = {}) {
       const r = { v: 1, id: x.id, nonce: x.nonce, from: me, at: x.replyAt, phase: x.phase, note: x.note || '' };
       if (x.phase === 'waiting') { r.status = x.status || null; r.waitingFor = x.waitingFor || null; if (x.external) r.external = true; }
       if (x.phase === 'released' && x.final) r.final = { ...x.final };
+      if (x.phase === 'failed' && x.workRefused) r.workRefused = true;
       return r;
     }).then(() => { x.repliedAt = now(); }, (e) => { logOnce(`reply|${x.id}`, `${short(x.id)}: the answer could not be sent (${clip(e && e.message)})`); });
   }
@@ -400,8 +422,9 @@ function createMover(o = {}) {
     if (!MOVING.has(phase)) writeAway();
     return sendReply(x);
   }
-  function failOut(x, why) {
+  function failOut(x, why, f = {}) {
     if (x.held) { try { up.unhold(x.id); } catch {} x.held = false; }
+    x.workRefused = !!f.workRefused;
     log(`${short(x.id)}: not handed over: ${why}`);
     return setOut(x, 'failed', { note: why });
   }
@@ -411,6 +434,8 @@ function createMover(o = {}) {
     const t = now();
     const x = {
       id, nonce: ask.nonce, to: lower(ask.to), force: ask.force === true, askAt: ask.at, askSeenAt: t, confirmed: false,
+      canCarry: ask.carry === 1, noWork: ask.noWork === true, account: row && (row.account === 'a' || row.account === 'b') ? row.account : 'b',
+      local: null, workRefused: false,
       phase: 'asked', note: '', status: null, waitingFor: null, external: false, final: null, held: false, task: null,
       file: null, stable: null, killAt: 0, replyAt: 0, repliedAt: -Infinity, finishing: null, startedAt: t,
     };
@@ -425,7 +450,8 @@ function createMover(o = {}) {
     const t = now();
     if (ask.at !== x.askAt) { x.askAt = ask.at; x.askSeenAt = t; x.confirmed = true; }
     if (ask.force === true) x.force = true;
-    if (t - x.askSeenAt >= tm.askStaleMs) return finishOut(x, 'stale');
+    if (ask.noWork === true) x.noWork = true;
+    if (t - x.askSeenAt >= tm.askStaleMs) return finishOut(x, 'stale', list);
     if (x.phase === 'failed' || !x.confirmed) return;
     if (!x.task) {
       if (x.phase === 'asked' || x.phase === 'waiting') await judge(x, list);
@@ -500,6 +526,20 @@ function createMover(o = {}) {
     if (!chk.ok) return failOut(x, chk.why);
     try { up.hold(x.id); x.held = true; } catch (e) { return failOut(x, `the upload could not be held (${clip(e && e.message)})`); }
     x.final = { size: Number(fin.size), sha256: fin.sha256, generation: Number(fin.generation) };
+    // the work (sync-carry.js): packed and uploaded, or why not; a pack sync-work.js refuses fails the hand-over unless
+    // the ask said noWork (Henry's "Move it without the work")
+    if (carry) {
+      await setOut(x, 'uploading', { note: `${name} is packing the work` });
+      let r = null;
+      try { r = await carry.packOut({ id: x.id, file: x.file, canCarry: x.canCarry, noWork: x.noWork, list: await hostList(), toName: nameOf(x.to) }); } catch (e) {
+        if (x.finishing || stopping) return;
+        if (e && e.code === 'refused') return failOut(x, `the work can't move: ${clip(e.message, 300)}`, { workRefused: true });
+        return failOut(x, `the work could not be packed on ${name}: ${clip(e && e.message)}`);
+      }
+      if (x.finishing || stopping) return;
+      x.local = r.local;
+      x.final.work = r.work;
+    }
     x.stable = { size: sizeOf(x.file), since: now() };
     log(`${short(x.id)}: let go (${x.final.size} bytes up)${chk.cut ? '; a cut last line stays here' : ''}`);
     await setOut(x, 'released', { note: chk.cut ? `${name} let it go; its last line was cut off and is left out` : `${name} let it go` });
@@ -510,7 +550,7 @@ function createMover(o = {}) {
     await failOut(x, `it was opened again on ${myName()}; try again`);
   }
   // the ask went away (claimed, cancelled, failed) or stale: let go of the hold, and of moving
-  async function finishOut(x, why) {
+  async function finishOut(x, why, list = null) {
     if (x.task) { x.finishing = why; return; } // after the upload under way
     let owner = null;
     try { const row = await getRow(x.id); owner = row ? lower(row.owner_device) : null; } catch (e) { logOnce(`row|${x.id}`, `${short(x.id)}: its row could not be read (${clip(e.message)})`); return; }
@@ -521,6 +561,12 @@ function createMover(o = {}) {
       gone.set(x.id, { device: x.to, at: now() });
       claimed.delete(x.id); // claimed here once, and gone again since
       log(`${short(x.id)}: it continues on ${name} now`);
+      // its work went with it: what is left here is put away (a stash, never deleted), unless another chat works there
+      if (carry && x.local) {
+        const local = x.local;
+        x.local = null;
+        try { await carry.putAwayAfter(local, { id: x.id, toName: name, list: list || await hostList() }); } catch (e) { log(`${short(x.id)}: its changes here could not be put away (${clip(e && e.message)})`); }
+      }
     } else if (x.phase !== 'failed') log(`${short(x.id)}: it stays here (${why === 'stale' ? `${name} stopped asking` : `${name} withdrew the request`})`);
     writeAway();
     if (why === 'stale') { staleAsks.set(x.id, `${x.nonce}|${x.askAt}`); await dropRows(x.id); } else await dropRows(x.id, ['reply']);
@@ -529,7 +575,7 @@ function createMover(o = {}) {
     for (const id of [...staleAsks.keys()]) if (!asks.has(id)) staleAsks.delete(id);
     for (const x of [...outs.values()]) {
       const ask = asks.get(x.id);
-      if (!ask || ask.nonce !== x.nonce) await finishOut(x, 'gone');
+      if (!ask || ask.nonce !== x.nonce) await finishOut(x, 'gone', list);
     }
     for (const [id, ask] of asks) {
       if (stopping) return;
@@ -550,11 +596,20 @@ function createMover(o = {}) {
   }
   function failJob(j, why, o2 = {}) {
     if (!ACTIVE.has(j.phase)) return;
+    undoLaid(j);
+    if (o2.workRefused) j.workRefused = true;
     j.error = why;
     j.endedAt = now();
     setJob(j, 'failed', { note: why });
     log(`${short(j.id)}: not moved here: ${why}`);
     if (!o2.keepRows) dropRows(j.id);
+  }
+  // the work laid down for a move that did not finish goes again (sync-work.js undo), in the background
+  function undoLaid(j) {
+    const res = j.laid && j.laid.carry && j.laid.carry.res;
+    if (!carry || !res || j.laid.carry.undone) return;
+    j.laid.carry.undone = true;
+    track(Promise.resolve().then(() => carry.undo(res)).then(() => log(`${short(j.id)}: the work laid down here for it went again`), (e) => log(`${short(j.id)}: the work laid down here could not be undone (${clip(e && e.message)})`)));
   }
   async function maybeAsk(j) {
     if (!ACTIVE.has(j.phase)) return;
@@ -563,7 +618,10 @@ function createMover(o = {}) {
     try {
       await putSetting(askKey(j.id), () => {
         j.askAt = nextAt(j.askAt);
-        return { v: 1, id: j.id, to: me, from: j.from.device, at: j.askAt, nonce: j.nonce, force: j.force };
+        const a = { v: 1, id: j.id, to: me, from: j.from.device, at: j.askAt, nonce: j.nonce, force: j.force };
+        if (carry) a.carry = 1; // this machine lays a work pack down (an older one never asks for one)
+        if (j.noWork) a.noWork = true;
+        return a;
       });
       j.askWrittenAt = now();
       if (!j.askFirstAt) j.askFirstAt = j.askWrittenAt;
@@ -592,6 +650,40 @@ function createMover(o = {}) {
               : 'the download said nothing about where it went');
     return null;
   }
+  // The rest of what a move carries, once the log is laid down and checked (sync-carry.js): the work pack laid down in
+  // the chat's own worktree (or its home-row folder), the log moved to the slug folder of the folder it resumes in,
+  // the env files and the sign-ins from A over the link (not for a pickup while A is off), and what this machine still
+  // lacks. -> true, or false when the job failed (nothing claimed; what was laid down goes again)
+  const envPathsOf = (c) => (c.work && Array.isArray(c.work.envPaths) ? c.work.envPaths : undefined);
+  async function carryIn(j, r, f = {}) {
+    const name = j.from.name;
+    const c = { work: f.work || null, ref: f.ref || null, snapshot: f.snapshot || null, forced: !!f.forced, res: null, copied: null, missing: [], notes: [], undone: false };
+    j.laid.carry = c;
+    if (!carry || !c.ref || !c.ref.pack) return true;
+    setJob(j, 'downloading', { note: c.snapshot ? `laying down ${name}'s last snapshot of the work` : 'laying the work down' });
+    let res;
+    try { res = await carry.unpackIn({ id: j.id, ref: c.ref, folder: r.folder, list: await hostList() }); } catch (e) {
+      failJob(j, e && e.code === 'no_checkout' ? e.message : `the work could not be laid down here: ${clip(e && e.message, 300)}`);
+      return false;
+    }
+    c.res = res;
+    if (!ACTIVE.has(j.phase)) { undoLaid(j); return false; } // cancelled meanwhile
+    try {
+      j.laid.dir = carry.relocateLog({ id: j.id, dir: j.laid.dir, cwd: res.cwd });
+      if (typeof down.moved === 'function') down.moved(j.id, j.laid.dir);
+    } catch (e) { failJob(j, `its log could not go where it resumes: ${clip(e && e.message)}`); return false; }
+    j.laid.cwd = res.cwd;
+    if (!c.forced) {
+      setJob(j, 'downloading', { note: `copying the env files and sign-ins from ${name}` });
+      try {
+        const sec = await carry.secretsIn({ id: j.id, from: j.from.device, fromName: name, into: res.into, manifest: res.manifest, envPaths: envPathsOf(c), account: (j.laid.row && j.laid.row.account) || 'b', root: res.root });
+        c.copied = sec.copied; c.missing.push(...sec.missing); c.notes.push(...sec.notes);
+      } catch (e) { c.notes.push(`the env files and sign-ins: ${clip(e && e.message)}`); }
+    }
+    try { c.missing.push(...await carry.ready({ into: res.into, cwd: res.cwd, manifest: res.manifest, envPaths: envPathsOf(c), fromName: name })); } catch {}
+    if (!ACTIVE.has(j.phase)) { undoLaid(j); return false; }
+    return true;
+  }
   // after A let go: lay it down, check it is A's final bytes -> claiming (the next tick claims while things are fresh)
   async function download(j) {
     const name = j.from.name;
@@ -600,6 +692,8 @@ function createMover(o = {}) {
     if (!r) return;
     if (!sameBytes(path.join(r.dir, `${j.id}.jsonl`), j.final.size, j.final.sha256)) return failJob(j, `it changed on ${name} meanwhile; try again`);
     j.laid = { dir: r.dir, folder: r.folder, row: r.row || {} };
+    const w = j.final.work || null;
+    if (!(await carryIn(j, r, { work: w, ref: w && w.pack ? w : null }))) return;
     setJob(j, 'claiming', { note: `taking it over from ${name}` });
   }
   // offline or noanswer: force takes the last copy A uploaded, though not while A's lease on it is ahead (A's
@@ -623,6 +717,10 @@ function createMover(o = {}) {
     j.final = { size: Number(row.size), sha256: row.sha256, generation: Number(row.generation) };
     j.laid = { dir: r.dir, folder: r.folder, row };
     j.forced = true;
+    // the work: A's newest snapshot (a portable chat's work at the end of its last turn there), if it left one
+    let snap = null;
+    if (carry) { try { snap = await carry.newestSnapshot(j.id, j.from.device); } catch (e) { log(`${short(j.id)}: ${name}'s snapshots could not be read (${clip(e && e.message)})`); } }
+    if (!(await carryIn(j, r, { ref: snap, snapshot: snap, forced: true }))) return;
     log(`${short(j.id)}: taking the last copy ${name} uploaded`);
     await claim(j);
   }
@@ -672,10 +770,23 @@ function createMover(o = {}) {
     writeAway();
     dropRows(j.id);
     const account = j.laid.row && j.laid.row.account === 'a' ? 'A' : 'B';
-    const cwd = resumeFolder(j.laid.dir, j.laid.folder, j.id);
+    const cwd = j.laid.cwd || resumeFolder(j.laid.dir, j.laid.folder, j.id);
     let ok2 = false;
     try { ok2 = !!trusted(cwd, account); } catch {}
-    j.ready = { cwd, account, trusted: ok2 };
+    const c = j.laid.carry || null;
+    let missing = [], notes = [], noted = false;
+    if (carry && c) {
+      missing = c.missing.slice(0, 20);
+      notes = c.notes.slice(0, 10);
+      let installing = null;
+      try { installing = c.res ? carry.installDeps(c.res.into) : null; } catch {}
+      try {
+        carry.saveNote(j.id, carry.noteText({ fromName: name, toName: myName(), at: now(), cwd, work: c.work, res: c.res, snapshot: c.snapshot, forced: c.forced, copied: c.copied, missing, installing }));
+        noted = true;
+      } catch (e) { log(`${short(j.id)}: its note could not be kept (${clip(e && e.message)})`); }
+      if (c.res && c.ref && c.ref.pack && !c.snapshot) { const pack = c.ref.pack; track(carry.dropPack(j.id, pack).catch((e) => log(`${short(j.id)}: its move's pack could not be removed (${clip(e && e.message)})`))); }
+    }
+    j.ready = { cwd, account, trusted: ok2, missing, notes, note: noted, work: c && c.res ? { branch: c.res.branch || null, into: c.res.into, summary: (c.res.manifest && c.res.manifest.summary) || null, snapshot: !!c.snapshot } : null };
     j.endedAt = now();
     setJob(j, 'ready', { note: ok2 ? 'ready: it continues here' : `ready; Claude will ask whether you trust ${cwd}` });
     log(`${short(j.id)}: moved here from ${name}${j.forced ? ' (its last uploaded copy)' : ''}`);
@@ -722,7 +833,7 @@ function createMover(o = {}) {
       // A's reply changed since the force: A is there after all, and the ask (with force now) has it hand it over
       log(`${short(j.id)}: ${name} answered after all; it hands it over itself`);
     }
-    if (r && r.phase === 'failed') return failJob(j, r.note || `${name} could not let it go`);
+    if (r && r.phase === 'failed') return failJob(j, r.note || `${name} could not let it go`, { workRefused: r.workRefused === true });
     await maybeAsk(j);
     if (j.redo) {
       if (t < j.retryAt) return;
@@ -733,6 +844,7 @@ function createMover(o = {}) {
     }
     if (j.laid) {
       if (!r || r.phase !== 'released' || !r.final || r.final.sha256 !== j.final.sha256) { // A took it back
+        undoLaid(j);
         j.laid = null; j.final = null;
         return setJob(j, 'asking', { note: `asking ${name} again` });
       }
@@ -750,7 +862,8 @@ function createMover(o = {}) {
         case 'released': {
           const f = r.final;
           if (!f || !Number.isSafeInteger(f.size) || f.size < 0 || !HEX64_RE.test(String(f.sha256 || ''))) return failJob(j, `${name} let it go without saying what it uploaded`);
-          j.final = { size: f.size, sha256: f.sha256, generation: f.generation };
+          // work: what A packed (sync-carry.js), or why not; none from an older A
+          j.final = { size: f.size, sha256: f.sha256, generation: f.generation, work: f.work && typeof f.work === 'object' && !Array.isArray(f.work) ? f.work : null };
           j.tries = 0;
           startTask(j, () => download(j));
           return;
@@ -766,6 +879,7 @@ function createMover(o = {}) {
     id: j.id, phase: j.phase, from: { device: j.from.device, name: nameOf(j.from.device, j.from.name) }, force: j.force,
     canForce: !!j.canForce && FORCEABLE.has(j.phase), note: j.note, status: j.status, waitingFor: j.waitingFor,
     ready: j.phase === 'ready' && j.ready ? { ...j.ready } : null, error: j.phase === 'failed' ? j.error : null,
+    workRefused: j.phase === 'failed' && !!j.workRefused,
     startedAt: j.startedAt, at: j.at,
   });
   // the row is another device's (the materializer's last listing, or a claim seen here since), and not just claimed here
@@ -781,9 +895,11 @@ function createMover(o = {}) {
     const k = lower(id);
     if (!UUID_RE.test(k)) throw codeError('bad_id', 'not a conversation id');
     const force = !!(opts && opts.force === true);
+    const noWork = !!(opts && opts.noWork === true);
     let j = jobs.get(k);
     if (j && ACTIVE.has(j.phase)) {
       j.seenAt = now();
+      if (noWork && !j.noWork) { j.noWork = true; j.askDue = true; }
       if (force) {
         if (!j.force) { j.force = true; j.askDue = true; } // waiting: A ends it mid-turn
         // offline or noanswer: the last uploaded copy, unless A's reply changes before the next tick (canForce: no
@@ -805,7 +921,7 @@ function createMover(o = {}) {
     }
     const t = now();
     j = {
-      id: k, phase: 'asking', from: { device: own.device, name: nameOf(own.device) }, force, canForce: false,
+      id: k, phase: 'asking', from: { device: own.device, name: nameOf(own.device) }, force, noWork, workRefused: false, canForce: false,
       note: `asking ${nameOf(own.device)} for it`, status: null, waitingFor: null, ready: null, error: null, startedAt: t, at: t,
       nonce: crypto.randomBytes(12).toString('hex'), askAt: 0, askWrittenAt: -Infinity, askFirstAt: 0, askDue: true,
       verified: false, reply: null, replySeenAt: 0, final: null, laid: null, task: null, forceClaim: false, forceFrom: null,
@@ -861,6 +977,66 @@ function createMover(o = {}) {
     } catch (e) { logOnce('lease', `the leases were not renewed (${clip(e && e.message)})`); }
   }
 
+  // ---------- what the machine taking a conversation over asks this one, over the link (fleet-view.js /peer/*) ----------
+  // Only while this machine hands that very conversation to that very machine (uploading or released): the env files
+  // its pack named (/peer/env), and the sign-ins this machine has for the allowlisted tools (/peer/logins). The log
+  // says which files and tools went, never what was in them. -> [status, json]
+  async function peer(route, b, from) {
+    const peerId = lower(from);
+    if (!carry) return [404, { ok: false, message: 'no such route' }];
+    if (!UUID_RE.test(peerId)) return [403, { ok: false, message: 'only through the relay' }];
+    if (!carry.peerAllowed(peerId)) return [429, { ok: false, message: 'too many calls from that machine: wait a minute', retryAfter: 60e3 }];
+    const id = lower(b && b.id);
+    if (!UUID_RE.test(id)) return [400, { ok: false, message: 'give a conversation id' }];
+    const x = outs.get(id);
+    if (!x || x.to !== peerId || (x.phase !== 'uploading' && x.phase !== 'released')) return [403, { ok: false, message: 'this machine is not handing that conversation to yours' }];
+    if (route === '/peer/env') {
+      if (!x.local) return [200, { ok: true, files: [] }];
+      const files = carry.envFiles(x.local);
+      log(`${short(id)}: sent ${files.length} env file${files.length === 1 ? '' : 's'} to ${nameOf(peerId)}${files.length ? ` (${files.map((f) => f.path).join(', ')})` : ''}`);
+      return [200, { ok: true, files }];
+    }
+    if (route === '/peer/logins') {
+      const l = await carry.logins(x.local, x.account);
+      const what = Object.keys(l);
+      log(`${short(id)}: sent ${what.length ? `the sign-ins for ${what.join(', ')}` : 'no sign-ins (none here)'} to ${nameOf(peerId)}`);
+      return [200, { ok: true, logins: l }];
+    }
+    return [404, { ok: false, message: 'no such route' }];
+  }
+
+  // ---------- the end of a turn: a snapshot of a portable chat's work, for a pickup while this machine is off ----------
+  // A hosted chat this device owns that was working and is idle now (its status in the host's list): sync-carry.js
+  // packs its work and uploads it when it changed since the last snapshot. One at a time, in the background.
+  const wasBusy = new Map(); // id -> busy at the last look
+  const snapQueue = [];
+  let snapping = null;
+  function turnEnds(list) {
+    if (!carry || typeof carry.snapshot !== 'function' || !Array.isArray(list)) return;
+    const own = ownersRaw(), seen = new Set();
+    for (const p of list) {
+      if (!p || !p.alive || typeof p.id !== 'string') continue;
+      const id = lower(p.id);
+      if (!UUID_RE.test(id)) continue;
+      seen.add(id);
+      const busy = p.status === 'busy' || p.status === 'shell' || (p.status === 'waiting' && p.waitingFor !== 'dialog open');
+      const was = wasBusy.get(id);
+      wasBusy.set(id, busy);
+      if (was === true && !busy && !own.has(id) && !outs.has(id) && !snapQueue.includes(id)) snapQueue.push(id);
+    }
+    for (const id of [...wasBusy.keys()]) if (!seen.has(id)) wasBusy.delete(id);
+    if (snapping || !snapQueue.length) return;
+    const id = snapQueue.shift();
+    snapping = track((async () => {
+      try {
+        const row = await getRow(id);
+        if (!row || lower(row.owner_device) !== me || row.state !== 'active') return;
+        const file = findLog(id);
+        if (file) await carry.snapshot({ id, file });
+      } catch (e) { logOnce(`snap|${id}`, `${short(id)}: no snapshot of its work (${clip(e && e.message)})`); }
+    })().finally(() => { snapping = null; }));
+  }
+
   // ---------- the loop ----------
   let running = false, stopping = false, timer = null, ticking = null, again = false;
   const active = () => outs.size > 0 || [...jobs.values()].some((j) => ACTIVE.has(j.phase));
@@ -872,6 +1048,7 @@ function createMover(o = {}) {
     letGo();
     try { await poll(); said.delete('poll'); } catch (e) { logOnce('poll', `the move requests could not be read (${clip(e && e.message)})`); writeAway(); return; }
     const list = await hostList();
+    turnEnds(list);
     const guard = async (what, fn) => { try { await fn(); } catch (e) { log(`${what} failed: ${clip(e && e.message)}`); } };
     await guard('answering the requests', () => stepOwner(list));
     for (const j of [...jobs.values()]) { if (stopping) break; await guard(`${short(j.id)}`, () => stepJob(j)); }
@@ -955,7 +1132,7 @@ function createMover(o = {}) {
   const status = (id) => { const j = jobs.get(lower(id)); if (!j) return null; j.seenAt = now(); return jobJson(j); };
   const outgoing = () => [...outs.values()].map((x) => ({ id: x.id, to: x.to, phase: x.phase, force: x.force, held: x.held, note: x.note }));
 
-  return { start, stop, tick, settle, move, status, cancel, owners, device, online, outgoing };
+  return { start, stop, tick, settle, move, status, cancel, owners, device, online, outgoing, peer };
 }
 
 module.exports = { createMover, awayPath, dropAway, resumeFolder, trustedIn, findLogIn, busyNow, TIMING };

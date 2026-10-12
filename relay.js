@@ -352,10 +352,11 @@ const ALLOW = {
 const ALLOW_RE = Object.fromEntries(Object.entries(ALLOW).map(([m, list]) => [m, new RegExp(`^(?:${list.join('|')})$`)]));
 // what only a linked computer may call besides (docs/link.md): the /peer/... routes, which fleet-view.js serves to the
 // relay alone (the marker's key and X-Fleet-View-Peer). GET /peer/status: who answers (its device and name) and its
-// version. The other routes the link adds (the work a move carries, logins) go here as they are built
+// version. POST /peer/env and /peer/logins: the env files and sign-ins of a conversation this machine is handing over
+// to that computer (fleet-view.js answers them only then: sync-move.js peer)
 const PEER_ALLOW = {
   GET: ['/peer/status'],
-  POST: [],
+  POST: ['/peer/env', '/peer/logins'],
 };
 const PEER_RE = Object.fromEntries(Object.entries(PEER_ALLOW).filter(([, list]) => list.length).map(([m, list]) => [m, new RegExp(`^(?:${list.join('|')})$`)]));
 // the path alone: printable ASCII, no '..', '//', '%', '?', '#' or backslash
@@ -784,6 +785,11 @@ function createRelay(opts = {}) {
       if (bad.length) return no(`a move takes only id and force, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
       if (!(typeof b.id === 'string' && UUID_RE.test(b.id))) return [400, 'id must be a conversation id'];
       return b.force === undefined || typeof b.force === 'boolean' ? null : [400, 'force must be true or false'];
+    }
+    // a linked computer's /peer/env and /peer/logins (PEER_ALLOW): only the conversation's id
+    if (p === '/peer/env' || p === '/peer/logins') {
+      if (Object.keys(b).some((k) => k !== 'id')) return no('these take only id');
+      return typeof b.id === 'string' && UUID_RE.test(b.id) ? null : [400, 'id must be a conversation id'];
     }
     // the Chief is started by its own route, which passes on only what it takes (and only in its own folder)
     if (p === '/api/sessions' && 'role' in b) return no('start the Chief with /api/chief/start');

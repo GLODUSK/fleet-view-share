@@ -191,6 +191,10 @@ function fleetView(m) {
         if (req.headers['x-fleet-view-relay'] !== m.relayKey) return json(403, { ok: false, message: 'only through the relay' });
         return json(200, { ok: true, device: { id: m.id, name: m.name }, peer: req.headers['x-fleet-view-peer'] });
       }
+      if (p === '/peer/env' || p === '/peer/logins') {
+        if (req.headers['x-fleet-view-relay'] !== m.relayKey || !req.headers['x-fleet-view-peer']) return json(403, { ok: false, message: 'only through the relay' });
+        return json(200, { ok: true, route: p, id: body && body.id, peer: req.headers['x-fleet-view-peer'] });
+      }
       if (p === `/api/sessions/${SID}/message`) return json(200, { ok: true, text: body && body.text, via: body && body.via, marked: req.headers['x-fleet-view-relay'] === m.relayKey });
       if (p === '/api/conversations') return json(200, { ok: true, big: BIG });
       if (p === '/chat/image') return json(200, { ok: true, got: body && typeof body.data === 'string' ? body.data.length : -1 });
@@ -300,6 +304,15 @@ async function main() {
   ok(ps && ps.headers['x-fleet-view-relay'] === A.relayKey && ps.headers['x-fleet-view-peer'] === R.id && !ps.headers.authorization, 'the PC\'s server got the marker and the peer header, no API token');
   r = await pass(A.link.call(R.id, 'GET', '/peer/status'));
   ok(r.s === 200 && r.b.peer === A.id && r.b.device.id === R.id, 'and the other way: the PC calls the Mac');
+  // the routes a move's env files and sign-ins come by (sync-move.js peer answers them): only { id }, with the marker
+  r = await pass(R.link.call(A.id, 'POST', '/peer/env', { b: { id: SID } }));
+  ok(r.s === 200 && r.b.route === '/peer/env' && r.b.id === SID && r.b.peer === R.id, `POST /peer/env through the relay: 200, with the peer (${JSON.stringify(r.b).slice(0, 120)})`);
+  r = await pass(R.link.call(A.id, 'POST', '/peer/logins', { b: { id: SID } }));
+  ok(r.s === 200 && r.b.route === '/peer/logins', 'POST /peer/logins through the relay: 200');
+  r = await pass(R.link.call(A.id, 'POST', '/peer/env', { b: { id: SID, path: '/etc/passwd' } }));
+  eq(r.s, 403, 'POST /peer/env with anything but id: 403 before the server');
+  r = await pass(R.link.call(A.id, 'POST', '/peer/logins', { b: { id: 'not-an-id' } }));
+  eq(r.s, 400, 'POST /peer/logins with a bad id: 400');
   r = await pass(R.link.call(A.id, 'POST', `/api/sessions/${SID}/message`, { b: { text: 'hello from the Mac' } }));
   ok(r.s === 200 && r.b.text === 'hello from the Mac' && r.b.via === 'phone' && r.b.marked === true, `a message: 200, with the marker (${JSON.stringify(r.b)})`);
   r = await pass(R.link.call(A.id, 'GET', '/api/conversations'));
@@ -345,10 +358,15 @@ async function main() {
   pdown = [RL.dirKey(K2, 'down'), ...pdown];
   pup(K2, { t: 'req', id: 'q1', at: clock.t, m: 'GET', p: '/peer/status', t0: clock.t });
   pup(K2, { t: 'req', id: 'q2', at: clock.t, m: 'GET', p: '/state', t0: clock.t });
-  ok(await until(() => pmsgs.some((x) => x.id === 'q1') && pmsgs.some((x) => x.id === 'q2'), 10e3), 'the phone\'s requests are answered');
+  pup(K2, { t: 'req', id: 'q3', at: clock.t, m: 'POST', p: '/peer/env', b: { id: SID }, t0: clock.t });
+  pup(K2, { t: 'req', id: 'q4', at: clock.t, m: 'POST', p: '/peer/logins', b: { id: SID }, t0: clock.t });
+  ok(await until(() => ['q1', 'q2', 'q3', 'q4'].every((q) => pmsgs.some((x) => x.id === q)), 10e3), 'the phone\'s requests are answered');
   eq(pmsgs.find((x) => x.id === 'q1').s, 403, 'a phone calling /peer/status: 403');
+  ok(pmsgs.find((x) => x.id === 'q3').s === 403 && pmsgs.find((x) => x.id === 'q4').s === 403, 'a phone calling /peer/env or /peer/logins: 403');
+  ok(!A.seen.some((x) => (x.path === '/peer/env' || x.path === '/peer/logins') && x.headers['x-fleet-view-peer'] === undefined), 'nothing of the phone\'s reached /peer/env or /peer/logins');
   eq(pmsgs.find((x) => x.id === 'q2').s, 200, 'the phone\'s own routes still work');
   ok(RL.peerRouteAllowed('GET', '/peer/status') && !RL.routeAllowed('GET', '/peer/status') && !RL.peerRouteAllowed('GET', '/peer/../state'), 'the allowlists: /peer/status is a peer route only');
+  ok(['/peer/env', '/peer/logins'].every((x) => RL.peerRouteAllowed('POST', x) && !RL.routeAllowed('POST', x) && !RL.peerRouteAllowed('GET', x)), 'the allowlists: POST /peer/env and /peer/logins are peer routes only');
   ok((await A.relay.status()).devices.some((d) => d.kind === 'computer') && (await A.relay.status()).devices.some((d) => !d.kind && d.name === 'Test iPhone'), '/relay/status names the computer\'s kind, the phone has none');
   await A.relay.revoke(pj.dev);
   ph.close();
