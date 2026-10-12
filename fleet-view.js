@@ -6342,8 +6342,11 @@ const SYNC = SYNC_API.createSync({ port: PORT, demo: DEMO, dataDir: LOG_DIR, log
 // while sync is set up and signed in, or on this PC's Wi-Fi (relay-lan.js: port 4779 on the private addresses only,
 // no sync needed); it answers the phone through this server's own routes over loopback, and marks what Henry sent
 // from it with api.js's in-memory relay key (viaOf)
+// Another of Henry's machines linked through link.js (docs/link.md) is a device of kind 'computer' there; one revoked
+// with relay.js revoke (the CLI) is unlinked on both machines (onComputerGone)
 const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, logDir: LOG_DIR, apiToken: API.TOKEN_FILE,
-  relayKey: () => API.relayKey(), version: () => VERSION.current().version, log: (t) => logOnce(t, t) });
+  relayKey: () => API.relayKey(), version: () => VERSION.current().version, log: (t) => logOnce(t, t),
+  onComputerGone: (peer) => { const l = SYNC_RUNNER.link(); if (l) l.unlink(peer).catch(() => {}); } });
 // sync-run.js: the uploader and the materializer, running only while sync is set up, signed in and has its key;
 // the materializer finds a synced repo here among the repos the page lists
 // host: the session host (api.js), for "Continue here": its list, and kill to end a conversation moving to another
@@ -6351,6 +6354,7 @@ const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, l
 // accounts: the Claude account letters must be Blackbox's before anything syncs (sync-accounts.js moves a login to its
 // letter by itself); mode: 'local' (the start screen's "Work locally", sync-setup.js) keeps sync off here
 // snapshot: what runs here, for the other devices (sync-live.js); their snapshots come back through live() (applyRemote)
+// relay: link.js keeps another linked machine there as a computer (docs/link.md); the link runs only while sync does
 const ACCOUNT_SYNC = SYNC_ACCOUNTS.createAccountSync({ accounts: ACCTS, log: (t) => logOnce(t, t) });
 // The shared settings (sync-prefs.js): the groups every device holds the same (hidden and removed conversations,
 // names, moves, hidden / renamed / ordered workspaces, the map's spots, teams), read from and put back into the
@@ -6402,6 +6406,7 @@ const PREFS_ROOTS = SYNC_PREFS.makeTranslate({
   exists: (root) => { try { return fs.statSync(root).isDirectory(); } catch { return false; } },
 });
 const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, log: (t) => logOnce(t, t), roots: () => pageRepos(),
+  relay: RELAY, version: () => VERSION.current().version,
   host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
   isOpen: (id) => liveProcs.has(String(id).toLowerCase()),
   mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot(),
@@ -6453,6 +6458,54 @@ function syncMove(req, res) {
     return sendJson(res, 200, { ok: has('cancelMove') ? !!R.cancelMove(id) : false });
   }
   return moveErr(res, 405, 'POST, GET or DELETE');
+}
+// /link/*: the link between Henry's machines (link.js, docs/link.md): this machine's own page only (never a remote
+// browser, never another site's page), POSTs with its Origin; 404 while sync is not set up here (a friend's install),
+// as /sync/* answer then.
+//   GET  /link/status              link.js status(): { running, me, machines, pairings }, or { running: false, reason }
+//   POST /link/request { device }  ask that machine (a sync device id) to link -> { ok, pid }
+//   POST /link/confirm { pid }     the code here matches the other machine's      POST /link/decline { pid }
+//   POST /link/unlink { device }   unlink it, here and there
+function linkRoute(req, res, pathname) {
+  const no = (code, message) => sendJson(res, code, { ok: false, message });
+  if (DEMO || !SYNC.enabled()) return no(404, 'no such route');
+  if (remoteOf(req)) return no(403, 'only on this machine');
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site' || site === 'same-site') return no(403, 'bad origin');
+  const link = SYNC_RUNNER.link();
+  if (pathname === '/link/status') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return no(405, 'GET');
+    if (!link) { const st = SYNC_RUNNER.status(); return sendJson(res, 200, { running: false, reason: st.running ? 'this machine can\'t link with the others' : st.reason || 'sync is not running' }); }
+    return sendJson(res, 200, link.status());
+  }
+  const acts = { '/link/request': (b) => link.request(b.device), '/link/confirm': (b) => link.confirm(b.pid), '/link/decline': (b) => link.decline(b.pid), '/link/unlink': (b) => link.unlink(b.device) };
+  if (!acts[pathname]) return no(404, 'no such route');
+  if (req.method !== 'POST') return no(405, 'POST');
+  const origin = req.headers.origin;
+  if (origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) return no(403, 'bad origin');
+  return readBody(req, res, (b) => {
+    if (!b || typeof b !== 'object') return no(400, 'bad json');
+    if (!link) return no(409, SYNC_RUNNER.status().reason || 'sync is not running');
+    Promise.resolve(acts[pathname](b)).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
+  });
+}
+// /peer/*: what another of Henry's machines asks this one through its link (link.js) and this machine's relay, which
+// passes a linked computer's /peer/... calls on (relay.js PEER_ALLOW) with the marker's key (api.js relayKey, in
+// memory only) and X-Fleet-View-Peer: <its sync device id>. Nothing else reaches them: not this page, not a remote
+// browser, not a script that only has the API token.
+//   GET /peer/status -> { ok, device: { id, name } | null, version, peer }
+function peerRoute(req, res, pathname) {
+  const no = (code, message) => sendJson(res, code, { ok: false, message });
+  if (remoteOf(req)) return no(403, 'only through the relay');
+  const given = Buffer.from(String(req.headers['x-fleet-view-relay'] || '')), want = Buffer.from(String(API.relayKey() || ''));
+  if (!want.length || given.length !== want.length || !require('crypto').timingSafeEqual(given, want)) return no(403, 'only through the relay');
+  const peer = String(req.headers['x-fleet-view-peer'] || '').toLowerCase();
+  if (!UUID_RE.test(peer)) return no(403, 'only through the relay');
+  if (pathname === '/peer/status') {
+    if (req.method !== 'GET') return no(405, 'GET');
+    return sendJson(res, 200, { ok: true, device: SYNC_RUNNER.device(), version: VERSION.current().version, peer });
+  }
+  return no(404, 'no such route');
 }
 // live.js's: authorize(req) is true only for this PC's page (Origin http://127.0.0.1:PORT or localhost) or an approved
 // remote device (Origin https://<its tailnet name>); state() is GET /state's object
@@ -6527,6 +6580,9 @@ function handleRequest(req, res) {
   if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   // GET /relay/status, POST /relay/pair | revoke (relay.js): this PC only, never a remote device; its POSTs need this page's Origin
   if (pathname === '/relay' || pathname.startsWith('/relay/')) return RELAY.handle(req, res, pageCtx);
+  // the link between Henry's machines (link.js): this machine's page; and what a linked machine asks, through the relay
+  if (pathname === '/link' || pathname.startsWith('/link/')) return linkRoute(req, res, pathname);
+  if (pathname === '/peer' || pathname.startsWith('/peer/')) return peerRoute(req, res, pathname);
   if (req.method === 'POST') {
     if (pathname === '/open') {
       return readBody(req, res, (b) => {

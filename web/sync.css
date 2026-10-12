@@ -44,3 +44,17 @@ body:not(.sync-on) .count.sync { display: none; } /* sync not set up on this PC 
 
 .sy-note { margin: 0 16px 10px; font-size: 12px; color: var(--mint); overflow-wrap: anywhere; }
 .sy-note.bad { color: var(--rose); }
+
+/* your machines (link.js): each machine, a link being made with its code, and the header button's mark while a
+   request waits for an answer here */
+.sy-mach { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
+.sy-mach + .sy-mach { border-top: 1px solid var(--line); }
+.sy-mach .sy-who .sy-dim { flex: none; }
+.sy-pair { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); }
+.sy-pair-on { border: 1px solid rgba(63, 216, 255, 0.45); background: rgba(63, 216, 255, 0.06); }
+.sy-code { font: 600 26px/1.15 var(--font-mono, ui-monospace, monospace); letter-spacing: 0.14em; color: var(--text); text-align: center; padding: 2px 0; }
+.sy-ok { color: var(--mint); font-size: 12.5px; }
+.count.sync { position: relative; }
+body.link-ask .count.sync::after {
+  content: ''; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--gold);
+}

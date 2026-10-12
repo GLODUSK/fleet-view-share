@@ -116,17 +116,26 @@
 //   Paths: the method and the whole path must match; ids match their patterns; '..', '//', '%', '?', '#', '\' refused.
 //
 // Devices: <dataDir>/relay/devices.json [{ id, name, mode: 'relay' | 'local', state: 'pending' | 'paired', createdAt,
-// exp?, pairedAt?, lastSeen?, app?, device? }] (app and device: what the phone's hello said; a file from before modes
-// has no mode: relay), no keys; the keys in sync-api.js's protectedStore(<dataDir>/relay, 'relay-keys') as one JSON
-// object { <dev>: { k, qr? } } (see loadKeys), for both modes.
+// exp?, pairedAt?, lastSeen?, app?, device?, kind?, peer? }] (app and device: what the phone's hello said; a file from
+// before modes has no mode: relay), no keys; the keys in sync-api.js's protectedStore(<dataDir>/relay, 'relay-keys') as
+// one JSON object { <dev>: { k, qr? } } (see loadKeys), for both modes.
+// Computers (docs/link.md): another of Henry's machines, linked through link.js, is a device of kind 'computer' with
+// peer: its sync device id. It never pairs with a QR code: link.js's pairing makes its key and adds it here paired
+// (addComputer), and removeComputer (link.js unlink) revokes it like any device. It is served exactly like a phone
+// (envelopes, replays, parts, limits, the marker, the fence), its presence key is 'peer', and it may also call
+// PEER_ALLOW: the /peer/... routes, which go to the server with the marker's key and X-Fleet-View-Peer: <its peer>,
+// so only the relay can reach them (fleet-view.js checks both). A phone may never call those.
 // Log: <logDir>/relay.log, one line a message: time, device, method, path (no query), status, ms, bytes. Never a body,
 // a key, a token or the pairing link.
 //
 // createRelay(opts) -> { start(), stop(reason) -> Promise, handle(req, res, ctx), status() -> Promise, pair(name,
-// mode) -> Promise [code, json], revoke(id) -> Promise [code, json] }
+// mode) -> Promise [code, json], revoke(id) -> Promise [code, json], addComputer({ dev, name, peer, key }) -> Promise
+// of the device's view, removeComputer(peer, why) -> Promise of how many went, computers() -> [{ id, peer, name,
+// pairedAt, lastSeen, channel }] }
 //   opts: { port, dataDir, logDir, sync (createSync()'s instance), apiToken (a function giving it, or the token
 //   file's path), relayKey (a function giving api.js's relayKey(), for the marker), version (string or function),
-//   pcName, log(text), lanPort (the Wi-Fi listener's, 4779) } and, for tests: now, WebSocketImpl, timers
+//   pcName, log(text), lanPort (the Wi-Fi listener's, 4779), onComputerGone(peer) (a computer revoked with revoke(),
+//   not through link.js: fleet-view.js has the link unlink it on both machines) } and, for tests: now, WebSocketImpl, timers
 //   ({ setTimeout, clearTimeout }), keyStore (a store as sync-api.js's), readConfig(dataDir), routeMs, waitRouteMs,
 //   startLimits ({ atOnce, max }, read at each request), resDeviceMax, lanHosts() (the listener's addresses: 127.0.0.1
 //   in a test; never anything but this PC's private ones in use), lanLimits (relay-lan.js LIMITS)
@@ -336,10 +345,21 @@ const ALLOW = {
     '/accounts/(?:add|login|code|cancel)'],
 };
 const ALLOW_RE = Object.fromEntries(Object.entries(ALLOW).map(([m, list]) => [m, new RegExp(`^(?:${list.join('|')})$`)]));
+// what only a linked computer may call besides (docs/link.md): the /peer/... routes, which fleet-view.js serves to the
+// relay alone (the marker's key and X-Fleet-View-Peer). GET /peer/status: who answers (its device and name) and its
+// version. The other routes the link adds (the work a move carries, logins) go here as they are built
+const PEER_ALLOW = {
+  GET: ['/peer/status'],
+  POST: [],
+};
+const PEER_RE = Object.fromEntries(Object.entries(PEER_ALLOW).filter(([, list]) => list.length).map(([m, list]) => [m, new RegExp(`^(?:${list.join('|')})$`)]));
 // the path alone: printable ASCII, no '..', '//', '%', '?', '#' or backslash
 const pathOk = (p) => typeof p === 'string' && p.length <= 300 && p[0] === '/' && /^[\x21-\x7e]+$/.test(p)
   && !p.includes('..') && !p.includes('//') && !/[%?#\\]/.test(p);
 const routeAllowed = (m, p) => !!ALLOW_RE[m] && pathOk(p) && ALLOW_RE[m].test(p);
+// a /peer/... route only a computer may call (never a phone)
+const peerRouteAllowed = (m, p) => !!PEER_RE[m] && pathOk(p) && PEER_RE[m].test(p);
+const isPeerPath = (p) => typeof p === 'string' && p.startsWith('/peer/');
 // what POST /settings may set from the phone (the Chats window's chatsBounds, chatsOpen, chatsOnTop are desktop state)
 const SETTINGS_KEYS = new Set(['repo', 'repos', 'hidden', 'hiddenRepos', 'finishedOpen', 'repoNames', 'repoOrder', 'forgotten', 'chief']);
 // what goes on to POST /api/chief/start (chief.js start reads no more), and what a bot may be given from the phone
@@ -566,9 +586,12 @@ function createRelay(opts = {}) {
   const isLocal = (dv) => dv.mode === 'local';
   // the topic in a device's AAD: fleet:<uid>:<dev> through Supabase, fleet:local:<dev> on the Wi-Fi
   const topicFor = (dv) => topicOf(isLocal(dv) ? LOCAL_UID : uid, dv.id);
+  const isComputer = (dv) => dv.kind === 'computer';
   function makeDevice(o) {
+    const computer = o.kind === 'computer' && typeof o.peer === 'string' && UUID_RE.test(o.peer);
     return {
-      id: o.id, name: clip(o.name, 60) || 'iPhone', mode: o.mode === 'local' ? 'local' : 'relay', state: o.state, createdAt: Number(o.createdAt) || now(),
+      kind: computer ? 'computer' : 'phone', peer: computer ? o.peer.toLowerCase() : undefined,
+      id: o.id, name: clip(o.name, 60) || (computer ? 'another computer' : 'iPhone'), mode: o.mode === 'local' && !computer ? 'local' : 'relay', state: o.state, createdAt: Number(o.createdAt) || now(),
       exp: o.state === 'pending' ? Number(o.exp) || 0 : undefined, pairedAt: Number(o.pairedAt) || undefined, lastSeen: Number(o.lastSeen) || undefined,
       app: o.app ? clip(o.app, 40) : undefined, device: o.device ? clip(o.device, 60) : undefined, gone: false,
       k: null, keys: null, qr: false, until: 0, cands: [], hsN: 0, hsAt: 0, old: null,
@@ -577,9 +600,11 @@ function createRelay(opts = {}) {
       unpacking: 0, unpackWait: [], resBytes: 0, parts: new Map(), dropped: 0,
     };
   }
+  // (a phone's has no kind: devices.json from before computers reads the same)
   const deviceView = (dv) => {
     const o = { id: dv.id, name: dv.name, mode: dv.mode, state: dv.state, createdAt: dv.createdAt };
     for (const k of ['exp', 'pairedAt', 'lastSeen', 'app', 'device']) if (dv[k] !== undefined) o[k] = dv[k];
+    if (isComputer(dv)) { o.kind = 'computer'; o.peer = dv.peer; }
     return o;
   };
   function loadDevices() {
@@ -587,6 +612,8 @@ function createRelay(opts = {}) {
     try { j = JSON.parse(fs.readFileSync(devicesFile, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') note(`devices.json could not be read: ${e.message}`); return; }
     for (const o of arr(j && j.devices).slice(0, DEVICES_MAX)) {
       if (!o || !DEV_RE.test(String(o.id)) || (o.state !== 'pending' && o.state !== 'paired')) continue;
+      // a computer is only ever paired, and always names its peer
+      if (o.kind === 'computer' && (o.state !== 'paired' || !(typeof o.peer === 'string' && UUID_RE.test(o.peer)))) continue;
       devices.set(o.id, makeDevice(o));
     }
   }
@@ -863,9 +890,10 @@ function createRelay(opts = {}) {
   }
   const fail = (s, message, extra) => ({ s, b: { ok: false, message, ...(extra || {}) } });
   // every header is made here, none taken from the phone; mark: the marker's key, on MARKED routes only; dv: the device
-  // whose answer it reads, which may have RES_DEVICE_MAX bytes of answers being read at once (429 past that)
+  // whose answer it reads, which may have RES_DEVICE_MAX bytes of answers being read at once (429 past that); peer: a
+  // computer's sync device id, on its /peer/... routes (which go with the marker's key too)
   // -> Promise of { s, b?, b64?, ct?, etag?, bytes }
-  function forward(m, p, q, b, etag, ms, mark = null, dv = null) {
+  function forward(m, p, q, b, etag, ms, mark = null, dv = null, peer = null) {
     return new Promise((resolve) => {
       const api = p.startsWith('/api/');
       const headers = { Accept: 'application/json, */*' };
@@ -875,6 +903,9 @@ function createRelay(opts = {}) {
         if (!t) return resolve({ ...fail(502, 'the API token could not be read on the PC'), bytes: 0 });
         headers.Authorization = `Bearer ${t}`;
         if (mark) headers['X-Fleet-View-Relay'] = mark;
+      } else if (peer && mark && isPeerPath(p)) {
+        headers['X-Fleet-View-Relay'] = mark;
+        headers['X-Fleet-View-Peer'] = peer;
       }
       if (m === 'POST') {
         body = Buffer.from(JSON.stringify(b || {}), 'utf8');
@@ -929,7 +960,9 @@ function createRelay(opts = {}) {
   async function run(dv, msg) {
     const m = msg.m, p = msg.p;
     if (m !== 'GET' && m !== 'POST') return fail(400, 'm must be GET or POST');
-    if (!routeAllowed(m, p)) return fail(403, 'not something the phone may call');
+    // a linked computer may also call the /peer/... routes; a phone never
+    const peerRoute = isComputer(dv) && peerRouteAllowed(m, p);
+    if (!routeAllowed(m, p) && !peerRoute) return fail(403, isComputer(dv) ? 'not something another computer may call' : 'not something the phone may call');
     let q = {};
     if (msg.q !== undefined && msg.q !== null) {
       if (typeof msg.q !== 'object' || Array.isArray(msg.q)) return fail(400, 'q must be an object');
@@ -958,12 +991,15 @@ function createRelay(opts = {}) {
       waitS = typeof b.wait === 'number' && b.wait > 0 ? Math.ceil(b.wait) : WAIT_CAP_S; // a bad one: the server says 400
     }
     const ms = routeTimeout(m, p, waitS, routeMs, waitRouteMs);
-    // Henry's own words from his phone (api.js viaOf): marked only here, with every check passed
+    // Henry's own words from his phone or another of his computers (api.js viaOf): marked only here, with every check
+    // passed. A /peer/... route goes with the marker's key and the computer's peer (fleet-view.js serves it only so)
     const mark = m === 'POST' && MARKED.test(p) ? markKey() : null;
     if (mark) b.via = 'phone';
+    const peerMark = peerRoute ? markKey() : null;
+    if (peerRoute && !peerMark) return fail(503, 'this PC has no relay key, so it cannot pass on what another computer asks');
     // revoked while the checks above waited (they may read /state): nothing goes
     if (dv.gone || devices.get(dv.id) !== dv) return null;
-    const r = await forward(m, p, q, b, etag, ms, mark, dv);
+    const r = await forward(m, p, q, b, etag, ms, mark || peerMark, dv, peerRoute ? dv.peer : null);
     // what the phone's own /state read says: the narrower checks use it too
     if (m === 'GET' && p === '/state' && r.s === 200 && r.b && typeof r.b === 'object') places = placesFrom(r.b);
     if (m === 'GET') { fenceAnswer(p, r); accountsAnswer(p, r); }
@@ -1487,7 +1523,8 @@ function createRelay(opts = {}) {
     }
     if (event === 'presence_state' || event === 'presence_diff') {
       const here = event === 'presence_state' ? payload : payload && payload.joins;
-      if (here && typeof here === 'object' && here.phone) { dv.lastSeen = now(); devicesDirty = true; }
+      // a phone tracks the key 'phone', a linked computer (link.js) 'peer'
+      if (here && typeof here === 'object' && (isComputer(dv) ? here.peer : here.phone)) { dv.lastSeen = now(); devicesDirty = true; }
     }
   }
 
@@ -1643,8 +1680,47 @@ function createRelay(opts = {}) {
     notice(dv, 'revoked');
     await forgetDevice(dv, 'was revoked');
     await evaluate();
+    if (isComputer(dv) && typeof opts.onComputerGone === 'function') { try { opts.onComputerGone(dv.peer); } catch {} }
     return [200, { ok: true, id: dv.id }];
   }
+  // ---------- linked computers (link.js, docs/link.md) ----------
+  // another of Henry's machines, its key made by link.js's pairing (confirmed on both screens): a paired device of kind
+  // 'computer' from the start, with no QR code and no handshake. One per peer: a newer link replaces the older one.
+  // -> its view; throws when it can't be kept
+  async function addComputer(o = {}) {
+    if (!started || stopped) throw new Error('the relay is not running');
+    const dev = String(o.dev || ''), peer = String(o.peer || '').toLowerCase(), k = Buffer.isBuffer(o.key) ? o.key : null;
+    if (!DEV_RE.test(dev)) throw new Error('dev must be 16 characters of base64url');
+    if (!UUID_RE.test(peer)) throw new Error('peer must be a sync device id');
+    if (!k || k.length !== 32) throw new Error('the key must be 32 bytes');
+    for (const dv of [...devices.values()]) if (isComputer(dv) && dv.peer === peer) await forgetDevice(dv, 'was linked again: the older link is dropped');
+    const there = devices.get(dev);
+    if (there) await forgetDevice(there, 'had the id of a new link: dropped');
+    if (devices.size >= DEVICES_MAX) throw new Error(`${DEVICES_MAX} devices are paired: revoke one first`);
+    await loadKeys();
+    keys.set(dev, { k, qr: null });
+    try { await saveKeys(); } catch (e) { keys.delete(dev); throw new Error(`the key could not be kept safe on this PC: ${e.message}`); }
+    const t = now();
+    const dv = makeDevice({ id: dev, name: clip(o.name, 60) || 'another computer', mode: 'relay', kind: 'computer', peer, state: 'paired', createdAt: t, pairedAt: t });
+    withKey(dv, keys.get(dev));
+    devices.set(dev, dv);
+    saveDevices();
+    note(`${dev} (${dv.name}, a linked computer) is paired`);
+    await evaluate();
+    return deviceView(dv);
+  }
+  // every device of that peer out (notice 'revoked' first, so its link.js forgets this machine too) -> how many
+  async function removeComputer(peer, why = 'was unlinked') {
+    const p = String(peer || '').toLowerCase();
+    const list = [...devices.values()].filter((dv) => isComputer(dv) && dv.peer === p);
+    for (const dv of list) { notice(dv, 'revoked'); await forgetDevice(dv, why); }
+    if (list.length) await evaluate();
+    return list.length;
+  }
+  const computers = () => [...devices.values()].filter(isComputer).map((dv) => ({
+    id: dv.id, peer: dv.peer, name: dv.name, pairedAt: dv.pairedAt, lastSeen: dv.lastSeen,
+    channel: dv.ch.state === 'errored' ? 'refused' : dv.ch.state,
+  }));
   async function status() {
     let enabled = false, signedIn = false, email = null;
     try {
@@ -1693,7 +1769,7 @@ function createRelay(opts = {}) {
     return send(404, { ok: false, message: 'no such route' });
   }
 
-  return { start, stop, handle, status, pair, revoke };
+  return { start, stop, handle, status, pair, revoke, addComputer, removeComputer, computers };
 }
 
 // ---------- CLI ----------
@@ -1788,7 +1864,7 @@ async function cli(argv, io = {}) {
 }
 
 module.exports = {
-  createRelay, cli, seal, open, decrypt, dirKey, aadText, topicOf, slices, pairLink, qrSvg, routeAllowed, pathOk,
+  createRelay, cli, seal, open, decrypt, dirKey, aadText, topicOf, slices, pairLink, qrSvg, routeAllowed, peerRouteAllowed, PEER_ALLOW, pathOk,
   routeTimeout, startWeight, resumeKind, resumeWeight, xPair, pairedKey, secretName, stepsOk, ALLOW, SIGNIN_LETTERS, SETTINGS_KEYS, MARKED, LABEL, PAIRED_INFO, LINK_V,
   PART_MAX, PARTS_MAX, C_MAX, LOCAL_UID,
   TIMES: { ROUTE_MS, WAIT_ROUTE_MS, WAIT_CAP_S, START_ROUTE_MS, RESUME_ROUTE_MS, ACTIVITY_MS, NOW_MS, MODEL_MS },

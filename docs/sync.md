@@ -144,6 +144,14 @@ The server decides who may sync, not this code. The `fleet_sync.members` list is
 and every storage policy. A Google account that is not on the list can sign in, but it reads and writes nothing.
 The page tells it so.
 
+## Linking machines
+
+While sync runs, `sync-run.js` also runs the link (`link.js`, [link.md](link.md)) beside the mover: Henry links two of
+his machines once in the Sync card (**Your machines**, **Link**, the same 6-digit code confirmed on both), and from then
+on each can call the other's routes through the other's relay, the way the phone does. The sync key carries only the
+pairing's rows; the keys the calls use come from the pairing, so the sync key alone never links a machine. With sync
+off there is no link. Tests: `node scripts/link-test.js`.
+
 ## Friends' installs stay local
 
 People who install Fleet View from the public share repo get no sync at all, and nothing they do can reach
@@ -152,7 +160,8 @@ Henry's project:
 - The share repo holds no project URL, no key and no project ref (Henry's own repo keeps them in `private.json`,
   which never goes to the share repo). The config lives outside the repo, in each
   machine's own data folder, and only `setup` writes it. A friend's install has no config, so sync stays off.
-  It makes no network call, starts no process or timer, and every `/sync` route except the status answers 404.
+  It makes no network call, starts no process or timer, and every `/sync` route except the status answers 404, as
+  every `/link` route does.
 - `scripts/publish-share.js` reads every outgoing file before a publish, and before a dry run too. It refuses
   to publish if a file holds a Supabase project URL, ref or key, a JWT, or a sync `config.json`. The test plants
   each of these in a throwaway repo to prove the refusal.

@@ -381,6 +381,8 @@ Per device, on the relay:
 
 `relay.js` holds the list; this table mirrors it. The relay checks the method and the whole path. Session ids, team
 ids and bot ids must match their own patterns, and a path with `..`, `//`, `%`, `?`, `#` or a backslash is refused.
+Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may call this list too, plus the
+`/peer/...` routes of `PEER_ALLOW`, which a phone may never call (403).
 
 **GET:** `/state`, `/conversation`, `/conversation/image`, `/repo-history`, `/chat/commands`, `/chat/files`,
 `/chat/kind`, `/file`, `/since`, `/chief/briefing`, `/api/sessions`, `/api/sessions/:id`, `/api/sessions/:id/menu`,
@@ -568,6 +570,10 @@ key counts as unsigned.
   `{ k, qr: { until, next, n? } }` while it pairs (`k` is `K`, which opens hellos until `until`, `next` the `K'` the
   handshakes made, and `n` how many handshakes it made, when any). `GET /relay/status` says `finished` for a paired
   device, and `handshakes` (that `n`) for one still pairing.
+- **Computers:** another of Henry's machines, linked in the Sync card ([link.md](link.md)), is a device too, with
+  `kind: "computer"` and `peer` (its sync device id). It never pairs with a QR code: `link.js` makes its key and adds
+  it paired (`addComputer`), and unlinking removes it (`removeComputer`, the notice `revoked`). It is served like a
+  phone, tracks the presence key `peer`, and may also call the `/peer/...` routes. The iPhone card does not list it.
 - **Routes (on the PC only, never through the relay):** `GET /relay/status` (`{ enabled, signedIn, email,
   connected, lan: { on, port, listening, addresses, sockets }, devices }`, never a key; each device has its `mode`,
   and a local one's `channel` is `joined` while a proven socket of its is open), `POST /relay/pair { name?, mode? }`
