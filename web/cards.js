@@ -303,8 +303,9 @@ const GLIDE = 'transform 280ms var(--ease, cubic-bezier(.2,.8,.2,1))';
 // set of items changed, items that stay glide from where they were (FLIP), new ones fade and rise in once,
 // and ones that left fade out where they were. `fill(id)` patches an item's content; it runs between the
 // two measurements, so a change in height that moves the others glides too. `make(id)` builds a new one.
-// `pairs` (old id -> new id, state.handoffPairs): a conversation that handed off dissolves into its pickup,
-// which comes in on the same spot, instead of the plain fade out and rise in.
+// `pairs` (old id -> new id, state.handoffPairs): a conversation that handed off carries on as its pickup: its
+// item is re-keyed to the pickup's id and stays where it is (nothing leaves, nothing rises in; relay() lights it
+// once it stops handing off). Only when both have an item already does the old one dissolve into the new one.
 export function syncGrid(grid, store, ids, make, fill, pairs = null) {
   const pickups = new Set(pairs ? pairs.values() : []);
   const order = ids.join('\n');
@@ -318,6 +319,15 @@ export function syncGrid(grid, store, ids, make, fill, pairs = null) {
   const first = new Map();
   const keep = new Set(ids);
   const leaving = [];
+  if (pairs) {
+    for (const [from, to] of pairs) {
+      const el = store.get(from);
+      if (!el || store.has(to) || !keep.has(to) || keep.has(from)) continue;
+      store.delete(from);
+      store.set(to, el);
+      el.dataset.id = to;
+    }
+  }
   if (animate) {
     for (const [id, el] of store) first.set(id, el.getBoundingClientRect());
     for (const [id, el] of store) if (!keep.has(id)) leaving.push([el, el.offsetLeft, el.offsetTop, el.offsetWidth, el.offsetHeight]);
@@ -421,10 +431,11 @@ function buildCard(id, ui) {
 // and clears the multi-selection.
 let lastPick = null; // { id, t }
 let anchor = null; // the last card or tile clicked (plain or Ctrl): where a Shift+click range starts
-export function wirePick(el, id, ui) {
+export function wirePick(el, id0, ui) {
   // Shift+click would select the page's text from the last click to here
   el.addEventListener('mousedown', (e) => { if (e.shiftKey && e.button === 0) e.preventDefault(); });
   el.addEventListener('click', (e) => {
+    const id = el.dataset.id || id0; // a handed-off conversation's card carries on as its pickup's (syncGrid)
     if (e.shiftKey && !(e.ctrlKey || e.metaKey) && typeof ui.selectMany === 'function') {
       e.preventDefault();
       const ids = [...(el.parentElement?.querySelectorAll(':scope > [data-id]') || [])].map((x) => x.dataset.id);
@@ -442,8 +453,26 @@ export function wirePick(el, id, ui) {
   });
   el.addEventListener('dblclick', (e) => {
     e.preventDefault();
-    ui.open(lastPick && performance.now() - lastPick.t < 700 ? lastPick.id : id);
+    ui.open(lastPick && performance.now() - lastPick.t < 700 ? lastPick.id : el.dataset.id || id0);
   });
+}
+// .handing on a card or tile; when it stops handing off to go live (its pickup took over), one bright band
+// passes over it and a violet rim settles into its edge (views.css .is-relay): picked up, the same card carrying on
+export function setHanding(el, s) {
+  const was = el.classList.contains('handing');
+  el.classList.toggle('handing', !!s.handing);
+  if (!was || s.handing || s.state === 'DONE' || reduced()) return;
+  el.classList.remove('is-relay');
+  void el.offsetWidth; // restart it if one is still running
+  el.classList.add('is-relay');
+  const token = (el._relay = {});
+  const end = (e) => {
+    if (e && (e.target !== el || e.pseudoElement)) return; // the band's own end (::after) comes first
+    el.removeEventListener('animationend', end);
+    if (el._relay === token) el.classList.remove('is-relay');
+  };
+  el.addEventListener('animationend', end);
+  setTimeout(end, 1400); // in case it never ran (a hidden view)
 }
 // a text that changes every second (a timer) is written into its own element, so the slot around it (and
 // any link in it) is not rewritten every second under the pointer
@@ -459,7 +488,7 @@ function fillCard(el, s, state, ui, now) {
   el.classList.toggle('picked', ui.selectedId === s.id);
   el.classList.toggle('needs', needs);
   el.classList.toggle('continued', !!s.continued); // a removed conversation just continued: dim until it works
-  el.classList.toggle('handing', !!s.handing); // handing off to a fresh conversation: a slow light runs across it
+  setHanding(el, s); // handing off to a fresh conversation: a slow light runs across it
   el.style.setProperty('--status', statusColor(s));
   el.style.setProperty('--hue', s.hue || C.cyan);
   setIcon(sl.icon, s);

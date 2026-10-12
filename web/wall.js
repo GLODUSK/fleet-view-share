@@ -3,7 +3,7 @@
 import {
   C, esc, setHTML, setIcon, badge, acctTag, ctxGauge, usage, shipTrack, planSteps, prTag, progressBar, pctText,
   agentDots, runningAgents, runningList, lastAction, turnText, needsYou, isBusy, gradHex, ago, repoChip, clashNotes, linksOf,
-  wirePick, setText, statusColor, waitNote, syncGrid, leadTag,
+  wirePick, setText, statusColor, waitNote, syncGrid, leadTag, setHanding,
 } from './cards.js';
 import { icon } from './icons.js';
 
@@ -30,7 +30,7 @@ function fillTile(el, s, state, ui, now) {
   const pct = Math.max(0, Math.min(1, Number(p.pct) || 0));
   el.classList.toggle('picked', ui.selectedId === s.id);
   el.classList.toggle('continued', !!s.continued); // a removed conversation just continued: dim until it works
-  el.classList.toggle('handing', !!s.handing); // handing off to a fresh conversation (cards.js)
+  setHanding(el, s); // handing off to a fresh conversation (cards.js)
   el.classList.toggle('needs', needsYou(s.state));
   el.style.setProperty('--status', statusColor(s));
   el.style.setProperty('--hue', s.hue || C.cyan);

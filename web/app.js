@@ -96,7 +96,8 @@
 // { id: 'new-<n>' or its id, pending: true, name: 'new session', state: 'NEW', repo, account, cwd } until
 // /state lists the conversation; the map draws them, the panel shows their Session tab. A session here that
 // handed off is the same: its pickup runs under the old conversation's key, is re-keyed to the new id (onRekey
-// moves the pick and the panel), and stands in as 'picked-up session' until /state lists it. One that had turns
+// moves the pick and the panel), and until /state lists it the old conversation's PICKING UP stand-in goes by that
+// id (handoffView), so it stays one entry in its place, never a 'new session' beside it. One that had turns
 // and aged off /state since (state.aged) is not new: no stand-in, it is off the map like any quiet conversation.
 //
 // One repo list for every view: the workspace list, the map's repo anchors (view.repoAnchors; a listed repo with no
@@ -157,7 +158,7 @@
 
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
-import { renderProjects } from './projects.js';
+import { renderProjects, followProjectsPick } from './projects.js';
 import { renderChats, botFace } from './chats.js';
 import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
@@ -1258,7 +1259,8 @@ function repoForFolder(st, folder) {
 // (its stand-in at once, POST /rename once it has its own id; a fork's first id can still be the original's, so
 // that one waits for the next)
 const pasteNames = new Map();
-function pendingSessions(st) {
+// covered: ids that already stand in as the conversation a handoff's pickup took over (handoffView): no second entry
+function pendingSessions(st, covered = new Set()) {
   const listed = new Set((st.sessions || []).map((s) => s.id));
   // one that had turns and aged off /state (its panel left open for hours) isn't new: it is left off, not a stand-in
   const aged = new Set(st.aged || []);
@@ -1267,28 +1269,39 @@ function pendingSessions(st) {
   const over = new Set((st.sessions || []).filter((s) => s.bot).map((s) => s.id));
   for (const h of hosts.values()) {
     // started here, or the pickup of a handoff (re-keyed from the conversation it took over: the panel follows it)
-    if (!(h.created || h.handoffFrom) || !h.alive || listed.has(h.id) || aged.has(h.id) || !h.cwd || h.role || over.has(h.handoffFrom)) continue;
+    if (!(h.created || h.handoffFrom) || !h.alive || listed.has(h.id) || aged.has(h.id) || !h.cwd || h.role || over.has(h.handoffFrom) || covered.has(h.id)) continue;
     const color = acctColor(h.account);
+    // a pickup whose predecessor /state still lists carries on as it (its name, workspace and colour, handing off),
+    // not as a new session: a new one's workspace is guessed from its folder, and a worktree would sprout a hub
+    const prev = h.handoffFrom && !h.created ? (st.sessions || []).find((s) => s.id === h.handoffFrom) : null;
     out.push({
       id: h.id, pending: true, name: pasteNames.get(h.id)?.name || (h.forkFrom ? 'forked session' : h.handoffFrom && !h.created ? 'picked-up session' : 'new session'), account: h.account, state: 'NEW', label: 'NEW SESSION', stateColor: color, hue: color,
       repo: repoForFolder(st, h.cwd), cwd: h.cwd, last: h.startedAt || Date.now(), turnStart: null, goal: null, lastAction: null, waitingOn: null,
       agents: [], files: [], calls: [], spark: [], ship: null, progress: { mode: 'ship', pct: 0 }, planSteps: null, context: null,
       links: { pr: null, branch: null, deploy: null, repoFolder: h.cwd }, lastReply: null, tokens: 0, cost: 0, endedAt: null, openElsewhere: false, calls20: 0,
+      ...(prev ? {
+        name: prev.name, repo: prev.repo, hue: prev.hue, goal: prev.goal || null, handing: true, state: 'HANDOFF', label: 'PICKING UP', stateColor: C.violet,
+        pickedUpFrom: { id: prev.id, name: prev.name },
+      } : {}),
     });
   }
   return out;
 }
 
-// ---------- handoffs: the old card holds its place until its pickup takes it ----------
-// A conversation that hands off (handoff.js) doesn't just go quiet and vanish: from the moment it hands off
-// it stands in as HANDING OFF (PICKING UP once its pickup runs), in its own slot, and when the pickup shows
-// up it takes that same slot (same first-seen place) while the old card dissolves into it (views.css
-// .is-handing / .is-picking; the map sends the old node over to the new one). Held at most HANDOFF_MS.
+// ---------- handoffs: one conversation carrying on, not a new one beside the old ----------
+// A conversation that hands off (handoff.js) doesn't just go quiet and vanish, and its pickup is not a new
+// conversation (Henry, 2026-10-12): from the moment it hands off it stands in as HANDING OFF (PICKING UP once its
+// pickup runs), in its own slot, and when the pickup shows up it carries on in that same place: the same card or
+// tile (syncGrid re-keys it), the same map node (map.js carryNode), the same first-seen place, and the pick follows
+// it (tookOver). A pickup running here goes by its own id as soon as the host has re-keyed it, before /state lists
+// it: the stand-in takes that id, so it stays the one entry, never a "new session" beside it. Held at most HANDOFF_MS.
 const HANDOFF_MS = 3 * 60e3;
 const lastLive = new Map(); // id -> the state it last showed live (the stand-in's place in the live order)
+let lastStand = new Set(); // the conversations that stood in as handing off at the last derive (old ids)
 function handoffView(all) {
   const now = Date.now();
   const live = new Set(all.filter((s) => s.state !== 'DONE').map((s) => s.id));
+  const listed = new Set(all.map((s) => s.id));
   const byFrom = new Map();
   for (const s of all) if (s.pickedUpFrom?.id) byFrom.set(s.pickedUpFrom.id, s.id);
   // a pickup running here, re-keyed to its own id (before that it runs under the old one's key)
@@ -1304,12 +1317,31 @@ function handoffView(all) {
     if (next && live.has(next)) continue; // its pickup is on the board: it took the slot
     if (!firstSeen.has(s.id)) continue; // never on this board: nothing to hand over
     const picking = !!(next || hostFrom.has(s.id));
+    // its pickup runs here under its own id, not listed yet: the stand-in goes by that id (pending, no log yet)
+    const run = hostFrom.get(s.id);
+    const key = run && !listed.has(run) ? run : s.id;
     stand.set(s.id, {
       ...s, handing: true, state: 'HANDOFF', label: picking ? 'PICKING UP' : 'HANDING OFF', stateColor: C.violet,
-      rankState: lastLive.get(s.id) || 'WORKING', pendingNext: hostFrom.get(s.id) || null, waitingOn: null,
+      rankState: lastLive.get(s.id) || 'WORKING', pendingNext: run || null, waitingOn: null,
+      ...(key !== s.id ? { id: key, pending: true, handoff: null, pickedUpFrom: { id: s.id, name: s.name } } : {}),
     });
   }
-  return { stand, pairs };
+  // the ones whose pickup took over since the last derive, seen here as they did: [old id, new id]
+  const tookOver = [...pairs].filter(([from, to]) => lastStand.has(from) && !stand.has(from) && live.has(to));
+  lastStand = new Set(stand.keys());
+  return { stand, pairs, tookOver };
+}
+// a pickup took over: the pick, the panel and the multi-selection follow it once, as they follow a re-key (a later
+// click on the old one stays there)
+function followPickups(pairs) {
+  for (const [from, to] of pairs) {
+    if (ui.selectedId === from) ui.selectedId = to;
+    if (ui.detailId === from) ui.detailId = to;
+    if (pickIntent?.id === from) pickIntent.id = to;
+    if (tabWant?.id === from) tabWant.id = to;
+    followProjectsPick(from, to);
+    if (multi.has(from)) { multi.delete(from); multi.add(to); try { mapMod?.setMapSelection?.([...multi]); } catch (e) { console.error(e); } }
+  }
 }
 
 function derive(st) {
@@ -1340,7 +1372,9 @@ function derive(st) {
   if (!shown.length && inR.length && q) filterNote = `nothing matches the filter "${local.query}" (Esc clears it)`;
   else if (!shown.length && shownSel().length) filterNote = `no live conversations in ${shownTitle()}`;
   if (hiddenSaveDue) { hiddenSaveDue = false; saveHidden(); }
-  const pending = pendingSessions(st);
+  // a stand-in that goes by its pickup's id is that pickup's entry: listed with every conversation, never twice
+  const standNew = [...ho.stand.values()].filter((s) => s.pending);
+  const pending = pendingSessions(st, new Set(standNew.map((s) => s.id)));
   // a conversation that handed off to a fresh one (handoff.js) is replaced by it: off the strip and the map
   // (its successor's "picked up from" link still opens it)
   // (one still handing off is on the board as its stand-in, not in the strip)
@@ -1350,10 +1384,10 @@ function derive(st) {
   const finIds = new Set(finishedRows(finished).map((f) => f.id));
   return {
     ...st, settings: { ...(st.settings || {}), ...local }, sessions: shown,
-    allSessions: all.filter((s) => !contIds.has(s.id)).concat(cont, pending, over),
+    allSessions: all.filter((s) => !contIds.has(s.id)).concat(cont, pending, standNew, over),
     pending: pending.filter((s) => inRepo(s.repo)), clashes, allClashes: st.clashes || [], feed, filterNote,
-    // handoffs in the last few minutes: old id -> its pickup's id (the views' hand-over motion)
-    handoffPairs: ho.pairs,
+    // handoffs in the last few minutes: old id -> its pickup's id (the views carry the old entry on as the new one)
+    handoffPairs: ho.pairs, tookOver: ho.tookOver,
     // continued stand-ins show on the map as dim nodes too, like the strip's
     finished, finishedSessions: all.filter((s) => s.state === 'DONE' && finIds.has(s.id) && !isHidden(s) && !contIds.has(s.id) && !offRepo(s)).concat(cont.filter((s) => inRepo(s.repo) && !offRepo(s))),
     // every listed repo in the picked one(s) gets its anchor on the map, conversations or not (the workspace list)
@@ -1382,6 +1416,7 @@ function render() {
   drawFooter();
   if (!state) return;
   view = derive(state);
+  if (view.tookOver.length) followPickups(view.tookOver);
   if (ui.selectedId && !view.allSessions.some((s) => s.id === ui.selectedId)) ui.selectedId = null;
   // a new session that ended before it ever spoke has nothing left to show
   if (ui.detailId && isNewKey(ui.detailId) && !view.allSessions.some((s) => s.id === ui.detailId)) ui.detailId = null;

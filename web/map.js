@@ -18,6 +18,9 @@
 // memory gauge, link and turning ring all glide (exponential easing, see glide). Going idle, the ring of dots
 // slows to a stop while its dots shrink into the orb; starting work, they grow out and pick up speed. A new
 // conversation or repo grows in with a slight overshoot (BIRTH_MS); one that leaves shrinks as it fades.
+// A handoff is no new conversation (Henry, 2026-10-12): the pickup's node takes over the old one's spot, look and
+// pick (state.handoffPairs, carryNode), so nothing is born next to the hub and nothing leaves; when it turns from
+// handing off to live, one violet ring spreads from it and fades (RELAY_MS).
 // prefers-reduced-motion snaps all of these to their end.
 //
 // Look: conversations and agents are lit orbs; a repo is a hub (a faceted hexagon in its colour, with the repo's
@@ -71,7 +74,9 @@
 // New sessions: state.pending (from the shell) lists conversations started in the desktop window that have no
 // log yet. Each is drawn at its repo as a hollow node with a steady dashed ring in its account's colour, and
 // becomes the real node in place: the shell calls rekeyNode(oldKey, id) when it gets its id, and the node
-// keeps its position when /state lists it. A conversation that leaves the map fades out over 400 ms.
+// keeps its position when /state lists it. A conversation that leaves the map fades out over 400 ms. A handoff's
+// pickup that runs here is the old conversation's stand-in (handing: true, keyed by the pickup's id once it has one):
+// it keeps the old node and its handing-off look, never the new-session one.
 //
 // Tests (?fixture=1 or ?debug=1): window.__map = { nodes, stats, debug, comet(fromId, toId) }. nodes() lists
 // each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label rectangles.
@@ -192,7 +197,8 @@ const NEEDS_YOU = new Set(['ASKING', 'QUESTION', 'STALLED', 'ERROR']);
 const GHOST_MS = 650;                // a conversation that leaves the map shrinks and fades out over this
 const DASH_NEW = [3, 3];             // a new session's ring (steady, never moving)
 const DASH_HO = [5, 4];              // a handing-off conversation's ring, turning slowly: it is in transit
-const HANDOFF_GHOST_MS = 950;        // a handed-off node flies into its pickup and is absorbed over this
+const HANDOFF_GHOST_MS = 950;        // a handed-off node flies into its pickup and is absorbed over this (a pickup already on the map elsewhere)
+const RELAY_MS = 900;                // a picked-up node's violet ring, as it turns from handing off to live
 const STEP_NAMES = ['push', 'PR', 'checks', 'merged', 'live'];
 
 // command center (see "Command center" at the top)
@@ -573,6 +579,8 @@ export function mapNodes() {
     // draw params: the bump scale (1 at rest), the alpha the node was drawn at, a hub's ring angle, finished
     fin: !!n.fin, state: n.kind === 'session' ? n.s.state : null, R: n.R, scale: n.bs || 1, alpha: n.da === undefined ? 1 : n.da, spin: n.spin === undefined ? null : n.spin,
     multi: !!(n.kind === 'session' ? I.multi.has(n.sid) : n.kind === 'repo' && I.multiRepos.has(n.id)),
+    // a conversation's look (lookKey) and whether its picked-up ring is spreading now
+    ...(n.kind === 'session' ? { look: I.look.get(n.id)?.key || null, relay: !!I.look.get(n.id)?.relay } : {}),
   }));
   for (const g of I.ghosts) out.push({ id: g.n.id, kind: g.n.kind, ghost: true, x: g.n.sx, y: g.n.sy, cx: r.left + g.n.sx, cy: r.top + g.n.sy, sid: g.n.sid || null });
   return out;
@@ -693,17 +701,27 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     hit: (x, y) => { if (!I) return null; const o = hitOver(x, y), n = hitTest(x, y), e = hitExtra(x, y); return { node: n ? n.id : null, over: o ? o.kind + ':' + o.id : null, extra: e ? e.kind + ':' + e.id : null }; } };
 }
 
+// node `from` carries on as node `to` ('s:<id>' keys): its position, dragged spot, look and pick move over, so
+// nothing leaves or grows in (a new session that got its id, a handoff's pickup taking its predecessor's place)
+function carryNode(from, to) {
+  for (const m of [I.pos, I.aura, I.look, I.homeXY]) if (m.has(from) && !m.has(to)) { m.set(to, m.get(from)); m.delete(from); }
+  if (I.homeXY.has(to)) saveSpotsSoon(300, true);
+  if (I.sel === from) I.sel = to;
+  if (I.hover === from) I.hover = to;
+  for (const [k, v] of [...I.lab]) if (k.startsWith(from + '|')) { I.lab.delete(k); I.lab.set(to + k.slice(from.length), v); }
+  // the set of nodes is the same as before: no reheat of the layout, no labels hunting for new spots (rebuild; one
+  // id a line, as a file's id has | in it)
+  if (I.sig) I.sig = I.sig.split('\n').map((x) => (x === from ? to : x)).sort().join('\n');
+}
+
 // a new conversation got its id: its node, position and pick move over, so the real node takes its place
 export function rekeyNode(oldKey, id) {
   if (!I || !oldKey || !id) return;
   const from = 's:' + oldKey, to = 's:' + id;
-  for (const m of [I.pos, I.aura, I.look, I.homeXY]) if (m.has(from) && !m.has(to)) { m.set(to, m.get(from)); m.delete(from); }
-  if (I.homeXY.has(to)) saveSpotsSoon(300, true);
+  carryNode(from, to);
   // the drawn node too, so the next rebuild doesn't see it leave (no fade for a node that only changed its key)
   const n = I.byId.get(from);
   if (n && !I.byId.has(to)) { I.byId.delete(from); n.id = to; n.sid = id; I.byId.set(to, n); }
-  if (I.sel === from) I.sel = to;
-  if (I.hover === from) I.hover = to;
   I.dirty = true;
 }
 
@@ -839,8 +857,8 @@ function visibleSessions(state) {
   // the "recently finished" strip's conversations (state.finishedSessions, from the shell) show too, as small
   // dim nodes on their repo; other finished conversations stay off the map unless showDone
   if (Array.isArray(state.allSessions)) {
-    // a handing-off stand-in whose pickup runs here is drawn as that pickup (its node was re-keyed to it)
-    const out = (state.sessions || []).filter((s) => (s.state !== 'DONE' || !!((I.ui && I.ui.showDone) || set.showDone)) && !(s.handing && s.pendingNext));
+    // a handing-off stand-in whose pickup runs here comes keyed by that pickup's id (the node was re-keyed to it)
+    const out = (state.sessions || []).filter((s) => s.state !== 'DONE' || !!((I.ui && I.ui.showDone) || set.showDone));
     const ids = new Set(out.map((s) => s.id));
     for (const s of state.finishedSessions || []) if (s && !ids.has(s.id)) { ids.add(s.id); out.push(s); }
     return out.concat(state.pending || []);
@@ -986,6 +1004,22 @@ function rebuild() {
     if (f && f !== s.id && byId.has('s:' + f)) trails.push({ a: 's:' + f, b: 's:' + s.id, name: s.pickedUpFrom.name || f });
   }
 
+  // a handoff's pickup that just showed up carries on from the node it took over (state.handoffPairs, old id -> new
+  // id): the same spot, look and pick, so it is not born as a new conversation next to its hub while the old one
+  // leaves. The old node may have started fading out a moment ago (it left one poll earlier): taken back from there.
+  const carried = new Set();
+  for (const [from, to] of state.handoffPairs || []) {
+    const a = 's:' + from, b = 's:' + to;
+    if (byId.has(a) || !byId.has(b) || I.pos.has(b)) continue;
+    const gi = I.ghosts.findIndex((g) => g.n.id === a);
+    const p = I.pos.get(a) || (gi >= 0 ? I.ghosts[gi].n.p : null);
+    if (!p) continue;
+    if (gi >= 0) I.ghosts.splice(gi, 1);
+    I.pos.set(a, p);
+    carryNode(a, b);
+    carried.add(a);
+  }
+
   // seed positions for new nodes next to something they link to
   const nb = new Map();
   for (const e of springs) {
@@ -1036,7 +1070,7 @@ function rebuild() {
   const tNow = performance.now();
   if (I.byId && I.lastDraw && tNow - I.lastDraw < 1500) {
     for (const old of I.nodes) {
-      if (old.kind !== 'session' || byId.has(old.id) || old.sx === undefined) continue;
+      if (old.kind !== 'session' || byId.has(old.id) || old.sx === undefined || carried.has(old.id)) continue;
       // handed off: it flies into its pickup's node instead of fading where it was
       const to = state.handoffPairs && state.handoffPairs.get(old.sid);
       if (!I.ghosts.some((g) => g.n.id === old.id)) I.ghosts.push({ n: old, at: tNow, to: to && byId.has('s:' + to) ? 's:' + to : null });
@@ -1055,7 +1089,7 @@ function rebuild() {
   I.nodes = nodes; I.byId = byId; I.springs = springs; I.paths = paths; I.clashes = clashes; I.sim = sim;
   I.conflicts = conflicts; I.teams = teams; I.parity = parity; I.trails = trails;
   if (sim.length && !I.camUntil) I.camUntil = performance.now() + 2000;
-  const sig = sim.map((n) => n.id).sort().join('|');
+  const sig = sim.map((n) => n.id).sort().join('\n');
   if (sig !== I.sig) {
     I.sig = sig;
     I.lab.clear();
@@ -2765,6 +2799,8 @@ function lookOf(n, now) {
       born: !I.still && !I.replay && I.lastDraw && now - I.lastDraw < 1500 ? now : -Infinity };
     I.look.set(n.id, L);
   } else if (L.key !== key) {
+    // picked up: from handing off to a live look, one violet ring spreads from it (drawSession)
+    if (L.key === 'HANDOFF' && key !== 'DONE' && !I.still && !I.replay) L.relay = now;
     // flipping back mid-morph reverses it from where it is, instead of starting over
     const u = (now - L.at) / MORPH_MS;
     if (L.prev === key && u < 1) { L.prev = L.key; L.at = now - (1 - u) * MORPH_MS; }
@@ -2852,6 +2888,15 @@ function drawSession(ctx, n, ks, selected, hovered) {
     if (L) L.prev = null;
     drawLook(ctx, key, s, x, y, R, ks);
   }
+  // picked up a moment ago: one violet ring spreads from it and fades
+  const ru = L && L.relay ? ((I.nowP || performance.now()) - L.relay) / RELAY_MS : 1;
+  if (ru >= 0 && ru < 1) {
+    const ga = ctx.globalAlpha, m = ease(ru);
+    ctx.globalAlpha = ga * 0.6 * (1 - m);
+    ctx.strokeStyle = COL.violet; ctx.lineWidth = 2 * ks;
+    circle(ctx, x, y, (n.RG || n.R) * bs + (3 + 16 * m) * ks); ctx.stroke();
+    ctx.globalAlpha = ga;
+  } else if (L && L.relay) L.relay = 0;
   // memory gauge: context used, clockwise from 12 o'clock over a faint full track; it thins away when done
   const g = L ? L.g : gaugeOn(s) ? 1 : 0;
   if (g > 0.02 && s.context && s.context.limit) {

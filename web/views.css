@@ -212,10 +212,10 @@ html.glass .card.multi.picked, html.glass .tile.multi.picked {
 
 /* ---------- handoff: the old conversation hands its place to the fresh one (Henry, 2026-10-08) ----------
    While it hands off (.handing, app.js handoffView) the card keeps its slot, its strip turns violet and a
-   slow band of light runs across it, like the busy ring: something is under way. When the pickup shows up,
-   the old card (.is-handing, out of the flow where it was) flares once as the band passes, then lifts and
-   blurs away, while the pickup (.is-picking) condenses out of that blur on the same spot with a violet rim
-   that settles into its normal edge. */
+   slow band of light runs across it, like the busy ring: something is under way. Its pickup carries on in that
+   same card (.is-relay below). Only when the pickup already had a card of its own does the old card (.is-handing,
+   out of the flow where it was) flare once as the band passes, then lift and blur away, while the pickup
+   (.is-picking) condenses out of that blur on the same spot with a violet rim that settles into its normal edge. */
 .card.handing, .tile.handing, html.glass .card.handing, html.glass .tile.handing { border-color: rgba(164, 123, 255, 0.26); }
 .card.handing > *, .tile.handing > * { transition: opacity 600ms var(--ease); }
 .card.handing > :not(.c-head):not(.t-head), .tile.handing > :not(.c-head):not(.t-head) { opacity: 0.62; }
@@ -246,9 +246,26 @@ html.glass .card.multi.picked, html.glass .tile.multi.picked {
     border-color: rgba(164, 123, 255, 0.7); box-shadow: 0 0 0 1px rgba(164, 123, 255, 0.55), 0 0 32px rgba(164, 123, 255, 0.4); }
   55% { opacity: 1; filter: none; transform: none; border-color: rgba(164, 123, 255, 0.5); box-shadow: 0 0 0 1px rgba(164, 123, 255, 0.35), 0 0 22px rgba(164, 123, 255, 0.22); }
 }
+/* Picked up (Henry, 2026-10-12: a handoff is no new conversation). The card that stood in as handing off carries
+   on as its pickup's (syncGrid re-keys it, nothing leaves or rises in): as it goes live, one bright band passes
+   over it and a violet rim settles into its edge (.is-relay, cards.js setHanding). .is-handing / .is-picking are
+   left for a pickup that already had its own card. */
+.is-relay { animation: ho-relay 900ms cubic-bezier(.2, .8, .2, 1) both; }
+.is-relay::after {
+  content: ""; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(105deg, transparent 34%, rgba(164, 123, 255, 0.22) 44%, rgba(220, 245, 255, 0.34) 50%,
+    rgba(164, 123, 255, 0.22) 56%, transparent 66%) no-repeat;
+  background-size: 260% 100%; background-position: 100% 0;
+  animation: ho-flash 640ms cubic-bezier(.3, 0, .2, 1) forwards;
+}
+@keyframes ho-relay {
+  0% { border-color: rgba(164, 123, 255, 0.6);
+    box-shadow: inset 0 1px 0 var(--glass-highlight), 0 0 0 1px rgba(164, 123, 255, 0.45), 0 0 26px rgba(164, 123, 255, 0.3); }
+}
 @media (prefers-reduced-motion: reduce) {
   .card.handing::after, .tile.handing::after { animation: none; background: none; }
-  .is-handing, .is-picking { animation: none !important; }
+  .is-handing, .is-picking, .is-relay, .is-relay::after { animation: none !important; }
+  .is-relay::after { background: none; }
 }
 
 /* ---------- stream of tool calls ---------- */

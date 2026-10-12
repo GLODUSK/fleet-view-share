@@ -25,7 +25,9 @@ let selLast = null; // the last copy of the picked conversation, kept if it leav
 const older = new Map(); // repo root -> { at, items, loading, all, open }
 let pane = null;
 
-onRekey((oldKey, id) => { if (selId === oldKey) { selId = id; store.set('fv.projects.sel', id); } });
+onRekey((oldKey, id) => followProjectsPick(oldKey, id));
+// the pick follows a new session's id, and a handoff's pickup when it takes over (app.js followPickups)
+export function followProjectsPick(from, to) { if (selId === from) { selId = to; store.set('fv.projects.sel', to); } }
 
 const rootOf = (s) => (s && s.repo && s.repo.root) || '';
 const lastOf = (s) => s.last || s.endedAt || s.lastActive || 0;
@@ -86,7 +88,7 @@ function row(s, now, picked, ui, extra = '') {
     + `<span class="pj-ic" data-ic="${esc(s.id)}"></span>`
     + `<span class="pj-name">${esc(s.name || String(s.id).slice(0, 8))}</span>`
     + `${here ? `<span class="pj-here" title="running here, in Fleet View">${icon('shell', 11)}</span>` : ''}`
-    + `${extra}${boundTag(s)}${acctTag(s.account)}<span class="pj-ago${busy ? ' busy' : ''}">${s.pending ? 'new' : coarseAgo(now - lastOf(s))}</span></button>`;
+    + `${extra}${boundTag(s)}${acctTag(s.account)}<span class="pj-ago${busy ? ' busy' : ''}">${s.pending && !s.handing ? 'new' : coarseAgo(now - lastOf(s))}</span></button>`;
 }
 
 function olderRow(h, now, picked) {

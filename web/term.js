@@ -1415,9 +1415,19 @@ export function installFakeTerm() {
     resize(id, cols, rows) { const p = ptys.get(id); if (p) { p.cols = cols; p.rows = rows; } },
     kill(id) { if (ptys.get(id)?.alive) end(id, 1); ptys.delete(id); },
     async list() {
-      return [...ptys.values()].map(({ id, pid, alive, exitCode, startedAt, isNew, created, cwd, account, status }) => ({
-        id, pid, alive, exitCode, startedAt, pending: !!isNew, created: !!created, cwd: cwd || null, account: account || 'B', status: alive ? status || null : null,
+      return [...ptys.values()].map(({ id, pid, alive, exitCode, startedAt, isNew, created, cwd, account, status, pickup, handoffFrom }) => ({
+        id, pid, alive, exitCode, startedAt, pending: !!isNew && !pickup, created: !!created, cwd: cwd || null, account: account || 'B', status: alive ? status || null : null,
+        handoffFrom: handoffFrom || null,
       }));
+    },
+    // tests only: a session handed off, as the desktop host does it (host.js handoff): its pickup starts under its
+    // key, with no id of its own until _rekey gives it one
+    _handoff(id, { cwd, account } = {}) {
+      const old = ptys.get(id);
+      const p = { id, cwd: cwd || old?.cwd || null, account: acctOf(account || old?.account), pid: 42000 + ++newSeq, alive: true, exitCode: null, startedAt: Date.now(),
+        buf: old?.buf || '', line: '', raw: '', isNew: true, pickup: 'handoff.md', handoffFrom: id, status: 'busy' };
+      ptys.set(id, p);
+      return id;
     },
     async snapshot(id) { return ptys.get(id)?.buf || ''; },
     onData(cb) { dataL.add(cb); return () => dataL.delete(cb); },
