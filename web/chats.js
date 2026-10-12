@@ -121,7 +121,9 @@ const bu = (id) => { let u = botUi.get(id); if (!u) botUi.set(id, (u = { startin
 // v: { account, model, effort, shape, color } as picked, pk: the pickers }
 let form = null;
 const made = new Map(); // bot id -> { bot, at }: made here, until /state lists it (?fixture=1: for good)
-const botOf = (state, id) => (state.bots || []).find((b) => b && b.id === id) || null;
+// a bot of this machine's; another machine's (elsewhere: bots.js) has no Start, Edit, menu or Tasks here
+const botOf = (state, id) => (state.bots || []).find((b) => b && b.id === id && !b.elsewhere) || null;
+const elsewhereBot = (state, id) => (state.bots || []).some((b) => b && b.id === id && b.elsewhere);
 // a bot's look as just picked here (bot id -> { shape?, color?, at }), worn until /state agrees or LOOK_MS passes
 const looks = new Map();
 const LOOK_MS = 15000;
@@ -315,6 +317,7 @@ function build(el, ui) {
     if (!r) return;
     const st = el._state;
     if (r.dataset.team) { e.preventDefault(); ui.contextMenu({ kind: 'team', id: r.dataset.team }, e.clientX, e.clientY); return; }
+    if (r.dataset.bot && elsewhereBot(st || {}, r.dataset.bot)) { e.preventDefault(); return; } // run on its own machine
     if (r.dataset.bot && botOf(st || {}, r.dataset.bot)) { e.preventDefault(); botMenu(el, ui, r.dataset.bot, e.clientX, e.clientY); return; }
     if (r.dataset.id && inState(st, r.dataset.id)) { e.preventDefault(); ui.contextMenu({ kind: 'session', id: r.dataset.id }, e.clientX, e.clientY); return; }
     e.preventDefault(); // the Chief stand-in and gone conversations: no menu

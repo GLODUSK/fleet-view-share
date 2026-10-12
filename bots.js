@@ -17,8 +17,11 @@
 //   that role (a handoff's pickup, a /clear) to its bot's ids. Each new one is told its id once, as the Chief is
 //   (chief.js createTeller). A removed bot's session that comes back (a restore) is ended.
 // - /state: tagger() and tagState() put bot: '<bot id>' ('chief' for the Chief's) on each overseer conversation in
-//   sessions, finished and removed; view() is state.bots. ~/Bots and this machine's bots' folders are never a workspace
-//   (ownFolder); another machine's bot's folder is, so its synced chats show like any other (registries never sync).
+//   sessions, finished and removed; view() is state.bots. The ~/Bots folders are never a workspace (inBots).
+// - Another machine's bots: registries never sync (sync-prefs.js), but sync brings their chats here, into ~/Bots/<slug>.
+//   elsewhere() makes one bot of each such folder that no bot here owns, from its conversations: tagged like a bot's,
+//   so they are the Bots tab's alone too, and listed in state.bots with elsewhere: true (no Start, Edit, Remove or
+//   Tasks here: it is run and changed on its own machine). Henry, 2026-10-11: the PC's Panchito on the Mac.
 // - Who is talking: api.js frames what reaches a bot as it does for the Chief (isOverseer).
 // - Tasks and routines: each bot keeps its task list in tasks.json in its folder (bot-tasks.js has the format), one-off
 //   and recurring, updated by the bot itself as Henry gives, finishes, changes or cancels work (bot/BRIEF.md says so).
@@ -188,6 +191,33 @@ function tagState(st, tagOf) {
   }
   return st;
 }
+// another machine's bots, from the conversations here (each { id, root?, cwd?, name, last, account }): one per folder
+// ~/Bots/<slug> that holds some and that no bot here (bots, a removed one's too) owns. Its id is made from the slug, so
+// it stays the same from one /state to the next; its name is its newest conversation's (a bot names its sessions
+// after itself), else the slug. -> [{ id, name, folder, ids (oldest first), convId (the newest), account, at }]
+function elsewhereBots(convs, base = BOTS_DIR, bots = []) {
+  const groups = new Map(); // folder key -> { folder, slug, convs }
+  const b = pathKey(base);
+  for (const c of convs || []) {
+    const p = c && (c.root || c.cwd);
+    if (!c || !c.id || !inBots(p, base) || pathKey(p) === b) continue;
+    if ((bots || []).some((x) => x && typeof x.folder === 'string' && inBots(p, x.folder))) continue;
+    const slug = path.relative(path.resolve(base), path.resolve(p)).split(/[\\/]/)[0];
+    const folder = path.join(base, slug), k = pathKey(folder);
+    if (!groups.has(k)) groups.set(k, { folder, slug, convs: [] });
+    groups.get(k).convs.push(c);
+  }
+  return [...groups.values()].map((g) => {
+    const cs = g.convs.sort((x, y) => (x.last || 0) - (y.last || 0));
+    const top = cs[cs.length - 1];
+    return { id: crypto.createHash('sha1').update(`elsewhere:${g.slug.toLowerCase()}`).digest('hex').slice(0, 12),
+      name: (typeof top.name === 'string' && top.name.trim()) || g.slug, folder: g.folder, ids: cs.map((x) => x.id),
+      convId: top.id, account: top.account || null, at: top.last || 0 };
+  });
+}
+// one of those as state.bots shows it: it never runs here and has nothing to change here
+const elsewhereView = (e) => ({ id: e.id, name: e.name, brief: '', account: e.account, model: null, effort: null, folder: e.folder,
+  createdAt: e.at, convId: e.convId, live: false, shape: null, color: null, tasks: [], elsewhere: true });
 // one bot as state.bots and the answers show it; l: its running session from the host's list ({ id }), if any
 function viewOf(b, l) {
   return { id: b.id, name: b.name, brief: b.brief, account: b.account, model: b.model, effort: b.effort, folder: b.folder, createdAt: b.createdAt,
@@ -724,15 +754,12 @@ function createBots(deps) {
     // api.js resumable: a bot's conversation (not a removed bot's) may be resumed in its folder, with its role
     vouch: (id) => { const b = bots.find((x) => !x.removed && x.ids.includes(id)); return b ? { role: roleOf(b.id), folder: b.folder } : null; },
     inBots: (p) => inBots(p, base),
-    // kept out of the workspaces here: the Bots folder itself and the folder of each bot in this machine's registry (a
-    // removed one's too). Another machine's bot, whose conversations sync brought here into ~/Bots/<slug> with no bot
-    // here to tag them, is an ordinary workspace: its chats show on the map, cards, wall and Projects (Henry,
-    // 2026-10-11: the PC's Panchito on the Mac)
-    ownFolder: (p) => inBots(p, base) && (pathKey(p) === pathKey(base) || bots.some((b) => inBots(p, b.folder))),
+    // another machine's bots, from these conversations (elsewhereBots)
+    elsewhere: (convs) => (d.demo ? [] : elsewhereBots(convs, base, bots)),
     // for tests
     _state: () => ({ bots, live, starting: [...starting] }),
   };
 }
 
-module.exports = { createBots, checkName, checkBrief, checkOpts, checkLook, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
+module.exports = { createBots, elsewhereBots, elsewhereView, checkName, checkBrief, checkOpts, checkLook, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
   startPrompt, idNote, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX };

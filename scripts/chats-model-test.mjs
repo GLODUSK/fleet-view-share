@@ -80,6 +80,15 @@ test('state.bots rows with no conversation listed: id null, NEW, the brief\'s fi
   assert.deepEqual([l.id, l.live, l.preview], [null, true, 'Starting...']);
 });
 
+test('another machine\'s bot (elsewhere): a row while its chats are listed, live null so it has no Start', () => {
+  const E = 'e1e1e1e1e1e1';
+  const x = S('x', { bot: E, name: 'Panchito', last: T + 5 });
+  const rows = build(st({ allSessions: [x, m], sessions: [m], bots: [BOT(E, { name: 'Panchito', convId: 'x', elsewhere: true })] }));
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].key, rows[0].id, rows[0].name, rows[0].live, rows[0].elsewhere], [`bot:${E}`, 'x', 'Panchito', null, true]);
+  // its chats gone from the list: no quiet row (it can't be started here)
+  assert.equal(build(st({ allSessions: [m], sessions: [m], bots: [BOT(E, { convId: 'x', elsewhere: true })] })).length, 0);
+});
 test('the Chief by its tag, renamed or not, and the placeholder', () => {
   const ch = S('ch', { bot: 'chief', state: 'IDLE', last: T + 4 });
   const rows = build(st({ allSessions: [ch, a, b, c], bots: [BOT(B1)] }), { chiefPlaceholder: true });

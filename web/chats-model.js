@@ -72,7 +72,8 @@
 //                     live one, else its newest; null for a team, a Chief not started yet and a bot with none known
 //     ids,            every conversation id it went through, oldest first (a team: its members)
 //     botId,          bot rows: the bot's id (state.bots)
-//     live,           bot rows: whether it runs now (state.bots), null when there is no state.bots to say
+//     live,           bot rows: whether it runs now (state.bots), null when there is no state.bots to say or the bot
+//                     is another machine's (elsewhere: true, a row only while its chats are listed)
 //     name,           a Fleet View rename of one of its conversations (the newest), else the bot's name, else 'Chief'
 //     account, repo ({ name, root, color } | null), state, label, statusColor,
 //     preview,        one line: what it is doing now, the question it asks, or its last reply; a bot with no
@@ -263,13 +264,14 @@ export function buildContacts(input, opts = {}) {
       preview: previewOf(s), at: Math.max(...members.map(lastOf)), needsYou: NEEDS.has(s.state), busy: BUSY.has(s.state), pinned: isChief,
       ...nowOf(s),
     };
-    if (!isChief) Object.assign(row, { botId: tag, live: b ? !!b.live : null, ...lookOf(b) });
+    // another machine's bot (state.bots elsewhere: bots.js): its chat as any synced one's, nothing to start here
+    if (!isChief) Object.assign(row, { botId: tag, live: b && !b.elsewhere ? !!b.live : null, ...(b && b.elsewhere ? { elsewhere: true } : {}), ...lookOf(b) });
     out.push(row);
     rowOf.set(tag, row);
   }
   // a bot with no conversation listed (new, or its last one is out of /state): a quiet row, so it can be started
   for (const b of bots || []) {
-    if (rowOf.has(b.id)) continue;
+    if (rowOf.has(b.id) || b.elsewhere) continue;
     const s = b.convId && known.has(b.convId) ? known.get(b.convId) : null;
     const st = b.convId ? 'IDLE' : 'NEW';
     const row = {

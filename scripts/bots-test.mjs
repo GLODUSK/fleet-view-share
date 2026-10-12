@@ -96,6 +96,30 @@ test('the Bots folder and every folder in it are never a workspace', () => {
   assert.equal(B.inBots(dir, base), false);
   assert.equal(B.inBots(null, base), false);
 });
+test('another machine\'s bots: one per ~/Bots folder no bot here owns, from its synced chats', () => {
+  const base = path.join(dir, 'Bots');
+  const mine = { id: 'aaaaaaaaaaaa', folder: path.join(base, 'mine') }, gone = { id: 'bbbbbbbbbbbb', folder: path.join(base, 'gone'), removed: true };
+  const pan = path.join(base, 'panchito');
+  const convs = [
+    { id: 'p1', root: pan, name: 'Panchito', last: 1, account: 'A' },
+    { id: 'p2', cwd: path.join(pan, 'notes'), name: 'Panchito', last: 3, account: 'B' },
+    { id: 'm1', root: path.join(base, 'mine'), name: 'Mine', last: 2 },
+    { id: 'g1', root: path.join(base, 'gone', 'x'), name: 'Gone', last: 2 },
+    { id: 'b0', root: base, name: 'in Bots itself', last: 2 },
+    { id: 'r1', root: path.join(dir, 'repo'), name: 'a repo', last: 2 },
+    { id: 'q1', root: path.join(base, 'quiet'), name: '', last: 1 },
+  ];
+  const out = B.elsewhereBots(convs, base, [mine, gone]);
+  assert.equal(out.length, 2);
+  const p = out.find((x) => x.folder === pan), q = out.find((x) => x.folder === path.join(base, 'quiet'));
+  assert.deepEqual([p.name, p.ids, p.convId, p.account, p.at], ['Panchito', ['p1', 'p2'], 'p2', 'B', 3]);
+  assert.match(p.id, /^[0-9a-f]{12}$/);
+  assert.equal(B.elsewhereBots(convs.slice(0, 1), base, []).find((x) => x.folder === pan).id, p.id); // the same id each time
+  assert.equal(q.name, 'quiet'); // no name: the folder's
+  const v = B.elsewhereView(p);
+  assert.deepEqual([v.id, v.name, v.convId, v.live, v.elsewhere, v.tasks], [p.id, 'Panchito', 'p2', false, true, []]);
+  assert.deepEqual(B.elsewhereBots(convs, base, [mine, gone, { id: 'cccccccccccc', folder: pan }, { id: 'dddddddddddd', folder: path.join(base, 'quiet') }]), []);
+});
 test('CLAUDE.md: the template with the name and the brief, in one pass', () => {
   const tpl = fs.readFileSync(B.TEMPLATE_FILE, 'utf8').split(String.fromCharCode(13)).join(''); // a CRLF checkout too
   const out = B.fillBrief(tpl, { name: 'Scout', brief: 'Watch the deploys.\nSay {{name}} never.' });
@@ -230,23 +254,6 @@ const realNow = Date.now;
 const clock = (t) => { Date.now = () => t; };
 
 await (async () => {
-  // the workspaces: ~/Bots and this machine's bots' folders (a removed one's too) are kept out; another machine's bot's
-  // folder, which sync made here for its chats, is an ordinary workspace (the PC's Panchito on the Mac)
-  {
-    const base = fs.mkdtempSync(path.join(dir, 'own-'));
-    const mine = { id: 'aaaaaaaaaaaa', name: 'Mine', folder: path.join(base, 'mine'), createdAt: 1, ids: [] };
-    const gone = { id: 'bbbbbbbbbbbb', name: 'Gone', folder: path.join(base, 'gone'), createdAt: 2, ids: [], removed: true };
-    const h = harness({ base, saved: [mine, gone] });
-    assert.equal(h.bots.ownFolder(base), true);
-    assert.equal(h.bots.ownFolder(mine.folder), true);
-    assert.equal(h.bots.ownFolder(path.join(mine.folder, 'sub')), true);
-    assert.equal(h.bots.ownFolder(gone.folder), true);
-    assert.equal(h.bots.ownFolder(path.join(base, 'panchito')), false);
-    assert.equal(h.bots.ownFolder(path.join(base, 'mine-2')), false);
-    assert.equal(h.bots.inBots(path.join(base, 'panchito')), true); // still no new session there
-    assert.equal(h.bots.ownFolder(dir), false);
-    assert.equal(h.bots.ownFolder(null), false);
-  }
   // make: checks first, then the folder, its CLAUDE.md, trust, and the start
   {
     const h = harness();

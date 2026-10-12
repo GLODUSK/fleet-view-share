@@ -166,10 +166,8 @@ try { saved = JSON.parse(fs.readFileSync(fs.existsSync(SETTINGS_FILE) ? SETTINGS
 if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
 // the Chief's part of the server (chief.js) and the bots' (bots.js), made once the API's ctx is there (below apiCtx)
 let CHIEF = null, BOTS = null;
-// ~/Bots and this machine's bots' folders in it are never a workspace; another machine's bot's folder is (bots.js
-// ownFolder). No new session starts anywhere in ~/Bots (anyBots)
-const inBots = (p) => !!BOTS && BOTS.ownFolder(p);
-const anyBots = (p) => !!BOTS && BOTS.inBots(p);
+// ~/Bots and the bots' folders in it are never a workspace
+const inBots = (p) => !!BOTS && BOTS.inBots(p);
 // remote access (remote.js): the page in a browser on another device, over Tailscale. settings.remote.enabled is the
 // switch (off unless turned on); settings.remote.logins, by hand only, lets more Tailscale logins than this PC's
 // owner pair a browser. The demo keeps its devices in memory and never changes `tailscale serve`; nor does a server on
@@ -5638,7 +5636,7 @@ function rememberMap(all, repos, now) {
     else if (remembered.sessions.delete(s.id)) changed = true;
   }
   for (const root of repos.keys()) { if (isHomeRoot(root)) continue; if (!remembered.repos.has(root)) changed = true; remembered.repos.set(root, now); }
-  for (const root of [...remembered.repos.keys()]) if (isHomeRoot(root) || repoHidden(root) || now - remembered.repos.get(root) > REMEMBER_REPO_MS) { remembered.repos.delete(root); changed = true; }
+  for (const root of [...remembered.repos.keys()]) if (isHomeRoot(root) || repoHidden(root) || inBots(root) || now - remembered.repos.get(root) > REMEMBER_REPO_MS) { remembered.repos.delete(root); changed = true; }
   while (remembered.repos.size > 100) remembered.repos.delete(remembered.repos.keys().next().value);
   while (remembered.sessions.size > 300) remembered.sessions.delete(remembered.sessions.keys().next().value);
   if (changed || now - rememberedSavedAt > 10 * 60e3) { rememberedSavedAt = now; saveSettings(); }
@@ -5697,7 +5695,12 @@ function buildState() {
   const out = all.map((s) => sessionJson(s, now, owners));
   // the overseers' conversations, the Chief's and the bots' (bots.js): tagged bot: '<bot id>' or 'chief' in sessions,
   // finished and removed (below), and never a repo's live count, a clash, a conflict, a header count or the feed
-  const tagOf = BOTS ? BOTS.tagOf(CHIEF ? CHIEF.chiefIds() : []) : () => null;
+  // another machine's bots (bots.js elsewhere): their synced chats are tagged the same way
+  const away = BOTS ? BOTS.elsewhere([...sessions.values()].map((s) => ({ id: s.id, root: s.root, cwd: s.cwd, name: nameNow(s.id, s.name), last: s.last, account: s.account }))) : [];
+  const awayTag = new Map();
+  for (const b of away) for (const id of b.ids) awayTag.set(id, b.id);
+  const ownTag = BOTS ? BOTS.tagOf(CHIEF ? CHIEF.chiefIds() : []) : () => null;
+  const tagOf = (id) => ownTag(id) || awayTag.get(id) || null;
   const onMap = all.filter((s) => !tagOf(s.id));
   // the repo menu: every repo in the window, busiest first, less the ones taken off it; the picked one stays listed
   pruneHiddenRepos(all);
@@ -5805,7 +5808,8 @@ function buildState() {
       .map((e) => { const x = { t: Math.round(e.t), sid: e.sid, who: e.who, verb: e.verb, what: e.what }; if (e.to) x.to = e.to; return x; }),
     // the bots (bots.js), newest first: { id, name, brief, account, model, effort, folder, createdAt, convId, live, shape, color,
     // tasks: its tasks.json as the Tasks list shows it (bot-tasks.js viewTask), tasksError? }
-    bots: BOTS ? BOTS.view() : [],
+    // and another machine's, elsewhere: true (bots.js elsewhereView)
+    bots: BOTS ? [...BOTS.view(), ...away.map(BOTS_JS.elsewhereView)] : [],
   }, tagOf);
 }
 
@@ -6155,13 +6159,13 @@ function conversationsFor(q) {
 }
 
 // what the automation API (api.js) needs from the server: the folders a new session may start in (the window's
-// rule for "New session": repos /state lists, and the conversations' repo roots and checkouts, never a folder in ~/Bots)
+// rule for "New session": repos /state lists, and the conversations' repo roots and checkouts, never a bot's folder)
 // and one conversation as /state shows it
 const apiCtx = {
   sendJson, readBody, log: (t) => logOnce('api:' + t, t), UNSAFE_PATH, accounts: () => (DEMO ? ['A', 'B'] : accountsHere()),
   allowedFolders() {
     const st = buildState(), out = [];
-    const add = (p) => { if (typeof p === 'string' && p && !anyBots(p)) out.push(p); };
+    const add = (p) => { if (typeof p === 'string' && p && !inBots(p)) out.push(p); };
     for (const r of st.repos) add(r.root);
     for (const s of st.sessions) { add(s.repo && s.repo.root); add(s.links && s.links.repoFolder); }
     return out;
