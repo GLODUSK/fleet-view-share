@@ -57,6 +57,7 @@ const SKEW_MS = 500; // transcript times vs. the moment it was sent
 const WAIT_DEFAULT_S = 1800, WAIT_MAX_S = 3600; // "wait": true, and the most a caller may ask for
 const MENU_EVERY_MS = 2000; // while waiting on a turn: how often the screen is read for a menu
 const ANSWER_MS = 3000; // after an answer: how long to wait for the menu to change
+const TRUST_NEXT_MS = 6000; // after the folder trust question was answered Yes: how long to watch for the Claude in Chrome offer
 const TYPE_DELAY_MS = 300; // after pressing "Type something.", before its text goes in
 const POINT_MS = 1500; // how long a moved pointer (or a typed answer) may take to show on the screen
 const FREE_EMPTY = /^(?:type something\.?|other)$/i; // "Type something" with nothing typed in it
@@ -759,7 +760,7 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code)' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
   { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|chrome|other), title, context, options, sig; or null' },
-  { method: 'POST', path: '/api/sessions/:id/answer', body: '{ option: n | "submit" | "esc", sig?, text?, allowPermission?, wait? }', does: 'answer the menu (text: for a "Type something." option; "submit": a multiple-choice question\'s Submit); any menu but a question needs allowPermission (esc never does)' },
+  { method: 'POST', path: '/api/sessions/:id/answer', body: '{ option: n | "submit" | "esc", sig?, text?, allowPermission?, wait? }', does: 'answer the menu (text: for a "Type something." option; "submit": a multiple-choice question\'s Submit); any menu but a question needs allowPermission (esc never does); the folder trust question answered Yes also has a Claude in Chrome offer that follows it answered Yes (chromeOffer: \'accepted\')' },
   { method: 'POST', path: '/api/sessions/:id/interrupt', does: 'press Esc once to stop Claude mid-turn (not while a menu is up)' },
   { method: 'POST', path: '/api/sessions/:id/open', body: '{ account?, prompt?, wait? }', does: 'resume a conversation Fleet View knows as a hosted session; prompt: then send it' },
   { method: 'GET', path: '/api/sessions/:id/transcript', query: 'since?, limit? (default the last 50, at most 500)', does: 'any conversation\'s transcript, compact: user, assistant, tool (name, input, result), note, thinking; queue: the messages queued in Claude Code (while it runs here)' },
@@ -1443,7 +1444,8 @@ async function readMenu(key) {
 // while the pointer is on "Type something" (a digit would be typed into it), or in a menu drawn without numbers
 // (m.unnumbered: 2.1.296's trust question, where a digit does nothing). "submit": a multiple-choice question's
 // Submit row. Then up to ANSWER_MS for the menu to
-// change; with wait, once no menu is left, the turn is waited on like a message's.
+// change; with wait, once no menu is left, the turn is waited on like a message's. The folder trust question answered
+// Yes: a Claude in Chrome offer that comes up after it is answered too (chromeOffer: 'accepted').
 async function answerMenu(key, b, ctx, gone, via = null) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
   const esc = b.option === 'esc';
@@ -1564,7 +1566,22 @@ async function answerMenu(key, b, ctx, gone, via = null) {
       if (!next || next.sig !== before.sig) break;
     }
     const changed = !next || next.sig !== before.sig;
-    const out = { ok: true, id: p.id, answered, changed, next };
+    // the folder trust question answered Yes: Claude Code may put up its Claude in Chrome offer next, which startSession
+    // (it leaves trust to its caller) never sees. Watched up to TRUST_NEXT_MS, before any wait: the offer is passed
+    // (passChromeOffer; the host keeps no record of a start's chrome: false, so undefined); idle with no menu, any
+    // other menu or the session ending stops it, and leaves that alone
+    let chromeOffer = null;
+    if (changed && m.kind === 'trust' && /^yes\b/i.test(answered.label || '')) {
+      for (const end = Date.now() + TRUST_NEXT_MS; Date.now() < end;) {
+        const q = hosted(await host.call('list'), p.id);
+        if (!q || !q.alive) break;
+        const x = await menuNow(host, q);
+        if (x && x.kind === 'chrome') { if (await passChromeOffer(host, q, undefined, ctx)) { chromeOffer = 'accepted'; next = await menuNow(host, q); } break; }
+        if (x ? x.kind !== 'trust' : q.status === 'idle') break;
+        await sleep(POLL_MS);
+      }
+    }
+    const out = { ok: true, id: p.id, answered, changed, next, ...(chromeOffer ? { chromeOffer } : {}) };
     if (!ms) return [200, { ...out, message: changed ? 'answered' : 'answered, but the menu has not changed yet' }];
     if (!changed) return [200, { ...out, done: false, message: 'answered, but the answer did not register: the menu is unchanged' }];
     // another menu (the next question, the submit step): that is where it waits now

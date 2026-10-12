@@ -461,7 +461,7 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     // picked with ↓ and Enter, never a digit
     fake.onWrite = (w) => {
       if (w === '\x1b[B') fake.screen = TRUST_RAW_YES;
-      else if (w === '\r' && fake.screen === TRUST_RAW_YES) fake.screen = screenOf(['', ...box()]);
+      else if (w === '\r' && fake.screen === TRUST_RAW_YES) { fake.screen = screenOf(['', ...box()]); live({ status: 'idle', cols: 120, rows: 30 }); }
     };
     const [c2, o2] = await call('POST', `${S}/answer`, { option: 2, sig: o0.menu.sig, allowPermission: true });
     assert.equal(c2, 200, o2.message);
@@ -470,7 +470,7 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     assert.equal(o2.changed, true);
     // the ❯ on it already: Enter alone
     reset(); fake.screen = TRUST_RAW_YES;
-    fake.onWrite = (w) => { if (w === '\r') fake.screen = screenOf(['', ...box()]); };
+    fake.onWrite = (w) => { if (w === '\r') { fake.screen = screenOf(['', ...box()]); live({ status: 'idle', cols: 120, rows: 30 }); } };
     const [c3, o3] = await call('POST', `${S}/answer`, { option: 2, allowPermission: true });
     assert.equal(c3, 200, o3.message);
     assert.deepEqual(fake.writes, ['\r']);
@@ -560,6 +560,63 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     ctx.log = () => {};
     fake.onOpen = null;
     ok('start and open: the Claude in Chrome offer answered Yes (↓, Enter) and the prompt sent; not with chrome: false; trust never');
+  }
+
+  // ---------- answer: the Claude in Chrome offer after the folder trust question answered Yes ----------
+  {
+    const logs = [];
+    ctx.log = (s) => logs.push(s);
+    const at = (screen, o) => { fake.screen = screen; live({ cols: 120, rows: 30, ...o }); };
+    const idle = () => at(screenOf(['', ...box()]), { status: 'idle' });
+    const trust = (after) => {
+      reset(); logs.length = 0; at(TRUST_RAW, { status: 'waiting', waitingFor: 'trust' });
+      // ↓ onto Yes and Enter (the trust question, then the offer); after: what the trust answer brings up
+      fake.onWrite = (w) => {
+        if (w === '\x1b[B' && fake.screen === TRUST_RAW) fake.screen = TRUST_RAW_YES;
+        else if (w === '\r' && (fake.screen === TRUST_RAW_YES || fake.screen === TRUST_RAW)) after(); // Yes, or No (the pointer on it)
+        else if (w === '\x1b[B' && fake.screen === CHROME_RAW) fake.screen = CHROME_RAW_YES;
+        else if (w === '\r' && fake.screen === CHROME_RAW_YES) idle();
+        else if (w === '\x1b') after();
+      };
+    };
+    const offer = () => at(CHROME_RAW, { status: 'waiting' });
+    // the offer next: answered with ↓ and Enter (no digit), chromeOffer in the reply
+    trust(offer);
+    const [c1, o1] = await call('POST', `${S}/answer`, { option: 2, allowPermission: true });
+    assert.equal(c1, 200, o1.message);
+    assert.deepEqual(o1.answered, { n: 2, label: 'Yes, I trust this folder' });
+    assert.equal(o1.chromeOffer, 'accepted');
+    assert.deepEqual(fake.writes, ['\x1b[B', '\r', '\x1b[B', '\r']);
+    assert.equal(o1.next, null);
+    assert.ok(logs.some((l) => /Claude in Chrome offer/.test(l)), logs.join('\n'));
+    // idle with no menu after it: nothing more
+    trust(idle);
+    const [c2, o2] = await call('POST', `${S}/answer`, { option: 2, allowPermission: true });
+    assert.equal(c2, 200, o2.message);
+    assert.equal(o2.chromeOffer, undefined);
+    assert.deepEqual(fake.writes, ['\x1b[B', '\r']);
+    // another menu after it: left alone
+    trust(() => at(screenOf(['Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel']), { status: 'waiting', waitingFor: 'approve Bash(x)' }));
+    const [c3, o3] = await call('POST', `${S}/answer`, { option: 2, allowPermission: true });
+    assert.equal(c3, 200, o3.message);
+    assert.equal(o3.chromeOffer, undefined);
+    assert.equal(o3.next.kind, 'permission');
+    assert.deepEqual(fake.writes, ['\x1b[B', '\r']);
+    // Esc, or "No, exit": the offer after it is left alone
+    trust(offer);
+    const [c4, o4] = await call('POST', `${S}/answer`, { option: 'esc' });
+    assert.equal(c4, 200, o4.message);
+    assert.equal(o4.chromeOffer, undefined);
+    assert.equal(o4.next.kind, 'chrome');
+    assert.deepEqual(fake.writes, ['\x1b']);
+    trust(offer);
+    const [c5, o5] = await call('POST', `${S}/answer`, { option: 1, allowPermission: true });
+    assert.equal(c5, 200, o5.message);
+    assert.deepEqual(o5.answered, { n: 1, label: 'No, exit' });
+    assert.equal(o5.chromeOffer, undefined);
+    assert.deepEqual(fake.writes, ['\r']);
+    ctx.log = () => {};
+    ok('answer: trust answered Yes has the Claude in Chrome offer after it answered Yes (↓, Enter); not after idle, another menu, Esc or No');
   }
 
   // ---------- Fleet View's own queue ----------
