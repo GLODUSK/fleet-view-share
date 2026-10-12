@@ -2068,12 +2068,17 @@ function checkAlerts(s, prev) {
 // ---------- discovery and polling ----------
 // A conversation leaves the list once its log has been quiet for the window (--window), except one that
 // finished its turn (DONE): it stays for 3 hours after it ended, so the app window's "recently finished"
-// strip and detail panel can show it. Logs older than the window are read once at start; one that turns
-// out not to be a finished turn is dropped and not read again until it changes.
+// strip and detail panel can show it. A turn the log says ended leaves 3 hours after that end, whatever the
+// log's modified time: something can touch a file without changing a byte, and that must not keep the chat
+// listed on one machine only. Logs older than the window are read once at start; one that turns out not to
+// be a finished turn is dropped. A dropped log is not read again until its modified time changes.
 const KEEP_DONE_MS = 3 * 3600e3;
 const passed = new Map(); // session id -> log mtime when it was dropped
 const endedAtOf = (s) => s.turnEndT || s.mtime || 0;
 const keepDone = (s, now) => s.state === 'DONE' && now - endedAtOf(s) < KEEP_DONE_MS;
+// finished hours ago by its own log's end of turn. A DONE forced another way (a handoff that killed a turn) is
+// left to the window rule, and so is one another device owns and still lists: that device's state stands
+const endedLongAgo = (s, now) => s.state === 'DONE' && !s.turnOpen && !s.remote?.entry && !!s.turnEndT && now - s.turnEndT >= KEEP_DONE_MS && !liveWaiting(s.id);
 // an unfinished conversation the map showed (remembered): kept while it was active in the last day
 const keepRemembered = (s, now) => s.state !== 'DONE' && remembered.sessions.has(s.id) && now - (s.actT || s.mtime || 0) < REMEMBER_MS;
 // its live claude waits on you (a prompt, or a panel left open): kept however long its log has been quiet
@@ -2102,7 +2107,7 @@ function discover() {
         if (!f.endsWith('.jsonl')) continue;
         const file = path.join(pdir, f), m = mtime(file), id = f.slice(0, -6);
         const rem = remembered.sessions.has(id) && now - m < REMEMBER_MS * 7;
-        if (!sessions.has(id) && !rem && !liveWaiting(id) && (now - m > horizon || (now - m > WINDOW_MS && passed.get(id) === m))) continue;
+        if (!sessions.has(id) && !rem && !liveWaiting(id) && (now - m > horizon || passed.get(id) === m)) continue;
         const old = found.get(id);
         if (!old || m > old.m) found.set(id, { file, pdir, m, account: r.account, root: r.dir });
       }
@@ -2122,7 +2127,7 @@ function discover() {
     }
     if (s.file === x.file) s.mtime = x.m;
   }
-  for (const s of [...sessions.values()]) if (s.state && now - s.mtime > WINDOW_MS && !keepDone(s, now) && !keepRemembered(s, now) && !liveWaiting(s.id)) dropSession(s);
+  for (const s of [...sessions.values()]) if (endedLongAgo(s, now) || (s.state && now - s.mtime > WINDOW_MS && !keepDone(s, now) && !keepRemembered(s, now) && !liveWaiting(s.id))) dropSession(s);
 }
 
 function poll() {
@@ -2220,6 +2225,8 @@ function pollOne(s, now, budget) {
     s.late = false;
     scanPrs(s);
   }
+  // finished hours ago and its log only touched since: gone before it shows or raises an alert
+  if (endedLongAgo(s, now)) { dropSession(s); return; }
   easBackground(s);
   if (prev && prev !== s.state) tl.changed = true;
   checkAlerts(s, prev);
