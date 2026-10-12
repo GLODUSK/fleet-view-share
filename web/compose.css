@@ -320,6 +320,12 @@ html.glass.mac .cmp-box { background: rgba(14, 17, 27, 0.46); } /* the Mac's lig
 .cmp-modelb .cmp-eff { flex: none; font-size: 11px; }
 .cmp-modelb .cmp-eff[hidden] { display: none; }
 .cmp-mi .eff { font: inherit; font-weight: 600; }
+/* a dynamic bot's menu: the model or effort it runs now, beside the fixed one */
+.cmp-mi-now { margin-left: auto; padding-left: 10px; color: var(--faint); font: 400 10.5px/1 var(--font-ui); }
+/* a bot's: Dynamic, a small switch at the right of the Model and Effort headings */
+.cmp-mh.cmp-mh-dyn { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 4px; padding-bottom: 2px; }
+.cmp-mi.cmp-mdyn { width: auto; gap: 3px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--dim); font: 600 11px/1 var(--font-ui); letter-spacing: normal; text-transform: none; }
+.cmp-mi.cmp-mdyn.on { color: var(--cyan); border-color: rgba(63, 216, 255, 0.45); }
 .cmp-menu-model { min-width: 200px; }
 .cmp-mh { padding: 6px 10px 3px 8px; color: var(--faint); font: 600 10.5px/1 var(--font-ui); letter-spacing: 0.06em; text-transform: uppercase; }
 .cmp-msep { height: 1px; margin: 4px 2px; background: var(--line); }

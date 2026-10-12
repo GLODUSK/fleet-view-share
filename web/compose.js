@@ -57,6 +57,9 @@
 // switchModel types /model and /effort while it is idle, answers "Switch model?", and puts the default for new
 // sessions back, so no other session is affected); a busy session is not switched (a session started a moment ago is
 // waited for a little first). What it picked goes with 'fv-chat-sent' (detail.pick), for chat.js's chip.
+// In a bot's chat the model button says Dynamic for what is dynamic (the menu checks Dynamic and marks what runs now),
+// and the menu offers Dynamic: picking it, or a fixed one for a part that is dynamic, changes the bot (POST /bots/:id),
+// so a fixed pick is never undone by the next message's size.
 //
 // What Claude is doing comes from its screen: term.js screenText reads the rendered lines of the session's
 // xterm (made off-screen when the Session tab never showed it), every 400 ms while the box is on screen. The
@@ -71,7 +74,7 @@ import { icon } from './icons.js';
 import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, noTermMsg } from './term.js';
 import { pickFolder, canPickFolder, uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
-import { sizeTask, dynamicSwitch } from './chats-model.js';
+import { sizeTask, dynamicSwitch, DYNAMIC } from './chats-model.js';
 import { pinText, setPin } from './keeps.js';
 
 const POLL_MS = 400;
@@ -96,11 +99,23 @@ const PANEL_KEYS = {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Dynamic (see the top): conversation -> { botId, model, effort } (which of the two are dynamic) or null, set by chats.js
+// Dynamic (see the top): conversation -> { botId, name, model, effort } for a bot's (model, effort: which of the two
+// are dynamic), or null, set by chats.js
 let dynamicOf = () => null;
 export function setDynamicBots(fn) { dynamicOf = typeof fn === 'function' ? fn : () => null; }
 const DYN_START_MS = 90e3; // a session started this recently: a busy one is waited for before the switch...
 const DYN_WAIT_MS = 20e3; // ...this long at most (its start notes); one busy with Henry's work is not waited for
+// Dynamic turned on or off in the model menu (POST /bots/:id): bot id -> { v: { model?, effort? } (true: dynamic), at },
+// what was picked winning until /state says the same or DYN_SET_MS pass
+const dynSet = new Map();
+const DYN_SET_MS = 60e3;
+function dynNow(s) {
+  const d = dynamicOf(s);
+  const o = d && d.botId ? dynSet.get(d.botId) : null;
+  if (!o) return d;
+  if (Date.now() - o.at > DYN_SET_MS || Object.keys(o.v).every((k) => d[k] === o.v[k])) { dynSet.delete(d.botId); return d; }
+  return { ...d, ...o.v };
+}
 const isFixture = () => { try { return new URLSearchParams(location.search).has('fixture'); } catch { return false; } };
 // icons the chat view adds to icons.js; a stand-in until it has them
 const ALT = { send: 'push', attach: 'file', image: 'file', check: 'checks', copy: 'file', shield: 'alert', mode: 'plan' };
@@ -2289,28 +2304,42 @@ export function mountCompose(slot, s) {
     }
     return { model, effort };
   }
+  // a bot's chat: its model or effort that is dynamic shows as Dynamic (checked in the menu, the one it runs now marked
+  // "now"); the menu also offers Dynamic, and a fixed pick for a part that is dynamic turns Dynamic off for the bot
   function drawModel() {
     const t = termApi();
     const { model, effort } = current();
-    const name = model ? modelLabel(model, true) : 'Model';
-    const key = `${name}|${model}|${effort}|${!!t}|${!!(st.menu || st.panel)}|${st.sending}`;
+    const dyn = dynNow(st.s), bot = !!(dyn && dyn.botId);
+    const dm = bot && !!dyn.model, de = bot && !!dyn.effort;
+    const name = dm ? 'Dynamic' : model ? modelLabel(model, true) : 'Model';
+    const key = `${name}|${model}|${effort}|${bot && dyn.name}|${dm}|${de}|${!!t}|${!!(st.menu || st.panel)}|${st.sending}`;
     if (st.drawn.model === key) return;
     st.drawn.model = key;
     // the model name shortens when space runs out; the effort, in its Claude Code color, always shows in full
     modelBtn.querySelector('.cmp-model-t').textContent = name;
     const eff = modelBtn.querySelector('.cmp-eff');
-    eff.hidden = !EFFORTS.includes(effort);
-    eff.className = `cmp-eff eff${eff.hidden ? '' : ` eff-${effort}`}`;
-    eff.textContent = eff.hidden ? '' : effort;
+    eff.hidden = de ? dm : !EFFORTS.includes(effort); // both dynamic: the one word says it
+    eff.className = `cmp-eff eff${eff.hidden ? '' : ` eff-${de ? 'dynamic' : effort}`}`;
+    eff.textContent = eff.hidden ? '' : de ? 'dynamic' : effort;
     modelBtn.disabled = !t || !!st.menu || !!st.panel || st.sending;
-    modelBtn.title = !t ? noTermMsg('Changing the model') : `Model and effort${st.s.model ? ` (now ${st.s.model}${effort ? `, ${effort} effort` : ''})` : ''}`;
-    const item = (k, label, on, attr) => `<button type="button" role="menuitemradio" class="cmp-mi${on ? ' on' : ''}" ${attr}="${esc(k)}" aria-checked="${on}">`
-      + `<span class="cmp-mi-c">${on ? ic('check', 13) : ''}</span><span${attr === 'data-effort' ? ` class="eff eff-${esc(k)}"` : ''}>${esc(label)}</span></button>`;
+    const now = [st.s.model || (dm && model ? modelLabel(model) : ''), effort ? `${effort} effort` : ''].filter(Boolean).join(', ');
+    modelBtn.title = !t ? noTermMsg('Changing the model')
+      : dm || de ? `${dyn.name || 'This bot'}'s ${dm && de ? 'model and effort are' : dm ? 'model is' : 'effort is'} dynamic: sized for each message you send${now ? ` (now ${now})` : ''}`
+      : `Model and effort${st.s.model ? ` (now ${st.s.model}${effort ? `, ${effort} effort` : ''})` : ''}`;
+    const item = (k, label, on, attr, mark = false) => `<button type="button" role="menuitemradio" class="cmp-mi${on ? ' on' : ''}" ${attr}="${esc(k)}" aria-checked="${on}">`
+      + `<span class="cmp-mi-c">${on ? ic('check', 13) : ''}</span><span${attr === 'data-effort' ? ` class="eff eff-${esc(k)}"` : ''}>${esc(label)}</span>`
+      + `${mark ? '<span class="cmp-mi-now">now</span>' : ''}</button>`;
+    // a bot's: Dynamic as a small switch in the section's heading, so the menu grows by no rows
+    const head = (label, kind, on) => (!bot ? `<div class="cmp-mh">${label}</div>`
+      : `<div class="cmp-mh cmp-mh-dyn"><span>${label}</span><button type="button" role="menuitemradio" class="cmp-mi cmp-mdyn${on ? ' on' : ''}" data-dyn="${kind}" aria-checked="${on}"`
+        + ` title="${on ? 'Sized for each message you send' : `Size the ${kind} for each message you send`}">${on ? ic('check', 11) : ''}<span>Dynamic</span></button></div>`);
     // the one it runs comes first in the list when it isn't one of the newest (an older version)
     const ids = model && !MODEL_IDS.includes(model) ? [model, ...MODEL_IDS] : MODEL_IDS;
-    modelMenu.innerHTML = '<div class="cmp-mh">Model</div>' + ids.map((k) => item(k, modelLabel(k), k === model, 'data-model')).join('')
-      + '<div class="cmp-msep" role="separator"></div><div class="cmp-mh">Effort</div>' + EFFORTS.map((e) => item(e, e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1), e === effort, 'data-effort')).join('')
-      + '<div class="cmp-mnote">Also becomes the default for new sessions</div>';
+    const note = dm || de ? 'A fixed pick turns Dynamic off for this bot, and becomes the default for new sessions' : 'Also becomes the default for new sessions';
+    modelMenu.innerHTML = head('Model', 'model', dm) + ids.map((k) => item(k, modelLabel(k), !dm && k === model, 'data-model', dm && k === model)).join('')
+      + '<div class="cmp-msep" role="separator"></div>' + head('Effort', 'effort', de)
+      + EFFORTS.map((e) => item(e, e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1), !de && e === effort, 'data-effort', de && e === effort)).join('')
+      + `<div class="cmp-mnote">${esc(note)}</div>`;
   }
   function openModelMenu(open) {
     modelMenu.hidden = !open;
@@ -2321,7 +2350,7 @@ export function mountCompose(slot, s) {
   // -> { model, effort, label, switched, at } (what the message runs on, as far as known), or null for a conversation
   // that is no dynamic bot's. A switch that does not happen (busy, refused) leaves the message to run on what it runs
   async function dynamicPick(id, msg) {
-    const dyn = dynamicOf(st.s);
+    const dyn = dynNow(st.s);
     if (!dyn || !dyn.botId || (!dyn.model && !dyn.effort)) return null;
     const size = sizeTask(msg);
     let cur = current();
@@ -2362,8 +2391,34 @@ export function mountCompose(slot, s) {
     }
     return pick;
   }
+  // the menu's pick for a bot whose model or effort (kind) is dynamic: POST /bots/:id makes it the bot's (v 'dynamic' or
+  // a fixed one); -> false (and the box says why) when that fails
+  async function setBotPart(dyn, kind, v) {
+    let r;
+    try {
+      const res = await fetch(`/bots/${encodeURIComponent(dyn.botId)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [kind]: v }) });
+      r = { status: res.status, body: await res.json().catch(() => ({})) };
+    } catch { r = { status: 0, body: { message: 'the server did not answer' } }; }
+    if (r.status !== 200 || !r.body || r.body.ok === false) {
+      err(`Could not ${v === DYNAMIC ? `make ${dyn.name || 'the bot'}'s ${kind} dynamic` : `turn Dynamic off for ${dyn.name || 'the bot'}`}: ${(r.body && r.body.message) || `error ${r.status}`}`);
+      return false;
+    }
+    const o = dynSet.get(dyn.botId);
+    dynSet.set(dyn.botId, { v: { ...(o && Date.now() - o.at <= DYN_SET_MS ? o.v : {}), [kind]: v === DYNAMIC }, at: Date.now() });
+    st.drawn.model = null;
+    drawModel();
+    return true;
+  }
+  async function pickDynamic(kind) {
+    openModelMenu(false);
+    const dyn = dynNow(st.s);
+    if (!dyn || !dyn.botId || dyn[kind]) return;
+    await setBotPart(dyn, kind, DYNAMIC);
+  }
   async function pickModel(kind, v) {
     openModelMenu(false);
+    const dyn = dynNow(st.s);
+    if (dyn && dyn.botId && dyn[kind] && !(await setBotPart(dyn, kind, v))) return;
     const from = st.s.model || null;
     if (!(await send(kind === 'model' ? `/model ${v}` : `/effort ${v}`))) return;
     st.want = { ...(st.want || {}), [kind]: v, from, at: Date.now() };
@@ -2682,6 +2737,7 @@ export function mountCompose(slot, s) {
     if (b.dataset.mode) { switchMode(b.dataset.mode); return; }
     if (b.dataset.model) { pickModel('model', b.dataset.model); return; }
     if (b.dataset.effort) { pickModel('effort', b.dataset.effort); return; }
+    if (b.dataset.dyn) { pickDynamic(b.dataset.dyn); return; }
     if (b.dataset.sl) { pickSlash(+b.dataset.sl, false); return; }
     const c = b.dataset.c;
     // a chat another machine runs: the mode, model and Remote Control are its session's, there

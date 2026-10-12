@@ -333,6 +333,8 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; transiti
 .eff-medium { color: #4eba65; }
 .eff-high { color: #b1b9f9; }
 .eff-xhigh { color: #af87ff; }
+/* a bot's effort sized for each message (Dynamic: compose.js drawModel) */
+.eff-dynamic { color: var(--cyan); }
 .eff-max {
   color: #ff6b80; background: linear-gradient(90deg, #ff6b80, #ffc107, #4eba65, #3fd8ff, #af87ff);
   -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;

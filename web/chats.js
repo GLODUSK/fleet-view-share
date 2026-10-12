@@ -106,12 +106,13 @@ const chief = {
 const BOT_WAIT = 90000; // a start with a message: how long the message waits for the bot's session to be up
 const MADE_MS = 15000; // a bot just made shows from POST /bots's answer until /state lists it, at most this long
 const DEF = { account: 'B', model: DYNAMIC, effort: DYNAMIC }; // a new bot's (bots.js NEW_BOT): sized for each message
-// Dynamic (compose.js): which conversations are a dynamic bot's, from the bots the last render saw
+// Dynamic (compose.js): which conversations are a bot's and which of its model and effort are dynamic, from the bots
+// the last render saw (a fixed bot's too: its model menu offers Dynamic)
 let dynBots = [];
 setDynamicBots((s) => {
   if (!s || !s.id) return null;
   const b = dynBots.find((x) => x && !x.removed && ((s.bot && x.id === s.bot) || x.convId === s.id));
-  return b && (b.model === DYNAMIC || b.effort === DYNAMIC) ? { botId: b.id, model: b.model === DYNAMIC, effort: b.effort === DYNAMIC } : null;
+  return b ? { botId: b.id, name: b.name || '', model: b.model === DYNAMIC, effort: b.effort === DYNAMIC } : null;
 });
 // bot id -> what this page is doing with it: { starting (its POST), wait ({ text, id, at }: a message waiting for it to
 // be up), err, note, draft (its box), restore (the draft goes back in the box) }
