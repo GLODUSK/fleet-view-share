@@ -2,7 +2,8 @@
 // Supabase, sealed, so the materializer (sync-down.js, S3) on another machine can lay them down again byte for byte.
 // docs/sync-format.md is the contract, and "The uploader's rules" there are what this file does:
 //
-//   createUploader({ api, dataDir, key, log, now, projects, home, chunkBytes, rateBytesPerSec, only, accountOf })
+//   createUploader({ api, dataDir, key, log, now, projects, home, chunkBytes, rateBytesPerSec, only, accountOf, busy,
+//                    ownerOf })
 //     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), flush(id), forget(id), hold(id), unhold(id), held() }
 //
 //   api              sync-api.js createSync()'s object (rest() and storage are all it uses)
@@ -21,6 +22,13 @@
 //   chunkBytes       plain bytes per chunk, at most 8 MiB (the default)
 //   rateBytesPerSec  sealed bytes per second sent to Storage, 4 MB/s by default
 //   only(id)         optional: a scan looks only at the conversations this says true for (live tests)
+//   busy(id)         optional: true while a turn of it runs here (fleet-view.js: its claude is alive and the turn is
+//                    open). Such a one goes up at most every LIVE_GAP_MS (counted 'throttled'); once its turn ends (busy
+//                    no more) the next scan sends what is left, and a flush (a move's) never waits.
+//   ownerOf(id)      optional: the materializer's owner(id) (sync-down.js): { device, at, checkedAt } | null. A
+//                    conversation its rows say another device owns, while its last list is under OWNERS_FRESH_MS old,
+//                    is 'foreign' with no request; after forget(id) only a whole list that began later says so. Not
+//                    listed, no list, a stale one, or a flush: the row is asked for, as without it.
 //
 // For S4's moves (sync-move.js), with ids lower-case:
 //   flush(id) -> Promise<{ size, sha256, generation, owner_device }>: upload that conversation now. It is urgent: a
@@ -30,7 +38,8 @@
 //     grew meanwhile it goes again (at most 3 more passes). Throws a SyncError when there is no log here ('missing'),
 //     no row, another device owns it ('foreign'), it is not synced (step 1: 'noRepo'), or the upload failed.
 //   forget(id): its up-state.json entry, back-off, running sha256 and pending count go, so the next pass takes over
-//     what the server has (adopt); a pass of it under way stops before its next write ('forgotten').
+//     what the server has (adopt); a pass of it under way stops before its next write ('forgotten'). ownerOf's rows
+//     say nothing of it until a whole list that began after (the row is asked for meanwhile).
 //   hold(id) / unhold(id) / held() -> ids: a held conversation is never uploaded by a scan (counted 'held'); a scan
 //     that reached it before hold() stops before its next write. flush(id) still runs for a held id.
 //   Every chunk write checks ownership again when 20 s have passed since the last look: another owner ends the pass
@@ -96,6 +105,8 @@ const TAIL_BYTES = 4096; // tailSha covers this much before the uploaded end
 const INTERVAL_MS = 5e3;
 const BACKOFF_MS = 30e3, BACKOFF_MAX_MS = 30 * 60e3;
 const FOREIGN_RECHECK_MS = 5 * 60e3; // another device's conversation is asked about again after this (or a change)
+const OWNERS_FRESH_MS = 60e3; // the materializer's rows (ownerOf) answer "whose is it" while its last list is this recent
+const LIVE_GAP_MS = 45e3; // a conversation mid-turn (busy) goes up at most this often; its turn's end sends it at once
 const SKIP_RECHECK_MS = 10 * 60e3; // one with no repo, the same
 const IDLE_MS = 60 * 60e3; // a conversation whose log is older than this has its side files listed at most...
 const IDLE_LIST_MS = 60e3; // ...this often (a background subagent can still write while the log sleeps)
@@ -251,6 +262,24 @@ function createUploader(opts = {}) {
     a = typeof a === 'string' ? a.toLowerCase() : null;
     return a === 'a' || a === 'b' ? a : c.account;
   };
+  // mid-turn here (opts.busy): it goes up at most every LIVE_GAP_MS
+  const isBusy = (id) => { try { return typeof opts.busy === 'function' && opts.busy(id) === true; } catch { return false; } };
+  // Another device owns it, as the materializer's rows say (opts.ownerOf, sync-down.js owner()): only while its last list
+  // is under OWNERS_FRESH_MS old, and, for one forget() let go of (this device took it over: a list of the changed rows
+  // never shows a row coming to this device), only by a whole list that began after the forget. Else (no list, not
+  // listed, stale): not known, and the row is asked for as before.
+  const forgotAt = new Map(); // id -> when forget() ran (this clock)
+  function listedForeign(id, device) {
+    if (typeof opts.ownerOf !== 'function') return false;
+    let o = null;
+    try { o = opts.ownerOf(id); } catch {}
+    const d = o && typeof o.device === 'string' ? o.device.toLowerCase() : null;
+    if (!d || d === String(device).toLowerCase()) return false;
+    const t = now();
+    if (!Number.isFinite(o.checkedAt) || t - o.checkedAt > OWNERS_FRESH_MS || t < o.checkedAt) return false;
+    const f = forgotAt.get(id);
+    return f === undefined || (Number.isFinite(o.at) && o.at > f);
+  }
 
   // ---------- memory ----------
   let state = null; // up-state.json as loaded
@@ -263,7 +292,7 @@ function createUploader(opts = {}) {
   const skipLogged = new Set();
   const holds = new Set(); // ids no scan uploads (hold/unhold)
   const epochs = new Map(); // id -> how often it was forgotten: a pass that began before a forget() writes nothing more
-  const counts = { conversations: 0, synced: 0, pending: 0, noRepo: 0, foreign: 0, inactive: 0, empty: 0, held: 0, backingOff: 0 };
+  const counts = { conversations: 0, synced: 0, pending: 0, noRepo: 0, foreign: 0, inactive: 0, empty: 0, held: 0, backingOff: 0, throttled: 0 };
   const totals = { scans: 0, uploadedBytes: 0, uploadedChunks: 0, lastScanAt: null, lastScanMs: null, lastError: null };
 
   function loadState(device) {
@@ -589,8 +618,8 @@ function createUploader(opts = {}) {
   }
 
   // ---------- one conversation ----------
-  // -> 'synced' | 'backingOff' | 'noRepo' | 'foreign' | 'inactive' | 'empty' | 'held' | 'forgotten'; throws when an
-  // upload failed. how: { urgent (flush: a hold does not stop it), tally (the counts to add to) }
+  // -> 'synced' | 'backingOff' | 'noRepo' | 'foreign' | 'inactive' | 'empty' | 'held' | 'forgotten' | 'throttled';
+  // throws when an upload failed. how: { urgent (flush: a hold or the busy wait does not stop it), tally (the counts) }
   async function syncConversation(c, device, how = {}) {
     const id = c.id, t = now();
     const tally = how.tally || counts;
@@ -600,6 +629,8 @@ function createUploader(opts = {}) {
     if (mem.backoffUntil > t) { tally.backingOff++; return 'backingOff'; }
     if (mem.skip && mem.skip.sig === `${c.size}:${c.mtimeMs}` && mem.skip.until > t) { tally[mem.skip.why]++; return mem.skip.why; }
     mem.skip = null;
+    // another device's, as the materializer's rows say: nothing asked (a flush always asks)
+    if (!how.urgent && listedForeign(id, device)) { pendingOf.delete(id); return skip(c, mem, 'foreign', FOREIGN_RECHECK_MS, tally); }
     let st = state.conversations[id] || null;
     if (st && (!st.files || typeof st.files !== 'object')) st = null;
     const account = accountOfRow(c);
@@ -621,6 +652,8 @@ function createUploader(opts = {}) {
       tally.synced++;
       return 'synced';
     }
+    // mid-turn and sent less than LIVE_GAP_MS ago: it waits (a flush, a move's, never does; the turn's end sends it)
+    if (!how.urgent && mem.sentAt && t - mem.sentAt < LIVE_GAP_MS && t >= mem.sentAt && isBusy(id)) { tally.throttled++; return 'throttled'; }
 
     // where it belongs: the folder its log lives in (it resumes there), else its last cwd when that folder is in no repo
     const meta = C.lastMeta(c.mainPath);
@@ -733,6 +766,7 @@ function createUploader(opts = {}) {
       throw e;
     }
     mem.fails = 0;
+    if (w.changed) mem.sentAt = now();
     pendingOf.set(id, 0);
     tally.synced++;
     return 'synced';
@@ -894,6 +928,7 @@ function createUploader(opts = {}) {
     if (!ID_RE.test(id)) return false;
     epochs.set(id, (epochs.get(id) || 0) + 1);
     memo.delete(id); hashes.delete(id); pendingOf.delete(id); untrim(id);
+    forgotAt.set(id, now());
     if (state) {
       if (state.conversations[id]) { delete state.conversations[id]; dirty = true; saveState(); }
     } else {
@@ -914,7 +949,7 @@ function createUploader(opts = {}) {
     return {
       running: started, scanning: !!running, scans: totals.scans, lastScanAt: totals.lastScanAt, lastScanMs: totals.lastScanMs,
       conversations: counts.conversations, synced: counts.synced, pending: counts.pending, pendingBytes,
-      skipped: { noRepo: counts.noRepo, foreign: counts.foreign, inactive: counts.inactive, empty: counts.empty, held: counts.held }, backingOff: counts.backingOff,
+      skipped: { noRepo: counts.noRepo, foreign: counts.foreign, inactive: counts.inactive, empty: counts.empty, held: counts.held }, backingOff: counts.backingOff, throttled: counts.throttled,
       uploadedBytes: totals.uploadedBytes, uploadedChunks: totals.uploadedChunks,
       lastError: totals.lastError ? { ...totals.lastError } : null,
     };

@@ -34,6 +34,19 @@
 // Pages: the fake answers 1000 rows at most (PostgREST's max-rows); a conversation of 1181 chunk rows is laid down
 // whole, side files after row 1000 too, and a row gone between two pages starts the listing again; down-state.json is
 // compact; an unchanged row whose log was deleted here is laid down again.
+// The rows: the first list whole (every column, paged by id), then only the changed ones (updated_at from the newest
+// seen less the overlap, or a lease past the newest seen; no state filter, never this device's), a whole light list
+// every 4 minutes that fetches by id only the rows it lacks or whose updated_at moved; a lease or an account alone (no
+// updated_at), a delete, a row gone inactive, one taken by a third device or by this one (owner(id) at once after a
+// pull; listedAt only at a whole list), a pull that lands mid-way through a changed or a whole list (the list's older
+// copy lays nothing over it, and one the pull found this device's stays so), a writer far behind, an hour ahead or a
+// minute behind, a lease from a clock an hour ahead (the lease watermark stops 3 minutes ahead); the filter refused
+// (400): whole lists, said once. New chunks only: down-state.json keeps each file's chunks, stamp and sha256; main and a side
+// log that grew fetch only their new chunks in one listing that leaves the laid-down ones out; a new side file alone;
+// a local log touched since, local bytes that changed under the same size and time ('redo': read again, then the
+// conflict it always was), a new generation of a side log or of main: all the rows; a URL or request too long (414,
+// 431): all, that time; a sha256 that does not match the bytes put together: all, then the conflict it is; the filter
+// refused: all, said once.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders or the real Supabase. Exit 0 = all pass.
 'use strict';
@@ -49,6 +62,7 @@ const S = require(path.join(ROOT, 'sync-api.js'));
 const X = require(path.join(ROOT, 'sync-crypto.js'));
 const C = require(path.join(ROOT, 'sync-common.js'));
 const D = require(path.join(ROOT, 'sync-down.js'));
+const PF = require(path.join(__dirname, 'pgrest-filter.js'));
 
 const base = process.env.SYNC_TEST_DIR || os.tmpdir();
 fs.mkdirSync(base, { recursive: true });
@@ -89,21 +103,20 @@ function restCall(req, u, body, res) {
   const rows = fake.tables[table];
   if (!rows) return json(res, 404, { code: 'PGRST205', message: 'no such table' });
   let select = null, order = [], limit = Infinity, offset = 0;
-  const filters = [];
   for (const [k, v] of u.searchParams) {
     if (k === 'select') select = v.split(',');
     else if (k === 'order') order = v.split(',').map((x) => { const [c, d] = x.split('.'); return [c, d === 'desc' ? -1 : 1]; });
     else if (k === 'limit') limit = Number(v);
     else if (k === 'offset') offset = Number(v);
-    else if (k !== 'on_conflict') { const i = v.indexOf('.'); filters.push([k, v.slice(0, i), v.slice(i + 1)]); }
   }
-  // SQL's way: a null never equals and never differs
-  const match = (r) => filters.every(([k, op, val]) => (r[k] == null ? false : op === 'eq' ? String(r[k]) === val : op === 'neq' ? String(r[k]) !== val : false));
+  // PostgREST's filters, the or= and and= trees too (scripts/pgrest-filter.js): SQL's way with a null
+  const match = PF.matcher(u.searchParams);
   if (req.method === 'GET') {
     if (fake.onPage && table === 'chunks') fake.onPage(offset); // rows that come or go between two pages
     let out = rows.filter(match);
     out.sort((a, b) => { for (const [c, d] of order) { if (a[c] < b[c]) return -d; if (a[c] > b[c]) return d; } return 0; });
-    out = out.slice(offset, offset + Math.min(limit, 1000)) // PostgREST's max-rows: never more than 1000 in one answer.map((r) => (select ? Object.fromEntries(select.map((c) => [c, r[c] === undefined ? null : r[c]])) : r));
+    // PostgREST's max-rows: never more than 1000 in one answer
+    out = out.slice(offset, offset + Math.min(limit, 1000)).map((r) => (select ? Object.fromEntries(select.map((c) => [c, r[c] === undefined ? null : r[c]])) : r));
     return json(res, 200, out);
   }
   const b = body.length ? JSON.parse(body.toString()) : null;
@@ -908,6 +921,306 @@ async function main() {
 
   eq(parts(), [], 'no .part file anywhere at the end');
   ok(!walk(T).some((f) => !inside(T, f)), 'nothing outside the temp folder');
+
+  // ---------- the rows: a whole list now and then, the changed ones in between ----------
+  {
+    const lists = []; // every conversations GET: its query and how many rows came back
+    const realRest = api.rest;
+    let refuse = null; // (query) => true: Supabase answers 400 (a filter it does not take)
+    let midList = null; // { when(query), run() }: run once, after the first conversations GET when() takes, before it answers
+    api.rest = async (meth, table, o = {}) => {
+      if (meth === 'GET' && refuse && refuse(table, o.query || {})) throw new S.SyncError('PGRST100: failed to parse logic tree', 400, 'bad_request');
+      const out = await realRest(meth, table, o);
+      if (meth === 'GET' && table === 'conversations') lists.push({ q: { ...(o.query || {}) }, ids: Array.isArray(out) ? out.map((x) => x.id) : [] });
+      if (meth === 'GET' && table === 'conversations' && midList && midList.when(o.query || {})) { const f = midList.run; midList = null; await f(); }
+      return out;
+    };
+    try {
+      let clk = clock + 1e3;
+      const mR = D.createMaterializer({ api, dataDir, key: KEY, home, roots: [repoDir], now: () => clk, log: (t) => logs.push(t) });
+      const scanAt = async (ms) => { clk += ms; lists.length = 0; return mR.scanOnce(); };
+      eq(mR.owner(c1.id), null, 'rows: owner() is null before the first list');
+      await scanAt(0);
+      const first = lists.filter((x) => !x.q.id || /^gt\./.test(x.q.id));
+      ok(first.length >= 1 && first.every((x) => /repo_id/.test(x.q.select) && !x.q.or && x.q.state === 'eq.active' && x.q.order === 'id.asc'), 'rows: the first list is a whole one, every column, paged by id');
+      const listed0 = mR.status().listedAt;
+      ok(listed0 && mR.status().checkedAt === listed0, 'rows: listedAt and checkedAt are when it began');
+      eq(mR.owner(c1.id) && mR.owner(c1.id).device, lower(OTHER), 'rows: owner(id) names the other device');
+      ok(mR.owner(c9.id).device === null && mR.owner(crypto.randomUUID()).device === null, 'rows: owner(id) of this device\'s row, or one not listed: no device');
+      // a new row an hour of the writer's time later: the next scan lists the changed rows only
+      tick += 3600;
+      const n1 = putConvo({ pieces: [Buffer.concat(logOf('n1', 3))] });
+      await scanAt(5e3);
+      ok(lists.length === 1 && typeof lists[0].q.or === 'string' && /updated_at\.gte\./.test(lists[0].q.or) && /lease_until\.gte\./.test(lists[0].q.or) && lists[0].q.owner_device === `neq.${me}` && !lists[0].q.state, `rows: the next scan lists the changed rows (${JSON.stringify(lists[0] && lists[0].q)})`);
+      ok(lists[0].ids.includes(n1.id), 'rows: the new row is in it');
+      ok(same(mainOf(n1.id), n1.main), 'rows: a new row from the changed list is laid down');
+      ok(mR.status().listedAt === listed0 && mR.status().checkedAt !== listed0, 'rows: a changed list moves checkedAt, never listedAt');
+      await scanAt(5e3);
+      // the watermark is n1's updated_at now: the rows an hour older stay out (c1's lease, set above, is the newest lease
+      // seen: it comes back too, as a lease renewed lately would)
+      ok(lists.length === 1 && lists[0].ids.includes(n1.id) && lists[0].ids.every((id) => id === n1.id || id === c1.id), `rows: then only the rows changed in the overlap come back (${lists[0] && lists[0].ids.length})`);
+      // a lease (no updated_at): the changed list sees it
+      const lease = new Date(clk + 180e3).toISOString();
+      n1.row.lease_until = lease;
+      await scanAt(5e3);
+      eq(mR.owners().get(n1.id).leaseUntil, Date.parse(lease), 'rows: a lease renewed (no updated_at) shows at the next scan');
+      // the account alone (no updated_at): only at the next whole list, which fetches no row again
+      c2.row.account = 'a'; // an older row, out of the overlap
+      await scanAt(5e3);
+      eq(mR.owners().get(c2.id).account, 'b', 'rows: the account alone moved: not seen by a changed list');
+      await scanAt(4 * 60e3);
+      const light = lists.filter((x) => !x.q.id || /^gt\./.test(x.q.id));
+      ok(light.length >= 1 && light.every((x) => x.q.select === 'id,account,updated_at,owner_device,lease_until' && !x.q.or), 'rows: every 4 minutes a whole list of the light columns');
+      ok(!lists.some((x) => /^in\./.test(x.q.id || '')), 'rows: no row fetched again by id when its updated_at did not move');
+      eq(mR.owners().get(c2.id).account, 'a', 'rows: the whole list brings the account');
+      ok(mR.status().listedAt === new Date(clk).toISOString(), 'rows: and moves listedAt');
+      // a row that changed without the changed lists seeing it (a writer far behind): the whole list fetches it by id
+      const n2 = putConvo({ pieces: [Buffer.concat(logOf('n2', 2))] });
+      n2.row.updated_at = '2020-01-01T00:00:00.000Z';
+      await scanAt(5e3);
+      ok(!fs.existsSync(mainOf(n2.id)) && !mR.owners().has(n2.id), 'rows: a row written by a clock far behind is not in a changed list');
+      await scanAt(4 * 60e3);
+      ok(lists.some((x) => /^in\./.test(x.q.id || '') && x.q.id.includes(n2.id)), 'rows: the whole list fetches the rows it lacks by id');
+      ok(same(mainOf(n2.id), n2.main) && mR.owners().has(n2.id), 'rows: and lays it down');
+      // gone inactive (with updated_at): the changed list drops it; deleted: the whole list does
+      const n3 = putConvo({ pieces: [Buffer.concat(logOf('n3', 2))] });
+      await scanAt(5e3);
+      ok(mR.owners().has(n3.id), 'rows: n3 listed');
+      Object.assign(n3.row, { state: 'archived', updated_at: stamp() });
+      await scanAt(5e3);
+      ok(!mR.owners().has(n3.id), 'rows: one gone inactive leaves at the next changed list');
+      fake.tables.conversations.splice(fake.tables.conversations.indexOf(n2.row), 1);
+      await scanAt(5e3);
+      ok(mR.owners().has(n2.id), 'rows: a deleted row stays until the whole list (nothing says it changed)');
+      await scanAt(4 * 60e3);
+      ok(!mR.owners().has(n2.id), 'rows: the whole list drops a deleted row');
+      // owner changes: to a third device (the changed list), to this one (the whole list; a pull sees it at once)
+      const THIRD = crypto.randomUUID();
+      Object.assign(n1.row, { owner_device: THIRD, updated_at: stamp() });
+      await scanAt(5e3);
+      eq(mR.owners().get(n1.id).device, lower(THIRD), 'rows: a row taken by another device shows at the next changed list');
+      Object.assign(n1.row, { owner_device: me, updated_at: stamp() });
+      const lAt = mR.status().listedAt;
+      await scanAt(5e3);
+      ok(mR.owners().has(n1.id) && mR.status().listedAt === lAt, 'rows: one taken by this device stays another\'s until the whole list, and listedAt does not move (the mover keeps its claim till then)');
+      eq((await mR.pull(n1.id)).outcome, 'mine', 'rows: a pull reads it as this device\'s');
+      eq(mR.owner(n1.id).device, null, 'rows: and owner(id) says so at once');
+      await scanAt(4 * 60e3);
+      ok(!mR.owners().has(n1.id), 'rows: the whole list drops it from owners()');
+      const ow = mR.owner(c1.id);
+      ok(ow && ow.device === lower(OTHER) && ow.at === Date.parse(mR.status().listedAt) && ow.checkedAt === Date.parse(mR.status().checkedAt), 'rows: owner(id) -> { device, at, checkedAt }');
+      // a pull that lands while a list is under way: the list's copy of that row (the older one) does not undo it, so
+      // the scan lays no older row over it (no false "the local copy is longer"); in a changed list and in a whole one
+      const pr = putConvo({ pieces: [Buffer.concat(logOf('pr', 2))] });
+      const pq = putConvo({ pieces: [Buffer.concat(logOf('pq', 2))] });
+      await scanAt(5e3);
+      ok(same(mainOf(pr.id), pr.main) && same(mainOf(pq.id), pq.main), 'rows: pr and pq laid down');
+      let prMain = pr.main, pulledMid = null;
+      const grow = (tag) => {
+        const more = Buffer.concat(logOf('pr', 1, tag));
+        putFile(pr.id, 'main', 0, [more], chunkRows(pr.id).length, prMain.length);
+        prMain = Buffer.concat([prMain, more]);
+        Object.assign(pr.row, { size: prMain.length, sha256: X.sha256(prMain), updated_at: stamp() });
+      };
+      midList = { when: (q) => !!q.or, run: async () => { grow('m1'); pulledMid = await mR.pull(pr.id); } };
+      await scanAt(5e3);
+      ok(!midList && pulledMid && pulledMid.outcome === 'done' && same(mainOf(pr.id), prMain), 'rows: a pull mid-way through a changed list lays the newer row down');
+      ok(!mR.conflicts().some((x) => x.id === pr.id), 'rows: and the changed list\'s older copy lays nothing over it (no conflict)');
+      // a whole list: its light page saw pr as it was; the pull lands while it fetches another row (pq) by id
+      pq.row.updated_at = stamp();
+      pulledMid = null;
+      midList = { when: (q) => /^in\./.test(q.id || ''), run: async () => { grow('m2'); pulledMid = await mR.pull(pr.id); } };
+      await scanAt(4 * 60e3);
+      ok(!midList && pulledMid && pulledMid.outcome === 'done' && same(mainOf(pr.id), prMain), 'rows: a pull mid-way through a whole list lays the newer row down');
+      ok(!mR.conflicts().some((x) => x.id === pr.id) && mR.status().listedAt === new Date(clk).toISOString(), 'rows: and the whole list\'s older copy lays nothing over it either');
+      // a pull mid-list that finds the row this device's: the list's copy (another device's) does not bring it back
+      pulledMid = null;
+      midList = { when: (q) => !!q.or, run: async () => { Object.assign(pr.row, { owner_device: me, updated_at: stamp() }); pulledMid = await mR.pull(pr.id); } };
+      await scanAt(5e3);
+      ok(pulledMid && pulledMid.outcome === 'mine' && mR.owner(pr.id).device === null && !mR.owners().has(pr.id), 'rows: a pull mid-list that finds the row this device\'s: the list does not make it another\'s again');
+      midList = null;
+      // clock skew (last: the writer here jumps an hour ahead): a writer whose clock runs an hour ahead hides nobody's
+      // writes; one a minute behind is in the overlap
+      const ahead = putConvo({ pieces: [Buffer.concat(logOf('ah', 2))] });
+      ahead.row.updated_at = new Date(clk + 3600e3).toISOString();
+      await scanAt(5e3);
+      ok(mR.owners().has(ahead.id), 'rows: a row from a clock ahead is listed');
+      const behind = putConvo({ pieces: [Buffer.concat(logOf('bh', 2))] });
+      behind.row.updated_at = new Date(clk - 60e3).toISOString();
+      await scanAt(5e3);
+      ok(mR.owners().has(behind.id) && same(mainOf(behind.id), behind.main), 'rows: after it, a row a minute behind this clock is still listed');
+      // a lease from a clock an hour ahead: the lease watermark stops 3 minutes past this clock, so a lease renewed
+      // after it still shows (c1's: its updated_at is long out of the overlap)
+      ahead.row.lease_until = new Date(clk + 3600e3).toISOString();
+      await scanAt(5e3);
+      const renewed = new Date(clk + 5e3 + 180e3).toISOString();
+      c1.row.lease_until = renewed;
+      await scanAt(5e3);
+      eq(mR.owners().get(c1.id).leaseUntil, Date.parse(renewed), 'rows: a lease from a clock an hour ahead hides no lease renewed after it');
+      // (those two rows go: the tests after this one write with the old writer's clock)
+      fake.tables.conversations = fake.tables.conversations.filter((x) => x !== ahead.row && x !== behind.row);
+      // Supabase refuses the changed rows' filter: whole lists from then on, said once
+      refuse = (table, q) => table === 'conversations' && !!q.or;
+      const n4 = putConvo({ pieces: [Buffer.concat(logOf('n4', 2))] });
+      const said = logs.length;
+      await scanAt(5e3);
+      ok(same(mainOf(n4.id), n4.main), 'rows: the changed list refused (400): a whole list instead, the new row laid down');
+      await scanAt(5e3);
+      ok(!lists.some((x) => x.q.or), 'rows: and no changed list is tried again');
+      eq(logs.slice(said).filter((t) => /changed rows could not be listed/.test(t)).length, 1, 'rows: said once');
+      refuse = null;
+    } finally { api.rest = realRest; }
+  }
+
+  // ---------- a conversation's new chunks only ----------
+  {
+    const chunkQs = []; // every chunks GET's query
+    const realRest = api.rest;
+    let refuse = null, tooLong = null;
+    api.rest = async (meth, table, o = {}) => {
+      if (meth === 'GET' && table === 'chunks') chunkQs.push({ ...(o.query || {}) });
+      if (meth === 'GET' && refuse && refuse(table, o.query || {})) throw new S.SyncError('PGRST100: failed to parse logic tree', 400, 'bad_request');
+      const long = meth === 'GET' && tooLong ? tooLong(table, o.query || {}) : 0; // 414 (true) or 431
+      if (long) throw long === 431 ? new S.SyncError('Supabase said 431: Request Header Fields Too Large', 431, '') : new S.SyncError('Supabase said 414: Request-URI Too Large', 414, '');
+      return realRest(meth, table, o);
+    };
+    const sinceQs = () => chunkQs.filter((q) => q.and);
+    try {
+      const subA = logOf('sa', 4);
+      const s1 = putConvo({
+        pieces: [Buffer.concat(logOf('s1', 3)), Buffer.concat(logOf('s1', 2, 'b')), Buffer.concat(logOf('s1', 2, 'c'))],
+        side: { 'subagents/agent-s1.jsonl': [Buffer.concat(subA.slice(0, 2)), Buffer.concat(subA.slice(2))], 'tool-results/s1.txt': Buffer.from('a result\n') },
+      });
+      later();
+      await m.scanOnce();
+      const side = (f) => path.join(slugDir(rootDir), s1.id, ...f.split('/'));
+      ok(same(mainOf(s1.id), s1.main) && same(side('subagents/agent-s1.jsonl'), Buffer.concat(subA)), 'since: laid down whole the first time');
+      let ds = C.readState(D.downStatePath(dataDir), {}).convos[s1.id].files;
+      ok(ds.main.seq === 3 && ds['subagents/agent-s1.jsonl'].seq === 2 && ds['tool-results/s1.txt'].seq === 1 && /^\d+:/.test(ds.main.stamp) && X.sha256(Buffer.concat(subA)) === ds['subagents/agent-s1.jsonl'].sha256, 'since: down-state.json has each file\'s chunks, stamp and whole sha256');
+      // main and the subagent log grow: only the rows past them are listed, only the new chunks fetched
+      const mMore = Buffer.concat(logOf('s1', 2, 'd')), sMore = Buffer.concat(logOf('sa', 2, 'e'));
+      putFile(s1.id, 'main', 0, [mMore], 3, s1.main.length);
+      putFile(s1.id, 'subagents/agent-s1.jsonl', 0, [sMore], 2, Buffer.concat(subA).length);
+      const main2 = Buffer.concat([s1.main, mMore]);
+      Object.assign(s1.row, { size: main2.length, sha256: X.sha256(main2), updated_at: stamp() });
+      chunkQs.length = 0;
+      let sg = storageGets();
+      await m.scanOnce();
+      ok(same(mainOf(s1.id), main2) && same(side('subagents/agent-s1.jsonl'), Buffer.concat([...subA, sMore])), 'since: both grew byte-identical');
+      eq(storageGets() - sg, 2, 'since: only the two new chunks were fetched');
+      const q1 = sinceQs()[0];
+      ok(chunkQs.length === 1 && q1 && q1.and.includes('not.and(file.eq."main",generation.eq.0,seq.lt.3)') && q1.and.includes('not.and(file.eq."subagents/agent-s1.jsonl",generation.eq.0,seq.lt.2)') && q1.and.includes('"tool-results/s1.txt"'), `since: one listing that leaves out what is laid down (${q1 && q1.and})`);
+      ds = C.readState(D.downStatePath(dataDir), {}).convos[s1.id].files;
+      ok(ds.main.seq === 4 && ds.main.size === main2.length && ds['subagents/agent-s1.jsonl'].seq === 3, 'since: down-state.json counts the new chunks');
+      // a side file only: a new tool result
+      putFile(s1.id, 'tool-results/s1b.txt', 0, [Buffer.from('another\n')]);
+      s1.row.updated_at = stamp();
+      chunkQs.length = 0;
+      sg = storageGets();
+      await m.scanOnce();
+      ok(same(side('tool-results/s1b.txt'), Buffer.from('another\n')) && same(mainOf(s1.id), main2), 'since: a new side file alone is laid down, main as it was');
+      ok(storageGets() - sg === 1 && sinceQs().length === 1 && chunkQs.length === 1, 'since: one listing, one download');
+      // the local log touched since (its modified time): all the rows
+      fs.utimesSync(mainOf(s1.id), new Date(), new Date(Date.now() - 5000));
+      s1.row.updated_at = stamp();
+      chunkQs.length = 0;
+      await m.scanOnce();
+      ok(chunkQs.length === 1 && !chunkQs[0].and && same(mainOf(s1.id), main2), 'since: a local log touched since it was laid down: all the rows, nothing changed');
+      // the local bytes changed with the same size and time: the check before adding finds it, all rows read again
+      const st0 = fs.statSync(mainOf(s1.id));
+      const bad = Buffer.from(main2); bad[5] = bad[5] === 0x61 ? 0x62 : 0x61;
+      fs.writeFileSync(mainOf(s1.id), bad);
+      fs.utimesSync(mainOf(s1.id), st0.atime, st0.mtime);
+      const mMore2 = Buffer.concat(logOf('s1', 1, 'f'));
+      putFile(s1.id, 'main', 0, [mMore2], 4, main2.length);
+      const main3 = Buffer.concat([main2, mMore2]);
+      Object.assign(s1.row, { size: main3.length, sha256: X.sha256(main3), updated_at: stamp() });
+      chunkQs.length = 0;
+      const said = logs.length;
+      let r2 = await m.scanOnce();
+      ok(chunkQs.length === 2 && chunkQs[0].and && !chunkQs[1].and, 'since: local bytes not the ones laid down: read again whole');
+      ok(logs.slice(said).some((t) => t.includes(s1.id) && /read again/.test(t)) && m.conflicts().some((x) => x.id === s1.id && /different/.test(x.reason)) && same(mainOf(s1.id), bad), 'since: and then it is the conflict it always was, the local copy left alone');
+      fs.writeFileSync(mainOf(s1.id), main2); // put right: laid down whole, as the conflict's entry has no stamp
+      chunkQs.length = 0;
+      r2 = await m.scanOnce();
+      ok(same(mainOf(s1.id), main3) && chunkQs.length === 1 && !chunkQs[0].and, 'since: put right here, laid down from all the rows');
+      // a new generation of a known side log (rewritten), its old one gone: read whole
+      const subB = logOf('sb', 3);
+      fake.tables.chunks = fake.tables.chunks.filter((c) => !(c.conversation_id === s1.id && c.file === 'subagents/agent-s1.jsonl'));
+      putFile(s1.id, 'subagents/agent-s1.jsonl', 1, [Buffer.concat(subB)]);
+      s1.row.updated_at = stamp();
+      chunkQs.length = 0;
+      await m.scanOnce();
+      ok(chunkQs.length === 2 && chunkQs[0].and && !chunkQs[1].and, 'since: a new generation of a known side file: read again whole');
+      ok(fs.existsSync(side('subagents/agent-s1.jsonl')), 'since: (the rewritten side log is the conflict it always was, or laid down)');
+      // a new generation of main: whole
+      const g1 = Buffer.concat(logOf('s1', 3, 'g1'));
+      putFile(s1.id, 'main', 1, [g1]);
+      Object.assign(s1.row, { size: g1.length, sha256: X.sha256(g1), generation: 1, updated_at: stamp() });
+      chunkQs.length = 0;
+      await m.scanOnce();
+      ok(chunkQs.length === 1 && !chunkQs[0].and, 'since: a new generation of main: all the rows');
+      // a proxy finds the URL too long (414): that conversation's rows are read whole this time only, and its next change
+      // fetches only the new chunks again
+      const s3 = putConvo({ pieces: [Buffer.concat(logOf('s3', 2))] });
+      await m.scanOnce();
+      const s3more = Buffer.concat(logOf('s3', 1, 'b'));
+      putFile(s3.id, 'main', 0, [s3more], 1, s3.main.length);
+      const s3main = Buffer.concat([s3.main, s3more]);
+      Object.assign(s3.row, { size: s3main.length, sha256: X.sha256(s3main), updated_at: stamp() });
+      tooLong = (table, q) => table === 'chunks' && !!q.and;
+      chunkQs.length = 0;
+      await m.scanOnce();
+      ok(same(mainOf(s3.id), s3main) && chunkQs.length === 2 && chunkQs[0].and && !chunkQs[1].and, 'since: a URL too long (414): laid down from all the rows');
+      tooLong = null;
+      const s3more2 = Buffer.concat(logOf('s3', 1, 'c'));
+      putFile(s3.id, 'main', 0, [s3more2], 2, s3main.length);
+      const s3main2 = Buffer.concat([s3main, s3more2]);
+      Object.assign(s3.row, { size: s3main2.length, sha256: X.sha256(s3main2), updated_at: stamp() });
+      chunkQs.length = 0;
+      await m.scanOnce();
+      ok(same(mainOf(s3.id), s3main2) && chunkQs.length === 1 && !!chunkQs[0].and, 'since: after a 414 the next change fetches only the new chunks again');
+      // a request too large (431) the same way
+      const s3more3 = Buffer.concat(logOf('s3', 1, 'd'));
+      putFile(s3.id, 'main', 0, [s3more3], 3, s3main2.length);
+      const s3main3 = Buffer.concat([s3main2, s3more3]);
+      Object.assign(s3.row, { size: s3main3.length, sha256: X.sha256(s3main3), updated_at: stamp() });
+      tooLong = (table, q) => (table === 'chunks' && !!q.and ? 431 : 0);
+      chunkQs.length = 0;
+      await m.scanOnce();
+      ok(same(mainOf(s3.id), s3main3) && chunkQs.length === 2 && chunkQs[0].and && !chunkQs[1].and, 'since: a request too large (431): laid down from all the rows');
+      tooLong = null;
+      // a sha256 that does not match the bytes put together (the server's first chunk is not the one laid down here,
+      // under the same generation): every row is read again in the same scan, which finds the conflict it is
+      const c0 = chunkRows(s3.id).find((c) => c.seq === 0);
+      const old0 = X.openChunk(fake.objects.get(`${UID}/${c0.object_path}`), KEY, c0.object_path);
+      const new0 = Buffer.from(old0); new0[3] = new0[3] === 0x61 ? 0x62 : 0x61;
+      fake.objects.set(`${UID}/${c0.object_path}`, X.sealChunk(new0, KEY, c0.object_path));
+      c0.sha256 = X.sha256(new0);
+      const s3more4 = Buffer.concat(logOf('s3', 1, 'e'));
+      putFile(s3.id, 'main', 0, [s3more4], 4, s3main3.length);
+      const s3remote = Buffer.concat([new0, s3main3.subarray(old0.length), s3more4]);
+      Object.assign(s3.row, { size: s3remote.length, sha256: X.sha256(s3remote), updated_at: stamp() });
+      chunkQs.length = 0;
+      const said3 = logs.length;
+      await m.scanOnce();
+      ok(chunkQs.length === 2 && chunkQs[0].and && !chunkQs[1].and, 'since: a sha256 that does not match the bytes put together: every row read again');
+      ok(logs.slice(said3).some((t) => t.includes(s3.id) && /sha256/.test(t) && /read again/.test(t)) && m.conflicts().some((x) => x.id === s3.id && /different/.test(x.reason)) && same(mainOf(s3.id), s3main3), 'since: and then the conflict it is, the local copy left alone (no failure to back off over)');
+      // Supabase refuses the filter: whole from then on, said once
+      const s2 = putConvo({ pieces: [Buffer.concat(logOf('s2', 2))] });
+      await m.scanOnce();
+      const s2more = Buffer.concat(logOf('s2', 1, 'b'));
+      putFile(s2.id, 'main', 0, [s2more], 1, s2.main.length);
+      const s2main = Buffer.concat([s2.main, s2more]);
+      Object.assign(s2.row, { size: s2main.length, sha256: X.sha256(s2main), updated_at: stamp() });
+      refuse = (table, q) => table === 'chunks' && !!q.and;
+      const said2 = logs.length;
+      await m.scanOnce();
+      ok(same(mainOf(s2.id), s2main), 'since: the filter refused (400): laid down from all the rows');
+      eq(logs.slice(said2).filter((t) => /new chunks could not be fetched/.test(t)).length, 1, 'since: said once');
+      refuse = null;
+    } finally { api.rest = realRest; }
+  }
 
   // ---------- status: nothing secret; start and stop ----------
   const s = JSON.stringify(m.status());

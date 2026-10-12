@@ -31,6 +31,7 @@ const C = require(path.join(ROOT, 'sync-common.js'));
 const D = require(path.join(ROOT, 'sync-down.js'));
 const K = require(path.join(ROOT, 'sync-clone.js'));
 const P = require(path.join(ROOT, 'platform.js'));
+const PF = require(path.join(__dirname, 'pgrest-filter.js'));
 
 const base = process.env.SYNC_TEST_DIR || os.tmpdir();
 fs.mkdirSync(base, { recursive: true });
@@ -66,15 +67,14 @@ function restCall(req, u, body, res) {
   const rows = fake.tables[table];
   if (!rows) return json(res, 404, { code: 'PGRST205', message: 'no such table' });
   let select = null, order = [], limit = Infinity, offset = 0;
-  const filters = [];
   for (const [k, v] of u.searchParams) {
     if (k === 'select') select = v.split(',');
     else if (k === 'order') order = v.split(',').map((x) => { const [c, d] = x.split('.'); return [c, d === 'desc' ? -1 : 1]; });
     else if (k === 'limit') limit = Number(v);
     else if (k === 'offset') offset = Number(v);
-    else if (k !== 'on_conflict') { const i = v.indexOf('.'); filters.push([k, v.slice(0, i), v.slice(i + 1)]); }
   }
-  const match = (r) => filters.every(([k, op, val]) => (r[k] == null ? false : op === 'eq' ? String(r[k]) === val : op === 'neq' ? String(r[k]) !== val : false));
+  // PostgREST's filters, the or= tree of the changed rows' list and in.(...) too (scripts/pgrest-filter.js)
+  const match = PF.matcher(u.searchParams);
   if (req.method === 'GET') {
     let out = rows.filter(match);
     out.sort((a, b) => { for (const [c, d] of order) { if (a[c] < b[c]) return -d; if (a[c] > b[c]) return d; } return 0; });

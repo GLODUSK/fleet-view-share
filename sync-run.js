@@ -15,14 +15,17 @@
 // sets no timer beyond the minute check and reaches no network.
 //
 //   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, bound, accountOf,
-//                      intervalMs, checkMs, prefs, relay, version, makeUploader, makeMaterializer, makeMover, makeLive,
-//                      makePrefs, makeLink, makeCarry })
+//                      busy, intervalMs, checkMs, prefs, relay, version, makeUploader, makeMaterializer, makeMover,
+//                      makeLive, makePrefs, makeLink, makeCarry })
 //     -> { start(), stop(), check(), status(), move(id, { force, noWork }), moveStatus(id), cancelMove(id), owners(),
 //          device(), live(), prefsChanged(), link(), missing(), rescan(), note(id), dropNote(id), peer(route, body, from) }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
 //   are one (by default each side's own: ~/.claude and ~/.claude-a); accountOf(id) -> the account a conversation ran
 //   under here or null (fleet-view.js: its claude process, or remembered), the uploader's option of that name, so its
-//   row says a when it ran on A in a folder A shares with B; roots: () => [repo folders] (the
+//   row says a when it ran on A in a folder A shares with B; busy(id) -> true while a turn of it runs here (the
+//   uploader's option of that name: such a chat goes up at most every 45 s, and at once when its turn ends); the
+//   uploader's ownerOf is the materializer's owner(id), so another device's conversation costs it no request;
+//   roots: () => [repo folders] (the
 //   repos Fleet View lists; the materializer matches a synced repo's origin against them). host: { list() ->
 //   Promise<desktop/host.js list()'s items | null>, kill(id) -> Promise } (api.js hostList / hostKill); isOpen(id) ->
 //   true while a Claude Code process here has it open (fleet-view.js's live pid files); trust(cwd, account) -> bool,
@@ -92,6 +95,7 @@ function createSyncRunner(o = {}) {
   const snapshot = typeof o.snapshot === 'function' ? o.snapshot : null;
   const boundIds = typeof o.bound === 'function' ? o.bound : null;
   const accountOf = typeof o.accountOf === 'function' ? o.accountOf : null;
+  const busy = typeof o.busy === 'function' ? o.busy : null;
   const prefsOpt = o.prefs && typeof o.prefs.read === 'function' && typeof o.prefs.apply === 'function' ? o.prefs : null;
   const host = o.host && typeof o.host.list === 'function' ? o.host : null;
   const isOpenOpt = typeof o.isOpen === 'function' ? o.isOpen : null;
@@ -180,8 +184,14 @@ function createSyncRunner(o = {}) {
     if (stopped) return;
     const args = { api: sync, dataDir, key, log };
     if (projects) args.projects = () => projects();
-    const up = makeUploader(accountOf ? { ...args, accountOf: (id) => accountOf(id) } : args);
-    const down = makeMaterializer({ ...args, roots: () => roots(), isOpen });
+    // the uploader asks the materializer's rows whose a conversation is (no request for another device's), and holds a
+    // chat mid-turn here to one upload every 45 s or so (busy)
+    let down = null;
+    const upArgs = { ...args, ownerOf: (id) => (down && typeof down.owner === 'function' ? down.owner(id) : null) };
+    if (accountOf) upArgs.accountOf = (id) => accountOf(id);
+    if (busy) upArgs.busy = (id) => busy(id);
+    const up = makeUploader(upArgs);
+    down = makeMaterializer({ ...args, roots: () => roots(), isOpen });
     let mover = null, link = null, carry = null;
     // the device id is the mover's (it makes the device row on its first tick): no mover, no snapshots
     const deviceId = () => { const d = mover && mover.device(); return d ? d.id : null; };

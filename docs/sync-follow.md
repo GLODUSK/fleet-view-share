@@ -194,7 +194,7 @@ hostname. Everything below names a peer by that id.
 
 **The link (item 1): `link.js`, and `relay.js` serving computers.**
 - Pairing runs over `fleet_sync.settings` rows `link:<pid>:<step>`, sealed with the sync key like move rows, polled
-  every 5 s (1 s while a pairing is under way). It is a commit-then-reveal X25519 exchange (as ZRTP and Bluetooth's
+  every 60 s (1 s while a pairing is under way). It is a commit-then-reveal X25519 exchange (as ZRTP and Bluetooth's
   numeric comparison do): the requester writes `sha256(its public key)`, the other machine answers with its public
   key, and only then does the requester reveal its key. Both derive the keys with HKDF over the shared secret and
   the whole transcript, plus a 6-digit code that both pages show. The pairing counts only once Henry confirms the

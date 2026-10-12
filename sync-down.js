@@ -4,11 +4,13 @@
 // `claude --resume` picks it up in the right folder. It reaches Supabase only through the api object it is handed
 // (sync-api.js createSync()), opens what it fetches with sync-crypto.js, and names things with sync-common.js.
 //
-//   createMaterializer({ api, dataDir, key, log, now, projects, roots, home, isOpen, only })
+//   createMaterializer({ api, dataDir, key, log, now, projects, roots, home, isOpen, only, fullListMs })
 //     (projects: [{ account, dir }], or a function giving it; ~/.claude for B and ~/.claude-a for A when not given;
 //     isOpen(id): true when this machine has it open in a way sessions/<pid>.json does not show yet, such as a panel
-//     the session host is starting; only(id): a scan looks only at the conversations this says true for, live tests)
-//     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), conflicts(), pull(id), owners(), missing() }
+//     the session host is starting; only(id): a scan looks only at the conversations this says true for, live tests;
+//     fullListMs: how often every row is listed, FULL_LIST_MS by default, tests)
+//     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), conflicts(), pull(id), owners(), owner(id),
+//          missing() }
 //
 // For S4's moves (sync-move.js), with ids lower-case:
 //   pull(id) -> Promise<{ outcome, reason?, dir?, folder?, row? }>: lay that conversation down now. It is urgent: it
@@ -22,7 +24,12 @@
 //   owners() -> Map<id, { device, leaseUntil, account, bound }>: the active rows other devices own, from the last scan's
 //     list (device lower-case, leaseUntil = Date.parse(lease_until) or null, account the row's 'a' | 'b' or null: the
 //     account it ran under there; bound: its repos row is a bound one, sync-common.js "portable or bound"). Empty before
-//     the first scan. status().listedAt is when that list began (ISO), so a change of owner made before then is in it.
+//     the first scan. status().listedAt is when the last whole list began (ISO), so a change of owner made before then
+//     is in it (the changed rows' lists between see a row going to another device, not one coming to this one: "The
+//     rows" below); status().checkedAt is when the last list of either kind began.
+//   owner(id) -> null before the first list; else { device, at, checkedAt }: the other device that owns that active row
+//     as the lists (or a pull since) left it, or null; at and checkedAt are listedAt and checkedAt in ms. For the
+//     uploader (sync-up.js ownerOf), one id at a time with no copy of the map.
 //   moved(id, dir): a move put the log it laid down into slug folder dir (where it resumes): it stays there
 //
 // For "Clone what's missing" (sync-clone.js):
@@ -34,9 +41,10 @@
 //
 // One scan:
 //   1. This machine's device row (ensureDevice; last_seen_at at most every 5 minutes).
-//   2. Every active conversation row owned by another device, newest first. A row whose updated_at, generation, size
-//      and sha256 are what down-state.json says was laid down costs nothing more. The others start in that order, up
-//      to ROWS_AT_ONCE conversations under way at once (steps 3 to 8 for each).
+//   2. Every active conversation row owned by another device, newest first: the rows held from the lists, every row
+//      (light columns) every FULL_LIST_MS and the changed ones in the scans between ("The rows" in the code). A row
+//      whose updated_at, generation, size and sha256 are what down-state.json says was laid down costs nothing more.
+//      The others start in that order, up to ROWS_AT_ONCE conversations under way at once (steps 3 to 8 for each).
 //   3. Its repo: this device's repo_paths row for the repo when that folder still has the repo's origin, else the
 //      repos Fleet View knows (the roots option; ~/.fleet-view.json's added and remembered repos when it is not
 //      given) matched by origin, and then this device's repo_paths row is written. No checkout here: skipped. The home
@@ -53,8 +61,13 @@
 //      this machine (laid down before, or its log in any slug folder of the account's projects folder: one this
 //      machine started) stays in that slug folder while its file is there, so it never ends up in two.
 //   5. Skipped while a Claude Code process on this machine has it open (sessions/<pid>.json), or isOpen(id) says so.
-//   6. The conversation's chunk rows, read in pages of 1000 (chunkRows). main: the rows of the row's generation,
-//      ordered by seq, must cover [0, size) with no gap; each object's
+//   6. The conversation's chunk rows, read in pages of 1000 (chunkRows). When main's generation is the one laid down
+//      here and the files laid down are still as they were (size and modified time, down-state.json's stamp), only the
+//      rows past them are read (each known file's first seq chunks are left out: chunkRowsSince), and the new chunks
+//      are added behind the bytes here, which layDown checks against their sha256 first; a new generation of a known
+//      side file, a gap, local bytes that are not the ones laid down ('redo'), or a sha256 that does not match the
+//      bytes put together read all the rows again, as does a filter too long for a proxy on the way (414, 431).
+//      main: the rows of the row's generation, ordered by seq, must cover [0, size) with no gap; each object's
 //      path must be the one objectPath() names for its row, it is opened with that path as the label (so an object
 //      copied to another path does not open), and its sha256 and then the whole file's are checked. Side files
 //      (subagents/, tool-results/, workflows/) the same way under <slug>/<id>/, from their newest generation; a side
@@ -98,6 +111,13 @@ const ROWS_AT_ONCE = 4;
 const BACKOFF_MIN_MS = 30e3;
 const BACKOFF_MAX_MS = 30 * 60e3;
 const ORIGINS_MS = 60e3; // the repos rows' origins are read again this often (and when a row names one not read yet)
+const FULL_LIST_MS = 4 * 60e3; // every active row is listed (light) this often; the scans between list the changed ones
+const OVERLAP_MS = 2 * 60e3; // the changed ones: from the newest updated_at seen less this (clock skew, writes on the way)
+const LEASE_AHEAD_MS = 3 * 60e3; // a lease runs this far ahead (sync-move.js leaseForMs): the newest one seen counts up to here
+const BY_ID = 100; // rows fetched by id in one request (the URL stays short)
+// characters of a chunk fetch's "past what is laid down" filter, at most: percent-encoded ("(),: each 3) it grows to
+// about 4 KB, well under the 8 KB request line a proxy on the way may allow
+const SINCE_MAX = 3000;
 const BAD_SEG_RE = /[<>:"|?*\\\x00-\x1f]/; // what a rel_cwd segment may not hold (Windows names, drives, streams)
 const NO_CHECKOUT = 'no checkout of its repo here';
 
@@ -139,16 +159,19 @@ function noLinks(base, parts) {
 // seq 0, 1, 2..., each starting where the one before ended, each object at the path objectPath() names for it, a hex
 // sha256. Rows past size (the uploader writes a chunk row before the conversation row) are left out. Throws a
 // SyncError: 'gap' (a hole, or not enough to reach size), 'bad_chunk', 'bad_path'.
-function planChunks(id, file, generation, rows, size) {
+// from: { seq, offset } where the rows begin when they are the ones past what is laid down here (that many chunks,
+// that many bytes); the chunks then make [offset, size) and size counts from 0 as before
+function planChunks(id, file, generation, rows, size, from = null) {
   const out = [];
-  let off = 0;
+  const seq0 = from ? from.seq : 0;
+  let off = from ? from.offset : 0;
   for (let i = 0; i < rows.length; i++) {
     const c = rows[i];
     if (size !== null && off >= size) break;
     const seq = Number(c.seq), start = Number(c.byte_offset), len = Number(c.byte_length);
-    if (seq !== i || start !== off) fail(`${file}: the chunks have a gap at byte ${off} (seq ${i})`, 'gap');
+    if (seq !== seq0 + i || start !== off) fail(`${file}: the chunks have a gap at byte ${off} (seq ${seq0 + i})`, 'gap');
     // an empty file is one empty chunk; otherwise every chunk holds bytes
-    if (!Number.isSafeInteger(len) || len < 0 || (len === 0 && rows.length > 1)) fail(`${file}: chunk ${seq} has no length`, 'bad_chunk');
+    if (!Number.isSafeInteger(len) || len < 0 || (len === 0 && (rows.length > 1 || from))) fail(`${file}: chunk ${seq} has no length`, 'bad_chunk');
     if (size !== null && off + len > size) fail(`${file}: chunk ${seq} runs past the file's size`, 'bad_chunk');
     if (typeof c.sha256 !== 'string' || !HEX64_RE.test(c.sha256)) fail(`${file}: chunk ${seq} has no sha256`, 'bad_chunk');
     if (c.object_path !== C.objectPath(id, file, generation, seq)) fail(`${file}: chunk ${seq}'s object is not where it belongs`, 'bad_path');
@@ -235,7 +258,9 @@ function createMaterializer(opts = {}) {
   }
 
   // ---------- state ----------
-  // { v: 1, convos: { <id>: { sig, dir, files: { <file key>: { generation, size, sha256 } }, conflict, localStamp, at } },
+  // { v: 1, convos: { <id>: { sig, dir, files: { <file key>: { generation, size, sha256, seq, stamp } }, conflict,
+  //   localStamp, at } }, (seq: how many chunks; stamp: '<size>:<mtimeMs>' right after it was laid down; an entry from
+  //   before them has neither, and its next change reads all its rows)
   //   conflicts: { '<id>|<file key>': { id, file, path, reason, localSize, remoteSize, at } } }
   function loadState() {
     const s = C.readState(statePath, null);
@@ -291,7 +316,7 @@ function createMaterializer(opts = {}) {
     if (id === null) sole = false; else { inUse--; busy.delete(id); }
     pump();
   }
-  const st = { running: false, scanning: false, scans: 0, lastScanAt: null, lastOkAt: null, listedAt: null, lastError: null, last: null, laidDown: 0 };
+  const st = { running: false, scanning: false, scans: 0, lastScanAt: null, lastOkAt: null, listedAt: null, checkedAt: null, lastError: null, last: null, laidDown: 0 };
 
   const live = (id) => C.isLive(id, { home, fresh: true }) || (typeof opts.isOpen === 'function' && !!opts.isOpen(id));
 
@@ -449,7 +474,9 @@ function createMaterializer(opts = {}) {
 
   // ---------- laying one file down ----------
   // job: { id, file, target, chunks, size, sha256 (whole file, or null), whole, known ({ size, sha256 } this side laid
-  // down last, or null) } -> { result: 'same' | 'written' } | { result: 'conflict', reason, localSize }
+  // down last, or null) } -> { result: 'same' | 'written', sha256 (the whole file's) } | { result: 'conflict', reason,
+  // localSize }. A chunk with laid: true (and no object) stands for the bytes laid down here before, when only the rows
+  // past them were fetched: the local copy must hold them (its sha256), else it throws 'redo' (all rows are read again).
   // Throws on a missing object, a bad sha256, a live conversation or a local file that changed meanwhile; then the
   // .part is gone and the local copy untouched.
   // ignoreLocal: replace the local copy whatever it holds (only for unchanged(), below)
@@ -476,14 +503,20 @@ function createMaterializer(opts = {}) {
       if (fd !== null) {
         for (const c of job.chunks) {
           if (c.end > localSize) break;
-          if (hashRange(fd, c.start, c.len, whole) !== c.sha256) return { result: 'conflict', reason: 'the local copy is different', localSize };
+          if (hashRange(fd, c.start, c.len, whole) !== c.sha256) {
+            if (c.laid) fail(`${job.file}: the local copy is not what was laid down`, 'redo');
+            return { result: 'conflict', reason: 'the local copy is different', localSize };
+          }
           have.add(c.seq);
         }
         if (localSize === job.size && have.size === job.chunks.length && !cut) {
-          if (job.sha256 && whole.digest('hex') !== job.sha256) fail(`${job.file}: the file's sha256 is not the row's`, 'bad_sha');
-          return { result: 'same' };
+          const sha = whole.digest('hex');
+          if (job.sha256 && sha !== job.sha256) fail(`${job.file}: the file's sha256 is not the row's`, 'bad_sha');
+          return { result: 'same', sha256: sha };
         }
       }
+      // the bytes laid down before (a fetch of only the rows past them) must all be here as they were
+      if (job.chunks.some((c) => c.laid && !have.has(c.seq))) fail(`${job.file}: the local copy is not what was laid down`, 'redo');
       // the rest: <target>.part, the local bytes it holds copied, the others fetched and opened
       fs.mkdirSync(path.dirname(target), { recursive: true });
       const total = crypto.createHash('sha256');
@@ -529,7 +562,8 @@ function createMaterializer(opts = {}) {
         ahead.delete(c.seq);
       }
       if (at !== job.size) fail(`${job.file}: ${at} bytes put together, ${job.size} expected`, 'gap');
-      if (job.sha256 && total.digest('hex') !== job.sha256) fail(`${job.file}: the file's sha256 is not the row's`, 'bad_sha');
+      const sha = total.digest('hex');
+      if (job.sha256 && sha !== job.sha256) fail(`${job.file}: the file's sha256 is not the row's`, 'bad_sha');
       fs.fsyncSync(pfd);
       fs.closeSync(pfd); pfd = null;
       if (fd !== null) { fs.closeSync(fd); fd = null; }
@@ -540,7 +574,7 @@ function createMaterializer(opts = {}) {
       renameOver(part, target);
       wrote = false;
       if (cut) log(`sync-down: ${job.id} ${job.file}: its cut last line (${cut} bytes) was replaced`);
-      return { result: 'written' };
+      return { result: 'written', sha256: sha };
     } finally {
       if (pfd !== null) { try { fs.closeSync(pfd); } catch {} }
       if (fd !== null) { try { fs.closeSync(fd); } catch {} }
@@ -570,14 +604,15 @@ function createMaterializer(opts = {}) {
   // an old generation dropped), so the listing starts again (a third time throws 'changed': the next scan tries again).
   const CHUNK_COLS = 'file,generation,seq,byte_offset,byte_length,object_path,sha256';
   const rowKey = (r) => (r ? `${r.file}|${r.generation}|${r.seq}` : '');
-  async function chunkRows(id) {
+  // filter: more of the query (chunkRowsSince's)
+  async function chunkRows(id, filter = {}) {
     for (let tries = 0; tries < 3; tries++) {
       const out = [];
       let shifted = false;
       for (;;) {
         const from = out.length ? out.length - 1 : 0;
         const rows = await api.rest('GET', 'chunks', {
-          query: { select: CHUNK_COLS, conversation_id: `eq.${id}`, order: 'file.asc,generation.asc,seq.asc', limit: String(PAGE), offset: String(from) },
+          query: { select: CHUNK_COLS, conversation_id: `eq.${id}`, ...filter, order: 'file.asc,generation.asc,seq.asc', limit: String(PAGE), offset: String(from) },
         });
         if (!Array.isArray(rows)) break;
         if (out.length) {
@@ -589,6 +624,51 @@ function createMaterializer(opts = {}) {
       if (!shifted) return out;
     }
     return fail('the chunk rows kept changing while they were read', 'changed');
+  }
+  // What was laid down for a conversation that is still here exactly as it was: file key -> { generation, size,
+  // sha256, seq (its chunks), stamp } for each file whose size and modified time are the ones it had when it was laid
+  // down (and so its bytes: layDown checks the sha256 again before it adds to one). null (fetch all of it) when 'main'
+  // is not among them, or its generation is not the row's (a new generation goes up from byte 0), or down-state.json
+  // does not have it from this folder or has it in conflict.
+  const knownOk = (k) => !!k && typeof k === 'object' && Number.isSafeInteger(Number(k.generation)) && Number(k.generation) >= 0
+    && Number.isSafeInteger(k.seq) && k.seq > 0 && Number.isSafeInteger(k.size) && k.size >= 0 && typeof k.sha256 === 'string' && HEX64_RE.test(k.sha256) && typeof k.stamp === 'string';
+  function knownLaid(id, prev, slugDir, row) {
+    if (!sinceOk || !prev || prev.conflict || !prev.files || typeof prev.dir !== 'string' || fold(prev.dir) !== fold(slugDir)) return null;
+    const m = prev.files.main;
+    if (!knownOk(m) || Number(m.generation) !== Number(row.generation) || Number(row.size) < m.size) return null;
+    const out = new Map();
+    for (const [file, k] of Object.entries(prev.files)) {
+      if (!knownOk(k)) continue;
+      const segs = file.split('/');
+      if (file !== 'main' && (!C.checkFileKey(file) || !C.SIDE_DIRS.includes(segs[0]) || segs.length < 2)) continue;
+      const target = file === 'main' ? path.join(slugDir, `${id}.jsonl`) : path.join(slugDir, id, ...segs);
+      if (stampOf(target) !== k.stamp || k.stamp === 'none') continue;
+      out.set(file, { generation: Number(k.generation), size: k.size, sha256: k.sha256, seq: k.seq, stamp: k.stamp });
+    }
+    return out.has('main') ? out : null;
+  }
+  // The chunk rows of a conversation but those already laid down (known, as knownLaid gives it): every row but the
+  // first seq chunks of each known file's generation. 'main' first, then the files with the most chunks, while the
+  // filter stays under SINCE_MAX characters; a known file left out of it is fetched whole (and taken out of known).
+  // -> the rows, or null when Supabase refused the filter (400: then it is never used again, every fetch is whole) or a
+  // proxy on the way found the URL or the request too long (414, 431: this conversation's rows are read whole, this
+  // time)
+  async function chunkRowsSince(id, known) {
+    const list = [...known].sort(([a, x], [b, y]) => (a === 'main' ? -1 : b === 'main' ? 1 : y.seq - x.seq));
+    const parts = [];
+    let len = 0;
+    for (const [file, k] of list) {
+      const p = `not.and(file.eq."${file}",generation.eq.${k.generation},seq.lt.${k.seq})`;
+      if (parts.length && len + p.length + 1 > SINCE_MAX) { known.delete(file); continue; }
+      parts.push(p); len += p.length + 1;
+    }
+    try { return await chunkRows(id, { and: `(${parts.join(',')})` }); } catch (e) {
+      if (e && (e.status === 414 || e.status === 431)) { log(`sync-down: ${id}: its new chunks' filter made too long a request (${e.message}); all its rows are read`); return null; }
+      if (!e || e.status !== 400) throw e;
+      sinceOk = false;
+      log(`sync-down: only a conversation's new chunks could not be fetched (${e.message}); every fetch is whole from now on`);
+      return null;
+    }
   }
 
   // ---------- one conversation ----------
@@ -647,91 +727,225 @@ function createMaterializer(opts = {}) {
     if (makeFirst && P.foldCase(path.basename(dir)) !== P.foldCase(C.slugOf(folder))) makeFirst = makeFolder = false;
     if (live(id)) return { outcome: 'skip', reason: 'open on this machine', folder, dir };
 
-    const rows = await chunkRows(id);
-    const byFile = new Map();
-    for (const c of Array.isArray(rows) ? rows : []) {
-      if (!c || typeof c.file !== 'string') continue;
-      if (!byFile.has(c.file)) byFile.set(c.file, new Map());
-      const g = Number(c.generation);
-      if (!Number.isSafeInteger(g) || g < 0) continue;
-      const gens = byFile.get(c.file);
-      if (!gens.has(g)) gens.set(g, []);
-      gens.get(g).push(c);
+    // the chunk rows: only those past what is laid down here when that is still here as it was (knownLaid), else all;
+    // a doubt found on the way ('redo': a file's new generation, a gap, the local bytes not the ones laid down; and a
+    // bad sha256 or a gap in the bytes put together, which a read of every row may not have) reads them all again,
+    // before anything is written when it can be told then
+    const known = knownLaid(id, prev, slugDir, row);
+    const since = known ? await chunkRowsSince(id, known) : null;
+    if (since) {
+      try { return await layAll(since, known); } catch (e) {
+        if (!e || !['redo', 'bad_sha', 'gap'].includes(e.code)) throw e;
+        log(`sync-down: ${id}: ${e.message}: all of its chunks are read again`);
+      }
     }
-    const sortSeq = (list) => list.slice().sort((a, b) => Number(a.seq) - Number(b.seq));
+    return layAll(await chunkRows(id), null);
 
-    // main
-    const size = Number(row.size), gen = Number(row.generation);
-    const files = {};
-    let pending = 0, wroteAny = false;
-    const conflict = (file, target, r) => {
-      state.conflicts[`${id}|${file}`] = { id, file, path: target, reason: r.reason, localSize: r.localSize, remoteSize: file === 'main' ? size : null, at: new Date(now()).toISOString() };
-      state.convos[id] = { sig: sigOf(row), dir: slugDir, files: prev ? prev.files || {} : {}, conflict: true, localStamp: stampOf(path.join(slugDir, `${id}.jsonl`)), at: now() };
+    async function layAll(rows, laid) {
+      const byFile = new Map();
+      for (const c of Array.isArray(rows) ? rows : []) {
+        if (!c || typeof c.file !== 'string') continue;
+        if (!byFile.has(c.file)) byFile.set(c.file, new Map());
+        const g = Number(c.generation);
+        if (!Number.isSafeInteger(g) || g < 0) continue;
+        const gens = byFile.get(c.file);
+        if (!gens.has(g)) gens.set(g, []);
+        gens.get(g).push(c);
+      }
+      const sortSeq = (list) => list.slice().sort((a, b) => Number(a.seq) - Number(b.seq));
+      const redo = (why) => fail(why, 'redo');
+      // the rows past what is laid down: planned from there, and the bytes laid down stand in front (a laid chunk)
+      const after = (file, g, list, size, k) => {
+        let plan;
+        try { plan = planChunks(id, file, g, list, size, { seq: k.seq, offset: k.size }); } catch (e) { redo(`${file}: ${e.message}`); }
+        return { chunks: [{ seq: -1, start: 0, len: k.size, end: k.size, sha256: k.sha256, objectPath: null, laid: true }, ...plan.chunks], size: plan.size, seq: k.seq + plan.chunks.length, added: plan.chunks.length };
+      };
+
+      // main
+      const size = Number(row.size), gen = Number(row.generation);
+      const files = {};
+      let pending = 0, wroteAny = false;
+      const conflict = (file, target, r) => {
+        state.conflicts[`${id}|${file}`] = { id, file, path: target, reason: r.reason, localSize: r.localSize, remoteSize: file === 'main' ? size : null, at: new Date(now()).toISOString() };
+        state.convos[id] = { sig: sigOf(row), dir: slugDir, files: prev ? prev.files || {} : {}, conflict: true, localStamp: stampOf(path.join(slugDir, `${id}.jsonl`)), at: now() };
+        changed();
+        log(`sync-down: ${id} ${file}: ${r.reason}; left alone`);
+        return { outcome: 'conflict', reason: r.reason, folder, dir };
+      };
+      const mainTarget = path.join(slugDir, `${id}.jsonl`);
+      let mainPlan = null;
+      if (size > 0) {
+        const list = sortSeq((byFile.get('main') || new Map()).get(gen) || []);
+        const km = laid ? laid.get('main') : null;
+        if (km) mainPlan = after('main', gen, list, size, km);
+        else { const p = planChunks(id, 'main', gen, list, size); mainPlan = { chunks: p.chunks, size, seq: p.chunks.length }; }
+        if (!row.sha256 || !HEX64_RE.test(row.sha256)) fail('main: the row has no sha256', 'bad_sha');
+      }
+      // side files, from their newest generation; one known here takes only the rows past it, of its own generation
+      const sides = [];
+      for (const [file, gens] of byFile) {
+        if (file === 'main') continue;
+        if (!C.checkFileKey(file) || !C.SIDE_DIRS.includes(file.split('/')[0]) || file.split('/').length < 2) { log(`sync-down: ${id}: a chunk row for a file that is not synced; ignored`); continue; }
+        const k = laid ? laid.get(file) : null;
+        if (k) {
+          // a whole file changes only by a new generation, and a new generation may still have the old one's rows up
+          if (!file.endsWith('.jsonl') || gens.size !== 1 || !gens.has(k.generation)) redo(`${file}: a new generation of it is up`);
+          sides.push({ file, g: k.generation, ...after(file, k.generation, sortSeq(gens.get(k.generation)), null, k), k });
+          continue;
+        }
+        if (gens.size > 1) { pending++; continue; } // a new generation is going up: next scan
+        const [g, list] = [...gens][0];
+        const p = planChunks(id, file, g, sortSeq(list), null);
+        sides.push({ file, g, chunks: p.chunks, size: p.size, seq: p.chunks.length, added: p.chunks.length, k: null });
+      }
+      // known side files with no new rows: as they were
+      if (laid) for (const [file, k] of laid) if (file !== 'main' && !byFile.has(file)) files[file] = { ...k };
+
+      if (mainPlan) {
+        if (makeFirst && !isDir(folder)) {
+          if (!noLinks(root, parts)) fail('its placeholder folder would be made through a link', 'bad_path');
+          fs.mkdirSync(folder, { recursive: true });
+          log(`sync-down: ${id}: made its placeholder folder (${folder}): its workspace is only on its host`);
+        }
+        const r = await layDown({ id, file: 'main', target: mainTarget, chunks: mainPlan.chunks, size, sha256: row.sha256, whole: false, known: null }, key);
+        if (r.result === 'conflict') return conflict('main', mainTarget, r);
+        if (r.result === 'written') { wroteAny = true; stampLastEntry(mainTarget); }
+        files.main = { generation: gen, size, sha256: row.sha256, seq: mainPlan.seq, stamp: stampOf(mainTarget) };
+        // its log is here now: the folder it resumes in too (the links looked at again right before)
+        if (makeFolder && !isDir(folder)) {
+          if (!noLinks(root, parts)) fail('its folder would be made through a link', 'bad_path');
+          fs.mkdirSync(folder, { recursive: true });
+          log(`sync-down: ${id}: made the folder it began in (${folder}), which this machine did not have`);
+        }
+      }
+      for (const s of sides) {
+        const segs = s.file.split('/');
+        const target = path.join(slugDir, id, ...segs);
+        if (!inside(slugDir, target) || !noLinks(slugDir, [id, ...segs])) fail(`${s.file}: its path would leave the conversation's folder`, 'bad_path');
+        if (s.k && !s.added) { files[s.file] = { ...s.k }; continue; } // nothing past what is laid down
+        const before = prev && prev.files && prev.files[s.file] ? prev.files[s.file] : null;
+        const sha = !s.k && s.chunks.length === 1 ? s.chunks[0].sha256 : null;
+        const r = await layDownFile({ id, file: s.file, target, chunks: s.chunks, size: s.size, sha256: sha, whole: !s.file.endsWith('.jsonl'), known: before }, key);
+        if (r.result === 'conflict') return conflict(s.file, target, r);
+        if (r.result === 'written') wroteAny = true;
+        files[s.file] = { generation: s.g, size: s.size, sha256: r.sha256 || sha, seq: s.seq, stamp: stampOf(target) };
+      }
+      for (const k of Object.keys(state.conflicts)) if (k.startsWith(`${id}|`)) delete state.conflicts[k];
+      state.convos[id] = { sig: pending ? null : sigOf(row), dir: slugDir, files, conflict: false, at: now() };
       changed();
-      log(`sync-down: ${id} ${file}: ${r.reason}; left alone`);
-      return { outcome: 'conflict', reason: r.reason, folder, dir };
-    };
-    const mainTarget = path.join(slugDir, `${id}.jsonl`);
-    if (size > 0) {
-      const plan = planChunks(id, 'main', gen, sortSeq((byFile.get('main') || new Map()).get(gen) || []), size);
-      if (!row.sha256 || !HEX64_RE.test(row.sha256)) fail('main: the row has no sha256', 'bad_sha');
-      if (makeFirst && !isDir(folder)) {
-        if (!noLinks(root, parts)) fail('its placeholder folder would be made through a link', 'bad_path');
-        fs.mkdirSync(folder, { recursive: true });
-        log(`sync-down: ${id}: made its placeholder folder (${folder}): its workspace is only on its host`);
-      }
-      const r = await layDown({ id, file: 'main', target: mainTarget, chunks: plan.chunks, size, sha256: row.sha256, whole: false, known: null }, key);
-      if (r.result === 'conflict') return conflict('main', mainTarget, r);
-      if (r.result === 'written') { wroteAny = true; stampLastEntry(mainTarget); }
-      files.main = { generation: gen, size, sha256: row.sha256 };
-      // its log is here now: the folder it resumes in too (the links looked at again right before)
-      if (makeFolder && !isDir(folder)) {
-        if (!noLinks(root, parts)) fail('its folder would be made through a link', 'bad_path');
-        fs.mkdirSync(folder, { recursive: true });
-        log(`sync-down: ${id}: made the folder it began in (${folder}), which this machine did not have`);
-      }
+      if (pending) return { outcome: 'pending', reason: 'a side file is mid-upload', folder, dir };
+      return { outcome: wroteAny ? 'done' : 'same', folder, dir };
     }
-    // side files, from their newest generation
-    for (const [file, gens] of byFile) {
-      if (file === 'main') continue;
-      if (!C.checkFileKey(file) || !C.SIDE_DIRS.includes(file.split('/')[0]) || file.split('/').length < 2) { log(`sync-down: ${id}: a chunk row for a file that is not synced; ignored`); continue; }
-      if (gens.size > 1) { pending++; continue; } // a new generation is going up: next scan
-      const [g, list] = [...gens][0];
-      const plan = planChunks(id, file, g, sortSeq(list), null);
-      const segs = file.split('/');
-      const target = path.join(slugDir, id, ...segs);
-      if (!inside(slugDir, target) || !noLinks(slugDir, [id, ...segs])) fail(`${file}: its path would leave the conversation's folder`, 'bad_path');
-      const known = prev && prev.files && prev.files[file] ? prev.files[file] : null;
-      const sha = plan.chunks.length === 1 ? plan.chunks[0].sha256 : null;
-      const r = await layDownFile({ id, file, target, chunks: plan.chunks, size: plan.size, sha256: sha, whole: !file.endsWith('.jsonl'), known }, key);
-      if (r.result === 'conflict') return conflict(file, target, r);
-      if (r.result === 'written') wroteAny = true;
-      files[file] = { generation: g, size: plan.size, sha256: sha || (known && known.size === plan.size ? known.sha256 : null) };
-    }
-    for (const k of Object.keys(state.conflicts)) if (k.startsWith(`${id}|`)) delete state.conflicts[k];
-    state.convos[id] = { sig: pending ? null : sigOf(row), dir: slugDir, files, conflict: false, at: now() };
-    changed();
-    if (pending) return { outcome: 'pending', reason: 'a side file is mid-upload', folder, dir };
-    return { outcome: wroteAny ? 'done' : 'same', folder, dir };
   }
 
-  // ---------- a scan ----------
+  // ---------- the rows: listed whole now and then, only the changed ones in between ----------
+  // rowsById holds every active row another device owns, as the lists left it; a scan goes through all of it (so a row
+  // that waits, a back-off or one open here, is looked at again without being listed again). Lists:
+  //   whole: the first one (every column) and one every fullMs after it: the light columns (LIGHT_COLS) of every active
+  //     row another device owns, and every column only of the rows whose updated_at is not the one held (and the new
+  //     ones), by id. A row it lacks goes (deleted, not active, this device's now); owner, lease and account are taken
+  //     from it as they are (a change of account alone, or a lease, moves no updated_at). status().listedAt is when it
+  //     began: a change of owner made before then is in it.
+  //   changed (every other scan): the rows whose updated_at is at or past the watermark, or whose lease_until is past
+  //     the newest one seen less the same overlap (sinceQuery), in any state (one gone inactive goes) and with any owner
+  //     but this device. This device's own are never listed (its uploader's writes would come back every scan), so a
+  //     row this device took over (the mover's claim) goes at the next whole list, and listedAt moves only then; a pull
+  //     puts the row it read in rowsById (or takes it out: 'mine', 'missing'), so the scans between see the row it
+  //     laid down and never lay an older one down over it. A list under way while a pull read its row leaves that row
+  //     as the pull did (its own read of it may be the older one; a newer one comes with the next list).
+  //   The watermark is the newest updated_at seen on another device's row (that writer's clock, not this machine's;
+  //   never past this machine's clock, so a writer whose clock runs ahead hides nobody's writes) less OVERLAP_MS: a
+  //   writer whose clock is behind, a write still on its way when the list ran. The lease watermark is the newest
+  //   lease_until seen, never past LEASE_AHEAD_MS on this clock, less the same. A change that moves no updated_at
+  //   (an account alone; a delete; a state set by hand) shows at the next whole list, fullMs at most.
   const ROW_COLS = 'id,account,repo_id,rel_cwd,size,sha256,generation,updated_at,owner_device,lease_until';
+  const LIGHT_COLS = 'id,account,updated_at,owner_device,lease_until';
+  const fullMs = Number.isFinite(opts.fullListMs) && opts.fullListMs >= 0 ? opts.fullListMs : FULL_LIST_MS;
+  let rowsById = new Map(); // id lower-case -> row (ROW_COLS)
+  let pulled = new Set(); // the ids a pull read since the list under way (or the last one) began
+  let fullAt = null; // when the last whole list began (this clock), null before the first
+  let newestAt = null, newestLease = null; // ms: the newest updated_at and lease_until seen on another device's row
+  let changedOk = true, sinceOk = true; // false once Supabase refused a filter (then lists and fetches are whole)
   // a row this side can lay down: a conversation id, account a or b, whole numbers for size and generation
   const usable = (row) => !!row && typeof row.id === 'string' && UUID_RE.test(row.id) && (row.account === 'a' || row.account === 'b')
     && Number.isSafeInteger(Number(row.size)) && Number(row.size) >= 0 && Number.isSafeInteger(Number(row.generation)) && Number(row.generation) >= 0;
-  async function listRows(me) {
+  const ownerOfRow = (row) => (row && typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null);
+  const others = (row, me) => !!row && typeof row.id === 'string' && UUID_RE.test(row.id) && !!ownerOfRow(row) && ownerOfRow(row) !== me;
+  const pick = (row) => Object.fromEntries(ROW_COLS.split(',').map((c) => [c, row[c] === undefined ? null : row[c]]));
+  function noteTimes(row) {
+    const u = Date.parse(row.updated_at), l = Date.parse(row.lease_until);
+    if (Number.isFinite(u) && (newestAt === null || u > newestAt)) newestAt = u;
+    if (Number.isFinite(l) && (newestLease === null || l > newestLease)) newestLease = l;
+  }
+  // every row a query names, in pages of PAGE by id (a key that never shifts while rows come, go or change)
+  async function pages(query) {
     const out = [];
-    for (let offset = 0; ; offset += PAGE) {
-      const rows = await api.rest('GET', 'conversations', {
-        query: { select: ROW_COLS, state: 'eq.active', owner_device: `neq.${me}`, order: 'updated_at.desc', limit: String(PAGE), offset: String(offset) },
-      });
-      if (!Array.isArray(rows)) break;
+    let after = null;
+    for (;;) {
+      const q = { ...query, order: 'id.asc', limit: String(PAGE) };
+      if (after) q.id = `gt.${after}`;
+      const rows = await api.rest('GET', 'conversations', { query: q });
+      if (!Array.isArray(rows) || !rows.length) break;
       out.push(...rows);
-      if (rows.length < PAGE) break;
+      const last = rows[rows.length - 1];
+      if (rows.length < PAGE || !last || typeof last.id !== 'string') break;
+      after = last.id;
     }
     return out;
   }
+  async function wholeList(me) {
+    const base = { state: 'eq.active', owner_device: `neq.${me}` };
+    const next = new Map();
+    if (fullAt === null || !rowsById.size) {
+      for (const row of await pages({ select: ROW_COLS, ...base })) if (others(row, me)) next.set(row.id.toLowerCase(), pick(row));
+    } else {
+      const want = [];
+      for (const r of await pages({ select: LIGHT_COLS, ...base })) {
+        if (!others(r, me)) continue;
+        const id = r.id.toLowerCase(), had = rowsById.get(id);
+        if (had && had.updated_at === r.updated_at) next.set(id, { ...had, owner_device: r.owner_device, lease_until: r.lease_until, account: r.account });
+        else want.push(id);
+      }
+      for (let i = 0; i < want.length; i += BY_ID) {
+        const got = await api.rest('GET', 'conversations', { query: { select: ROW_COLS, ...base, id: `in.(${want.slice(i, i + BY_ID).join(',')})` } });
+        for (const row of Array.isArray(got) ? got : []) if (others(row, me)) next.set(row.id.toLowerCase(), pick(row));
+      }
+    }
+    // a row a pull read meanwhile stays as the pull left it (rowsById is still the map it wrote to)
+    for (const id of pulled) { const row = rowsById.get(id); if (row) next.set(id, row); else next.delete(id); }
+    rowsById = next;
+    for (const row of next.values()) noteTimes(row);
+  }
+  // the changed rows' filter: updated_at at or past the watermark, or lease_until past the newest lease seen (less the
+  // same overlap; never past LEASE_AHEAD_MS on this clock, so a writer whose clock runs ahead hides nobody's renewed
+  // leases): quoted, as PostgREST wants a value holding '.' or ':' in a logic tree
+  function sinceQuery(t) {
+    const w = (newestAt === null ? t : Math.min(newestAt, t)) - OVERLAP_MS;
+    const lw = (newestLease === null ? w + OVERLAP_MS : Math.min(newestLease, t + LEASE_AHEAD_MS)) - OVERLAP_MS;
+    return `(updated_at.gte."${new Date(w).toISOString()}",lease_until.gte."${new Date(lw).toISOString()}")`;
+  }
+  async function changedList(me, t) {
+    const rows = await pages({ select: `${ROW_COLS},state`, owner_device: `neq.${me}`, or: sinceQuery(t) });
+    for (const row of rows) {
+      if (!row || typeof row.id !== 'string' || !UUID_RE.test(row.id)) continue;
+      const id = row.id.toLowerCase();
+      if (pulled.has(id)) continue; // a pull read it meanwhile: its row stands
+      if (row.state === 'active' && others(row, me)) { rowsById.set(id, pick(row)); noteTimes(row); } else rowsById.delete(id);
+    }
+  }
+  // -> true when this was a whole list
+  async function listRows(me, t) {
+    pulled = new Set();
+    if (fullAt === null || !changedOk || t - fullAt >= fullMs || t < fullAt) { await wholeList(me); fullAt = t; return true; }
+    try { await changedList(me, t); return false; } catch (e) {
+      if (!e || e.status !== 400) throw e;
+      changedOk = false; // Supabase does not take the filter: whole lists from now on
+      log(`sync-down: the changed rows could not be listed (${e.message}); every scan lists them all`);
+      await wholeList(me); fullAt = t;
+      return true;
+    }
+  }
+  const byNewest = (a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
   async function scan() {
     const key = await getKey();
     if (!key) { st.lastError = 'no sync key on this machine'; return { skipped: 'no key' }; }
@@ -745,7 +959,8 @@ function createMaterializer(opts = {}) {
     const lacking = new Map(); // origin -> { origin, name, chats, newest }: repos skipped as having no checkout here
     const only = onlyOf();
     const listStart = now();
-    const rows = (await listRows(me)).filter((row) => row && typeof row.id === 'string' && UUID_RE.test(row.id) && (!only || only(row.id.toLowerCase())));
+    const whole = await listRows(me, listStart);
+    const rows = [...rowsById.values()].filter((row) => !only || only(row.id.toLowerCase())).sort(byNewest);
     // who owns what, for owners(): every active row another device owns, and whether it is bound (its repos row's)
     const repoOrigins = await origins(rows.map((row) => row.repo_id));
     const seen = new Map();
@@ -757,14 +972,18 @@ function createMaterializer(opts = {}) {
       seen.set(row.id.toLowerCase(), { device: owner, leaseUntil: Number.isFinite(lease) ? lease : null, account: row.account === 'a' || row.account === 'b' ? row.account : null, bound });
     }
     ownersMap = seen;
-    st.listedAt = new Date(listStart).toISOString();
+    if (whole) st.listedAt = new Date(listStart).toISOString();
+    st.checkedAt = new Date(listStart).toISOString();
     // rows start in list order, up to ROWS_AT_ONCE under way at once; Supabase out of reach (fatal) starts no more,
     // and the ones under way finish (or fail) and count before it is thrown
     const going = new Set();
     let fatal = null;
     try {
-      for (const row of rows) {
+      for (const listed of rows) {
         if (fatal) break;
+        // the row as it is now: a pull since the list may have read a newer one (or found it this device's)
+        const row = rowsById.get(listed.id.toLowerCase());
+        if (!row) continue;
         const owner = typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null;
         if (!owner || owner === me) continue; // this device's own (or nobody's): the uploader's
         if (!usable(row)) continue;
@@ -777,9 +996,12 @@ function createMaterializer(opts = {}) {
         if (b && now() < b.until) { tally.waiting++; continue; }
         await slot(id, false); // a pull() waiting goes first
         if (fatal) { unslot(id); break; }
+        // a pull of it ran while this waited: the row it read, and what it laid down, stand
+        const cur = rowsById.get(id), p0 = state.convos[id];
+        if (!cur || (cur !== row && p0 && p0.sig === sigOf(cur))) { unslot(id); tally.unchanged++; continue; }
         const p = (async () => {
           try {
-            const r = await syncOne(row, ctx, key);
+            const r = await syncOne(cur, ctx, key);
             tally[r.outcome]++;
             if (r.reason) reasons[r.reason] = (reasons[r.reason] || 0) + 1;
             if (r.reason === NO_CHECKOUT && typeof r.origin === 'string' && r.origin) {
@@ -836,6 +1058,10 @@ function createMaterializer(opts = {}) {
     try {
       const got = await api.rest('GET', 'conversations', { query: { select: ROW_COLS, id: `eq.${id}`, state: 'eq.active' } });
       const row = Array.isArray(got) && got[0] ? got[0] : null;
+      // the scans' rows take what this read: the newest there is (none, or this device's: not another's any more), and
+      // a list under way leaves it so
+      if (row && others(row, me)) rowsById.set(id, pick(row)); else rowsById.delete(id);
+      pulled.add(id);
       if (!row) return { outcome: 'missing' };
       const owner = typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null;
       if (owner === me) return { outcome: 'mine', row };
@@ -851,6 +1077,13 @@ function createMaterializer(opts = {}) {
   }
   // a copy: the caller cannot change this side's map
   const owners = () => new Map([...ownersMap].map(([id, o]) => [id, { ...o }]));
+  // one id's owner, cheap (no copy of the map): null before the first list
+  function owner(raw) {
+    if (fullAt === null) return null;
+    const row = rowsById.get(String(raw == null ? '' : raw).toLowerCase());
+    const ms = (iso) => (iso ? Date.parse(iso) : null);
+    return { device: row ? ownerOfRow(row) : null, at: ms(st.listedAt), checkedAt: ms(st.checkedAt) };
+  }
   const missing = () => ({ at: missingNow.at, repos: missingNow.repos.map((r) => ({ ...r })) });
 
   let current = null, timer = null, interval = 5000;
@@ -896,7 +1129,7 @@ function createMaterializer(opts = {}) {
   }
   function status() {
     return {
-      running: st.running, scanning: st.scanning, scans: st.scans, lastScanAt: st.lastScanAt, lastOkAt: st.lastOkAt, listedAt: st.listedAt,
+      running: st.running, scanning: st.scanning, scans: st.scans, lastScanAt: st.lastScanAt, lastOkAt: st.lastOkAt, listedAt: st.listedAt, checkedAt: st.checkedAt,
       lastError: st.lastError, laidDown: st.laidDown, last: st.last ? { ...st.last, reasons: { ...st.last.reasons } } : null,
       conflicts: Object.keys(state.conflicts).length, waiting: backoff.size,
     };
@@ -914,7 +1147,7 @@ function createMaterializer(opts = {}) {
     return true;
   }
 
-  return { scanOnce, start, stop, status, conflicts, pull, owners, missing, moved };
+  return { scanOnce, start, stop, status, conflicts, pull, owners, owner, missing, moved };
 }
 
 module.exports = { createMaterializer, relParts, planChunks, downStatePath, FETCH_AHEAD, ROWS_AT_ONCE, NO_CHECKOUT };

@@ -34,6 +34,10 @@
 //   up, the row never caught up, the file from before them), the next process drops them before it appends, so the
 //   subagent log and main come back with no gap and no object is left without its row. The fake answers 1000 rows at
 //   most, as PostgREST does.
+// ownerOf(id) (the materializer's owner()): another device's conversation, listed fresh, is 'foreign' with no request
+//   (nor when its log grows); a stale list, one not listing it, none yet or one that throws: the row is asked for;
+//   after forget(id) only a list that began later counts; a flush always asks. busy(id): a chat mid-turn goes up at
+//   most every 45 s ('throttled'), at once when its turn ends and on a flush; nothing new is never counted waiting.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders, the real Supabase or claude.
 // Exit 0 = all pass.
@@ -726,6 +730,121 @@ async function main() {
   ok(!fake.calls.slice(callsX).some((c) => c.method === 'DELETE' || (c.method === 'GET' && /seq=gte/.test(decodeURIComponent(c.search)))), 'crash: the next append in the same process asks nothing more');
   sameAsLocal(X1, 'subagents/agent-x.jsonl', xSub, true, 'crash: a later append');
   await upX2.stop();
+
+  // ---------- ownerOf: another device's conversation costs no request while the materializer's rows say so ----------
+  {
+    const lc = (id) => id.toLowerCase();
+    const Z = newId('Z');
+    const zMain = mainOf(projB, repo1, Z);
+    write(zMain, lines(repo1, 4));
+    db.conversations.push({ ...DEFAULTS.conversations(), id: lc(Z), user_id: UID, account: 'b', owner_device: otherDev, size: 5, generation: 0 });
+    let answer = null; // what the materializer's owner(id) says
+    const asked = [];
+    const upO = make({ only: (id) => id === lc(Z), ownerOf: (id) => { asked.push(id); return typeof answer === 'function' ? answer(id) : answer; } });
+    const rowGets = (from) => fake.calls.slice(from).filter((c) => c.method === 'GET' && c.path === '/rest/v1/conversations' && c.search.includes(lc(Z))).length;
+    // the rows say another device has it, fresh: no request at all
+    answer = { device: otherDev.toUpperCase(), at: clock - 1000, checkedAt: clock - 1000 };
+    let c0 = fake.calls.length;
+    await upO.scanOnce();
+    ok(asked.includes(lc(Z)) && rowGets(c0) === 0 && upO.status().skipped.foreign === 1, `ownerOf: another device's, listed fresh: 'foreign' with no request (${rowGets(c0)})`);
+    ok(!fake.calls.slice(c0).some((c) => /conversations|chunks|storage/.test(c.path)), 'ownerOf: nothing else asked or sent for it either');
+    // its log changes (the materializer laid more down): still no request
+    append(zMain, lines(repo1, 1));
+    c0 = fake.calls.length;
+    await upO.scanOnce();
+    eq(rowGets(c0), 0, 'ownerOf: its log grew, still listed: no request');
+    // the rows are stale (no list for over a minute): the row is asked for, as before
+    answer = { device: otherDev, at: clock - 120e3, checkedAt: clock - 120e3 };
+    append(zMain, lines(repo1, 1));
+    c0 = fake.calls.length;
+    await upO.scanOnce();
+    ok(rowGets(c0) === 1 && upO.status().skipped.foreign === 1, 'ownerOf: a stale list: the row is asked for (still another device\'s)');
+    // not listed (or no list yet): asked for
+    for (const [a, what] of [[{ device: null, at: clock, checkedAt: clock }, 'not listed as another\'s'], [null, 'no list yet']]) {
+      answer = a;
+      append(zMain, lines(repo1, 1));
+      c0 = fake.calls.length;
+      await upO.scanOnce();
+      eq(rowGets(c0), 1, `ownerOf: ${what}: the row is asked for`);
+    }
+    // this device forgot it (a move here): only a whole list that began after the forget says it is another's
+    upO.forget(Z);
+    answer = { device: otherDev, at: clock - 1, checkedAt: clock };
+    c0 = fake.calls.length;
+    await upO.scanOnce();
+    eq(rowGets(c0), 1, 'ownerOf: after forget(id), a list from before it does not count: the row is asked for');
+    clock += 1000;
+    answer = { device: otherDev, at: clock, checkedAt: clock };
+    append(zMain, lines(repo1, 1));
+    c0 = fake.calls.length;
+    await upO.scanOnce();
+    eq(rowGets(c0), 0, 'ownerOf: a whole list after the forget counts again');
+    // a flush always asks
+    let fz = null;
+    c0 = fake.calls.length;
+    try { await upO.flush(Z); } catch (e) { fz = e; }
+    ok(fz && fz.code === 'foreign' && rowGets(c0) >= 1, 'ownerOf: a flush asks the server whatever the rows say (foreign)');
+    // ownerOf throwing: not known, asked for
+    answer = () => { throw new Error('owner() broke'); };
+    append(zMain, lines(repo1, 1));
+    c0 = fake.calls.length;
+    await upO.scanOnce();
+    ok(rowGets(c0) === 1 && upO.status().lastError === null, 'ownerOf: one that throws counts as not known');
+    eq(db.chunks.filter((r) => r.conversation_id === lc(Z)).length, 0, 'ownerOf: another device\'s conversation never got a chunk');
+    await upO.stop();
+  }
+
+  // ---------- busy: a chat mid-turn goes up at most every 45 s, at once when its turn ends or a flush asks ----------
+  {
+    const lc = (id) => id.toLowerCase();
+    const V = newId('V');
+    const vMain = mainOf(projB, repo1, V);
+    write(vMain, lines(repo1, 4));
+    let busy = true;
+    const upV = make({ only: (id) => id === lc(V), busy: (id) => id === lc(V) && busy });
+    await upV.scanOnce();
+    rowMatchesMain(V, vMain, 'busy: the first pass goes at once');
+    let u0 = fake.uploads;
+    append(vMain, lines(repo1, 2));
+    clock += 10e3;
+    await upV.scanOnce();
+    ok(fake.uploads === u0 && upV.status().throttled === 1, `busy: 10 s later, mid-turn: it waits (${upV.status().throttled})`);
+    clock += 30e3;
+    await upV.scanOnce();
+    eq(fake.uploads, u0, 'busy: 40 s after the last: still waits');
+    clock += 6e3;
+    await upV.scanOnce();
+    ok(fake.uploads > u0 && upV.status().throttled === 0, 'busy: 46 s after the last: it goes');
+    rowMatchesMain(V, vMain, 'busy: after 45 s');
+    // the turn ends: at once
+    u0 = fake.uploads;
+    append(vMain, lines(repo1, 2));
+    clock += 5e3;
+    await upV.scanOnce();
+    eq(fake.uploads, u0, 'busy: 5 s later it waits');
+    busy = false;
+    await upV.scanOnce();
+    ok(fake.uploads > u0, 'busy: its turn ended: the next scan sends it at once');
+    rowMatchesMain(V, vMain, 'busy: at the turn\'s end');
+    // mid-turn again, a flush (a move's) never waits
+    busy = true;
+    append(vMain, lines(repo1, 3));
+    clock += 1e3;
+    const fin = await upV.flush(V);
+    const want = wholeLines(vMain);
+    ok(fin && fin.size === want.length && fin.sha256 === K.sha256(want), 'busy: a flush mid-turn goes at once, all of it');
+    // an unchanged conversation is never counted as waiting
+    clock += 1e3;
+    await upV.scanOnce();
+    eq(upV.status().throttled, 0, 'busy: nothing new: not counted as waiting');
+    // busy() throwing: not busy
+    const upW = make({ only: (id) => id === lc(V), busy: () => { throw new Error('busy broke'); } });
+    append(vMain, lines(repo1, 1));
+    await upW.scanOnce();
+    rowMatchesMain(V, vMain, 'busy: one that throws counts as not busy');
+    await upV.stop();
+    await upW.stop();
+  }
 }
 
 function short(id) { return String(id).slice(0, 8); }

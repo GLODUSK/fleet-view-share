@@ -6670,6 +6670,15 @@ const PREFS_ROOTS = SYNC_PREFS.makeTranslate({
   originOf: (root) => { const g = githubOf(root); return g ? g.slug : null; },
   exists: (root) => { try { return fs.statSync(root).isDirectory(); } catch { return false; } },
 });
+function syncBusy(id) {
+  const lp = liveProcs.get(id);
+  if (!lp) return false;
+  if (lp.status) return lp.status === 'busy';
+  const f = feedOf(lp);
+  if (f) return f.turnOpen;
+  const s = sessions.get(id);
+  return !!(s && s.turnOpen);
+}
 const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, log: (t) => logOnce(t, t), roots: () => pageRepos(),
   relay: RELAY, version: () => VERSION.current().version,
   host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
@@ -6681,6 +6690,9 @@ const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, lo
   mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot(), bound: () => liveBound(),
   // the account each conversation ran under here (its process, or remembered): its synced row names it
   accountOf: (id) => knownAccount(String(id).toLowerCase()),
+  // a turn under way here (its claude alive and busy: the pid file's status, else the feed's or the log's open turn):
+  // the uploader sends such a chat at most every 45 s, and at once when the turn ends (waiting on Henry counts as ended)
+  busy: (id) => syncBusy(String(id).toLowerCase()),
   prefs: { read: prefsGroups, apply: applyPrefs, translate: PREFS_ROOTS,
     load: () => saved.prefsSync, save: (s) => { saved.prefsSync = s; saveSettings(); } } });
 // "Clone what's missing" (sync-clone.js): a repo whose synced chats have no checkout here is cloned into this machine's

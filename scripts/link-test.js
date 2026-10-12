@@ -13,7 +13,9 @@
 // refused the /peer/ routes; presence (offline at once when the other relay's socket drops, online again when it
 // rejoins); a man in the middle swapping keys gets two different codes, and a reveal that does not match its commitment
 // is refused with nothing linked; decline; a pairing that runs out; unlink taking effect on both at once (the notice);
-// unlink while the other machine is off (the gone row, read when it comes back); and linking again after an unlink.
+// unlink while the other machine is off (the gone row, read when it comes back); linking again after an unlink; and the
+// pace (the flows above poll every 5 s by a timing option): by default the rows are read every 60 s while nothing
+// pairs, and every second while a pairing is under way.
 // Exit 0 = all pass. Everything in a temp folder, deleted at the end. No network.
 'use strict';
 const fs = require('fs');
@@ -231,6 +233,8 @@ async function machine(name, platform) {
   m.makeLink = () => L.createLink({
     api: m.sync, key: SYNC_KEY, dataDir: m.dataDir, log: (t) => m.logs.push(t), relay: m.relay, device: () => m.id, name, version: `1.0.${name.length}`,
     now, timers, WebSocketImpl: wsClass(`link:${name}`), keyStore: m.linkKeys, readConfig: () => CONFIG,
+    // the flows below at the old 5 s pace while nothing pairs (the default 60 s is checked on its own at the end)
+    timing: { pollMs: 5e3 },
   });
   m.link = m.makeLink();
   return m;
@@ -460,6 +464,30 @@ async function main() {
   ok(await until(() => pairOf(R, e1.pid) && pairOf(R, e1.pid).state === 'expired' && pairOf(A, e1.pid) && pairOf(A, e1.pid).state === 'expired', 30e3), 'a pairing nobody confirms runs out on both');
   ok(await until(() => linkRows().length === 0, 70e3), 'and its rows go');
   eq([comps(R).length, comps(A).length], [0, 0], 'nothing linked');
+
+  // ---------- the pace: every 60 s while nothing pairs, every second while one does ----------
+  {
+    const Z = { name: 'ZED', id: crypto.randomUUID(), tamper: null };
+    const GHOST = crypto.randomUUID(); // a machine sync lists that never answers
+    db.devices.push({ id: Z.id, user_id: UID, name: 'ZED', platform: 'linux', last_seen_at: new Date(clock.t).toISOString() }, { id: GHOST, user_id: UID, name: 'GHOST', platform: 'linux', last_seen_at: new Date(clock.t).toISOString() });
+    const zSync = { enabled: () => true, uid: async () => UID, email: async () => 'henry@example.com', accessToken: async () => 'test-token', onChange: () => () => {}, rest: (method, table, o) => rest(Z, method, table, o) };
+    const zl = L.createLink({ api: zSync, key: SYNC_KEY, dataDir: path.join(T, 'ZED'), log: () => {}, relay: { addComputer: async () => {}, removeComputer: async () => 0, computers: () => [] }, device: () => Z.id, name: 'ZED', now, timers, WebSocketImpl: wsClass('link:ZED'), keyStore: memStore(), readConfig: () => CONFIG });
+    const reads = () => calls.filter((c) => c.who === Z && c.method === 'GET' && c.table === 'settings').length;
+    eq([L.TIMING.pollMs, L.TIMING.pairPollMs], [60e3, 1e3], 'pace: the rows every 60 s while nothing pairs, every second while one does');
+    await zl.start();
+    await advance(1e3);
+    const r0 = reads();
+    await advance(300e3);
+    ok(r0 >= 1 && reads() - r0 === 5, `pace: idle, 5 reads in 5 minutes (${reads() - r0})`);
+    const [cz] = await zl.request(GHOST);
+    eq(cz, 200, 'pace: a pairing asked');
+    const r1 = reads();
+    await advance(10e3);
+    ok(reads() - r1 >= 9, `pace: while it pairs, a read every second (${reads() - r1} in 10 s)`);
+    await zl.stop();
+    db.devices = db.devices.filter((d) => d.id !== Z.id && d.id !== GHOST);
+    db.settings = db.settings.filter((r) => !/^link/.test(r.key));
+  }
 
   // ---------- off ----------
   await R.link.stop();

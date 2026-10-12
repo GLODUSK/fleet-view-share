@@ -8,8 +8,11 @@
 //   is online; a row sealed with another key, or not JSON, ignored, said once and not fetched again until it changes;
 //   a write that fails is said once and tried again; each conversation's repo ({ origin, name }) published, read back,
 //   cleaned, and a change of it alone written, an older entry with none still valid; remoteFor's rules (listed, listed but resting, fresh and not
-//   listed, offline owner, an owner that never published, not read yet); the bound list (cleaned and sorted, written
-//   when it alone changed, read back, kept while its device is offline, emptied); and sync-run.js's wiring (the mover's
+//   listed, offline owner, an owner that never published, not read yet); the bound list in its own bound:<device> row
+//   (and in the live row too, for older readers; cleaned and sorted, written when it changed and only then, listed
+//   with the live rows in one request, fetched when it moved, read back, kept while its device is offline, emptied; an older device's
+//   live row's bound read while it has no bound row, a bound row winning over it, one that does not open falling back;
+//   the or filter refused: two lists); and sync-run.js's wiring (the mover's
 //   device id and online(), the snapshot, live(), started and stopped with the run, none without a snapshot), which on
 //   a Mac runs only with SYNC_TEST_KEYCHAIN=1: it writes the sync key into the real login Keychain.
 // Run: node scripts/sync-live-test.js   (exit 0 = all pass)
@@ -22,6 +25,7 @@ const ROOT = path.resolve(__dirname, '..');
 const S = require(path.join(ROOT, 'sync-api.js'));
 const K = require(path.join(ROOT, 'sync-crypto.js'));
 const L = require(path.join(ROOT, 'sync-live.js'));
+const PF = require(path.join(__dirname, 'pgrest-filter.js'));
 const { createSyncRunner } = require(path.join(ROOT, 'sync-run.js'));
 
 let pass = 0, fail = 0;
@@ -40,16 +44,14 @@ const db = [];
 const api = { calls: [], offline: false, rest };
 async function rest(method, table, o = {}) {
   const q = o.query || {};
-  api.calls.push({ method, table, query: { ...q } });
+  api.calls.push({ method, table, query: { ...q }, key: o.body && o.body.key });
   if (api.offline) throw new S.SyncError('Supabase is out of reach', 0, 'network');
   if (table !== 'settings') throw new Error(`unexpected table ${table}`);
   if (method === 'GET') {
-    const m = /^like\.(.*)$/.exec(q.key || '');
-    const re = m ? new RegExp(`^${m[1].split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`) : null;
-    const inList = /^in\.\((.*)\)$/.exec(q.key || '');
-    const want = inList ? new Set(inList[1].split(',').map((k) => k.replace(/^"|"$/g, ''))) : null;
+    if (api.noOr && q.or) throw new S.SyncError('PGRST100: failed to parse logic tree', 400, 'bad_request');
+    const match = PF.matcher(new URLSearchParams(q)); // like, in and or=(...) as PostgREST reads them
     const cols = String(q.select || '').split(',');
-    return db.filter((r) => (!re || re.test(r.key)) && (!want || want.has(r.key))).map((r) => Object.fromEntries(cols.map((c) => [c, r[c]])));
+    return db.filter(match).map((r) => Object.fromEntries(cols.map((c) => [c, r[c]])));
   }
   if (method === 'POST') {
     ok(q.on_conflict === 'user_id,key' && /resolution=merge-duplicates/.test(o.prefer || ''), 'a write is an upsert on (user_id, key)');
@@ -59,9 +61,11 @@ async function rest(method, table, o = {}) {
   }
   throw new Error(`unexpected ${method}`);
 }
-const writes = (dev) => api.calls.filter((c) => c.method === 'POST').length - (dev || 0);
+// the live rows' writes (the bound rows' are boundWrites())
+const writes = (dev) => api.calls.filter((c) => c.method === 'POST' && /^live:/.test(c.key || '')).length - (dev || 0);
+const boundWrites = () => api.calls.filter((c) => c.method === 'POST' && /^bound:/.test(c.key || '')).length;
 const fetches = () => api.calls.filter((c) => c.method === 'GET' && /value_enc/.test(c.query.select || '')).length;
-const rowOf = (dev) => { const r = db.find((x) => x.key === `live:${dev}`); return r ? JSON.parse(K.openText(r.value_enc, KEY, `setting:live:${dev}`)) : null; };
+const rowOf = (dev, kind = 'live') => { const r = db.find((x) => x.key === `${kind}:${dev}`); return r ? JSON.parse(K.openText(r.value_enc, KEY, `setting:${kind}:${dev}`)) : null; };
 
 // ---------- the two devices ----------
 const pcClock = { t: Date.parse('2026-10-11T12:00:00Z') };
@@ -87,8 +91,10 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
   pcDevice = PC;
   await pc.tick();
   eq(writes(), 1, 'the first round writes the snapshot');
+  eq(boundWrites(), 1, 'and the bound row, once');
   let v = rowOf(PC);
   ok(v && v.v === 1 && v.device === PC && v.at === pcClock.t, 'the row is sealed under live:<device> with v, device and at');
+  eq(v.bound, [], 'the live row carries the bound list too (an older Fleet View reads it only there)');
   eq(v.sessions.map((e) => [e.id, e.state, e.agents]), [[C1, 'AGENTS', 2], [C2, 'WORKING', 0]], 'its sessions: cleaned, one per id, in id order');
   ok(v.sessions[1].name === 'fix-mac-sync-parity' && v.sessions[1].renamed === true && v.sessions[1].account === 'A' && v.sessions[1].waitingOn === null, 'with name, renamed, account and waitingOn');
   ok(!JSON.stringify(db).includes('fix-mac-sync-parity'), 'the name never reaches the table in the clear');
@@ -249,17 +255,30 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
 
   // ---------- bound: the conversations whose workspace is only on their device ----------
   {
-    eq(rowOf(PC).bound, [], 'bound: none yet, an empty list');
+    eq(rowOf(PC, 'bound').bound, [], 'bound: none yet, an empty list in the bound row');
     ok(mac.live().bound.get(PC) instanceof Set && mac.live().bound.get(PC).size === 0, 'bound: the other device reads none');
-    const w0 = writes();
+    const w0 = writes(), b0 = boundWrites();
     pcBound = [C3.toUpperCase(), 'not-an-id', C1, C1];
     step(5e3); await pc.tick();
-    eq(writes(), w0 + 1, 'bound: a change of the list alone is written');
-    eq(rowOf(PC).bound, [C1, C3].sort(), 'bound: lower case, one each, sorted, bad ids dropped');
+    eq([writes(), boundWrites()], [w0 + 1, b0 + 1], 'bound: a change of the list writes the bound row, and the live row (older readers)');
+    const br = rowOf(PC, 'bound');
+    eq(br.bound, [C1, C3].sort(), 'bound: lower case, one each, sorted, bad ids dropped');
+    eq(rowOf(PC).bound, br.bound, 'bound: the live row holds the same list');
+    ok(br.v === 1 && br.device === PC && db.find((r) => r.key === `bound:${PC}`).updated_at === new Date(br.at).toISOString(), 'bound: its row has v, device and at, updated_at its at');
     step(5e3); await pc.tick();
-    eq(writes(), w0 + 1, 'bound: the same list again writes nothing');
+    eq([writes(), boundWrites()], [w0 + 1, b0 + 1], 'bound: the same list again writes nothing');
+    const fb = fetches();
     step(5e3); await mac.tick();
     ok([C1, C3].every((id) => mac.live().bound.get(PC).has(id)), 'bound: the other device reads them');
+    eq(fetches(), fb + 1, 'bound: its row fetched once, as it moved');
+    step(5e3); await mac.tick();
+    eq(fetches(), fb + 1, 'bound: and not again while it does not move');
+    const lists = api.calls.filter((c) => c.method === 'GET' && c.query.select === 'key,updated_at').slice(-2);
+    ok(lists.length === 2 && lists.every((c) => c.query.or === '(key.like.live:*,key.like.bound:*)' && !c.query.key), 'bound: the live and bound keys are listed in one request');
+    // a live-row change alone does not touch the bound row
+    pcList[0].name = 'only the name moved';
+    step(5e3); await pc.tick();
+    eq(boundWrites(), b0 + 1, 'bound: a change of the snapshot alone does not write the bound row');
     isOn.set(PC, false);
     ok(mac.live().bound.get(PC).has(C3) && !mac.live().fresh.has(PC), 'bound: kept while the device is offline (what is bound does not change while it sleeps)');
     isOn.set(PC, true);
@@ -267,6 +286,32 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
     step(5e3); await pc.tick();
     step(5e3); await mac.tick();
     ok(mac.live().bound.get(PC).size === 0, 'bound: an emptied list empties it on the other device');
+    // an older device: its live row carries bound, and it has no bound row; a newer device's bound row wins over its
+    // live row's (stale) field
+    const OLD = '66666666-6666-4666-8666-666666666666';
+    isOn.set(OLD, true);
+    db.push({ key: `live:${OLD}`, updated_at: 'o1', value_enc: K.sealText(JSON.stringify({ v: 1, device: OLD, at: 1, sessions: [{ id: C2, state: 'WORKING' }], bound: [C2] }), KEY, `setting:live:${OLD}`) });
+    step(5e3); await mac.tick();
+    ok(mac.live().bound.get(OLD) && mac.live().bound.get(OLD).has(C2), 'bound: an older device\'s list comes from its live row');
+    db.push({ key: `bound:${OLD}`, updated_at: 'b1', value_enc: K.sealText(JSON.stringify({ v: 1, device: OLD, at: 2, bound: [C3] }), KEY, `setting:bound:${OLD}`) });
+    step(5e3); await mac.tick();
+    ok(mac.live().bound.get(OLD).has(C3) && !mac.live().bound.get(OLD).has(C2), 'bound: once it has a bound row, that row\'s list (not the live row\'s)');
+    db.find((r) => r.key === `bound:${OLD}`).value_enc = K.sealText('not json', KEY, `setting:bound:${OLD}`);
+    db.find((r) => r.key === `bound:${OLD}`).updated_at = 'b2';
+    step(5e3); await mac.tick();
+    ok(mac.live().bound.get(OLD).has(C2), 'bound: a bound row that does not open: the live row\'s list again');
+    eq(macLogs.filter((t) => /bound list of 66666666/.test(t)).length, 1, 'bound: a bad bound row is said once');
+    db.splice(db.findIndex((r) => r.key === `bound:${OLD}`), 1);
+    db.splice(db.findIndex((r) => r.key === `live:${OLD}`), 1);
+    step(5e3); await mac.tick();
+    ok(!mac.live().known.has(OLD) && !mac.live().bound.has(OLD), 'bound: a device whose rows are gone is forgotten');
+    // Supabase refuses the or filter: the two lists, one each
+    api.noOr = true;
+    const n0 = api.calls.length;
+    step(5e3); await mac.tick();
+    const two = api.calls.slice(n0).filter((c) => c.method === 'GET' && c.query.select === 'key,updated_at');
+    ok(two.length === 3 && two[1].query.key === 'like.live:*' && two[2].query.key === 'like.bound:*' && mac.live().known.has(PC), 'bound: the or filter refused: live:* and bound:* listed apart, still read');
+    api.noOr = false;
     eq(L.cleanIds(Array.from({ length: L.MAX_BOUND + 10 }, () => crypto.randomUUID())).length, L.MAX_BOUND, 'cleanIds: at most MAX_BOUND');
     eq(L.cleanIds('nope'), [], 'cleanIds: not a list');
   }

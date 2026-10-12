@@ -70,15 +70,20 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
   - `live:<device id>` (`sync-live.js`): what runs on that device right now, written by that device only, sealed with
     `sealText(json, key, 'setting:live:<device id>')`, `updated_at` set to its `at`:
     `{ v: 1, device, at, sessions: [{ id, state, label, stateColor, name, renamed, account, last, active, turnStart,
-    waitingOn, agents, repo }], bound: [ids] }`. `bound`: every conversation that device runs whose workspace is only
-    there ([Portable and bound](#portable-and-bound)), whatever its state, sorted, at most 5000; a row from before it
-    has none. Another device keeps the last list it read while that device is offline. `repo` is `{ origin, name }` (the portable root of the `prefs:` rows: GitHub
+    waitingOn, agents, repo }], bound: [ids] }`. `bound` is the `bound:` row's list (below), kept here for a Fleet View
+    from before that row, which reads it only here; it goes from the live row in a later release.
+  - `bound:<device id>` (`sync-live.js`): every conversation that device runs whose workspace is only there
+    ([Portable and bound](#portable-and-bound)), whatever its state: `{ v: 1, device, at, bound: [ids] }`, sorted, at
+    most 5000, sealed and stamped like the live row, written by that device only and only when the list changes (at
+    most every 5 s). A reader takes a device's list from its `bound:` row when it has one that opens, else from that
+    device's live row's `bound` (an older Fleet View, which writes no `bound:` row; none: nothing bound). Another
+    device keeps the last list it read while that device is offline. In a `live:` entry, `repo` is `{ origin, name }` (the portable root of the `prefs:` rows: GitHub
     `owner/name` and folder name, either may be null) for the repo that device shows it under, or null; another
     device shows it under its own checkout of that repo when it has one (by origin, else a same-named folder with no
     origin), else works the repo out itself. A row from before `repo` (none on its entries) still counts. `sessions` lists the conversations it owns that are not DONE, and the DONE ones active
-    in the last day (300 at most, running ones first), in id order. It is written only when that list changes (not
-    `last` or `active`), at most every 5 s. Every device lists the `live:*` keys and `updated_at` every 5 s and fetches
-    a value only when its `updated_at` moved. A snapshot counts while its device is online (S4's `last_seen_at`
+    in the last day (300 at most, running ones first), in id order. It is written only when that list (not `last` or
+    `active`) or `bound` changes, at most every 5 s. Every device lists the `live:*` and `bound:*` keys and `updated_at` every
+    5 s (one request: `or=(key.like.live:*,key.like.bound:*)`) and fetches a value only when its `updated_at` moved. A snapshot counts while its device is online (S4's `last_seen_at`
     rule, `sync-move.js` `online()`); then a conversation that device owns shows its state, name and account from it,
     and DONE when it is not listed or the device is offline. Until this device has seen that `last_seen_at` move
     (after a start, or while its own reads fail), and for a device with no `live:` row (an older Fleet View), the
@@ -155,7 +160,10 @@ chunks.
 5. Only lines that are whole: an upload of `main` or a `.jsonl` stops at the last `\n`, so a line being written is
    never cut.
 6. Newest first, a few MB/s at most, one conversation at a time; a failure backs off and retries, never loses state.
-7. Only conversations this device owns (or new ones). A live conversation keeps uploading as it grows.
+7. Only conversations this device owns (or new ones). A live conversation keeps uploading as it grows, at most
+   every 45 s while a turn of it runs here (its claude busy), at once when the turn ends, and at once for a move's
+   flush. A conversation the materializer's rows (below) say another device owns, while they were listed in the last
+   minute, is left alone with no request; otherwise its row is asked for, as is every flush's.
 
 ## The materializer's rules (S3)
 
@@ -171,9 +179,31 @@ chunks.
    A bound row needs no checkout: `X` is its placeholder here (see [Portable and bound](#portable-and-bound)), made
    empty right before its log is laid down (never through a link, nothing in its place); the device that hosted it
    (this one, after another device took the row) uses the folder `rel_cwd` names when that is still here.
+   **Listing the rows.** The first scan lists every active row another device owns (every column, in pages by `id`);
+   after it, a whole list of the light columns (`id, account, updated_at, owner_device, lease_until`) every 4 minutes,
+   which fetches every column by `id` only for the rows it lacks or whose `updated_at` moved, and drops the rows it no
+   longer lists. The scans between list only the changed rows, in any state and with any owner but this device:
+   `or=(updated_at.gte.<W>,lease_until.gte.<L>)`, where `W` is the newest `updated_at` seen on another device's row
+   (that writer's clock), never past this device's clock, less 2 minutes (clock skew, a write still on its way), and
+   `L` the newest `lease_until` seen, never more than 3 minutes (a lease's length) past this device's clock, less the
+   same. Every row change that matters moves `updated_at` (the uploader's
+   row write, a new row, the mover's claim); what does not shows at the next whole list, 4 minutes at most: a change
+   of account alone, a row deleted or set inactive by hand, an owner set where there was none (the uploader's claim of
+   an ownerless row, written again with `updated_at` at the end of that pass), and a row this device took over (its
+   own rows are never listed: the mover keeps its claim until a whole list began after it, and a pull reads the row
+   itself). A row a pull read while a list was under way stays as the pull read it until the next list (the list's
+   copy may be the older one). No trigger is needed.
 2. Read its chunk rows (in pages of 1000, PostgREST's cap: each page starts on the last row of the one before, and a
    different row there starts the listing again) for the current generation, ordered by `seq`; check they cover `[0, size)` with no gap; fetch
    and open each, check each `sha256`, then the whole file's against the conversation row.
+   When `main`'s generation is the one laid down and the files laid down are still here as they were (their size and
+   modified time right after they were laid down), only the rows past them are read: `and=(not.and(file.eq."<file>",
+   generation.eq.<g>,seq.lt.<n>),...)`, one clause per file laid down (main first, then the ones with most chunks,
+   while the filter stays under 3000 characters; percent-encoded it is about 4 KB). The new chunks go behind the bytes
+   here, which are checked against their sha256 first, and the whole file against the row as above. A new generation
+   of a known side file, a gap, local bytes that are not the ones laid down, or a sha256 that does not match the bytes
+   put together read every row again; so does a filter a proxy on the way finds too long (414 or 431, that time
+   only), and one Supabase refuses (400, from then on).
 3. Lay it down per the recipe: write `<id>.jsonl.part`, rename. If a local copy exists, replace it only when it is a
    byte prefix of the new file; if it is longer or different, leave it, write nothing, and report a conflict. A local
    `.jsonl` whose last line was cut off (its writer ended mid-line, so that part never went up, rule 5 above) counts
@@ -181,8 +211,8 @@ chunks.
 4. Side files the same way, under `<slug>/<id>/`.
 5. Never touch a conversation that is running on this machine (the session host or a live Claude process has it open).
 6. Remember what it laid down (`<dataDir>/sync/down-state.json`, compact, written once a scan and after a pull, a
-   move and a stop), so an unchanged row costs one cheap compare, unless its log is gone from here (Claude Code's
-   cleanup): then it is laid down again.
+   move and a stop; per file its generation, size, sha256, chunk count and size and modified time), so an unchanged
+   row costs one cheap compare, unless its log is gone from here (Claude Code's cleanup): then it is laid down again.
 
 ## Moving a conversation (S4)
 
@@ -204,7 +234,9 @@ no fork; its header has the whole order. What it adds to the rows:
 - **`lease_until`**: the owner puts it 3 minutes ahead every 60 s on the conversations it runs in its session host
   (one PATCH, conditional on `owner_device` = itself), and a claim sets it. A forced takeover (A offline or not
   answering) waits while it is ahead, and after one the new owner's uploader stays held 30 s, then takes over what the
-  server has, so a chunk A still had on its way never replaces one the new owner wrote.
+  server has, so a chunk A still had on its way never replaces one the new owner wrote. What the server has can be
+  behind A's log: mid-turn, A's uploader sends a chat at most every 45 s (the uploader's rule 7), so a forced takeover
+  of a chat A went offline in mid-turn can lack up to that turn's last 45 s.
 - **`devices.last_seen_at`**: the mover touches it every 30 s. Another device counts it offline when it sees the value
   unchanged for 2 minutes on its own clock.
 

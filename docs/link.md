@@ -45,7 +45,9 @@ request shows on the other machine's page; an unlink row unlinks), never a link.
 ## Pairing
 
 Rows in `fleet_sync.settings`, sealed with the sync key like the mover's (`sync-crypto.js sealText(json, key,
-'setting:<key>')`), upserted on `(user_id, key)`, polled every 5 s (every second while a pairing is under way):
+'setting:<key>')`), upserted on `(user_id, key)`, polled every 60 s, and every second while a pairing is under way
+here (one asked here, or one the other machine asked for that this one took up at its last poll). So the other machine
+sees a new ask within a minute, and the rest of the pairing runs at once:
 
 | Row | Written by | Value |
 |---|---|---|
@@ -202,7 +204,7 @@ scripts/follow-plan-test.mjs` (what the Chat tab's Send does).
 ## Off
 
 With sync off there is no link: no socket, no timer and no key read. With sync on and nothing linked, the link reads
-its rows every 5 s and opens no socket. The link's keys are read only while `peers.json` lists a machine.
+its rows every 60 s and opens no socket. The link's keys are read only while `peers.json` lists a machine.
 
 ## Tests
 

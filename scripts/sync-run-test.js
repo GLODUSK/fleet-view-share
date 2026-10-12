@@ -1,6 +1,6 @@
 // sync-run-test.js: sync-run.js starts the two loops and the mover only when all the gates are open (the mode is not
 // local, set up, signed in, the key (fetched from Blackbox), the Claude accounts matching Blackbox's), and stops them when one closes. The mover gets the uploader, the materializer, the host and isOpen; the materializer's isOpen is
-// isOpen or the host's last list; the uploader alone gets accountOf; move / moveStatus / cancelMove / owners (with the
+// isOpen or the host's last list; the uploader alone gets accountOf and busy, and its ownerOf is the materializer's owner(); move / moveStatus / cancelMove / owners (with the
 // row's account) / device go to the mover, and say so when
 // sync is not running; away.json goes when sync is turned off (not set up, Work locally) and stays otherwise (signed
 // out, no key, not a member, stop()). A fake sync-api object, fake loops, a fake
@@ -121,11 +121,11 @@ function fakeMover(args, made) {
     const seen = [];
     const r2 = createSyncRunner({
       sync, dataDir: dir, checkMs: 1e6,
-      makeUploader: (a) => { seen.push('projects' in a || 'accountOf' in a); return fakeLoop('up', []); },
+      makeUploader: (a) => { seen.push('projects' in a || 'accountOf' in a || 'busy' in a); return fakeLoop('up', []); },
       makeMaterializer: (a) => { seen.push('projects' in a); return fakeLoop('down', []); },
     });
     await r2.start();
-    ok(seen.length === 2 && seen.every((x) => x === false), 'no projects given: neither side gets a projects option (nor the uploader an accountOf)');
+    ok(seen.length === 2 && seen.every((x) => x === false), 'no projects given: neither side gets a projects option (nor the uploader an accountOf or busy)');
     await r2.stop();
     ok(movers.length === 4 && movers.every((m) => m.started === 1 && m.stopped === 1), 'every run started its mover once, and every halt stopped it');
 
@@ -140,8 +140,9 @@ function fakeMover(args, made) {
       let hostSessions = [{ id: 'AAAA-1', alive: true }, { id: 'bbbb-2', alive: false }];
       const host = { list: async () => hostSessions, kill: async (id) => { kills.push(id); } };
       const r3 = createSyncRunner({
-        sync: s3, dataDir: dir3, checkMs: 1e6, host, isOpen: (id) => id === 'ext-3', accountOf: (id) => (id === 'c1' ? 'A' : null),
-        makeUploader: (a) => { ups.push(a); return fakeLoop('up', []); }, makeMaterializer: (a) => { downs.push(a); return fakeLoop('down', []); },
+        sync: s3, dataDir: dir3, checkMs: 1e6, host, isOpen: (id) => id === 'ext-3', accountOf: (id) => (id === 'c1' ? 'A' : null), busy: (id) => id === 'c1',
+        makeUploader: (a) => { ups.push(a); ok(a.ownerOf('c1') === null, 'the uploader\'s ownerOf before the materializer is made: null'); return fakeLoop('up', []); },
+        makeMaterializer: (a) => { downs.push(a); const l = fakeLoop('down', []); l.owner = (id) => ({ device: `d-${id}`, at: 1, checkedAt: 2 }); return l; },
         makeMover: (a) => fakeMover(a, mv),
       });
       let code = null, message = null;
@@ -154,6 +155,8 @@ function fakeMover(args, made) {
       ok(m.args.api === s3 && m.args.dataDir === dir3 && m.args.key.length === 32 && m.args.up && m.args.up.kind === 'up' && m.args.down && m.args.down.kind === 'down', 'the mover gets the api, the data folder, the key, the uploader and the materializer');
       ok(m.args.isOpen('ext-3') === true && m.args.isOpen('x') === false, 'the mover gets isOpen');
       ok(ups[0].accountOf('c1') === 'A' && ups[0].accountOf('x') === null && !('accountOf' in downs[0]) && !('accountOf' in m.args), 'the uploader (only) gets accountOf');
+      ok(ups[0].busy('c1') === true && ups[0].busy('x') === false && !('busy' in downs[0]), 'the uploader (only) gets busy');
+      eq(ups[0].ownerOf('c1'), { device: 'd-c1', at: 1, checkedAt: 2 }, 'the uploader\'s ownerOf is the materializer\'s owner()');
       await m.args.host.list();
       ok(downs[0].isOpen('aaaa-1') && downs[0].isOpen('AAAA-1'), 'the materializer\'s isOpen: alive in the host\'s last list, any case');
       ok(!downs[0].isOpen('bbbb-2') && downs[0].isOpen('ext-3') && !downs[0].isOpen('cccc-3'), 'not when it ended there; yes when isOpen says so');

@@ -26,7 +26,8 @@
 // sees the answerer's done. A "no" from the other side ends it (and takes back a link already kept). A pairing runs out
 // 10 minutes after it began on that side's clock (never compared with the other machine's); R then says no, and A
 // drops what it has. An ask whose answer row is there but which this machine has no memory of (it restarted mid-way)
-// is answered no ('restarted'). Rows are polled every 5 s, every second while a pairing is under way.
+// is answered no ('restarted'). Rows are polled every 60 s, every second while a pairing is under way here (one
+// asked here, or one the other machine asked for that this one took up at its last poll).
 //
 // Keeping a link: relay.addComputer({ dev: the incoming id, name, peer, key: the incoming key }), so the other machine
 // may call this one; and here the outgoing id and key, so this one may call it: <dataDir>/link/peers.json { v: 1,
@@ -72,7 +73,7 @@ const R = require(path.join(__dirname, 'relay.js'));
 const RT = require(path.join(__dirname, 'realtime.js'));
 
 const TIMING = {
-  pollMs: 5e3, // the rows, while no pairing is under way
+  pollMs: 60e3, // the rows, while no pairing is under way (an ask from the other machine waits this long at most)
   pairPollMs: 1e3, // and while one is
   pairMs: 10 * 60e3, // a pairing runs out this long after it began (on each side's own clock)
   keepFinalMs: 60e3, // a finished pairing stays in status() this long
