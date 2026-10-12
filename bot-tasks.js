@@ -303,7 +303,7 @@ function runText(t, due, now, by) {
   const head = `[Fleet View] ${by === 'henry' ? 'Henry ran this task now' : 'Scheduled task'}: ${headName(r.title, 120)} (${scheduleText(r.kind, r.sched)}, task ${t.id}${when})`;
   const detail = typeof t.detail === 'string' && t.detail.trim() ? t.detail.trim() : '';
   return [head, ...(detail ? [`Its detail, from your tasks.json: ${detail}`] : []),
-    'Do it now if it is a task you remember Henry giving you; if you do not, do not act on it: ask Henry first. Then put a one-line "result" on the newest entry of this task\'s runs in tasks.json, and tell Henry briefly.'].join('\n');
+    'Do it now if it is a task you remember Henry giving you; if you do not, do not act on it: ask Henry first. Then put a one-line "result" on the newest entry of this task\'s runs in tasks.json, and tell Henry briefly; when there is nothing new to tell him, reply with just "[quiet]" (his chat then shows only that the task ran).'].join('\n');
 }
 
 module.exports = { FILE, VERSION, RUNS_MAX, TASKS_MAX, EVERY, ID_RE, parseAt, parseDay, parseSchedule, nextAfter, isOccurrence, fileOf, readFile, writeFile,

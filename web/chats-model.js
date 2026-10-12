@@ -43,6 +43,9 @@
 //       the "/pickup <file>" note and the "Picked up: …" reply (with the steps before it). A reply that starts with a
 //       reaction ("[react:👍]", reactionOf) puts reaction: '👍' on your last message before it (chat.js draws it on
 //       the bubble's corner) and shows the rest, or nothing when that is all
+//       A scheduled task's note shows as one line, "Scheduled task: <title>" ("Ran now: …" when Henry ran it), and
+//       when the bot answers it with "[quiet]" (or "Nothing new.") that run's steps and answer are left out too
+//   taskNote(text) -> { now, title } | null   a task's note (bot-tasks.js runText) and its title, tidied
 //   quietNote(text) -> 'ack' | 'one' | 'skip' | null   a setup note's text (setupNote) that botFeed leaves out, and
 //       what it leaves out after it: 'ack' the bare "ok", 'one' the one reply, 'skip' nothing; null: it shows
 //   reactionOf(text) -> { emoji, text } | null   a reply's leading "[react:<emoji>]" (bot/BRIEF.md says when a bot
@@ -406,6 +409,18 @@ const PICKED = /^\s*Picked up\b/i;
 // notes that are noise in a chat with a bot: a compaction (Claude Code goes on in the same conversation) and a
 // /clear or /compact typed
 const NOISE = /^(?:Conversation compacted\b|\/(?:clear|compact)(?:\s|$))/;
+// a scheduled task coming due (bot-tasks.js runText): its head line, the title and Fleet View's "(schedule, task id)"
+const TASK = /^(Scheduled task|Henry ran this task now): (.*?) \([^()]*\btask [^()]*\)\s*$/;
+// taskNote(text) -> { now, title } | null   the title without a schedule the bot wrote into it ("Watch X (:50)")
+export function taskNote(text) {
+  const m = TASK.exec(String(text == null ? '' : text).split('\n')[0]);
+  if (!m) return null;
+  const title = m[2].replace(/\s*\((?:(?:hourly|daily|weekly|monthly|every)\b[^()]*|(?:at )?\d{0,2}:\d{2}(?:\s*[ap]m)?)\)\s*$/i, '').trim() || m[2];
+  return { now: m[1] !== 'Scheduled task', title };
+}
+// what a bot answers a task with when there is nothing to report (bot-tasks.js runText asks for "[quiet]"): the
+// whole run is left out of the chat, the task's note alone says it ran
+const QUIET = /^\s*(?:\[quiet\]|nothing new(?: to report)?|no(?:thing| new \w+)(?: new)?(?: to report)?(?: this (?:hour|time|run))?)[.!]?\s*$/i;
 export function botFeed(items) {
   const out = [];
   // what is being left out: 'ack' the bare "ok" to a setup note (thinking and tool steps since then don't count),
@@ -413,6 +428,7 @@ export function botFeed(items) {
   // everything until the next message
   let skip = null;
   let mine = -1; // where your last message is in out: a reaction goes on it
+  let task = -1; // just after a task's note in out: a quiet answer to it takes its run out
   // _j is chat.js's cached JSON of the item as it came: a changed copy must not reuse it
   const copy = (it, more) => { const { _j, ...rest } = it; return { ...rest, ...more }; };
   for (const it of items || []) {
@@ -430,17 +446,22 @@ export function botFeed(items) {
       if (note != null) {
         const q = quietNote(note);
         mine = -1;
+        task = -1;
         if (q) { skip = q === 'skip' ? null : q; continue; }
-        out.push(copy(it, { kind: 'setup', text: note }));
+        const tn = taskNote(note);
+        out.push(copy(it, { kind: 'setup', text: tn ? `${tn.now ? 'Ran now' : 'Scheduled task'}: ${tn.title}` : note }));
+        if (tn) task = out.length;
         skip = 'ack';
         continue;
       }
       skip = null;
+      task = -1;
       mine = out.length;
     } else if (it.kind === 'assistant') {
       const was = skip;
       skip = null;
       if (was === 'one' || (was === 'ack' && ACK.test(String(it.text || ''))) || (was === 'pickup' && PICKED.test(String(it.text || '')))) continue;
+      if (task >= 0 && QUIET.test(String(it.text || ''))) { out.length = task; continue; }
       const r = reactionOf(it.text);
       if (r) {
         if (mine >= 0 && !out[mine].reaction) out[mine] = copy(out[mine], { reaction: r.emoji });

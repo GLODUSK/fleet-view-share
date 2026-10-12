@@ -7,7 +7,7 @@
 // taskWhen, taskLine, tasksHead). Plain asserts, no dependencies:
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, rawToContactsState, previewOf, replyLine, botFeed, setupNote, quietNote, doingOf, botChoices, botEdits,
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, rawToContactsState, previewOf, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
   sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
@@ -464,7 +464,7 @@ test('botFeed: no plumbing: quiet setup notes, handoffs, pickups, compactions an
     { key: 'p14', kind: 'user', text: 'thanks' },
   ];
   const out = botFeed(items);
-  assert.deepEqual(out.map((it) => it.key), [4, 5, 6, 8, 'p6', 'p7', 'p13', 'p14']);
+  assert.deepEqual(out.map((it) => it.key), [4, 5, 6, 8, 'p6', 'p13', 'p14']); // p7: the task's "Nothing new."
   assert.equal(out[4].kind, 'setup');
   // a handoff that did not end the conversation (it was resumed): your next message shows again, and its reply
   assert.deepEqual(botFeed([{ key: 1, kind: 'note', text: '/handoff' }, { key: 2, kind: 'assistant', text: 'Handoff saved' }, { key: 3, kind: 'user', text: 'hi' }, { key: 4, kind: 'assistant', text: 'Hi' }]).map((it) => it.key), [3, 4]);
@@ -472,6 +472,29 @@ test('botFeed: no plumbing: quiet setup notes, handoffs, pickups, compactions an
   assert.deepEqual(botFeed([{ key: 1, kind: 'note', text: '/pickup x.md' }, { key: 2, kind: 'assistant', text: 'Done: the tests pass.' }]).map((it) => it.key), [2]);
   // "instructions changed" leaves out one reply only
   assert.deepEqual(botFeed([{ key: 1, kind: 'user', text: '[Fleet View] Your instructions changed: read it.' }, { key: 2, kind: 'assistant', text: 'Read it.' }, { key: 3, kind: 'assistant', text: 'Also, the deploy is done.' }]).map((it) => it.key), [3]);
+});
+
+test('botFeed: a scheduled task shows as one tidy line, and a quiet run of it shows nothing more', () => {
+  assert.deepEqual(taskNote('Scheduled task: Watch DetailForge requests (:50) (hourly at :50, task t-df-watch-50)\nDo it now.'), { now: false, title: 'Watch DetailForge requests' });
+  assert.deepEqual(taskNote('Henry ran this task now: Check deploys (daily 9:00, task t-dep; try 2, the last could not be delivered)'), { now: true, title: 'Check deploys' });
+  assert.deepEqual(taskNote('Scheduled task: Report (weekly) (weekly Mon 9:00, task t-r)'), { now: false, title: 'Report' });
+  assert.deepEqual(taskNote('Scheduled task: Pay (the plumber) (once Oct 11 15:00, task inv)'), { now: false, title: 'Pay (the plumber)' });
+  assert.equal(taskNote('Your instructions changed: read it.'), null);
+  const head = '[Fleet View] Scheduled task: Watch DetailForge requests (:50) (hourly at :50, task t-df-watch-50)\nDo it now if it is a task you remember.';
+  // quiet: the note stays, its steps and answer go
+  const quiet = botFeed([
+    { key: 1, kind: 'user', text: head },
+    { key: 2, kind: 'assistant', text: 'Checking.' },
+    { key: 3, kind: 'tool', name: 'Bash', input: { command: 'gh pr list' } },
+    { key: 4, kind: 'tool', name: 'Edit', input: { file_path: 'tasks.json' } },
+    { key: 5, kind: 'assistant', text: '[quiet]' },
+  ]);
+  assert.deepEqual(quiet.map((it) => [it.key, it.kind, it.text]), [[1, 'setup', 'Scheduled task: Watch DetailForge requests']]);
+  for (const t of ['Nothing new.', 'nothing new to report', 'No new requests.', 'Nothing']) assert.equal(botFeed([{ key: 1, kind: 'user', text: head }, { key: 2, kind: 'assistant', text: t }]).length, 1, t);
+  // something to report: it all shows
+  assert.deepEqual(botFeed([{ key: 1, kind: 'user', text: head }, { key: 2, kind: 'tool', name: 'Bash', input: {} }, { key: 3, kind: 'assistant', text: 'One new request: a logo change.' }]).map((it) => it.key), [1, 2, 3]);
+  // only the run's own answer: after your message, "Nothing new." is a real reply
+  assert.deepEqual(botFeed([{ key: 1, kind: 'user', text: head }, { key: 2, kind: 'assistant', text: 'One new request.' }, { key: 3, kind: 'user', text: 'anything else?' }, { key: 4, kind: 'assistant', text: 'Nothing new.' }]).map((it) => it.key), [1, 2, 3, 4]);
 });
 
 test('reactions: a reply starting "[react:<emoji>]" puts the emoji on your last message', () => {
