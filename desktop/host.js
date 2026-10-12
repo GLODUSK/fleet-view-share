@@ -127,7 +127,6 @@ const NEW_RE = /^new-\d{1,9}$/; // a new session's key until Claude Code reports
 const KEY_RE = /^(?:[0-9a-f-]{36}|new-\d{1,9})$/i;
 const SCAN_MS = 800;
 const BUFFER_MAX = 512 * 1024; // characters of output kept per pty for snapshot()
-const MAX_PTYS = 24;
 const FLUSH_MS = 6; // output goes out in small batches, not one message per ConPTY read
 const PROTO = 1;
 // what a terminal sends by itself, not a key: focus in/out, and its replies to Claude Code's queries (cursor
@@ -606,9 +605,9 @@ function createPtys(opts = {}) {
   }
   const noPty = () => ({ ok: false, message: `No pty module: ${ptyError ? ptyError.message : 'not installed'}` });
 
-  // starts `command` in a pty under `key`; extra fields go onto the entry
+  // starts `command` in a pty under `key`; extra fields go onto the entry. No cap on how many run at once (Henry,
+  // 2026-10-12: "dont have a limit")
   function spawnPty(key, command, o, extra) {
-    if (aliveCount() >= MAX_PTYS) return { ok: false, message: `At most ${MAX_PTYS} sessions at once` };
     const cols = intIn(o.cols, 20, 1000, 120), rows = intIn(o.rows, 5, 500, 32);
     const cwd = dirOr(o.cwd);
     const launchKey = HO.newLaunchKey();
