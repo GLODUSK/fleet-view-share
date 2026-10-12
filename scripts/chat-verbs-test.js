@@ -47,6 +47,15 @@ const RULE = '─'.repeat(40);
   ok('screen.js: promptBox, spinner and effortShown read what compose.js reads');
 }
 
+// ---------- typing: a text ending in "\" (Claude Code takes "\" then Enter as a new line, leaving it unsent) ----------
+{
+  const typed = (s) => API.pasteWrites(s).map((w) => (w.startsWith('\x1b[200~') ? w.slice(6, -6) : w)).join('');
+  assert.equal(typed('It\'s a mistake.?\\'), 'It\'s a mistake.?\\ ');
+  assert.equal(typed('one\\\ntwo'), 'one\\\ntwo');
+  assert.equal(typed('C:\\dir\\ next'), 'C:\\dir\\ next');
+  ok('api.js pasteWrites: a trailing backslash gets a space, so Enter sends');
+}
+
 // ---------- menus: 2.1.296's unnumbered trust question, the older numbered one ----------
 // the raw pty output of Claude Code 2.1.296's folder trust question on the Mac (cols 120): every space drawn as a
 // move to a column (CSI n G), "No, exit" first with the ❯ on it, no numbers

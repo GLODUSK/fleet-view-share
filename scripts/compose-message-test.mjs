@@ -38,4 +38,11 @@ assert.equal(messageText('a\nb', [MAC]), `a\nb\n"${MAC}"`);
 assert.equal(messageText('  just text  ', []), 'just text');
 assert.equal(messageText('', []), '');
 
+// pasteWrites: a text ending in "\" gets a space after it (Claude Code takes "\" then Enter as a new line, so the
+// message would stay unsent in its prompt); a "\" anywhere else stays as it is
+const typed = (msg) => pasteWrites(msg).map((w) => (w.startsWith('\x1b[200~') ? w.slice(6, -6) : w)).join('');
+assert.equal(typed('It\'s a mistake.?\\'), 'It\'s a mistake.?\\ ');
+assert.equal(typed('one\\\ntwo'), 'one\\\ntwo');
+assert.equal(typed('C:\\dir\\ next'), 'C:\\dir\\ next');
+
 console.log('compose-message-test: ok');

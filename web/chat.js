@@ -27,7 +27,8 @@
 // it back out of Claude Code's queue ('fv-chat-unsend': compose.js pulls the queue into the prompt, clears it,
 // and queues the others again; the reply's `queue` says what is queued). Fork and New chat take it out the same way
 // and hand it to a new conversation instead ('fv-chat-fork' on window, app.js): a fork of this one (its history) or
-// a fresh one in its folder, which gets the message once it is up.
+// a fresh one in its folder, which gets the message once it is up. One Claude Code kept in its prompt after the
+// Enter ('fv-chat-stuck' from compose.js) says "Not sent", with Send it ('fv-chat-enter': Enter once more).
 // A long message (yours, sent or shown) folds to a few lines behind a "Show all N lines" pill (or a click on its
 // faded text), like Claude Code's pasted text; open, its "Show less" stays at the feed's bottom while it scrolls by.
 // Rewind on one of your messages ('fv-chat-rewind') runs Claude Code's /rewind back to just before it; the
@@ -900,6 +901,14 @@ function sendNow(c) {
     if (st && st.querySelector('[data-now]')) st.textContent = 'Interrupting: Claude takes it now';
   }
 }
+// Send it on a message Claude Code kept in its prompt: compose.js presses Enter there once more
+function enterAgain(c, stEl) {
+  const ev = new CustomEvent('fv-chat-enter', { detail: { id: c.id, ok: false } });
+  c.pane.dispatchEvent(ev);
+  if (!ev.detail.ok || !stEl) return;
+  stEl.classList.remove('stuck');
+  stEl.textContent = 'Sending…';
+}
 // Unsend on a queued message: compose.js takes it out of Claude Code's queue (the rest stay queued).
 // fork: 'fork' | 'new' (its Fork / New chat): out of the queue, then to a new conversation (app.js)
 async function unsend(c, el, fork = null) {
@@ -1092,6 +1101,17 @@ function wire(c) {
     drawPick(el, p, launchedOptions(c));
   });
   pane.addEventListener('fv-chat-sent', (e) => { if (e.detail && e.detail.id === c.id) addSent(c, e.detail); });
+  // Claude Code kept it in its prompt after the Enter (compose.js): say so, with Send it (Enter once more)
+  pane.addEventListener('fv-chat-stuck', (e) => {
+    const d = e.detail;
+    if (!d || d.id !== c.id) return;
+    const text = norm(d.text);
+    const s = [...c.sent].reverse().find((x) => x.text === text) || c.sent[c.sent.length - 1];
+    const stEl = s?.el.querySelector('.cu-status');
+    if (!stEl) return;
+    stEl.classList.add('stuck');
+    stEl.innerHTML = `<span>Not sent: it is still in Claude's prompt</span><button type="button" class="cu-now cu-new" data-enter title="Press Enter in the session once more">${icon('send', 11)}<span>Send it</span></button>`;
+  });
   // the command's panel came up under the feed (compose.js): it was sent, and what it shows is down there
   pane.addEventListener('fv-chat-panel', (e) => {
     const d = e.detail;
@@ -1126,6 +1146,7 @@ function wire(c) {
     else if ((b = t.closest('[data-cp]'))) { e.preventDefault(); e.stopPropagation(); copyText(copySource(b), b); }
     else if ((b = t.closest('[data-launch]'))) { e.preventDefault(); launchPicks(c, b.closest('.ci')); }
     else if ((b = t.closest('[data-now]'))) { e.preventDefault(); sendNow(c); }
+    else if ((b = t.closest('[data-enter]'))) { e.preventDefault(); enterAgain(c, b.closest('.cu-status')); }
     else if ((b = t.closest('[data-unsend]'))) { e.preventDefault(); unsend(c, b.closest('.ci')); }
     else if ((b = t.closest('[data-fork]'))) { e.preventDefault(); unsend(c, b.closest('.ci'), b.dataset.fork === 'new' ? 'new' : 'fork'); }
     else if ((b = t.closest('[data-fork-at]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) forkAt(c, el); }

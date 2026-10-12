@@ -1031,11 +1031,13 @@ export async function closePanel(id) {
 // (ESC[200~ text ESC[201~) of at most PASTE_MAX characters (never splitting a surrogate pair), Ctrl+J (a line
 // feed: a new line in the prompt) between lines. Claude Code wraps a paste of several lines, or a long one, in
 // <pasted_content> tags, which tell the model the text is not the user's own request; pieces this small stay
-// plain. Kept in step with api.js pasteWrites and typePasted.
+// plain. A text ending in "\" gets a space after it: Claude Code takes "\" then Enter as a new line (the "\"
+// goes), so the Enter that follows would leave the message unsent in its prompt. Kept in step with api.js
+// pasteWrites and typePasted.
 const PASTE_MAX = 400;
 export function pasteWrites(text) {
   const out = [];
-  String(text).split('\n').forEach((line, x) => {
+  String(text).replace(/\\$/, '\\ ').split('\n').forEach((line, x) => {
     if (x) out.push('\n');
     for (let i = 0; i < line.length;) {
       let j = Math.min(line.length, i + PASTE_MAX);

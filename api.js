@@ -218,11 +218,13 @@ function cleanText(v) {
 }
 // the writes that type text into Claude Code's prompt as the user's own (see the top): each line pasted in pieces
 // of at most PASTE_MAX characters (never splitting a surrogate pair), Ctrl+J (a line feed: a new line in the
-// prompt) between lines. typePasted writes them. Kept in step with web/term.js pasteWrites and typeInto.
+// prompt) between lines. A text ending in "\" gets a space after it: Claude Code takes "\" then Enter as a new
+// line, so the Enter would leave the message unsent. typePasted writes them. Kept in step with web/term.js
+// pasteWrites and typeInto.
 const PASTE_MAX = 400;
 function pasteWrites(text) {
   const out = [];
-  String(text).split('\n').forEach((line, x) => {
+  String(text).replace(/\\$/, '\\ ').split('\n').forEach((line, x) => {
     if (x) out.push('\n');
     for (let i = 0; i < line.length;) {
       let j = Math.min(line.length, i + PASTE_MAX);

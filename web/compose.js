@@ -5,7 +5,8 @@
 // card for a command's panel (/usage, /status, /config, /mcp…: what the session draws there, with keys that drive
 // it; see parsePanel; sending text closes it first), the text box with its image attachments, the permission-mode picker, the Remote Control switch (see parseRemote) and Send. While Claude works and the box is
 // empty, Send is a red Stop button (so is Esc in an empty box); with text in the box it sends, as always. A sent message goes to the feed at once
-// (the 'fv-chat-sent' event): chat.js shows it until the transcript has it. Interrupt on a queued message there
+// (the 'fv-chat-sent' event): chat.js shows it until the transcript has it, or says it is still in Claude Code's
+// prompt when the Enter left it there ('fv-chat-stuck', see watchSent). Interrupt on a queued message there
 // ('fv-chat-sendnow') presses Claude Code's "send now" chord, Ctrl+X then Ctrl+S: it stops the step Claude is on
 // and sends every queued message as the next turn, the way that terminal's "ctrl+x ctrl+s to send now" does.
 // Unsend there ('fv-chat-unsend') takes one message back out of Claude Code's queue the way its terminal does:
@@ -1435,6 +1436,39 @@ export function mountCompose(slot, s) {
     }
   }
 
+  // ----- still in Claude Code's prompt after the Enter -----
+  // Enter sends what the prompt holds, and the prompt empties (a message sent mid-turn waits in the queue, above it).
+  // The text still there on two looks means Claude Code took the Enter as something else: the bubble says so
+  // ('fv-chat-stuck', chat.js) with a Send it button ('fv-chat-enter': Enter once more), rather than show
+  // "Sending…" until it drops off. stuck: id -> { want, typed, shown } of the one it kept
+  const STUCK_LOOKS_MS = [1200, 1500];
+  const stuck = new Map();
+  // (wrapping, and a "\" Claude Code made a new line of, change neither)
+  const squash = (v) => flat(v).replace(/[\s\\]/g, '');
+  const stillTyped = (id, want) => { const b = screenReady(id) ? boxNow(id) : null; return !!b && squash(b.text).startsWith(want); };
+  async function watchSent(id, typed, shown) {
+    const want = squash(typed).slice(0, 40);
+    if (!want) return;
+    for (const ms of STUCK_LOOKS_MS) {
+      await sleep(ms);
+      if (!stillTyped(id, want)) return;
+    }
+    stuck.set(id, { want, typed, shown });
+    pane.dispatchEvent(new CustomEvent('fv-chat-stuck', { detail: { id, text: shown } }));
+  }
+  // -> true when the Enter went in
+  function enterAgain(id) {
+    const s = stuck.get(id), t = termApi();
+    if (!s || !t || !hosts.get(id)?.alive) { err('The session isn\'t running here'); return false; }
+    if (menuNow(id)) { err('Claude is asking something: answer it first'); return false; }
+    if (!stillTyped(id, s.want)) { stuck.delete(id); err('It isn\'t in Claude\'s prompt any more: see the Session tab'); return false; }
+    try { t.write(id, '\r'); } catch (e) { err(String(e?.message || e)); return false; }
+    keepSession(id);
+    stuck.delete(id);
+    watchSent(id, s.typed, s.shown);
+    return true;
+  }
+
   // what the box holds, or (cmd) a command the model picker sends; the draft stays as it is then. In bash mode the
   // box holds a shell command: a typed "!" goes first (see the top), and only the command goes.
   // -> true when it went in
@@ -1568,6 +1602,7 @@ export function mountCompose(slot, s) {
       const shown = shell ? `!${msg}` : messageText(text, list.filter((a) => a.file).map((a) => a.path));
       pane.dispatchEvent(new CustomEvent('fv-chat-sent', { detail: { id, text: shown, images: shots, busy: st.busy, pick } }));
       rememberSent(id, shown);
+      watchSent(id, typed, shown);
       if (!fromBox) return true;
       clearSent(id, raw, quote, list, shell);
       return true;
@@ -2633,6 +2668,7 @@ export function mountCompose(slot, s) {
   fileIn.addEventListener('change', () => { addFiles(fileIn.files); fileIn.value = ''; ta.focus(); });
 
   pane.addEventListener('fv-chat-sendnow', (e) => { if (e.detail && sendNow(e.detail.id)) e.detail.ok = true; });
+  pane.addEventListener('fv-chat-enter', (e) => { if (e.detail && enterAgain(e.detail.id)) e.detail.ok = true; });
   pane.addEventListener('fv-chat-unsend', (e) => { const x = e.detail; if (x) x.done = unsendQueued(x.id, x.text, typeof x.queue === 'function' ? x.queue : () => x.queue); });
   pane.addEventListener('fv-chat-rewind', (e) => { const x = e.detail; if (x) rewindTo(x.id, x.text, x.nth | 0, typeof x.edit === 'string' ? x.edit : null); });
   root.addEventListener('click', (e) => {
