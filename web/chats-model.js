@@ -65,7 +65,8 @@
 //   botChoices({ accounts, models, efforts, modelLabel, current? }) -> { account, model, effort }: the New bot and Edit
 //       bot pickers' choices, each [{ value, label }]; current { account?, model? } (the bot being edited) keeps a value
 //       no longer offered (an account gone, an older model) as the first choice. The model and effort lists start
-//       with Dynamic ({ value: 'dynamic', label: 'Dynamic', note }: sized for each message, sizeTask)
+//       with Dynamic ({ value: 'dynamic', label: 'Dynamic', note }: sized for each message, sizeTask); the account
+//       list ends with it (each new conversation starts on the account with the most usage left: bots.js)
 //   botEdits(bot, values) -> body for POST /bots/:id: only the fields that changed (name and brief trimmed; shape and
 //       color '' or null: back to the automatic pick, sent as null); {} when nothing did
 //   taskSchedule(task) -> string   a task's schedule (state.bots[].tasks, bots.js): "Daily 9:00", "Weekdays 9:00",
@@ -456,10 +457,11 @@ export function botFeed(items) {
 const EFFORT_LABEL = { xhigh: 'Extra high' };
 export const DYNAMIC = 'dynamic'; // a bot's model or effort that is sized per message (sizeTask), not fixed
 const DYNAMIC_CHOICE = { value: DYNAMIC, label: 'Dynamic', note: 'sized for each message' };
+const DYNAMIC_ACCOUNT = { value: DYNAMIC, label: 'Dynamic', note: 'the one with the most usage left' };
 export function botChoices({ accounts = [], models = [], efforts = [], modelLabel = (m) => m, current = {} } = {}) {
   const keep = (list, v) => (v && v !== DYNAMIC && !list.includes(v) ? [v, ...list] : list);
   return {
-    account: keep(accounts, current.account).map((a) => ({ value: a, label: `Account ${a}` })),
+    account: [...keep(accounts, current.account).map((a) => ({ value: a, label: `Account ${a}` })), DYNAMIC_ACCOUNT],
     model: [DYNAMIC_CHOICE, ...keep(models, current.model).map((m) => ({ value: m, label: modelLabel(m) }))],
     effort: [DYNAMIC_CHOICE, ...efforts.map((e) => ({ value: e, label: EFFORT_LABEL[e] || e.charAt(0).toUpperCase() + e.slice(1) }))],
   };

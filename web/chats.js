@@ -9,7 +9,7 @@
 // a box that sends to every member the way the team menu's "Message the team" does (ui.messageTeam in app.js).
 //
 // Bots: "+" opens the New bot form in the chat side (name, what it does, account, model, effort, its shape and colour;
-// account B and a Dynamic model and effort by default, the shape and colour picked for it unless you pick), which POSTs
+// account B and a Dynamic model and effort by default (the account may be Dynamic too: the one with the most usage left), the shape and colour picked for it unless you pick), which POSTs
 // /bots: the server makes its folder ~/Bots/<slug> with its CLAUDE.md and starts it, and the new row is picked.
 // Account, model, effort, shape and colour are styled pickers (picker.js, in the chat box's model-menu look), not
 // browser dropdowns; their choices come from chats-model.js botChoices. Model and effort may each be Dynamic (a new
@@ -58,7 +58,7 @@
 // and the Watch mode switch (POST /settings { chief: { watch } }). With ?fixture=1 nothing is posted: Start fakes
 // a Chief from a fixture conversation and the briefing is built here from the fixture sessions; a bot made with the
 // form is kept in the page, and Start, Edit bot, Rename and Remove bot only record their POSTs.
-import { C, esc, setHTML, badge, acctTag, acctColor, isAcct, repoChip } from './cards.js';
+import { C, esc, setHTML, badge, acctColor, isAcct, repoChip } from './cards.js';
 import { icon } from './icons.js';
 import { renderChatPane } from './chat.js';
 import { onRekey, hosts, termApi } from './term.js';
@@ -246,7 +246,7 @@ function rowHtml(state, c, now) {
   return `<button type="button" class="ch-row${on ? ' on' : ''}${c.needsYou ? ' needs' : ''}${un ? ' unread' : ''}${c.kind !== 'team' && !c.id ? ' ghost' : ''}" role="option" aria-selected="${on}"`
     + ` data-key="${esc(c.key)}"${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''}${c.botId ? ` data-bot="${esc(c.botId)}"` : ''} style="--rc:${esc(colorOf(c))}" title="${esc(c.name || '')}">`
     + `<span class="ch-av"${c.kind === 'team' ? '' : ` title="${esc(doingTip(c))}"`}>${avatar(state, c, 40)}</span>`
-    + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${esc(c.name || 'bot')}</span>${c.kind === 'team' ? '' : acctTag(c.account)}`
+    + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${esc(c.name || 'bot')}</span>`
     + `<span class="ch-time">${pin}${esc(when(c.at, now))}</span></span>`
     + `<span class="ch-l2"><span class="ch-prev">${esc(previewOf(c))}</span>${c.needsYou ? '<span class="ch-flag" title="needs you">!</span>' : un ? '<span class="ch-dot" aria-label="unread"></span>' : ''}</span>`
     + `</span></button>`;
@@ -261,12 +261,6 @@ function listHtml(state, list, now, noBots) {
   return list.map((c) => rowHtml(state, c, now)).join('') + intro;
 }
 
-function acctDots(state, contacts) {
-  const list = Array.isArray(state.accounts) && state.accounts.length ? state.accounts.filter(isAcct)
-    : [...new Set(contacts.map((c) => c.account).filter(isAcct))].sort();
-  return list.map((a) => `<span class="ch-acct" style="background:${esc(acctColor(a))}" title="Claude account ${esc(a)}">${esc(a)}</span>`).join('');
-}
-
 // ---------- build ----------
 function build(el, ui) {
   el.innerHTML = `${SOLO ? `<header class="ch-solo-top"><span class="ch-solo-m">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 20 })}</span>`
@@ -277,7 +271,7 @@ function build(el, ui) {
     + `<div class="ch-popped-t">Bots is open in its own window</div><div class="ch-popped-b">`
     + `<button type="button" class="btn" data-dock="1">Bring it back</button><button type="button" class="btn primary" data-show="1">Show it</button></div></div></div>`
     + `<div class="ch"><nav class="ch-side" aria-label="bots">`
-    + `<div class="ch-top"><span class="ch-title">Bots</span><span class="ch-accts"></span><span class="grow"></span>`
+    + `<div class="ch-top"><span class="ch-title">Bots</span><span class="grow"></span>`
     + `<button type="button" class="ch-ib ch-pop" title="Open Bots in its own window" hidden>${icon('external', 15)}</button>`
     + `<button type="button" class="ch-ib ch-new" title="New bot" aria-label="New bot">${icon('plus', 16)}</button></div>`
     + `<label class="ch-search">${icon('search', 14)}<input type="search" spellcheck="false" autocomplete="off" placeholder="Search bots" aria-label="Search bots"></label>`
@@ -296,7 +290,7 @@ function build(el, ui) {
     + `<div class="ch-blank"></div></section></div>`;
   const q = (s) => el.querySelector(s);
   Object.assign(el, {
-    _ch: q('.ch'), _side: q('.ch-side'), _list: q('.ch-list'), _accts: q('.ch-accts'), _pop: q('.ch-pop'), _new: q('.ch-new'),
+    _ch: q('.ch'), _side: q('.ch-side'), _list: q('.ch-list'), _pop: q('.ch-pop'), _new: q('.ch-new'),
     _search: q('.ch-search input'), _head: q('.ch-head'), _headAv: q('.ch-head-av'), _headT: q('.ch-head-t'), _headB: q('.ch-head-b'),
     _chat: q('.ch-chat'), _chief: q('.ch-chief'), _team: q('.ch-team'), _thread: q('.ch-thread'), _ta: q('.ch-team textarea'), _send: q('.ch-team .ch-send'),
     _tnote: q('.ch-team .ch-tnote'), _blank: q('.ch-blank'), _popped: q('.ch-popped'), _onTop: q('.ch-ontop'),
@@ -496,7 +490,7 @@ function closeForm(ui) {
 // the colour the form's bot wears as picked: its own pick, else its account's
 const formColor = () => form.v.color || (isAcct(form.v.account) ? acctColor(form.v.account) : C.cyan);
 const effortHtml = (x) => `<span class="eff eff-${esc(x.value)}">${esc(x.label)}</span>`;
-const acctHtml = (a) => `<span class="ch-acct" style="background:${esc(acctColor(a))}">${esc(a)}</span>`;
+const acctHtml = (a) => (a === DYNAMIC ? '<span class="ch-acct ch-acct-dyn">~</span>' : `<span class="ch-acct" style="background:${esc(acctColor(a))}">${esc(a)}</span>`);
 const formAccounts = (state) => (Array.isArray(state.accounts) && state.accounts.some(isAcct) ? state.accounts.filter(isAcct) : ['A', 'B']);
 // the pickers' choices (chats-model.js botChoices: one more entry there is one more choice here), drawn: effort in
 // its Claude Code colour, the account's dot, each shape as a mascot in the colour picked, colours as swatches. Each
@@ -521,7 +515,7 @@ function formChoices(state, bot) {
       // a colour from the dialog (or a bot's own one not in the palette) is a choice too, after the palette
       const own = form.v.color && !PALETTE.some((x) => x[0] === form.v.color)
         ? [{ value: form.v.color, label: `Custom ${form.v.color}`, art: sw(form.v.color), btn: `${sw(form.v.color)}<span class="pk-mono">${esc(form.v.color)}</span>` }] : [];
-      return [{ value: '', label: "Its account's colour", wide: true, art: `${sw(auto, ' sm')}<span class="pk-auto">Auto</span>`, btn: `${sw(auto)}<span>Auto (account ${esc(form.v.account || '')})</span>` },
+      return [{ value: '', label: "Its account's colour", wide: true, art: `${sw(auto, ' sm')}<span class="pk-auto">Auto</span>`, btn: `${sw(auto)}<span>Auto${isAcct(form.v.account) ? ` (account ${esc(form.v.account)})` : ''}</span>` },
         ...named, ...own, { custom: true, label: 'Any colour...', wide: true, art: `${sw('', ' sm any')}<span class="pk-auto">Any...</span>` }];
     },
   };
@@ -806,7 +800,7 @@ function drawHead(el, state, c, s) {
     setHTML(el._headB, edit + (start || ''));
     return;
   }
-  setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || s.name)}</span>${acctTag(s.account)}${badge(s)}</div>`
+  setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || s.name)}</span>${badge(s)}</div>`
     + `<div class="ch-head-m">${repoChip(s)}${s.goal && setupNote(s.goal) == null ? `<span class="ch-goal" title="${esc(s.goal)}">${esc(s.goal)}</span>` : ''}</div>`);
   if (start) { setHTML(el._headB, edit + start); return; }
   const live = !s.past && inState(state, s.id);
@@ -970,7 +964,7 @@ function blankHtml(state, c, noBots) {
     const wait = chief.starting || Date.now() - chief.startedAt < START_WAIT;
     return `<div class="ch-empty ch-start">${mas}<div class="ch-empty-t">The Chief</div>`
       + `<div class="ch-empty-s">Briefs you, answers what's going on, passes your orders on</div>`
-      + `<div class="ch-defaults" title="What it starts with">Sonnet 5.5 · medium · account B</div>`
+      + `<div class="ch-defaults" title="What it starts with">Sonnet 5.5 · medium</div>`
       + `<button type="button" class="btn primary ch-start-btn"${wait ? ' disabled' : ''}>${wait ? 'Starting...' : 'Start the Chief'}</button>`
       + `${chief.err ? `<div class="ch-start-err" role="alert">${esc(chief.err)}</div>` : ''}</div>`;
   }
@@ -991,7 +985,7 @@ function introHtml(c, b, u) {
   const busy = u.starting || !!u.wait;
   const dynBoth = b && b.model === DYNAMIC && b.effort === DYNAMIC;
   const defs = b ? [dynBoth ? 'Dynamic model and effort' : b.model === DYNAMIC ? 'Dynamic model' : b.model ? modelLabel(b.model) : '',
-    dynBoth ? '' : b.effort === DYNAMIC ? 'dynamic effort' : b.effort || '', b.account ? `account ${b.account}` : ''].filter(Boolean).join(' · ') : '';
+    dynBoth ? '' : b.effort === DYNAMIC ? 'dynamic effort' : b.effort || ''].filter(Boolean).join(' · ') : '';
   return `<div class="ch-empty ch-start">${mascotSVG(c.key, { state: 'new', color: colorOf(c), size: 72, shape: c.shape || undefined })}<div class="ch-empty-t">${esc(c.name)}</div>`
     + (b && b.brief ? `<div class="ch-brief">${esc(b.brief)}</div>` : '<div class="ch-empty-s">No instructions yet: give it some in Edit bot.</div>')
     + (defs ? `<div class="ch-defaults" title="What it starts with">${esc(defs)}</div>` : '')
@@ -1173,7 +1167,6 @@ export function renderChats(el, view, ui) {
   const noBots = !contacts.some((x) => x.kind === 'bot');
   const shown = contacts.filter((c) => matches(c, query));
   el._shown = shown;
-  setHTML(el._accts, acctDots(state, contacts));
   setHTML(el._list, listHtml(state, shown, now, noBots));
 
   const c = contacts.find((x) => x.key === selKey) || null;

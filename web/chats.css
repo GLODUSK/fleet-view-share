@@ -15,11 +15,12 @@
 /* ---- the list's top bar: title, account dots, pop-out, + ---- */
 .ch-top { flex: none; display: flex; align-items: center; gap: 8px; height: 52px; padding: 0 10px 0 16px; }
 .ch-title { font: 650 17px/1 var(--font-display); letter-spacing: 0.01em; color: var(--text); }
-.ch-accts { display: inline-flex; gap: 4px; margin-left: 2px; }
 .ch-acct {
   display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%;
   color: #0a0c13; font: 700 9.5px/1 var(--font-ui); opacity: 0.9;
 }
+/* the Dynamic account: whichever has the most usage left */
+.ch-acct-dyn { background: linear-gradient(135deg, var(--acct-a, #58a6ff), var(--acct-b, #af87ff)); font-size: 12px; }
 .ch-ib {
   flex: none; display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 9px;
   background: none; color: var(--dim); cursor: pointer; transition: background-color 140ms var(--ease), color 140ms var(--ease);

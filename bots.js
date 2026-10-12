@@ -100,12 +100,13 @@ function checkBrief(v) {
   return { brief };
 }
 // account, model, effort, as POST /api/sessions takes them, or 'dynamic' for the model or the effort (sized for each
-// message Henry sends from the page: web/chats-model.js sizeTask, switched through switchTo below); one left out is
-// base's. -> { account, model, effort } or { err }
+// message Henry sends from the page: web/chats-model.js sizeTask, switched through switchTo below) or for the account
+// (each new conversation starts on the one with the most usage left: roomiest); one left out is base's.
+// -> { account, model, effort } or { err }
 function checkOpts(b, base, accounts) {
   const out = { account: base.account, model: base.model, effort: base.effort };
   if (b.account != null) {
-    if (typeof b.account !== 'string' || !accounts.includes(b.account)) return { err: `account must be one of ${accounts.join(', ')}` };
+    if (typeof b.account !== 'string' || (b.account !== DYNAMIC && !accounts.includes(b.account))) return { err: `account must be one of ${accounts.join(', ')}, or dynamic` };
     out.account = b.account;
   }
   if (b.model != null) {
@@ -117,6 +118,24 @@ function checkOpts(b, base, accounts) {
     out.effort = b.effort;
   }
   return out;
+}
+// A Dynamic account's pick for a new conversation: of the accounts here, the one with the most usage left, judged by
+// the fuller of its 5-hour and weekly limits (usage: /state's usage, usage-watch.js view), the weekly one breaking a
+// tie. An account with no read yet comes after every one with a read; with none read, the default account (else the
+// first). Resuming a conversation keeps the account it ran on.
+function roomiest(accounts, usage, def = NEW_BOT.account) {
+  const list = (accounts || []).filter((a) => typeof a === 'string' && a);
+  if (!list.length) return def;
+  const pct = (x) => (x && Number.isFinite(x.pct) ? x.pct : null);
+  const score = (a) => {
+    const u = usage && usage[a];
+    const f = pct(u && u.five), w = pct(u && u.week);
+    return f == null && w == null ? null : { top: Math.max(f ?? 0, w ?? 0), week: w ?? 0 };
+  };
+  const read = list.map((a) => ({ a, s: score(a) })).filter((x) => x.s);
+  if (!read.length) return list.includes(def) ? def : list[0];
+  read.sort((x, y) => x.s.top - y.s.top || x.s.week - y.s.week);
+  return read[0].a;
 }
 // Long context (Henry, 2026-10-12): a bot keeps its whole chat with Henry in context. It never hands off at 200k
 // (~/.claude/hooks/session-length.py leaves sessions in ~/Bots alone), and runs on a model's 1M-context version:
@@ -272,7 +291,8 @@ function loadBots(saved, base = BOTS_DIR) {
 // ---------- the server's part ----------
 // deps: { api (api.js: hostList, deliverText, startBot, openBot, endHosted), ctx (api.js's ctx), saved (settings.bots as
 //   saved), save() (the registry changed), log(text), demo, exists(id) -> its log is on disk, turnInfo(id) -> { promptAt }
-//   or null, sessionsFile, trustFolder(dir), accounts() -> the account letters, rename(id, name) (its Fleet View name),
+//   or null, sessionsFile, trustFolder(dir), accounts() -> the account letters, usage() -> /state's usage (a Dynamic
+//   account's pick: roomiest), rename(id, name) (its Fleet View name),
 //   base (the Bots folder) and template (bot/BRIEF.md), which tests set }
 function createBots(deps) {
   const d = deps || {};
@@ -295,6 +315,7 @@ function createBots(deps) {
   const byId = (id) => bots.find((b) => b.id === id) || null;
   const view1 = (b) => viewOf(b, live.get(b.id));
   const accounts = () => { try { const a = d.accounts ? d.accounts() : null; if (Array.isArray(a) && a.length) return a; } catch {} return ['A', 'B']; };
+  const usageNow = () => { try { return (d.usage && d.usage()) || {}; } catch { return {}; } };
   // bot/BRIEF.md with its CRs dropped (a CRLF checkout), so every CLAUDE.md has the same line ends
   const template = () => fs.readFileSync(templateFile, 'utf8').split(String.fromCharCode(13)).join('');
   const noBot = () => [404, { ok: false, message: 'no such bot (GET /api/bots lists them)' }];
@@ -405,7 +426,9 @@ function createBots(deps) {
         if (code === 503 || code === 502 || (out && out.elsewhere)) return [code, { ...out, bot: view1(bot) }];
         log(`could not resume ${bot.name} (${last}: ${(out && out.message) || code}); it starts a new conversation`);
       }
-      const [code, out] = await d.api.startBot({ repo: bot.folder, account: bot.account, ...runOpts(bot), prompt: startPrompt(bot.name), name: bot.name, role }, d.ctx);
+      const account = bot.account === DYNAMIC ? roomiest(accounts(), usageNow()) : bot.account;
+      if (bot.account === DYNAMIC) log(`${bot.name}: dynamic account, starting on ${account}`);
+      const [code, out] = await d.api.startBot({ repo: bot.folder, account, ...runOpts(bot), prompt: startPrompt(bot.name), name: bot.name, role }, d.ctx);
       // another start got in first (it is running already): that one is the bot
       if (code === 409 && convId(out && out.id)) {
         follow(bot, convId(out.id));
@@ -791,4 +814,4 @@ function createBots(deps) {
 }
 
 module.exports = { createBots, elsewhereBots, elsewhereView, checkName, checkBrief, checkOpts, checkLook, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
-  startPrompt, idNote, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX };
+  startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX };

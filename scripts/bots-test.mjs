@@ -57,6 +57,14 @@ test('account, model and effort: the defaults, or what POST /api/sessions takes'
   assert.deepEqual(B.checkOpts({}, C.DEFAULTS, ['A', 'B']), { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium' });
   assert.deepEqual(B.checkOpts({ account: 'A', model: 'opus', effort: 'high' }, C.DEFAULTS, ['A', 'B']), { account: 'A', model: 'opus', effort: 'high' });
   assert.ok(B.checkOpts({ account: 'Z' }, C.DEFAULTS, ['A', 'B']).err);
+  assert.equal(B.checkOpts({ account: 'dynamic' }, C.DEFAULTS, ['A', 'B']).account, 'dynamic');
+  // a Dynamic account: the one with the most usage left, by the fuller of its two limits, the weekly one breaking a tie
+  const u = (five, week) => ({ five: five == null ? null : { pct: five }, week: week == null ? null : { pct: week } });
+  assert.equal(B.roomiest(['A', 'B'], { A: u(80, 20), B: u(10, 50) }), 'B');
+  assert.equal(B.roomiest(['A', 'B'], { A: u(10, 30), B: u(30, 10) }), 'B');
+  assert.equal(B.roomiest(['A', 'B'], { A: u(5, 5) }), 'A', 'an account with no read comes after one with a read');
+  assert.equal(B.roomiest(['A', 'B'], {}), 'B', 'none read: the default');
+  assert.equal(B.roomiest(['A'], null), 'A');
   assert.ok(B.checkOpts({ account: 'a' }, C.DEFAULTS, ['A', 'B']).err);
   assert.ok(B.checkOpts({ model: 'x y' }, C.DEFAULTS, ['A', 'B']).err);
   assert.ok(B.checkOpts({ effort: 'huge' }, C.DEFAULTS, ['A', 'B']).err);

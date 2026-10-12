@@ -327,16 +327,17 @@ test('mascot.js: thinking until a tool runs in this turn; the shapes; the same c
 test('botChoices: one list per picker, labels, a value no longer offered kept first', () => {
   const ml = (m) => m.toUpperCase();
   const ch = botChoices({ accounts: ['A', 'B'], models: ['m1', 'm2'], efforts: ['low', 'medium', 'xhigh'], modelLabel: ml });
-  assert.deepEqual(ch.account, [{ value: 'A', label: 'Account A' }, { value: 'B', label: 'Account B' }]);
+  assert.deepEqual(ch.account, [{ value: 'A', label: 'Account A' }, { value: 'B', label: 'Account B' }, { value: 'dynamic', label: 'Dynamic', note: 'the one with the most usage left' }]);
   // Dynamic first in the model and effort lists
   assert.deepEqual(ch.model.map((x) => x.label), ['Dynamic', 'M1', 'M2']);
   assert.deepEqual(ch.effort.map((x) => x.label), ['Dynamic', 'Low', 'Medium', 'Extra high']);
   assert.equal(ch.model[0].value, DYNAMIC); assert.equal(ch.effort[0].value, 'dynamic');
   const kept = botChoices({ accounts: ['A'], models: ['m1'], efforts: [], current: { account: 'C', model: 'old' } });
-  assert.deepEqual(kept.account.map((x) => x.value), ['C', 'A']);
+  assert.deepEqual(kept.account.map((x) => x.value), ['C', 'A', 'dynamic']);
   assert.deepEqual(kept.model.map((x) => x.value), ['dynamic', 'old', 'm1']);
   assert.deepEqual(botChoices({ models: ['m1'], current: { model: 'dynamic' } }).model.map((x) => x.value), ['dynamic', 'm1']); // not twice
-  assert.deepEqual(botChoices({ accounts: ['A'], current: { account: 'A' } }).account.length, 1); // offered: not twice
+  assert.deepEqual(botChoices({ accounts: ['A'], current: { account: 'A' } }).account.length, 2); // offered: not twice
+  assert.deepEqual(botChoices({ accounts: ['A'], current: { account: 'dynamic' } }).account.map((x) => x.value), ['A', 'dynamic']);
   assert.deepEqual(botChoices().effort.map((x) => x.value), ['dynamic']);
 });
 test('botEdits: only what changed, trimmed; the look back to auto is null; colours in lower case', () => {

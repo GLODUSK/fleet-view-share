@@ -6696,7 +6696,7 @@ function chiefWatchFacts(chiefIds) {
     log: (t) => logOnce(t, t),
     exists: (id) => !!conversationLog(id),
     turnInfo: (id) => apiCtx.turnInfo(id),
-    sessionsFile: HOSTJS.sessionsFile(), trustFolder, accounts: () => accountsHere(), rename: (id, name) => renameSession(id, name),
+    sessionsFile: HOSTJS.sessionsFile(), trustFolder, accounts: () => accountsHere(), usage: () => (DEMO ? {} : USAGE.view()), rename: (id, name) => renameSession(id, name),
   });
   apiCtx.bots = { list: () => BOTS.list(), create: (b) => BOTS.create(b), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id), look: (b) => BOTS.look(b) };
   apiCtx.botOf = (id) => BOTS.vouch(id);
