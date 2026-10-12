@@ -2126,8 +2126,27 @@ function checkAlerts(s, prev) {
 // log's modified time: something can touch a file without changing a byte, and that must not keep the chat
 // listed on one machine only. Logs older than the window are read once at start; one that turns out not to
 // be a finished turn is dropped. A dropped log is not read again until its modified time changes.
+// A conversation another device runs is on the list here exactly while it is on that device's (ownerView), whatever
+// this copy says, while that device is there: the same chat comes and goes on both machines at once.
 const KEEP_DONE_MS = 3 * 3600e3;
 const passed = new Map(); // session id -> log mtime when it was dropped
+// The device that runs it (sync-live.js), while that device is there and its snapshot was read: { listed, last }.
+// listed: its snapshot names it, which it does exactly while it keeps it on its own list (the snapshot is that list);
+// last: when it saw its own copy of the log move. null when it runs here, no other device owns it, or that device is
+// offline or not known yet: then this copy's own rules stand. This copy is laid down late, a log only touched there
+// (resumed, closed) does not change here at all, and one laid down mid-turn can look unfinished here, so by this copy
+// alone a chat would leave the list here sooner or later than there
+function ownerView(id) {
+  const rv = pollRemote;
+  if (!rv || liveProcs.has(id)) return null;
+  const o = rv.owners.get(String(id).toLowerCase());
+  if (!o || o.moving === 'away') return null;
+  const r = SYNC_LIVE.remoteFor(rv.live, o.device, id);
+  if (!r) return null;
+  if (r.entry) return { listed: true, last: Number(r.entry.last) || 0 };
+  return rv.live.fresh instanceof Set && rv.live.fresh.has(String(o.device).toLowerCase()) ? { listed: false, last: 0 } : null;
+}
+const ownerLast = (id) => { const v = ownerView(id); return v ? v.last : 0; };
 const endedAtOf = (s) => s.turnEndT || s.mtime || 0;
 const keepDone = (s, now) => s.state === 'DONE' && now - endedAtOf(s) < KEEP_DONE_MS;
 // finished hours ago by its own log's end of turn. A DONE forced another way (a handoff that killed a turn) is
@@ -2161,7 +2180,7 @@ function discover() {
         if (!f.endsWith('.jsonl')) continue;
         const file = path.join(pdir, f), m = mtime(file), id = f.slice(0, -6);
         const rem = remembered.sessions.has(id) && now - m < REMEMBER_MS * 7;
-        if (!sessions.has(id) && !rem && !liveWaiting(id) && (now - m > horizon || passed.get(id) === m)) continue;
+        if (!sessions.has(id) && !rem && !liveWaiting(id) && (now - m > horizon || passed.get(id) === m) && !ownerView(id)?.listed) continue;
         const old = found.get(id);
         if (!old || m > old.m) found.set(id, { file, pdir, m, account: r.account, root: r.dir });
       }
@@ -2181,7 +2200,11 @@ function discover() {
     }
     if (s.file === x.file) s.mtime = x.m;
   }
-  for (const s of [...sessions.values()]) if (endedLongAgo(s, now) || (s.state && now - s.mtime > WINDOW_MS && !keepDone(s, now) && !keepRemembered(s, now) && !liveWaiting(s.id))) dropSession(s);
+  for (const s of [...sessions.values()]) {
+    const ov = s.demo ? null : ownerView(s.id);
+    if (ov) { if (!ov.listed) dropSession(s); continue; }
+    if (endedLongAgo(s, now) || (s.state && now - s.mtime > WINDOW_MS && !keepDone(s, now) && !keepRemembered(s, now) && !liveWaiting(s.id))) dropSession(s);
+  }
 }
 
 function poll() {
@@ -2212,6 +2235,14 @@ function pollOne(s, now, budget) {
   };
   s.mtime = mtime(s.file);
   ingest((r) => ingestMain(s, r), readNew(s.file, 3 << 20));
+  // old by this copy, but another device runs it: on the list exactly while it is on that device's, whatever this
+  // copy's tail says (laid down mid-turn, it can look unfinished here)
+  const ov = s.late && !s.demo ? ownerView(s.id) : null;
+  if (ov) {
+    if (!ov.listed) { dropSession(s); return; }
+    s.late = false;
+    scanPrs(s);
+  }
   // an old log that doesn't end on a finished turn: drop it before reading its agents and history
   if (s.late && (s.turnOpen || s.asking || s.apiError || s.endedOnQuestion || now - endedAtOf(s) >= KEEP_DONE_MS)) { dropSession(s); return; }
   // subagents: plain Agent calls and workflow agents, tailed while they are fresh
@@ -2423,7 +2454,7 @@ function card(s, W, f, now) {
 // conversations still going, each with its repo. A conversation's colour is a shade of its repo's
 // family, rechecked every few seconds as it moves.
 // still inside the activity window (--window); finished conversations kept longer than that don't count as hidden
-const inWindow = (s, now) => now - (s.last || s.mtime || 0) <= WINDOW_MS;
+const inWindow = (s, now) => now - Math.max(s.last || s.mtime || 0, s.demo ? 0 : ownerLast(s.id)) <= WINDOW_MS;
 function activeSessions(now) {
   const list = [...sessions.values()].filter((s) => s.name && s.state !== 'DONE' && s.state !== 'IDLE');
   for (const s of list) refreshHue(s, now);
