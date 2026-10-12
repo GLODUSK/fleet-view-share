@@ -498,7 +498,10 @@ function linkedDirs() {
   let names = [];
   try { names = fs.readdirSync(home); } catch {}
   for (const n of names) if (n[0] === '.') { const x = real(path.join(home, n)); if (x) out.push(x); }
-  for (const d of P.isWin ? [env.APPDATA, env.LOCALAPPDATA] : appDirs(null)) {
+  // a Mac's counterparts of %APPDATA% and %LOCALAPPDATA% too: an app's folder there may be a link (as Claude's is on
+  // the PC), and those are a level below ~/Library
+  const mac = P.isMac ? [path.join(home, 'Library', 'Application Support'), path.join(home, 'Library', 'Caches')] : [];
+  for (const d of P.isWin ? [env.APPDATA, env.LOCALAPPDATA] : [...appDirs(null), ...mac]) {
     if (typeof d !== 'string' || !d || !path.isAbsolute(d)) continue;
     let ents = [];
     try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch {}

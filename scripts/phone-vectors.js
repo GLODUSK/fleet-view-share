@@ -111,7 +111,10 @@ if (process.argv.includes('--check')) {
   let old = '';
   try { old = fs.readFileSync(OUT, 'utf8'); } catch {}
   // a checkout with core.autocrlf has CRLF line ends
-  if (old.replace(/\r\n/g, '\n') !== text) { console.error('docs/phone-vectors.json differs from a fresh run: node scripts/phone-vectors.js'); process.exitCode = 1; }
+  // the z=1 envelope's ciphertext is node's raw DEFLATE, which another zlib (another node, or a Mac's) may make
+  // differently: it is left out of the compare (relay-test.js opens the stored one to its exact plaintext)
+  const same = (t) => { try { return JSON.stringify(JSON.parse(t), (k, v) => (v && typeof v === 'object' && v.z === 1 && typeof v.c === 'string' ? { ...v, c: '(z=1)' } : v)); } catch { return t; } };
+  if (same(old.replace(/\r\n/g, '\n')) !== same(text)) { console.error('docs/phone-vectors.json differs from a fresh run: node scripts/phone-vectors.js'); process.exitCode = 1; }
   else console.log('docs/phone-vectors.json is current');
 } else {
   fs.writeFileSync(OUT, text);

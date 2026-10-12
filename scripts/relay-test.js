@@ -107,7 +107,11 @@ const CWD = path.join(KNOWN, 'sub'), ELSEWHERE = path.join(T, 'elsewhere');
 // dot-folder, a folder in the app data, and one that only ran in ELSEWHERE
 // (the app data folders sit outside the fake home, so each rule is tested on its own: on a real Windows PC they are
 // inside it, and the home rule and the app data rule both refuse the home folder)
-const HOME = path.join(T, 'home'), APPDATA = path.join(T, 'appdata', 'Roaming'), LOCALAPPDATA = path.join(T, 'appdata', 'Local');
+const HOME = path.join(T, 'home');
+// the app data folders as each system has them: %APPDATA% and %LOCALAPPDATA% on Windows, their counterparts under
+// ~/Library on a Mac (relay.js appDirs and linkedDirs read those there), so the fence's cases mean the same on both
+const APPDATA = process.platform === 'darwin' ? path.join(HOME, 'Library', 'Application Support') : path.join(T, 'appdata', 'Roaming');
+const LOCALAPPDATA = process.platform === 'darwin' ? path.join(HOME, 'Library', 'Caches') : path.join(T, 'appdata', 'Local');
 const DRIVE = path.parse(T).root, WT = path.join(KNOWN, '.claude', 'worktrees', 'wt'), INAPP = path.join(LOCALAPPDATA, 'tool', 'repo');
 // another drive's top (one that holds neither the home folder nor the app data), and a folder on it with no dot-named
 // step (for a link out of the repo to another drive), where this PC has one
