@@ -2250,8 +2250,9 @@ const ownerLast = (id) => { const v = ownerView(id); return v ? v.last : 0; };
 const endedAtOf = (s) => s.turnEndT || s.mtime || 0;
 const keepDone = (s, now) => s.state === 'DONE' && now - endedAtOf(s) < KEEP_DONE_MS;
 // finished hours ago by its own log's end of turn. A DONE forced another way (a handoff that killed a turn) is
-// left to the window rule, and so is one another device owns and still lists: that device's state stands
-const endedLongAgo = (s, now) => s.state === 'DONE' && !s.turnOpen && !s.remote?.entry && !!s.turnEndT && now - s.turnEndT >= KEEP_DONE_MS && !liveWaiting(s.id);
+// left to the window rule, and so is one another device owns and still lists: that device's state stands. The Bots
+// tab's conversations (overseerKeep) are never dropped this way
+const endedLongAgo = (s, now) => s.state === 'DONE' && !s.turnOpen && !s.remote?.entry && !!s.turnEndT && now - s.turnEndT >= KEEP_DONE_MS && !liveWaiting(s.id) && !overseerKeep.has(s.id);
 // an unfinished conversation the map showed (remembered): kept while it was active in the last day
 const keepRemembered = (s, now) => s.state !== 'DONE' && remembered.sessions.has(s.id) && now - (s.actT || s.mtime || 0) < REMEMBER_MS;
 // its live claude waits on you (a prompt, or a panel left open): kept however long its log has been quiet
