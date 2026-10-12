@@ -89,7 +89,7 @@ const trMac = P.makeTranslate({ roots: () => Object.values(MACR), originOf: (r) 
 
 // a machine's settings, as fleet-view.js's prefsGroups gives them
 function machine() {
-  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], keepPins: [], parity: [] };
+  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], dynamicChats: [], keepPins: [], parity: [] };
 }
 const pcSet = machine(), macSet = machine();
 const T0 = Date.parse('2026-10-11T12:00:00Z');
@@ -469,6 +469,11 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     'pinOverrides: stay with no host, a bad id, an unknown mode or no time is no choice');
   eq(P.cleanPinOverride({ id: id(1), mode: 'free', hostDevice: MAC, at: 5 }), { id: id(1), mode: 'free', at: 5 }, 'pinOverrides: no hostDevice without a host');
   ok(P.GROUP_NAMES.includes('pinOverrides') && P.GROUPS.pinOverrides.key({ id: id(1) }) === id(1), 'pinOverrides: a shared group, one per chat');
+  // ---------- dynamicChats: a chat's Dynamic parts ----------
+  eq(P.cleanDynamicChat({ id: id(2).toUpperCase(), model: true, effort: false, at: 5, x: 1 }), { id: id(2), model: true, effort: false, at: 5 }, 'dynamicChats: an id in lower case and the two parts');
+  ok(P.cleanDynamicChat({ id: id(2), model: false, effort: false, at: 5 }) === null && P.cleanDynamicChat({ id: 'x', model: true, at: 5 }) === null && P.cleanDynamicChat({ id: id(2), model: 'yes', effort: true }) === null,
+    'dynamicChats: neither part, a bad id or no time is nothing');
+  ok(P.GROUP_NAMES.includes('dynamicChats') && P.GROUPS.dynamicChats.key({ id: id(2) }) === id(2), 'dynamicChats: a shared group, one per chat');
 
   // ---------- "Start clean" (fleet-view.js freshBeforeStart): every group emptied but its local-only items, no saved
   // state: the first join takes the rows' items as they are, keeps the local-only ones and writes nothing back ----------

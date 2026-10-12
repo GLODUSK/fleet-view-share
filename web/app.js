@@ -2910,6 +2910,8 @@ async function startLead({ folder, account }) {
 // "Model ▸", "Effort ▸", "Fast mode ▸": one setting for each of them, typed in as /model <id>, /effort <level> or
 // /fast on|off. Claude Code runs these at once, even mid-turn. A tick: every one of them has it already; "2 of 5":
 // some do (read from each one's latest reply). /model and /effort also become the default for new sessions.
+// Dynamic, first in Model ▸ and Effort ▸: that part sized for each message sent from the chat box (compose.js, POST
+// /chat/dynamic); a fixed pick turns it off. Bots keep theirs in the Bots tab, so theirs are left out of it.
 function setItems(list) {
   const reach = list.filter((s) => !unreachable(s));
   if (!termApi() || !reach.length) return [];
@@ -2920,13 +2922,32 @@ function setItems(list) {
   };
   const modelOf = (s) => (s.model ? (s.context?.limit === 1000000 ? `${String(s.model).replace(/\[1m\]$/i, '')}[1m]` : s.model) : null);
   const who = n === 1 ? reach[0].name : `all ${n}`;
+  const dynList = reach.filter((s) => isConvId(s.id) && !s.bot);
+  const dynKid = (kind) => {
+    if (!dynList.length) return [];
+    const k = dynList.filter((s) => s.dynamic && s.dynamic[kind]).length, all = k === dynList.length;
+    return [{ label: 'Dynamic', icon: all ? 'check' : null, badge: k && !all ? `${k} of ${dynList.length}` : null, note: 'sized for each message',
+      run: () => runDynamic(dynList, kind, !all) }];
+  };
+  const fixed = (kind, cmd) => (s) => runSet(s, cmd, kind);
   return [
-    { label: 'Model', icon: 'model', note: who, children: MODEL_IDS.map((id) => kid(modelLabel(id), (s) => modelOf(s) === id, `/model ${id}`)) },
-    { label: 'Effort', icon: 'think', note: who, children: EFFORTS.map((e) => kid(e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1), (s) => s.effort === e, `/effort ${e}`)) },
+    { label: 'Model', icon: 'model', note: who, children: [...dynKid('model'), ...MODEL_IDS.map((id) => ({ ...kid(modelLabel(id), (s) => modelOf(s) === id && !(s.dynamic && s.dynamic.model), `/model ${id}`), run: () => fixed('model', `/model ${id}`)(reach) }))] },
+    { label: 'Effort', icon: 'think', note: who, children: [...dynKid('effort'), ...EFFORTS.map((e) => ({ ...kid(e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1), (s) => s.effort === e && !(s.dynamic && s.dynamic.effort), `/effort ${e}`), run: () => fixed('effort', `/effort ${e}`)(reach) }))] },
     { label: 'Fast mode', icon: 'fast', note: who, children: [kid('On', (s) => s.fast === true, '/fast on'), kid('Off', (s) => s.fast === false, '/fast off')] },
   ];
 }
-async function runSet(list, cmd) {
+// Dynamic on or off for that part (kind 'model' or 'effort') of each conversation in list (POST /chat/dynamic)
+async function runDynamic(list, kind, on) {
+  const res = await Promise.all(list.map((s) => fetch('/chat/dynamic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: s.id, [kind]: on }) })
+    .then((r) => r.ok, () => false)));
+  const ok = res.filter(Boolean).length, who = list.length === 1 ? list[0].name : `${list.length} conversations`;
+  toast(ok === list.length ? `Dynamic ${kind} ${on ? 'on' : 'off'} · ${who}` : `Dynamic ${kind}: ${ok} of ${list.length} changed`, ok === list.length ? C.mint : C.red);
+  poll();
+}
+// kind: a fixed model or effort, which turns Dynamic off for that part first where it was on
+async function runSet(list, cmd, kind = null) {
+  const dyn = kind ? list.filter((s) => isConvId(s.id) && !s.bot && s.dynamic && s.dynamic[kind]) : [];
+  if (dyn.length) await Promise.all(dyn.map((s) => fetch('/chat/dynamic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: s.id, [kind]: false }) }).catch(() => null)));
   toast(`${cmd} → ${list.length === 1 ? list[0].name : `${list.length} conversations`}…`, C.dim);
   let res;
   try { res = { results: await sendEach(list, cmd) }; res.ok = res.results.some((x) => x.ok); } catch (e) { res = { ok: false, results: [], message: String(e?.message || e) }; }

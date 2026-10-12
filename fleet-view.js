@@ -527,6 +527,20 @@ function cleanPinOverrides(list) {
   return new Map([...out].sort((a, b) => a[1].at - b[1].at).slice(-PIN_OVERRIDES_MAX));
 }
 let pinOverrides = DEMO ? new Map() : cleanPinOverrides(saved.pinOverrides) || new Map();
+// Dynamic for any chat (its model menu, POST /chat/dynamic): settings.dynamicChats, [{ id, model, effort, at }]
+// (sync-prefs.js cleanDynamicChat), the parts of a conversation's model and effort sized for each message Henry sends
+// from the page (web/compose.js dynamicPick; a bot's are its own, bots.js). At most 500 (the newest), the same on every
+// device (the dynamicChats group); one with neither part is dropped. New sessions keep the default model and effort
+const DYNAMIC_CHATS_MAX = 500;
+function cleanDynamicChats(list) {
+  if (!Array.isArray(list)) return null;
+  const out = new Map();
+  for (const x of list.slice(-DYNAMIC_CHATS_MAX * 2)) { const p = SYNC_PREFS.cleanDynamicChat(x); if (p) { out.delete(p.id); out.set(p.id, p); } }
+  return new Map([...out].sort((a, b) => a[1].at - b[1].at).slice(-DYNAMIC_CHATS_MAX));
+}
+let dynamicChats = DEMO ? new Map() : cleanDynamicChats(saved.dynamicChats) || new Map();
+// /state's dynamic for a conversation: { model, effort } (true: sized per message), or null
+const dynamicView = (id) => { const d = dynamicChats.get(String(id).toLowerCase()); return d ? { model: d.model, effort: d.effort } : null; };
 // the repo menu's order, set by hand (Shift+↑↓ or dragging a row): settings.repoOrder, roots, at most 300;
 // the ones listed come first in that order, the rest after them, busiest first
 const REPO_ORDER_MAX = 300;
@@ -764,6 +778,7 @@ function flushSettings() {
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp, pinOverrides: [...pinOverrides.values()],
+    dynamicChats: [...dynamicChats.values()],
     chief: CHIEF ? CHIEF.saveShape() : saved.chief,
     bots: BOTS ? BOTS.saveShape() : saved.bots,
     remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
@@ -4592,6 +4607,7 @@ function sessionJson(s, now, owners = syncOwners()) {
     side,
     parity: side ? { partner: null, missing: null } : null,
     team: team ? team.id : null,
+    dynamic: dynamicView(s.id),
     planSteps: prog.mode === 'plan' ? wf.phases.map((p, i) => {
       const done = wf.done === 'completed';
       return { name: p, state: done || i < wf.cur ? 'past' : i === wf.cur ? 'current' : 'future' };
@@ -6694,7 +6710,7 @@ function prefsGroups() {
     hidden: hidden.map((h) => ({ id: h.id, at: h.at, forgot: fg.has(h.id) })),
     names: [...names].map(([id, name]) => ({ id, name })),
     moved: [...moved.values()],
-    hiddenRepos, repoNames, repoOrder, mapSpots, teams, hostRules, pinOverrides: [...pinOverrides.values()],
+    hiddenRepos, repoNames, repoOrder, mapSpots, teams, hostRules, pinOverrides: [...pinOverrides.values()], dynamicChats: [...dynamicChats.values()],
     addedRepos: addedRepos.map((r) => ({ root: r.root, at: r.at })), keepPins: HK.remotePins(), parity: parityRules,
   };
 }
@@ -6724,6 +6740,7 @@ function applyPrefs(group, items) {
   else if (group === 'mapSpots') mapSpots = cleanMapSpots(items) || [];
   else if (group === 'hostRules') hostRules = cleanHostRules(items) || [];
   else if (group === 'pinOverrides') pinOverrides = cleanPinOverrides(items) || new Map();
+  else if (group === 'dynamicChats') dynamicChats = cleanDynamicChats(items) || new Map();
   else if (group === 'addedRepos') addedRepos = cleanAddedRepos(items) || [];
   else if (group === 'keepPins') { HK.setRemotePins(items); return; } // housekeeping's own file, not settings
   else if (group === 'parity') { parityRules = cleanParity(items) || []; saved.parity = parityRules; }
@@ -7208,6 +7225,46 @@ function syncPin(req, res) {
   });
 }
 
+// POST /chat/dynamic: a chat's Dynamic parts on or off -> [code, { ok, dynamic: { model, effort } | null }]
+function setDynamicChat(b) {
+  const id = typeof b.id === 'string' && UUID_RE.test(b.id) ? b.id.toLowerCase() : null;
+  if (!id) return [400, { ok: false, message: 'id must be a conversation id' }];
+  const part = (v) => v == null || typeof v === 'boolean';
+  if (!part(b.model) || !part(b.effort)) return [400, { ok: false, message: 'model and effort are true or false' }];
+  if (b.model == null && b.effort == null) return [400, { ok: false, message: 'give model, effort or both' }];
+  const was = dynamicChats.get(id) || { model: false, effort: false };
+  const next = { id, model: b.model == null ? was.model : b.model, effort: b.effort == null ? was.effort : b.effort, at: Date.now() };
+  dynamicChats.delete(id);
+  if (next.model || next.effort) {
+    dynamicChats.set(id, next);
+    if (dynamicChats.size > DYNAMIC_CHATS_MAX) dynamicChats.delete(dynamicChats.keys().next().value);
+  }
+  saveSettings();
+  return [200, { ok: true, dynamic: dynamicView(id) }];
+}
+// POST /chat/switch: Dynamic's switch before a message, only for the parts of that chat that are dynamic; api.js
+// switchModel types /model and /effort while it is idle and puts the default for new sessions back as it was
+async function switchDynamicChat(b) {
+  const id = typeof b.id === 'string' && UUID_RE.test(b.id) ? b.id.toLowerCase() : null;
+  const d = id ? dynamicChats.get(id) : null;
+  if (!d) return [409, { ok: false, message: 'this chat is not dynamic' }];
+  const body = {};
+  if (b.model != null) {
+    if (!d.model) return [409, { ok: false, message: "this chat's model is not dynamic" }];
+    if (typeof b.model !== 'string' || !API.MODEL_RE.test(b.model)) return [400, { ok: false, message: 'model must be a model name like claude-opus-5-5' }];
+    body.model = b.model;
+  }
+  if (b.effort != null) {
+    if (!d.effort) return [409, { ok: false, message: "this chat's effort is not dynamic" }];
+    if (!API.EFFORTS.includes(b.effort)) return [400, { ok: false, message: `effort must be one of ${API.EFFORTS.join(', ')}` }];
+    body.effort = b.effort;
+  }
+  if (!Object.keys(body).length) return [400, { ok: false, message: 'give model, effort or both' }];
+  const [code, out] = await API.switchModel(id, body, apiCtx, 'henry');
+  logLine(`dynamic chat ${id.slice(0, 8)}: switch to ${[body.model, body.effort].filter(Boolean).join(', ')} -> ${code}${out && out.message ? ` (${out.message})` : ''}`);
+  return [code, out];
+}
+
 // /rules/*: what the page's "Keeps on a machine…" sheet (web/keeps.js) reads while Henry sets a workspace's rule. This
 // PC's page and approved remote browsers; never another site's page. The rule itself is saved with POST /settings
 // { hostRules } (the whole list), so it syncs as the hostRules group.
@@ -7574,6 +7631,16 @@ function handleRequest(req, res) {
         if (verb !== 'start' && !liveCtx.authorize(req)) return sendJson(res, 403, { ok: false, message: 'only the Bots tab makes, changes, removes or switches a bot' });
         const r = !bid ? BOTS.create(b) : verb === 'start' ? BOTS.start(bid) : verb === 'remove' ? BOTS.remove(bid) : verb === 'switch' ? BOTS.switchTo(bid, b) : BOTS.update(bid, b);
         Promise.resolve(r).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
+      });
+    }
+    // Dynamic for any chat (web/compose.js): POST /chat/dynamic { id, model?, effort? } (true or false) turns a part on or
+    // off (dynamicChats, shared with the other devices); POST /chat/switch { id, model?, effort? } switches a dynamic part
+    // before a message, as /bots/:id/switch does for a bot. Only the page itself (its Origin, as /live)
+    if (pathname === '/chat/dynamic' || pathname === '/chat/switch') {
+      return readBody(req, res, (b) => {
+        if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
+        if (!liveCtx.authorize(req)) return sendJson(res, 403, { ok: false, message: 'only the page sets or switches a dynamic chat' });
+        Promise.resolve(pathname === '/chat/dynamic' ? setDynamicChat(b) : switchDynamicChat(b)).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
       });
     }
     // "I know, keep using": the heads-up for that episode of usage from elsewhere stays away

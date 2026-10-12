@@ -1,7 +1,8 @@
 // sync-prefs.js: what Henry decides about his conversations and workspaces, the same on every device. Hiding or
 // removing a conversation, renaming one, moving one to a workspace, hiding, adding, renaming or ordering a workspace,
 // the map's spots, the teams, where a kind of work stays (hostRules), a chat kept on or let go from a machine
-// (pinOverrides), housekeeping's keep-pins on GitHub branches (keepPins) and the parity rules (parity) are intent, not
+// (pinOverrides), the chats whose model or effort is Dynamic (dynamicChats), housekeeping's keep-pins on GitHub
+// branches (keepPins) and the parity rules (parity) are intent, not
 // a view of one screen: done on the PC, the Mac does it too. What belongs to one
 // screen (view, zoom, camera, window bounds, query, the repo filter, saved map views, accounts turned off, push
 // targets, bots, compact, finishedOpen, steady, notify) never leaves the machine.
@@ -256,6 +257,12 @@ const GROUPS = {
     out(x) { const p = this.clean(x); return p && { p, known: true }; },
     in: (p) => p, key: idOf, lkey: idOf,
   },
+  // a chat's Dynamic parts (fleet-view.js dynamicChats, POST /chat/dynamic): { id, model, effort, at }, one per chat
+  dynamicChats: {
+    clean: (x) => cleanDynamicChat(x),
+    out(x) { const p = this.clean(x); return p && { p, known: true }; },
+    in: (p) => p, key: idOf, lkey: idOf,
+  },
   // housekeeping's "Keep" on a GitHub branch (housekeeping.js remotePins): { root, branch, at } here, { repo, branch, at }
   // in the row. A GitHub branch is the same on every device, so its keep-pin is too; worktrees and local branches are
   // each machine's own and never go
@@ -326,6 +333,13 @@ function cleanPinOverride(x) {
   if (x.mode === 'stay' && !host) return null;
   const hostDevice = host && typeof x.hostDevice === 'string' && UUID_RE.test(lower(x.hostDevice)) ? lower(x.hostDevice) : null;
   return { id: lower(x.id), mode: x.mode, ...(host ? { host } : {}), ...(hostDevice ? { hostDevice } : {}), at: num(x.at) };
+}
+
+// a chat's Dynamic parts: { id, model, effort (true: sized for each message), at }; null when neither is on
+function cleanDynamicChat(x) {
+  if (!x || typeof x !== 'object' || !UUID_RE.test(lower(x.id)) || !(num(x.at) > 0)) return null;
+  const model = x.model === true, effort = x.effort === true;
+  return model || effort ? { id: lower(x.id), model, effort, at: num(x.at) } : null;
 }
 
 // local items -> portable ones, one per key: a root this machine has wins over a stale one that names the same repo
@@ -940,5 +954,5 @@ function createPrefs(o = {}) {
   return { start, stop, tick, nudge, status };
 }
 
-module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, GONE_MS, GONE_MAX, cleanRoot, cleanHostRule, cleanPinOverride, spotId, portable, cleanItems,
+module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, GONE_MS, GONE_MAX, cleanRoot, cleanHostRule, cleanPinOverride, cleanDynamicChat, spotId, portable, cleanItems,
   union, join, merge3, mergeOrder, weave, timeOf, applyOps, newest };
