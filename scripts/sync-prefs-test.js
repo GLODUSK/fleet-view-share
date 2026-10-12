@@ -79,7 +79,7 @@ const trMac = P.makeTranslate({ roots: () => Object.values(MACR), originOf: (r) 
 
 // a machine's settings, as fleet-view.js's prefsGroups gives them
 function machine() {
-  return { hidden: [], names: [], moved: [], hiddenRepos: [], repoNames: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [] };
+  return { hidden: [], names: [], moved: [], hiddenRepos: [], repoNames: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [] };
 }
 const pcSet = machine(), macSet = machine();
 const T0 = Date.parse('2026-10-11T12:00:00Z');
@@ -96,6 +96,8 @@ pcSet.mapSpots = [
   { id: `s:${id(1)}`, x: 30, y: 40, pin: true },
 ];
 pcSet.teams = [{ id: 't00000001', name: 'parity', color: '#ff9f43', members: [id(1), id(4)], lead: id(1), order: 'ship it', at: T0, messages: [], successors: [], seenAt: T0 }];
+pcSet.pinOverrides = [{ id: id(6), mode: 'free', host: 'BlackBox', hostDevice: PC.toUpperCase(), at: T0 - 1e3 }, { id: id(7), mode: 'stay', host: 'Mac', at: T0 - 1e3 }];
+macSet.pinOverrides = [{ id: id(8), mode: 'stay', host: 'BlackBox', at: T0 - 86400e3 }];
 macSet.hidden = [{ id: id(9), at: T0 - 86400e3, forgot: false }];
 macSet.hiddenRepos = [{ root: MACR.notes, at: T0 - 86400e3 }];
 macSet.mapSpots = [{ id: 'r:\\users\\henry\\notes', x: 1, y: 2, pin: false }];
@@ -158,6 +160,10 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
   eq(macSet.hidden.map((h) => h.id).sort(), [id(1), id(2), id(9)], 'first join: the rows joined with the Mac\'s own');
   ok(macSet.hidden.find((h) => h.id === id(2)).forgot === true, 'forgot comes along');
   eq(macSet.moved.find((m) => m.id === id(4)).root, MACR.fv, 'a move lands on the Mac\'s folder for that repo');
+  eq(macSet.pinOverrides.slice().sort((a, b) => (a.id < b.id ? -1 : 1)), [
+    { id: id(6), mode: 'free', host: 'BlackBox', hostDevice: PC, at: T0 - 1e3 }, { id: id(7), mode: 'stay', host: 'Mac', at: T0 - 1e3 },
+    { id: id(8), mode: 'stay', host: 'BlackBox', at: T0 - 86400e3 },
+  ], 'pinOverrides: the PC\'s choices joined with the Mac\'s own (device ids in lower case)');
   eq(macSet.repoNames, [{ root: MACR.df, name: 'DF web' }], 'a workspace name lands on the Mac\'s folder');
   eq(macSet.repoOrder, [MACR.df, MACR.fv], 'the order, on the Mac\'s folders');
   eq(macSet.hiddenRepos.map((h) => h.root), [MACR.notes], 'a repo the Mac does not have (pc-only) is not put in');
@@ -414,6 +420,18 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     'hostRules: no host, nothing to match, a bad id or a bad repo is no rule');
   eq(P.cleanHostRule({ ...rule, tools: ['ok_tool', 'bad tool', 'x;rm'], paths: ['a\nb', 'c/**'] }).tools, ['ok_tool'], 'hostRules: only plain tool names');
   ok(P.GROUP_NAMES.includes('hostRules') && P.GROUPS.hostRules.in(P.GROUPS.hostRules.out(rule).p) && P.GROUPS.hostRules.out(rule).known === true, 'hostRules: a shared group, portable as it is');
+  eq(P.cleanHostRule({ ...rule, hostDevice: PC.toUpperCase(), pinOn: 'edits' }), { id: rule.id, repo: rule.repo, paths: rule.paths, tools: rule.tools, host: rule.host, hostDevice: PC, pinOn: 'edits', note: rule.note }, 'hostRules: hostDevice (lower case) and pinOn are kept');
+  eq(P.cleanHostRule({ ...rule, hostDevice: 'BlackBox', pinOn: 'any' }), rule, 'hostRules: a hostDevice that is no device id, and the default pinOn, are left out');
+  eq(P.cleanHostRule({ ...rule, pinOn: 'sometimes' }), rule, 'hostRules: an unknown pinOn is the default');
+  eq(['edits', 'tools', 'none'].map((x) => P.cleanHostRule({ ...rule, pinOn: x }).pinOn), ['edits', 'tools', 'none'], 'hostRules: every pinOn');
+
+  // ---------- pinOverrides: a chat's own choice ----------
+  eq(P.cleanPinOverride({ id: id(1).toUpperCase(), mode: 'free', at: 5 }), { id: id(1), mode: 'free', at: 5 }, 'pinOverrides: free with no host');
+  eq(P.cleanPinOverride({ id: id(1), mode: 'stay', host: ' BlackBox ', hostDevice: MAC, at: 5, extra: 1 }), { id: id(1), mode: 'stay', host: 'BlackBox', hostDevice: MAC, at: 5 }, 'pinOverrides: stay with its host');
+  ok([{ id: id(1), mode: 'stay', at: 5 }, { id: 'x', mode: 'free', at: 5 }, { id: id(1), mode: 'clear', at: 5 }, { id: id(1), mode: 'free' }, null].every((x) => P.cleanPinOverride(x) === null),
+    'pinOverrides: stay with no host, a bad id, an unknown mode or no time is no choice');
+  eq(P.cleanPinOverride({ id: id(1), mode: 'free', hostDevice: MAC, at: 5 }), { id: id(1), mode: 'free', at: 5 }, 'pinOverrides: no hostDevice without a host');
+  ok(P.GROUP_NAMES.includes('pinOverrides') && P.GROUPS.pinOverrides.key({ id: id(1) }) === id(1), 'pinOverrides: a shared group, one per chat');
 
   await pc.stop();
   await mac.stop();

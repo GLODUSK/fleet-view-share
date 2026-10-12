@@ -88,7 +88,8 @@
 // (un-hidden, nothing starts) and Forget (off the list for good: settings.forgotten), and the top of it "Show all
 // again", "Continue all" and "Forget all" (one Undo each but Continue). A repo also offers "Remove repo", and
 // empty space "Add workspace", "Removed workspaces ▸" (every removed repo, to add one back) and "Removed
-// conversations ▸" (every removed conversation, its workspace in the note, those with none too). The browser's own menu
+// conversations ▸" (every removed conversation, its workspace in the note, those with none too). A repo's "Keeps on a
+// machine…" (just above Remove) opens keeps.js's sheet for its stays-on rule (settings.hostRules). The browser's own menu
 // is kept only in text inputs and the live terminal (and in Edge outside those targets).
 //
 // New sessions (term.js createSession) are listed in state.pending (and state.allSessions) as stand-ins
@@ -174,6 +175,7 @@ import { mountPhone } from './phone.js';
 import { mountHousekeeping } from './housekeeping.js';
 import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults } from './compose.js';
 import { forkAt } from './forkat.js';
+import { openKeeps, setRules } from './keeps.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects', 'chats'];
 // the views the tabs offer: Cards, Map, Wall, Projects, Bots (Henry, 2026-10-11: Map and Projects tabs back after #260)
@@ -473,6 +475,7 @@ async function poll() {
     online = true;
     if (st.settings) syncHiddenRepos(st.settings.hiddenRepos);
     if (st.settings) syncRepoPrefs(st.settings);
+    if (st.settings) setRules(st.settings.hostRules);
     applyRepoNames(st);
     if (st.settings && Array.isArray(st.settings.offAccounts) && !('offAccounts' in pendingSave) && Date.now() - offSentAt > 3000) offAccts = st.settings.offAccounts.filter(isAcct);
     if (st.settings) adoptSyncedHidden(st.settings);
@@ -2296,6 +2299,9 @@ function openContextMenu(target, x, y) {
     if (rm) items.push({ sep: true }, rm);
     // push sits at the bottom, just above Remove; a repo has no "Unpin from the map" (Henry, 2026-10-10)
     if (pushHook()) items.push({ sep: true }, repoPushItem(folder, repo.push || 'production'));
+    // which machine its files and some of its chats stay on (keeps.js, fleet-view.js hostRules), just above Remove
+    if (!pushHook()) items.push({ sep: true });
+    items.push(keepsItem(rIt.root, rIt.name));
     // the repo and its conversations leave every view (the workspace list too); Undo on the toast
     items.push({ sep: true }, { label: 'Remove workspace', icon: 'close', danger: true, run: () => removeRepo({ root: folder, name: target.name || repo.name }) });
     openCtxMenu({ x, y, title: target.name || repo.name || repoName(folder), dot: color, sub: folder, items });
@@ -2341,6 +2347,15 @@ function openContextMenu(target, x, y) {
   openCtxMenu({ x, y, title: s.name, dot: s.pending ? s.hue : statusColor(s), sub, items });
 }
 const statusColor = (s) => s.stateColor || C.dim;
+// "Keeps on a machine…": the sheet for the workspace's stays-on rule (keeps.js). The whole list goes back with POST
+// /settings { hostRules }, so it syncs to the other machines; the page takes the server's list on the next poll
+function keepsItem(root, name) {
+  const save = (list) => post('/settings', { hostRules: list }).then((r) => {
+    if (!r && !FIXTURE) throw new Error('Fleet View did not answer: it was not saved');
+    if (state && state.settings) { state.settings.hostRules = list; setRules(list); }
+  });
+  return { label: 'Keeps on a machine…', icon: 'pin', run: () => openKeeps({ root, name, rules: () => state?.settings?.hostRules || [], save, toast: (t) => toast(t, C.dim) }) };
+}
 // "Push to": where the work goes when it's done. Production is the standing rule (merge to main and ship); Preview
 // pushes the branch for a preview and doesn't merge. A repo's choice is the default for its conversations, a
 // conversation's own wins; the server keeps both (POST /push-target) and a hook tells the conversation at every

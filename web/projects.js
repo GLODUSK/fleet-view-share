@@ -12,6 +12,7 @@ import { C, esc, setHTML, setIcon, badge, acctTag, isAcct, ago, statusColor, isB
 import { icon } from './icons.js';
 import { renderChatPane } from './chat.js';
 import { onRekey } from './term.js';
+import { pinText } from './keeps.js';
 
 const OLDER_SHOW = 8; // older conversations listed before "Show all"
 const store = {
@@ -68,9 +69,11 @@ function groups(state) {
   return out;
 }
 
-// another machine runs it and its workspace is only there (/state's workspace): a faint "on BlackBox"
+// another machine runs it and its workspace is only there (/state's workspace): a faint "on BlackBox"; pinned there (or
+// here) by a stays-on rule or by hand (workspace.pin): "stays on BlackBox", why in its title (keeps.js pinText)
 const boundTag = (s) => {
   const w = s.workspace;
+  if (w && w.pin && w.pin.host) return `<span class="pj-tag pj-bound" title="${esc(pinText(w.pin))}">stays on ${esc(w.pin.host)}</span>`;
   if (!w || w.kind !== 'bound' || !w.host) return '';
   const n = w.host.name || 'another machine';
   return `<span class="pj-tag pj-bound" title="${esc(`This workspace is only on ${n}`)}">on ${esc(n)}</span>`;

@@ -1,6 +1,7 @@
 // sync-prefs.js: what Henry decides about his conversations and workspaces, the same on every device. Hiding or
 // removing a conversation, renaming one, moving one to a workspace, hiding, renaming or ordering a workspace, the map's
-// spots and the teams are intent, not a view of one screen: done on the PC, the Mac does it too. What belongs to one
+// spots, the teams, where a kind of work stays (hostRules) and a chat kept on or let go from a machine (pinOverrides)
+// are intent, not a view of one screen: done on the PC, the Mac does it too. What belongs to one
 // screen (view, zoom, camera, window bounds, query, the repo filter, saved map views, accounts turned off, push
 // targets, bots, compact, finishedOpen, steady, notify) never leaves the machine.
 //
@@ -217,6 +218,13 @@ const GROUPS = {
     out(x) { const p = this.clean(x); return p && { p, known: true }; },
     in: (p) => p, key: idOf, lkey: idOf,
   },
+  // a chat's own stays-on choice (fleet-view.js pinOverrides, POST /sync/pin): { id, mode: 'free' | 'stay', host?,
+  // hostDevice?, at }, one per chat, so the host lets a freed chat go and the other machine stops refusing its move
+  pinOverrides: {
+    clean: (x) => cleanPinOverride(x),
+    out(x) { const p = this.clean(x); return p && { p, known: true }; },
+    in: (p) => p, key: idOf, lkey: idOf,
+  },
 };
 const GROUP_NAMES = Object.keys(GROUPS);
 // a stays-on rule, cleaned (null when it is not one): an id, a host, and at least one path glob or tool name
@@ -229,7 +237,23 @@ function cleanHostRule(x) {
   if (!host || (!paths.length && !tools.length)) return null;
   const repo = x.repo ? cleanRoot(x.repo) : null;
   if (x.repo && !repo) return null;
-  return { id: x.id, repo, paths, tools, host, ...(typeof x.note === 'string' && x.note ? { note: x.note.slice(0, 300) } : {}) };
+  // hostDevice: the host's sync device id (host keeps its name, and is the match while it has none); pinOn: what pins a
+  // chat (host-rules.js PIN_ON), left out for 'any', the default
+  const hostDevice = typeof x.hostDevice === 'string' && UUID_RE.test(lower(x.hostDevice)) ? lower(x.hostDevice) : null;
+  const pinOn = PIN_ON.includes(x.pinOn) && x.pinOn !== 'any' ? x.pinOn : null;
+  return { id: x.id, repo, paths, tools, host, ...(hostDevice ? { hostDevice } : {}), ...(pinOn ? { pinOn } : {}),
+    ...(typeof x.note === 'string' && x.note ? { note: x.note.slice(0, 300) } : {}) };
+}
+const PIN_ON = ['any', 'edits', 'tools', 'none']; // host-rules.js PIN_ON
+// a chat's own stays-on choice, cleaned (null when it is not one): { id: the chat's id, mode: 'free' (never pinned) |
+// 'stay' (pinned to host, with or without a rule's evidence), host?: a device's name (stay needs one; free keeps the
+// host it was pinned to, for "Keep on <host>"), hostDevice?: its sync device id, at }
+function cleanPinOverride(x) {
+  if (!x || typeof x !== 'object' || !UUID_RE.test(lower(x.id)) || (x.mode !== 'free' && x.mode !== 'stay') || !(num(x.at) > 0)) return null;
+  const host = typeof x.host === 'string' ? x.host.trim().slice(0, 100) : '';
+  if (x.mode === 'stay' && !host) return null;
+  const hostDevice = host && typeof x.hostDevice === 'string' && UUID_RE.test(lower(x.hostDevice)) ? lower(x.hostDevice) : null;
+  return { id: lower(x.id), mode: x.mode, ...(host ? { host } : {}), ...(hostDevice ? { hostDevice } : {}), at: num(x.at) };
 }
 
 // local items -> portable ones, one per key: a root this machine has wins over a stale one that names the same repo
@@ -642,4 +666,4 @@ function createPrefs(o = {}) {
   return { start, stop, tick, nudge, status };
 }
 
-module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, cleanRoot, cleanHostRule, spotId, portable, cleanItems, union, merge3 };
+module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, cleanRoot, cleanHostRule, cleanPinOverride, spotId, portable, cleanItems, union, merge3 };

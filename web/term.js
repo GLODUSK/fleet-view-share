@@ -49,6 +49,9 @@
 // A move carries the chat's work too (sync-carry.js): ready.missing (tools, sign-ins, env files this machine lacks)
 // shows in the card and then in a bar over the session until OK; a failed job whose work the other machine could not
 // pack (workRefused) offers "Move it without the work" (POST with noWork).
+// A chat pinned to the machine that has it (workspace.pin, a stays-on rule or Henry's own choice: keeps.js) says why
+// and offers "Let it follow me" (POST /sync/pin free); a Continue here the server refused because its host is offline
+// (409 pinned, offline) offers "Unpin and continue here": free, then Continue here as for any chat.
 //
 // The terminal is xterm.js, vendored in vendor/xterm/ and loaded the first time a session is shown. One xterm
 // per hosted conversation, kept while its pty exists, so switching between conversations keeps each one's
@@ -70,6 +73,7 @@
 import { esc, loadModule } from './cards.js';
 import { icon } from './icons.js';
 import { createRemoteTerm } from './remote-term.js';
+import { pinText, setPin } from './keeps.js';
 
 // a Claude account letter: one letter (A, B, C, ...), else B, the default login
 const acctOf = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
@@ -631,6 +635,8 @@ function buildPane(pane) {
     else if (act === 'move' || act === 'move-retry') startMove(pane, s, false);
     else if (act === 'move-force') startMove(pane, s, true);
     else if (act === 'move-nowork') startMove(pane, s, false, { noWork: true });
+    else if (act === 'pin-free') unpin(pane, s, false);
+    else if (act === 'move-unpin') unpin(pane, s, true);
     else if (act === 'move-cancel') cancelMove(pane, s);
     else if (act === 'move-open') openReady(pane, s);
     else if (act === 'trust-hide') { pane._trust = null; rerender(pane); }
@@ -723,12 +729,36 @@ async function startMove(pane, s, force, extra = {}) {
   const r = await moveCall('POST', s.id, body);
   if (pane._move !== m) return;
   m.busy = false;
+  // pinned there (409 pinned): offline says so, and the card offers "Unpin and continue here"
+  m.pinnedOff = !!(r && r.status === 409 && r.data && r.data.code === 'pinned' && r.data.offline);
   if (r && r.status === 200 && r.data) m.job = r.data;
-  else m.err = moveErr(r); // a 409: sync is not running, or no other device owns it
+  else m.err = moveErr(r); // a 409: sync is not running, or no other device owns it, or it is pinned there
   m.want = !!m.job && !MOVE_FINAL.has(m.job.phase);
   if (m.want) pollMove(pane, m, MOVE_POLL_MS);
   rerender(pane);
   if (m.job?.phase === 'ready') openReady(pane, pane._s);
+}
+
+// "Let it follow me" (go false) and "Unpin and continue here" (go true) on a chat pinned to the machine that has it
+// (keeps.js setPin: POST /sync/pin free, shared with the other machines): it is never pinned again, so it moves like
+// any chat; go then runs Continue here (an offline host's next step is "Use the cloud copy", as for any chat)
+async function unpin(pane, s, go) {
+  if (pane._move?.id !== s.id) { stopMove(pane); pane._move = newMove(s.id); }
+  const m = pane._move;
+  if (m.busy) return;
+  m.busy = true;
+  m.err = '';
+  rerender(pane);
+  const r = await setPin(s.id, 'free');
+  if (pane._move !== m) return;
+  m.busy = false;
+  m.pinnedOff = false;
+  if (!r.ok) { m.err = r.message || 'It was not unpinned'; rerender(pane); return; }
+  // /state says so on its next poll: until then the card goes by this
+  const ws = { ...(s.workspace || {}), pin: undefined, kind: 'portable', free: r.override && r.override.host ? { host: r.override.host } : undefined };
+  pane._s = { ...s, workspace: ws };
+  if (go) startMove(pane, pane._s, false);
+  else rerender(pane);
 }
 
 async function cancelMove(pane, s) {
@@ -784,6 +814,20 @@ function ownerHtml(s, pane, m) {
   const state = o.live ? '<span class="s-state live">running</span>' : '<span class="s-state">idle</span>';
   // bound (/state's workspace.kind): its folder is only on that machine, so the conversation comes but its files don't
   const bound = s.workspace && s.workspace.kind === 'bound';
+  // pinned there by a stays-on rule or by hand (workspace.pin): why; "Let it follow me" lets it go, and once a try
+  // found its host offline (409 pinned, offline), "Unpin and continue here" lets it go and brings it here
+  const pin = s.workspace && s.workspace.pin;
+  const dis = m && m.busy ? ' disabled' : '';
+  if (pin) {
+    const off = !!(m && m.pinnedOff);
+    const go = off ? `<button type="button" class="btn primary s-go" data-s="move-unpin"${dis}>${icon('sync', 15)}<span>Unpin and continue here</span></button>`
+      : `<button type="button" class="btn s-go" data-s="move"${dis}>${icon('sync', 15)}<span>Continue here</span></button>`
+        + `<button type="button" class="btn s-go" data-s="pin-free"${dis}>${icon('pin', 15)}<span>Let it follow me</span></button>`;
+    return `<div class="s-card s-elsewhere s-move"><div class="s-ic">${icon('pin', 20)}</div><div class="s-title">On ${esc(name)} ${state}</div>`
+      + `<div class="s-text"><b>${esc(pinText(pin))}.</b></div>`
+      + `<div class="s-text">${off ? `${esc(name)} is offline. Unpin it to continue here from its last copy; its files stay on ${esc(name)}.` : 'Type in the Chat tab: your messages go there, and it runs there.'}</div>`
+      + (off ? '' : errHtml) + `<div class="s-actions">${go}</div></div>`;
+  }
   const text = (o.live
     ? `Claude is running it on ${esc(name)} right now. Continue here asks ${esc(name)} to finish and upload its last lines, then opens it on this PC.`
     : `It is idle on ${esc(name)}. Continue here brings it to this PC with every line ${esc(name)} has written.`)
@@ -791,7 +835,7 @@ function ownerHtml(s, pane, m) {
   return `<div class="s-card s-elsewhere s-move"><div class="s-ic">${icon('sync', 20)}</div><div class="s-title">On ${esc(name)} ${state}</div>`
     + (bound ? `<div class="s-text"><b>This workspace is only on ${esc(name)}.</b></div>` : '')
     + `<div class="s-text">${text}</div>` + errHtml
-    + `<div class="s-actions"><button type="button" class="btn primary s-go" data-s="move">${icon('sync', 15)}<span>${bound ? 'Continue here anyway' : 'Continue here'}</span></button></div>`
+    + `<div class="s-actions"><button type="button" class="btn primary s-go" data-s="move"${dis}>${icon('sync', 15)}<span>${bound ? 'Continue here anyway' : 'Continue here'}</span></button></div>`
     + '<div class="s-text">Or just type in the Chat tab: your messages go there.</div></div>';
 }
 

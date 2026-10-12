@@ -71,6 +71,7 @@ import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isS
 import { pickFolder, canPickFolder, uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
 import { sizeTask, dynamicSwitch } from './chats-model.js';
+import { pinText, setPin } from './keeps.js';
 
 const POLL_MS = 400;
 const ENTER_DELAY_MS = 300; // the paste, then Enter on its own (api.js waits the same)
@@ -865,7 +866,7 @@ export function mountCompose(slot, s) {
     // (live: { text, stretch }, the preview of what is being said, drawn after the text until its final comes)
     // a chat another machine runs (see "a chat another machine runs" below): the host's activity and menu as the link
     // last read them; the offline card; what needs Continue here; a passing note; a Send that forces the move; a move
-    rem: newRem(), offline: null, cont: null, info: null, forceMove: null, moving: null, moveAbort: false,
+    rem: newRem(), offline: null, cont: null, info: null, forceMove: null, moving: null, moveAbort: false, noWork: null, pinning: false,
     drawn: {}, timer: 0, saveTimer: 0, alive: true,
   };
   boxes.add(st);
@@ -1098,14 +1099,32 @@ export function mountCompose(slot, s) {
       else if (p.how === 'link') chip('warn', `Runs on ${n}: link ${n} in the Sync card to type here`);
       else if (p.how === 'offline') { if (!st.offline) chip('info', `${n} is offline: sending offers to continue here`); }
       else if (p.how === 'moving') chip('info', `Moving here from ${n}…`);
+      // pinned there by a stays-on rule (or by hand): why, and "Let it follow me" (keeps.js setPin free)
+      else if (p.how === 'remote' && p.why === 'bound' && pinNow()) chip('info', `${esc(pinText(pinNow()))}: your messages go there`, freeBtn());
       else if (p.how === 'remote') chip('info', p.why === 'busy' ? `Working on ${n}: what you send goes there` : p.why === 'bot' ? `Runs on ${n}: your messages go there` : `Its workspace is only on ${n}: your messages go there`);
       else if (p.how === 'move') chip('info', `On ${n}: sending brings it here`);
     }
     else if (!h && openElsewhere(st.s)) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>Open in another window: sending here starts a second copy</span></span>`);
+    // runs here and stays here (this is the host its pin names): why, and "Let it follow me"
+    if (!remoteOn() && pinNow()) bits.push(`<span class="cmp-chip">${icon('pin', 13)}<span>${esc(pinText(pinNow()))}</span>${freeBtn()}</span>`);
+    // let go by hand: it follows Henry now; "Keep on <host>" pins it again (clear when a rule pins it, else stay)
+    const fr = st.s && st.s.workspace && st.s.workspace.free;
+    if (fr && fr.host && !pinNow()) bits.push(`<span class="cmp-chip">${icon('sync', 13)}<span>Follows you</span><button type="button" class="cmp-chip-b" data-c="pin-keep"${st.pinning ? ' disabled' : ''}>Keep on ${esc(fr.host)}</button></span>`);
     if (st.offline && st.offline.id === st.id) {
       const o = st.offline, n = esc(o.name);
-      bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${o.kind === 'bound' ? `Only on ${n}, which is offline. Continue here anyway brings the conversation, not its files` : `${n} is offline. Continue here from its last copy?`}</span>`
-        + `<button type="button" class="cmp-chip-b" data-c="off-go">${o.kind === 'bound' ? 'Continue here anyway' : 'Continue here'}</button><button type="button" class="cmp-chip-x" data-c="off-x" title="Not now" aria-label="not now">${icon('close', 11)}</button></span>`);
+      // pinned to that machine: its move is refused, so the way here is to let it go first (then the cloud copy)
+      if (o.pinned) {
+        bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>Stays on ${n}, which is offline. Unpin it to continue here from its last copy, without its files</span>`
+          + `<button type="button" class="cmp-chip-b" data-c="off-unpin"${st.pinning ? ' disabled' : ''}>Unpin and continue here</button><button type="button" class="cmp-chip-x" data-c="off-x" title="Not now" aria-label="not now">${icon('close', 11)}</button></span>`);
+      } else {
+        bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${o.kind === 'bound' ? `Only on ${n}, which is offline. Continue here anyway brings the conversation, not its files` : `${n} is offline. Continue here from its last copy?`}</span>`
+          + `<button type="button" class="cmp-chip-b" data-c="off-go">${o.kind === 'bound' ? 'Continue here anyway' : 'Continue here'}</button><button type="button" class="cmp-chip-x" data-c="off-x" title="Not now" aria-label="not now">${icon('close', 11)}</button></span>`);
+      }
+    }
+    // the other machine could not pack its work (too big, a merge under way...): it can come without it
+    if (st.noWork && st.noWork.id === st.id) {
+      bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${esc(st.noWork.text)}</span>`
+        + `<button type="button" class="cmp-chip-b" data-c="move-nowork">Move it without the work</button><button type="button" class="cmp-chip-x" data-c="nowork-x" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
     }
     if (st.cont && st.cont.id === st.id) {
       bits.push(`<span class="cmp-chip info">${icon('sync', 13)}<span>${esc(st.cont.what)} ${CONT_WORDS}: Continue here to use this</span>`
@@ -1461,7 +1480,7 @@ export function mountCompose(slot, s) {
       if (shell) { contNeeded('Bash mode'); return false; }
       if (plan.how === 'link') { err(`Link ${plan.host.name} in the Sync card to type here`); return false; }
       if (plan.how === 'moving') { err(`It is moving here from ${plan.host.name}: wait a moment, then send`); return false; }
-      if (plan.how === 'offline') { st.offline = { id, name: plan.host.name, kind: plan.kind }; drawNotes(); return false; }
+      if (plan.how === 'offline') { st.offline = { id, name: plan.host.name, kind: plan.kind, pinned: !!pinNow() }; drawNotes(); return false; }
       if (plan.how === 'remote') {
         if (list.some((a) => a.file)) { contNeeded('Attaching files'); return false; }
         const pc = panelCommand(text);
@@ -1583,6 +1602,29 @@ export function mountCompose(slot, s) {
   // a "/" command that opens a panel, the mode, the model and Remote Control are its session's: they say Continue
   // here, with the button. fleet-view.js and link-send.js serve the routes.
   function remoteOn() { return !hosts.get(st.id)?.alive && !!hostOfChat(st.s); }
+  // pinned to the machine that runs it (/state's workspace.pin: { rule, host, why?, manual? }), or null; the chip's
+  // "Let it follow me" lets it go (POST /sync/pin free: never pinned again, so it moves like any chat)
+  function pinNow() { return (st.s && st.s.workspace && st.s.workspace.pin) || null; }
+  const freeBtn = () => `<button type="button" class="cmp-chip-b" data-c="pin-free"${st.pinning ? ' disabled' : ''}>Let it follow me</button>`;
+  // POST /sync/pin for this chat; then says how it went. -> true when it went through
+  async function pinAct(mode, said) {
+    const id = st.id;
+    if (st.pinning) return false;
+    st.pinning = true;
+    drawNotes();
+    try {
+      const r = await setPin(id, mode);
+      if (st.id !== id) return r.ok;
+      if (!r.ok) { err(r.message || 'It did not go through'); return false; }
+      // /state shows it on the next poll; the chip goes by what came back until then
+      st.s = { ...st.s, workspace: { ...(st.s.workspace || {}), pin: r.pin || undefined, free: mode === 'free' && r.override && r.override.host ? { host: r.override.host } : undefined } };
+      if (said) st.info = { id, until: Date.now() + 8000, text: said };
+      return true;
+    } finally {
+      st.pinning = false;
+      drawNotes();
+    }
+  }
   function planNow() { return followPlan(st.s, { local: !!hosts.get(st.id)?.alive, act: st.rem.act, online: st.rem.online, linked: st.rem.linked }); }
   // one of this machine's page routes -> its JSON with status and ok (a 2xx that didn't say ok: false), message
   async function call(method, url, body) {
@@ -1681,16 +1723,20 @@ export function mountCompose(slot, s) {
   function contNeeded(what) { st.cont = { id: st.id, what }; drawNotes(); }
   // Continue here from the Chat tab (POST /sync/move, as the Session tab's): the job every second, its phase in the
   // status line (Cancel stops it), until it is ready -> its ready ({ cwd, account, trusted }), or null: it failed, was
-  // cancelled, or the other machine is offline (the card, whose Continue here forces it: the last copy)
-  async function moveHere(id, force = false) {
+  // cancelled, or the other machine is offline (the card, whose Continue here forces it: the last copy). A chat pinned
+  // there (409 pinned) whose host is offline gets the card with "Unpin and continue here"; a move whose work the other
+  // machine could not pack (workRefused: too big, a merge under way...) gets "Move it without the work" (extra.noWork)
+  async function moveHere(id, force = false, extra = {}) {
     const host = hostOfChat(st.s), name = host ? host.name : 'the other machine';
     const kind = st.s?.bot || st.s?.workspace?.kind === 'bound' ? 'bound' : 'portable';
     const show = (x) => { if (st.id === id) { st.step = x; drawNotes(); } };
     st.moving = id;
     st.moveAbort = false;
+    if (st.noWork && st.noWork.id === id) st.noWork = null;
     try {
       show(`Moving it here from ${name}…`);
-      let job = await call('POST', '/sync/move', force ? { id, force: true } : { id });
+      let job = await call('POST', '/sync/move', { id, ...(force ? { force: true } : {}), ...(extra.noWork ? { noWork: true } : {}) });
+      if (!job.ok && job.code === 'pinned' && job.offline) { st.offline = { id, name: job.host || name, kind: 'bound', pinned: true }; drawNotes(); return null; }
       if (!job.ok) { err(job.message || 'The move did not start'); return null; }
       for (const end = Date.now() + MOVE_MAX_MS; ;) {
         if (!st.alive) return null;
@@ -1701,6 +1747,7 @@ export function mountCompose(slot, s) {
         }
         const ph = job.phase;
         if (ph === 'ready') { st.offline = null; st.cont = null; return job.ready || {}; }
+        if (ph === 'failed' && job.workRefused && !extra.noWork) { st.noWork = { id, text: job.error || job.note || `${name} could not pack its work` }; drawNotes(); return null; }
         if (ph === 'failed' || ph === 'cancelled') { err(job.error || job.note || 'The move did not finish'); return null; }
         if ((ph === 'offline' || ph === 'noanswer') && !force) { st.offline = { id, name, kind }; drawNotes(); return null; }
         if (Date.now() > end) { err(`${name} did not hand it over: try again`); return null; }
@@ -1716,14 +1763,14 @@ export function mountCompose(slot, s) {
     }
   }
   // Continue here with no message (the chip's button, the offline card of a bound chat): move it, then open it here
-  async function continueHere(force = false) {
+  async function continueHere(force = false, extra = {}) {
     const id = st.id;
     if (st.sending || !termApi()) return;
     st.sending = true;
     st.errs = [];
     drawSend(); drawNotes();
     try {
-      const ready = await moveHere(id, force);
+      const ready = await moveHere(id, force, extra);
       if (!ready || st.id !== id) return;
       st.cont = null;
       const s1 = { ...st.s, cwd: ready.cwd || st.s.cwd, account: ready.account || st.s.account };
@@ -2605,6 +2652,12 @@ export function mountCompose(slot, s) {
     if (remoteOn() && (c === 'mode' || c === 'model' || c === 'remote')) { contNeeded(c === 'mode' ? 'The permission mode' : c === 'model' ? 'Switching the model' : 'Remote Control'); return; }
     if (c === 'off-go') { const o = st.offline; st.offline = null; drawNotes(); if (!o) return; if (o.kind === 'bound' || !hasDraft()) continueHere(true); else { st.forceMove = st.id; send(); } return; }
     if (c === 'off-x') { st.offline = null; drawNotes(); return; }
+    // the stays-on chip and the offline card of a pinned chat (keeps.js setPin)
+    if (c === 'pin-free') { const p = pinNow(); pinAct('free', p ? `It follows you now: it can move off ${p.host}` : 'It follows you now'); return; }
+    if (c === 'pin-keep') { const f = st.s?.workspace?.free; if (f) pinAct(f.rule ? 'clear' : 'stay', `It stays on ${f.host} now`); return; }
+    if (c === 'off-unpin') { const o = st.offline; pinAct('free').then((ok) => { if (!ok || st.id !== (o && o.id)) return; st.offline = null; continueHere(true); }); return; }
+    if (c === 'move-nowork') { st.noWork = null; drawNotes(); continueHere(false, { noWork: true }); return; }
+    if (c === 'nowork-x') { st.noWork = null; drawNotes(); return; }
     if (c === 'cont') { continueHere(false); return; }
     if (c === 'cont-x') { st.cont = null; drawNotes(); return; }
     if (c === 'move-x') { st.moveAbort = true; return; }
@@ -2810,7 +2863,7 @@ export function mountCompose(slot, s) {
         st.menu = null; st.mode = null; st.effort = null; st.want = null; st.busy = false; st.errs = []; st.step = ''; st.elsewhereAt = 0;
         st.freeDraft = null;
         st.rcSeen = null; st.rcConnecting = false;
-        st.rem = newRem(st.rem.gen + 1); st.offline = null; st.cont = null; st.info = null; st.forceMove = null;
+        st.rem = newRem(st.rem.gen + 1); st.offline = null; st.cont = null; st.info = null; st.forceMove = null; st.noWork = null;
         st.drawn = {};
         loadDraft();
         st.s = next;

@@ -1,0 +1,29 @@
+/* "Keeps on a machine…" (keeps.js): the Sync card's frame (.uw-pop, .sy-pop in usage.css and sync.css), in the middle
+   of the page, with its own fields */
+.kp-pop { top: calc(var(--top-h) + 40px); right: auto; left: 50%; transform: translateX(-50%); width: min(460px, calc(100vw - 32px)); }
+.kp-ws { margin-left: 4px; font-weight: 500; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kp-form { gap: 9px; }
+.kp-f { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.kp-f > .sy-dim { flex: none; min-width: 110px; }
+.kp-f.kp-col { flex-direction: column; align-items: stretch; gap: 4px; }
+.kp-f.kp-col > .sy-dim { min-width: 0; }
+.kp-pop select, .kp-pop input[type="text"], .kp-pop textarea {
+  flex: 1 1 auto; min-width: 0; font: 12.5px/1.4 var(--font-ui); color: var(--text);
+  padding: 5px 8px; border-radius: 6px; background: rgba(0, 0, 0, 0.18); border: 1px solid var(--glass-edge);
+}
+.kp-pop textarea { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; resize: vertical; min-height: 44px; }
+.kp-pop select option { background: var(--bg, #15171c); color: var(--text); }
+.kp-pop select:focus, .kp-pop input:focus, .kp-pop textarea:focus { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.kp-prev { min-height: 18px; font-size: 12.5px; }
+.kp-prev b { font-weight: 600; }
+.kp-chats { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kp-ev { font-size: 12.5px; }
+.sy-pop button[data-kp] {
+  background: var(--hover); border: 1px solid var(--glass-edge); border-radius: 6px; color: var(--text);
+  font: 500 12px/1.2 var(--font-ui); padding: 5px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
+}
+.sy-pop button[data-kp]:hover:not(:disabled) { background: var(--press); }
+.sy-pop button[data-kp]:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.sy-pop button.uw-x[data-kp] { background: none; padding: 4px 6px; color: var(--dim); }
+.sy-pop button.kp-stop { margin-left: auto; }
+@media (max-width: 520px) { .kp-f:not(.kp-col) { flex-direction: column; align-items: stretch; } .sy-pop button.kp-stop { margin-left: 0; } }
