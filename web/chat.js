@@ -56,6 +56,16 @@
 // /clear's) come before this one as one chat. Scrolled near the top, earlier messages load by themselves (this
 // conversation's, then the one before it, and so on: loadPast), and the handoffs between them never show (botFeed).
 // Their messages have Copy only: Edit and Rewind act on the conversation that runs now.
+// A picked-up conversation in a normal chat (not bubbles; Henry, 2026-10-12): the conversations it was handed off
+// from (its s.pickedUpFrom, then that one's while the page's state has it: handoffChain, at most CHAIN_MAX) show above
+// it, dimmed (chat.css .ci-past), with a divider where each handoff happened: "Handed off here · <time> · Summary ▸"
+// and a small caption under it (chainFeed). Summary ▸ opens the handoff summary under the divider, as markdown (the
+// pickup's own HANDOFF text when the chat has it, else GET /handoff-summary: the file here, or the copy in that
+// conversation's own log, so on both machines). The new conversation's
+// "/pickup <file>" line and that HANDOFF text fold into the divider. Only the previous conversation loads by itself
+// (scrolled up to the start, as bots do); each one before it waits for a click on "Show the conversation before ·
+// <name>". Display only: nothing changes in what Claude sees. Older messages have Copy only, no option picking, and
+// count for nothing of this conversation's (launched options, the "You" bar at the top, Rewind's count).
 //
 // ?fixture=1 reads ./fixtures/conversation-sample.json instead of the server (same JSON); with it,
 // ?chatWindow=<n> shrinks the first page (to try "Show earlier") and ?chatRepeat=<n> repeats the sample n times
@@ -583,7 +593,8 @@ function renderItem(it, c) {
       md.className = 'chat-md';
       md.appendChild(mdFragment(L, it.text, c));
       el.appendChild(md);
-      if (!c.readOnly) pickList(el, md, it, c);
+      // (an earlier conversation's options in a normal chat are history: nothing to launch from there)
+      if (!c.readOnly && !(it.past && !c.bubbles)) pickList(el, md, it, c);
       el.insertAdjacentHTML('beforeend', `<div class="ci-acts">${copyBtn('msg', 'Copy message (markdown)')}</div>`);
       el._text = String(it.text || '');
       break;
@@ -614,6 +625,17 @@ function renderItem(it, c) {
       else el.innerHTML = `<span class="cs-row"${timeTitle(it.t)}>${k}<span class="cn-t">${esc(text)}</span></span>`;
       break;
     }
+    case 'handoff': { // where a handoff happened (chainFeed): a divider, its caption, and the summary behind Summary ▸
+      const can = !!(it.summary || it.can);
+      el.className = 'ci ci-handoff';
+      el.innerHTML = `<div class="ho-line"><span class="ho-k"${it.from ? ` title="${esc(`Picked up from ${it.from}`)}"` : ''}>Handed off here${it.t ? ` · ${esc(handoffTime(it.t))}` : ''}</span>`
+        + (can ? `<span class="ho-dot">·</span><button type="button" class="ho-sum" data-ho-sum aria-expanded="false" title="Show the handoff summary Claude started from">Summary<span class="ho-car">${icon('chevron', 11)}</span></button>` : '')
+        + '</div><div class="ho-cap">Claude starts fresh from the summary below this line</div>'
+        + (can ? `<div class="ho-body cp-box" hidden><div class="ho-md"></div>${copyBtn('box', 'Copy the summary')}</div>` : '');
+      el._ho = it;
+      if (can && c.open.get(String(it.key))) showSummary(c, el, true);
+      break;
+    }
     default: { // note
       const text = String(it.text || '');
       const cls = /^\//.test(text) ? ' cmd' : /^API Error|^Error/i.test(text) ? ' bad' : '';
@@ -627,7 +649,63 @@ function renderItem(it, c) {
     const open = c.expandAll && (it.kind === 'tool' || it.kind === 'thinking') ? true : was != null ? was : it.kind === 'tool' && toolOpenByDefault(it);
     if (open) { el.open = true; if (it.kind === 'tool') fillToolBody(el, it, c); }
   }
+  // an earlier conversation's (opts.history in a normal chat): dimmed. The Bots tab's stay as they are
+  if (it.past && !c.bubbles) el.classList.add('ci-past');
   return el;
+}
+
+// ---------- handoffs in a normal chat (the conversations a picked-up one came from) ----------
+// "12 Oct 15:00"
+function handoffTime(t) {
+  const d = new Date(t);
+  return Number.isFinite(d.getTime()) ? `${d.getDate()} ${d.toLocaleString([], { month: 'short' })} ${clockTime(t, false)}` : '';
+}
+// the summary as it reads: without the pickup's "HANDOFF <file>" / "from session …" header lines and the file's
+// front matter (session:, cwd: … between --- lines, for the tools)
+function summaryText(t) {
+  let s = String(t || '').replace(/\r\n?/g, '\n');
+  s = s.replace(/^\s*(?:\(Note:[^\n]*\)[ \t]*\n\s*)?HANDOFF [^\n]*\n(?:from session [^\n]*\n)?/, '').replace(/^\s+/, '');
+  s = s.replace(/^﻿?---\n[\s\S]*?\n---[ \t]*(?:\n|$)/, '');
+  // and what `/pickup` adds after the summary (as handoff.js summaryBody)
+  s = s.replace(/\n[ \t]*\n(?:CHECK BEFORE STOPPING:|The handoff above is from the previous session)[\s\S]*$/, '');
+  return s.trim();
+}
+// the summary a picked-up conversation started from (GET /handoff-summary, as the panel's peek reads it: the handoff
+// file here, else the copy in that conversation's own log, so on both machines): its id -> Promise<text | null>; a
+// failure is asked again the next time
+const summaries = new Map();
+function summaryOf(id) {
+  let p = summaries.get(id);
+  if (!p) {
+    p = fetch(`/handoff-summary?id=${encodeURIComponent(id)}`, { cache: 'no-store' }).then((r) => r.json())
+      .then((j) => (j && j.ok && typeof j.text === 'string' ? summaryText(j.text) || null : null)).catch(() => null);
+    p.then((t) => { if (t == null) summaries.delete(id); });
+    summaries.set(id, p);
+  }
+  return p;
+}
+// Summary ▸ on a divider: open or shut the summary under it (remembered in c.open, so a redraw keeps it)
+function showSummary(c, el, open) {
+  const it = el._ho, body = el.querySelector('.ho-body'), btn = el.querySelector('[data-ho-sum]');
+  if (!it || !body || !btn) return;
+  c.open.set(String(it.key), open);
+  body.hidden = !open;
+  btn.setAttribute('aria-expanded', String(open));
+  if (!open || body._filled) return;
+  body._filled = true;
+  const md = body.querySelector('.ho-md');
+  const fill = (text) => libs().then((L) => {
+    md.textContent = '';
+    if (!text) { md.innerHTML = '<p class="ho-none">The summary could not be read</p>'; body._filled = false; return; }
+    const box = document.createElement('div');
+    box.className = 'chat-md';
+    box.appendChild(mdFragment(L, text, c));
+    md.appendChild(box);
+    body._text = text;
+  }).catch(() => { body._filled = false; });
+  if (it.summary) { fill(it.summary); return; }
+  md.innerHTML = '<p class="ho-none">Loading the summary…</p>';
+  summaryOf(it.for).then(fill);
 }
 // ---------- picking options from a reply ----------
 // A reply that offers options as a task list with every box unticked ("- [ ] …", which CLAUDE.md asks for) gets
@@ -687,7 +765,8 @@ function launchedOptions(c) {
       else if (line.trim()) break; // the launch line after the list
     }
   };
-  for (const it of c.past) if (it.kind === 'user') read(it.text);
+  // (a bot's earlier conversations are its one chat; a normal chat's handed-off ones launched nothing here)
+  if (c.bubbles) for (const it of c.past) if (it.kind === 'user') read(it.text);
   for (const it of c.items) if (it.kind === 'user') read(it.text);
   for (const s of c.sent) read(s.raw);
   return out;
@@ -854,6 +933,9 @@ function buildPane(pane) {
     // the earlier conversations (opts.history): their ids oldest first, the one loadPast reads next (-1: none left),
     // where its loaded part starts (null: none of it yet), and their items so far, oldest first
     hist: [], histKey: null, hi: -1, hfrom: null, hgen: 0, past: [],
+    // a normal chat's handoff chain (handoffChain): the lowest one that may load by itself (the previous one, or one
+    // a "Show the conversation before" click opened), each one's name, and each handoff into one ({ file, at, from })
+    hopen: -1, hname: new Map(), hinto: new Map(),
   };
   pane._chat = c;
   panes.add(c);
@@ -1018,7 +1100,8 @@ function settleSent(c) {
 function drawTop(c) {
   const { feed, top } = c;
   const view = feed.getBoundingClientRect();
-  const mine = [...c.list.children, ...c.outbox.children].filter((el) => el.classList.contains('ci-user'));
+  // (not an earlier conversation's: the bar is about the one that runs now)
+  const mine = [...c.list.children, ...c.outbox.children].filter((el) => el.classList.contains('ci-user') && !el.classList.contains('ci-past'));
   let el = null;
   for (let i = mine.length - 1; i >= 0; i--) if (mine[i].getBoundingClientRect().top < view.bottom) { el = mine[i]; break; }
   const show = !!el && el.getBoundingClientRect().bottom < view.top + 2;
@@ -1140,6 +1223,7 @@ function wire(c) {
     if ((b = t.closest('[data-fpath]')) && window.getSelection()?.isCollapsed !== false) { e.preventDefault(); e.stopPropagation(); openPath(c, b, e.ctrlKey || e.metaKey); }
     else if ((b = t.closest('[data-xall]'))) { e.preventDefault(); setExpandAll(c, !c.expandAll); }
     else if ((b = t.closest('[data-cp]'))) { e.preventDefault(); e.stopPropagation(); copyText(copySource(b), b); }
+    else if ((b = t.closest('[data-ho-sum]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) showSummary(c, el, b.getAttribute('aria-expanded') !== 'true'); }
     else if ((b = t.closest('[data-launch]'))) { e.preventDefault(); launchPicks(c, b.closest('.ci')); }
     else if ((b = t.closest('[data-now]'))) { e.preventDefault(); sendNow(c); }
     else if ((b = t.closest('[data-enter]'))) { e.preventDefault(); enterAgain(c, b.closest('.cu-status')); }
@@ -1170,7 +1254,12 @@ function wire(c) {
       const pre = det?.querySelector('.tb-code');
       if (pre && det._item) { pre.textContent = str(det._item.input?.content); pre.dataset.full = '1'; }
       b.remove();
-    } else if (t.closest('[data-earlier]')) { e.preventDefault(); loadEarlier(c); }
+    } else if (t.closest('[data-earlier]')) {
+      e.preventDefault();
+      // "Show the conversation before": from now on that one loads by itself too, as the previous one does
+      if (!c.bubbles && c.from <= 0 && c.hi >= 0) c.hopen = Math.min(c.hopen, c.hi);
+      loadEarlier(c);
+    }
     else if (t.closest('[data-top]')) { e.preventDefault(); toTop(c); }
     else if (t.closest('[data-pill]')) { e.preventDefault(); feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' }); c.pill.hidden = true; }
     else if (t.closest('[data-retry]')) { e.preventDefault(); c.error = ''; drawState(c); poll(c, true); }
@@ -1350,7 +1439,7 @@ async function loadPast(c) {
       const items = Array.isArray(res.items) ? res.items : [];
       const from = Math.max(0, Number(res.from) || 0);
       const mine = c.hfrom == null ? items : items.slice(0, Math.max(0, c.hfrom - from));
-      c.past = mine.map((it) => ({ ...it, key: `h:${id}:${it.key}`, past: true })).concat(c.past);
+      c.past = mine.map((it) => ({ ...it, key: `h:${id}:${it.key}`, past: true, hid: id })).concat(c.past);
       c.hfrom = from;
       if (from <= 0) { c.hi--; c.hfrom = null; }
     }
@@ -1364,14 +1453,70 @@ function setHistory(c, ids) {
   const h = FIXTURE || !Array.isArray(ids) ? [] : [...new Set(ids.filter((x) => typeof x === 'string' && x && x !== c.id))];
   const k = h.join(',');
   if (k === c.histKey) return;
-  c.histKey = k; c.hist = h; c.hi = h.length - 1; c.hfrom = null; c.hgen++;
+  c.histKey = k; c.hist = h; c.hi = h.length - 1; c.hfrom = null; c.hgen++; c.hopen = h.length - 1;
   if (c.past.length) { c.past = []; if (c.loaded) draw(c, 'since'); }
 }
-// the Bots tab: near the top (or all of it fits), the earlier messages load by themselves
+// the Bots tab: near the top (or all of it fits), the earlier messages load by themselves. A normal chat with a
+// handoff chain: only once its own start is in, and only from the conversations it may (c.hopen: the previous one,
+// or one opened with "Show the conversation before")
 const moreEarlier = (c) => c.from > 0 || (c.hi >= 0 && c.loaded);
+const autoPast = (c) => c.hist.length > 0 && c.loaded && c.from <= 0 && c.hi >= 0 && c.hi >= c.hopen;
 function fillUp(c) {
-  if (!c.bubbles || c.busy || !c.visible || !moreEarlier(c) || !c.feed.isConnected) return;
+  if (c.busy || !c.visible || !c.feed.isConnected || !(c.bubbles ? moreEarlier(c) : autoPast(c))) return;
   if (c.feed.scrollTop < 400) loadEarlier(c);
+}
+
+// the page's conversations by id (app.js setChatLookup: its state lists, finished ones too), to follow a handoff
+// chain further back than the shown one's own pickedUpFrom
+let lookupSession = () => null;
+export function setChatLookup(fn) { lookupSession = typeof fn === 'function' ? fn : () => null; }
+const CHAIN_MAX = 10;
+// a picked-up conversation's chain: { ids (oldest first, the shown one left out), names (id -> name), into (id ->
+// { file, has, at, from }: the handoff that started it: its summary file (where this machine has it), whether it has a
+// summary (pickedUpFrom.summary: the file, or the copy in its log), when it happened, the name it came from) }
+function handoffChain(s) {
+  const ids = [], names = new Map(), into = new Map(), seen = new Set([s.id]);
+  let cur = s;
+  while (cur && cur.pickedUpFrom && typeof cur.pickedUpFrom.id === 'string' && cur.pickedUpFrom.id && !seen.has(cur.pickedUpFrom.id) && ids.length < CHAIN_MAX) {
+    const p = cur.pickedUpFrom;
+    let prev = null;
+    try { prev = lookupSession(p.id) || null; } catch {}
+    seen.add(p.id);
+    ids.unshift(p.id);
+    const name = String(p.name || prev?.name || '');
+    names.set(p.id, name);
+    into.set(cur.id, { file: typeof p.file === 'string' ? p.file : '', has: !!(p.summary || p.file), at: Number(prev?.handoff?.at) || 0, from: name });
+    cur = prev;
+  }
+  return { ids, names, into };
+}
+const PICKUP_NOTE = /^\/pickup(?:\s|$)/;
+const PICKUP_FILE = /^\/pickup\s+"?([^"\n]+?\.md)"?\s*$/i;
+const HANDOFF_TEXT = /^\s*(?:\(Note:[^\n]*\)[ \t]*\r?\n\s*)?HANDOFF \S/;
+const FOLD_WITHIN = 4; // a pickup's own lines are among a conversation's first few
+// what a normal chat with a handoff chain shows: each conversation's items, oldest first, and above each one picked
+// up from the one before it (once its start is in) a divider, with its "/pickup" line and HANDOFF text folded in
+function chainFeed(c) {
+  const by = new Map();
+  for (const it of c.past) { const a = by.get(it.hid); if (a) a.push(it); else by.set(it.hid, [it]); }
+  const convs = c.hist.map((id, j) => ({ id, items: by.get(id) || [], start: c.hi < j, past: true }));
+  convs.push({ id: c.id, items: c.items, start: c.loaded && c.from <= 0, past: false });
+  const out = [];
+  for (const v of convs) {
+    const into = c.hinto.get(v.id);
+    if (!into || !v.start || (v.past && !v.items.length)) { for (const it of v.items) out.push(it); continue; }
+    let file = '', summary = '';
+    const rest = [];
+    v.items.forEach((it, i) => {
+      const text = String(it.text || '');
+      if (i < FOLD_WITHIN && it.kind === 'note' && PICKUP_NOTE.test(text)) { file = file || (PICKUP_FILE.exec(text) || [])[1] || ''; return; }
+      if (i < FOLD_WITHIN && it.kind === 'user' && !summary && HANDOFF_TEXT.test(text)) { summary = summaryText(text); return; }
+      rest.push(it);
+    });
+    out.push({ kind: 'handoff', key: `ho:${v.id}`, t: Number(v.items[0]?.t) || into.at || 0, file: file || into.file, summary, can: !!(summary || into.has), for: v.id, from: into.from });
+    for (const it of rest) out.push(it);
+  }
+  return out;
 }
 
 // fold a response into the list. init: it is the list. since: it replaces everything from its "from" on.
@@ -1403,7 +1548,7 @@ function draw(c, how) {
   const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
   const keys = new Set();
   const seq = []; // { it } or { steps: [...] }
-  for (const it of c.bubbles ? botFeed(c.past.length ? c.past.concat(c.items) : c.items) : c.items) {
+  for (const it of c.bubbles ? botFeed(c.past.length ? c.past.concat(c.items) : c.items) : c.hist.length ? chainFeed(c) : c.items) {
     const k = String(it.key);
     if (keys.has(k)) continue; // a repeated key would fight over one element
     keys.add(k);
@@ -1445,6 +1590,7 @@ function draw(c, how) {
     if (e.it) { prev = place(list, itemEl(e.it), prev); lastKey = String(e.it.key); continue; }
     const g = stepGroup(c, `steps:${e.steps[0].key}`);
     used.add(g.dataset.key);
+    if (!c.bubbles) g.classList.toggle('ci-past', !!e.steps[0].past);
     let p = null;
     for (const it of e.steps) p = place(g._body, itemEl(it), p);
     drawGroup(g, e.steps);
@@ -1461,13 +1607,19 @@ function draw(c, how) {
   else if (how === 'before') { if (anchor?.isConnected) feed.scrollTop += anchor.getBoundingClientRect().top - anchorTop; }
   else if (c.stick) feed.scrollTop = feed.scrollHeight;
   else if (added && added === lastKey) c.pill.hidden = false;
-  if (c.bubbles) setTimeout(() => fillUp(c), 0); // after the poll that drew lets go of c.busy
+  if (c.bubbles || c.hist.length) setTimeout(() => fillUp(c), 0); // after the poll that drew lets go of c.busy
 }
 
 function drawState(c) {
   const n = c.items.length + c.sent.length + c.past.length;
   c.earlier.hidden = !(moreEarlier(c) && (n || c.hist.length));
-  if (!c.earlier.hidden) c.earlierBtn.textContent = c.bubbles ? 'Show earlier messages' : `Show earlier (${c.from})`;
+  if (!c.earlier.hidden) {
+    c.earlierBtn.textContent = c.bubbles ? 'Show earlier messages'
+      : c.from > 0 ? `Show earlier (${c.from})`
+        // a normal chat's handoff chain: the previous conversation loads by itself; one before it waits for this
+        : c.hi < c.hopen ? `Show the conversation before · ${c.hname.get(c.hist[c.hi]) || 'an earlier one'}`
+          : 'Show earlier messages';
+  }
   let html = '';
   if (c.error && !n) html = `<div class="chat-empty">${icon('error', 16)}<span>Couldn't load the conversation</span><button type="button" class="btn chat-retry" data-retry>Retry</button></div>`;
   else if (!c.loaded) html = '<div class="chat-empty faint"><span>Loading the conversation…</span></div>';
@@ -1535,7 +1687,7 @@ function reset(c, s) {
   c.busy = false;
   c.id = s.id;
   c.items = []; c.from = 0; c.total = 0; c.loaded = false; c.missing = false; c.error = ''; c.queue = []; c.cut = 0; c.src = null;
-  c.past = []; c.hist = []; c.histKey = null; c.hi = -1; c.hfrom = null; c.hgen++;
+  c.past = []; c.hist = []; c.histKey = null; c.hi = -1; c.hfrom = null; c.hgen++; c.hopen = -1; c.hname = new Map(); c.hinto = new Map();
   c.els.clear(); c.groups.clear(); c.open.clear(); c.picks.clear();
   c.expandAll = false; c.openBefore = null; drawXall(c);
   c.io?.disconnect(); c.io = null;
@@ -1562,6 +1714,12 @@ export function renderChatPane(pane, s, opts = {}) {
   if (fresh) reset(c, s);
   else { try { c.compose?.update(s); } catch (e) { console.error('chat: compose', e); } }
   if (c.bubbles) setHistory(c, opts.history);
+  else {
+    // a picked-up conversation: the ones it was handed off from show above it (chainFeed)
+    const ch = handoffChain(s);
+    c.hname = ch.names; c.hinto = ch.into;
+    setHistory(c, ch.ids);
+  }
   c.visible = opts.visible !== false;
   c.seen = Date.now();
   if (!c.visible) return;

@@ -1707,6 +1707,7 @@ const ACCTS = ACCOUNTS.createAccounts({
   },
 });
 
+let pickupGen = 0; // counts s.pickupFrom being set, so handoffOf's index of successors by log is built again
 function ingestMain(s, recs) {
   for (const { d, raw } of recs) {
     if (d.type === 'custom-title' && d.customTitle) s.custom = d.customTitle;
@@ -1736,6 +1737,13 @@ function ingestMain(s, recs) {
     if (d.gitBranch) s.gitBranch = d.gitBranch === 'HEAD' ? null : d.gitBranch; // the branch of its folder, when no tool call names a checkout
     const content = d.message?.content;
     const blocks = Array.isArray(content) ? content : [];
+    // a conversation that picked up a handoff: `/pickup`'s HANDOFF text names the old conversation, in the command's
+    // message or one of the next few (often an isMeta one). It syncs with the log, so the chain links on the other
+    // machine too (handoffOf). Only the first 8 user records are looked at.
+    if (d.type === 'user' && !s.pickupFrom && (s.userSeen = (s.userSeen || 0) + 1) <= 8) {
+      const p = HO.pickupIn(content);
+      if (p && p.from !== String(s.id).toLowerCase()) { s.pickupFrom = p.from; s.pickupFile = p.file; s.pickupAt = t; pickupGen++; }
+    }
     if (d.type === 'assistant') {
       // the model and how full its context is, from the latest reply in the main log
       const msg = d.message || {}, u = msg.usage;
@@ -4547,21 +4555,54 @@ function handoffOf(s, now) {
     const nx = s.demo.handedOffTo ? by(s.demo.handedOffTo) : null, pf = s.demo.pickedUpFrom ? by(s.demo.pickedUpFrom) : null;
     return { handoff: nx ? { next: nx.id, nextName: nx.name, at: Math.round(s.turnEndT || now) } : null, pickedUpFrom: pf ? { id: pf.id, name: pf.name } : null };
   }
-  const L = handoffLinks(now);
-  const h = L.bySession.get(s.id);
-  // the successor: named in the handoff (next_session) or its state file; else the conversation that ran
-  // `/pickup <this file>`
-  let from = L.byNext.get(s.id) || null;
-  if (!from && s.pickupArg) {
-    const want = path.basename(s.pickupArg).toLowerCase();
-    for (const r of L.bySession.values()) if (path.basename(r.file).toLowerCase() === want) { from = r; break; }
-  }
-  let next = h ? h.next : null;
-  if (h && !next) for (const x of sessions.values()) if (x.pickupArg && path.basename(x.pickupArg).toLowerCase() === path.basename(h.file).toLowerCase()) { next = x.id; break; }
+  // the handoff files first; where they say nothing (the folder is on the other machine), the logs, which sync
+  const k = HO.linksOf(s, handoffLinks(now), logSuccessors(), sessions.values());
+  const f = k.from, file = f ? (f.rec ? f.rec.file || null : pickupLocalFile(s, now)) : null;
   return {
-    handoff: h && (next || h.handedOffAt || s.state === 'DONE') ? { next, nextName: next ? titleOf(next) : null, at: Math.round(h.handedOffAt || h.created) } : null,
-    pickedUpFrom: from && from.session !== s.id ? { id: from.session, name: titleOf(from.session) || (from.title ? plain(from.title, 80) : null), file: from.file || null } : null,
+    handoff: k.next || (k.h && (k.h.handedOffAt || s.state === 'DONE')) ? { next: k.next, nextName: k.next ? titleOf(k.next) : null, at: Math.round(k.at || now) } : null,
+    // summary: GET /handoff-summary has one for it, from the file here or (s.pickupFrom: read from the log) the
+    // HANDOFF text in its own log, which syncs; file: the handoff file, only where this machine has it
+    pickedUpFrom: f ? { id: f.id, name: titleOf(f.id) || (f.rec && f.rec.title ? plain(f.rec.title, 80) : null), file, summary: !!(file || s.pickupFrom) } : null,
   };
+}
+// GET /handoff-summary?id=<a picked-up conversation's id>: the handoff summary it started from, for every Summary view
+// (the panel's peek, Previous conversation ▸, the card's link, the chat's divider). The handoff file when this machine
+// has it, else the copy in that conversation's own log (HO.summaryFromLog: `/pickup`'s HANDOFF text; the log syncs,
+// the handoff folder does not), so Summary opens on both machines.
+//   -> { ok: true, text, source: 'file' | 'log' } | { ok: false, message }
+// Guarded as GET /conversation (the page and approved remote browsers, never another site's page; the phone's relay
+// does not pass it on).
+function handoffSummaryRoute(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { ok: false, message: 'GET only' });
+  const id = String(new URL(req.url, 'http://x').searchParams.get('id') || '');
+  if (!UUID_RE.test(id)) return sendJson(res, 400, { ok: false, message: 'give a conversation id (?id=)' });
+  if (DEMO) return sendJson(res, 404, { ok: false, message: 'the demo has no handoff summaries' });
+  const s = sessions.get(id) || sessions.get(id.toLowerCase());
+  const pf = s ? handoffOf(s, Date.now()).pickedUpFrom : null;
+  const ok = (text, source) => sendJson(res, 200, { ok: true, text, source });
+  let text = pf && pf.file ? HO.summaryFromFile(pf.file) : null;
+  if (text) return ok(text, 'file');
+  const where = conversationLog(s ? s.id : id);
+  const fromLog = where && where.file ? HO.summaryFromLog(where.file) : null;
+  if (!fromLog) return sendJson(res, 404, { ok: false, message: pf ? 'The summary could not be read' : 'it picked up no handoff' });
+  const here = HO.localFile(fromLog.file);
+  text = here ? HO.summaryFromFile(here) : null;
+  return text ? ok(text, 'file') : ok(fromLog.text, 'log');
+}
+// successors by log (HO.successorsFromLogs), built again only when a pickup was read or the list changed size
+let logSucc = null, logSuccGen = -1, logSuccSize = -1;
+function logSuccessors() {
+  if (!logSucc || logSuccGen !== pickupGen || logSuccSize !== sessions.size) {
+    logSucc = HO.successorsFromLogs(sessions.values());
+    logSuccGen = pickupGen; logSuccSize = sessions.size;
+  }
+  return logSucc;
+}
+// the handoff file a log names, when this machine has it (looked for at most every 30 s per conversation)
+function pickupLocalFile(s, now) {
+  if (!s.pickupFile) return null;
+  if (!s.pickupLocal || now - s.pickupLocal.at > 30e3) s.pickupLocal = { at: now, file: HO.localFile(s.pickupFile) };
+  return s.pickupLocal.file;
 }
 
 // owners: syncOwners(), read once per /state by buildState
@@ -7557,7 +7598,7 @@ function handleRequest(req, res) {
   }
   // the page's own routes: never for another site (a previewed dev page's <img src> sends no Origin)
   const site = req.headers['sec-fetch-site'];
-  if ((site === 'cross-site' || site === 'same-site') && /^\/(changes|preview|file|folders|upload|chat\/kind|chat\/files)(\/|$)/.test(pathname)) return sendJson(res, 403, { ok: false, message: 'bad origin' });
+  if ((site === 'cross-site' || site === 'same-site') && /^\/(changes|preview|file|folders|upload|chat\/kind|chat\/files|handoff-summary)(\/|$)/.test(pathname)) return sendJson(res, 403, { ok: false, message: 'bad origin' });
   // GET /remote/me, POST /remote/approve | deny | revoke { id }: this PC's page and approved devices
   if (REMOTE.common(req, res, pathname, who, pageCtx)) return;
   if (pathname === '/changes' || pathname.startsWith('/changes/')) return void Promise.resolve(CHANGES.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
@@ -7729,6 +7770,7 @@ function handleRequest(req, res) {
   // a bot's task list (bots.js tasks; state.bots[].tasks has the same)
   { const m = /^\/bots\/([0-9a-f]{12})\/tasks$/.exec(pathname); if (m) { const [code, out] = BOTS.tasks(m[1]); return sendJson(res, code, out); } }
   if (pathname === '/conversation') return void Promise.resolve(conversationRoute(req, res)).catch((e) => requestFailed(req, res, e));
+  if (pathname === '/handoff-summary') return handoffSummaryRoute(req, res);
   if (pathname === '/chat/commands') return sendJson(res, 200, CMDS.list(new URL(req.url, 'http://x').searchParams.get('cwd')));
   if (pathname === '/chat/files') {
     const q = new URL(req.url, 'http://x').searchParams;

@@ -16,8 +16,10 @@ A conversation is the Claude Code session `<id>` (a UUID) in `<projects>/<slug>/
 | `tool-results/<name>`, `workflows/<...>` | `<slug>/<id>/tool-results/...`, `<slug>/<id>/workflows/...` | whole files |
 
 Not synced: `custom-title.json` (Claude Code writes it again from the log), `file-history/`, `todos/`, `session-env/`,
-`tasks/`, `sessions/`, `history.jsonl`, memory folders and handoffs (later, with settings). File keys use `/` and
-each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name does not fit is skipped and logged.
+`tasks/`, `sessions/`, `history.jsonl`, memory folders and handoffs (later, with settings). The handoff folder itself
+does not need to sync: `/pickup` leaves the whole summary (its `HANDOFF <file>` / `from session <old id>` text) in the
+new conversation's log, which does, so the chain and its Summary show on both machines (handoff.js `pickupOf`,
+`summaryFromLog`; GET /handoff-summary). File keys use `/` and each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name does not fit is skipped and logged.
 
 ## Rows (schema `fleet_sync`, migration 0375; every row is the signed-in user's, RLS checks membership)
 

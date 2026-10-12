@@ -26,6 +26,30 @@
 .ci-note { margin-top: 12px; }
 .ci-note + .ci-note { margin-top: 6px; }
 
+/* ---------- a handoff chain (chat.js chainFeed): the earlier conversations dimmed, a divider at each handoff ---------- */
+.ci-past { opacity: 0.55; transition: opacity 160ms var(--ease); }
+.ci-past:hover, .ci-past:focus-within { opacity: 0.8; }
+.ci-handoff { margin: 26px 0 6px; min-width: 0; }
+.chat-list > .ci-handoff:first-child { margin-top: 4px; }
+.ci-handoff + .ci { margin-top: 14px; }
+.ho-line { display: flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; color: var(--violet); font: 600 11.5px/1.4 var(--font-ui); }
+.ho-line::before, .ho-line::after { content: ''; flex: 1 1 12px; min-width: 12px; height: 1px; background: rgba(164, 123, 255, 0.35); }
+.ho-k { flex: 0 1 auto; min-width: 0; text-align: center; overflow-wrap: anywhere; }
+.ho-dot { flex: none; color: var(--faint); }
+.ho-sum {
+  flex: none; display: inline-flex; align-items: center; gap: 3px; padding: 1px 4px; border: 0; border-radius: 6px;
+  background: none; color: var(--violet); font: inherit; cursor: pointer;
+}
+.ho-sum:hover { background: rgba(164, 123, 255, 0.12); text-decoration: underline; text-underline-offset: 3px; }
+.ho-sum:focus-visible { outline: 1px solid var(--violet); outline-offset: 1px; }
+.ho-car { display: inline-flex; transition: transform 180ms var(--ease); }
+.ho-sum[aria-expanded="true"] .ho-car { transform: rotate(90deg); }
+.ho-cap { margin-top: 3px; color: var(--faint); font: 11px/1.4 var(--font-ui); text-align: center; overflow-wrap: anywhere; }
+.ho-body { margin: 10px 0 2px; padding: 10px 14px; border: 1px solid rgba(164, 123, 255, 0.22); border-radius: var(--radius-sm); background: rgba(164, 123, 255, 0.05); }
+.ho-body[hidden] { display: none; }
+.ho-body .chat-md { font-size: 12.8px; }
+.ho-none { margin: 0; color: var(--dim); font: 12px/1.4 var(--font-ui); }
+
 /* ---------- show earlier, empty and error states ---------- */
 .chat-earlier { display: flex; justify-content: center; padding: 0 0 14px; }
 .chat-earlier-btn {

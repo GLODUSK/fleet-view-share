@@ -10,6 +10,8 @@
 //                                CLAUDE_LAUNCH_KEY=<launchKey>; claude is killed ~4 s later, and the launcher
 //                                (claude-run.ps1, or Fleet View's session host) starts the pickup in its place
 // Used by fleet-view.js (the cards' "handed off" / "picked up from" lines) and desktop/host.js (the restart).
+// The handoff folder stays on its machine, so the link also comes from the new conversation's own log (pickupOf:
+// the HANDOFF text `/pickup` leaves there), which syncs: the chain holds on the other machine too.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -84,6 +86,170 @@ function readAll() {
   return { bySession, byNext };
 }
 
+// The handoff a conversation picked up, from its own log. `/pickup` runs `handoff.py pickup`, whose output lands in
+// the new conversation's log as a user text item that starts
+//   HANDOFF <path of the .md file>
+//   from session <old id> (account A), folder <cwd>, <created ISO time>
+// (after a "(Note: this handoff was already picked up by session …)" line when it is picked up again).
+// The log syncs to the other machine and the handoff folder does not, so this links the chain there too.
+// Returns { from (the old id, lower case), file (the path as written, / or \), created (ms or null) } or null.
+const PICKUP_RE = /^\s*(?:\(Note:[^\r\n]*\)[ \t]*\r?\n\s*)?HANDOFF[ \t]+(\S[^\r\n]*?)[ \t]*\r?\n[ \t]*from session ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b([^\r\n]*)/i;
+function pickupOf(text) {
+  if (typeof text !== 'string' || text.length < 20) return null;
+  const m = PICKUP_RE.exec(text.slice(0, 2000));
+  if (!m) return null;
+  const tail = m[3].split(',').pop().trim();
+  return { from: m[2].toLowerCase(), file: m[1].replace(/^"(.*)"$/, '$1'), created: Date.parse(tail) || null };
+}
+
+// pickupOf over a log record's message content (a string, or blocks whose text blocks are read)
+function pickupIn(content) {
+  for (const x of typeof content === 'string' ? [content] : Array.isArray(content) ? content : []) {
+    const p = pickupOf(typeof x === 'string' ? x : x && x.type === 'text' ? x.text : null);
+    if (p) return p;
+  }
+  return null;
+}
+
+// The successor of each conversation by those log lines: Map(old id -> { id, at }) from conversations
+// { id, pickupFrom, pickupAt } (at: when it picked up). A conversation never succeeds itself; picked up twice, the
+// later pickup wins.
+function successorsFromLogs(list) {
+  const out = new Map();
+  for (const x of list) {
+    if (!x || !x.pickupFrom || !x.id) continue;
+    const id = String(x.id).toLowerCase();
+    if (x.pickupFrom === id) continue;
+    const old = out.get(x.pickupFrom);
+    if (!old || (x.pickupAt || 0) >= (old.at || 0)) out.set(x.pickupFrom, { id, at: x.pickupAt || null });
+  }
+  return out;
+}
+
+// The chain links of one conversation s ({ id, pickupArg, pickupFrom }): from the handoff files (links: readAll())
+// first, then the logs (succ: successorsFromLogs(all)); all: every conversation listed ({ id, pickupArg }).
+//   { h: s's own handoff rec or null, next: its successor's id or null, at: when it handed off (ms) or null,
+//     from: { id, rec } (rec: the file's, null when only s's log names it) or null }
+// The successor by file: next_session (or the state file), else the conversation that ran `/pickup <that file>`.
+// Nothing links a conversation to itself.
+const baseOf = (f) => String(f || '').split(/[\\/]/).pop().toLowerCase();
+function linksOf(s, links, succ, all) {
+  const id = String(s.id).toLowerCase();
+  const h = links.bySession.get(id) || null;
+  let from = links.byNext.get(id) || null;
+  if (!from && s.pickupArg) {
+    const want = baseOf(s.pickupArg);
+    for (const r of links.bySession.values()) if (baseOf(r.file) === want) { from = r; break; }
+  }
+  let next = h ? h.next : null, at = h ? h.handedOffAt || h.created || null : null;
+  if (h && !next) for (const x of all) if (x.pickupArg && baseOf(x.pickupArg) === baseOf(h.file)) { next = String(x.id).toLowerCase(); break; }
+  if (next === id) next = null;
+  if (!next) {
+    const by = succ.get(id);
+    if (by && by.id !== id) { next = by.id; at = at || by.at || null; }
+  }
+  let f = null;
+  if (from) { if (from.session !== id) f = { id: from.session, rec: from }; }
+  else if (s.pickupFrom && s.pickupFrom !== id) f = { id: s.pickupFrom, rec: null };
+  return { h, next, at, from: f };
+}
+
+// where this machine keeps a handoff file a log names (the same name in the handoff folder), or null when it has none
+function localFile(file) {
+  const base = String(file || '').split(/[\\/]/).pop();
+  if (!base || !/\.md$/i.test(base)) return null;
+  const f = path.join(dir(), base);
+  try { return fs.statSync(f).isFile() ? f : null; } catch { return null; }
+}
+
+// ---------- the summary itself (GET /handoff-summary) ----------
+// A handoff file's summary: its markdown without the front matter, or null. Only a .md file right in the handoff
+// folder is read (at most SUMMARY_MAX bytes).
+const SUMMARY_MAX = 1 << 20;
+const FRONT_RE = /^﻿?---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
+function summaryFromFile(file) {
+  const f = path.resolve(String(file || ''));
+  if (!/\.md$/i.test(f) || path.dirname(f).toLowerCase() !== path.resolve(dir()).toLowerCase()) return null;
+  try {
+    const fd = fs.openSync(f, 'r');
+    try {
+      const b = Buffer.alloc(Math.min(fs.fstatSync(fd).size, SUMMARY_MAX));
+      const text = b.toString('utf8', 0, fs.readSync(fd, b, 0, b.length, 0)).replace(/\r\n?/g, '\n').replace(FRONT_RE, '').trim();
+      return text || null;
+    } finally { fs.closeSync(fd); }
+  } catch { return null; }
+}
+
+// The summary in a pickup's HANDOFF text (pickupOf's): the text less its two header lines, and less what `/pickup`
+// itself adds after the handoff's own markdown (handoff.py's "CHECK BEFORE STOPPING: …", the command's "The handoff
+// above is from the previous session …"). Null when nothing is left.
+const PICKUP_HEAD_RE = /^\s*(?:\(Note:[^\n]*\)[ \t]*\n\s*)?HANDOFF[^\n]*\n[ \t]*from session [^\n]*(?:\n|$)/;
+const PICKUP_TAIL_RE = /\n[ \t]*\n(?:CHECK BEFORE STOPPING:|The handoff above is from the previous session)[\s\S]*$/;
+function summaryBody(text) {
+  const s = String(text || '').replace(/\r\n?/g, '\n').replace(PICKUP_HEAD_RE, '').replace(PICKUP_TAIL_RE, '').trim();
+  return s || null;
+}
+
+// The handoff summary a conversation's own log holds (its `/pickup`'s HANDOFF text), for the machine without the
+// handoff file: { text, from, file, created } or null. Only the head of the log is read: lines that start in its
+// first LOG_HEAD bytes, at most LOG_LINES of them, and a line no longer than LOG_LINE_MAX (the pickup's comes among a
+// conversation's first records; the rest of a long log is never read). Remembered per file: a find while the log has
+// not shrunk (logs only grow), a miss while its size and mtime stay the same.
+const LOG_HEAD = 64 << 10, LOG_LINES = 40, LOG_LINE_MAX = 1 << 20;
+const logSummaries = new Map(); // file -> { size, mtime, out }
+function summaryFromLog(file, o = {}) {
+  let st;
+  try { st = fs.statSync(file); } catch { return null; }
+  if (!st.isFile()) return null;
+  const c = logSummaries.get(file);
+  if (c && (c.out ? st.size >= c.size : st.size === c.size && st.mtimeMs === c.mtime)) return c.out;
+  const out = scanLog(file, o.head || LOG_HEAD, o.lines || LOG_LINES, o.lineMax || LOG_LINE_MAX);
+  if (logSummaries.size > 200) logSummaries.clear();
+  logSummaries.set(file, { size: st.size, mtime: st.mtimeMs, out });
+  return out;
+}
+// one log line: the summary when it is a user record whose text pickupOf knows
+function summaryInLine(buf) {
+  if (!buf.includes('HANDOFF') || !buf.includes('"user"')) return null; // most lines: not even parsed
+  let d;
+  try { d = JSON.parse(buf.toString('utf8')); } catch { return null; }
+  if (!d || d.type !== 'user' || d.isSidechain) return null;
+  const content = d.message && d.message.content;
+  for (const x of typeof content === 'string' ? [content] : Array.isArray(content) ? content : []) {
+    const t = typeof x === 'string' ? x : x && x.type === 'text' ? x.text : null;
+    const p = pickupOf(t);
+    if (!p) continue;
+    const text = summaryBody(t);
+    if (text) return { text, from: p.from, file: p.file, created: p.created };
+  }
+  return null;
+}
+function scanLog(file, head, maxLines, lineMax) {
+  let fd;
+  try { fd = fs.openSync(file, 'r'); } catch { return null; }
+  try {
+    const buf = Buffer.alloc(64 << 10);
+    let pos = 0, lineStart = 0, lines = 0, parts = [];
+    for (;;) {
+      const got = fs.readSync(fd, buf, 0, buf.length, pos);
+      if (!got) return parts.length ? summaryInLine(Buffer.concat(parts)) : null; // the last line, with no newline yet
+      let i = 0;
+      while (i < got) {
+        const nl = buf.indexOf(10, i);
+        if (nl === -1 || nl >= got) { parts.push(Buffer.from(buf.subarray(i, got))); break; }
+        parts.push(buf.subarray(i, nl));
+        const r = summaryInLine(Buffer.concat(parts));
+        parts = [];
+        if (r) return r;
+        lines++; lineStart = pos + nl + 1; i = nl + 1;
+        if (lines >= maxLines || lineStart >= head) return null;
+      }
+      pos += got;
+      if (pos - lineStart > lineMax) return null; // a line too long to be the pickup's
+    }
+  } catch { return null; } finally { fs.closeSync(fd); }
+}
+
 // a fresh launch key for one claude process (the host sets it as CLAUDE_LAUNCH_KEY)
 const newLaunchKey = () => `fv-${crypto.randomUUID()}`;
 
@@ -123,4 +289,4 @@ function pickupCommand(file) {
   return `claude ${EFFORTS.has(effort) ? `--effort ${effort} ` : ''}"/pickup ${file}"`;
 }
 
-module.exports = { dir, limit, parseFront, readAll, newLaunchKey, safeFile, takeRestart, pickupCommand, DEFAULT_LIMIT };
+module.exports = { dir, limit, parseFront, readAll, pickupOf, pickupIn, successorsFromLogs, linksOf, localFile, summaryFromFile, summaryBody, summaryFromLog, newLaunchKey, safeFile, takeRestart, pickupCommand, DEFAULT_LIMIT };

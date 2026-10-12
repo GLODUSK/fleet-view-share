@@ -280,7 +280,7 @@ const focusCompose = (el) => requestAnimationFrame(() => el._chatMain.querySelec
 // Under the main chat: (1) the other selected conversations (a Ctrl+click or Ctrl+drag selection), up to
 // SPLIT_MAX chats in all, each with its own bar (its name, a pin, ✕ takes it out of the selection) and its own compose
 // box; (2) the peek, a picked-up conversation's previous one: its chat, read only (chat.js readOnly), or its
-// handoff summary (the .md, GET /file, drawn as markdown), switched by the bar's Chat / Summary, ✕ closes it.
+// handoff summary (GET /handoff-summary: the .md here, else the copy in the new conversation's log; drawn as markdown), switched by the bar's Chat / Summary, ✕ closes it.
 // The peek belongs to the conversation it was opened for and goes when another one is shown.
 export const SPLIT_MAX = 3;
 let peek = null; // { for, kind: 'chat' | 'summary', id, name, file }
@@ -330,22 +330,24 @@ function drawSplits(el, s, extras, on, ui) {
   const p = on && peek && peek.for === s.id ? peek : null;
   if (peek && peek.for !== s.id) peek = null;
   el._peek.hidden = !p;
-  if (!p) return;
-  const tab = (k, label, dis) => `<button type="button" class="d-cb-tab${p.kind === k ? ' on' : ''}" data-peek-kind="${k}"${dis ? ' disabled title="no summary file"' : ''}>${label}</button>`;
+  if (!p) { el._peekMd._for = null; return; } // (opened again, the summary is read again)
+  // (a summary: the handoff file here, or the copy in the picked-up conversation's own log, so on both machines)
+  const has = !!(p.summary || p.file);
+  const tab = (k, label, dis) => `<button type="button" class="d-cb-tab${p.kind === k ? ' on' : ''}" data-peek-kind="${k}"${dis ? ' disabled title="no handoff summary"' : ''}>${label}</button>`;
   setHTML(el._peekBar, `<span class="d-cb-k">Previous conversation</span><span class="d-cb-n" title="${esc(p.name || p.id)}">${esc(p.name || p.id.slice(0, 8))}</span><span class="grow"></span>`
-    + `${tab('chat', 'Chat')}${tab('summary', 'Summary', !p.file)}<button type="button" class="d-cb-x" data-peek-x title="close it" aria-label="close the previous conversation">${icon('close', 13)}</button>`);
-  const md = p.kind === 'summary' && !!p.file;
+    + `${tab('chat', 'Chat')}${tab('summary', 'Summary', !has)}<button type="button" class="d-cb-x" data-peek-x title="close it" aria-label="close the previous conversation">${icon('close', 13)}</button>`);
+  const md = p.kind === 'summary' && has;
   el._peekChat.hidden = md;
   el._peekMd.hidden = !md;
   if (!md) { renderChatPane(el._peekChat, { id: p.id, name: p.name, cwd: '' }, { visible: true, readOnly: true }); return; }
-  if (el._peekMd._file === p.file) return;
-  el._peekMd._file = p.file;
+  if (el._peekMd._for === p.for) return;
+  el._peekMd._for = p.for;
   el._peekMd.innerHTML = '<p class="dim">Loading the summary…</p>';
-  fetch(`/file?path=${encodeURIComponent(p.file)}`).then((r) => r.json()).then((j) => {
-    if (el._peekMd._file !== p.file) return;
+  fetch(`/handoff-summary?id=${encodeURIComponent(p.for)}`, { cache: 'no-store' }).then((r) => r.json()).then((j) => {
+    if (el._peekMd._for !== p.for) return;
     el._peekMd.innerHTML = j && j.ok && typeof j.text === 'string' ? mdHtml(stripFront(j.text)) : `<p class="dim">${esc((j && j.message) || 'The summary could not be read')}</p>`;
     el._peekMd.scrollTop = 0;
-  }).catch(() => { if (el._peekMd._file === p.file) { el._peekMd._file = null; el._peekMd.innerHTML = '<p class="dim">The summary could not be read</p>'; } });
+  }).catch(() => { if (el._peekMd._for === p.for) { el._peekMd._for = null; el._peekMd.innerHTML = '<p class="dim">The summary could not be read</p>'; } });
 }
 const focusTerm = (el) => requestAnimationFrame(() => el._session.querySelector('.term-host textarea')?.focus({ preventScroll: true }));
 

@@ -128,7 +128,7 @@ export function handoffBits(s) {
   const out = [];
   const h = s?.handoff, p = s?.pickedUpFrom;
   if (h) out.push(h.next ? ['handed off →', sessionLink(h.next, h.nextName, 'ho-n')] : ['handed off', '<span class="ho-n dim">waiting for its pickup</span>']);
-  if (p && p.id) out.push(['picked up from', `${sessionLink(p.id, p.name, 'ho-n')} ${peekLink(s.id, 'chat', 'Chat', 'read its chat under this one (read only)')}${p.file ? ` ${peekLink(s.id, 'summary', 'Summary', `read the handoff summary under this chat: ${p.file}`)}` : ''}`]);
+  if (p && p.id) out.push(['picked up from', `${sessionLink(p.id, p.name, 'ho-n')} ${peekLink(s.id, 'chat', 'Chat', 'read its chat under this one (read only)')}${p.summary || p.file ? ` ${peekLink(s.id, 'summary', 'Summary', p.file ? `read the handoff summary under this chat: ${p.file}` : 'read the handoff summary under this chat (from this conversation\'s log)')}` : ''}`]);
   return out;
 }
 

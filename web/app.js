@@ -161,6 +161,7 @@ import { renderProjects } from './projects.js';
 import { renderChats, botFace } from './chats.js';
 import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
+import { setChatLookup } from './chat.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote } from './term.js';
 import { pickFolder, canPickFolder, uploads, upload, sizeText, droppedFolders } from './pcfiles.js';
@@ -1362,6 +1363,9 @@ function derive(st) {
 
 // ---------- drawing ----------
 let view = null; // the derived state last drawn
+// a chat follows a handoff chain back through these (chat.js handoffChain: the conversations a picked-up one came from)
+setChatLookup((id) => (view?.allSessions || []).find((x) => x.id === id)
+  || (state?.sessions || []).find((x) => x.id === id) || (state?.finished || []).find((x) => x && x.id === id) || null);
 const viewEls = { cards: $('view-cards'), map: $('view-map'), wall: $('view-wall'), projects: $('view-projects'), chats: $('view-chats') };
 
 function render() {
@@ -1738,7 +1742,7 @@ function openPeekFor(forId, kind) {
   const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === forId);
   const p = s && s.pickedUpFrom;
   if (!p || !p.id) return;
-  openPeek({ for: s.id, kind, id: p.id, name: p.name, file: p.file || null });
+  openPeek({ for: s.id, kind, id: p.id, name: p.name, file: p.file || null, summary: !!(p.summary || p.file) });
   tabWant = { id: s.id, tab: 'chat' };
   if (local.view === 'projects' || local.view === 'chats') projPanel = true;
   ui.showDetail(s.id);
@@ -1749,7 +1753,8 @@ function previousMenuItem(s) {
   if (!p || !p.id) return null;
   return { label: 'Previous conversation', icon: 'clock', note: p.name || null, children: [
     { label: 'Read its chat', icon: 'read', note: 'under this one, read only', run: () => openPeekFor(s.id, 'chat') },
-    p.file ? { label: 'Read the handoff summary', icon: 'file', run: () => openPeekFor(s.id, 'summary') } : { label: 'Read the handoff summary', icon: 'file', disabled: true, note: 'no summary file' },
+    // (the file here, or the copy in this one's own log: both machines)
+    p.summary || p.file ? { label: 'Read the handoff summary', icon: 'file', run: () => openPeekFor(s.id, 'summary') } : { label: 'Read the handoff summary', icon: 'file', disabled: true, note: 'no handoff summary' },
   ] };
 }
 // a link to another conversation (handoffs): a shown one is picked like a click on it; a finished or filtered
