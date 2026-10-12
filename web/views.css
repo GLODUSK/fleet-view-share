@@ -671,6 +671,7 @@ html.glass .detail, html.glass .detail:has(.term-host) { background: rgba(18, 21
 .pj-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pj-here { display: inline-flex; color: var(--cyan); }
 .pj-tag { color: var(--faint); font-size: 11px; }
+.pj-bound { flex: none; max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pj-ago { flex: none; color: var(--faint); font: 11px/1 var(--font-ui); font-variant-numeric: tabular-nums; min-width: 26px; text-align: right; }
 .pj-ago.busy { color: var(--cyan); }
 .pj-row .acct { flex: none; }

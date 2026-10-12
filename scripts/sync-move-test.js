@@ -6,7 +6,8 @@
 // sessions go from busy to idle. One shared clock, moved by hand; no timer runs.
 //   a clean move A -> B -> A -> B with lines added between (bytes equal after each move, the owner flips, no
 //   conflict, uploader.forget on the side that claimed, holds let go, the rows deleted, away.json and owners() at
-//   each step (with the row's account), the resume folder and its trust); A busy -> waiting -> idle -> moved (the lines written while busy
+//   each step (with the row's account), the resume folder and its trust); a bound conversation is in the other
+//   machine's away.json like any other, and owners() says it is bound; A busy -> waiting -> idle -> moved (the lines written while busy
 //   arrive); force while busy; a terminal outside the host refuses even with force; A offline -> offline -> force
 //   takes the last uploaded copy, and A's watcher then ends its hosted session once idle; no answer -> noanswer; B
 //   gone quiet after A let go -> A drops the stale ask, unholds and drops moving, and B asking again later still
@@ -117,6 +118,7 @@ const openRow = (k) => { const r = db.settings.find((x) => x.key === k); return 
 const server = new Map(); // conversation id -> the uploaded bytes of its log
 
 // ---------- a machine: its folders, fake uploader, materializer and host ----------
+const boundIds = new Set(); // conversations whose repos row is a bound one (sync-common.js "portable or bound")
 function machine(name, letter) {
   const dir = path.join(T, letter);
   const home = path.join(dir, 'home');
@@ -184,7 +186,7 @@ function machine(name, letter) {
     scan() { // its listing: the rows other devices own
       m.listedAt = now();
       m.owners = new Map(db.conversations.filter((r) => r.state === 'active' && r.owner_device && lower(r.owner_device) !== m.me)
-        .map((r) => [r.id, { device: lower(r.owner_device), leaseUntil: r.lease_until ? Date.parse(r.lease_until) : null, account: r.account }]));
+        .map((r) => [r.id, { device: lower(r.owner_device), leaseUntil: r.lease_until ? Date.parse(r.lease_until) : null, account: r.account, bound: boundIds.has(r.id) }]));
       m.downOk = true;
     },
   };
@@ -288,7 +290,7 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       ok(A.out(id) && A.out(id).phase === 'asked', 'A saw the ask and answered asked');
       eq(A.awayOf(id), { device: 'mac', why: 'moving' }, 'A: away.json has it as moving to mac');
       eq(B.mover.owners().get(id).moving, 'here', 'B: owners() says moving here');
-      eq(A.mover.owners().get(id), { device: B.me, name: 'mac', live: false, moving: 'away', account: null }, 'A: owners() says moving away to mac');
+      eq(A.mover.owners().get(id), { device: B.me, name: 'mac', live: false, moving: 'away', account: null, bound: false }, 'A: owners() says moving away to mac');
       await step(A);
       eq(A.out(id).phase, 'asked', 'A does nothing more until it sees the ask change (the handshake)');
       ok(await until(() => done(B, id)), 'the move ends');
@@ -335,6 +337,19 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       eq(rowOf(id).owner_device, B.me, 'the row is B\'s again');
       eq(rowOf(id).generation, gen, 'only appends: the generation never moved');
       ok(!A.logs.concat(B.logs).some((t) => /won't merge|conflict/.test(t)), 'no conflict on either side');
+    }
+
+    // ---------- 1b. a bound conversation: another device's like any other, and owners() says it is bound ----------
+    {
+      const id = seed(A, 3);
+      boundIds.add(id);
+      await step(A); await step(B);
+      eq(B.awayOf(id), { device: 'pc', why: 'owned' }, 'bound: B\'s away.json has it as pc\'s, so B\'s session host never opens it');
+      const o = B.mover.owners().get(id);
+      ok(o && o.bound === true && o.device === A.me && o.name === 'pc', `bound: B's owners() says it is pc's and bound (${JSON.stringify(o)})`);
+      ok(!A.awayOf(id) && !A.mover.owners().has(id), 'bound: A, its host, has it as its own');
+      const other = B.mover.owners().get([...B.mover.owners().keys()].find((k) => !boundIds.has(k)));
+      ok(!other || other.bound === false, 'bound: a portable one is not');
     }
 
     // ---------- 2. A busy -> waiting -> idle -> moved ----------

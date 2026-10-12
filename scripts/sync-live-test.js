@@ -8,8 +8,10 @@
 //   is online; a row sealed with another key, or not JSON, ignored, said once and not fetched again until it changes;
 //   a write that fails is said once and tried again; each conversation's repo ({ origin, name }) published, read back,
 //   cleaned, and a change of it alone written, an older entry with none still valid; remoteFor's rules (listed, listed but resting, fresh and not
-//   listed, offline owner, an owner that never published, not read yet); and sync-run.js's wiring (the mover's device
-//   id and online(), the snapshot, live(), started and stopped with the run, none without a snapshot).
+//   listed, offline owner, an owner that never published, not read yet); the bound list (cleaned and sorted, written
+//   when it alone changed, read back, kept while its device is offline, emptied); and sync-run.js's wiring (the mover's
+//   device id and online(), the snapshot, live(), started and stopped with the run, none without a snapshot), which on
+//   a Mac runs only with SYNC_TEST_KEYCHAIN=1: it writes the sync key into the real login Keychain.
 // Run: node scripts/sync-live-test.js   (exit 0 = all pass)
 'use strict';
 const fs = require('fs');
@@ -71,9 +73,10 @@ const pcList = [
   { id: C1, state: 'DONE' }, // a second C1: the first one stays
 ];
 let pcDevice = null;
+let pcBound = []; // the PC's bound conversations (bound())
 const pcLogs = [], macLogs = [];
 const isOn = new Map([[PC, true]]); // what the Mac's mover says of each device
-const pc = L.createLive({ api, key: KEY, now: () => pcClock.t, device: () => pcDevice, snapshot: () => pcList, log: (t) => pcLogs.push(t) });
+const pc = L.createLive({ api, key: KEY, now: () => pcClock.t, device: () => pcDevice, snapshot: () => pcList, bound: () => pcBound, log: (t) => pcLogs.push(t) });
 const mac = L.createLive({ api, key: KEY, now: () => macClock.t, device: () => ({ id: MAC.toUpperCase(), name: 'mac' }), online: (d) => (isOn.has(d) ? isOn.get(d) : false), snapshot: () => [], log: (t) => macLogs.push(t) });
 const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
 
@@ -238,8 +241,35 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
     && L.sigOf(base) !== L.sigOf([{ ...base[0], repo: { origin: 'GLODUSK/fleet-view', name: 'other' } }])
     && L.sigOf(base) !== L.sigOf([old]), 'sigOf changes when the repo changes, or goes');
 
-  // ---------- sync-run.js wiring ----------
+  // ---------- bound: the conversations whose workspace is only on their device ----------
   {
+    eq(rowOf(PC).bound, [], 'bound: none yet, an empty list');
+    ok(mac.live().bound.get(PC) instanceof Set && mac.live().bound.get(PC).size === 0, 'bound: the other device reads none');
+    const w0 = writes();
+    pcBound = [C3.toUpperCase(), 'not-an-id', C1, C1];
+    step(5e3); await pc.tick();
+    eq(writes(), w0 + 1, 'bound: a change of the list alone is written');
+    eq(rowOf(PC).bound, [C1, C3].sort(), 'bound: lower case, one each, sorted, bad ids dropped');
+    step(5e3); await pc.tick();
+    eq(writes(), w0 + 1, 'bound: the same list again writes nothing');
+    step(5e3); await mac.tick();
+    ok([C1, C3].every((id) => mac.live().bound.get(PC).has(id)), 'bound: the other device reads them');
+    isOn.set(PC, false);
+    ok(mac.live().bound.get(PC).has(C3) && !mac.live().fresh.has(PC), 'bound: kept while the device is offline (what is bound does not change while it sleeps)');
+    isOn.set(PC, true);
+    pcBound = [];
+    step(5e3); await pc.tick();
+    step(5e3); await mac.tick();
+    ok(mac.live().bound.get(PC).size === 0, 'bound: an emptied list empties it on the other device');
+    eq(L.cleanIds(Array.from({ length: L.MAX_BOUND + 10 }, () => crypto.randomUUID())).length, L.MAX_BOUND, 'cleanIds: at most MAX_BOUND');
+    eq(L.cleanIds('nope'), [], 'cleanIds: not a list');
+  }
+
+  // ---------- sync-run.js wiring ----------
+  // (On a Mac the sync key goes in the real login Keychain whatever the folder, sync-api.js protectedStore: this part
+  // would overwrite the live sync key there, so it runs on a Mac only with SYNC_TEST_KEYCHAIN=1)
+  if (process.platform === 'darwin' && process.env.SYNC_TEST_KEYCHAIN !== '1') console.log('skipped on this Mac: sync-run.js wiring (it writes the login Keychain; SYNC_TEST_KEYCHAIN=1 runs it)');
+  else {
     const C = require(path.join(ROOT, 'sync-crypto.js'));
     const dir = fs.mkdtempSync(path.join(process.env.SYNC_TEST_DIR || os.tmpdir(), 'fv-sync-live-'));
     try {
@@ -255,12 +285,12 @@ const step = (ms) => { pcClock.t += ms; macClock.t += ms; };
         return l;
       };
       const snap = [{ id: C1, state: 'WORKING' }];
-      const runner = createSyncRunner({ sync, dataDir: dir, checkMs: 1e6, makeUploader: loop, makeMaterializer: loop, makeMover: () => mover, makeLive: fakeLive, snapshot: () => snap });
+      const runner = createSyncRunner({ sync, dataDir: dir, checkMs: 1e6, makeUploader: loop, makeMaterializer: loop, makeMover: () => mover, makeLive: fakeLive, snapshot: () => snap, bound: () => [C1] });
       ok(runner.live() === null, 'live() before start: null');
       await runner.start();
       const l = lives[0];
       ok(lives.length === 1 && l.started === 1, 'the live loop starts with the run');
-      ok(l.a.api === sync && l.a.key.length === 32 && l.a.snapshot() === snap, 'it gets the api, the key and the snapshot');
+      ok(l.a.api === sync && l.a.key.length === 32 && l.a.snapshot() === snap && JSON.stringify(l.a.bound()) === JSON.stringify([C1]), 'it gets the api, the key, the snapshot and the bound list');
       ok(l.a.device() === null, 'no device id until the mover has one');
       moverDevice = { id: PC, name: 'pc' };
       ok(l.a.device() === PC, 'then the mover\'s device id');

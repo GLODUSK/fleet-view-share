@@ -31,9 +31,13 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
   normalizes to it, and both sides read origins through `rowOrigin`). It stands for the user's home folder: a
   conversation whose folder is under the home folder but in no repo with an origin (a bot's folder, a scratchpad, a
   git repo with no origin, the home folder itself) syncs under it. Outside the home folder, or under its `AppData`,
-  `Library` or `.claude-<letter>` folder (`homeSkipped`), and in no repo with an origin: not synced. Nor while a
-  `.git` above the folder is one git could not read (a time-out, no git): it waits for git, never the home row. Down
-  here, a folder `homeSkipped` names, or one where a file sits, is never made: the home folder itself stands in.
+  `Library` or `.claude-<letter>` folder (`homeSkipped`), and in no repo with an origin: a bound row (below). Nor
+  while a `.git` above the folder is one git could not read (a time-out, no git): it waits for git, never the home
+  row. Down here, a folder `homeSkipped` names, or one where a file sits, is never made: the home folder itself
+  stands in.
+  More rows, **the bound rows**, have the origin `bound:<device id>` (lower case; `sync-common.js` `boundOrigin`; no
+  git remote normalizes to it either: `bound:x` as a remote reads as `https://bound/x`), one per device that hosts a
+  bound conversation. See [Portable and bound](#portable-and-bound). No device writes a `repo_paths` row for one.
 - **repo_paths** `{ device_id, repo_id, root }`: where this device has a checkout of that repo (the main checkout's
   top-level folder, `git rev-parse --show-toplevel`). Written by whichever side finds it. For the home row, `root` is
   that device's home folder (`os.homedir()`: `C:\Users\henry` on one, `/Users/henry` on another).
@@ -54,6 +58,9 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
     folder's `cwd` or the last `cwd` (a checkout under home, `/Users/henry/code/fleet-view`, keeps its repo row).
     Then `rel_cwd` is the slug folder's `cwd` (else the last `cwd`) relative to the home folder: `Bots/panchito`,
     `Scratchpads/scratch-2026-10-11`, `''` for home itself. That folder need not exist when it goes up.
+    Under a bound row, `rel_cwd` is that folder's full path on the device that hosts it, with `/` between folders
+    (`sync-common.js` `boundRel`): `C:/Perforce/ws` (a drive letter in upper case), `//server/share/x` (a Windows
+    share), `/Users/henry/ws`. At most 1024 characters, no `.` or `..` or empty folder name (`boundRelOk`).
   - `branch`: the last `gitBranch` in the log, plain text.
   - `title_enc`: `sealText(title, key, 'title:<id>')`, the last `custom-title` (or `summary`) line's title.
   - `size`, `sha256`, `generation`: the `main` file's uploaded length, the hex sha256 of those bytes, its generation.
@@ -63,7 +70,9 @@ each segment must match `[A-Za-z0-9._-]+`, never `.` or `..`; a file whose name 
   - `live:<device id>` (`sync-live.js`): what runs on that device right now, written by that device only, sealed with
     `sealText(json, key, 'setting:live:<device id>')`, `updated_at` set to its `at`:
     `{ v: 1, device, at, sessions: [{ id, state, label, stateColor, name, renamed, account, last, active, turnStart,
-    waitingOn, agents, repo }] }`. `repo` is `{ origin, name }` (the portable root of the `prefs:` rows: GitHub
+    waitingOn, agents, repo }], bound: [ids] }`. `bound`: every conversation that device runs whose workspace is only
+    there ([Portable and bound](#portable-and-bound)), whatever its state, sorted, at most 5000; a row from before it
+    has none. Another device keeps the last list it read while that device is offline. `repo` is `{ origin, name }` (the portable root of the `prefs:` rows: GitHub
     `owner/name` and folder name, either may be null) for the repo that device shows it under, or null; another
     device shows it under its own checkout of that repo when it has one (by origin, else a same-named folder with no
     origin), else works the repo out itself. A row from before `repo` (none on its entries) still counts. `sessions` lists the conversations it owns that are not DONE, and the DONE ones active
@@ -155,6 +164,9 @@ chunks.
    the home folder or through a link on the way. A conversation already on this device stays where its
    log is: the slug folder it was laid down in, or any slug folder of that projects folder holding `<id>.jsonl`
    (one this device started, that another one took over). It never gets a second copy.
+   A bound row needs no checkout: `X` is its placeholder here (see [Portable and bound](#portable-and-bound)), made
+   empty right before its log is laid down (never through a link, nothing in its place); the device that hosted it
+   (this one, after another device took the row) uses the folder `rel_cwd` names when that is still here.
 2. Read its chunk rows for the current generation, ordered by `seq`; check they cover `[0, size)` with no gap; fetch
    and open each, check each `sha256`, then the whole file's against the conversation row.
 3. Lay it down per the recipe: write `<id>.jsonl.part`, rename. If a local copy exists, replace it only when it is a
@@ -188,6 +200,41 @@ no fork; its header has the whole order. What it adds to the rows:
   server has, so a chunk A still had on its way never replaces one the new owner wrote.
 - **`devices.last_seen_at`**: the mover touches it every 30 s. Another device counts it offline when it sees the value
   unchanged for 2 minutes on its own clock.
+
+## Portable and bound
+
+Every conversation's workspace is one of two kinds (`sync-common.js` "portable or bound"; `sync-work.js` `inspect()`
+uses the same rule and the same words):
+
+- **Portable:** a git checkout whose origin normalizes (every machine has it, or can clone it), or a folder under the
+  home folder in no git checkout (a scratchpad, a bot's folder).
+- **Bound:** everything else, which only the machine it is on has: a git checkout with no origin (wherever it is:
+  its commits have nowhere to be fetched from), a folder outside the home folder, the home folder itself, an app data
+  or Claude account folder, a Perforce workspace (a `.p4config`, `p4config.txt`, `.p4config.txt` or `.p4ignore` file,
+  or the file `P4CONFIG` names, in the folder or above it; the client root `p4 info` gives; or a folder under
+  `~/Perforce`, P4V's default), and a placeholder (below).
+
+Which row a conversation goes under is the uploader's rule (above), and it did not change for the ones synced before:
+a checkout with no origin, a Perforce workspace or the home folder itself under the home folder still go under the
+home row. The ones never synced before go under their device's bound row: a folder outside the home folder (a git
+repo with no origin there too), and `AppData` or `Library` under it. Never: the temp folder (`os.tmpdir()`, and
+`/tmp` and `/var/folders` on a Mac: a script's or a test's), a Claude account's own folder (`~/.claude-<letter>`), or
+Fleet View's data folder (a tool's chats).
+
+**The placeholder.** Another device lays a bound conversation down in a folder Fleet View owns:
+`<home>/.fleet-view/bound/<host's name>/<hash>/<folder name>` (`sync-common.js` `boundPlaceholder`): the host's
+device name and the folder's last name made safe for a folder, and the first 8 hex of the sha256 of `rel_cwd`, so two
+folders of one name (or two paths whose slugs would match) never share one. It is made empty, before the log, and is
+never a checkout. The conversation is the host's like any row another device owns: in `away.json`, never opened here
+as this machine's own. **Continue here anyway** (S4) moves it into the placeholder: its files stay on the host. A
+conversation resumed in a placeholder is bound to the device it runs on, whatever holds the folder.
+
+**What each machine says.** `/state` gives every conversation `workspace: { kind: 'portable' | 'bound', host: {
+device, name } | null }` (`host` null when this machine runs it). For one another device runs: bound when its row is a
+bound one, or when that device's `live:` row lists it in `bound` (only it can tell a checkout with no origin under its
+home folder, which goes under the home row); a placeholder here is bound; else portable. For one this machine runs:
+its folder's kind, read at once (`fleet-view.js` `workspaceOf`, the facts from `sync-common.js` `checkoutAt` and
+`perforceAt`).
 
 ## The work pack (not wired into moves yet)
 

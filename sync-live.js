@@ -17,15 +17,19 @@
 //             agents, repo }]: the conversations this device owns, as its /state shows them. repo: { origin, name }, the
 //             repo it shows it under, portable (sync-prefs.js makeTranslate out()), or null; the other devices show it
 //             under their own checkout of that repo (its tool calls name this machine's paths, which they lack)
+//   bound()   -> [ids]: every conversation this device owns whose workspace is only here (sync-common.js "portable or
+//             bound"), old ones too. Only this device can tell for some: a git checkout with no origin under home syncs
+//             under the home row, as a portable folder does. Not given: none
 //   now()     the clock (Date.now); timing: { ...TIMING } overrides (tests)
 //
 // The row: fleet_sync.settings key live:<device id>, one per device and written by that device only, sealed with
 // sync-crypto.js sealText(json, key, 'setting:live:<device id>'), upserted on (user_id, key) with updated_at = its at
 // (no migration: the settings table takes any key):
-//   { v: 1, device, at, sessions: [ ...snapshot(), cleaned, picked, by id ] }
+//   { v: 1, device, at, sessions: [ ...snapshot(), cleaned, picked, by id ], bound: [ ...bound() ids, sorted ] }
 // picked: every one not DONE, and the DONE ones whose last is in the last day (for their names and account letters;
-// one not listed shows DONE anyway), at most MAX_SESSIONS, the running ones first. A write goes out only when that
-// list, or any field of it but last and active (those move all the time), changed, at most every 5 s; at (and so
+// one not listed shows DONE anyway), at most MAX_SESSIONS, the running ones first. bound: at most MAX_BOUND, whatever
+// their state (an older row has none: nothing bound). A write goes out only when that list, any field of it but last
+// and active (those move all the time), or the bound list changed, at most every 5 s; at (and so
 // updated_at) differs on every write and is never compared with another machine's clock. The row is never deleted.
 // Every device lists the live:* rows' keys and updated_at every 5 s, and fetches a row's sealed value only when its
 // updated_at moved: the rows stay small on the wire while nothing changes. This device's own row is skipped, and a
@@ -34,7 +38,8 @@
 //   live() -> { ready, known: Set<device>, unsure: Set<device>, fresh: Set<device>, sessions: Map id -> { ...entry,
 //             device }, byDevice: Map device -> Map id -> entry }: known, the devices with a snapshot that opened;
 //             unsure, those of them not known to be there or not yet; fresh, those there; sessions and byDevice, the
-//             fresh ones' (ready: the rows were read once)
+//             fresh ones' (ready: the rows were read once); bound: Map device -> Set of ids, from every known device's
+//             last row, online or not (what is bound does not change while a device sleeps)
 //   remoteFor(view, device, id) -> what a conversation that device owns shows here:
 //     { device, entry, live }: entry from its fresh snapshot (live: its state is not DONE or IDLE), or entry null when
 //     the owner's snapshot is fresh and does not list it, or the owner is offline: it runs nowhere we can see, so it is
@@ -54,6 +59,7 @@ const TIMING = {
   doneMs: 24 * 3600e3, // a DONE conversation is listed while its last is this recent
 };
 const MAX_SESSIONS = 300; // a snapshot carries at most this many
+const MAX_BOUND = 5000; // and at most this many bound ids (37 bytes each in the row)
 const RESTING = new Set(['DONE', 'IDLE']); // states that are not running
 
 const lower = (s) => (typeof s === 'string' ? s.toLowerCase() : '');
@@ -88,6 +94,12 @@ function cleanEntry(x) {
     agents: Number.isInteger(x.agents) && x.agents > 0 ? Math.min(x.agents, 999) : 0,
     repo: cleanRepo(x.repo),
   };
+}
+// a row's bound list: conversation ids, lower case, one each, sorted, at most MAX_BOUND
+function cleanIds(list) {
+  const out = new Set();
+  for (const x of Array.isArray(list) ? list.slice(0, MAX_BOUND * 2) : []) { const id = lower(x); if (UUID_RE.test(id)) out.add(id); }
+  return [...out].sort().slice(0, MAX_BOUND);
 }
 // a snapshot's list: clean, one per id, in id order (so a list that only moved around writes nothing)
 function cleanList(list) {
@@ -131,19 +143,21 @@ function createLive(o = {}) {
   const deviceOf = typeof o.device === 'function' ? o.device : () => o.device;
   const online = typeof o.online === 'function' ? o.online : null;
   const snapshot = typeof o.snapshot === 'function' ? o.snapshot : () => [];
+  const boundOf = typeof o.bound === 'function' ? o.bound : () => [];
   const said = new Map();
   const logOnce = (k, t) => { if (said.get(k) === t) return; said.set(k, t); log(t); };
 
   let me = null;
   let lastSig = null, lastTry = -Infinity, at = 0, writes = 0, fetched = 0;
   let lastRead = -Infinity, ready = false;
-  // device -> { stamp (its updated_at), changedAt (this clock), sessions: Map id -> entry, or null when it did not open }
+  // device -> { stamp (its updated_at), changedAt (this clock), sessions: Map id -> entry, or null when it did not open,
+  // bound: Set of ids (empty for a row that did not open) }
   const seen = new Map();
 
   async function publish(t) {
-    let list;
-    try { list = pickList(cleanList(snapshot()), t, tm.doneMs); } catch (e) { logOnce('snapshot', `live: this device's conversations could not be listed (${errText(e)})`); return; }
-    const sig = sigOf(list);
+    let list, bound;
+    try { list = pickList(cleanList(snapshot()), t, tm.doneMs); bound = cleanIds(boundOf()); } catch (e) { logOnce('snapshot', `live: this device's conversations could not be listed (${errText(e)})`); return; }
+    const sig = `${sigOf(list)}|${bound.join(',')}`;
     if (sig === lastSig || !waited(t, lastTry, tm.minGapMs)) return;
     lastTry = t;
     at = Math.max(t, at + 1); // differs from the last one even when the clock did not move
@@ -151,13 +165,14 @@ function createLive(o = {}) {
     try {
       await api.rest('POST', 'settings', {
         query: { on_conflict: 'user_id,key' }, prefer: 'resolution=merge-duplicates,return=minimal',
-        body: { key: k, value_enc: K.sealText(JSON.stringify({ v: 1, device: me, at, sessions: list }), key, `setting:${k}`), updated_at: new Date(at).toISOString() },
+        body: { key: k, value_enc: K.sealText(JSON.stringify({ v: 1, device: me, at, sessions: list, bound }), key, `setting:${k}`), updated_at: new Date(at).toISOString() },
       });
       lastSig = sig; writes++;
       said.delete('write');
     } catch (e) { logOnce('write', `live: this device's snapshot could not be written (${errText(e)})`); }
   }
-  // one row's sealed value -> its sessions Map, or null (said once) when it does not open as this device's snapshot
+  // one row's sealed value -> { sessions: Map, bound: Set }, or null (said once) when it does not open as this device's
+  // snapshot
   function openRow(row, d) {
     let v = null;
     try { v = JSON.parse(K.openText(row.value_enc, key, `setting:${row.key}`)); } catch {}
@@ -165,7 +180,10 @@ function createLive(o = {}) {
       logOnce(`bad|${row.key}`, `live: the snapshot of ${short(d)} does not open with this key; ignored`);
       return null;
     }
-    return new Map(cleanList(v.sessions.slice(0, MAX_SESSIONS)).map((e) => [e.id, { ...e, device: d }]));
+    return {
+      sessions: new Map(cleanList(v.sessions.slice(0, MAX_SESSIONS)).map((e) => [e.id, { ...e, device: d }])),
+      bound: new Set(cleanIds(v.bound)),
+    };
   }
   async function read(t) {
     if (!waited(t, lastRead, tm.readMs)) return;
@@ -194,7 +212,8 @@ function createLive(o = {}) {
         const m = row && typeof row.key === 'string' ? KEY_RE.exec(row.key) : null;
         if (!m || !here.has(m[1])) continue;
         fetched++;
-        seen.set(m[1], { stamp: String(row.updated_at || ''), changedAt: t2, sessions: openRow(row, m[1]) });
+        const opened = openRow(row, m[1]);
+        seen.set(m[1], { stamp: String(row.updated_at || ''), changedAt: t2, sessions: opened ? opened.sessions : null, bound: opened ? opened.bound : new Set() });
       }
     }
     ready = true;
@@ -240,10 +259,11 @@ function createLive(o = {}) {
   // true, false, or null (not known)
   const isOnline = (d) => { if (!online) return true; try { const v = online(d); return v === true ? true : v === false ? false : null; } catch { return null; } };
   function live() {
-    const known = new Set(), unsure = new Set(), fresh = new Set(), sessions = new Map(), byDevice = new Map(), when = new Map();
+    const known = new Set(), unsure = new Set(), fresh = new Set(), sessions = new Map(), byDevice = new Map(), when = new Map(), bound = new Map();
     for (const [d, r] of seen) {
       if (!r.sessions) continue;
       known.add(d);
+      bound.set(d, r.bound || new Set());
       const on = isOnline(d);
       if (on === null) unsure.add(d);
       if (on !== true) continue;
@@ -252,11 +272,11 @@ function createLive(o = {}) {
       // two fresh snapshots with one id (a move under way): the one seen changing last
       for (const [id, e] of r.sessions) if (!sessions.has(id) || when.get(id) < r.changedAt) { sessions.set(id, e); when.set(id, r.changedAt); }
     }
-    return { ready, known, unsure, fresh, sessions, byDevice };
+    return { ready, known, unsure, fresh, sessions, byDevice, bound };
   }
   const status = () => { const v = live(); return { device: me, writes, fetched, ready, devices: v.known.size, fresh: v.fresh.size }; };
 
   return { start, stop, tick, live, status };
 }
 
-module.exports = { createLive, remoteFor, cleanEntry, cleanList, pickList, sigOf, TIMING, MAX_SESSIONS };
+module.exports = { createLive, remoteFor, cleanEntry, cleanList, cleanIds, pickList, sigOf, TIMING, MAX_SESSIONS, MAX_BOUND };

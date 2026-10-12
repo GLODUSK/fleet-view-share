@@ -1002,6 +1002,14 @@ export function mountCompose(slot, s) {
       else if (!w || w === 'dialog open') bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>A dialog or panel is open in this session: answer or close it in the Session tab</span></span>`);
       else bits.push(`<span class="cmp-chip info">${icon('info', 13)}<span>Claude is waiting: ${esc(w.length > 120 ? `${w.slice(0, 119)}…` : w)} — answer it in the Session tab</span></span>`);
     }
+    // another machine runs it (sync, /state's workspace.host): this machine's session host won't open it until it moves
+    // here (Continue here, in the Session tab); a bound one's files stay on that machine even then
+    else if (!h && st.s && st.s.workspace && st.s.workspace.host) {
+      const w = st.s.workspace, n = esc(w.host.name || 'another machine');
+      bits.push(`<span class="cmp-chip info">${icon('sync', 13)}<span>${w.kind === 'bound'
+        ? `This workspace is only on ${n}: Continue here, in the Session tab, brings the conversation here but not its files`
+        : `On ${n}: to type here, use Continue here in the Session tab`}</span></span>`);
+    }
     else if (!h && openElsewhere(st.s)) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>Open in another window: sending here starts a second copy</span></span>`);
     const v = st.dict || st.drain;
     if (v && (v.note || v.busy || st.sendAfter)) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>${esc(v.note || (st.sendAfter ? 'Sending as soon as what you said is written out…' : 'Writing out what you said…'))}</span></span>`);

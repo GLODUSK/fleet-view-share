@@ -765,12 +765,16 @@ function ownerHtml(s, pane, m) {
       + errHtml + '</div>';
   }
   const state = o.live ? '<span class="s-state live">running</span>' : '<span class="s-state">idle</span>';
-  const text = o.live
+  // bound (/state's workspace.kind): its folder is only on that machine, so the conversation comes but its files don't
+  const bound = s.workspace && s.workspace.kind === 'bound';
+  const text = (o.live
     ? `Claude is running it on ${esc(name)} right now. Continue here asks ${esc(name)} to finish and upload its last lines, then opens it on this PC.`
-    : `It is idle on ${esc(name)}. Continue here brings it to this PC with every line ${esc(name)} has written.`;
+    : `It is idle on ${esc(name)}. Continue here brings it to this PC with every line ${esc(name)} has written.`)
+    + (bound ? ` Its files stay on ${esc(name)}.` : '');
   return `<div class="s-card s-elsewhere s-move"><div class="s-ic">${icon('sync', 20)}</div><div class="s-title">On ${esc(name)} ${state}</div>`
+    + (bound ? `<div class="s-text"><b>This workspace is only on ${esc(name)}.</b></div>` : '')
     + `<div class="s-text">${text}</div>` + errHtml
-    + `<div class="s-actions"><button type="button" class="btn primary s-go" data-s="move">${icon('sync', 15)}<span>Continue here</span></button></div></div>`;
+    + `<div class="s-actions"><button type="button" class="btn primary s-go" data-s="move">${icon('sync', 15)}<span>${bound ? 'Continue here anyway' : 'Continue here'}</span></button></div></div>`;
 }
 
 // a move on show: its phase in one line, and the buttons that phase allows

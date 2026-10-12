@@ -140,6 +140,13 @@ title, a path inside a conversation, a token or the key. Conflicts (a local copy
 the synced one) are listed there and left alone. The wire format is `docs/sync-format.md`. Tests:
 `node scripts/sync-common-test.js`, `sync-up-test.js`, `sync-down-test.js`, `sync-run-test.js` (all in `scripts/`).
 
+**Portable and bound.** A chat whose folder every machine has, or can clone (a GitHub checkout, a folder under home in
+no checkout), is portable. One whose folder only its machine has (a checkout with no origin, a folder outside home, a
+Perforce workspace) is bound: its log syncs too, and the other machine lists and reads it, in an empty placeholder
+folder, but never runs it while its host has it. `/state` says which for every chat (`workspace`), and the Session
+tab's card says "This workspace is only on BlackBox". The details are in
+[sync-format.md](sync-format.md#portable-and-bound).
+
 The server decides who may sync, not this code. The `fleet_sync.members` list is checked by every table policy
 and every storage policy. A Google account that is not on the list can sign in, but it reads and writes nothing.
 The page tells it so.

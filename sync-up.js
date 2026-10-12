@@ -15,6 +15,7 @@
 //                    account of the projects folder its log is in: a folder A shares with B (a junction) is listed
 //                    once, as B's, so without it every conversation there would say b.
 //   home             the user's home folder (os.homedir() by default): what the home row stands for (step 1 below)
+//   temp             the temp folders, whose chats are not synced (tests; the system's by default, sync-common.js)
 //   log(text)        one line per thing worth knowing (no title, no transcript text, no token)
 //   now()            the clock for back-offs and row times (Date.now by default; tests move it)
 //   chunkBytes       plain bytes per chunk, at most 8 MiB (the default)
@@ -27,8 +28,7 @@
 //     so one conversation is never sent twice at once. Its back-off and skip are cleared, it is synced, the row is read
 //     again (size, sha256 and generation of 'main' as the row now says; owner_device lower-case), and while the log
 //     grew meanwhile it goes again (at most 3 more passes). Throws a SyncError when there is no log here ('missing'),
-//     no row, another device owns it ('foreign'), it is in no repo and not under the home folder ('noRepo'), or the
-//     upload failed.
+//     no row, another device owns it ('foreign'), it is not synced (step 1: 'noRepo'), or the upload failed.
 //   forget(id): its up-state.json entry, back-off, running sha256 and pending count go, so the next pass takes over
 //     what the server has (adopt); a pass of it under way stops before its next write ('forgotten').
 //   hold(id) / unhold(id) / held() -> ids: a held conversation is never uploaded by a scan (counted 'held'); a scan
@@ -38,13 +38,20 @@
 //
 // One scan (scanOnce): this machine's devices row (sync-common.js ensureDevice); every conversation in every projects
 // folder, newest log first, one at a time. For each one whose files changed since the last scan:
-//   1. The folder its log lives in (else its last cwd) must be inside a git checkout with an origin on a host. A cwd
-//      that is gone (a removed worktree) counts by the nearest folder above it that is still there, as long as the
-//      checkout found holds the cwd. When no checkout with an origin holds it (no repo, or a repo with no origin) but
+//   1. Where it belongs, by the folder its log lives in (else its last cwd): a git checkout with an origin on a host
+//      holding it gives that repo's row. A cwd that is gone (a removed worktree) counts by the nearest folder above it
+//      that is still there, as long as the checkout found holds the cwd. When no checkout with an origin holds it but
 //      the folder is under the home folder, it goes under the home row (sync-common.js HOME_ORIGIN) with rel_cwd
-//      relative to home. Outside home and in no repo with an origin: not synced.
+//      relative to home, as it always has (a checkout with no origin, a Perforce workspace and home itself too, which
+//      /state calls bound: sync-common.js "portable or bound"). Outside home, or in an app data or Claude account
+//      folder (homeSkipped), which were never synced before, it goes under this device's bound row ('bound:<device
+//      id>', sync-common.js boundOrigin) with rel_cwd the folder's full path here (boundRel). A placeholder (another
+//      machine's bound chat laid down here, then resumed here) is bound to this device whatever holds it. In the temp
+//      folder, a Claude account's own folder or Fleet View's data folder (a tool's chats), under a .git git could not
+//      read (it waits for git), or a path of the other platform (a copy laid down here and not resumed here): not
+//      synced.
 //   2. The repos row for that origin and this device's repo_paths row (the main checkout's folder, or the home
-//      folder for the home row) are made when missing.
+//      folder for the home row; none for a bound row) are made when missing.
 //   3. The conversations row: made with owner_device = this device when there is none; one with no owner is claimed;
 //      one another device owns is left alone (S4 moves owners), and so is one that is not 'active'.
 //   4. Each file (sync-common.js conversationFiles: main, subagents/, tool-results/, workflows/):
@@ -103,7 +110,7 @@ const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // what a pass that sent nothing ends with -> the SyncError flush throws
 const NOT_SYNCED = {
   foreign: 'another device owns this conversation',
-  noRepo: 'this conversation is in no git checkout with an origin and not under the home folder',
+  noRepo: 'this conversation is not synced: its folder is another machine\'s path here, the temp folder, a Claude account\'s or Fleet View\'s own folder, or in a checkout git could not read yet',
   inactive: 'this conversation is not active on the server',
   empty: 'this conversation has no whole line yet',
   held: 'this conversation is held',
@@ -197,20 +204,14 @@ function homeFor(cwd, home) {
   if (relCwd === null || C.homeSkipped(relCwd)) return null;
   return { origin: C.HOME_ORIGIN, mainRoot: root, relCwd };
 }
-// A git checkout git could not read (a time-out, no git on PATH, a refused folder) holds cwd: a .git in the nearest
-// folder still there or one above it, up to home, with repoOf giving nothing for it. Such a conversation is a repo's,
-// not home's: it waits for git rather than go under the home row (a repo with no origin, which git did read, is home's)
-async function gitUnread(cwd, home) {
-  let dir = path.resolve(cwd);
-  while (!isDir(dir)) { const up = path.dirname(dir); if (up === dir) return false; dir = up; }
-  for (;;) {
-    if (inside(home, dir) === null) return false;
-    if (fs.existsSync(path.join(dir, '.git'))) return !(await C.repoOf(dir));
-    const up = path.dirname(dir);
-    if (up === dir) return false;
-    dir = up;
-  }
+// A bound conversation (sync-common.js workspaceKind): this device's bound row, 'bound:<device id>', with rel_cwd the
+// folder's full path here ('/' between folders, sync-common.js boundRel). No repo_paths row: no other device has it.
+function boundFor(cwd, device) {
+  const relCwd = C.boundRel(cwd);
+  return relCwd ? { origin: C.boundOrigin(device), mainRoot: null, relCwd, bound: true } : null;
 }
+// (A git checkout git could not read, a .git with repoOf giving nothing for it, holds a conversation that waits for git
+// rather than go under the home row or a bound one: sync-common.js gitUnreadAt.)
 
 function createUploader(opts = {}) {
   const api = opts.api;
@@ -225,6 +226,16 @@ function createUploader(opts = {}) {
   const rate = Number(opts.rateBytesPerSec) > 0 ? Number(opts.rateBytesPerSec) : RATE;
   const statePath = path.join(S.syncDir(dataDir), 'up-state.json');
   const userHome = typeof opts.home === 'string' && opts.home ? opts.home : os.homedir();
+  const tempOpt = Array.isArray(opts.temp) ? opts.temp : undefined; // the temp folders (tests); the system's otherwise
+  // never a bound row either, as never synced before: a Claude account's own folder (~/.claude-<letter>: a sign-in's
+  // or a tool's chat) and Fleet View's data folder (its own); other app data folders' chats (the Claude app's
+  // scratchpads) are a person's, and go up bound
+  const ownData = [dataDir, P.dataDir()].filter(Boolean).map((d) => path.resolve(d));
+  const toolFolder = (cwd) => {
+    const rel = inside(path.resolve(userHome), path.resolve(cwd));
+    if (rel !== null && /^\.claude-[a-z]$/i.test(rel.split('/')[0])) return true;
+    return ownData.some((d) => inside(d, path.resolve(cwd)) !== null);
+  };
   const projectsList = () => {
     const p = opts.projects;
     if (typeof p === 'function') return C.projectsDirs({ dirs: p() });
@@ -589,15 +600,22 @@ function createUploader(opts = {}) {
     // where it belongs: the folder its log lives in (it resumes there), else its last cwd when that folder is in no repo
     const meta = C.lastMeta(c.mainPath);
     const startCwd = C.homeCwd(c.mainPath, meta.cwd);
-    let repo = startCwd ? await repoFor(startCwd) : null;
+    const where = startCwd || meta.cwd;
+    // another machine's bound chat laid down here, and resumed here: bound, to this device now (whatever holds it)
+    let repo = ownPath(where) && C.isBoundPlaceholder(where, userHome) ? boundFor(where, device) : null;
+    if (!repo && startCwd) repo = await repoFor(startCwd);
     if (!repo && meta.cwd && meta.cwd !== startCwd) repo = await repoFor(meta.cwd);
-    // no repo with an origin holds either: the home row, by the folder it started in, when that is under home (a
-    // repo checkout under home has its own row and was found above)
-    if (!repo) {
-      const h = homeFor(startCwd || meta.cwd, userHome);
-      if (h && !(await gitUnread(startCwd || meta.cwd, h.mainRoot))) repo = h;
+    // no repo with an origin holds either: by the folder it started in, the home row under home, as always (a repo
+    // checkout under home has its own row and was found above; one with no origin, a Perforce workspace and home
+    // itself are the home row's too, though /state calls them bound); else (outside home, or an app data or Claude
+    // account folder, which were never synced before) this device's bound row. Never one in the temp folder, nor one
+    // under a .git git could not read (it waits for git).
+    if (!repo && ownPath(where)) {
+      const h = homeFor(where, userHome);
+      if (h) { if (!(await C.gitUnreadAt(where, h.mainRoot))) repo = h; }
+      else if (!C.inTemp(where, { home: userHome, temp: tempOpt }) && !toolFolder(where) && !(await C.gitUnreadAt(where))) repo = boundFor(where, device);
     }
-    if (!repo) { pendingOf.delete(id); return skip(c, mem, 'noRepo', SKIP_RECHECK_MS, tally); }
+    if (!repo || (repo.bound && (!repo.relCwd || repo.relCwd.length > 1024))) { pendingOf.delete(id); return skip(c, mem, 'noRepo', SKIP_RECHECK_MS, tally); }
     const rid = await repoId(repo.origin);
 
     // its row
@@ -645,7 +663,7 @@ function createUploader(opts = {}) {
 
     // this device's checkout of the repo, only once the conversation is this device's: a copy laid down here from
     // another device names that device's folders, which must not become this device's repo_paths row
-    await repoPath(device, rid, repo.mainRoot);
+    if (!repo.bound) await repoPath(device, rid, repo.mainRoot);
     const w = { id, st, rowExisted, listing: null, maxGen: {}, changed: false, device, mem, epoch, urgent: !!how.urgent };
     // a row on the server but no state here (a lost up-state.json, or one that disagreed): one look at the server's
     // chunk rows, so what is already there is taken over and not sent again
@@ -879,4 +897,4 @@ function createUploader(opts = {}) {
   return { scanOnce, start, stop, status, flush, forget, hold, unhold, held };
 }
 
-module.exports = { createUploader, repoFor, homeFor, lastLineEnd, MAX_CHUNK, TAIL_BYTES };
+module.exports = { createUploader, repoFor, homeFor, boundFor, lastLineEnd, MAX_CHUNK, TAIL_BYTES };

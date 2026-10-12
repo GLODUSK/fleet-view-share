@@ -927,6 +927,54 @@ function localCwd(cwd, logFile) {
   return (logFile && folderOfSlug(path.basename(path.dirname(logFile)))) || cwd;
 }
 
+// ---------- portable or bound (sync-common.js "portable or bound") ----------
+// A conversation's workspace is portable (a git checkout with an origin, or a folder under home in no checkout: every
+// machine has it, or can) or bound (only the machine it is on has it: a checkout with no origin, a folder outside home,
+// a Perforce workspace...). Another machine's bound conversation is laid down here in a placeholder,
+// <home>/.fleet-view/bound/<host>/<hash>/<name> (sync-down.js), the folder its log's slug folder names.
+// -> that placeholder, or null
+let boundSlug = null;
+function boundPlaceOf(s) {
+  const slug = s && s.dir ? path.basename(path.dirname(s.dir)) : '';
+  if (!boundSlug) boundSlug = `${SYNC_COMMON.slugOf(SYNC_COMMON.boundBase(os.homedir())).toLowerCase()}-`;
+  if (!slug || !slug.toLowerCase().startsWith(boundSlug)) return null;
+  const f = folderOfSlug(slug);
+  return f && SYNC_COMMON.isBoundPlaceholder(f, os.homedir()) ? f : null;
+}
+// This machine's own folder: 'portable' | 'bound' (sync-common.js workspaceKind, from what is read here at once:
+// checkoutAt's checkout and origin, a Perforce workspace around it), cached a minute per folder; null for another
+// machine's path
+const kindCache = new Map(); // folded folder -> { at, kind }
+function folderKind(folder) {
+  if (!folder || !nativeAbs(folder)) return null;
+  const k = P.foldCase(path.resolve(folder)), t = Date.now(), hit = kindCache.get(k);
+  if (hit && t - hit.at < 60e3) return hit.kind;
+  const co = SYNC_COMMON.checkoutAt(folder), home = os.homedir();
+  const perforce = !co && !!SYNC_COMMON.perforceAt(folder, { home, roots: SYNC_COMMON.p4RootsNow() });
+  const w = SYNC_COMMON.workspaceKind({ cwd: folder, git: !!co, origin: co ? co.origin : null, perforce, home });
+  const kind = w ? w.kind : null;
+  kindCache.set(k, { at: t, kind });
+  if (kindCache.size > 2000) kindCache.delete(kindCache.keys().next().value);
+  return kind;
+}
+// /state's workspace: { kind: 'portable' | 'bound', host: { device, name } | null } (host: the device that runs it, null
+// when this machine does); null while it can't be told (a demo, another machine's path with sync off). Another
+// device's: bound when its row is a bound one (sync-run.js owners()) or that device lists it as bound (sync-live.js
+// live().bound, kept while it sleeps); this machine's: a placeholder is bound, else its folder's kind. owners:
+// syncOwners()
+function workspaceOf(s, owners) {
+  if (s.demo) return null;
+  const id = String(s.id).toLowerCase();
+  const o = owners && owners.get(id);
+  if (o && o.device && o.moving !== 'away') {
+    const listed = pollRemote && pollRemote.live && pollRemote.live.bound instanceof Map ? pollRemote.live.bound.get(o.device) : null;
+    return { kind: o.bound || (listed && listed.has(id)) ? 'bound' : 'portable', host: { device: o.device, name: o.name || null } };
+  }
+  if (boundPlaceOf(s)) return { kind: 'bound', host: null };
+  const kind = folderKind(s.homeCwd || s.cwd);
+  return kind ? { kind, host: null } : null;
+}
+
 function gitInfo(file) {
   if (!nativeAbs(file)) return null; // another machine's path (see nativeAbs), or a relative one
   let dir = path.dirname(file);
@@ -1124,6 +1172,9 @@ function homeRootOf(s) {
 function repoOf(s, now) {
   const mv = movedRootOf(s);
   if (mv) return mv;
+  // another machine's bound conversation: its placeholder, never a workspace here (its tool calls name the host's paths)
+  const ph = boundPlaceOf(s);
+  if (ph) return ph;
   // s.remote is only set once the sync runner is up, which is after PREFS_ROOTS
   const rr = s.remote && s.remote.entry && s.remote.entry.repo;
   const there = rr && PREFS_ROOTS.in(rr);
@@ -4322,6 +4373,9 @@ function sessionJson(s, now, owners = syncOwners()) {
     openElsewhere: s.demo ? false : liveProcs.has(s.id),
     // another device has it (sync), or it is moving: { device, name, live, moving }; no key otherwise
     ...syncOwnerOf(s, owners),
+    // portable (any machine has its workspace or can) or bound (only its host does), and the host when it is another
+    // device: { kind, host: { device, name } | null } (workspaceOf)
+    workspace: workspaceOf(s, owners),
   };
 }
 // the conversations another device has, and the ones moving between this one and another (sync-run.js owners():
@@ -4397,6 +4451,21 @@ function liveSnapshot() {
       waitingOn: waitingOf(s), agents: runningAgents(s),
       repo: rp && (rp.origin || rp.name) ? { origin: rp.origin || null, name: rp.name || null } : null,
     });
+  }
+  return out;
+}
+// sync-live.js's bound list: every conversation this device runs (no other device owns it) whose workspace is only here
+// (workspaceOf), whatever its state: the other devices can't tell a checkout with no origin under home, which syncs
+// under the home row, from a portable folder
+function liveBound() {
+  if (DEMO) return [];
+  const owners = syncOwners(), out = [];
+  for (const s of sessions.values()) {
+    if (s.demo) continue;
+    const o = owners && owners.get(String(s.id).toLowerCase());
+    if (o && o.moving !== 'away') continue;
+    const w = workspaceOf(s, null);
+    if (w && w.kind === 'bound') out.push(String(s.id).toLowerCase());
   }
   return out;
 }
@@ -6410,7 +6479,7 @@ const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, lo
   relay: RELAY, version: () => VERSION.current().version,
   host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
   isOpen: (id) => liveProcs.has(String(id).toLowerCase()),
-  mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot(),
+  mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot(), bound: () => liveBound(),
   // the account each conversation ran under here (its process, or remembered): its synced row names it
   accountOf: (id) => knownAccount(String(id).toLowerCase()),
   prefs: { read: prefsGroups, apply: applyPrefs, translate: PREFS_ROOTS,

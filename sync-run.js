@@ -14,7 +14,7 @@
 // written by `sync-api.js setup`). Off by default: a PC with none of the three runs no loop,
 // sets no timer beyond the minute check and reaches no network.
 //
-//   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, accountOf,
+//   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, bound, accountOf,
 //                      intervalMs, checkMs, prefs, relay, version, makeUploader, makeMaterializer, makeMover, makeLive,
 //                      makePrefs, makeLink })
 //     -> { start(), stop(), check(), status(), move(id, { force }), moveStatus(id), cancelMove(id), owners(), device(),
@@ -35,12 +35,13 @@
 //     Error with .code 'not_running' (its message says why sync is not running), 'bad_id' or 'not_elsewhere' (no
 //     other device has it). A second move() of the same id gives the same job; force: true forces it.
 //   moveStatus(id) -> the job | null      cancelMove(id) -> true when it was stopped
-//   owners() -> Map id -> { device, name, live, moving, account }: conversations another device owns (live: its lease
-//     is ahead; account: its row's, 'a' | 'b' | null), and this device's own moves (moving 'here' or 'away'); an empty
-//     Map while not running
+//   owners() -> Map id -> { device, name, live, moving, account, bound }: conversations another device owns (live: its
+//     lease is ahead; account: its row's, 'a' | 'b' | null; bound: its workspace is only on that device, sync-common.js
+//     "portable or bound"), and this device's own moves (moving 'here' or 'away'); an empty Map while not running
 //   device() -> { id, name } of this device | null
 // What runs where (sync-live.js), beside the mover and only with it (it needs the mover's device id): snapshot() ->
-// the conversations this device owns, as fleet-view.js's /state shows them, published for the other devices;
+// the conversations this device owns, as fleet-view.js's /state shows them, published for the other devices; bound()
+// -> the ids of the ones whose workspace is only here (sync-live.js's option of that name);
 //   live() -> sync-live.js live(): the other devices' fresh snapshots | null while not running (or no snapshot given)
 // The shared settings (sync-prefs.js), beside the mover and only with it (the same device id): prefs: { read(),
 // apply(group, items), translate, load(), save(state) } (sync-prefs.js createPrefs's options of those names);
@@ -77,6 +78,7 @@ function createSyncRunner(o = {}) {
   const makeLink = o.makeLink || ((a) => require(path.join(__dirname, 'link.js')).createLink(a));
   const relay = o.relay && typeof o.relay.addComputer === 'function' ? o.relay : null;
   const snapshot = typeof o.snapshot === 'function' ? o.snapshot : null;
+  const boundIds = typeof o.bound === 'function' ? o.bound : null;
   const accountOf = typeof o.accountOf === 'function' ? o.accountOf : null;
   const prefsOpt = o.prefs && typeof o.prefs.read === 'function' && typeof o.prefs.apply === 'function' ? o.prefs : null;
   const host = o.host && typeof o.host.list === 'function' ? o.host : null;
@@ -162,7 +164,9 @@ function createSyncRunner(o = {}) {
     const deviceId = () => { const d = mover.device(); return d ? d.id : null; };
     let live = null;
     if (mover && snapshot) {
-      try { live = makeLive({ ...args, device: deviceId, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null), snapshot: () => snapshot() }); } catch (e) { log(`sync: what runs on the other devices can't be shown here: ${e && e.message}`); }
+      const liveArgs = { ...args, device: deviceId, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null), snapshot: () => snapshot() };
+      if (boundIds) liveArgs.bound = () => boundIds();
+      try { live = makeLive(liveArgs); } catch (e) { log(`sync: what runs on the other devices can't be shown here: ${e && e.message}`); }
     }
     let prefs = null;
     if (mover && prefsOpt) {

@@ -9,6 +9,12 @@
 // the end of a log, grows past a long tail, and falls back to custom-title.json. homeCwd picks the first or last cwd
 // whose slug is the log's folder (a session that moved into a worktree resumes from where it started). ensureDevice and touchDevice
 // against a fake api object. isLive with a live pid, a dead one and a shared sessions folder. readState/writeState.
+// Portable or bound: boundOrigin/boundDeviceOf/rowOrigin (no remote normalizes to 'bound:'), workspaceKind in its
+// order with sync-work.js's why texts (placeholder, checkout with or without an origin, outside home, home itself, app
+// folder, Perforce), inTemp, the placeholder's path and names, boundRel/boundRelOk/boundNative both ways and what they
+// refuse, perforceAt (a P4CONFIG file above, a .p4ignore, P4V's Perforce folder under home, a client root),
+// classifyFolder against throwaway git repos (a .git git could not read: null), gitUnreadAt, and checkoutAt (a
+// worktree's .git file and commondir).
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders or the network. Exit 0 = all pass.
 'use strict';
@@ -271,6 +277,117 @@ async function main() {
   ok(C.isLive(otherId, { home, fresh: true }), 'isLive: any account folder counts');
   ok(!C.isLive('', { home }) && !C.isLive(null, { home }), 'isLive: no id');
   ok(C.pidAlive(process.pid) && !C.pidAlive(0) && !C.pidAlive(-1) && !C.pidAlive('1'), 'pidAlive');
+
+  // ---------- portable or bound ----------
+  const DEV = '6a7b8c9d-0e1f-4a2b-9c3d-4e5f6a7b8c9d';
+  eq(C.boundOrigin(DEV.toUpperCase()), `bound:${DEV}`, 'boundOrigin: bound:<device id>, lower case');
+  throws(() => C.boundOrigin('nope'), 'boundOrigin: not a device id');
+  eq([C.boundDeviceOf(`bound:${DEV}`), C.boundDeviceOf(`BOUND:${DEV.toUpperCase()}`), C.boundDeviceOf('bound:x'), C.boundDeviceOf('home:'), C.boundDeviceOf(GH)], [DEV, DEV, null, null, null], 'boundDeviceOf');
+  eq(C.rowOrigin(`bound:${DEV.toUpperCase()}`), `bound:${DEV}`, 'rowOrigin: a bound origin, lower case');
+  for (const u of [`bound:${DEV}`, `git@bound:${DEV}`, `ssh://x@bound/${DEV}`, `bound:${DEV}.git`]) ok(!String(C.normalizeOrigin(u) || '').startsWith('bound:'), `no remote normalizes to a bound origin: ${u}`);
+  // the facts -> the kind and why, in order (sync-work.js inspect()'s rule and texts)
+  const wh = path.join(T, 'wk-home'), wkTemp = path.join(T, 'wk-temp');
+  const kind = (cwd, f = {}) => { const k = C.workspaceKind({ cwd, git: false, origin: null, perforce: false, home: wh, ...f }); return k && `${k.kind}/${k.why}`; };
+  const W = C.BOUND_WHY;
+  eq(Object.values(W), ['a placeholder for another machine\'s folder', 'a git checkout with no origin', 'outside the home folder', 'the home folder itself', 'an app data or Claude account folder', 'a Perforce workspace'], 'workspaceKind: the bound why texts');
+  eq(kind(path.join(wh, 'code', 'x'), { git: true, origin: GH }), 'portable/null', 'workspaceKind: a checkout with an origin');
+  eq(kind(path.join(T, 'far', 'x'), { git: true, origin: GH }), 'portable/null', 'workspaceKind: one outside home too');
+  eq(kind(path.join(wh, 'code', 'x'), { git: true, origin: GH, perforce: true }), 'portable/null', 'workspaceKind: a Perforce marker inside a checkout with an origin is git\'s');
+  eq(kind(path.join(wh, 'code', 'x'), { git: true }), `bound/${W.noOrigin}`, 'workspaceKind: a checkout with no origin under home is bound (its commits can\'t travel)');
+  eq(kind(path.join(T, 'far', 'x'), { git: true }), `bound/${W.noOrigin}`, 'workspaceKind: and outside home');
+  eq(kind(path.join(wh, 'code', 'x'), { git: true, origin: C.HOME_ORIGIN }), `bound/${W.noOrigin}`, 'workspaceKind: a pseudo origin is no origin');
+  eq(kind(path.join(wh, 'Bots', 'b')), 'portable/null', 'workspaceKind: a folder under home in no checkout');
+  eq(kind(wh), `bound/${W.home}`, 'workspaceKind: the home folder itself');
+  eq(kind(path.join(wh, 'p4', 'ws'), { perforce: true }), `bound/${W.perforce}`, 'workspaceKind: a Perforce workspace under home');
+  eq(kind(path.join(wh, 'Library', 'Caches', 'x')), `bound/${W.app}`, 'workspaceKind: an app data folder under home');
+  eq(kind(path.join(wh, 'AppData', 'Local', 'x')), `bound/${W.app}`, 'workspaceKind: AppData under home');
+  eq(kind(path.join(wh, '.claude-a')), `bound/${W.app}`, 'workspaceKind: a Claude account\'s folder');
+  eq(kind(path.join(T, 'far', 'x')), `bound/${W.outside}`, 'workspaceKind: outside home, no checkout');
+  const ph = C.boundPlaceholder(wh, 'BlackBox', 'C:/Perforce/ws');
+  eq(kind(ph, { git: true, origin: GH }), `bound/${W.placeholder}`, 'workspaceKind: a placeholder is bound whatever holds it');
+  eq(kind(path.join(ph, 'sub')), `bound/${W.placeholder}`, 'workspaceKind: a folder inside a placeholder too');
+  eq(kind(P.isWin ? '/Users/henry/x' : 'C:\\x'), null, 'workspaceKind: another platform\'s path: not ours to say');
+  eq(kind(''), null, 'workspaceKind: no folder');
+  // inTemp: the uploader's throwaway folders
+  ok(C.inTemp(path.join(wkTemp, 'x'), { home: wh, temp: [wkTemp] }) && !C.inTemp(path.join(T, 'far'), { home: wh, temp: [wkTemp] }), 'inTemp: a folder in the temp folder, and one outside it');
+  ok(!C.inTemp(path.join(wh, 'x'), { home: wh, temp: [T] }), 'inTemp: a temp folder that holds the home folder does not count');
+  ok(C.inTemp(path.join(os.tmpdir(), 'x'), { home: wh }), 'inTemp: the system\'s temp folder by default');
+  // the placeholder: <home>/.fleet-view/bound/<host>/<hash>/<name>
+  ok(same(path.dirname(path.dirname(path.dirname(ph))), C.boundBase(wh)) && path.basename(ph) === 'ws' && path.basename(path.dirname(path.dirname(ph))) === 'BlackBox', `boundPlaceholder: under .fleet-view/bound, the host, a hash, the folder's name (${ph})`);
+  ok(C.boundPlaceholder(wh, 'BlackBox', 'D:/Perforce/ws') !== ph && path.basename(C.boundPlaceholder(wh, 'BlackBox', 'D:/Perforce/ws')) === 'ws', 'boundPlaceholder: another folder of the same name gets another hash');
+  eq(path.basename(C.boundPlaceholder(wh, 'BlackBox', 'C:/')), 'C', 'boundPlaceholder: a drive\'s root is named by its letter');
+  eq([path.basename(C.boundPlaceholder(wh, 'x', '/srv/con')), path.basename(path.dirname(path.dirname(C.boundPlaceholder(wh, 'a/b:c..', '/x'))))], ['_con', 'a-b-c'], 'boundPlaceholder: names made safe for a folder');
+  eq(path.basename(path.dirname(path.dirname(C.boundPlaceholder(wh, '', '/x')))), 'other-machine', 'boundPlaceholder: no host name');
+  ok(C.isBoundPlaceholder(ph, wh) && !C.isBoundPlaceholder(path.dirname(ph), wh) && !C.isBoundPlaceholder(C.boundBase(wh), wh) && !C.isBoundPlaceholder(path.join(wh, 'x'), wh), 'isBoundPlaceholder: the folder and below it only');
+  // a bound rel_cwd: this platform's full path with '/', and back
+  if (P.isWin) {
+    eq(C.boundRel('c:\\Perforce\\ws'), 'C:/Perforce/ws', 'boundRel: a drive, upper case, with /');
+    eq(C.boundRel('\\\\srv\\share\\x'), '//srv/share/x', 'boundRel: a share');
+    eq([C.boundNative('C:/Perforce/ws'), C.boundNative('//srv/share/x'), C.boundNative('C:/')], ['C:\\Perforce\\ws', '\\\\srv\\share\\x', 'C:\\'], 'boundNative: back to Windows paths');
+    eq(C.boundNative('/Users/henry/ws'), null, 'boundNative: a Mac path is not one here');
+  } else {
+    eq(C.boundRel('/Users/henry/ws'), '/Users/henry/ws', 'boundRel: a full path as it is');
+    eq([C.boundNative('/Users/henry/ws'), C.boundNative('/Users/henry/ws/')], ['/Users/henry/ws', '/Users/henry/ws'], 'boundNative: back to a path here');
+    eq([C.boundNative('C:/Perforce/ws'), C.boundNative('//srv/share/x')], [null, null], 'boundNative: a Windows path is not one here');
+  }
+  for (const r of ['', 'x/y', '/a/../b', '/a/./b', '/a//b', '/a\u0001b', `/${'x'.repeat(1100)}`, null]) eq(C.boundNative(r), null, `boundNative: refused: ${JSON.stringify(r).slice(0, 40)}`);
+  eq(C.boundRel('relative/x'), null, 'boundRel: not a full path');
+  eq(['C:/Perforce/ws', '//srv/share/x', '/Users/henry/ws', 'C:/', 'x/y', '/a/../b', 'C:', 'C:/a<b', ''].map(C.boundRelOk), [true, true, true, true, false, false, false, false, false], 'boundRelOk: a full path on either platform, nothing else');
+  // perforceAt: a P4CONFIG file above, P4V's Perforce folder under home, nothing
+  const p4root = path.join(T, 'p4ws'), p4sub = path.join(p4root, 'a', 'b');
+  fs.mkdirSync(p4sub, { recursive: true });
+  ok(!C.perforceAt(p4sub, { home: wh }), 'perforceAt: no marker');
+  write(path.join(p4root, 'p4config.txt'), 'P4CLIENT=x\n');
+  const p4b = path.join(T, 'p4ws2', 'a');
+  fs.mkdirSync(p4b, { recursive: true });
+  write(path.join(T, 'p4ws2', '.p4config'), 'P4CLIENT=x\n');
+  ok(same(C.perforceAt(p4b, { home: wh }), path.join(T, 'p4ws2')), 'perforceAt: a .p4config above the folder');
+  ok(same(C.perforceAt(path.join(T, 'p4ws2', 'a', 'gone', 'deeper'), { home: wh }), path.join(T, 'p4ws2')), 'perforceAt: a folder that is gone counts by the one above it');
+  ok(same(C.perforceAt(path.join(wh, 'Perforce', 'henry-ws', 'game'), { home: wh }), path.join(wh, 'Perforce')), 'perforceAt: P4V\'s Perforce folder under home');
+  ok(!C.perforceAt(path.join(wh, 'Perforce'), { home: wh }), 'perforceAt: the Perforce folder itself is no workspace');
+  const p4c = path.join(T, 'p4client', 'proj');
+  fs.mkdirSync(p4c, { recursive: true });
+  ok(same(C.perforceAt(p4c, { home: wh, roots: [path.join(T, 'p4client')] }), path.join(T, 'p4client')) && !C.perforceAt(path.join(T, 'p4other'), { home: wh, roots: [path.join(T, 'p4client')] }), 'perforceAt: inside the client root p4 gives, and not outside it');
+  write(path.join(T, 'p4ignore-ws', '.p4ignore'), 'node_modules\n');
+  ok(same(C.perforceAt(path.join(T, 'p4ignore-ws'), { home: wh }), path.join(T, 'p4ignore-ws')), 'perforceAt: a .p4ignore file');
+  ok(Array.isArray(await C.p4ClientRoots()) && Array.isArray(C.p4RootsNow()), 'p4ClientRoots: a list (none without p4)');
+  // classifyFolder: the facts from git
+  const cRepo = path.join(T, 'cl-repo'), cHome = path.join(T, 'cl-home'), cLocal = path.join(cHome, 'local'), cBot = path.join(cHome, 'Bots', 'b');
+  const cP4 = path.join(cHome, 'depot', 'ws', 'src');
+  fs.mkdirSync(cRepo, { recursive: true });
+  fs.mkdirSync(cLocal, { recursive: true });
+  fs.mkdirSync(cBot, { recursive: true });
+  fs.mkdirSync(cP4, { recursive: true });
+  write(path.join(cHome, 'depot', 'ws', '.p4config'), 'P4CLIENT=x\n');
+  cp.execFileSync('git', ['init', '-q'], { cwd: cRepo });
+  cp.execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/Test/Cl.git'], { cwd: cRepo });
+  cp.execFileSync('git', ['init', '-q'], { cwd: cLocal });
+  const cl = async (p) => { const k = await C.classifyFolder(p, { home: cHome, p4Roots: [] }); return k && { kind: k.kind, why: k.why, git: k.git, origin: k.origin }; };
+  eq(await cl(cRepo), { kind: 'portable', why: null, git: true, origin: 'https://github.com/test/cl' }, 'classifyFolder: a checkout with an origin');
+  eq(await cl(path.join(cRepo, 'gone', 'x')), { kind: 'portable', why: null, git: true, origin: 'https://github.com/test/cl' }, 'classifyFolder: a gone folder inside it');
+  eq(await cl(cLocal), { kind: 'bound', why: W.noOrigin, git: true, origin: null }, 'classifyFolder: a repo with no origin under home is bound');
+  eq(await cl(cBot), { kind: 'portable', why: null, git: false, origin: null }, 'classifyFolder: a folder under home in no checkout');
+  eq(await cl(path.join(cHome, 'Bots', 'gone')), { kind: 'portable', why: null, git: false, origin: null }, 'classifyFolder: one that is gone too');
+  eq(await cl(cP4), { kind: 'bound', why: W.perforce, git: false, origin: null }, 'classifyFolder: under a P4CONFIG file');
+  eq(await cl(cHome), { kind: 'bound', why: W.home, git: false, origin: null }, 'classifyFolder: the home folder itself');
+  eq(await cl(path.join(T, 'nowhere')), { kind: 'bound', why: W.outside, git: false, origin: null }, 'classifyFolder: outside home');
+  const cBroken = path.join(cHome, 'broken', 'sub');
+  fs.mkdirSync(cBroken, { recursive: true });
+  fs.writeFileSync(path.join(cHome, 'broken', '.git'), `gitdir: ${path.join(T, 'no-such-gitdir')}`);
+  eq(await C.classifyFolder(cBroken, { home: cHome, p4Roots: [] }), null, 'classifyFolder: under a .git git could not read: null (wait)');
+  ok(await C.gitUnreadAt(path.join(cBroken, 'gone')) && !(await C.gitUnreadAt(cBot)) && !(await C.gitUnreadAt(cBroken, path.join(cHome, 'broken', 'sub'))), 'gitUnreadAt: from the folder still there, up to stop');
+  eq(await C.classifyFolder(P.isWin ? '/Users/x' : 'C:\\x', { home: cHome }), null, 'classifyFolder: another platform\'s path: null');
+  // checkoutAt: the same facts from disk, no git process
+  const co = (p) => { const r = C.checkoutAt(p); return r && { top: path.basename(r.top), origin: r.origin }; };
+  eq(co(path.join(cRepo, 'gone', 'x')), { top: 'cl-repo', origin: 'https://github.com/test/cl' }, 'checkoutAt: a checkout with an origin, from a folder that is gone inside it');
+  eq(co(cLocal), { top: 'local', origin: null }, 'checkoutAt: a checkout with no origin');
+  eq(co(cBot), null, 'checkoutAt: no checkout');
+  // a linked worktree's .git file, and its commondir back to the main checkout's config
+  const wtDir = path.join(T, 'cl-wt'), wtGit = path.join(cRepo, '.git', 'worktrees', 'cl-wt');
+  write(path.join(wtGit, 'commondir'), '../..\n');
+  write(path.join(wtDir, '.git'), `gitdir: ${wtGit}\n`);
+  eq(co(wtDir), { top: 'cl-wt', origin: 'https://github.com/test/cl' }, 'checkoutAt: a worktree reads its main checkout\'s origin');
+  eq(C.checkoutAt(P.isWin ? '/Users/x' : 'C:\\x'), null, 'checkoutAt: another platform\'s path');
 }
 
 main().catch((e) => { failures++; console.log(`FAIL threw: ${e && e.stack}`); }).finally(() => {

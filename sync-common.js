@@ -7,7 +7,13 @@
 //   projectsDirs(o)                    [{ account: 'a' | 'b', dir }]: the Claude projects folders on this machine
 //   normalizeOrigin(url)               a git remote as the repos row keeps it, or null
 //   HOME_ORIGIN, rowOrigin(s)          the home folder's pseudo origin; a repos row's origin as both sides read it
-//   homeSkipped(relCwd)                a home-row rel_cwd that is never synced (AppData, Library, ~/.claude-<letter>)
+//   homeSkipped(relCwd)                a home-row rel_cwd that is never the home row's (AppData, Library, ~/.claude-<letter>)
+//   workspaceKind(facts), classifyFolder(cwd), checkoutAt, gitUnreadAt, inTemp, perforceAt, p4ClientRoots, p4RootsNow:
+//                                      portable or bound (see "portable or bound" below)
+//   boundOrigin(device), boundDeviceOf(origin), boundRel(folder), boundRelOk(rel), boundNative(rel)   a bound chat's
+//                                      repos row and rel_cwd
+//   boundBase(home), isBoundPlaceholder(p, home), boundPlaceholder(home, host, rel)  where another machine's bound chat
+//                                      is laid down here
 //   repoOf(folder)                     -> Promise<{ root, mainRoot, origin } | null>, from git, cached per folder
 //   checkFileKey(k), fileKeyB64(k), fileKeyFromB64(s), objectPath(id, fileKey, generation, seq)
 //                                      file keys and the 't/<id>/<b64>/<gen>/<seq>' object paths
@@ -120,12 +126,273 @@ function normalizeOrigin(url) {
 // an origin (a bot, a scratchpad, the home folder itself) syncs under it, and each device's repo_paths root for it is
 // its own home (docs/sync-format.md). It is not a URL, so no git remote ever normalizes to it.
 const HOME_ORIGIN = 'home:';
-// A repos row's origin as both sides read it: the home marker exactly, else normalizeOrigin's string, else null
-const rowOrigin = (s) => (s === HOME_ORIGIN ? HOME_ORIGIN : normalizeOrigin(s));
-// A rel_cwd under the home row that is never synced, nor made on another machine: the app data folders (Windows'
+// The repos row a bound conversation goes under: one per device that hosts bound ones, 'bound:<its device id>'
+// (lower case). Not a URL either: normalizeOrigin never gives a string that starts with 'bound:' (a remote spelled
+// "bound:x" reads as https://bound/x), so no git remote is ever taken for it.
+const BOUND_RE = /^bound:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+const boundOrigin = (device) => {
+  const d = typeof device === 'string' ? device.toLowerCase() : '';
+  if (!UUID_RE.test(d)) throw new S.SyncError('not a device id', 400, 'bad_request');
+  return `bound:${d}`;
+};
+// a repos row's origin -> the device id of a bound one (lower case), else null
+const boundDeviceOf = (origin) => { const m = typeof origin === 'string' ? BOUND_RE.exec(origin.toLowerCase()) : null; return m ? m[1] : null; };
+// A repos row's origin as both sides read it: the home marker exactly, a bound one in lower case, else
+// normalizeOrigin's string, else null
+const rowOrigin = (s) => (s === HOME_ORIGIN ? HOME_ORIGIN : boundDeviceOf(s) ? s.toLowerCase() : normalizeOrigin(s));
+// A rel_cwd under home that is never the home row's, nor made on another machine: the app data folders (Windows'
 // AppData, the Mac's Library), and a Claude account's own folder (~/.claude-<letter>: one made on the other machine
-// would show there as an account)
+// would show there as an account). A chat started there is bound to its machine.
 const homeSkipped = (relCwd) => /^(?:appdata|library|\.claude-[a-z])$/i.test(String(relCwd || '').split(/[\\/]/)[0]);
+
+// ---------- portable or bound ----------
+// Every conversation's workspace is one of two kinds (docs/sync-format.md "Portable and bound"), by the rule
+// sync-work.js inspect() follows too, with the same why texts:
+//   portable  a git checkout whose origin normalizes (normalizeOrigin: every machine has it, or can clone it), or a
+//             folder under the home folder in no git checkout (the home row: a scratchpad, a bot's folder)
+//   bound     everything else, which only the machine it is on has, why:
+//               'a placeholder for another machine's folder'   (boundPlaceholder, below), first, whatever holds it
+//               'a git checkout with no origin'                wherever it is: its commits have nowhere to come from
+//               'outside the home folder'
+//               'the home folder itself'
+//               'an app data or Claude account folder'         (homeSkipped)
+//               'a Perforce workspace'                         (perforceAt), in no git checkout
+// Which row sync puts a conversation under did not change for the ones it synced before: a checkout with an origin
+// under its repo's row, anything else under the home folder (a checkout with no origin, a Perforce workspace and the
+// home folder itself too) under the home row. Only the ones it left out before (outside home, or in an app data or
+// Claude account folder; never the temp folder) and placeholders go under a bound row (sync-up.js). Another machine
+// lists and reads a bound one and never resumes it as its own while its host owns it (it is in away.json then, as any
+// conversation another device owns is).
+//
+// workspaceKind({ cwd, git, origin, perforce, home }) -> { kind: 'portable' | 'bound', why } | null; why is null for a
+// portable one. Pure: the caller gathers the facts (classifyFolder with git; fleet-view.js from what it reads at once).
+//   cwd       the folder: an absolute path of this platform (another platform's, or none: null, not ours to say)
+//   git       a git checkout holds cwd
+//   origin    that checkout's origin as normalizeOrigin gives it, or null
+//   perforce  perforceAt(cwd) found a Perforce workspace around it
+//   home      the user's home folder
+// classifyFolder(cwd, o) -> Promise<{ kind, why, git, origin, root, mainRoot } | null>: the facts from git (repoOf) and
+//   perforceAt; root and mainRoot are repoOf's (null outside a checkout). A folder that is gone counts by the nearest
+//   one above it that is there. null: not this platform's path, or under a .git git could not read (a time-out, no
+//   git): ask again later. o.home and o.p4Roots (tests), o.fresh (ask git again).
+// checkoutAt(folder) -> { top, origin } | null: the same facts read from disk at once, no git process (below).
+// gitUnreadAt(folder, stop) -> Promise<bool>: a .git in the nearest folder still there or one above it (up to stop,
+//   when given) that git could not read: a checkout's folder that waits for git, never one taken for no checkout.
+// inTemp(cwd, o): cwd is in the temp folder (os.tmpdir(), and /tmp and /var/folders on a Mac; o.temp in tests), where
+//   only throwaway chats run (a script's, a test's): the uploader never syncs one there. A temp folder that holds the
+//   home folder (o.home) does not count.
+const nativeAbs = (p) => typeof p === 'string' && !!p && (P.isWin ? /^(?:[A-Za-z]:[\\/]|\\\\[^\\/])/.test(p) : p.startsWith('/'));
+// rel is p relative to base with '/' ('' for base itself), or null when p is not inside base
+function under(base, p) {
+  const rel = path.relative(path.resolve(base), path.resolve(p));
+  if (rel === '') return '';
+  if (rel.split(path.sep)[0] === '..' || path.isAbsolute(rel)) return null;
+  return rel.split(path.sep).join('/');
+}
+const BOUND_WHY = {
+  placeholder: 'a placeholder for another machine\'s folder',
+  noOrigin: 'a git checkout with no origin',
+  outside: 'outside the home folder',
+  home: 'the home folder itself',
+  app: 'an app data or Claude account folder',
+  perforce: 'a Perforce workspace',
+};
+function workspaceKind(f = {}) {
+  const cwd = f.cwd;
+  const home = typeof f.home === 'string' && f.home ? f.home : null;
+  if (!nativeAbs(cwd)) return null;
+  const bound = (why) => ({ kind: 'bound', why });
+  if (home && isBoundPlaceholder(cwd, home)) return bound(BOUND_WHY.placeholder);
+  if (f.git) {
+    const o = typeof f.origin === 'string' ? f.origin : '';
+    return o && o !== HOME_ORIGIN && !boundDeviceOf(o) ? { kind: 'portable', why: null } : bound(BOUND_WHY.noOrigin);
+  }
+  const rel = home ? under(home, cwd) : null;
+  if (rel === null) return bound(BOUND_WHY.outside);
+  if (rel === '') return bound(BOUND_WHY.home);
+  if (homeSkipped(rel)) return bound(BOUND_WHY.app);
+  if (f.perforce) return bound(BOUND_WHY.perforce);
+  return { kind: 'portable', why: null };
+}
+const nearestDir = (p) => { let d = path.resolve(p); while (!isDir(d)) { const up = path.dirname(d); if (up === d) return null; d = up; } return d; };
+async function gitUnreadAt(folder, stop = null) {
+  const start = nearestDir(folder);
+  if (!start) return false;
+  for (let dir = start; ;) {
+    if (stop && under(stop, dir) === null) return false;
+    if (fs.existsSync(path.join(dir, '.git'))) return !(await repoOf(dir));
+    const up = path.dirname(dir);
+    if (up === dir) return false;
+    dir = up;
+  }
+}
+async function classifyFolder(cwd, o = {}) {
+  if (!nativeAbs(cwd)) return null;
+  const home = typeof o.home === 'string' && o.home ? o.home : os.homedir();
+  const want = path.resolve(cwd), dir = nearestDir(want);
+  const r = dir ? await repoOf(dir, o) : null;
+  if (!r && dir && await gitUnreadAt(dir, under(home, dir) !== null ? home : null)) return null;
+  const roots = Array.isArray(o.p4Roots) ? o.p4Roots : await p4ClientRoots();
+  const k = workspaceKind({ cwd: want, git: !!r, origin: r ? r.origin : null, perforce: !r && !!perforceAt(want, { home, roots }), home });
+  return k ? { ...k, git: !!r, origin: r ? r.origin : null, root: r ? r.root : null, mainRoot: r ? r.mainRoot : null } : null;
+}
+// The git checkout around a folder, read from disk at once (no git process: for fleet-view.js's /state, which can't
+// wait): the nearest folder still there or one above it holding a .git (a folder, or a worktree's or submodule's .git
+// file), and that checkout's origin from its config (the remote "origin", followed through the .git file and a
+// worktree's commondir), as normalizeOrigin gives it. -> { top, origin } | null (no .git found)
+function checkoutAt(folder) {
+  if (!nativeAbs(folder)) return null;
+  for (let dir = nearestDir(folder); dir;) {
+    const dot = path.join(dir, '.git');
+    let st = null;
+    try { st = fs.statSync(dot); } catch {}
+    if (st) {
+      let gd = dot, origin = null;
+      try {
+        if (st.isFile()) {
+          gd = path.resolve(dir, (/gitdir:\s*(.+)/.exec(fs.readFileSync(dot, 'utf8')) || [])[1].trim());
+          try { gd = path.resolve(gd, fs.readFileSync(path.join(gd, 'commondir'), 'utf8').trim()); } catch {}
+        }
+        let cur = null;
+        for (const line of fs.readFileSync(path.join(gd, 'config'), 'utf8').split(/\r?\n/)) {
+          const h = /^\s*\[\s*remote\s+"([^"]+)"\s*\]/.exec(line);
+          if (h) { cur = h[1]; continue; }
+          if (/^\s*\[/.test(line)) { cur = null; continue; }
+          const u = cur === 'origin' && /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
+          if (u) { origin = normalizeOrigin(u[1]); break; }
+        }
+      } catch {}
+      return { top: dir, origin };
+    }
+    const up = path.dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+  return null;
+}
+const tempDirs = () => {
+  const list = [os.tmpdir()];
+  if (process.platform === 'darwin') list.push('/tmp', '/private/tmp', '/var/folders', '/private/var/folders');
+  return list.filter(Boolean).map((d) => path.resolve(d));
+};
+function inTemp(cwd, o = {}) {
+  if (!nativeAbs(cwd)) return false;
+  const home = typeof o.home === 'string' && o.home ? o.home : os.homedir();
+  return (Array.isArray(o.temp) ? o.temp : tempDirs()).some((d) => typeof d === 'string' && !!d && under(d, home) === null && under(d, cwd) !== null);
+}
+
+// A Perforce workspace around a folder: a P4CONFIG file in it or a folder above it (the name the P4CONFIG variable
+// gives, .p4config, p4config.txt, .p4config.txt or .p4ignore), a Perforce client root it is in (o.roots, else the one
+// `p4 info` gave, p4ClientRoots), or P4V's default home for workspaces, a folder named Perforce right under the home
+// folder (o.home). -> the folder that says so, or null. A folder that is gone counts by the nearest one above it that
+// is there. Cached per folder for a minute.
+const P4_NAMES = ['.p4config', 'p4config.txt', '.p4config.txt', '.p4ignore'];
+const p4Cache = new Map(); // folded folder -> { at, found }
+const P4_CACHE_MS = 60e3;
+function perforceAt(folder, o = {}) {
+  if (!nativeAbs(folder)) return null;
+  const want = path.resolve(folder), key = P.foldCase(want), t = Date.now(), hit = p4Cache.get(key);
+  if (hit && t - hit.at < P4_CACHE_MS) return hit.found;
+  const names = P4_NAMES.slice();
+  const env = typeof process.env.P4CONFIG === 'string' ? process.env.P4CONFIG.trim() : '';
+  if (env && !/[\\/]/.test(env) && !names.includes(env)) names.unshift(env);
+  const home = typeof o.home === 'string' && o.home ? path.resolve(o.home) : path.resolve(os.homedir());
+  let found = null;
+  const p4Home = under(home, want);
+  if (p4Home !== null && /^perforce$/i.test(p4Home.split('/')[0]) && p4Home.includes('/')) found = path.join(home, p4Home.split('/')[0]);
+  if (!found) found = (Array.isArray(o.roots) ? o.roots : p4Known.roots).find((r) => typeof r === 'string' && nativeAbs(r) && under(r, want) !== null) || null;
+  for (let dir = nearestDir(want); dir && !found;) {
+    for (const n of names) {
+      try { if (fs.statSync(path.join(dir, n)).isFile()) { found = dir; break; } } catch {}
+    }
+    const up = path.dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  p4Cache.set(key, { at: t, found });
+  if (p4Cache.size > 2000) p4Cache.delete(p4Cache.keys().next().value);
+  return found;
+}
+// The Perforce client root `p4 info` gives (the p4 command on PATH, 5 s at most), asked once every 10 minutes: -> a
+// Promise of [root] or []. p4RootsNow() -> what was last found, at once, and asks again in the background when due.
+let p4Known = { at: -Infinity, roots: [], going: null };
+const P4_ROOTS_MS = 10 * 60e3;
+function p4ClientRoots() {
+  if (Date.now() - p4Known.at < P4_ROOTS_MS) return Promise.resolve(p4Known.roots);
+  if (p4Known.going) return p4Known.going;
+  const going = new Promise((resolve) => {
+    try {
+      execFile('p4', ['-ztag', '-F', '%clientRoot%', 'info'], { windowsHide: true, timeout: 5000, encoding: 'utf8', maxBuffer: 64 * 1024 },
+        (err, out) => {
+          const root = err ? '' : String(out || '').trim().split(/\r?\n/)[0].trim();
+          resolve(root && root !== '*unknown*' && nativeAbs(root) ? [path.resolve(root)] : []);
+        });
+    } catch { resolve([]); }
+  }).then((roots) => { p4Known = { at: Date.now(), roots, going: null }; return roots; });
+  p4Known.going = going;
+  return going;
+}
+const p4RootsNow = () => { if (Date.now() - p4Known.at >= P4_ROOTS_MS && !p4Known.going) p4ClientRoots().catch(() => {}); return p4Known.roots; };
+
+// A bound row's rel_cwd: the folder's full path on the machine it runs on, with '/' between folders: C:/Perforce/ws on
+// Windows (a share as //server/share/x), /Users/henry/ws on a Mac. It names a folder only that machine has; another
+// machine never resolves it as a path of its own (boundNative says when it is one, for the machine it came from).
+function boundRel(folder) {
+  if (!nativeAbs(folder)) return null;
+  const p = path.resolve(folder);
+  if (!P.isWin) return p;
+  const s = p.replace(/\\/g, '/');
+  return /^[a-z]:/.test(s) ? s[0].toUpperCase() + s.slice(1) : s;
+}
+// A bound rel_cwd -> { win, head, segs } (win: a Windows path, a drive's or a share's), or null when it is no full path
+// made of folder names, on any platform ('.', '..', an empty name inside it, a control character, over 1024
+// characters, a Windows name with <>:"|?* in it: refused)
+function parseBoundRel(rel) {
+  if (typeof rel !== 'string' || !rel || rel.length > 1024 || /[\x00-\x1f\x7f]/.test(rel)) return null;
+  let win, head, rest;
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(rel), unc = /^\/\/([^/]+)\/([^/]+)(?:\/(.*))?$/.exec(rel);
+  if (drive) { win = true; head = `${drive[1].toUpperCase()}:\\`; rest = drive[2]; }
+  else if (unc) { win = true; head = `\\\\${unc[1]}\\${unc[2]}`; rest = unc[3] || ''; }
+  else if (rel.startsWith('/') && !rel.startsWith('//')) { win = false; head = '/'; rest = rel.slice(1); }
+  else return null;
+  const segs = rest ? rest.split('/') : [];
+  if (segs.length && !segs[segs.length - 1]) segs.pop(); // a trailing '/'
+  if (segs.some((s) => !s || s === '.' || s === '..' || (win && /[<>:"|?*]/.test(s)))) return null;
+  return { win, head, segs };
+}
+// a bound rel_cwd is a folder's full path on some platform
+const boundRelOk = (rel) => !!parseBoundRel(rel);
+// a bound rel_cwd -> the path it names on this platform, or null (another platform's, or not a full path)
+function boundNative(rel) {
+  const b = parseBoundRel(rel);
+  if (!b || b.win !== P.isWin) return null;
+  return b.segs.length ? path.join(b.head, ...b.segs) : b.head;
+}
+// Where another machine's bound conversation is laid down here: <home>/.fleet-view/bound/<host>/<hash>/<name>, a folder
+// Fleet View owns and makes (empty). host is that machine's name made safe for a folder, hash the first 8 hex of the
+// sha256 of the rel_cwd (two folders of the same name, or two paths whose slugs would match, never share one), name
+// the rel_cwd's last folder name made safe (the drive's letter for a drive's root). Its own slug is never a real
+// folder's: nothing else lives under .fleet-view/bound.
+const boundBase = (home) => path.join(home, '.fleet-view', 'bound');
+// (a name Windows keeps for a device, con or lpt1.txt, gets a '_' in front)
+const safeName = (s, n, fallback) => {
+  const t = String(s == null ? '' : s).replace(/[^A-Za-z0-9._ -]+/g, '-').slice(0, n).replace(/^[.\s-]+|[.\s]+$/g, '');
+  if (!t) return fallback;
+  return /^(?:con|prn|aux|nul|com\d|lpt\d)(?:\.|$)/i.test(t) ? `_${t}` : t;
+};
+function boundPlaceholder(home, host, rel) {
+  if (typeof home !== 'string' || !home || typeof rel !== 'string' || !rel) throw new S.SyncError('a placeholder needs the home folder and a rel_cwd', 400, 'bad_request');
+  const hash = crypto.createHash('sha256').update(rel, 'utf8').digest('hex').slice(0, 8);
+  const segs = rel.split('/').filter(Boolean);
+  const leaf = segs.length ? segs[segs.length - 1].replace(/:$/, '') : '';
+  return path.join(boundBase(home), safeName(host, 60, 'other-machine'), hash, safeName(leaf, 80, 'folder'));
+}
+// p is a placeholder folder or inside one: <home>/.fleet-view/bound/<host>/<hash>/<name>[/...]
+function isBoundPlaceholder(p, home) {
+  if (!nativeAbs(p) || typeof home !== 'string' || !home) return false;
+  const rel = under(boundBase(home), p);
+  return rel !== null && rel.split('/').filter(Boolean).length >= 3;
+}
 
 // git in a folder (no shell, no window, a time limit) -> its trimmed stdout, or null when it fails
 function git(cwd, args) {
@@ -447,6 +714,7 @@ const isLive = (id, o = {}) => typeof id === 'string' && !!id && liveIds(o).has(
 
 module.exports = {
   slugOf, projectsDirs, normalizeOrigin, HOME_ORIGIN, rowOrigin, homeSkipped, repoOf, forgetRepos, checkFileKey, fileKeyB64, fileKeyFromB64, objectPath,
+  workspaceKind, classifyFolder, checkoutAt, gitUnreadAt, inTemp, perforceAt, p4ClientRoots, p4RootsNow, BOUND_WHY, nativeAbs, boundOrigin, boundDeviceOf, boundRel, boundRelOk, boundNative, boundBase, boundPlaceholder, isBoundPlaceholder,
   conversationFiles, lastMeta, homeCwd, ensureDevice, touchDevice, devicePath, isLive, pidAlive, readState, writeState,
   SIDE_DIRS, TOUCH_MS,
 };

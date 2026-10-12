@@ -19,10 +19,10 @@
 //     down as a scan would (steps 3 to 8) -> that outcome ('done' | 'same' | 'conflict' | 'skip' | 'pending'), the
 //     reason, dir (the slug folder its log is in, absolute), folder (the resume folder X from root + rel_cwd) and the
 //     row. A failure throws, as in a scan (no back-off is set for it).
-//   owners() -> Map<id, { device, leaseUntil, account }>: the active rows other devices own, from the last scan's list
-//     (device lower-case, leaseUntil = Date.parse(lease_until) or null, account the row's 'a' | 'b' or null: the
-//     account it ran under there). Empty before the first scan. status().listedAt is when that list began (ISO), so a
-//     change of owner made before then is in it.
+//   owners() -> Map<id, { device, leaseUntil, account, bound }>: the active rows other devices own, from the last scan's
+//     list (device lower-case, leaseUntil = Date.parse(lease_until) or null, account the row's 'a' | 'b' or null: the
+//     account it ran under there; bound: its repos row is a bound one, sync-common.js "portable or bound"). Empty before
+//     the first scan. status().listedAt is when that list began (ISO), so a change of owner made before then is in it.
 //
 // For "Clone what's missing" (sync-clone.js):
 //   missing() -> { at, repos: [{ origin, name, chats, newest }] }: the repos whose conversations the last whole scan
@@ -39,7 +39,12 @@
 //   3. Its repo: this device's repo_paths row for the repo when that folder still has the repo's origin, else the
 //      repos Fleet View knows (the roots option; ~/.fleet-view.json's added and remembered repos when it is not
 //      given) matched by origin, and then this device's repo_paths row is written. No checkout here: skipped. The home
-//      row (sync-common.js HOME_ORIGIN) is this machine's home folder (the home option), always there.
+//      row (sync-common.js HOME_ORIGIN) is this machine's home folder (the home option), always there. A bound row
+//      ('bound:<host's device id>', sync-common.js "portable or bound": a folder only its host has) needs no checkout:
+//      its folder here is a placeholder, <home>/.fleet-view/bound/<host's name>/<hash>/<folder name>
+//      (sync-common.js boundPlaceholder), made (empty, never through a link) right before its log is laid down; the
+//      device that hosted it (this one, after the row went to another) keeps the folder rel_cwd names when it is here.
+//      It is another device's like any other row here: in away.json, never opened as this machine's own.
 //   4. Folder X = that main checkout + rel_cwd ('..', an absolute path or a drive is refused). A rel_cwd whose folder
 //      is not on this machine (a worktree the other machine made) falls back to the root. Under the home row a missing
 //      folder is made instead (empty, logged once), so the conversation shows and resumes where it began; never
@@ -89,6 +94,7 @@ const FETCH_AHEAD = 8;
 const ROWS_AT_ONCE = 4;
 const BACKOFF_MIN_MS = 30e3;
 const BACKOFF_MAX_MS = 30 * 60e3;
+const ORIGINS_MS = 60e3; // the repos rows' origins are read again this often (and when a row names one not read yet)
 const BAD_SEG_RE = /[<>:"|?*\\\x00-\x1f]/; // what a rel_cwd segment may not hold (Windows names, drives, streams)
 const NO_CHECKOUT = 'no checkout of its repo here';
 
@@ -298,6 +304,18 @@ function createMaterializer(opts = {}) {
   }
 
   // ---------- repos ----------
+  // every repos row's origin (id lower-case -> sync-common.js rowOrigin, or null), kept across scans: read again when
+  // a minute has passed, or when a row names a repo it lacks (ids). owners() says which rows are bound from it.
+  let originsAt = -Infinity, originsMap = new Map();
+  async function origins(ids) {
+    const t = now();
+    const lacks = Array.isArray(ids) && ids.some((id) => typeof id === 'string' && UUID_RE.test(id) && !originsMap.has(id.toLowerCase()));
+    if (!lacks && t >= originsAt && t - originsAt < ORIGINS_MS) return originsMap;
+    const rows = await api.rest('GET', 'repos', { query: { select: 'id,origin' } });
+    originsMap = new Map((Array.isArray(rows) ? rows : []).filter((r) => r && typeof r.id === 'string').map((r) => [r.id.toLowerCase(), C.rowOrigin(r.origin) || null]));
+    originsAt = t;
+    return originsMap;
+  }
   async function candidateRoots() {
     let list = opts.roots;
     if (typeof list === 'function') list = await list();
@@ -332,11 +350,12 @@ function createMaterializer(opts = {}) {
       }
       return ctx.logs.get(k).get(id) || null;
     };
-    // ctx.repos and ctx.repoPaths are set together, both or neither
-    ctx.loadRepos = () => once(ctx, 'reposP', async () => {
-      const rows = await api.rest('GET', 'repos', { query: { select: 'id,origin' } });
+    // ctx.repos and ctx.repoPaths are set together, both or neither; the repos' origins come from origins(), kept
+    // across scans (read again after a minute, or when a row names a repo it lacks: want)
+    ctx.loadRepos = (want) => once(ctx, 'reposP', async () => {
+      const repos = await origins(want ? [want] : null);
       const paths = await api.rest('GET', 'repo_paths', { query: { select: 'repo_id,root', device_id: `eq.${me}` } });
-      ctx.repos = new Map((Array.isArray(rows) ? rows : []).filter((r) => r && typeof r.id === 'string').map((r) => [r.id.toLowerCase(), C.rowOrigin(r.origin) || null]));
+      ctx.repos = repos;
       ctx.repoPaths = new Map((Array.isArray(paths) ? paths : []).filter((r) => r && typeof r.repo_id === 'string' && typeof r.root === 'string').map((r) => [r.repo_id.toLowerCase(), r.root]));
     });
     ctx.localOrigins = () => once(ctx, 'localP', async () => {
@@ -348,6 +367,35 @@ function createMaterializer(opts = {}) {
       return local;
     });
     return ctx;
+  }
+  // a bound row's host: the device id in its repos row's origin ('bound:<id>', sync-common.js boundOrigin), else null
+  async function boundHost(repoId, ctx) {
+    if (typeof repoId !== 'string' || !UUID_RE.test(repoId)) return null;
+    await ctx.loadRepos(repoId);
+    return C.boundDeviceOf(ctx.repos.get(repoId.toLowerCase()));
+  }
+  // a device's name (its hostname, from the devices table: read once a scan, shared by the rows under way, when a bound
+  // row needs it), or null
+  async function deviceName(id, ctx) {
+    await once(ctx, 'namesP', async () => {
+      const names = new Map();
+      const rows = await api.rest('GET', 'devices', { query: { select: 'id,name' } });
+      for (const r of Array.isArray(rows) ? rows : []) if (r && typeof r.id === 'string' && typeof r.name === 'string') names.set(r.id.toLowerCase(), r.name);
+      ctx.names = names;
+    });
+    return ctx.names.get(String(id).toLowerCase()) || null;
+  }
+  // Where a bound row is laid down here (sync-common.js "portable or bound"): a placeholder, <home>/.fleet-view/bound/
+  // <host's name>/<hash>/<folder name> (boundPlaceholder), made here when missing, never through a link. The device
+  // that hosted it and still has its folder (this one, once its row went to another device) keeps that folder: it was
+  // always here. -> { folder, base, parts } (parts: below base, for the link check and the make) | { skip }
+  async function boundPlace(row, host, ctx) {
+    if (!C.boundRelOk(row.rel_cwd)) return { skip: 'its rel_cwd is not a folder\'s full path' };
+    const native = C.boundNative(row.rel_cwd);
+    if (host === ctx.me && native && isDir(native)) return { folder: path.resolve(native), base: null, parts: null };
+    const folder = C.boundPlaceholder(home, (await deviceName(host, ctx)) || host.slice(0, 8), row.rel_cwd);
+    const parts = path.relative(path.resolve(home), folder).split(path.sep);
+    return { folder, base: path.resolve(home), parts };
   }
   // repo id -> this device's main checkout of it (this machine's home folder for the home row), or null. ctx.roots
   // holds the lookup's promise, so rows of one repo under way at once share one (dropped when it fails)
@@ -512,24 +560,40 @@ function createMaterializer(opts = {}) {
   async function syncOne(row, ctx, key) {
     const id = row.id.toLowerCase();
     const prev = state.convos[id] || null;
-    const root = await rootFor(row.repo_id, ctx);
-    if (!root) return { outcome: 'skip', reason: NO_CHECKOUT, origin: (ctx.repos && typeof row.repo_id === 'string' && ctx.repos.get(row.repo_id.toLowerCase())) || null };
-    const parts = relParts(row.rel_cwd);
-    if (!parts) return { outcome: 'skip', reason: 'its rel_cwd is not a plain relative path' };
-    let folder = parts.length ? path.resolve(root, ...parts) : path.resolve(root);
-    let makeFolder = false;
-    if (isHomeRow(row.repo_id, ctx)) {
-      // under home: the folder it began in, made when this machine has none (never through a link, never outside home)
-      if (parts.length && !inside(root, folder)) return { outcome: 'skip', reason: 'its rel_cwd is not a plain relative path' };
-      // a folder never made here (an app data or Claude account folder, sync-common.js homeSkipped), or something not
-      // a folder in its place: the home folder itself, as a repo row falls back to its root
-      const inWay = () => { try { fs.lstatSync(folder); return true; } catch { return false; } };
-      if (!isDir(folder) && (C.homeSkipped(row.rel_cwd) || inWay())) folder = path.resolve(root);
-      else if (!isDir(folder)) {
-        if (!noLinks(root, parts)) return { outcome: 'skip', reason: 'its folder would be made through a link', folder };
-        makeFolder = true;
+    // where it goes: a bound row (only its host has its folder) gets a placeholder here (boundPlace); any other, this
+    // device's checkout of its repo (the home folder for the home row) and rel_cwd
+    const host = await boundHost(row.repo_id, ctx);
+    let root = null, parts = null, folder, makeFolder = false, makeFirst = false;
+    if (host) {
+      const b = await boundPlace(row, host, ctx);
+      if (b.skip) return { outcome: 'skip', reason: b.skip };
+      folder = b.folder;
+      if (b.base && !isDir(folder)) {
+        // made right before its log comes (not after, as under home): its log's slug folder then names a folder here at
+        // once (fleet-view.js folderOfSlug), and the folder is Fleet View's own
+        if (lstatOr(folder)) return { outcome: 'skip', reason: 'something that is not a folder is where its placeholder goes', folder };
+        if (!noLinks(b.base, b.parts)) return { outcome: 'skip', reason: 'its placeholder folder would be made through a link', folder };
+        root = b.base; parts = b.parts; makeFolder = true; makeFirst = true;
       }
-    } else if (parts.length && (!inside(root, folder) || !isDir(folder))) folder = path.resolve(root);
+    } else {
+      root = await rootFor(row.repo_id, ctx);
+      if (!root) return { outcome: 'skip', reason: NO_CHECKOUT, origin: (ctx.repos && typeof row.repo_id === 'string' && ctx.repos.get(row.repo_id.toLowerCase())) || null };
+      parts = relParts(row.rel_cwd);
+      if (!parts) return { outcome: 'skip', reason: 'its rel_cwd is not a plain relative path' };
+      folder = parts.length ? path.resolve(root, ...parts) : path.resolve(root);
+      if (isHomeRow(row.repo_id, ctx)) {
+        // under home: the folder it began in, made when this machine has none (never through a link, never outside home)
+        if (parts.length && !inside(root, folder)) return { outcome: 'skip', reason: 'its rel_cwd is not a plain relative path' };
+        // a folder never made here (an app data or Claude account folder, sync-common.js homeSkipped), or something not
+        // a folder in its place: the home folder itself, as a repo row falls back to its root
+        const inWay = () => { try { fs.lstatSync(folder); return true; } catch { return false; } };
+        if (!isDir(folder) && (C.homeSkipped(row.rel_cwd) || inWay())) folder = path.resolve(root);
+        else if (!isDir(folder)) {
+          if (!noLinks(root, parts)) return { outcome: 'skip', reason: 'its folder would be made through a link', folder };
+          makeFolder = true;
+        }
+      } else if (parts.length && (!inside(root, folder) || !isDir(folder))) folder = path.resolve(root);
+    }
     const projects = projectsFor(row.account);
     if (!projects) return { outcome: 'skip', reason: `no projects folder for account ${row.account}`, folder };
     let slugDir = path.join(projects, C.slugOf(folder));
@@ -542,6 +606,8 @@ function createMaterializer(opts = {}) {
       return { outcome: 'skip', reason: 'its folder would be outside the projects folder', folder };
     }
     const dir = path.resolve(slugDir);
+    // a log that stays where it already is (this machine hosted it once) needs no placeholder
+    if (makeFirst && P.foldCase(path.basename(dir)) !== P.foldCase(C.slugOf(folder))) makeFirst = makeFolder = false;
     if (live(id)) return { outcome: 'skip', reason: 'open on this machine', folder, dir };
 
     // every chunk row of the conversation, at once
@@ -575,6 +641,11 @@ function createMaterializer(opts = {}) {
     if (size > 0) {
       const plan = planChunks(id, 'main', gen, sortSeq((byFile.get('main') || new Map()).get(gen) || []), size);
       if (!row.sha256 || !HEX64_RE.test(row.sha256)) fail('main: the row has no sha256', 'bad_sha');
+      if (makeFirst && !isDir(folder)) {
+        if (!noLinks(root, parts)) fail('its placeholder folder would be made through a link', 'bad_path');
+        fs.mkdirSync(folder, { recursive: true });
+        log(`sync-down: ${id}: made its placeholder folder (${folder}): its workspace is only on its host`);
+      }
       const r = await layDown({ id, file: 'main', target: mainTarget, chunks: plan.chunks, size, sha256: row.sha256, whole: false, known: null }, key);
       if (r.result === 'conflict') return conflict('main', mainTarget, r);
       if (r.result === 'written') { wroteAny = true; stampLastEntry(mainTarget); }
@@ -641,13 +712,15 @@ function createMaterializer(opts = {}) {
     const only = onlyOf();
     const listStart = now();
     const rows = (await listRows(me)).filter((row) => row && typeof row.id === 'string' && UUID_RE.test(row.id) && (!only || only(row.id.toLowerCase())));
-    // who owns what, for owners(): every active row another device owns
+    // who owns what, for owners(): every active row another device owns, and whether it is bound (its repos row's)
+    const repoOrigins = await origins(rows.map((row) => row.repo_id));
     const seen = new Map();
     for (const row of rows) {
       const owner = typeof row.owner_device === 'string' ? row.owner_device.toLowerCase() : null;
       if (!owner || owner === me) continue;
       const lease = row.lease_until ? Date.parse(row.lease_until) : NaN;
-      seen.set(row.id.toLowerCase(), { device: owner, leaseUntil: Number.isFinite(lease) ? lease : null, account: row.account === 'a' || row.account === 'b' ? row.account : null });
+      const bound = typeof row.repo_id === 'string' && !!C.boundDeviceOf(repoOrigins.get(row.repo_id.toLowerCase()));
+      seen.set(row.id.toLowerCase(), { device: owner, leaseUntil: Number.isFinite(lease) ? lease : null, account: row.account === 'a' || row.account === 'b' ? row.account : null, bound });
     }
     ownersMap = seen;
     st.listedAt = new Date(listStart).toISOString();

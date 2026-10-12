@@ -15,7 +15,12 @@
 // (the row's bytes replace the cut line, with or without new lines after it; a whole line the row lacks is still a
 // conflict); the home row ('home:') lays a conversation down under this machine's home folder + rel_cwd, making a
 // folder it lacks (empty, logged once; also on pull), never through a link and never for a rel_cwd with '..' or an
-// absolute path, and writes this device's repo_paths row for it with the home folder; no .part file is ever left behind; status() holds no key or token; start/stop.
+// absolute path, and writes this device's repo_paths row for it with the home folder; a bound row ('bound:<host>') is
+// laid down in a placeholder of its own under <home>/.fleet-view/bound/<host's name>/<hash>/<folder name>, made empty
+// first and once (a folder of the same name elsewhere gets another), a repos row not seen yet has the origins read
+// again, a rel_cwd that is no full path is refused, the device that hosted it keeps its own folder, no placeholder
+// through a link or over a file, the host's folder never made here, pull says the placeholder, owners() says bound;
+// no .part file is ever left behind; status() holds no key or token; start/stop.
 // S4: pull(id) -> missing (no row, or not active) / mine (this device's) / done with dir and folder / same / conflict
 // (left alone, still saying where) / skip when open here; a back-off does not hold a pull up; owners() with leaseUntil
 // and the row's account (a copy, empty before the first scan); only(id).
@@ -507,6 +512,65 @@ async function main() {
   ok(ph.outcome === 'done' && P_same(ph.folder, pulledDir) && fs.statSync(pulledDir).isDirectory() && same(mainOf(pHome.id, pulledDir), pHome.main), `home row: pull makes the folder and says it (${ph.outcome}, ${ph.folder})`);
   fs.unlinkSync(link); // the link goes before the temp folder does
 
+  // ---------- bound rows: a workspace only its host has ----------
+  const BOUND_ID = crypto.randomUUID(), MINE_BOUND = crypto.randomUUID(), LINKDEV = crypto.randomUUID(), LINK_BOUND = crypto.randomUUID();
+  fake.tables.devices.push({ id: LINKDEV, name: 'linkhost', platform: 'win32' });
+  fake.tables.repos.push({ id: BOUND_ID, origin: `bound:${OTHER}` }, { id: MINE_BOUND, origin: `bound:${me}` }, { id: LINK_BOUND, origin: `bound:${LINKDEV}` });
+  const wsRel = 'C:/Perforce/ws', ws2Rel = 'D:/Other/ws';
+  const bd1 = putConvo({ pieces: [Buffer.concat(logOf('b1', 3))], repo_id: BOUND_ID, rel_cwd: wsRel });
+  const bd2 = putConvo({ pieces: [Buffer.concat(logOf('b2', 2))], repo_id: BOUND_ID, rel_cwd: ws2Rel }); // the same name, another folder
+  const bdRefused = ['x/y', '/a/../b', 'C:', `/${'x'.repeat(1100)}`].map((rel) => putConvo({ pieces: [Buffer.concat(logOf('b3', 2))], repo_id: BOUND_ID, rel_cwd: rel }));
+  // this device hosted it, and its folder is still here: the row went to the other device, the folder stays its own
+  const hostedHere = path.join(T, 'p4', 'mine');
+  fs.mkdirSync(hostedHere, { recursive: true });
+  const bdMine = putConvo({ pieces: [Buffer.concat(logOf('b4', 2))], repo_id: MINE_BOUND, rel_cwd: C.boundRel(hostedHere) });
+  // a link where the host's folder would be, and a file where a placeholder would be
+  fs.mkdirSync(C.boundBase(home), { recursive: true });
+  fs.symlinkSync(elsewhere, path.join(C.boundBase(home), 'linkhost'), 'junction');
+  const bdLink = putConvo({ pieces: [Buffer.concat(logOf('b5', 2))], repo_id: LINK_BOUND, rel_cwd: '/srv/thing' });
+  const inWayPh = C.boundPlaceholder(home, 'mac', 'C:/In/way');
+  write(inWayPh, 'a file');
+  const bdInWay = putConvo({ pieces: [Buffer.concat(logOf('b6', 2))], repo_id: BOUND_ID, rel_cwd: 'C:/In/way' });
+  // its log is here already, in another folder's slug folder (this machine began it; the other took the row since)
+  const wasHere = path.join(T, 'p4', 'was-here'), wasRel = '/Users/mac/elsewhere/was-here';
+  fs.mkdirSync(wasHere, { recursive: true });
+  const h1 = Buffer.concat(logOf('b8', 2)), h2 = Buffer.concat(logOf('b8', 1, 'more'));
+  const bdHere = putConvo({ pieces: [h1, h2], repo_id: BOUND_ID, rel_cwd: wasRel });
+  write(mainOf(bdHere.id, wasHere), h1);
+  const restBefore = restGets('repos');
+  r = await m.scanOnce();
+  ok(restGets('repos') > restBefore, 'bound: a repos row not seen yet has the origins read again');
+  const ph1 = C.boundPlaceholder(home, 'mac', wsRel), ph2 = C.boundPlaceholder(home, 'mac', ws2Rel);
+  ok(fs.statSync(ph1).isDirectory() && fs.readdirSync(ph1).length === 0, `bound: its placeholder is made under home, empty (${ph1})`);
+  ok(same(mainOf(bd1.id, ph1), bd1.main), 'bound: the log is laid down in the placeholder\'s slug folder');
+  ok(path.basename(ph1) === 'ws' && path.basename(path.dirname(path.dirname(ph1))) === 'mac' && P_same(path.dirname(path.dirname(path.dirname(ph1))), C.boundBase(home)), 'bound: .fleet-view/bound/<host\'s name>/<hash>/<folder name>');
+  ok(!P_same(ph1, ph2) && same(mainOf(bd2.id, ph2), bd2.main), 'bound: a folder of the same name elsewhere gets a placeholder of its own');
+  eq(logs.filter((t) => t.includes(bd1.id) && /made its placeholder folder/.test(t)).length, 1, 'bound: making the placeholder is logged');
+  for (const c of bdRefused) ok(!walk(T).some((f) => path.basename(f).startsWith(c.id)), `bound: rel_cwd ${JSON.stringify(c.row.rel_cwd).slice(0, 30)} refused, nothing written`);
+  eq(r.reasons['its rel_cwd is not a folder\'s full path'], bdRefused.length, 'bound: every bad rel_cwd counted');
+  ok(same(mainOf(bdMine.id, hostedHere), bdMine.main) && !fs.existsSync(C.boundPlaceholder(home, 'Henrys-PC', C.boundRel(hostedHere))), 'bound: the device that hosted it keeps its own folder, no placeholder');
+  ok(!walk(elsewhere).length && !walk(T).some((f) => path.basename(f).startsWith(bdLink.id)), 'bound: no placeholder made through a link, nothing laid down');
+  eq(r.reasons['its placeholder folder would be made through a link'], 1, 'bound: the link counted as a skip');
+  ok(fs.statSync(inWayPh).isFile() && !walk(T).some((f) => path.basename(f).startsWith(bdInWay.id)), 'bound: a file where its placeholder goes: left alone, nothing laid down');
+  eq(r.reasons['something that is not a folder is where its placeholder goes'], 1, 'bound: that counted as a skip');
+  ok(!fs.existsSync(path.join(home, 'Perforce')) && !fs.existsSync(path.join(T, 'Perforce')), 'bound: the host\'s own folder is never made here');
+  ok(same(mainOf(bdHere.id, wasHere), bdHere.main) && !fs.existsSync(C.boundPlaceholder(home, 'mac', wasRel)), 'bound: a log already here grows where it is, and no placeholder is made for it');
+  const bo = m.owners();
+  ok(bo.get(bd1.id).bound === true && bo.get(bdMine.id).bound === true && bo.get(c1.id).bound === false && bo.get(atHome.id).bound === false, 'bound: owners() says which rows are bound');
+  // more lines: it grows where it is, the placeholder is not made again
+  const bdMore = Buffer.concat(logOf('b1', 2, 'more'));
+  putFile(bd1.id, 'main', 0, [bdMore], 1, bd1.main.length);
+  Object.assign(bd1.row, { size: bd1.main.length + bdMore.length, sha256: X.sha256(Buffer.concat([bd1.main, bdMore])), updated_at: stamp() });
+  r = await m.scanOnce();
+  ok(same(mainOf(bd1.id, ph1), Buffer.concat([bd1.main, bdMore])), 'bound: it grew where it was laid down');
+  eq(logs.filter((t) => t.includes(bd1.id) && /made its placeholder folder/.test(t)).length, 1, 'bound: the placeholder is made once');
+  // pull: the placeholder is its resume folder
+  const bdP = putConvo({ pieces: [Buffer.concat(logOf('b7', 2))], repo_id: BOUND_ID, rel_cwd: '/Users/mac/p4/pulled' });
+  const bpr = await m.pull(bdP.id);
+  const phP = C.boundPlaceholder(home, 'mac', '/Users/mac/p4/pulled');
+  ok(bpr.outcome === 'done' && P_same(bpr.folder, phP) && fs.statSync(phP).isDirectory() && same(mainOf(bdP.id, phP), bdP.main), `bound: pull makes the placeholder and says it (${bpr.outcome}, ${bpr.folder})`);
+  fs.unlinkSync(path.join(C.boundBase(home), 'linkhost'));
+
   // ---------- S4: pull, owners, only ----------
   const lower = (x) => String(x).toLowerCase();
   // missing: no row, or one that is not active
@@ -787,8 +851,8 @@ async function main() {
   eq(m.status().listedAt, new Date(listStart).toISOString(), 'owners: status().listedAt is when the listing began');
   const ow = m.owners();
   ok(ow instanceof Map && ow.size > 5, `owners: a Map of the rows another device owns (${ow.size})`);
-  eq(ow.get(c1.id), { device: lower(OTHER), leaseUntil: Date.parse(leaseAt), account: 'b' }, 'owners: device, leaseUntil and the row\'s account');
-  eq(ow.get(c2.id), { device: lower(OTHER), leaseUntil: null, account: 'b' }, 'owners: no lease -> null');
+  eq(ow.get(c1.id), { device: lower(OTHER), leaseUntil: Date.parse(leaseAt), account: 'b', bound: false }, 'owners: device, leaseUntil and the row\'s account');
+  eq(ow.get(c2.id), { device: lower(OTHER), leaseUntil: null, account: 'b', bound: false }, 'owners: no lease -> null');
   eq(ow.get(inA.id) && ow.get(inA.id).account, 'a', 'owners: account a (the account it ran under there)');
   ok(!ow.has(c9.id) && !ow.has(c9b.id) && !ow.has(c9c.id), 'owners: not this device\'s, not nobody\'s, not archived');
   ow.delete(c1.id);

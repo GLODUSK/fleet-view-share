@@ -68,6 +68,14 @@ function groups(state) {
   return out;
 }
 
+// another machine runs it and its workspace is only there (/state's workspace): a faint "on BlackBox"
+const boundTag = (s) => {
+  const w = s.workspace;
+  if (!w || w.kind !== 'bound' || !w.host) return '';
+  const n = w.host.name || 'another machine';
+  return `<span class="pj-tag pj-bound" title="${esc(`This workspace is only on ${n}`)}">on ${esc(n)}</span>`;
+};
+
 function row(s, now, picked, ui, extra = '') {
   const here = ui.isHosted && ui.isHosted(s.id);
   const busy = isBusy(s.state);
@@ -75,7 +83,7 @@ function row(s, now, picked, ui, extra = '') {
     + `<span class="pj-ic" data-ic="${esc(s.id)}"></span>`
     + `<span class="pj-name">${esc(s.name || String(s.id).slice(0, 8))}</span>`
     + `${here ? `<span class="pj-here" title="running here, in Fleet View">${icon('shell', 11)}</span>` : ''}`
-    + `${extra}${acctTag(s.account)}<span class="pj-ago${busy ? ' busy' : ''}">${s.pending ? 'new' : coarseAgo(now - lastOf(s))}</span></button>`;
+    + `${extra}${boundTag(s)}${acctTag(s.account)}<span class="pj-ago${busy ? ' busy' : ''}">${s.pending ? 'new' : coarseAgo(now - lastOf(s))}</span></button>`;
 }
 
 function olderRow(h, now, picked) {

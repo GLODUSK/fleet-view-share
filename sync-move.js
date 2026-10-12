@@ -927,15 +927,15 @@ function createMover(o = {}) {
     for (const [id0, v] of ownersRaw()) {
       const id = lower(id0), d = lower(v && v.device);
       if (!d || d === me) continue;
-      out.set(id, { device: d, name: nameOf(d), live: !!(v.leaseUntil && v.leaseUntil > t), moving: null, account: v.account === 'a' || v.account === 'b' ? v.account : null });
+      out.set(id, { device: d, name: nameOf(d), live: !!(v.leaseUntil && v.leaseUntil > t), moving: null, account: v.account === 'a' || v.account === 'b' ? v.account : null, bound: !!v.bound });
     }
-    for (const [id, g] of gone) if (!listedSince(g.at) && !out.has(id)) out.set(id, { device: g.device, name: nameOf(g.device), live: false, moving: null, account: null });
+    for (const [id, g] of gone) if (!listedSince(g.at) && !out.has(id)) out.set(id, { device: g.device, name: nameOf(g.device), live: false, moving: null, account: null, bound: false });
     for (const [id, j] of jobs) {
       if (!ACTIVE.has(j.phase)) continue;
-      const e = out.get(id) || { device: j.from.device, name: nameOf(j.from.device, j.from.name), live: false, account: null };
+      const e = out.get(id) || { device: j.from.device, name: nameOf(j.from.device, j.from.name), live: false, account: null, bound: false };
       out.set(id, { ...e, moving: 'here' });
     }
-    for (const x of outs.values()) if (MOVING.has(x.phase)) out.set(x.id, { device: x.to, name: nameOf(x.to), live: false, moving: 'away', account: null });
+    for (const x of outs.values()) if (MOVING.has(x.phase)) out.set(x.id, { device: x.to, name: nameOf(x.to), live: false, moving: 'away', account: null, bound: false });
     for (const [id, at] of claimed) if (!listedSince(at)) out.delete(id);
     return out;
   }

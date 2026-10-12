@@ -24,7 +24,12 @@
 // The home row: in a made-up home folder, a chat in the home folder itself, one in a bot's folder with no git, one in
 //   a git repo with no origin and one in a folder that is gone all go up under the 'home:' repos row with rel_cwd
 //   relative to home (and this device's repo_paths root for it is the home folder); a checkout with an origin under
-//   home, and a chat that began under home and went into it, keep the repo's row; a chat outside home stays unsynced.
+//   home, and a chat that began under home and went into it, keep the repo's row; a chat outside home is bound.
+// Bound (sync-common.js "portable or bound"): the chats never synced before, a git repo with no origin and a plain
+//   folder outside home and an app data folder under home, and a placeholder under home, go up under this device's one
+//   'bound:<device id>' repos row, rel_cwd their full path, no repo_paths row; the ones that synced before stay as they
+//   were (P4V's Perforce folder and a folder under a P4CONFIG file, under home: the home row); one in the temp folder,
+//   a Claude account's folder or Fleet View's data folder is not synced; boundFor.
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Nothing here touches the real ~/.claude* folders, the real Supabase or claude.
 // Exit 0 = all pass.
@@ -341,9 +346,15 @@ async function main() {
   eq(db.devices.length, 2, 'first scan: this device made its row');
   const dev = C.readState(C.devicePath(dataDir), {}).id;
   ok(db.devices.some((d) => d.id === dev && d.platform === process.platform), 'the device row is this machine');
-  eq(db.repos.map((r) => r.origin), ['https://github.com/test/repo1'], 'one repos row, the origin normalized (no-origin and plain folders made none)');
+  eq(db.repos.map((r) => r.origin).sort(), ['https://github.com/test/repo1', C.boundOrigin(dev)].sort(), 'two repos rows: the origin normalized, and this device\'s bound row (the no-origin repo and the plain folder outside home)');
   ok(db.repo_paths.length === 1 && db.repo_paths[0].device_id === dev && same(db.repo_paths[0].root, repo1), 'repo_paths: this device has the repo at its main checkout');
-  eq(db.conversations.map((r) => r.id).sort(), [A, Ac, B, F, Gm].map((x) => x.toLowerCase()).sort(), 'conversations rows: A, B, Ac, Gm (and F, already there); none for no origin, no repo or no whole line');
+  eq(db.conversations.map((r) => r.id).sort(), [A, Ac, B, D, E, F, Gm].map((x) => x.toLowerCase()).sort(), 'conversations rows: A, B, Ac, Gm, the bound D and E (and F, already there); none with no whole line');
+  const boundRow = db.repos.find((r) => r.origin === C.boundOrigin(dev));
+  for (const [id, folder, what] of [[D, repo2, 'a git repo with no origin outside home'], [E, plain, 'a plain folder outside home']]) {
+    const c = conv(id);
+    ok(c && boundRow && c.repo_id === boundRow.id && c.rel_cwd === C.boundRel(folder) && c.owner_device === dev, `bound: ${what}: this device's bound row, rel_cwd its full path (${c && c.rel_cwd})`);
+  }
+  ok(!db.repo_paths.some((r) => boundRow && r.repo_id === boundRow.id), 'bound: no repo_paths row for the bound row');
   for (const [id, rel, acct] of [[A, '', 'b'], [B, 'sub', 'b'], [Ac, '.claude/worktrees/gone', 'a'], [Gm, 'sub', 'b']]) {
     const c = conv(id);
     ok(c && c.owner_device === dev && c.rel_cwd === rel && c.account === acct && c.branch === 'feat/x' && c.state === 'active', `row ${short(id)}: owner, rel_cwd '${rel}', account ${acct}, branch (${JSON.stringify(c && { o: c.owner_device === dev, rel: c.rel_cwd, a: c.account, b: c.branch })})`);
@@ -374,7 +385,7 @@ async function main() {
     ok(db.chunks.some((r) => r.object_path === rel), `every object has its chunk row (${rel})`);
   }
   eq(st.conversations, 8, 'status: eight conversations found');
-  eq([st.synced, st.skipped.foreign, st.skipped.noRepo, st.skipped.empty], [4, 1, 2, 1], 'status: 4 synced, 1 another device\'s, 2 with no repo, 1 with no whole line');
+  eq([st.synced, st.skipped.foreign, st.skipped.noRepo, st.skipped.empty], [6, 1, 0, 1], 'status: 6 synced (two of them bound), 1 another device\'s, none with no repo, 1 with no whole line');
   let s = upState();
   ok(s && s.v === 1 && s.device === dev && s.conversations[A.toLowerCase()] && s.conversations[A.toLowerCase()].files.main.offset === wholeLines(aMain).length, 'up-state.json remembers each file\'s uploaded end');
 
@@ -590,7 +601,7 @@ async function main() {
   await upH.scanOnce();
   const hst = upH.status();
   eq(hst.lastError, null, 'home: no error');
-  eq([hst.synced, hst.skipped.noRepo], [6, 2], 'home: six synced; the one outside home, and the one under a .git git could not read, skipped as noRepo');
+  eq([hst.synced, hst.skipped.noRepo], [7, 1], 'home: seven synced (the one outside home bound); the one under a .git git could not read skipped as noRepo');
   const homeRow = db.repos.find((r) => r.origin === C.HOME_ORIGIN);
   const hRepoRow = db.repos.find((r) => r.origin === 'https://github.com/test/home-repo');
   ok(!!homeRow && db.repos.filter((r) => r.origin === C.HOME_ORIGIN).length === 1, 'home: one repos row with the home origin');
@@ -603,11 +614,52 @@ async function main() {
     const c = conv(id);
     ok(c && rid && c.repo_id === rid.id && c.rel_cwd === rel && c.owner_device === dev, `home: ${what}: ${rid === homeRow ? 'the home row' : 'its repo row'}, rel_cwd '${rel}' (${JSON.stringify(c && { home: c.repo_id === (homeRow && homeRow.id), rel: c.rel_cwd })})`);
   }
-  ok(!conv(hOut), 'home: a chat outside home in no repo has no row');
+  const hOutRow = conv(hOut), hBound = db.repos.find((r) => r.origin === C.boundOrigin(dev));
+  ok(hOutRow && hBound && hOutRow.repo_id === hBound.id && hOutRow.rel_cwd === C.boundRel(outside), `home: a chat outside home in no repo is bound: the bound row, its full path (${hOutRow && hOutRow.rel_cwd})`);
   ok(!conv(hBroken), 'home: a chat under a .git git could not read has no row (never the home row)');
   sameAsLocal(hBot, 'main', mainOf(projH, bots, hBot), true, 'home: the bot\'s chat');
   rowMatchesMain(hBot, mainOf(projH, bots, hBot), 'home: the bot\'s chat');
   await upH.stop();
+
+  // ---------- bound: a workspace only this machine has ----------
+  const bh = path.join(T, 'bhome'); // another made-up home folder, with a made-up temp folder beside it
+  const projBd = path.join(bh, '.claude', 'projects');
+  const fakeTemp = path.join(T, 'faketemp');
+  const bP4 = path.join(bh, 'Perforce', 'ws', 'game'); // P4V's default home for workspaces: bound, never the home row
+  const bCfgRoot = path.join(bh, 'depot', 'proj'), bCfg = path.join(bCfgRoot, 'src'); // a P4CONFIG file above the folder
+  const bLib = path.join(bh, 'Library', 'Application Support', 'Claude', 'scratch'); // an app data folder
+  const bPh = C.boundPlaceholder(bh, 'BlackBox', 'C:/Perforce/ws'); // another machine's bound chat, resumed here
+  const bTmp = path.join(fakeTemp, 'x'); // the temp folder: never synced
+  const bOut = path.join(T, 'elsewhere', 'proj'); // outside home, no repo
+  const bAcct = path.join(bh, '.claude-a'), bData = path.join(dataDir, 'tool'); // a Claude account's folder, Fleet View's own
+  for (const d of [projBd, bP4, bCfg, bLib, bPh, bTmp, bOut, bAcct, bData]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(bCfgRoot, '.p4config'), 'P4CLIENT=henry-ws\n');
+  const bIds = { p4: newId('bP4'), cfg: newId('bCfg'), lib: newId('bLib'), ph: newId('bPh'), tmp: newId('bTmp'), out: newId('bOut'), acct: newId('bAcct'), data: newId('bData') };
+  const bFolders = { p4: bP4, cfg: bCfg, lib: bLib, ph: bPh, tmp: bTmp, out: bOut, acct: bAcct, data: bData };
+  for (const k of Object.keys(bIds)) write(mainOf(projBd, bFolders[k], bIds[k]), lines(bFolders[k], 3));
+  const upB = U.createUploader({ api, dataDir, key: SYNC_KEY, home: bh, temp: [fakeTemp], projects: [{ account: 'b', dir: projBd }], chunkBytes: 4096, rateBytesPerSec: 50 * 1024 * 1024 });
+  await upB.scanOnce();
+  const bst = upB.status();
+  eq(bst.lastError, null, 'bound: no error');
+  eq([bst.synced, bst.skipped.noRepo], [5, 3], 'bound: five synced; the ones in the temp folder, a Claude account\'s folder and Fleet View\'s data folder skipped');
+  ok(!conv(bIds.acct) && !conv(bIds.data), 'bound: a Claude account\'s folder and Fleet View\'s data folder have no row (a tool\'s chats)');
+  const bRow = db.repos.find((r) => r.origin === C.boundOrigin(dev));
+  ok(bRow && db.repos.filter((r) => r.origin === C.boundOrigin(dev)).length === 1, 'bound: one bound repos row for this device, whatever the folder');
+  for (const [k, what] of [['lib', 'an app data folder under home'], ['ph', 'a placeholder under home'], ['out', 'a folder outside home']]) {
+    const c = conv(bIds[k]);
+    ok(c && bRow && c.repo_id === bRow.id && c.rel_cwd === C.boundRel(bFolders[k]) && c.owner_device === dev, `bound: ${what}: the bound row, rel_cwd its full path (${c && c.rel_cwd})`);
+  }
+  // a Perforce workspace under home is bound (/state says so), but it synced under the home row before and still does
+  for (const [k, rel, what] of [['p4', 'Perforce/ws/game', 'P4V\'s Perforce folder under home'], ['cfg', 'depot/proj/src', 'a folder under a P4CONFIG file']]) {
+    const c = conv(bIds[k]);
+    ok(c && homeRow && c.repo_id === homeRow.id && c.rel_cwd === rel, `bound: ${what}: still the home row, rel_cwd '${rel}' (${c && c.rel_cwd})`);
+  }
+  ok(!conv(bIds.tmp), 'bound: a chat in the temp folder has no row');
+  sameAsLocal(bIds.p4, 'main', mainOf(projBd, bP4, bIds.p4), true, 'bound: the Perforce chat');
+  rowMatchesMain(bIds.p4, mainOf(projBd, bP4, bIds.p4), 'bound: the Perforce chat');
+  eq(U.boundFor(bOut, dev), { origin: C.boundOrigin(dev), mainRoot: null, relCwd: C.boundRel(bOut), bound: true }, 'boundFor: this device\'s bound row and the full path');
+  eq(U.boundFor(P.isWin ? '/Users/henry/x' : 'C:\\x', dev), null, 'boundFor: another platform\'s path: none');
+  await upB.stop();
 }
 
 function short(id) { return String(id).slice(0, 8); }
