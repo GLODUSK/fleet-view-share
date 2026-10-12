@@ -99,6 +99,9 @@ try {
   eq(r && r.text, '# Title\n\n## Goal\nmore', 'string content (Mac path), handoff.py\'s CHECK line cut');
   r = HO.summaryFromLog(log([...head, { type: 'user', message: { content: [{ type: 'tool_result', content: winText }, { type: 'text', text: winText }] } }]));
   eq(r && r.text, '# Title\n\n## Goal\n...', 'block content: only a text block counts');
+  eq(r && r.at, null, 'a record with no timestamp: at is null');
+  r = HO.summaryFromLog(log([...head, { type: 'user', timestamp: '2026-10-12T22:00:05.000Z', message: { content: winText } }]));
+  eq(r && r.at, Date.parse('2026-10-12T22:00:05.000Z'), 'at: the pickup record\'s time (a long log\'s pickupAt, fleet-view.js headPickup)');
   ok(HO.summaryFromLog(log([...head, cmdRec, { type: 'user', message: { content: 'hello' } }, { type: 'assistant', message: { content: [{ type: 'text', text: winText }] } }])) === null, 'no HANDOFF text in a user record: null');
   ok(HO.summaryFromLog(log([...head, { type: 'user', isSidechain: true, message: { content: winText } }])) === null, 'a subagent\'s record: null');
   ok(HO.summaryFromLog(log([...head, { type: 'user', message: { content: `HANDOFF C:\\x.md\nfrom session ${OLD} (account A)\n\n` } }])) === null, 'a header with no summary under it: null');

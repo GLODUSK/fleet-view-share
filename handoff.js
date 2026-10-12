@@ -191,10 +191,10 @@ function summaryBody(text) {
 }
 
 // The handoff summary a conversation's own log holds (its `/pickup`'s HANDOFF text), for the machine without the
-// handoff file: { text, from, file, created } or null. Only the head of the log is read: lines that start in its
-// first LOG_HEAD bytes, at most LOG_LINES of them, and a line no longer than LOG_LINE_MAX (the pickup's comes among a
-// conversation's first records; the rest of a long log is never read). Remembered per file: a find while the log has
-// not shrunk (logs only grow), a miss while its size and mtime stay the same.
+// handoff file: { text, from, file, created, at (its record's time) } or null. Only the head of the log is read: lines
+// that start in its first LOG_HEAD bytes, at most LOG_LINES of them, and a line no longer than LOG_LINE_MAX (the
+// pickup's comes among a conversation's first records; the rest of a long log is never read). Remembered per file: a
+// find while the log has not shrunk (logs only grow), a miss while its size and mtime stay the same.
 const LOG_HEAD = 64 << 10, LOG_LINES = 40, LOG_LINE_MAX = 1 << 20;
 const logSummaries = new Map(); // file -> { size, mtime, out }
 function summaryFromLog(file, o = {}) {
@@ -220,7 +220,7 @@ function summaryInLine(buf) {
     const p = pickupOf(t);
     if (!p) continue;
     const text = summaryBody(t);
-    if (text) return { text, from: p.from, file: p.file, created: p.created };
+    if (text) return { text, from: p.from, file: p.file, created: p.created, at: Date.parse(d.timestamp) || null };
   }
   return null;
 }

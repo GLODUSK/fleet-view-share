@@ -1732,6 +1732,18 @@ const ACCTS = ACCOUNTS.createAccounts({
 });
 
 let pickupGen = 0; // counts s.pickupFrom being set, so handoffOf's index of successors by log is built again
+const LOG_TAIL = 3 << 20; // a log is first read from its last 3 MB (readNew)
+// a log longer than that is first read without its head, where a pickup's HANDOFF text is: look there on its own
+// (HO.summaryFromLog reads only the head), so a long picked-up conversation links on the machine without the handoff
+// file too. The tail's user records are not its first ones, so ingestMain looks at none of them.
+function headPickup(s) {
+  let size = 0;
+  try { size = fs.statSync(s.file).size; } catch { return; }
+  if (size <= LOG_TAIL) return;
+  s.userSeen = Math.max(s.userSeen || 0, 8);
+  const p = s.pickupFrom ? null : HO.summaryFromLog(s.file);
+  if (p && p.from !== String(s.id).toLowerCase()) { s.pickupFrom = p.from; s.pickupFile = p.file; s.pickupAt = p.at || p.created || null; pickupGen++; }
+}
 function ingestMain(s, recs) {
   for (const { d, raw } of recs) {
     if (d.type === 'custom-title' && d.customTitle) s.custom = d.customTitle;
@@ -2515,7 +2527,8 @@ function pollOne(s, now, budget) {
     }
   };
   s.mtime = mtime(s.file);
-  ingest((r) => ingestMain(s, r), readNew(s.file, 3 << 20));
+  if (!tails.has(s.file)) headPickup(s);
+  ingest((r) => ingestMain(s, r), readNew(s.file, LOG_TAIL));
   // old by this copy, but another device runs it: on the list exactly while it is on that device's, whatever this
   // copy's tail says (laid down mid-turn, it can look unfinished here)
   const ov = s.late && !s.demo ? ownerView(s.id) : null;
