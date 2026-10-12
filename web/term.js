@@ -961,11 +961,15 @@ async function startPty(s, { cols, rows }, stillWanted = () => true) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const starting = new Map(); // id -> the ensureLive promise on its way, so two sends start it once
 const READY_MS = 60000, SETTLE_MS = 1000, READY_POLL_MS = 150;
-// o.ready saw the prompt: Claude Code reads keys from the moment it draws it (timed on 2.1.296: a paste then, and
-// Enter 300 ms on, went in), so a short wait does
+// o.ready saw the prompt: a short wait does (Claude Code may still be seconds from reading keys: compose.js send
+// waits for the typed text to show before the Enter)
 const DRAWN_SETTLE_MS = 250;
 // a session started less than this ago may still be loading (Claude Code took 3 to 5 s to draw its prompt here)
 const BOOT_MS = 30000;
+// A new chat (new-<n>) gets its id when Claude Code writes its pid file, about when it draws its prompt. From then
+// the host takes keys only under the id, and drops what comes for new-<n> before the page hears of it (host.js
+// rekey), so a new chat is waited for until it has its id too: REKEY_MS at most once its prompt shows.
+const REKEY_MS = 4000;
 
 // Make sure the conversation runs here, ready for typing: a live one is kept (sending is typing, so a preview
 // becomes the user's); one that isn't hosted starts like an explicit open (it stays), and one that ended starts
@@ -973,9 +977,10 @@ const BOOT_MS = 30000;
 // more, so the prompt is drawn before anything is pasted into it: 250 ms when o.ready(id) says the screen shows it,
 // else a second. o.ready(id) -> true when the screen shows Claude Code's prompt (or a question or panel over it: the
 // caller deals with those). With it, a live one started moments ago (a new chat sent to at once) is waited for too,
-// until o.ready or idle (at most until BOOT_MS after its start): Claude Code drops an Enter typed before its prompt
-// is drawn, which left the message in its prompt, unsent. o.sizeEl: the element to size a new pty (and the view
-// that reads its screen) from; o.onStep(text) hears what it is doing. Resolves { ok, started, message? }.
+// until idle, or o.ready once it has its id (REKEY_MS), at most until BOOT_MS after its start: Claude Code drops an
+// Enter typed before it reads keys, which left the message in its prompt, unsent. o.sizeEl: the element to size a
+// new pty (and the view that reads its screen) from; o.onStep(text) hears what it is doing. Resolves
+// { ok, started, message? }; the session's key may be its id by then (keyNow).
 export function ensureLive(s, o = {}) {
   const t = termApi();
   if (!t) return Promise.resolve({ ok: false, message: noTermMsg('Sending') });
@@ -985,17 +990,20 @@ export function ensureLive(s, o = {}) {
   const step = (x) => { try { o.onStep?.(x); } catch {} };
   if (h?.alive) {
     keep(s.id);
-    if (!o.ready || h.status === 'idle' || Date.now() - h.startedAt > BOOT_MS || drawn()) return Promise.resolve({ ok: true, started: false });
+    const keyed = () => !isNewKey(keyNow(s.id));
+    if (!o.ready || h.status === 'idle' || Date.now() - h.startedAt > BOOT_MS || (drawn() && keyed())) return Promise.resolve({ ok: true, started: false });
     if (starting.has(s.id)) return starting.get(s.id);
     const p = (async () => {
       step('Starting session…');
+      let drawnAt = 0;
       for (;;) {
         screenText(keyNow(s.id), 1, { sizeEl: o.sizeEl }); // makes the view that reads its screen, the first time
         await sleep(READY_POLL_MS);
         await refreshHosts();
         const x = hosts.get(keyNow(s.id)); // (it may get its id meanwhile)
         if (!x?.alive) return { ok: false, message: 'the session ended while starting' };
-        if (x.status === 'idle' || x.status === 'waiting' || drawn() || Date.now() - x.startedAt > BOOT_MS) break;
+        if (!drawnAt && drawn()) drawnAt = Date.now();
+        if (x.status === 'idle' || x.status === 'waiting' || (drawnAt && (keyed() || Date.now() - drawnAt > REKEY_MS)) || Date.now() - x.startedAt > BOOT_MS) break;
       }
       step('');
       await sleep(DRAWN_SETTLE_MS);

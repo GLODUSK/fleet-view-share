@@ -1645,6 +1645,8 @@ export function mountCompose(slot, s) {
       }
       id = keyNow(id);
       if (st.id === id && st.step) { st.step = ''; drawNotes(); }
+      // (still not there: the keys went astray. No Enter then, and the draft stays for another try)
+      if (before && echoed(id, typed, before.text) === false) { err('Claude Code didn\'t get the text: send it again'); return; }
       if (blocked()) { err('A question came up before Enter: the text is in Claude\'s prompt, not sent'); return; }
       const seen = inPrompt(id, typed);
       t.write(id, '\r');
