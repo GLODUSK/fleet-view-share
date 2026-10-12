@@ -1485,9 +1485,9 @@ export function mountCompose(slot, s) {
         if (!ready || st.id !== id) return;
         s0 = { ...s0, cwd: ready.cwd || s0.cwd, account: ready.account || s0.account };
         if (ready.trusted === false) {
-          // Claude asks whether this machine's folder is trusted: Henry answers that (the card), then sends again
+          // a folder Fleet View does not list (it marks the ones it lists trusted itself): Henry answers the card, then sends again
           ensureLive(s0, { sizeEl: sizeEl() }).catch(() => {});
-          err(`Claude asks whether you trust ${ready.cwd || 'its folder'} on this machine: answer it above, then send again`);
+          err(`Claude Code asks once whether it may work in ${ready.cwd || 'its folder'} on this machine: pick "Yes, I trust this folder" on the card above, then send again`);
           return;
         }
       }
@@ -1729,7 +1729,7 @@ export function mountCompose(slot, s) {
       const s1 = { ...st.s, cwd: ready.cwd || st.s.cwd, account: ready.account || st.s.account };
       if (ready.trusted === false) {
         ensureLive(s1, { sizeEl: sizeEl() }).catch(() => {});
-        err(`Claude asks whether you trust ${ready.cwd || 'its folder'} on this machine: answer it above`);
+        err(`Claude Code asks once whether it may work in ${ready.cwd || 'its folder'} on this machine: pick "Yes, I trust this folder" on the card above`);
         return;
       }
       const r = await ensureLive(s1, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });

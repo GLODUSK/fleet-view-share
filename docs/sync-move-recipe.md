@@ -20,7 +20,9 @@ conversation worked in):
 3. **Change nothing.** Leave `cwd` and every other path in the log as it is. Write to `<id>.jsonl.part`, then rename.
 4. **The folder must be trusted** in that account (`~/.claude.json`, `projects["<X with forward slashes>"]
    .hasTrustDialogAccepted`). If not, the resume stops at "Do you trust the files in this folder?" (the default answer
-   is "No, exit"), and Fleet View must not answer that question for Henry.
+   is "No, exit"). Fleet View marks it trusted itself (fleet-view.js `trustMoved`) when X is a checkout of a repo it
+   lists or a folder inside one (its `.claude/worktrees/*`, the materializer's folder); any other folder, the home
+   folder, a drive root and a bound placeholder (`~/.fleet-view/bound/`) still ask, and Henry answers on the card.
 5. **Resume** with the session host's `open` op, `{ id, cwd: X, account }` (`claude --resume <id>` started in `X`).
    Not with `api.js` `openSession`/`fv open`: those resume in the folder the log last ran in.
 6. **Coming back** (the other machine has an older copy): replace it only when it is a byte prefix of the new file

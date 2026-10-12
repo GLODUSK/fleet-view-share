@@ -25,8 +25,9 @@
 //   row says a when it ran on A in a folder A shares with B; roots: () => [repo folders] (the
 //   repos Fleet View lists; the materializer matches a synced repo's origin against them). host: { list() ->
 //   Promise<desktop/host.js list()'s items | null>, kill(id) -> Promise } (api.js hostList / hostKill); isOpen(id) ->
-//   true while a Claude Code process here has it open (fleet-view.js's live pid files). The materializer never lays
-//   down a conversation that isOpen, or the host's last list (alive), says is open. makeUploader, makeMaterializer and
+//   true while a Claude Code process here has it open (fleet-view.js's live pid files); trust(cwd, account) -> bool,
+//   the mover's option of that name (fleet-view.js trustMoved: a moved chat's folder in a listed repo is trusted).
+//   The materializer never lays down a conversation that isOpen, or the host's last list (alive), says is open. makeUploader, makeMaterializer and
 //   makeMover are for tests; by default sync-up.js createUploader, sync-down.js createMaterializer and sync-move.js
 //   createMover.
 //
@@ -173,7 +174,7 @@ function createSyncRunner(o = {}) {
     // the device id is the mover's (it makes the device row on its first tick): no mover, no snapshots
     const deviceId = () => { const d = mover && mover.device(); return d ? d.id : null; };
     try { carry = makeCarry({ ...args, device: deviceId, link: () => link, roots: () => roots(), ...(typeof o.stays === 'function' ? { stays: o.stays } : {}) }); } catch (e) { log(`sync: a move carries the conversation alone here: ${e && e.message}`); }
-    try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false), carry }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
+    try { mover = makeMover({ ...args, up, down, host: hostFor, isOpen: isOpenOpt || (() => false), carry, ...(typeof o.trust === 'function' ? { trust: o.trust } : {}) }); } catch (e) { log(`sync: conversations can't move between devices here: ${e && e.message}`); }
     let live = null;
     if (mover && snapshot) {
       const liveArgs = { ...args, device: deviceId, online: (d) => (typeof mover.online === 'function' ? mover.online(d) : null), snapshot: () => snapshot() };

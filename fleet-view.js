@@ -649,9 +649,10 @@ async function addScratchWith(paths) {
 // ~/.claude-<x>/.claude.json for the others), as answering "Do you trust the files in this folder?" with Yes does.
 // Without it a new scratchpad opens on that question (unless a parent folder, like the home folder, is trusted),
 // and the panel's prompt can't reach Claude. A config that is missing or unreadable is left alone.
-function trustFolder(dir) {
+// account: just that one ('A', 'B', ...); none: every account here.
+function trustFolder(dir, account) {
   const key = path.resolve(dir).replace(/\\/g, '/');
-  for (const f of accountsHere().map((a) => (a === 'B' ? path.join(os.homedir(), '.claude.json') : path.join(acctDir(a), '.claude.json')))) {
+  for (const f of accountsHere().filter((a) => !account || a === account).map((a) => (a === 'B' ? path.join(os.homedir(), '.claude.json') : path.join(acctDir(a), '.claude.json')))) {
     try {
       const j = JSON.parse(fs.readFileSync(f, 'utf8'));
       if (!j || typeof j !== 'object') continue;
@@ -663,6 +664,23 @@ function trustFolder(dir) {
       try { fs.renameSync(tmp, f); } catch { fs.writeFileSync(f, JSON.stringify(j, null, 2)); try { fs.unlinkSync(tmp); } catch {} }
     } catch (e) { if (e.code !== 'ENOENT') logOnce('trust:' + f, `could not mark ${dir} trusted in ${f}: ${e.code || e.message}`); }
   }
+}
+// A chat that moved here ("Continue here", sync-move.js) resumes in folder cwd: when cwd is a repo the page lists or a
+// folder inside one (its .claude/worktrees/*, the materializer's folder for a synced repo), Fleet View answers Claude
+// Code's one-time trust question itself, for that account only, and says true. Any other folder asks as before: the
+// home folder, a drive root, a bound placeholder (~/.fleet-view/bound/: only its host has the real one), a folder
+// that is not there, and anything outside the listed repos.
+function trustMoved(cwd, account) {
+  if (typeof cwd !== 'string' || !cwd || !path.isAbsolute(cwd)) return false;
+  const dir = path.resolve(cwd), k = rootKey(dir);
+  const never = new Set([rootKey(os.homedir()), rootKey(path.parse(dir).root)]);
+  const under = (x, r) => x === r || x.startsWith(r + '\\');
+  if (never.has(k) || under(k, rootKey(path.join(os.homedir(), '.fleet-view', 'bound')))) return false;
+  try { if (!fs.statSync(dir).isDirectory()) return false; } catch { return false; }
+  const listed = pageRepos().map((r) => rootKey(path.resolve(r))).filter((r) => r && !never.has(r));
+  if (!listed.some((r) => under(k, r))) return false;
+  trustFolder(dir, account === 'A' || account === 'B' ? account : undefined);
+  return true;
 }
 function removeAddedRepo(root) {
   if (typeof root !== 'string' || !root) return [400, { ok: false, message: 'no folder given' }];
@@ -6602,6 +6620,8 @@ const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, lo
   host: { list: () => API.hostList(), kill: (id) => API.hostKill(id) },
   isOpen: (id) => liveProcs.has(String(id).toLowerCase()),
   stays: (root, rel) => staysHere(root, rel),
+  // a moved chat's folder in a repo the page lists is trusted here without asking (trustMoved)
+  trust: (cwd, account) => trustMoved(cwd, account),
   mode: () => SYNC_SETUP.mode(), accounts: ACCOUNT_SYNC, snapshot: () => liveSnapshot(), bound: () => liveBound(),
   // the account each conversation ran under here (its process, or remembered): its synced row names it
   accountOf: (id) => knownAccount(String(id).toLowerCase()),

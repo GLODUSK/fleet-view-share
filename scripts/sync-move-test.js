@@ -234,6 +234,8 @@ function machine(name, letter, o = {}) {
   m.mover = M.createMover({
     api, dataDir: m.dataDir, key: KEY, log: (t) => m.logs.push(t), now, up: m.up, down: m.down, host: m.host, me: m.me,
     home: m.home, projects: [{ account: 'b', dir: proj }], isLive: m.isLive, carry: m.carry,
+    // fleet-view.js trustMoved's stand-in: m.trustFn when a test sets it, else it does not trust
+    ...(o.trust ? { trust: (cwd, account) => (m.trustFn ? m.trustFn(cwd, account) : false) } : {}),
   });
   m.away = () => C.readState(M.awayPath(m.dataDir), null);
   m.awayOf = (id) => { const a = m.away(); return a && a.ids ? a.ids[id] || null : null; };
@@ -242,7 +244,7 @@ function machine(name, letter, o = {}) {
 }
 
 const A = machine('pc', 'A');
-const B = machine('mac', 'B');
+const B = machine('mac', 'B', { trust: true });
 // B trusts its own repo folder; A trusts nothing
 fs.writeFileSync(path.join(B.home, '.claude.json'), JSON.stringify({ projects: { [B.folder.replace(/\\/g, '/')]: { hasTrustDialogAccepted: true } } }));
 
@@ -356,6 +358,7 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       ok(A.bytes(id).equals(B.bytes(id)), 'A\'s copy is B\'s log byte for byte');
       eq(rowOf(id).owner_device, A.me, 'the row is A\'s again');
       ok(jobOf(A, id).ready.cwd === A.folder && jobOf(A, id).ready.trusted === false, 'A: ready, and its folder is not trusted there');
+      ok(jobOf(A, id).note === `ready; Claude will ask whether you trust ${A.folder}` && !A.logs.some((t) => /: trusted /.test(t)), 'no trust option: A still says Claude will ask, and marks nothing');
       await step(B);
       ok(A.forgotten.includes(id) && B.holds.includes(id) && !B.held.has(id), 'A forgot it; B held it and let go');
       ok(!B.out(id) && !B.mover.move(id).ready && phaseOf(B, id) === 'asking', 'B can ask for it again at once (its earlier claim does not hide that A has it now)');
@@ -386,6 +389,53 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       ok(!A.awayOf(id) && !A.mover.owners().has(id), 'bound: A, its host, has it as its own');
       const other = B.mover.owners().get([...B.mover.owners().keys()].find((k) => !boundIds.has(k)));
       ok(!other || other.bound === false, 'bound: a portable one is not');
+    }
+
+    // ---------- 1c. a folder B does not trust yet: the trust option marks it (a listed repo), or Claude asks ----------
+    {
+      const cfg = path.join(B.home, '.claude.json'), before = fs.readFileSync(cfg);
+      try {
+        fs.writeFileSync(cfg, JSON.stringify({ projects: {} }));
+        const calls = [];
+        B.trustFn = (cwd, account) => {
+          calls.push([cwd, account]);
+          fs.writeFileSync(cfg, JSON.stringify({ projects: { [path.resolve(cwd).replace(/\\/g, '/')]: { hasTrustDialogAccepted: true } } }));
+          return true;
+        };
+        const id = seed(A, 3);
+        await step(A); await step(B);
+        B.mover.move(id);
+        ok(await until(() => done(B, id)), 'trust: the move ends');
+        let j = jobOf(B, id);
+        eq(calls, [[B.folder, 'B']], 'trust: asked once, for the resume folder and the account');
+        ok(j.phase === 'ready' && j.ready.trusted === true && j.note === 'ready: it continues here', 'trust: a folder it marks is ready as trusted');
+        ok(M.trustedIn(B.home, B.folder, 'B'), 'trust: the mark is in that account\'s .claude.json');
+        ok(B.logs.some((t) => t.includes(`trusted ${B.folder} for account B (a checkout Fleet View lists)`)), 'trust: it says so in the log');
+
+        // a folder it does not mark (not a listed repo): Claude asks, as before
+        fs.writeFileSync(cfg, JSON.stringify({ projects: {} }));
+        calls.length = 0;
+        B.trustFn = (cwd, account) => { calls.push([cwd, account]); return false; };
+        const id2 = seed(A, 3);
+        await step(A); await step(B);
+        B.mover.move(id2);
+        ok(await until(() => done(B, id2)), 'no trust: the move ends');
+        j = jobOf(B, id2);
+        eq(calls.length, 1, 'no trust: it was asked');
+        ok(j.phase === 'ready' && j.ready.trusted === false && j.note === `ready; Claude will ask whether you trust ${B.folder}`, 'no trust: ready, untrusted, and Claude will ask');
+        ok(!M.trustedIn(B.home, B.folder, 'B'), 'no trust: nothing was written');
+
+        // one that throws counts as not marked
+        B.trustFn = () => { throw new Error('boom'); };
+        const id3 = seed(A, 3);
+        await step(A); await step(B);
+        B.mover.move(id3);
+        ok(await until(() => done(B, id3)), 'trust throws: the move ends');
+        ok(jobOf(B, id3).phase === 'ready' && jobOf(B, id3).ready.trusted === false && B.logs.some((t) => /could not mark .* trusted \(boom\)/.test(t)), 'trust throws: ready, untrusted, logged');
+      } finally {
+        B.trustFn = null;
+        fs.writeFileSync(cfg, before);
+      }
     }
 
     // ---------- 2. A busy -> waiting -> idle -> moved ----------

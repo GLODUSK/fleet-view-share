@@ -29,7 +29,7 @@
 //     carry.snapshot, a pack of its work when it changed, for a pickup while this device is off.
 //
 //   createMover({ api, dataDir, key, log, now, up, down, host, isOpen, me, home, projects, isLive, findLog, trusted,
-//                 timing, carry })
+//                 trust, timing, carry })
 //     -> { start(), stop(), tick(), settle(), move(id, { force, noWork }), status(id), cancel(id), owners(), device(),
 //          online(deviceId), outgoing(), peer(route, body, from) }
 //
@@ -46,6 +46,9 @@
 //   home      the folder holding .claude, .claude-a and .claude.json (tests); projects: [{ account, dir }] (or a
 //             function) where A looks for the log (sync-common.js projectsDirs by default); findLog(id) -> path and
 //             trusted(cwd, account) -> bool replace those lookups (tests)
+//   trust     (cwd, account) -> bool: marks folder cwd trusted for that account when Fleet View may (fleet-view.js: a
+//             checkout of a repo it lists, or a folder inside one, like its .claude/worktrees/*), true when it did;
+//             none: a moved chat whose folder is not trusted yet asks, as Claude Code does
 //   now()     the clock (Date.now); timing: { ...TIMING } overrides (tests)
 //
 // The request channel is two rows of fleet_sync.settings per move, each written by one side only, sealed with
@@ -90,8 +93,8 @@
 //   uploader.forget(id) (it adopts
 //   the row from the server again), the id out of away.json, ready = { cwd, account, trusted }: cwd is the resume
 //   folder (the materializer's folder when its slug is the log's folder, else the log's own folder when it is here),
-//   account 'A' | 'B', trusted whether that account's .claude.json has projects[cwd].hasTrustDialogAccepted (never
-//   written here).
+//   account 'A' | 'B', trusted whether that account's .claude.json has projects[cwd].hasTrustDialogAccepted. When it
+//   has not, the trust option may mark it (a folder Fleet View lists or made, never any other): then trusted is true.
 //
 // Also, on every device:
 //   away.json   <dataDir>/sync/away.json = { v: 1, at, ids: { <id>: { device: <name>, why: 'owned' | 'moving' } } }:
@@ -201,7 +204,7 @@ function findLogIn(dirs, id) {
   return best ? best.p : null;
 }
 // does account ('A' | 'B') trust folder cwd? Its .claude.json's projects[<cwd with />].hasTrustDialogAccepted, read
-// only (Fleet View never answers the trust question for a moved conversation)
+// only (the mover's trust option is what marks a folder Fleet View lists or made; any other folder still asks)
 function trustedIn(home, cwd, account) {
   if (typeof cwd !== 'string' || !cwd) return false;
   const f = account === 'A' ? path.join(home, '.claude-a', '.claude.json') : path.join(home, '.claude.json');
@@ -257,6 +260,7 @@ function createMover(o = {}) {
   };
   const findLog = typeof o.findLog === 'function' ? o.findLog : (id) => findLogIn(projects(), id);
   const trusted = typeof o.trusted === 'function' ? o.trusted : (cwd, account) => trustedIn(home, cwd, account);
+  const trust = typeof o.trust === 'function' ? o.trust : null;
   // what a move carries besides the conversation (sync-carry.js): none given, a move carries the conversation alone
   const carry = o.carry && typeof o.carry.packOut === 'function' ? o.carry : null;
   let me = typeof o.me === 'string' && UUID_RE.test(o.me.toLowerCase()) ? o.me.toLowerCase() : null;
@@ -773,6 +777,7 @@ function createMover(o = {}) {
     const cwd = j.laid.cwd || resumeFolder(j.laid.dir, j.laid.folder, j.id);
     let ok2 = false;
     try { ok2 = !!trusted(cwd, account); } catch {}
+    if (!ok2) ok2 = trustHere(j.id, cwd, account);
     const c = j.laid.carry || null;
     let missing = [], notes = [], noted = false;
     if (carry && c) {
@@ -790,6 +795,18 @@ function createMover(o = {}) {
     j.endedAt = now();
     setJob(j, 'ready', { note: ok2 ? 'ready: it continues here' : `ready; Claude will ask whether you trust ${cwd}` });
     log(`${short(j.id)}: moved here from ${name}${j.forced ? ' (its last uploaded copy)' : ''}`);
+  }
+  // a folder the account does not trust yet: the trust option marks it when it is one Fleet View lists or made
+  // (true then: it did, or it was marked meanwhile); else, or when it fails, Claude asks as it does today
+  function trustHere(id, cwd, account) {
+    if (!trust) return false;
+    let did = false;
+    try { did = !!trust(cwd, account); } catch (e) { log(`${short(id)}: could not mark ${cwd} trusted (${clip(e && e.message)})`); return false; }
+    if (!did) return false;
+    let ok = true;
+    try { ok = !!trusted(cwd, account); } catch {}
+    if (ok) log(`${short(id)}: trusted ${cwd} for account ${account} (a checkout Fleet View lists)`);
+    return ok;
   }
   async function stepJob(j) {
     if (!ACTIVE.has(j.phase) || !me) return;
