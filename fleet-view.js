@@ -503,6 +503,29 @@ function cleanRepoNames(list) {
   return [...out.values()];
 }
 let repoNames = DEMO ? [] : cleanRepoNames(saved.repoNames) || [];
+// colours picked in Fleet View (right-click "Colour" on a workspace or a conversation): settings.repoHues, [{ root, hue }],
+// and settings.sessHues, [{ id, hue }]; hue is 0-359 (a tone round the colour wheel). A workspace's hue replaces its
+// family's base hue (its conversations' shades follow it); a conversation's own wins over its workspace's
+const HUES_MAX = 500;
+const cleanHue = (h) => (Number.isFinite(h) ? ((Math.round(h) % 360) + 360) % 360 : null);
+function cleanRepoHues(list) {
+  const out = new Map();
+  for (const x of Array.isArray(list) ? list.slice(-HUES_MAX) : []) {
+    const hue = x && cleanHue(x.hue);
+    if (x && typeof x.root === 'string' && x.root.trim() && x.root.length <= 1024 && hue !== null) out.set(rootKey(x.root), { root: x.root, hue });
+  }
+  return out;
+}
+function cleanSessHues(list) {
+  const out = new Map();
+  for (const x of Array.isArray(list) ? list.slice(-HUES_MAX) : []) {
+    const hue = x && cleanHue(x.hue);
+    if (x && typeof x.id === 'string' && x.id && x.id.length <= 100 && hue !== null) out.set(x.id, { id: x.id, hue });
+  }
+  return out;
+}
+let repoHues = DEMO ? new Map() : cleanRepoHues(saved.repoHues);
+let sessHues = DEMO ? new Map() : cleanSessHues(saved.sessHues);
 // Where a kind of work stays (Henry, 2026-10-12: 3D work on the configurator's meshes happens on BlackBox, never on the
 // Mac): settings.hostRules, [{ id, repo: { origin, name } | null, paths: [globs], tools: [names, a trailing * for a
 // prefix], host: a device's name, hostDevice?: its sync device id, pinOn?: 'edits' | 'tools' | 'none', note? }]
@@ -776,7 +799,7 @@ function flushSettings() {
   clearTimeout(saveTimer);
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
-  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
+  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp, pinOverrides: [...pinOverrides.values()],
     dynamicChats: [...dynamicChats.values()],
     chief: CHIEF ? CHIEF.saveShape() : saved.chief,
@@ -857,11 +880,11 @@ function hsl(h, s, l) {
 const FAMILIES = [22, 44, 152, 192, 262, 330, 8, 212, 120, 288];
 // keyed by the repo's folder name, not its whole path, so one repo has one colour on every machine (Z:\Github\x on
 // the PC, /Users/henry/code/x on the Mac)
-const familyBase = (root) => FAMILIES[hashOf(String(root || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop().toLowerCase()) % FAMILIES.length];
+const familyBase = (root) => repoHues.get(rootKey(root))?.hue ?? FAMILIES[hashOf(String(root || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop().toLowerCase()) % FAMILIES.length];
 const familyColor = (root, light = 0.68) => hsl(familyBase(root), 0.9, light);
 // k >>> 3, never k >> 3: k is unsigned, and a signed shift of one over 2^31 is negative, so its lightness fell below
 // the family's (half of all conversations came out darker and deeper, reading as another repo's colour)
-const shadeOf = (root, id) => { const k = hashOf(id); return hsl(familyBase(root) + ((k % 5) - 2) * 6, 0.82 + (k % 3) * 0.06, 0.6 + ((k >>> 3) % 4) * 0.035); };
+const shadeOf = (root, id) => { const k = hashOf(id); if (sessHues.has(id)) return hsl(sessHues.get(id).hue, 0.85, 0.64); return hsl(familyBase(root) + ((k % 5) - 2) * 6, 0.82 + (k % 3) * 0.06, 0.6 + ((k >>> 3) % 4) * 0.035); };
 
 // A line is a list of segments [text, color, bold?]. Rendering clips to width and pads the rest.
 // Cells keep the terminal's default background, which is the one Windows Terminal blurs with acrylic.
@@ -6090,7 +6113,7 @@ function buildState() {
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
     // hiddenSync: bumped when another device's hidden list was put in (sync-prefs.js): the page takes hidden whole then
-    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoOrder, hostRules, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenSync, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
+    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, hostRules, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenSync, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
       mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() },
       // the Chief: { id: the live Chief's conversation id, else the last one's while its log is there, else null; watch }
       chief: CHIEF ? CHIEF.view() : { id: null, watch: false } },
@@ -6198,6 +6221,17 @@ function applySettings(b) {
   if ('repoNames' in b) { const r = cleanRepoNames(b.repoNames); if (r) repoNames = r; }
   // the page's single-item changes (see SYNC_PREFS.applyOps), applied to this machine's list as it is now
   if ('repoNamesOps' in b) { const r = cleanRepoNames(SYNC_PREFS.applyOps('repoNames', repoNames, b.repoNamesOps)); if (r) repoNames = r; }
+  // one colour change: repoHue { root, hue | null } or sessHue { id, hue | null } (null goes back to the default)
+  if (b.repoHue && typeof b.repoHue === 'object' && typeof b.repoHue.root === 'string') {
+    const k = rootKey(b.repoHue.root), h = cleanHue(b.repoHue.hue);
+    if (h === null) repoHues.delete(k); else repoHues.set(k, { root: b.repoHue.root, hue: h });
+    for (const x of sessions.values()) x.hueAt = 0;
+  }
+  if (b.sessHue && typeof b.sessHue === 'object' && typeof b.sessHue.id === 'string') {
+    const h = cleanHue(b.sessHue.hue);
+    if (h === null) sessHues.delete(b.sessHue.id); else sessHues.set(b.sessHue.id, { id: b.sessHue.id, hue: h });
+    const x = sessions.get(b.sessHue.id); if (x) x.hueAt = 0;
+  }
   if ('repoOrder' in b) { const o = cleanRepoOrder(b.repoOrder); if (o) repoOrder = o; }
   if ('repoOrderOps' in b) { const o = cleanRepoOrder(SYNC_PREFS.applyOps('repoOrder', repoOrder, b.repoOrderOps, REPO_ORDER_MAX)); if (o) repoOrder = o; }
   if ('hostRules' in b) { const h = cleanHostRules(b.hostRules); if (h) hostRules = h; }

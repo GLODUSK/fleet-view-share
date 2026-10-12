@@ -689,6 +689,7 @@ html.titlebar .top.fit-7 .tabs button { padding: 0 8px; }
 .menu-item.ctx-item.has-tail { grid-template-columns: 16px minmax(0, 1fr) auto; }
 .ctx-tail { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); }
 /* a small quiet word on an item's right ("removed" in Past conversations) */
+.ctx-sw { display: inline-block; width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); }
 .ctx-badge { font: 10.5px/1.5 var(--font-ui); color: var(--dim); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; white-space: nowrap; }
 .ctx-more { display: inline-flex; color: var(--faint); }
 .menu-item.ctx-item.has-sub[aria-expanded="true"] { background: var(--hover); }

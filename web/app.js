@@ -798,6 +798,7 @@ function syncRepoPrefs(s) {
     for (const r of s.repoNames) if (r && typeof r.root === 'string' && typeof r.name === 'string' && r.name) repoNames.set(normRoot(r.root), { root: r.root, name: r.name });
     repoNamesSeen = new Map([...repoNames].map(([k, r]) => [k, { ...r }]));
   }
+  syncHues(s);
   if (Array.isArray(s.repoOrder)) repoOrder = s.repoOrder.filter((x) => typeof x === 'string' && x);
 }
 // /state's workspace names (its repos, each conversation's repo, the deploys) become the shown ones; _n0 keeps the
@@ -812,6 +813,44 @@ function applyRepoNames(st) {
   for (const r of st.repos || []) set(r);
   for (const list of [st.sessions, st.finished, st.removed]) for (const x of list || []) set(x && x.repo);
   for (const d of st.deploys || []) set(d);
+}
+// ---------- colouring a workspace or a conversation ----------
+// "Colour" on a workspace's or a conversation's right-click: a tone round the colour wheel (settings.repoHues,
+// settings.sessHues). A workspace's tone is its family's, so its conversations' shades follow it; a conversation's own
+// wins. "Default" goes back to the automatic one. Single changes go as { repoHue: { root, hue } } / { sessHue: { id, hue } }.
+const HUE_PICKS = [['Red', 8], ['Ember', 22], ['Gold', 44], ['Green', 120], ['Mint', 152], ['Cyan', 192], ['Blue', 212], ['Violet', 262], ['Purple', 288], ['Rose', 330]];
+const hueCss = (h) => `hsl(${h} 85% 62%)`;
+const repoHues = new Map(); // normRoot -> hue
+const sessHues = new Map(); // id -> hue
+function syncHues(s) {
+  if (Array.isArray(s.repoHues) && !('repoHue' in pendingSave)) { repoHues.clear(); for (const x of s.repoHues) if (x && typeof x.root === 'string' && Number.isFinite(x.hue)) repoHues.set(normRoot(x.root), x.hue); }
+  if (Array.isArray(s.sessHues) && !('sessHue' in pendingSave)) { sessHues.clear(); for (const x of s.sessHues) if (x && typeof x.id === 'string' && Number.isFinite(x.hue)) sessHues.set(x.id, x.hue); }
+}
+function hueItem(cur, pick) {
+  return {
+    label: 'Colour', icon: 'star', note: cur == null ? 'automatic' : (HUE_PICKS.find(([, h]) => h === cur) || [`${cur}°`])[0],
+    children: [
+      { label: 'Default', icon: cur == null ? 'check' : null, run: () => pick(null) },
+      { sep: true },
+      ...HUE_PICKS.map(([label, h]) => ({ label, swatch: hueCss(h), note: cur === h ? 'now' : null, run: () => pick(h) })),
+    ],
+  };
+}
+function repoColorItem(root) {
+  const r = repoRootOf({ root }), k = normRoot(r);
+  return hueItem(repoHues.has(k) ? repoHues.get(k) : null, (h) => {
+    if (h == null) repoHues.delete(k); else repoHues.set(k, h);
+    saveSettings({ repoHue: { root: r, hue: h } });
+    toast(h == null ? `${repoName(r)} has its own colour again` : `${repoName(r)} is ${HUE_PICKS.find(([, x]) => x === h)?.[0].toLowerCase() || 'recoloured'}`, C.mint);
+  });
+}
+function sessionColorItem(s) {
+  if (s.pending) return { label: 'Colour', icon: 'star', disabled: true, note: 'once it has started' };
+  return hueItem(sessHues.has(s.id) ? sessHues.get(s.id) : null, (h) => {
+    if (h == null) sessHues.delete(s.id); else sessHues.set(s.id, h);
+    saveSettings({ sessHue: { id: s.id, hue: h } });
+    toast(h == null ? `${s.name} follows its workspace's colour again` : `${s.name} is ${HUE_PICKS.find(([, x]) => x === h)?.[0].toLowerCase() || 'recoloured'}`, C.mint);
+  });
 }
 function repoRenameItem(root) {
   const r = repoRootOf({ root });
@@ -2326,7 +2365,7 @@ function openContextMenu(target, x, y) {
     // whether it is shown (only it, or with the others shown; not in Bots, which no workspace filters) and its name in
     // Fleet View
     const rIt = { root: repoRootOf({ root: folder }), name: target.name || repo.name || repoName(folder) };
-    items.push({ sep: true }, ...(local.view === 'chats' ? [] : [...showOnlyItems(rIt), ...showTooItems(rIt)]), repoRenameItem(folder));
+    items.push({ sep: true }, ...(local.view === 'chats' ? [] : [...showOnlyItems(rIt), ...showTooItems(rIt)]), repoRenameItem(folder), repoColorItem(folder));
     // orders for every conversation in it, idle and new ones too (one team), or the same text to each
     items.push({ sep: true }, ...repoOrderItems(folder, target.name || repo.name || repoName(folder)));
     items.push(selectAllItem(repoSessions(folder).filter((s) => !s.pending), `no conversation in ${target.name || repo.name || repoName(folder)}`));
@@ -2364,7 +2403,7 @@ function openContextMenu(target, x, y) {
   const hosted = isHosted(s.id);
   const items = [];
   if (previousMenuItem(s)) items.push(previousMenuItem(s));
-  items.push(renameMenuItem(s));
+  items.push(renameMenuItem(s), sessionColorItem(s));
   if (desk && !s.pending && !s.demo) items.push(forkMenuItem(s));
   if (!s.pending && !s.demo) { const mv = moveMenuItem(s); if (mv) items.push(mv); }
   if (desk && !s.pending && !s.demo && !singleAccount()) { const se = sendElsewhereItem(s, hosted); if (se) items.push(se); }

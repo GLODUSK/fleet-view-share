@@ -2,7 +2,7 @@
 //
 //   openCtxMenu({ x, y, title, dot, sub, items })   opens at the pointer (client px), kept on screen
 //     title / sub: a heading line (the repo or conversation) and a quieter line under it; dot: its colour
-//     items: [{ label, icon?, run(), disabled?, note?, tag?, danger?, confirm?: { text, yes }, children? } | { sep: true }]
+//     items: [{ label, icon?, swatch? (a CSS colour drawn as a dot in place of the icon), run(), disabled?, note?, tag?, danger?, confirm?: { text, yes }, children? } | { sep: true }]
 //       disabled items are a quiet line that can't be picked (note: why); confirm turns the menu into a small
 //       question ("yes" runs it, Cancel goes back) before run() is called; tag: 'A' or 'B', the account tag
 //       on the right; children: the items of a submenu (same shape; a confirm there turns the main menu into the question),
@@ -139,7 +139,7 @@ const subPickable = (j) => !!subItems[j] && !subItems[j].sep && !subItems[j].dis
 
 function rowHtml(it, i, attr = 'data-i', on = i === sel) {
   if (it.sep) return '<div class="ctx-sep" role="separator"></div>';
-  const ic = it.icon ? icon(it.icon, 15) : '';
+  const ic = it.swatch ? `<span class="ctx-sw" style="background:${esc(it.swatch)}"></span>` : it.icon ? icon(it.icon, 15) : '';
   const kids = hasKids(it);
   const tail = (it.badge ? `<span class="ctx-badge">${esc(it.badge)}</span>` : '') + (it.tag ? acctTag(it.tag) : '') + (kids ? `<span class="ctx-more" aria-hidden="true">${icon('chevron', 13) || '▸'}</span>` : '');
   const cls = `menu-item ctx-item${it.disabled ? ' off' : ''}${it.danger ? ' danger' : ''}${tail ? ' has-tail' : ''}${kids ? ' has-sub' : ''}${on ? ' sel' : ''}`;
