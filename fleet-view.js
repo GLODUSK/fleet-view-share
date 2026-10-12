@@ -166,8 +166,10 @@ try { saved = JSON.parse(fs.readFileSync(fs.existsSync(SETTINGS_FILE) ? SETTINGS
 if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
 // the Chief's part of the server (chief.js) and the bots' (bots.js), made once the API's ctx is there (below apiCtx)
 let CHIEF = null, BOTS = null;
-// ~/Bots and the bots' folders in it are never a workspace
-const inBots = (p) => !!BOTS && BOTS.inBots(p);
+// ~/Bots and this machine's bots' folders in it are never a workspace; another machine's bot's folder is (bots.js
+// ownFolder). No new session starts anywhere in ~/Bots (anyBots)
+const inBots = (p) => !!BOTS && BOTS.ownFolder(p);
+const anyBots = (p) => !!BOTS && BOTS.inBots(p);
 // remote access (remote.js): the page in a browser on another device, over Tailscale. settings.remote.enabled is the
 // switch (off unless turned on); settings.remote.logins, by hand only, lets more Tailscale logins than this PC's
 // owner pair a browser. The demo keeps its devices in memory and never changes `tailscale serve`; nor does a server on
@@ -6153,13 +6155,13 @@ function conversationsFor(q) {
 }
 
 // what the automation API (api.js) needs from the server: the folders a new session may start in (the window's
-// rule for "New session": repos /state lists, and the conversations' repo roots and checkouts, never a bot's folder)
+// rule for "New session": repos /state lists, and the conversations' repo roots and checkouts, never a folder in ~/Bots)
 // and one conversation as /state shows it
 const apiCtx = {
   sendJson, readBody, log: (t) => logOnce('api:' + t, t), UNSAFE_PATH, accounts: () => (DEMO ? ['A', 'B'] : accountsHere()),
   allowedFolders() {
     const st = buildState(), out = [];
-    const add = (p) => { if (typeof p === 'string' && p && !inBots(p)) out.push(p); };
+    const add = (p) => { if (typeof p === 'string' && p && !anyBots(p)) out.push(p); };
     for (const r of st.repos) add(r.root);
     for (const s of st.sessions) { add(s.repo && s.repo.root); add(s.links && s.links.repoFolder); }
     return out;

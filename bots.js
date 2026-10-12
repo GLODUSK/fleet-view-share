@@ -17,7 +17,8 @@
 //   that role (a handoff's pickup, a /clear) to its bot's ids. Each new one is told its id once, as the Chief is
 //   (chief.js createTeller). A removed bot's session that comes back (a restore) is ended.
 // - /state: tagger() and tagState() put bot: '<bot id>' ('chief' for the Chief's) on each overseer conversation in
-//   sessions, finished and removed; view() is state.bots. The ~/Bots folders are never a workspace (inBots).
+//   sessions, finished and removed; view() is state.bots. ~/Bots and this machine's bots' folders are never a workspace
+//   (ownFolder); another machine's bot's folder is, so its synced chats show like any other (registries never sync).
 // - Who is talking: api.js frames what reaches a bot as it does for the Chief (isOverseer).
 // - Tasks and routines: each bot keeps its task list in tasks.json in its folder (bot-tasks.js has the format), one-off
 //   and recurring, updated by the bot itself as Henry gives, finishes, changes or cancels work (bot/BRIEF.md says so).
@@ -723,6 +724,11 @@ function createBots(deps) {
     // api.js resumable: a bot's conversation (not a removed bot's) may be resumed in its folder, with its role
     vouch: (id) => { const b = bots.find((x) => !x.removed && x.ids.includes(id)); return b ? { role: roleOf(b.id), folder: b.folder } : null; },
     inBots: (p) => inBots(p, base),
+    // kept out of the workspaces here: the Bots folder itself and the folder of each bot in this machine's registry (a
+    // removed one's too). Another machine's bot, whose conversations sync brought here into ~/Bots/<slug> with no bot
+    // here to tag them, is an ordinary workspace: its chats show on the map, cards, wall and Projects (Henry,
+    // 2026-10-11: the PC's Panchito on the Mac)
+    ownFolder: (p) => inBots(p, base) && (pathKey(p) === pathKey(base) || bots.some((b) => inBots(p, b.folder))),
     // for tests
     _state: () => ({ bots, live, starting: [...starting] }),
   };

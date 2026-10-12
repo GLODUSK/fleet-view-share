@@ -230,6 +230,23 @@ const realNow = Date.now;
 const clock = (t) => { Date.now = () => t; };
 
 await (async () => {
+  // the workspaces: ~/Bots and this machine's bots' folders (a removed one's too) are kept out; another machine's bot's
+  // folder, which sync made here for its chats, is an ordinary workspace (the PC's Panchito on the Mac)
+  {
+    const base = fs.mkdtempSync(path.join(dir, 'own-'));
+    const mine = { id: 'aaaaaaaaaaaa', name: 'Mine', folder: path.join(base, 'mine'), createdAt: 1, ids: [] };
+    const gone = { id: 'bbbbbbbbbbbb', name: 'Gone', folder: path.join(base, 'gone'), createdAt: 2, ids: [], removed: true };
+    const h = harness({ base, saved: [mine, gone] });
+    assert.equal(h.bots.ownFolder(base), true);
+    assert.equal(h.bots.ownFolder(mine.folder), true);
+    assert.equal(h.bots.ownFolder(path.join(mine.folder, 'sub')), true);
+    assert.equal(h.bots.ownFolder(gone.folder), true);
+    assert.equal(h.bots.ownFolder(path.join(base, 'panchito')), false);
+    assert.equal(h.bots.ownFolder(path.join(base, 'mine-2')), false);
+    assert.equal(h.bots.inBots(path.join(base, 'panchito')), true); // still no new session there
+    assert.equal(h.bots.ownFolder(dir), false);
+    assert.equal(h.bots.ownFolder(null), false);
+  }
   // make: checks first, then the folder, its CLAUDE.md, trust, and the start
   {
     const h = harness();
