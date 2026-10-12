@@ -79,7 +79,8 @@
 // Command center (2026-10-08). The map is also where many conversations are steered at once:
 //   Multi-select: Ctrl+click toggles a conversation (or a workspace's hub) into the selection; Ctrl+drag on empty
 //     space draws a thin dashed band (fixed alpha) and adds every conversation and workspace hub inside it.
-//     Selected ones wear a steady double ring. Dragging a selected hub moves every selected hub with it; the
+//     Selected ones wear a steady double ring. Dragging a selected hub, or a selected conversation while hubs
+//     are selected too, moves the whole selection: every selected hub and the selected conversations; the
 //     hubs (I.multiRepos) stay the map's own, the shell only hears about conversations.
 //     A plain click goes back to a single pick, Esc clears the selection first. mapSelection() lists the ids,
 //     setMapSelection(ids) sets them (the cards' own multi-select), and every change calls ui.setMulti(ids).
@@ -3214,9 +3215,17 @@ function wireMouse(cv) {
       return;
     }
     const node = !mod && !e.shiftKey && hit && (hit.kind === 'repo' || hit.kind === 'session') ? hit.id : null;
-    // the hubs it moves, by id (a /state can rebuild the nodes mid-drag)
-    const hubs = node && hit.kind === 'repo' ? (I.multiRepos.has(node) ? [...I.multiRepos].filter((id) => I.byId.has(id)) : [node]) : null;
-    I.drag = { x: e.clientX, y: e.clientY, moved: false, button: e.button, mod, shift: e.shiftKey, node, hubs };
+    // the hubs it moves, by id (a /state can rebuild the nodes mid-drag). A selected hub, or a selected
+    // conversation while workspaces are selected too, moves the whole selection: every selected hub, and the
+    // selected conversations of other repos with it (convs)
+    const picked = I.multi.size ? I.multi : I.sel && I.byId.get(I.sel) && I.byId.get(I.sel).kind === 'session' ? new Set([I.byId.get(I.sel).sid]) : new Set();
+    const group = node && I.multiRepos.size && (hit.kind === 'repo' ? I.multiRepos.has(node) : picked.has(hit.sid));
+    let hubs = node && hit.kind === 'repo' ? [node] : null, convs = null;
+    if (group) {
+      hubs = [...I.multiRepos].filter((id) => I.byId.has(id));
+      convs = I.sim.filter((m) => m.kind === 'session' && m.p && picked.has(m.sid) && !hubs.includes(m.cl) && convBase(m)).map((m) => m.id);
+    }
+    I.drag = { x: e.clientX, y: e.clientY, moved: false, button: e.button, mod, shift: e.shiftKey, node, hubs, convs, group: !!group };
   });
   window.addEventListener('mousemove', (e) => {
     if (!I || I.canvas !== cv) return;
@@ -3240,7 +3249,7 @@ function wireMouse(cv) {
       }
       if (I.drag.moved && !I.drag.band) {
         const hub = I.drag.node && I.byId.get(I.drag.node);
-        const base = hub && hub.kind === 'session' && hub.p && convBase(hub);
+        const base = !I.drag.group && hub && hub.kind === 'session' && hub.p && convBase(hub);
         if (base) {
           // one conversation: it follows the mouse, kept as an offset from its repo's hub
           hub.p.x += dx / K(); hub.p.y += dy / K(); hub.p.vx = hub.p.vy = 0;
@@ -3261,10 +3270,17 @@ function wireMouse(cv) {
           I.alpha = Math.max(I.alpha, 0.05);
           const to = dropRepo(hub);
           I.drag.drop = to ? to.id : null;
-        } else if (hub && hub.kind === 'repo' && hub.p) {
+        } else if (I.drag.group || (hub && hub.kind === 'repo' && hub.p)) {
           // the hub (and the other selected hubs with it) follows the mouse and everything on it trails behind,
-          // easing back into the same shape (trailStep); its spot follows and is pinned
+          // easing back into the same shape (trailStep); its spot follows and is pinned. The selected
+          // conversations of other repos move along, each kept as an offset from its own repo's hub.
           const wx = dx / K(), wy = dy / K();
+          for (const id of I.drag.convs || []) {
+            const m = I.byId.get(id), b = m && m.p && convBase(m);
+            if (!b) continue;
+            m.p.x += wx; m.p.y += wy; m.p.vx = m.p.vy = 0;
+            I.homeXY.set(m.id, { x: m.p.x - b.x, y: m.p.y - b.y, pin: true });
+          }
           for (const id of I.drag.hubs || [hub.id]) {
             const h = I.byId.get(id);
             if (!h || !h.p) continue;
