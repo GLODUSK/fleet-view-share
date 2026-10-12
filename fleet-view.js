@@ -473,8 +473,8 @@ function cleanMoved(list, now = Date.now()) {
 let moved = DEMO ? new Map() : cleanMoved(saved.moved) || new Map();
 // conversations renamed in Fleet View (right-click "Rename", the panel's title, POST /rename): settings.names,
 // { <id>: '<name>' }, at most 500. The name wins over Claude Code's own title (/rename, then its AI title) everywhere
-// a conversation's name shows (baseName). A pickup of a handoff takes its predecessor's name (inheritName); null
-// is a name cleared by hand, kept so the pickup doesn't take it again. Names are trimmed, one line, 80 characters.
+// a conversation's name shows (baseName). A pickup of a handoff keeps its predecessor's name, stored here
+// (inheritName); null is a name cleared by hand, kept so the pickup doesn't take one again. Names are trimmed, one line, 80 characters.
 const NAMES_MAX = 500;
 // (plainText's \s already makes line and paragraph separators spaces)
 const cleanName = (v) => (typeof v === 'string' ? plainText(v.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')).slice(0, 80).trim() : '');
@@ -1504,24 +1504,48 @@ function nameNow(id, had) {
   if (s) return plain(baseName(s) || s.name || had || String(id).slice(0, 8), 80);
   return names.get(id) || had;
 }
-// a pickup of a handoff takes the name its predecessor was given in Fleet View (following handoffs back, like
-// movedRootOf), unless it has one of its own; run at each poll while any conversation has a name
+// A pickup of a handoff keeps its predecessor's name, so the work goes on under one name. Run at each poll, before
+// the pickup is first listed (pollOne sets its name and state after this).
+// - A name given in Fleet View: the nearest one up the chain (following handoffs back, like movedRootOf), at any age.
+// - Else the name the predecessor shows (baseName: Claude Code's title, or the other device's name), only for a
+//   pickup that started in the last 30 minutes, so pickups from before this existed keep their names. The
+//   predecessor must be listed and read once; until then it is tried again at the next poll.
+// Either is kept in names like a rename: later polls skip it, it syncs, and Rename can clear it (null: the pickup
+// goes back to Claude Code's title and never takes one again). A pickup with its own entry in names is left alone.
+// A /rename typed in the terminal doesn't count as its own name: it can't be told from the titles the auto-title
+// hook writes at /pickup (both are custom-title records).
+const PICKUP_TITLE_MS = 30 * 60e3;
 function inheritName(s) {
-  if (s.demo || names.has(s.id) || ![...names.values()].some(Boolean)) return;
+  if (s.demo || names.has(s.id)) return;
+  // only a pickup has a predecessor: what the log or the handoff files say, without building the links
+  if (!s.pickupFrom && !s.pickupArg && !handoffLinks().byNext.has(String(s.id).toLowerCase())) return;
+  const now = Date.now();
+  const first = handoffOf(s, now).pickedUpFrom;
+  if (!first) return;
+  const take = (n) => {
+    names.set(s.id, n);
+    while (names.size > NAMES_MAX) names.delete(names.keys().next().value);
+    saveSettings();
+  };
   const seen = new Set([s.id]);
-  for (let x = s, i = 0; i < 8; i++) {
-    const from = handoffOf(x, Date.now()).pickedUpFrom;
-    if (!from || seen.has(from.id)) return;
+  for (let x = s, from = first, i = 0; from && i < 8; i++) {
+    if (seen.has(from.id)) break;
     seen.add(from.id);
     if (names.has(from.id)) {
       const n = names.get(from.id);
-      if (!n) return;
-      names.set(s.id, n);
-      saveSettings();
-      return;
+      if (n) return take(n);
+      break; // cleared by hand: no Fleet View name from up the chain
     }
     x = sessions.get(from.id) || { id: from.id };
+    from = handoffOf(x, now).pickedUpFrom;
   }
+  const rec = handoffLinks(now).byNext.get(String(s.id).toLowerCase());
+  const started = s.pickupAt || (rec && (rec.handedOffAt || rec.created)) || 0;
+  if (!started || now - started > PICKUP_TITLE_MS) return;
+  const p = sessions.get(first.id);
+  if (!p || !p.state) return;
+  const n = cleanName(baseName(p));
+  if (n) take(n);
 }
 // POST /rename { id, name }: the name the conversation goes by in Fleet View; '' or null clears it (back to Claude
 // Code's own title). Returns [code, json] with the name it shows now.
