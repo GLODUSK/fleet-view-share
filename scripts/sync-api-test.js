@@ -643,6 +643,19 @@ async function main() {
   ok(noDir, 'protectedStore needs a folder');
   const ps = S.protectedStore(pdir, 'relay-keys');
   ok(ps.kind === (process.platform === 'win32' ? 'dpapi' : process.platform === 'darwin' ? 'keychain' : 'file'), `protectedStore picks the OS's store (${ps.kind})`);
+  // the login Keychain is global: only stores in Fleet View's own data folder may use the live service
+  {
+    const P = require(path.join(ROOT, 'platform.js'));
+    const was = process.env.FV_KEYCHAIN_SERVICE;
+    delete process.env.FV_KEYCHAIN_SERVICE;
+    try {
+      ok(S.keychainService(pdir) === 'fleet-view-sync-test', `a store in a test folder gets the test Keychain service (${S.keychainService(pdir)})`);
+      ok(S.keychainService(path.join(P.dataDir(), 'sync')) === 'fleet-view-sync', 'a store in the data folder gets the live service');
+      ok(S.keychainService(P.dataDir() + '-other') === 'fleet-view-sync-test', 'a folder beside the data folder is not in it');
+      process.env.FV_KEYCHAIN_SERVICE = 'fleet-view-sync-mine';
+      ok(S.keychainService(path.join(P.dataDir(), 'sync')) === 'fleet-view-sync-mine', 'FV_KEYCHAIN_SERVICE overrides it');
+    } finally { if (was === undefined) delete process.env.FV_KEYCHAIN_SERVICE; else process.env.FV_KEYCHAIN_SERVICE = was; }
+  }
   ok(path.dirname(ps.file) === path.resolve(pdir) && path.basename(ps.file).startsWith('relay-keys.'), `its file is <dir>/relay-keys.* (${ps.file})`);
   const fdir = path.join(T, 'file-store');
   const fs1 = S.fileStore(fdir, 'relay-keys'), fsSession = S.fileStore(fdir);

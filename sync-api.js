@@ -86,6 +86,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const NAME_RE = /^[a-z_][a-z0-9_]{0,62}$/;
 const SEGMENT_RE = /^[A-Za-z0-9._-]{1,200}$/;
 const KEYCHAIN_SERVICE = 'fleet-view-sync';
+const KEYCHAIN_TEST_SERVICE = 'fleet-view-sync-test';
 const SESSION_NAME = 'session'; // the sign-in's store name (and its Keychain account)
 const STORE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,40}$/;
 
@@ -213,10 +214,20 @@ function dpapiStore(dir, name) {
     async clear() { fs.rmSync(file, { force: true }); },
   };
 }
+// The login Keychain's items are the user's, whatever folder a store is for, so the live service is only for stores
+// in Fleet View's own data folder (P.dataDir()). A store anywhere else (a test's temporary folder, a test server's
+// FV data folder) gets the service fleet-view-sync-test, so a test never reads, replaces or deletes the live sign-in
+// or sync key. FV_KEYCHAIN_SERVICE overrides both (a test that wants a service of its own).
+function keychainService(dir) {
+  if (process.env.FV_KEYCHAIN_SERVICE) return process.env.FV_KEYCHAIN_SERVICE;
+  const live = P.foldCase(path.resolve(P.dataDir())), d = P.foldCase(path.resolve(String(dir || '')));
+  return d === live || d.startsWith(live + path.sep) ? KEYCHAIN_SERVICE : KEYCHAIN_TEST_SERVICE;
+}
 // the login Keychain through /usr/bin/security; `security -i` reads its command from stdin, so the secret is never in
 // the arguments of a process (which any other process could list)
 function keychainStore(dir, name) {
   const account = storeName(name);
+  const KEYCHAIN_SERVICE = keychainService(dir);
   const marker = path.join(dir, `${account}.keychain`);
   const SECURITY = '/usr/bin/security';
   const find = () => new Promise((resolve, reject) => {
@@ -919,7 +930,7 @@ async function cli(argv, io = {}) {
 
 module.exports = {
   createSync, cli, checkUrl, checkKey, readConfig, writeConfig, readSmallJson, configPath, pkceVerifier, pkceChallenge, objectPath, checkRel,
-  dpapiStore, keychainStore, fileStore, protectedStore, syncDir, SyncError, SCHEMA, BUCKET,
+  dpapiStore, keychainStore, keychainService, fileStore, protectedStore, syncDir, SyncError, SCHEMA, BUCKET,
 };
 
 if (require.main === module) {
