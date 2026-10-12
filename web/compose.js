@@ -5,8 +5,9 @@
 // card for a command's panel (/usage, /status, /config, /mcp…: what the session draws there, with keys that drive
 // it; see parsePanel; sending text closes it first), the text box with its image attachments, the permission-mode picker, the Remote Control switch (see parseRemote) and Send. While Claude works and the box is
 // empty, Send is a red Stop button (so is Esc in an empty box); with text in the box it sends, as always. A sent message goes to the feed at once
-// (the 'fv-chat-sent' event): chat.js shows it until the transcript has it, or says it is still in Claude Code's
-// prompt when the Enter left it there ('fv-chat-stuck', see watchSent). Interrupt on a queued message there
+// (the 'fv-chat-sent' event): chat.js shows it until the transcript has it, marked "Sending…" until Claude Code's
+// prompt lets go of it ('fv-chat-taken'), or says it is still in that prompt when the Enter left it there
+// ('fv-chat-stuck', see watchSent). Interrupt on a queued message there
 // ('fv-chat-sendnow') presses Claude Code's "send now" chord, Ctrl+X then Ctrl+S: it stops the step Claude is on
 // and sends every queued message as the next turn, the way that terminal's "ctrl+x ctrl+s to send now" does.
 // Unsend there ('fv-chat-unsend') takes one message back out of Claude Code's queue the way its terminal does:
@@ -21,7 +22,8 @@
 // at most 400 characters each, Ctrl+J between lines (term.js typeInto: a long or multi-line paste reaches
 // the model as <pasted_content>, not the user's words), 300 ms, then Enter on its own. A
 // conversation that isn't running here is started first (term.js ensureLive: like the Session tab's explicit
-// open, then wait until Claude is idle). Images go to the server first (POST /chat/image saves them under
+// open, then wait until Claude is idle), and one started moments ago (a new chat) is waited for until its prompt is
+// drawn (Claude Code drops an Enter typed before that). Images go to the server first (POST /chat/image saves them under
 // %LOCALAPPDATA%\fleet-view\chat-images and answers the path); the message then carries their paths after the
 // text, each on a line of its own (messageText), and Claude Code turns a pasted image path into [Image #N]. Any other file (dropped, picked with the clip,
 // or pasted from Explorer) goes in as its own path, which the desktop window knows (fleetDesktop.pathForFile). A
@@ -75,7 +77,7 @@
 import { esc } from './cards.js';
 import { voiceSupported, startVoice, stopVoice, onVoice } from './voice.js';
 import { icon } from './icons.js';
-import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, noTermMsg } from './term.js';
+import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, keyNow, noTermMsg } from './term.js';
 import { uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
 import { sizeTask, dynamicSwitch, DYNAMIC } from './chats-model.js';
@@ -1262,7 +1264,7 @@ export function mountCompose(slot, s) {
     try {
       if (!hosts.get(id)?.alive) {
         if (openElsewhere(st.s)) { err('It is open in another window: end it there, then rewind here'); return; }
-        const r = await ensureLive(st.s, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
+        const r = await ensureLive(st.s, { sizeEl: sizeEl(), ready: drawnNow, onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
         if (st.id !== id) return;
         st.step = 'Rewinding…'; drawNotes();
         if (!r || !r.ok) { err((r && r.message) || 'Could not start the session to rewind it'); return; }
@@ -1346,6 +1348,8 @@ export function mountCompose(slot, s) {
   // a command's panel on the live screen now, and closing it: Esc until it is gone (one with a search box takes
   // two: the first clears the search). -> true when none is up
   const panelNow = (id) => (hosts.get(id)?.alive ? parsePanel(screenMarked(id, PANEL_LINES)) : null);
+  // Claude Code has drawn its prompt, or a question or panel over it: it reads keys (ensureLive's o.ready)
+  const drawnNow = (id) => screenReady(id) && !!(boxNow(id) || menuNow(id) || panelNow(id));
   async function closePanel(id) {
     const t = termApi();
     for (let i = 0; i < 3 && panelNow(id); i++) {
@@ -1457,19 +1461,41 @@ export function mountCompose(slot, s) {
 
   // ----- still in Claude Code's prompt after the Enter -----
   // Enter sends what the prompt holds, and the prompt empties (a message sent mid-turn waits in the queue, above it).
+  // The prompt seen empty after it held the text (seen: just before the Enter, or after it: Claude Code may draw
+  // keys late while it starts up, see send) means Claude Code took it: the bubble drops its "Sending…" then
+  // ('fv-chat-taken', chat.js), a moment after the Enter, rather than when the transcript has it (Claude Code
+  // writes it there only after its UserPromptSubmit hooks ran: a second and more here).
   // The text still there on two looks means Claude Code took the Enter as something else: the bubble says so
   // ('fv-chat-stuck', chat.js) with a Send it button ('fv-chat-enter': Enter once more), rather than show
   // "Sending…" until it drops off. stuck: id -> { want, typed, shown } of the one it kept
   const STUCK_LOOKS_MS = [1200, 1500];
+  const TAKEN_LOOK_MS = 60; // how often the prompt is read meanwhile
   const stuck = new Map();
   // (wrapping, and a "\" Claude Code made a new line of, change neither)
   const squash = (v) => flat(v).replace(/[\s\\]/g, '');
   const stillTyped = (id, want) => { const b = screenReady(id) ? boxNow(id) : null; return !!b && squash(b.text).startsWith(want); };
-  async function watchSent(id, typed, shown) {
+  // is the text in the prompt now? (bash mode draws a "!" before it)
+  const holds = (b, typed) => { const want = squash(typed).slice(0, 40); return !!want && !!b && squash(b.text).includes(want); };
+  const inPrompt = (id, typed) => holds(screenReady(id) ? boxNow(id) : null, typed);
+  // has Claude Code drawn what was typed: the text, or anything the box didn't hold before (before: its text then;
+  // a long paste shows as "[Pasted text #1 …]")? null: the box can't be read
+  const ECHO_MS = 10000;
+  const echoed = (id, typed, before) => { const b = screenReady(id) ? boxNow(id) : null; return b ? holds(b, typed) || (!!b.text && b.text !== before) : null; };
+  async function watchSent(id, typed, shown, seen = false) {
     const want = squash(typed).slice(0, 40);
     if (!want) return;
+    const t0 = Date.now();
+    let at = 0;
     for (const ms of STUCK_LOOKS_MS) {
-      await sleep(ms);
+      at += ms;
+      while (Date.now() - t0 < at) {
+        await sleep(Math.min(TAKEN_LOOK_MS, at - (Date.now() - t0)));
+        id = keyNow(id); // a new conversation got its id meanwhile
+        const b = screenReady(id) ? boxNow(id) : null;
+        if (!b) continue;
+        if (seen && !b.text) { pane.dispatchEvent(new CustomEvent('fv-chat-taken', { detail: { id, text: shown } })); return; }
+        if (squash(b.text).includes(want)) seen = true;
+      }
       if (!stillTyped(id, want)) return;
     }
     stuck.set(id, { want, typed, shown });
@@ -1484,7 +1510,7 @@ export function mountCompose(slot, s) {
     try { t.write(id, '\r'); } catch (e) { err(String(e?.message || e)); return false; }
     keepSession(id);
     stuck.delete(id);
-    watchSent(id, s.typed, s.shown);
+    watchSent(id, s.typed, s.shown, true);
     return true;
   }
 
@@ -1510,7 +1536,7 @@ export function mountCompose(slot, s) {
     if (!text.trim() && !list.length) return false;
     if (fromBox) stopDictation(false);
     shutSlash();
-    const id = st.id;
+    let id = st.id; // (keyNow: a new conversation may get its id while it starts)
     let s0 = st.s;
     // a menu is up: text never goes in as a message (a digit would pick an option). A question with a "Type
     // something" option takes what the box holds as that answer; any other menu is answered first (here, or on the
@@ -1580,7 +1606,8 @@ export function mountCompose(slot, s) {
       // (never before a shell command or a "/" command)
       const note = shell || /^\/[^\s/]/.test(msg) ? null : await takeNote(id);
       const typed = note ? `${note}\n\n${msg}` : msg;
-      const r = await ensureLive(s0, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
+      const r = await ensureLive(s0, { sizeEl: sizeEl(), ready: drawnNow, onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
+      id = keyNow(id);
       if (st.id === id) { st.step = ''; drawNotes(); }
       if (!r.ok) { err(r.message || 'could not start the session'); return; }
       // a permission prompt or a question may have come up since: the text would land in it and Enter would pick
@@ -1599,16 +1626,27 @@ export function mountCompose(slot, s) {
       const pick = shell || /^\/[^\s/]/.test(msg) ? null : await dynamicPick(id, text);
       if (st.id === id && st.step) { st.step = ''; drawNotes(); }
       if (pick && blocked()) { err('Claude is asking something: answer it first, then send'); return; }
+      id = keyNow(id);
+      const before = screenReady(id) ? boxNow(id) : null; // (before bash mode's "!")
       if (shell) {
         // bash mode: "!" as a key of its own into an empty prompt (a "!" after text, or a pasted one, is just text)
-        const b = screenReady(id) ? boxNow(id) : null;
-        if (b && b.text) { err('Something is typed in the session\'s prompt: clear it in the Session tab first'); return; }
+        if (before && before.text) { err('Something is typed in the session\'s prompt: clear it in the Session tab first'); return; }
         t.write(id, '!');
         await sleep(BANG_MS);
       }
       await typeInto((w) => t.write(id, w), typed.replace(/\r\n?/g, '\n'));
       await sleep(ENTER_DELAY_MS);
+      // Claude Code draws the text once it reads keys. Starting up, it can show its prompt seconds before it does,
+      // and drops an Enter typed then (the message sat in its prompt, unsent): the Enter waits for the text, ECHO_MS
+      // at most (not while the box can't be read)
+      for (const t1 = Date.now(); before && echoed((id = keyNow(id)), typed, before.text) === false && Date.now() - t1 < ECHO_MS;) {
+        if (st.id === id && !st.step) { st.step = 'Starting session…'; drawNotes(); }
+        await sleep(TAKEN_LOOK_MS);
+      }
+      id = keyNow(id);
+      if (st.id === id && st.step) { st.step = ''; drawNotes(); }
       if (blocked()) { err('A question came up before Enter: the text is in Claude\'s prompt, not sent'); return; }
+      const seen = inPrompt(id, typed);
       t.write(id, '\r');
       keepSession(id);
       if (note) noteDone(id);
@@ -1621,7 +1659,7 @@ export function mountCompose(slot, s) {
       const shown = shell ? `!${msg}` : messageText(text, list.filter((a) => a.file).map((a) => a.path));
       pane.dispatchEvent(new CustomEvent('fv-chat-sent', { detail: { id, text: shown, images: shots, busy: st.busy, pick } }));
       rememberSent(id, shown);
-      watchSent(id, typed, shown);
+      watchSent(id, typed, shown, seen);
       if (!fromBox) return true;
       clearSent(id, raw, quote, list, shell);
       return true;
@@ -1833,7 +1871,7 @@ export function mountCompose(slot, s) {
         err(`Claude Code asks once whether it may work in ${ready.cwd || 'its folder'} on this machine: pick "Yes, I trust this folder" on the card above`);
         return;
       }
-      const r = await ensureLive(s1, { sizeEl: sizeEl(), onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
+      const r = await ensureLive(s1, { sizeEl: sizeEl(), ready: drawnNow, onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
       if (!r.ok) err(r.message || 'could not start the session');
     } finally {
       st.sending = false;

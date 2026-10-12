@@ -4438,7 +4438,7 @@ function scanLiveProcs() {
       if (!j || typeof j.sessionId !== 'string' || !Number.isInteger(j.pid) || !pidAlive(j.pid)) continue;
       const at = j.updatedAt || j.startedAt || 0, old = byId.get(j.sessionId);
       const wf = typeof j.waitingFor === 'string' ? j.waitingFor.trim().slice(0, 300) : '';
-      if (!old || at > old.at) byId.set(j.sessionId, { pid: j.pid, at, startedAt: j.startedAt || 0,status: LIVE_STATUS.has(j.status) ? j.status : null, waitingFor: wf || null, statusAt: j.statusUpdatedAt || at });
+      if (!old || at > old.at) byId.set(j.sessionId, { pid: j.pid, at, startedAt: j.startedAt || 0,status: LIVE_STATUS.has(j.status) ? j.status : null, waitingFor: wf || null, statusAt: j.statusUpdatedAt || at, cwd: typeof j.cwd === 'string' ? j.cwd : '' });
     }
   }
   for (const [sid, p] of byId) p.feed = readFeed(sid, p.startedAt);
@@ -6715,6 +6715,16 @@ function conversationLog(id) {
   if (!UUID_RE.test(id)) return null;
   const known = convoLogs.get(id);
   if (known && fs.existsSync(known)) return { file: known };
+  // a running claude's log appears with its first message (a new chat's, a second or so after the Enter): looked
+  // for every time where Claude Code puts it (its folder's projects\ folder, in each account's), a stat or two,
+  // so the chat shows it then and not after the miss below runs out or discover finds it (up to 15 s)
+  const lp = liveProcs.get(id);
+  if (lp && lp.cwd) {
+    for (const r of roots()) {
+      const f = path.join(r.dir, lp.cwd.replace(/[^a-zA-Z0-9]/g, '-'), id + '.jsonl');
+      if (mtime(f)) { convoLogs.set(id, f); convoMiss.delete(id); return { file: f }; }
+    }
+  }
   const missAt = convoMiss.get(id);
   if (missAt && Date.now() - missAt < CONVO_MISS_MS) return null;
   let best = null, bm = 0;

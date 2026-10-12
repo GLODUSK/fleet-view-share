@@ -132,6 +132,9 @@ const listeners = new Set();
 const rekeyListeners = new Set();
 // a new conversation was given its id: cb(oldKey, id), after this module has moved everything over
 export function onRekey(cb) { rekeyListeners.add(cb); return () => rekeyListeners.delete(cb); }
+const rekeyed = new Map(); // new-<n> -> the id it was given
+// the key a conversation goes by now: for a new-<n> given its id since (a wait that began before it), the id
+export const keyNow = (key) => rekeyed.get(key) || key;
 let hostsKey = '', started = false;
 // an exited session the user closed: hidden until a newer one (another startedAt) appears for that id
 const dismissed = new Map(); // id -> startedAt
@@ -227,6 +230,7 @@ function hostChanged(up) {
 // a new conversation got its id: its entry, its terminal view and its marks move to the id
 function rekeyLocal(oldKey, id) {
   if (typeof oldKey !== 'string' || typeof id !== 'string' || !ID_RE.test(id) || oldKey === id) return;
+  rekeyed.set(oldKey, id);
   const h = hosts.get(oldKey);
   if (h) { hosts.delete(oldKey); h.id = id; h.pending = false; hosts.set(id, h); }
   const v = views.get(oldKey);
@@ -956,22 +960,52 @@ async function startPty(s, { cols, rows }, stillWanted = () => true) {
 // ---------- for the Chat tab: start a session without the Session tab, and read its screen ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const starting = new Map(); // id -> the ensureLive promise on its way, so two sends start it once
-const READY_MS = 60000, SETTLE_MS = 1000;
+const READY_MS = 60000, SETTLE_MS = 1000, READY_POLL_MS = 150;
+// o.ready saw the prompt: Claude Code reads keys from the moment it draws it (timed on 2.1.296: a paste then, and
+// Enter 300 ms on, went in), so a short wait does
+const DRAWN_SETTLE_MS = 250;
+// a session started less than this ago may still be loading (Claude Code took 3 to 5 s to draw its prompt here)
+const BOOT_MS = 30000;
 
 // Make sure the conversation runs here, ready for typing: a live one is kept (sending is typing, so a preview
 // becomes the user's); one that isn't hosted starts like an explicit open (it stays), and one that ended starts
-// again (like Reopen). Then it waits until Claude says it is idle (at most 60 s) and a second more, so the
-// prompt is drawn before anything is pasted into it. o.sizeEl: the element to size a new pty from; o.onStep(text)
-// hears what it is doing. Resolves { ok, started, message? }.
+// again (like Reopen). Then it waits until Claude says it is idle (at most 60 s), looking every 150 ms, and a moment
+// more, so the prompt is drawn before anything is pasted into it: 250 ms when o.ready(id) says the screen shows it,
+// else a second. o.ready(id) -> true when the screen shows Claude Code's prompt (or a question or panel over it: the
+// caller deals with those). With it, a live one started moments ago (a new chat sent to at once) is waited for too,
+// until o.ready or idle (at most until BOOT_MS after its start): Claude Code drops an Enter typed before its prompt
+// is drawn, which left the message in its prompt, unsent. o.sizeEl: the element to size a new pty (and the view
+// that reads its screen) from; o.onStep(text) hears what it is doing. Resolves { ok, started, message? }.
 export function ensureLive(s, o = {}) {
   const t = termApi();
   if (!t) return Promise.resolve({ ok: false, message: noTermMsg('Sending') });
   if (!s || !KEY_RE.test(String(s.id || ''))) return Promise.resolve({ ok: false, message: 'not a conversation' });
   const h = hosts.get(s.id);
-  if (h?.alive) { keep(s.id); return Promise.resolve({ ok: true, started: false }); }
+  const drawn = () => { try { return !!o.ready?.(keyNow(s.id)); } catch { return false; } };
+  const step = (x) => { try { o.onStep?.(x); } catch {} };
+  if (h?.alive) {
+    keep(s.id);
+    if (!o.ready || h.status === 'idle' || Date.now() - h.startedAt > BOOT_MS || drawn()) return Promise.resolve({ ok: true, started: false });
+    if (starting.has(s.id)) return starting.get(s.id);
+    const p = (async () => {
+      step('Starting session…');
+      for (;;) {
+        screenText(keyNow(s.id), 1, { sizeEl: o.sizeEl }); // makes the view that reads its screen, the first time
+        await sleep(READY_POLL_MS);
+        await refreshHosts();
+        const x = hosts.get(keyNow(s.id)); // (it may get its id meanwhile)
+        if (!x?.alive) return { ok: false, message: 'the session ended while starting' };
+        if (x.status === 'idle' || x.status === 'waiting' || drawn() || Date.now() - x.startedAt > BOOT_MS) break;
+      }
+      step('');
+      await sleep(DRAWN_SETTLE_MS);
+      return { ok: true, started: false };
+    })().finally(() => starting.delete(s.id));
+    starting.set(s.id, p);
+    return p;
+  }
   if (starting.has(s.id)) return starting.get(s.id);
   if (!ID_RE.test(s.id)) return Promise.resolve({ ok: false, message: 'this new session has ended' });
-  const step = (x) => { try { o.onStep?.(x); } catch {} };
   const p = (async () => {
     if (h && !h.alive) {
       try { await t.kill(s.id); } catch {}
@@ -988,18 +1022,20 @@ export function ensureLive(s, o = {}) {
     preview.delete(s.id); // started on purpose: it stays
     await refreshHosts();
     notify();
-    // ready when Claude reports idle; a host that reports no status at all gets 20 s to draw its prompt
+    // ready when Claude reports idle (a resume says busy while it loads, prompt drawn or not); a host that reports
+    // no status at all gets 20 s to draw its prompt
     const t0 = Date.now();
     for (;;) {
       const x = hosts.get(s.id);
       if (x && !x.alive) return { ok: false, message: 'the session ended while starting' };
       if (x?.alive && (x.status === 'idle' || (x.status == null && Date.now() - t0 > 20000))) break;
       if (Date.now() - t0 > READY_MS) return { ok: false, message: 'the session did not get ready within 60 s' };
-      await sleep(500);
+      if (x?.alive && o.ready) screenText(s.id, 1, { sizeEl: o.sizeEl }); // makes the view that reads its screen, the first time
+      await sleep(READY_POLL_MS);
       await refreshHosts();
     }
     step('');
-    await sleep(SETTLE_MS);
+    await sleep(drawn() ? DRAWN_SETTLE_MS : SETTLE_MS);
     return { ok: true, started: true };
   })().finally(() => starting.delete(s.id));
   starting.set(s.id, p);

@@ -22,8 +22,9 @@
 // monitors: the reply's `bg`, see conversation.js), like the task list under a Claude Code terminal. Folded it is
 // one line with a count; a click opens a row per task with how long it has run.
 // A message you send shows at once ('fv-chat-sent' from compose.js) as a bubble marked "Sending" (or "Queued"
-// while Claude is mid-turn, which writes it to the transcript only when it reads it); the transcript's own copy
-// replaces it. A queued one has an Interrupt button: Claude stops the step it is on and takes your message now
+// while Claude is mid-turn, which writes it to the transcript only when it reads it); the mark goes once Claude
+// Code's prompt lets go of it ('fv-chat-taken'), and the transcript's own copy replaces it (looked for every 200 ms
+// until then, FAST_POLL_MS: Claude Code writes it a second or so after the Enter). A queued one has an Interrupt button: Claude stops the step it is on and takes your message now
 // (compose.js presses Claude Code's own "send now" keys, which send every queued message at once). Unsend takes
 // it back out of Claude Code's queue ('fv-chat-unsend': compose.js pulls the queue into the prompt, clears it,
 // and queues the others again; the reply's `queue` says what is queued). Fork and New chat take it out the same way
@@ -81,6 +82,8 @@ import { botFeed } from './chats-model.js';
 const params = (() => { try { return new URLSearchParams(location.search); } catch { return new URLSearchParams(); } })();
 const FIXTURE = params.has('fixture');
 const POLL_MS = 1000;
+// a message just sent (not queued) and not in the transcript yet: asked this often, for at most FAST_FOR_MS
+const FAST_POLL_MS = 200, FAST_FOR_MS = 15000;
 const STALE_MS = 3000; // no renderChatPane call for this long: the tab is hidden, stop asking
 const EARLIER = 200; // items per "Show earlier"
 const DIFF_CAP = 400; // diff lines shown per edit
@@ -962,8 +965,9 @@ function addSent(c, d) {
   // used: the user messages and notes already in the feed (or matched to another sent one), which can't be this one
   const used = new Set(c.items.filter((it) => it.kind === 'user' || it.kind === 'note').map((it) => String(it.key)));
   const text = norm(d.text), cmd = /^\/[^\s/]+/.exec(text)?.[0] || null;
-  c.sent.push({ at: Date.now(), text, raw: String(d.text || ''), cmd, images: d.images || [], el, used });
+  c.sent.push({ at: Date.now(), text, raw: String(d.text || ''), cmd, images: d.images || [], el, used, queued: !!d.busy });
   c.outbox.appendChild(el);
+  if (!d.busy) c.wake?.(); // the transcript is looked for at once, and often (see loop)
   syncPicks(c); // a launch typed by hand greys its options at once
   drawState(c);
   toBottom(c);
@@ -1179,6 +1183,18 @@ function wire(c) {
     drawPick(el, p, launchedOptions(c));
   });
   pane.addEventListener('fv-chat-sent', (e) => { if (e.detail && e.detail.id === c.id) addSent(c, e.detail); });
+  // Claude Code's prompt let go of it (compose.js): sent, so no "Sending…" while the transcript catches up
+  pane.addEventListener('fv-chat-taken', (e) => {
+    const d = e.detail;
+    if (!d || d.id !== c.id) return;
+    const text = norm(d.text), open = c.sent.filter((x) => !x.queued && !x.taken && x.el.classList.contains('sending'));
+    const s = [...open].reverse().find((x) => x.text === text) || open[open.length - 1];
+    const stEl = s?.el.querySelector('.cu-status');
+    if (!stEl || stEl.classList.contains('stuck')) return;
+    s.taken = true;
+    s.el.classList.add('taken');
+    stEl.textContent = '';
+  });
   // Claude Code kept it in its prompt after the Enter (compose.js): say so, with Send it (Enter once more)
   pane.addEventListener('fv-chat-stuck', (e) => {
     const d = e.detail;
@@ -1654,16 +1670,19 @@ function drawBg(c) {
   c.bgEl.classList.toggle('open', c.bgOpen);
 }
 
-// ask every second while the tab shows; stop when renderChatPane stops calling (the tab is hidden)
+// ask every second while the tab shows (every FAST_POLL_MS while a message just sent waits for its transcript copy,
+// and at once when one is sent: c.wake); stop when renderChatPane stops calling (the tab is hidden)
+const awaitingCopy = (c) => c.sent.some((s) => !s.queued && Date.now() - s.at < FAST_FOR_MS);
 async function loop(c) {
   if (c.looping) return;
   c.looping = true;
   try {
     while (c.pane.isConnected && c.visible && Date.now() - c.seen < STALE_MS) {
       await poll(c);
-      await new Promise((r) => setTimeout(r, POLL_MS));
+      await new Promise((r) => { c.wake = r; setTimeout(r, awaitingCopy(c) ? FAST_POLL_MS : POLL_MS); });
+      c.wake = null;
     }
-  } finally { c.looping = false; }
+  } finally { c.looping = false; c.wake = null; }
 }
 
 // a new conversation got its id (after its first message): the same conversation, so the pane keeps its compose
