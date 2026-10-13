@@ -31,7 +31,7 @@
 // ({ pid, pipe, token, startedAt, version }); anything else, or a wrong token, closes the connection. Then:
 //   { t: 'req', n?, op, a: [args] }  ->  { t: 'res', n, v } or { t: 'res', n, err }   (no n: no reply)
 //   ops: open(o), create(o) (o.chrome, o.forkFrom, o.model, o.effort, o.role: see create below), write(id, data), resize(id, cols, rows), kill(id), list(), snapshot(id),
-//        endAll(graceMs), killAll(), setUi(ui), quitAll({ ui }), restart({ now, by }) (see Restart), log(text),
+//        endAll(graceMs), killAll(), setUi(ui), quitAll({ ui }), restart({ now, by }) (see Restart), log(text), parked(),
 //        sendTo(o), switchAccount({ id, account, rescue }) (see Switching accounts)
 //   events: { t: 'ev', e: 'data', id, d } / { e: 'exit', id, code } / { e: 'rekey', from, id } / { e: 'sessions', list }
 // list() gives each session: id, pid, alive, exitCode, startedAt, pending, created, forkFrom, cwd, handoffFrom,
@@ -54,10 +54,22 @@
 // busy: working, or waiting on a prompt mid-turn (anything but an open "/" panel). "Quit everything" (the tray)
 // writes it with every running session and freezes it, then ends them all and the host exits. A reboot leaves
 // the last one written (a session whose claude died first, with a non-zero
-// exit, stays in it; one closed from the page, or that exited cleanly, leaves it). When a host starts, it resumes every listed
-// conversation (claude --resume) and marks the ones that were busy as interrupted (list() says interrupted
+// exit, stays in it; one closed from the page, or that exited cleanly, leaves it). When a host starts, it brings the
+// listed conversations back (claude --resume) and marks the ones that were busy as interrupted (list() says interrupted
 // until Claude starts work again or Enter is typed); new sessions that never got an id are dropped, and so is a
 // conversation a live claude elsewhere already has open, or another device has (see Away).
+// The restore runs after the pipe listens and never blocks it: one start, then RESTORE_GAP_MS before the next
+// (FV_HOST_RESTORE_GAP_MS in tests), so a client is let in and answered throughout and 40 sessions never start at once
+// (2026-10-13: a 12 s synchronous restore made the window take the host for stuck, kill it and start another, five
+// times in 71 s). Started straight away, in this order: the restart asker (restartBy) and the conversation the window
+// showed (ui.selectedId); the busy or interrupted ones; the Chief, bots (role) and pickups; idle ones whose transcript
+// shows background tasks still running (runningTasks, read before the resume reports them stopped). Every other idle
+// one is parked: not started, kept in the restore list (parked: true) across saves and hosts until it is opened, and
+// then resumed as the restore would have (its saved folder, account and role). open() or sendTo() of one still waiting
+// (parked, or its turn not come) starts it at once and takes it out of the queue; kill() of one forgets it; a quit or
+// restart mid-restore stops the queue and saves the rest as they were. parked() lists the waiting ones; list() only
+// running ones, so a parked conversation is, to every client, one not running here that opens on a click.
+// "restoreIdle": true in ~/.fleet-view.json starts the idle ones too (after the others, still one at a time).
 //
 // Auto-continue: `claude --resume` starts no turn, so a conversation cut off mid-turn, or whose background tasks
 // died with the host, would sit idle for good. Each resumed one gets a one-line "[Fleet View] …" note typed into
@@ -117,7 +129,8 @@
 // %LOCALAPPDATA%\fleet-view\test-<name> (or FV_HOST_DIR); only with such a pipe does it honour FV_TERM_CMD (a
 // harmless command in place of `claude`, given the same arguments), FV_HOST_SESSIONS_DIR (one more folder of pid files),
 // FV_HOST_IDLE_MS, FV_HOST_SETTINGS (another settings file), FV_HOST_PROJECTS_DIR (where transcripts are, instead
-// of ~/.claude*/projects), FV_HOST_NUDGE_GIVEUP_MS and FV_HOST_PANEL_CLOSE_MS. desktop/host-test.js uses them.
+// of ~/.claude*/projects), FV_HOST_NUDGE_GIVEUP_MS, FV_HOST_PANEL_CLOSE_MS and FV_HOST_RESTORE_GAP_MS.
+// desktop/host-test.js and desktop/host-restore-test.js use them.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -143,6 +156,7 @@ const PANEL_CLOSE_MS = 60 * 1000; // a "/" panel left open this long with no key
 const ESC_GAP_MS = 3000; // two Escs closer than this at Claude Code's prompt open its rewind menu
 const NUDGE_GIVEUP_MS = 3 * 60 * 1000; // a resumed session not ready this long after its start gets no note
 const NUDGE_IDLE_MS = 2500, NUDGE_QUIET_MS = 1500, NUDGE_TASKS_MS = 20000;
+const RESTORE_GAP_MS = 1800; // between two starts of a restore (see Restore list)
 
 // ---------- where things live ----------
 const userTag = () => { let u = ''; try { u = os.userInfo().username; } catch {} return (u || process.env.USERNAME || 'user').replace(/[^\w.-]/g, '_').slice(0, 60); };
@@ -182,7 +196,7 @@ function fileHash(file) { try { return crypto.createHash('sha1').update(fs.readF
 
 // ~/.fleet-view.json, the Fleet View server's settings. The server writes it and keeps keys it does not know,
 // so this only ever reads it: autoContinue (false: no notes after a restore), panelAutoCloseSec (0: never),
-// newSessionEffort (see newEffort).
+// newSessionEffort (see newEffort), restoreIdle (true: a restore starts idle conversations too, see Restore list).
 // Read at most every 30 s; the scan asks for it every 800 ms.
 // newSessionEffort: the effort a new conversation starts at (`claude --effort <level>`), "medium" when unset;
 // "last" adds no flag, so Claude Code's saved default (the last /effort typed anywhere) applies.
@@ -334,6 +348,54 @@ function stoppedWork(file, offset) {
     }
   }
   return found;
+}
+
+// How many background tasks a transcript says still run, from its last 8 MB, as conversation.js keeps them (L.bg):
+// launched (a tool result whose toolUseResult has backgroundTaskId, or taskId / agentId when async_launched or from
+// a Monitor) with no <task-notification> status for it after, no TaskStop (KillShell) of it, and under a day old (a
+// monitor with a timeout: until then). A restore asks this before the resume, which then reports them stopped.
+const BG_MAX_MS = 24 * 3600e3;
+function runningTasks(file, now = Date.now()) {
+  let text = '';
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = fs.fstatSync(fd).size, len = Math.min(size, 8 << 20);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      text = buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } catch { return 0; }
+  const uses = new Map(), bg = new Map(); // tool_use id -> 'monitor' | 'stop:<task id>'; task id -> running until
+  const KEYS_RE = /"name":"(?:Monitor|TaskStop|KillShell)"|backgroundTaskId|async_launched|"taskId"/;
+  for (const line of text.split('\n')) {
+    if (line.includes('task-notification')) {
+      for (const m of line.matchAll(/<task-id>([^<]+)<\/task-id>[\s\S]*?<status>(\w+)<\/status>/g)) if (m[2] !== 'running') bg.delete(m[1].trim());
+    }
+    if (!KEYS_RE.test(line) && !(uses.size && [...uses.keys()].some((k) => line.includes(k)))) continue;
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    if (!d || typeof d !== 'object' || d.isSidechain || !d.message || !Array.isArray(d.message.content)) continue;
+    for (const b of d.message.content) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type === 'tool_use' && typeof b.id === 'string') {
+        const i = b.input && typeof b.input === 'object' ? b.input : {};
+        const tid = i.task_id || i.shell_id;
+        if (b.name === 'Monitor') uses.set(b.id, 'monitor');
+        else if ((b.name === 'TaskStop' || b.name === 'KillShell') && typeof tid === 'string') uses.set(b.id, `stop:${tid}`);
+      } else if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
+        const u = uses.get(b.tool_use_id) || '', r = d.toolUseResult;
+        uses.delete(b.tool_use_id);
+        if (u.startsWith('stop:')) { if (!b.is_error) bg.delete(u.slice(5)); continue; }
+        if (!r || typeof r !== 'object') continue;
+        const tid = r.backgroundTaskId || (r.status === 'async_launched' || u === 'monitor' ? r.taskId || r.agentId : null);
+        if (typeof tid !== 'string' || !tid) continue;
+        const t = Date.parse(d.timestamp) || now;
+        bg.set(tid, u === 'monitor' && !r.persistent && Number.isFinite(r.timeoutMs) ? t + r.timeoutMs : t + BG_MAX_MS);
+      }
+    }
+  }
+  return [...bg.values()].filter((until) => until > now).length;
 }
 
 // ---------- conversations on another device (sync's "Continue here", ../sync-move.js) ----------
@@ -582,6 +644,15 @@ function createPtys(opts = {}) {
   const terms = new Map();
   let newSeq = 0;
   let screenLib = null;
+  // what a restore has not started (see Restore list): its lowercased id ('pickup:<n>' for a pickup with no id) ->
+  // { s: its entry as sessions.json keeps it, extra: () -> open()'s extra when the restore starts it in its turn; null:
+  // parked until it is opened }. restoreList() carries these on
+  const held = new Map();
+  const hold = (key, s, extra) => { held.set(key, { s, extra: extra || null }); };
+  const heldOf = (key) => held.get(String(key).toLowerCase()) || null;
+  // the restore's turn for one: it leaves the map (null when a client opened or closed it meanwhile)
+  function take(key) { const h = held.get(key) || null; held.delete(key); return h; }
+  const parked = () => [...held.values()].map(({ s, extra }) => ({ id: s.id, cwd: s.cwd, account: s.account, role: s.role || null, pickup: !!s.pickup, parked: !extra }));
 
   function flush(t) {
     clearTimeout(t.timer);
@@ -711,11 +782,20 @@ function createPtys(opts = {}) {
     if (typeof id !== 'string' || !ID_RE.test(id)) throw new Error('bad conversation id');
     if (!loadPty()) return noPty();
     const old = terms.get(id);
-    if (old && old.alive) return { ok: true, message: 'already running', pid: old.pid };
+    if (old && old.alive) { held.delete(id.toLowerCase()); return { ok: true, message: 'already running', pid: old.pid }; }
     // another device has it (or it is moving there): never start it here (one running here is only attached to, above)
     const away = awayOf(id);
     if (away) { log(`open: ${id} refused: it is on ${away.device}`); return awayRefusal(away); }
     if (old) terms.delete(id); // ended: start it again
+    // one the restore holds (parked, or its turn not come yet): it starts now, as the restore would have started it, in
+    // its saved folder and account (the caller's size, when it gives one, as the panel resizes it anyway)
+    const h = heldOf(id);
+    if (h) {
+      held.delete(id.toLowerCase());
+      o = { ...o, cwd: h.s.cwd || o.cwd, account: h.s.account || o.account, cols: o.cols || h.s.cols, rows: o.rows || h.s.rows };
+      if (!extra) extra = h.extra ? h.extra() : { restored: true, role: h.s.role };
+      log(`open: ${id} ${h.extra ? 'was waiting for its turn in the restore; it starts now' : 'was parked; resumed'}`);
+    }
     const role = soleRole(roleOf(extra && extra.role) || roleOf(o.role) || (old ? old.role : null), id, 'open');
     const r = spawnPty(id, commandFor(id, role, o.cwd), o, { ...(extra || {}), role });
     delete r.key;
@@ -737,16 +817,20 @@ function createPtys(opts = {}) {
     if (!loadPty()) return Promise.resolve(noPty());
     const account = acctId(o.account);
     const old = terms.get(id);
+    // one the restore holds (not running yet): it goes with its saved folder and role
+    const h = old && old.alive ? null : heldOf(id);
+    const cwd = o.cwd || old?.cwd || h?.s.cwd || null;
     // nothing is ended when that account can't carry it on
-    const why = sendToMissing(id, account, o.cwd || old?.cwd || null);
+    const why = sendToMissing(id, account, cwd);
     if (why) { log(`send to ${account}: ${id} refused: ${why}`); return Promise.resolve({ ok: false, message: why }); }
+    if (h) { held.delete(id.toLowerCase()); changed(); }
     const gone = old && old.alive ? new Promise((r) => { old.dismissed = true; end(old, 2500, r); }) : Promise.resolve();
     return gone.then(() => {
       if (terms.get(id) === old) terms.delete(id);
       if (terms.get(id)?.alive) return { ok: false, message: 'it was started again meanwhile' };
       const note = `The user sent this conversation to account ${account} from Fleet View; the pickup carries on there`;
-      const role = soleRole(old ? old.role : null, id, `send to ${account}:`);
-      const r = spawnPty(id, `${commandFor(id, role, o.cwd || old?.cwd)} "/handoff ${note}"`, { ...o, account, cwd: o.cwd || old?.cwd || null }, { role });
+      const role = soleRole(old ? old.role : h ? roleOf(h.s.role) : null, id, `send to ${account}:`);
+      const r = spawnPty(id, `${commandFor(id, role, cwd)} "/handoff ${note}"`, { ...o, account, cwd }, { role });
       log(`send to ${account}: ${id} ${r.ok ? `resumed with /handoff (pid ${r.pid})` : `failed: ${r.message}`}`);
       delete r.key;
       return r;
@@ -867,6 +951,7 @@ function createPtys(opts = {}) {
     if (terms.has(id) && terms.get(id).alive) { t.claudePid = f.pid; return; } // already hosted under that id (should not happen)
     flush(t); // output so far goes out under the old key, the rest under the new one
     terms.delete(old);
+    held.delete(id); // (a parked conversation it went on in is running now)
     t.id = id; t.isNew = false; t.claudePid = f.pid; t.status = f.status; t.waitingFor = f.status === 'waiting' ? f.waitingFor : null;
     terms.set(id, t);
     send('rekey', old, id);
@@ -1118,10 +1203,13 @@ function createPtys(opts = {}) {
   }
 
   // a running one: end it (above); the exit then goes out and it is forgotten.
-  // An ended one: forget it now (the page's "Close" on the "Session ended" bar).
+  // An ended one: forget it now (the page's "Close" on the "Session ended" bar). One the restore holds: forgotten too.
   function kill(id) {
     const t = terms.get(id);
-    if (!t) return;
+    if (!t) {
+      if (held.delete(String(id).toLowerCase())) { log(`restore: ${id} was closed before it started; it leaves the restore list`); changed(); }
+      return;
+    }
     if (!t.alive) { terms.delete(id); changed(); return; }
     if (t.dismissed) return; // already ending
     t.dismissed = true;
@@ -1175,7 +1263,8 @@ function createPtys(opts = {}) {
 
   // the ones to bring back after a restart: every running one, and one that ended without a clean exit (code
   // 0, e.g. /exit) and was not closed from the page. At a shutdown or reboot claude may die before this
-  // process does, and its exit must not drop it from the list.
+  // process does, and its exit must not drop it from the list. Then, as they were saved, the ones the restore
+  // holds: parked, or not started yet
   function restoreList() {
     return [...terms.values()].filter((t) => !t.dismissed && (t.alive || (!t.isNew && t.exitCode !== 0))).map((t) => ({
       id: t.isNew ? null : t.id, cwd: t.cwd, account: t.account, startedAt: t.startedAt, busy: isBusy(t),
@@ -1183,7 +1272,7 @@ function createPtys(opts = {}) {
       ...(t.isNew && t.pickup ? { pickup: t.pickup, handoffFrom: t.handoffFrom || null } : {}),
       ...(t.restartBy ? { restartBy: true } : {}),
       ...(t.role ? { role: t.role } : {}),
-    }));
+    })).concat([...held.values()].filter((h) => !(h.s.id && terms.has(h.s.id))).map((h) => h.s));
   }
 
   // for the restart: the running sessions that are mid-turn, but the one with this CLAUDE_LAUNCH_KEY (the asker)
@@ -1204,7 +1293,8 @@ function createPtys(opts = {}) {
     return t.chunks.join('');
   }
 
-  return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, markRestartBy, snapshot, aliveCount, dirs };
+  return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, markRestartBy, snapshot, aliveCount, dirs,
+    hold, heldOf, take, parked };
 }
 
 // ---------- the host process ----------
@@ -1273,7 +1363,11 @@ function runHost() {
     nudgeGiveUpMs: testMs('FV_HOST_NUDGE_GIVEUP_MS'),
   });
 
-  // On start: resume every conversation the last list had running
+  // On start, once the pipe listens: the conversations the last list had, one start at a time (see Restore list).
+  // Sorting them reads no transcript; the idle ones it would park are each checked for running background tasks in
+  // a turn of their own, then the starts go RESTORE_GAP apart. A client is let in and answered in between throughout.
+  const RESTORE_GAP = testMs('FV_HOST_RESTORE_GAP_MS') ?? RESTORE_GAP_MS;
+  const restoreStopped = () => quitting || frozen || down;
   function restore() {
     const saved = readJson(sessionsFile());
     if (!saved || typeof saved !== 'object') {
@@ -1283,41 +1377,19 @@ function runHost() {
     if (saved.ui && typeof saved.ui === 'object') ui = saved.ui;
     const list = Array.isArray(saved.sessions) ? saved.sessions : [];
     if (!list.length) return;
-    // a conversation some live claude already has open (a terminal resumed it meanwhile) is left alone;
-    // pid files from before this boot are stale whatever their pid says now
+    // a conversation some live claude already has open (a terminal resumed it meanwhile) is left alone; asked again
+    // at each start. Pid files from before this boot are stale whatever their pid says now
     const bootAt = Date.now() - os.uptime() * 1000;
-    const openNow = new Set(readPidFiles(ptys.dirs()).filter((f) => f.startedAt >= bootAt - 60000).map((f) => f.sessionId));
+    const openNow = () => new Set(readPidFiles(ptys.dirs()).filter((f) => f.startedAt >= bootAt - 60000).map((f) => f.sessionId));
+    const open0 = openNow();
     // each resumed one is told to carry on once it has loaded (see Auto-continue), unless that is turned off
-    const autoContinue = settings(true).autoContinue !== false;
+    const set = settings(true);
+    const autoContinue = set.autoContinue !== false, restoreIdle = set.restoreIdle === true;
     const cause = saved.reason === 'quit' ? 'Fleet View was quit' : saved.reason === 'restart' ? 'the session host restarted for an update'
       : 'the session host stopped (the PC shut down, or the host ended)';
-    let n = 0;
-    for (const s of list) {
-      if (!s || typeof s !== 'object') continue;
-      const role = roleOf(s.role);
-      // a pickup that had no id yet: the conversation it started when the handoff names it, else the pickup again
-      if (typeof s.pickup === 'string' && (typeof s.id !== 'string' || !ID_RE.test(s.id))) {
-        const from = typeof s.handoffFrom === 'string' && ID_RE.test(s.handoffFrom) ? s.handoffFrom.toLowerCase() : null;
-        const rec = from ? HO.readAll().bySession.get(from) : null;
-        if (rec && rec.next) { s.id = rec.next; log(`restore: the handoff of ${from} was picked up as ${rec.next}`); }
-        else {
-          const file = HO.safeFile(s.pickup);
-          let r = { ok: false, message: 'the handoff file is gone' };
-          if (file) {
-            try { r = ptys.startPickup(from, file, { cwd: s.cwd, account: acctId(s.account), cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: from, role }); } catch (e) { r = { ok: false, message: e.message }; }
-          }
-          log(`restore: pickup of ${s.pickup} ${r.ok ? `started again (pid ${r.pid})` : `failed: ${r.message}`}`);
-          if (r.ok) n++;
-          continue;
-        }
-      }
-      if (typeof s.id !== 'string' || !ID_RE.test(s.id)) { log(`restore: dropped a new session that never got an id (${s.pendingKey || '?'})`); continue; }
-      const id = s.id.toLowerCase();
-      if (openNow.has(id)) { log(`restore: ${id} is open in another claude; not resumed`); continue; }
-      // another device has it now (sync, away.json): resuming it here would run it in two places
-      const away = awayOf(id);
-      if (away) { log(`restore: ${id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); continue; }
-      const interrupted = !!(s.busy || s.interrupted);
+    const shown = ui && typeof ui.selectedId === 'string' ? ui.selectedId.toLowerCase() : null;
+    // what open() gets for one, worked out when it starts (from the transcript as it is then)
+    const extraFor = (id, s, interrupted, role) => () => {
       let nudge = null;
       if (autoContinue) {
         nudge = { kind: s.restartBy ? 'restart' : interrupted ? 'interrupted' : 'tasks', cause };
@@ -1328,14 +1400,89 @@ function runHost() {
           nudge = tr ? { ...nudge, file: tr.file, offset: tr.size } : null;
         }
       }
-      let r;
-      try {
-        r = ptys.open({ id, cwd: s.cwd, account: acctId(s.account), cols: s.cols, rows: s.rows }, { interrupted, restored: true, nudge, role });
-      } catch (e) { r = { ok: false, message: e.message }; }
-      log(`restore: ${id} ${r.ok ? `resumed (pid ${r.pid})${role ? `, as the ${role}` : ''}${interrupted ? ', was interrupted' : ''}${nudge ? `, note due (${nudge.kind})` : ''}` : `failed: ${r.message}`}`);
-      if (r.ok) n++;
+      return { interrupted, restored: true, nudge, role };
+    };
+    const queue = [], checks = []; // queue: [{ key, tier }], started by tier, in the list's order within one
+    let pickups = 0;
+    for (const s0 of list) {
+      if (!s0 || typeof s0 !== 'object') continue;
+      const role = roleOf(s0.role);
+      // as this host keeps it in the restore list while it waits
+      const s = { id: typeof s0.id === 'string' && ID_RE.test(s0.id) ? s0.id.toLowerCase() : null, cwd: typeof s0.cwd === 'string' ? s0.cwd : null,
+        account: acctId(s0.account), startedAt: Number(s0.startedAt) || 0, busy: !!s0.busy, interrupted: !!s0.interrupted,
+        cols: Number.isInteger(s0.cols) ? s0.cols : null, rows: Number.isInteger(s0.rows) ? s0.rows : null,
+        ...(typeof s0.pendingKey === 'string' ? { pendingKey: s0.pendingKey } : {}), ...(s0.restartBy ? { restartBy: true } : {}), ...(role ? { role } : {}) };
+      let pickup = false;
+      // a pickup that had no id yet: the conversation it started when the handoff names it, else the pickup again
+      if (typeof s0.pickup === 'string' && !s.id) {
+        const from = typeof s0.handoffFrom === 'string' && ID_RE.test(s0.handoffFrom) ? s0.handoffFrom.toLowerCase() : null;
+        const rec = from ? HO.readAll().bySession.get(from) : null;
+        if (rec && rec.next && ID_RE.test(rec.next)) { s.id = rec.next.toLowerCase(); pickup = true; log(`restore: the handoff of ${from} was picked up as ${rec.next}`); }
+        else if (!HO.safeFile(s0.pickup)) { log(`restore: pickup of ${s0.pickup} failed: the handoff file is gone`); continue; }
+        else {
+          const key = `pickup:${++pickups}`;
+          ptys.hold(key, { ...s, pickup: s0.pickup, handoffFrom: from }, null);
+          queue.push({ key, tier: 2 });
+          continue;
+        }
+      }
+      if (!s.id) { log(`restore: dropped a new session that never got an id (${s0.pendingKey || '?'})`); continue; }
+      const id = s.id;
+      if (ptys.heldOf(id)) continue; // listed twice
+      if (open0.has(id)) { log(`restore: ${id} is open in another claude; not resumed`); continue; }
+      // another device has it now (sync, away.json): resuming it here would run it in two places
+      const away = awayOf(id);
+      if (away) { log(`restore: ${id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); continue; }
+      const interrupted = !!(s.busy || s.interrupted);
+      const tier = s.restartBy || id === shown ? 0 : interrupted ? 1 : role || pickup ? 2 : restoreIdle ? 4 : -1;
+      const extra = extraFor(id, s, interrupted, role);
+      if (tier < 0) { ptys.hold(id, { ...s, parked: true }, null); checks.push({ id, s, extra }); continue; }
+      ptys.hold(id, s, extra);
+      queue.push({ key: id, tier });
     }
-    log(`restore: ${n} of ${list.length} resumed`);
+    log(`restore: ${list.length} listed: ${queue.length} to resume one at a time${checks.length ? `, ${checks.length} idle to park unless their background tasks were running` : ''}`);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    (async () => {
+      for (const c of checks) {
+        await new Promise((r) => setImmediate(r));
+        if (restoreStopped()) break;
+        if (!ptys.heldOf(c.id)) continue; // opened or closed meanwhile
+        const tr = findTranscript(c.id, c.s.cwd);
+        const k = tr ? runningTasks(tr.file) : 0;
+        if (!k) continue;
+        ptys.hold(c.id, c.s, c.extra);
+        queue.push({ key: c.id, tier: 3 });
+        log(`restore: ${c.id} had ${k} background task(s) running; it is resumed`);
+      }
+      queue.sort((a, b) => a.tier - b.tier); // (stable: the list's order within a tier)
+      let n = 0, last = 0, left = queue.length;
+      for (const q of queue) {
+        if (restoreStopped()) break;
+        if (ptys.heldOf(q.key)) { const wait = last + RESTORE_GAP - Date.now(); if (wait > 0) await sleep(wait); }
+        if (restoreStopped()) break;
+        left--;
+        const h = ptys.take(q.key);
+        if (!h) { log(`restore: ${q.key} was opened or closed meanwhile`); continue; }
+        const s = h.s;
+        let r;
+        if (!s.id) {
+          try { r = ptys.startPickup(s.handoffFrom, HO.safeFile(s.pickup), { cwd: s.cwd, account: s.account, cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: s.handoffFrom, role: s.role }); } catch (e) { r = { ok: false, message: e.message }; }
+          log(`restore: pickup of ${s.pickup} ${r.ok ? `started again (pid ${r.pid})` : `failed: ${r.message}`}`);
+        } else {
+          if (openNow().has(s.id)) { log(`restore: ${s.id} is open in another claude; not resumed`); changed(); continue; }
+          const away = awayOf(s.id);
+          if (away) { log(`restore: ${s.id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); changed(); continue; }
+          const x = h.extra();
+          try { r = ptys.open({ id: s.id, cwd: s.cwd, account: s.account, cols: s.cols, rows: s.rows }, x); } catch (e) { r = { ok: false, message: e.message }; }
+          log(`restore: ${s.id} ${r.ok ? `resumed (pid ${r.pid})${x.role ? `, as the ${x.role}` : ''}${x.interrupted ? ', was interrupted' : ''}${x.nudge ? `, note due (${x.nudge.kind})` : ''}` : `failed: ${r.message}`}`);
+        }
+        last = Date.now();
+        if (r.ok) n++;
+      }
+      if (restoreStopped()) { log(`restore: stopped (${quitting ? 'quitting' : 'the host is ending'}) with ${left} not started; they stay in the restore list`); return; }
+      const p = ptys.parked().filter((x) => x.parked).length;
+      log(`restore: ${n} of ${list.length} resumed${p ? `, ${p} parked until opened` : ''}`);
+    })().catch((e) => log(`restore failed: ${e && e.stack ? e.stack : e}`));
   }
 
   // ---------- requests ----------
@@ -1454,6 +1601,7 @@ function runHost() {
         case 'resize': if (typeof a[0] === 'string' && KEY_RE.test(a[0])) ptys.resize(a[0], Number(a[1]), Number(a[2])); return reply(true);
         case 'kill': if (typeof a[0] === 'string' && KEY_RE.test(a[0])) ptys.kill(a[0]); return reply(true);
         case 'list': return reply(ptys.list());
+        case 'parked': return reply(ptys.parked());
         case 'snapshot': return reply(typeof a[0] === 'string' && KEY_RE.test(a[0]) ? ptys.snapshot(a[0]) : '');
         case 'endAll': return ptys.endAll(intIn(a[0], 0, 30000, 2500)).then(() => reply(true), fail);
         case 'killAll': ptys.killAll(); return reply(true);
@@ -1586,7 +1734,7 @@ function runHost() {
 }
 
 module.exports = {
-  createPtys, sessionDirs, readPidFiles, normDir, pipeName, dataDir, hostFile, sessionsFile, logFile, fileHash, readJson,
+  createPtys, sessionDirs, readPidFiles, normDir, pipeName, dataDir, hostFile, sessionsFile, logFile, fileHash, readJson, runningTasks,
   HOST_JS, ID_RE, KEY_RE, NEW_RE, PROTO, FV_ALLOWED, FV_CHIEF, FV_CHIEF_DENIED, BOT_ROLE_RE, ptyName: () => ptyName, ptyError: () => ptyError,
 };
 

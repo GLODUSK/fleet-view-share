@@ -28,7 +28,8 @@ const PIPE = P.isWin ? `\\\\.\\pipe\\${TEST_TAG}` : path.join(os.tmpdir(), `${TE
 const DATA = path.join(ROOT, 'data'), PIDS = path.join(ROOT, 'sessions'), PROJECTS = path.join(ROOT, 'projects');
 const SETTINGS = path.join(ROOT, 'fleet-view.json'), FAKE = path.join(ROOT, 'fake-claude.js');
 for (const d of [DATA, PIDS, PROJECTS, path.join(ROOT, 'handoffs')]) fs.mkdirSync(d, { recursive: true });
-fs.writeFileSync(SETTINGS, JSON.stringify({ autoContinue: true }));
+// restoreIdle: every idle one is resumed too, as before parking (desktop/host-restore-test.js tests parking)
+fs.writeFileSync(SETTINGS, JSON.stringify({ autoContinue: true, restoreIdle: true }));
 const PANEL_CLOSE_MS = 2500;
 
 // node-pty lives in desktop/node_modules; a git worktree has none, so use the main checkout's
@@ -64,7 +65,7 @@ process.stdin.resume();
 const NODE_PATH = nodePath();
 const ENV = {
   ...process.env, FV_HOST_PIPE: PIPE, FV_HOST_DIR: DATA, FV_HOST_SESSIONS_DIR: PIDS, FV_HOST_SETTINGS: SETTINGS,
-  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_PANEL_CLOSE_MS: String(PANEL_CLOSE_MS),
+  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_PANEL_CLOSE_MS: String(PANEL_CLOSE_MS), FV_HOST_RESTORE_GAP_MS: '100',
   FV_TERM_CMD: `"${process.execPath}" "${FAKE}"`, FV_HANDOFF_DIR: path.join(ROOT, 'handoffs'),
   ...(NODE_PATH ? { NODE_PATH } : {}),
 };
