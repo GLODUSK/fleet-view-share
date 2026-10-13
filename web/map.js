@@ -48,9 +48,11 @@
 // Under the stars a faint sky tint follows the local clock (SKY_KEYS: indigo night, rose dawn, clear day, amber dusk);
 // it changes by the minute, never because something happened. Over the sky (never the nodes) a soft vignette darkens
 // the edges, and a still dither, fixed to the pixel, keeps the faint gradients from banding. The graphics card draws
-// the sky (tint, deep sky, stars, vignette) in one pass on a WebGL2 canvas off the page (drawSkyGL), only when
-// something in it changed, and the map's canvas lays that picture down first each frame; without WebGL2 the map's
-// canvas draws the tint and stars itself (drawSky, drawStars), without the deep sky and vignette.
+// the sky (tint, deep sky, stars, vignette) and the repo nebulae over it in one pass on a WebGL2 canvas off the page
+// (drawSkyGL), in float before that one dither, so the nebulae's soft edges show no steps; it draws only when
+// something in it changed, and the map's canvas lays that picture down first each frame. Without WebGL2 the map's
+// canvas draws the tint and stars itself (drawSky, drawStars), without the deep sky and vignette, and the nebulae
+// (drawTerritories), as it does too without half-float textures.
 //
 // Repo spots (Henry: repos must never jump across the map): every repo keeps the spot it first got. Only the
 // first layout packs the repos in rows to fit the window; a repo that appears later takes the nearest free spot
@@ -106,9 +108,10 @@
 // rest(on), battery(on) }.
 // nodes() lists each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label
 // rectangles; merge('s:<id>') launches that conversation's merge now; stats().sky says what draws the sky ('webgl2'
-// or '2d'), stats().fps the draws in the last second, and skyGL() is the sky's WebGL2 context (to lose it). rest(true)
+// or '2d'), stats().glow what drew the repo nebulae last, stats().fps the draws in the last second, and skyGL() is the sky's WebGL2 context (to lose it). rest(true)
 // rests the map as if nobody were there (null: as the desktop says), battery(true) paces it as on battery.
-// ?skyHour=<0-24> forces the sky's hour; ?sky2d=1 has the canvas draw the sky, as without WebGL2.
+// ?skyHour=<0-24> forces the sky's hour; ?sky2d=1 has the canvas draw the sky, as without WebGL2; ?glow2d=1 has it
+// draw only the repo nebulae (to compare the two).
 //
 // Pacing (Henry: quality over savings, but the frame rate is the map's big cost). Anything fast or short-lived draws
 // at every screen refresh: comets, sparks, ghosts, morphs, births, bumps, kicks, whirls, relay rings, sizes and levels
@@ -230,8 +233,9 @@ const AURA_MIN = 14, AURA_MAX = 42, AURA_CALLS = 60, AURA_ALPHA = 0.17;
 // puff: a core and NEB_LOBES lobes that wander NEB_WANDER of the puff's radius and breathe NEB_BREATHE in scale, once
 // per NEB_PERIOD seconds (min, spread). Puffs add up (clamped), so near nodes melt into one cloud that grows with the
 // group, a node far off keeps a small cloud of its own, and the empty space between them stays dark. The field is
-// drawn white at NEB_RES of the screen's size, tinted the repo's colour (one lit spot per puff NEB_LIGHT of the way
-// to white) and laid on the map at NEB_A. A puff: [world radius, screen px added (x ks), strength]; a finished
+// added up at NEB_RES of the screen's size (on the graphics card in half floats, see "The repo glows" by drawSkyGL;
+// else white on a canvas), tinted the repo's colour (one lit spot per puff NEB_LIGHT of the way to white) and laid
+// on the map at NEB_A. A puff: [world radius, screen px added (x ks), strength]; a finished
 // conversation's is NEB_DONE as strong. Puffs fade in and out over about NEB_FADE_MS. Alpha moves only then.
 const NEB_RES = 1 / 3, NEB_A = 0.46, NEB_LIGHT = 0.32, NEB_LIT_A = 0.5, NEB_DONE = 0.55, NEB_FADE_MS = 700;
 const NEB_PUFF = { repo: [80, 28, 0.55], session: [58, 20, 0.42], pr: [34, 10, 0.3] };
@@ -677,6 +681,7 @@ export function mapStats() {
   const s = I.stats;
   return { avgMs: s.n ? s.sum / s.n : 0, maxMs: s.max, frames: s.frames, comets: I.comets.length, queued: I.cometQ.length,
     big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length, sky: I.skyGL && I.skyGL.ok ? 'webgl2' : '2d',
+    glow: I.glowGL ? 'webgl2' : '2d',
     fps: I.pace.draws.filter((t) => t > performance.now() - 1000).length,
     pace: { fps: I.pace.fps, refreshMs: Math.round(I.pace.ms * 100) / 100, quick: I.quick, lively: I.lively, rest: resting(), battery: away.battery } };
 }
@@ -859,6 +864,7 @@ function createInstance(state) {
   return {
     el: null, canvas: null, ctx: null, tip: null, legendEl: null, emptyEl: null,
     skyCanvas: null, skyGL: null, // the sky's WebGL2 canvas (off the page) and its state (null: the canvas draws the sky)
+    glowGL: false,            // the last draw's repo glows came with the sky's picture (else the canvas drew them)
     W: 0, H: 0, dpr: 1,
     pos: new Map(),           // node id -> { x, y, vx, vy } in world units, kept between polls
     ang: new Map(),           // agent node id -> current orbit angle (eases toward its slot)
@@ -2274,7 +2280,9 @@ function hueTurn(hex, deg) {
   return '#' + [R, G, B].map((v) => Math.round((v + m) * 255).toString(16).padStart(2, '0')).join('');
 }
 // a tileable fractal noise, white with the noise as alpha (bright, ragged patches over a clear background), made once
+let noiseC = null;
 function noiseTile() {
+  if (noiseC) return noiseC;
   const T = 128, c = document.createElement('canvas');
   c.width = c.height = T;
   const g = c.getContext('2d'), img = g.createImageData(T, T), v = new Float32Array(T * T);
@@ -2298,16 +2306,16 @@ function noiseTile() {
     img.data[i * 4 + 3] = Math.round(t * t * (3 - 2 * t) * 255);
   }
   g.putImageData(img, 0, 0);
-  return c;
+  return (noiseC = c);
 }
 
-// repo glow (see NEB_*): puffs are kept by node id (I.puffs) so they fade in and out, and a repo's puffs are
-// summed into the field canvas, tinted, and laid on the map in one drawImage per repo
-function drawTerritories(ctx, k, ks, ox, oy) {
+// repo glow (see NEB_*): puffs are kept by node id (I.puffs) so they fade in and out; this frame's puffs by repo,
+// each with its screen place (sx, sy), radius R and strength a, or null when there are none. The sky's shader
+// draws them (drawSkyGL), or the canvas does (drawTerritories).
+function territoryPuffs(k, ks, ox, oy) {
   const P = I.puffs || (I.puffs = new Map());
   const first = !P.size; // the map's first frame: what is there already shows at once
   const ease = I.still ? 1 : 1 - Math.exp(-(I.dt || 16) / (NEB_FADE_MS / 3));
-  const ts = I.still ? 0 : I.time / 1000;
   const live = new Set();
   const put = (m, repo, kind) => {
     let p = P.get(m.id);
@@ -2335,18 +2343,31 @@ function drawTerritories(ctx, k, ks, ox, oy) {
     if (!g) byRepo.set(p.repo, (g = []));
     g.push(p);
   }
-  if (!byRepo.size) return;
+  return byRepo.size ? byRepo : null;
+}
+// a repo's box: everything its puffs can touch, in field px (NEB_RES of CSS px), cut to the field (w x h);
+// null when none of it is on screen
+function glowBox(list, w, h) {
+  const q = NEB_RES;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of list) {
+    const e = p.R * NEB_REACH;
+    x0 = Math.min(x0, p.sx - e); y0 = Math.min(y0, p.sy - e); x1 = Math.max(x1, p.sx + e); y1 = Math.max(y1, p.sy + e);
+  }
+  x0 = Math.max(0, Math.floor(x0 * q)); y0 = Math.max(0, Math.floor(y0 * q));
+  x1 = Math.min(w, Math.ceil(x1 * q)); y1 = Math.min(h, Math.ceil(y1 * q));
+  return x1 - x0 < 1 || y1 - y0 < 1 ? null : { x0, y0, x1, y1 };
+}
+// the canvas draws the glow (no WebGL2, or ?glow2d=1): a repo's puffs are summed into the field canvas, tinted, and
+// laid on the map in one drawImage per repo
+function drawTerritories(ctx, k, ox, oy, byRepo) {
+  if (!byRepo) return;
+  const ts = I.still ? 0 : I.time / 1000;
   const F = fieldCanvas(), g = F.g, q = NEB_RES;
   for (const list of byRepo.values()) {
-    // the repo's box on screen: everything it can touch, cut to the screen
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const p of list) {
-      const e = p.R * NEB_REACH;
-      x0 = Math.min(x0, p.sx - e); y0 = Math.min(y0, p.sy - e); x1 = Math.max(x1, p.sx + e); y1 = Math.max(y1, p.sy + e);
-    }
-    x0 = Math.max(0, Math.floor(x0 * q)); y0 = Math.max(0, Math.floor(y0 * q));
-    x1 = Math.min(F.c.width, Math.ceil(x1 * q)); y1 = Math.min(F.c.height, Math.ceil(y1 * q));
-    if (x1 - x0 < 1 || y1 - y0 < 1) continue;
+    const b = glowBox(list, F.c.width, F.c.height);
+    if (!b) continue;
+    const { x0, y0, x1, y1 } = b;
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1;
     g.clearRect(x0, y0, x1 - x0, y1 - y0);
@@ -2577,9 +2598,9 @@ function drawSky(ctx) {
 
 // ---------- the sky on the graphics card ----------
 // The sky's own WebGL2 canvas (I.skyCanvas) draws the whole sky in one full-screen pass: the page's colour (none in
-// glass), the tint, the deep sky, then the star layers, each tile a repeating texture placed by starsAt, and last the
-// vignette and the dither. A frame only works out the
-// shader's uniforms; when they are the ones last drawn it makes no GL calls and the canvas keeps its picture, which
+// glass), the tint, the deep sky, then the star layers, each tile a repeating texture placed by starsAt, the
+// vignette, the repo glows (from their field, a small texture filled just before) and last the dither. A frame only
+// works out the shader's uniforms and the glows' quads; when they are the ones last drawn it makes no GL calls and the canvas keeps its picture, which
 // the map's canvas lays down as its first layer (one drawImage, where it used to fill, tint and lay three patterns).
 // The sky's canvas is never on the page: shown, a WebGL canvas that changes keeps about four buffers of its size (a
 // 1600x665 map at dpr 2: +90 MB of GPU memory), off the page about two (+40 MB). No WebGL2 (or only a software one)
@@ -2590,20 +2611,69 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // colour (premultiplied; 0 in glass), the tint's top and bottom (straight rgba) and, per star layer, its offset in
 // device px (x, y) and 1 / (scale x tile px) (z); the deep sky's offset in device px and 1 / its size in device px
 // (x, y), its star dust's the same way (1 / the tile's size in z), and the vignette, DEEP_A, DUST_A and the dither.
-// Its textures: the star tiles on units 0 to 2, the deep sky on 3, its star dust on 4.
+// Its textures: the star tiles on units 0 to 2, the deep sky on 3, its star dust on 4, the glows' noise on 5 and their
+// fields on 6.
 const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx'];
-const SKY_TEX = ['uS0', 'uS1', 'uS2', 'uDeep', 'uDust'];
+const SKY_TEX = ['uS0', 'uS1', 'uS2', 'uDeep', 'uDust', 'uNoise', 'uField'];
+// The repo glows (see NEB_*) are drawn by the same context, over the vignette and under the dither, so the 2D
+// canvas gets sky and glows in its one drawImage, at the glows' place in its stack (nothing it draws comes between).
+// Each frame with glows, every puff's lobes, heart, middle and lit spot go in as instanced quads (GLOW_VS, GLOW_FS),
+// added up in a half-float texture (the field, I.skyGL.ft) at NEB_RES of the screen: each repo its own box in it,
+// packed in rows, the quads cut to that box. A texel holds what the canvas path works out per repo: the lobes' sum,
+// the hearts' sum, and the middles' and lit spots' cover as -log(1 - cover) summed (a product of what each leaves).
+// The sky's pass then takes, per repo whose box holds the pixel, its texel (LINEAR), cuts the noise out (sampled at
+// the field's scale), tints it and lays it on with 'screen' at NEB_A, in float, before the one dither: no 8-bit steps.
+// Its uniforms: uGlow (CSS px per device px x NEB_RES, NEB_A, 1 / the field's size), per noise layer (uN0, uN1) its
+// offset in device px, 1 / its tile in device px and its mip level, and per repo (up to GLOW_MAX) its box in field px
+// (uGB) and its edge, middle and lit colours (uGE, uGC, uGL), the first two carrying in w where the box sits in the
+// field texture (x, y, from the box's corner). Without a renderable half-float texture, more than GLOW_MAX repos on
+// screen, a field taller than GLOW_ROWS screens, or ?glow2d=1, the canvas draws the glows (drawTerritories).
+const GLOW_MAX = 32, GLOW_ROWS = 4, GLOW_INST = 12;
+const glow2d = typeof location !== 'undefined' && /[?&]glow2d=1(&|$)/.test(location.search); // tests: the canvas draws the glows
 // one triangle over the whole canvas
 const SKY_VS = `#version 300 es
 void main() { gl_Position = vec4(float((gl_VertexID & 1) << 2) - 1.0, float((gl_VertexID & 2) << 1) - 1.0, 0.0, 1.0); }`;
+// the lobe's falloff (buildNeb's stops, t from its middle to its edge)
+const NEB_GLSL = `float neb(float t) {
+  t = clamp(t, 0.0, 1.0);
+  return t < 0.3 ? mix(1.0, 0.8, t / 0.3) : t < 0.55 ? mix(0.8, 0.45, (t - 0.3) / 0.25) :
+    t < 0.8 ? mix(0.45, 0.14, (t - 0.55) / 0.25) : mix(0.14, 0.0, (t - 0.8) / 0.2);
+}`;
+// a quad per lobe, heart, middle or lit spot (aC: its centre and radius in field texels, aW: what it adds to each
+// channel, aR: its repo's box in the texture, which the quad is cut to)
+const GLOW_VS = `#version 300 es
+in vec4 aC, aW, aR;
+uniform vec2 uA;
+out vec2 vL;
+out vec4 vW;
+void main() {
+  vec2 s = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)) * 2.0 - 1.0;
+  vec2 q = clamp(aC.xy + s * aC.z, aR.xy, aR.zw);
+  vL = (q - aC.xy) / aC.z; vW = aW;
+  gl_Position = vec4(q / uA * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const GLOW_FS = `#version 300 es
+precision highp float;
+in vec2 vL;
+in vec4 vW;
+out vec4 o;
+${NEB_GLSL}
+void main() {
+  float f = neb(length(vL));
+  o = vec4(f * vW.xy, -log(1.0 - min(f * vW.zw, 0.999)));
+}`;
 // per device pixel, premultiplied: the tint (mixed top to bottom unpremultiplied, as a canvas gradient mixes) over the
 // page's colour, the deep sky's light and its star dust (dense where the band is) over that, then each star layer,
 // sampled where the pixel's centre falls on its tile; then the vignette (black, so in glass it dims the acrylic a
-// little too) and a dither fixed to the pixel (never to time) that breaks the faint gradients' 8-bit bands
+// little too), the repo glows ('screen': 1 - (1 - sky)(1 - glow), on colour and alpha alike, as the canvas does) and
+// a dither fixed to the pixel (never to time) that breaks the faint gradients' 8-bit bands
 const SKY_FS = `#version 300 es
 precision highp float;
-uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx;
-uniform sampler2D uS0, uS1, uS2, uDeep, uDust;
+#define GLOW_MAX ${GLOW_MAX}
+uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uGlow, uN0, uN1;
+uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
+uniform int uGN;
+uniform sampler2D uS0, uS1, uS2, uDeep, uDust, uNoise, uField;
 out vec4 color;
 vec4 over(vec4 a, vec4 b) { return a + b * (1.0 - a.a); }
 vec4 star(sampler2D s, vec4 l, vec2 p) { return texture(s, (p - l.xy) * l.z); }
@@ -2625,6 +2695,22 @@ void main() {
   c = over(star(uS2, uL2, p), c);
   vec2 q = p / uSize.xy * 2.0 - 1.0;
   c = over(vec4(0.0, 0.0, 0.0, uFx.x * smoothstep(0.3, 2.0, dot(q, q))), c);
+  // the glows: per repo whose box holds the pixel, its field's texel; the noise is the same for every repo
+  vec2 f = p * uGlow.x;
+  float cut = -1.0;
+  for (int i = 0; i < uGN; i++) {
+    vec4 b = uGB[i];
+    if (any(lessThan(f, b.xy)) || any(greaterThan(f, b.zw))) continue;
+    vec4 e = uGE[i], m = uGC[i];
+    vec4 v = texture(uField, (clamp(f, b.xy + 0.5, b.zw - 0.5) + vec2(e.w, m.w)) * uGlow.zw);
+    if (cut < 0.0) cut = (1.0 - ${NEB_GRAIN.toFixed(4)} * textureLod(uNoise, (p - uN0.xy) * uN0.z, uN0.w).a) *
+      (1.0 - ${(NEB_GRAIN * 0.6).toFixed(4)} * textureLod(uNoise, (p - uN1.xy) * uN1.z, uN1.w).a);
+    // the cloud: its lobes (clamped), the noise cut out, the hearts put back; its colour: the edge's, turned to the
+    // middle's by what the middles leave, then to the lit colour by what the lit spots leave
+    float a = uGlow.y * min(1.0, min(1.0, v.r) * cut + v.g);
+    vec3 col = mix(uGL[i].rgb, mix(m.rgb, e.rgb, exp(-v.b)), exp(-v.a));
+    c += a * vec4(col, 1.0) * (1.0 - c);
+  }
   // a triangular dither of about uFx.w levels: on the colour where the sky is opaque, else on its alpha (the colour
   // kept), so a see-through pixel never gets more colour than alpha
   uvec2 u = uvec2(gl_FragCoord.xy);
@@ -2638,29 +2724,41 @@ function skyGLMake(cv) {
   try { gl = cv.getContext('webgl2', SKY_GL_ATTRS); } catch { gl = null; }
   if (!gl) return null;
   const n = SKY_U.length * 4;
-  const G = { gl, ok: false, loc: [], u: new Float32Array(n), last: new Float32Array(n), drawn: false, dpr: 0, tw: 0, hour: '', tint: null, bgCss: null, bg: null };
+  const G = { gl, ok: false, loc: [], u: new Float32Array(n), last: new Float32Array(n), drawn: false, dpr: 0, tw: 0, hour: '', tint: null, bgCss: null, bg: null,
+    // the glows: their state (see "The repo glows" above and glowPrep)
+    glow: false, gp: null, gloc: null, vao: null, buf: null, fb: null, ft: null, fw: 0, fh: 0, fieldOk: false, bufN: 0,
+    inst: new Float32Array(64 * GLOW_INST), ni: 0, lastInst: new Float32Array(64 * GLOW_INST), lastNi: -1,
+    gu: new Float32Array((3 + 4 * GLOW_MAX) * 4), lastGu: new Float32Array((3 + 4 * GLOW_MAX) * 4), gn: 0, lastGn: -1, cols: new Map() };
   // a lost context: the map's canvas draws the sky from the next frame on, until the context is back
   cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; I.dirty = true; });
   cv.addEventListener('webglcontextrestored', () => { skyGLInit(G); I.dirty = true; });
   skyGLInit(G);
   return G;
 }
-// the program and the star textures (their pixels come in drawSkyGL, once per dpr); the program and the textures
-// stay bound, as nothing else draws in this context
-function skyGLInit(G) {
-  const gl = G.gl, p = gl.createProgram();
-  const sh = [[gl.VERTEX_SHADER, SKY_VS], [gl.FRAGMENT_SHADER, SKY_FS]].map(([type, src]) => {
+// a linked program from two shaders' sources, or null (said once on the console, unless the context is lost)
+function glProgram(gl, vs, fs, what) {
+  const p = gl.createProgram();
+  const sh = [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]].map(([type, src]) => {
     const s = gl.createShader(type);
     gl.shaderSource(s, src); gl.compileShader(s); gl.attachShader(p, s);
     return s;
   });
   gl.linkProgram(p);
-  G.ok = !!gl.getProgramParameter(p, gl.LINK_STATUS);
-  if (!G.ok && !gl.isContextLost()) console.warn('map: the sky shader failed, the canvas draws the sky:', sh.map((s) => gl.getShaderInfoLog(s)).join(' ') || gl.getProgramInfoLog(p));
+  const ok = !!gl.getProgramParameter(p, gl.LINK_STATUS);
+  if (!ok && !gl.isContextLost()) console.warn(`map: the ${what} shader failed, the canvas draws the ${what}:`, sh.map((s) => gl.getShaderInfoLog(s)).join(' ') || gl.getProgramInfoLog(p));
   for (const s of sh) gl.deleteShader(s);
+  return ok ? p : null;
+}
+// the programs and the textures (the star tiles' pixels come in drawSkyGL, once per dpr); the sky's program and the
+// textures stay bound, the glows' program only while it fills the field (glowField)
+function skyGLInit(G) {
+  const gl = G.gl, p = glProgram(gl, SKY_VS, SKY_FS, 'sky');
+  G.ok = !!p;
   if (!G.ok) return;
   gl.useProgram(p);
+  G.prog = p;
   G.loc = SKY_U.map((name) => gl.getUniformLocation(p, name));
+  G.gloc = ['uGlow', 'uN0', 'uN1', 'uGB', 'uGE', 'uGC', 'uGL', 'uGN'].map((name) => gl.getUniformLocation(p, name));
   SKY_TEX.forEach((name, i) => {
     gl.activeTexture(gl.TEXTURE0 + i);
     gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
@@ -2680,6 +2778,38 @@ function skyGLInit(G) {
   gl.activeTexture(gl.TEXTURE4);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, DUST_T, DUST_T, 0, gl.RED, gl.UNSIGNED_BYTE, D.dust);
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  // the glows: the noise tile with mipmaps (sampled at the field's scale, as the canvas samples it), the field
+  // (its size set in glowPrep, cut to its texels at its edges), and the quads' program
+  G.glow = false; G.fieldOk = false; G.fw = G.fh = 0; G.bufN = 0; G.lastNi = -1; G.lastGn = -1;
+  try {
+    gl.activeTexture(gl.TEXTURE5);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, noiseTile());
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  } catch { return; }
+  gl.activeTexture(gl.TEXTURE6);
+  G.ft = gl.getParameter(gl.TEXTURE_BINDING_2D);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 1, 1, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  if (!gl.getExtension('EXT_color_buffer_float')) return;
+  G.fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, G.fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, G.ft, 0);
+  const fbOk = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  G.gp = fbOk ? glProgram(gl, GLOW_VS, GLOW_FS, 'glow') : null;
+  if (!G.gp) return;
+  G.uA = gl.getUniformLocation(G.gp, 'uA');
+  G.vao = gl.createVertexArray(); G.buf = gl.createBuffer();
+  gl.bindVertexArray(G.vao); gl.bindBuffer(gl.ARRAY_BUFFER, G.buf);
+  ['aC', 'aW', 'aR'].forEach((name, i) => {
+    const at = gl.getAttribLocation(G.gp, name);
+    gl.enableVertexAttribArray(at);
+    gl.vertexAttribPointer(at, 4, gl.FLOAT, false, GLOW_INST * 4, i * 16);
+    gl.vertexAttribDivisor(at, 1);
+  });
+  gl.bindVertexArray(null);
+  G.glow = true;
 }
 // a CSS colour as premultiplied [r, g, b, a] (0-1): painted on one pixel and read back, so any colour the page sets works
 function rgbaOf(css) {
@@ -2690,8 +2820,112 @@ function rgbaOf(css) {
   const d = g.getImageData(0, 0, 1, 1).data, a = d[3] / 255;
   return [(d[0] / 255) * a, (d[1] / 255) * a, (d[2] / 255) * a, a];
 }
-// the sky on its canvas, drawn only when its uniforms changed; false when the map's canvas must draw the sky itself
-function drawSkyGL(glass) {
+// a repo colour's edge, middle and lit colours for the glow shader, rgb 0-1 (as fieldEdge, fieldCore, fieldLit)
+function glowCols(G, hex) {
+  let v = G.cols.get(hex);
+  if (!v) {
+    const f = (h) => hexRgb(h).map((c) => c / 255);
+    G.cols.set(hex, (v = [f(mixHex(hueTurn(hex, NEB_EDGE_HUE), '#05070d', NEB_EDGE_DARK)), f(hex), f(mixHex(hex, '#ffffff', NEB_LIGHT))]));
+  }
+  return v;
+}
+// this frame's glows for the sky's shader: each repo's box placed in the field texture (rows, tallest first), its
+// quads (G.inst, G.ni) and the uniforms (G.gu, G.gn); false when the canvas must draw them (see "The repo glows")
+function glowPrep(G, byRepo, k, ox, oy, dpr) {
+  G.gn = 0; G.ni = 0;
+  if (!G.glow || glow2d) return false;
+  if (!byRepo) return true;
+  const gl = G.gl, q = NEB_RES, w = Math.max(1, Math.ceil(I.W * q)), h = Math.max(1, Math.ceil(I.H * q));
+  const boxes = [];
+  for (const list of byRepo.values()) {
+    const b = glowBox(list, w, h);
+    if (b) { b.list = list; boxes.push(b); }
+  }
+  if (boxes.length > GLOW_MAX) return false;
+  boxes.sort((a, b) => b.y1 - b.y0 - (a.y1 - a.y0));
+  // rows of boxes, a texel apart so the smoothing never reads a neighbour
+  let rx = 0, ry = 0, row = 0;
+  for (const b of boxes) {
+    const bw = b.x1 - b.x0;
+    if (rx + bw > w) { ry += row + 1; rx = 0; row = 0; }
+    b.ax = rx; b.ay = ry; rx += bw + 1; row = Math.max(row, b.y1 - b.y0);
+  }
+  const need = ry + row;
+  if (need > GLOW_ROWS * h || need > gl.getParameter(gl.MAX_TEXTURE_SIZE)) return false;
+  if (G.fw !== w || G.fh < need) {
+    // a bigger field: room for a quarter more, so a slowly growing one isn't made again every frame
+    G.fw = w; G.fh = Math.min(GLOW_ROWS * h, Math.ceil((need * 1.25) / 16) * 16);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, G.fw, G.fh, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    G.fieldOk = false;
+  }
+  // the quads: per puff its lobes (to the sum), its heart (to the hearts), its middle and its lit spot
+  const ts = I.still ? 0 : I.time / 1000;
+  let n = 0;
+  const quad = (b, x, y, r, w0, w1, w2, w3) => {
+    if (G.inst.length < (n + 1) * GLOW_INST) { const a = new Float32Array(G.inst.length * 2); a.set(G.inst); G.inst = a; }
+    const o = n++ * GLOW_INST, A = G.inst;
+    A[o] = q * x - b.x0 + b.ax; A[o + 1] = q * y - b.y0 + b.ay; A[o + 2] = q * r; A[o + 3] = 0;
+    A[o + 4] = w0; A[o + 5] = w1; A[o + 6] = w2; A[o + 7] = w3;
+    A[o + 8] = b.ax; A[o + 9] = b.ay; A[o + 10] = b.ax + b.x1 - b.x0; A[o + 11] = b.ay + b.y1 - b.y0;
+  };
+  const u = G.gu, M = GLOW_MAX * 4;
+  boxes.forEach((b, i) => {
+    for (const p of b.list) {
+      if (p.a < 0.004) continue;
+      for (const L of p.lobes) {
+        const x = p.sx + (L.x + NEB_WANDER * Math.cos(ts * L.w1 + L.p1)) * p.R;
+        const y = p.sy + (L.y + NEB_WANDER * Math.sin(ts * L.w2 + L.p2)) * p.R;
+        quad(b, x, y, p.R * L.s * (1 + NEB_BREATHE * Math.sin(ts * L.w3 + L.p3)), Math.min(1, p.a * L.a), 0, 0, 0);
+      }
+      quad(b, p.sx, p.sy, p.R * NEB_HEART[0], 0, Math.min(1, p.a * NEB_HEART[1]), 0, 0);
+      quad(b, p.sx, p.sy, p.R * 1.05, 0, 0, Math.min(1, p.w), 0);
+      const L = p.lobes[p.lit];
+      const x = p.sx + (L.x + NEB_WANDER * Math.cos(ts * L.w1 + L.p1)) * p.R;
+      const y = p.sy + (L.y + NEB_WANDER * Math.sin(ts * L.w2 + L.p2)) * p.R;
+      quad(b, x, y, p.R * 0.62 * (1 + NEB_BREATHE * Math.sin(ts * L.w3 + L.p3)), 0, 0, 0, NEB_LIT_A * Math.min(1, p.w));
+    }
+    const [e, c, l] = glowCols(G, b.list[0].color), o = 12 + i * 4;
+    u[o] = b.x0; u[o + 1] = b.y0; u[o + 2] = b.x1; u[o + 3] = b.y1;
+    u.set(e, M + o); u[M + o + 3] = b.ax - b.x0;
+    u.set(c, 2 * M + o); u[2 * M + o + 3] = b.ay - b.y0;
+    u.set(l, 3 * M + o); u[3 * M + o + 3] = 0;
+  });
+  G.ni = n; G.gn = boxes.length;
+  u[0] = q / dpr; u[1] = NEB_A; u[2] = 1 / G.fw; u[3] = 1 / G.fh;
+  // the noise layers as the canvas places them (pinned to the map, drifting), in device px, each offset wrapped by
+  // its tile; mip level: the tile's texels a field texel spans
+  for (let i = 0; i < 2; i++) {
+    const T = k * NEB_NOISE[i] * dpr, wrap = (v) => v - Math.floor(v / T) * T;
+    u[4 + i * 4] = wrap((ox + ts * NEB_NOISE_DRIFT[i] * k + i * 97 * k) * dpr);
+    u[5 + i * 4] = wrap((oy + ts * NEB_NOISE_DRIFT[1 - i] * 0.6 * k + i * 53 * k) * dpr);
+    u[6 + i * 4] = 1 / T; u[7 + i * 4] = Math.max(0, Math.log2(128 / (q * k * NEB_NOISE[i])));
+  }
+  return true;
+}
+// the field: cleared, then every quad added up (only when they changed)
+function glowField(G) {
+  const gl = G.gl, A = G.inst.subarray(0, G.ni * GLOW_INST);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, G.fb);
+  gl.viewport(0, 0, G.fw, G.fh);
+  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+  if (G.ni) {
+    gl.useProgram(G.gp); gl.bindVertexArray(G.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, G.buf);
+    if (G.bufN < A.length) { G.bufN = G.inst.length; gl.bufferData(gl.ARRAY_BUFFER, G.bufN * 4, gl.DYNAMIC_DRAW); }
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, A);
+    gl.uniform2f(G.uA, G.fw, G.fh);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, G.ni);
+    gl.disable(gl.BLEND); gl.bindVertexArray(null); gl.useProgram(G.prog);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  G.lastInst = G.lastInst.length < G.inst.length ? new Float32Array(G.inst.length) : G.lastInst;
+  G.lastInst.set(A); G.lastNi = G.ni; G.fieldOk = true;
+}
+// the sky (and the repo glows, when it can: I.glowGL) on its canvas, drawn only when its uniforms or the glows'
+// quads changed; false when the map's canvas must draw the sky itself
+function drawSkyGL(glass, glows, k, ox, oy) {
   const G = I.skyGL;
   if (!G || !G.ok || G.gl.isContextLost()) return false;
   const gl = G.gl, dpr = I.dpr || 1, cv = I.skyCanvas, u = G.u;
@@ -2729,12 +2963,25 @@ function drawSkyGL(glass) {
   u[28] = wrap(dx, dw); u[29] = wrap(dy, dh); u[30] = 1 / dw; u[31] = 1 / dh;
   u[32] = wrap(dx, dt); u[33] = wrap(dy, dt); u[34] = 1 / dt; u[35] = 0;
   u[36] = VIG_A[glass ? 1 : 0]; u[37] = DEEP_A; u[38] = DUST_A; u[39] = DITHER;
-  let same = G.drawn;
+  I.glowGL = glowPrep(G, glows, k, ox, oy, dpr);
+  // the field again when its quads changed; the sky's pass when anything it shows did
+  let fresh = !G.gn || (G.fieldOk && G.ni === G.lastNi);
+  for (let j = 0, n = G.gn ? G.ni * GLOW_INST : 0; fresh && j < n; j++) fresh = G.inst[j] === G.lastInst[j];
+  let same = fresh && G.drawn && G.gn === G.lastGn;
   for (let j = 0; same && j < u.length; j++) same = u[j] === G.last[j];
+  for (let j = 0, n = 12 + G.gn * 4; same && j < n; j++) same = G.gu[j] === G.lastGu[j];
+  for (let j = 1; same && j < 4; j++) for (let i = 0; same && i < G.gn * 4; i++) same = G.gu[12 + j * GLOW_MAX * 4 + i] === G.lastGu[12 + j * GLOW_MAX * 4 + i];
   if (same) return true;
-  G.last.set(u); G.drawn = true;
+  if (G.gn && !fresh) glowField(G);
+  G.last.set(u); G.lastGu.set(G.gu); G.lastGn = G.gn; G.drawn = true;
   gl.viewport(0, 0, cv.width, cv.height);
   for (let j = 0; j < SKY_U.length; j++) gl.uniform4fv(G.loc[j], u, j * 4, 4);
+  if (G.glow) {
+    const L = G.gloc, gu = G.gu, M = GLOW_MAX * 4;
+    for (let j = 0; j < 3; j++) gl.uniform4fv(L[j], gu, j * 4, 4);
+    for (let j = 0; j < 4; j++) gl.uniform4fv(L[3 + j], gu, 12 + j * M, M);
+    gl.uniform1i(L[7], G.gn);
+  }
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   return true;
 }
@@ -2745,7 +2992,13 @@ function draw() {
   screen(ctx);
   // glass (the desktop window): the canvas stays see-through so the window's acrylic shows behind the map
   const glass = document.documentElement.classList.contains('glass');
-  if (drawSkyGL(glass)) {
+  const k = K(), ks = ksOf(k);
+  bendCap = BEND_MAX * ks;
+  const ox = I.W / 2 - (I.cam.cx + I.pan.x) * k, oy = I.H / 2 - (I.cam.cy + I.pan.y) * k;
+  // the repo glows sit right over the sky, under everything else: the sky's shader draws them when it can
+  const glows = territoryPuffs(k, ks, ox, oy);
+  I.glowGL = false;
+  if (drawSkyGL(glass, glows, k, ox, oy)) {
     // the sky's picture first, pixel for pixel (it carries the page's colour when not in glass)
     ctx.clearRect(0, 0, W, H);
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(I.skyCanvas, 0, 0); screen(ctx);
@@ -2755,15 +3008,13 @@ function draw() {
     drawSky(ctx);
     drawStars(ctx);
   }
-  const k = K(), ks = ksOf(k);
-  bendCap = BEND_MAX * ks;
+  if (!I.glowGL) drawTerritories(ctx, k, ox, oy, glows);
   const nowC = Date.now() - I.skew;
   const selNode = I.sel ? I.byId.get(I.sel) : null;
   const hovNode = I.hover ? I.byId.get(I.hover) : null;
   const focusSid = (hovNode && hovNode.sid) || (selNode && selNode.sid) || null;
 
   // screen positions, plus a slow drift that is purely a draw offset (the layout never sees it)
-  const ox = I.W / 2 - (I.cam.cx + I.pan.x) * k, oy = I.H / 2 - (I.cam.cy + I.pan.y) * k;
   const amp = I.still ? 0 : DRIFT_PX * ks, tm = I.time;
   for (const n of I.sim) {
     let x = n.p.x * k + ox, y = n.p.y * k + oy;
@@ -2820,8 +3071,6 @@ function draw() {
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   // hit areas of the things that aren't nodes, rebuilt every frame
   I.linkHits = []; I.wtHits = []; I.parGhosts = []; I.virt.clear();
-
-  drawTerritories(ctx, k, ks, ox, oy);
 
   // auras: a soft glow in the conversation's colour whose SIZE follows its last 20 minutes of tool calls
   // (eased over ~2 s); its alpha is fixed, so nothing gets brighter when something happens
