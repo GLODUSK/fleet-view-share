@@ -455,7 +455,8 @@ The Chief and the bots:
 Narrower rules:
 
 - `POST /settings` may set only `repo`, `repos`, `hidden`, `hiddenRepos`, `finishedOpen`, the list features'
-  `repoNames`, `repoOrder` and `forgotten`, and `chief`. Any other key makes the whole request 403. `repo` and each
+  `repoNames`, `repoOrder` and `forgotten`, `chief`, and the Bots list's order `chatOrder` (`{ pinned, keys }`: row
+  keys `chief`, `bot:<id>`, `team:<id>`; the server cleans it). Any other key makes the whole request 403. `repo` and each
   `repos` entry that is a path (a bare name only filters by name), and each `hiddenRepos` root, must be a root Fleet
   View already knows (`/state`'s repos, its removed workspaces, its added repos); each `repoNames` and `repoOrder`
   root may also be one the list features' settings already hold. The Chats window keys (`chatsBounds`,

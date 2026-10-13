@@ -237,6 +237,7 @@ function tagState(st, tagOf) {
 // ~/Bots/<slug> that holds some and that no bot here (bots, a removed one's too) owns. Its id is made from the slug, so
 // it stays the same from one /state to the next; its name is its newest conversation's (a bot names its sessions
 // after itself), else the slug. -> [{ id, name, folder, ids (oldest first), convId (the newest), account, at }]
+const elsewhereId = (slug) => crypto.createHash('sha1').update(`elsewhere:${String(slug).toLowerCase()}`).digest('hex').slice(0, 12);
 function elsewhereBots(convs, base = BOTS_DIR, bots = []) {
   const groups = new Map(); // folder key -> { folder, slug, convs }
   const b = pathKey(base);
@@ -252,7 +253,7 @@ function elsewhereBots(convs, base = BOTS_DIR, bots = []) {
   return [...groups.values()].map((g) => {
     const cs = g.convs.sort((x, y) => (x.last || 0) - (y.last || 0));
     const top = cs[cs.length - 1];
-    return { id: crypto.createHash('sha1').update(`elsewhere:${g.slug.toLowerCase()}`).digest('hex').slice(0, 12),
+    return { id: elsewhereId(g.slug),
       name: (typeof top.name === 'string' && top.name.trim()) || g.slug, folder: g.folder, ids: cs.map((x) => x.id),
       convId: top.id, account: top.account || null, at: top.last || 0 };
   });
@@ -813,5 +814,5 @@ function createBots(deps) {
   };
 }
 
-module.exports = { createBots, elsewhereBots, elsewhereView, checkName, checkBrief, checkOpts, checkLook, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
+module.exports = { createBots, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkOpts, checkLook, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
   startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX };

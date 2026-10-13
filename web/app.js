@@ -38,7 +38,8 @@
 //                          { kind: 'repo', root, name?, color? }, { kind: 'sessions', ids } (a multi-selection of 2+),
 //                          { kind: 'team', id } (state.teams) or { kind: 'conflict', id, kind2, label, sessions: [ids],
 //                          rel? } (state.conflicts, or a file clash: kind2 'clash' with rel), { kind: 'file', rel, abs?, wrote, sid }
-//                          or { kind: 'pr', num, url?, sid } (the map's file and PR dots); the map calls it, cards /
+//                          or { kind: 'pr', num, url?, sid } (the map's file and PR dots); a session's or a team's may
+//                          carry extra: [menu items] put on top (the Bots list's Pin / Unpin); the map calls it, cards /
 //                          tiles / chips / the finished strip are caught by the page's own contextmenu listener
 //   ui.setMulti(ids)       the map's multi-selection changed (Ctrl+click, Ctrl+drag): the shell keeps one list for
 //                          every view and outlines those cards and tiles; the shell tells the map with map.js
@@ -2380,7 +2381,7 @@ function openContextMenu(target, x, y) {
   }
   if (target.kind === 'team') {
     const t = (state.teams || []).find((k) => k.id === target.id);
-    if (t) teamMenu(t, x, y);
+    if (t) teamMenu(t, x, y, target.extra);
     return;
   }
   if (target.kind === 'conflict') { conflictMenu(target, x, y); return; }
@@ -2442,7 +2443,7 @@ function openContextMenu(target, x, y) {
   const s = (view?.allSessions || state.sessions || []).find((x) => x.id === target.id);
   if (!s) return;
   const hosted = isHosted(s.id);
-  const items = [];
+  const items = [...extraItems(target.extra)];
   if (previousMenuItem(s)) items.push(previousMenuItem(s));
   items.push(renameMenuItem(s), sessionColorItem(s));
   if (desk && !s.pending && !s.demo) items.push(forkMenuItem(s));
@@ -3253,11 +3254,13 @@ const toldN = (list) => `told ${(list || []).filter((x) => x.ok).length}`;
 const leadOf = (t) => (t && t.lead && (t.members || []).includes(t.lead) ? t.lead : null);
 const nameOfId = (id) => sessionsOf([id])[0]?.name || String(id || '').slice(0, 8);
 // a team (right-click its link or pill on the map, or a member's 'Team "x" ▸')
-function teamMenu(t, x, y) {
+function teamMenu(t, x, y, extra) {
   const lead = leadOf(t);
   openCtxMenu({ x, y, title: lead ? `★ ${nameOfId(lead)} · ${t.name}` : t.name, dot: t.color || C.cyan,
-    sub: `${t.members.length} conversations${lead ? `, led by ${nameOfId(lead)}` : ', peers'} · ${firstWords(t.order, 10, 70)}`, items: teamMenuItems(t, true) });
+    sub: `${t.members.length} conversations${lead ? `, led by ${nameOfId(lead)}` : ', peers'} · ${firstWords(t.order, 10, 70)}`, items: [...extraItems(extra), ...teamMenuItems(t, true)] });
 }
+// a caller's own items on top of a menu (the Bots list's Pin / Unpin: chats.js), then a line
+const extraItems = (extra) => (Array.isArray(extra) && extra.length ? [...extra, { sep: true }] : []);
 // "Lead ▸": who leads the team (they report to it), or no lead (peers again). POST /teams/lead
 function leadItem(t) {
   const cur = leadOf(t);

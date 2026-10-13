@@ -22,7 +22,7 @@
 //   capped), D6 the page's single-item ops (sync-prefs.js applyOps, and web/app.js's own save code run in a vm: a
 //   stale page never undoes the Mac's change), D7 web/app.js repoIsHidden goes by turnStart as the server goes by
 //   promptAt, D8 repoOrder keeps a repo only the other machine has in place, and the new groups addedRepos, keepPins
-//   and parity. "Start clean": a device with every group emptied but its local-only items and no saved state takes
+//   and parity, and chatOrder (the Bots list: cleanChatOrder, a bot by its folder's name). "Start clean": a device with every group emptied but its local-only items and no saved state takes
 //   the rows exactly, keeps its local-only items, writes nothing, and never writes over a row that does not open.
 // Run: node scripts/sync-prefs-test.js   (exit 0 = all pass)
 'use strict';
@@ -89,7 +89,7 @@ const trMac = P.makeTranslate({ roots: () => Object.values(MACR), originOf: (r) 
 
 // a machine's settings, as fleet-view.js's prefsGroups gives them
 function machine() {
-  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoHues: [], sessHues: [], repoOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], dynamicChats: [], keepPins: [], parity: [] };
+  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoHues: [], sessHues: [], repoOrder: [], chatOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], dynamicChats: [], keepPins: [], parity: [] };
 }
 const pcSet = machine(), macSet = machine();
 const T0 = Date.parse('2026-10-11T12:00:00Z');
@@ -556,13 +556,13 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
 
   // ---------- the parity review's fixes: each on a fresh pair (a fresh table, the Mac's clock 2 s behind) ----------
   const T1 = T0 + 30 * 86400e3;
-  function pair() {
+  function pair(trA = trPc, trB = trMac) {
     db.length = 0;
     const A = machine(), B = machine(), ca = { t: T1 }, cb = { t: T1 - 2e3 }, sa = { s: null }, sb = { s: null };
     const mk = (set, clock, dev, tr, st) => P.createPrefs({ api, key: KEY, now: () => clock.t, device: () => dev, read: () => set, apply: (g, items) => { set[g] = JSON.parse(JSON.stringify(items)); },
       translate: tr, load: () => st.s, save: (s) => { st.s = JSON.parse(JSON.stringify(s)); }, log: () => {} });
     const step = (ms) => { ca.t += ms; cb.t += ms; };
-    return { A, B, ca, cb, a: mk(A, ca, PC, trPc, sa), b: mk(B, cb, MAC, trMac, sb), step };
+    return { A, B, ca, cb, a: mk(A, ca, PC, trA, sa), b: mk(B, cb, MAC, trB, sb), step };
   }
   const DFP = 'r:z:\\github\\detailforge-web', DFM = 'r:\\users\\henry\\documents\\github\\detailforge-web';
 
@@ -603,6 +603,43 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     X.B.mapSpots = X.B.mapSpots.map((s) => (s.id === DFM ? { ...s, pin: true, x: 77, at: X.cb.t + 60e3 } : s));
     X.step(5e3); await X.b.tick(); X.step(10e3); await X.a.tick();
     ok(X.A.mapSpots.some((s) => s.id === DFP && s.pin && s.x === 77), 'D1: pinned again later on the Mac: the PC takes the new pin');
+  }
+
+  // the Bots list's order (chatOrder): cleaned, and the same on both machines, a bot by its folder's name (its id is each
+  // machine's own: the PC's Panchito is an elsewhere bot on the Mac, bots.js elsewhereId)
+  {
+    eq(P.cleanChatOrder({ pinned: ['chief', 'bot:aaaaaaaaaaaa', 'bot:nope', 7], keys: ['team:t0123456789', 'chief', 'bot:aaaaaaaaaaaa', 'map:x', 'bot:bbbbbbbbbbbb'] }),
+      { pinned: ['chief', 'bot:aaaaaaaaaaaa'], keys: ['team:t0123456789', 'bot:bbbbbbbbbbbb'] }, 'cleanChatOrder: row keys only, each once (pinned wins)');
+    eq(P.cleanChatOrder([]), null, 'cleanChatOrder: not an object: null');
+    eq(P.cleanChatOrder({}), { pinned: [], keys: [] }, 'cleanChatOrder: empty lists');
+    const many = Array.from({ length: 400 }, (_, i) => `bot:${String(i).padStart(12, '0')}`);
+    eq([P.cleanChatOrder({ keys: many }).keys.length, P.cleanChatOrder({ keys: many }, 5).keys.length], [300, 5], 'cleanChatOrder: at most 300 (or max) each');
+    const { elsewhereId } = require(path.join(ROOT, 'bots.js'));
+    const PAN = 'a1a1a1a1a1a1', MACBOT = 'b2b2b2b2b2b2';
+    // as fleet-view.js PREFS_BOTS: its own bots by id, another machine's by the ~/Bots folders here (dirs); a name with
+    // no folder here does not translate (it rides along)
+    const botTr = (own, dirs) => ({ out: (bid) => own[bid] || dirs.find((d) => elsewhereId(d) === bid) || null,
+      in: (slug) => Object.keys(own).find((k) => own[k] === slug) || (dirs.includes(slug) ? elsewhereId(slug) : null) });
+    const trA = { ...trPc, bot: botTr({ [PAN]: 'panchito' }, ['panchito']) }, trB = { ...trMac, bot: botTr({ [MACBOT]: 'mateo' }, ['mateo', 'panchito']) };
+    eq(P.GROUPS.chatOrder.out({ key: `bot:${PAN}`, pin: true }, trA), { p: { k: 'bots:panchito', pin: true }, known: true }, "chatOrder out: a bot by its folder's name");
+    eq(P.GROUPS.chatOrder.out({ key: 'bot:cccccccccccc' }, trA), null, 'chatOrder out: a bot this machine does not know: left out');
+    eq(P.GROUPS.chatOrder.in({ k: 'bots:panchito' }, trB), { key: `bot:${elsewhereId('panchito')}` }, "chatOrder in: another machine's bot is its elsewhere bot here");
+    eq(P.GROUPS.chatOrder.in({ k: 'chief', pin: true }, trB), { key: 'chief', pin: true }, 'chatOrder in: the Chief as it is');
+    eq(P.GROUPS.chatOrder.in({ k: 'bots:mateo' }, trA), null, "chatOrder in: a bot with no folder here does not translate (it rides along)");
+    const X = pair(trA, trB);
+    X.A.chatOrder = [{ key: `bot:${PAN}`, pin: true }, { key: 'chief', pin: true }, { key: 'team:t0123456789' }];
+    await X.a.tick(); X.step(10e3); await X.b.tick();
+    eq(X.B.chatOrder, [{ key: `bot:${elsewhereId('panchito')}`, pin: true }, { key: 'chief', pin: true }, { key: 'team:t0123456789' }], "chatOrder: the PC's order and pins reach the Mac, its bot under the Mac's id for it");
+    // the Mac puts its own bot in and unpins the Chief: on the PC, the Mac's bot (no chats of it there yet) is not put in
+    // but keeps its place in the row
+    X.B.chatOrder = [{ key: `bot:${elsewhereId('panchito')}`, pin: true }, { key: `bot:${MACBOT}` }, { key: 'chief' }, { key: 'team:t0123456789' }];
+    X.step(5e3); await X.b.tick(); X.step(10e3); await X.a.tick();
+    eq(X.A.chatOrder, [{ key: `bot:${PAN}`, pin: true }, { key: 'chief' }, { key: 'team:t0123456789' }], "chatOrder: the Mac's change reaches the PC (the Chief unpinned)");
+    eq(rowOf('chatOrder').items.map((x) => x.k), ['bots:panchito', 'bots:mateo', 'chief', 'team:t0123456789'], "chatOrder: the Mac's own bot rides in the row at its place");
+    X.A.chatOrder = [{ key: 'chief', pin: true }, { key: 'team:t0123456789' }, { key: `bot:${PAN}` }];
+    X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    eq(X.B.chatOrder.map((x) => `${x.pin ? '*' : ''}${x.key}`), ['*chief', 'team:t0123456789', `bot:${elsewhereId('panchito')}`, `bot:${MACBOT}`],
+      "chatOrder: a reorder on the PC keeps the Mac's own bot (riding there) after the one it stood after");
   }
 
   // D8: repoOrder keeps the other machine's repos in place

@@ -85,7 +85,7 @@
 // loopback request looks like this PC's own page to the server: a root the phone names must be one Fleet View already
 // lists (/state's repos, its removed workspaces, its added repos), so a phone can't make a new folder "known":
 //   POST /settings      only repo, repos, hidden, hiddenRepos, finishedOpen and the list features' repoNames, repoOrder,
-//                       forgotten, and chief (anything else: 403 for the whole request); repo and each repos entry that
+//                       forgotten, chief and the Bots list's chatOrder (anything else: 403 for the whole request); repo and each repos entry that
 //                       is a path, and each hiddenRepos, repoNames and repoOrder root, must be a known root; chief must
 //                       be { watch: true | false } (400), and only watch goes on (its id and the rest are dropped)
 //   POST /api/sessions  no role (403: the Chief starts by /api/chief/start)
@@ -367,7 +367,7 @@ const routeAllowed = (m, p) => !!ALLOW_RE[m] && pathOk(p) && ALLOW_RE[m].test(p)
 const peerRouteAllowed = (m, p) => !!PEER_RE[m] && pathOk(p) && PEER_RE[m].test(p);
 const isPeerPath = (p) => typeof p === 'string' && p.startsWith('/peer/');
 // what POST /settings may set from the phone (the Chats window's chatsBounds, chatsOpen, chatsOnTop are desktop state)
-const SETTINGS_KEYS = new Set(['repo', 'repos', 'hidden', 'hiddenRepos', 'finishedOpen', 'repoNames', 'repoOrder', 'forgotten', 'chief']);
+const SETTINGS_KEYS = new Set(['repo', 'repos', 'hidden', 'hiddenRepos', 'finishedOpen', 'repoNames', 'repoOrder', 'forgotten', 'chief', 'chatOrder']);
 // what goes on to POST /api/chief/start (chief.js start reads no more), and what a bot may be given from the phone
 // (bots.js create and update read no more: shape and color are its avatar's look)
 const CHIEF_START_KEYS = new Set(['account', 'model', 'effort']);

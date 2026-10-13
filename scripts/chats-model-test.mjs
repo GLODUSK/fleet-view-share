@@ -1,6 +1,6 @@
 // Tests for web/chats-model.js (the Bots tab's contact model): overseers only (map conversations left out), one row
 // per bot across its handoffs and resumes, state.bots rows with no conversation, renames, the Chief row and its
-// fallbacks, hidden ones, teams of overseers only, sorting, unread, a storage that throws and raw GET /state (the
+// fallbacks, hidden ones, teams of overseers only, sorting (and the Bots list's own order: chatOrder), unread, a storage that throws and raw GET /state (the
 // phone app), a row's moment and look (turnStart, lastAction, running, shape, color), doingOf (the avatar's hover), botChoices and
 // botEdits (the New bot and Edit bot forms), mascot.js (thinking, the shapes, the same markup for the same call) and Dynamic
 // (sizeTask, dynamicSwitch, the switch notes left out) and a bot's Tasks strip (taskSchedule,
@@ -8,7 +8,8 @@
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
 import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, rawToContactsState, previewOf, botPreview, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
-  sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead } from '../web/chats-model.js';
+  sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
+  sameChatOrder } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
 const KEY = 'fv.chats.chains';
@@ -168,6 +169,64 @@ test('sortContacts: Chief, then needs-you longest waiting, then newest', () => {
   const out = sortContacts([r('new', 50), r('old', 10), r('n2', 40, { needsYou: true }), r('n1', 20, { needsYou: true }), r('chief', 1, { kind: 'chief', pinned: true })]);
   assert.deepEqual(out.map((x) => x.key), ['chief', 'n1', 'n2', 'new', 'old']);
 });
+
+// the Bots list's order, Henry's (settings.chatOrder): rows never move by themselves
+{
+  const r = (key, at, o = {}) => ({ key, kind: key === 'chief' ? 'chief' : key.startsWith('team:') ? 'team' : 'bot', at, needsYou: false, pinned: key === 'chief', ...o });
+  const keys = (l) => l.map((x) => `${x.pinned ? '*' : ''}${x.key}`);
+  const rows = [r('chief', 5), r('bot:a', 10), r('bot:b', 20), r('team:t1', 30), r('bot:c', 40)];
+  const order = { pinned: ['bot:b', 'chief'], keys: ['bot:a', 'team:t1', 'bot:c'] };
+
+  test('sortContacts(order): pinned first in their order, then the rest in theirs', () => {
+    assert.deepEqual(keys(sortContacts(rows, order)), ['*bot:b', '*chief', 'bot:a', 'team:t1', 'bot:c']);
+  });
+  test('sortContacts(order): stable under activity, needs-you and a new message', () => {
+    const busy = rows.map((x) => (x.key === 'bot:c' ? { ...x, at: 999, needsYou: true } : x.key === 'bot:b' ? { ...x, at: 1 } : x));
+    assert.deepEqual(keys(sortContacts(busy, order)), keys(sortContacts(rows, order)));
+    assert.deepEqual(keys(sortContacts(rows.slice().reverse(), order)), keys(sortContacts(rows, order)), 'whatever order they come in');
+  });
+  test('sortContacts(order): the Chief is pinned by default, on top; once unpinned it stays where it was put', () => {
+    assert.deepEqual(keys(sortContacts(rows, { pinned: ['bot:b'], keys: ['bot:a', 'team:t1', 'bot:c'] })), ['*chief', '*bot:b', 'bot:a', 'team:t1', 'bot:c']);
+    assert.deepEqual(keys(sortContacts(rows, { pinned: [], keys: [] })).slice(0, 1), ['*chief']);
+    assert.deepEqual(keys(sortContacts(rows, { pinned: ['bot:b'], keys: ['bot:a', 'chief', 'team:t1', 'bot:c'] })), ['*bot:b', 'bot:a', 'chief', 'team:t1', 'bot:c']);
+  });
+  test('sortContacts(order): new rows at the top of the rest (newest first among them), then they stay put', () => {
+    const more = [...rows, r('bot:new', 1), r('team:t2', 2)];
+    assert.deepEqual(keys(sortContacts(more, order)), ['*bot:b', '*chief', 'team:t2', 'bot:new', 'bot:a', 'team:t1', 'bot:c']);
+    const saved = fullChatOrder(order, more);
+    assert.deepEqual(saved, { pinned: ['bot:b', 'chief'], keys: ['team:t2', 'bot:new', 'bot:a', 'team:t1', 'bot:c'] });
+    const later = more.map((x) => (x.key === 'bot:new' ? { ...x, at: 5000 } : x));
+    assert.deepEqual(keys(sortContacts(later, saved)), keys(sortContacts(more, saved)), 'saved: activity no longer moves it');
+  });
+  test('sortContacts(order): keys with no row are left out; the rows keep their places', () => {
+    const gone = rows.filter((x) => x.key !== 'bot:a');
+    assert.deepEqual(keys(sortContacts(gone, { pinned: ['bot:zz', ...order.pinned], keys: ['team:old', ...order.keys] })), ['*bot:b', '*chief', 'team:t1', 'bot:c']);
+    // a key in both lists is pinned
+    assert.deepEqual(keys(sortContacts(rows, { pinned: ['bot:a'], keys: ['bot:a', 'bot:b'] })).slice(0, 2), ['*chief', '*bot:a']);
+  });
+  test('sortContacts without an order: as before (the Projects list)', () => {
+    assert.deepEqual(keys(sortContacts(rows)), ['*chief', 'bot:c', 'team:t1', 'bot:b', 'bot:a']);
+  });
+  test('moveInChatOrder / pinInChatOrder / stepInChatOrder: by hand, other keys keep their places', () => {
+    const o = { ...order, keys: [...order.keys, 'bot:elsewhere'] }; // a key with no row here
+    assert.deepEqual(moveInChatOrder(o, rows, 'bot:c', { pin: false, before: 'bot:a' }), { pinned: ['bot:b', 'chief'], keys: ['bot:c', 'bot:a', 'team:t1', 'bot:elsewhere'] });
+    assert.deepEqual(moveInChatOrder(o, rows, 'bot:a', { pin: true, before: 'chief' }), { pinned: ['bot:b', 'bot:a', 'chief'], keys: ['team:t1', 'bot:c', 'bot:elsewhere'] }, 'dropped among the pinned: pinned');
+    assert.deepEqual(moveInChatOrder(o, rows, 'chief', { pin: false, before: null }), { pinned: ['bot:b'], keys: ['bot:a', 'team:t1', 'bot:c', 'bot:elsewhere', 'chief'] }, 'the Chief unpinned, last');
+    assert.deepEqual(moveInChatOrder(o, rows, 'team:t1', { pin: false, before: 'team:t1' }), o, 'in front of itself: no change');
+    assert.deepEqual(pinInChatOrder(o, rows, 'bot:c', true), { pinned: ['bot:b', 'chief', 'bot:c'], keys: ['bot:a', 'team:t1', 'bot:elsewhere'] }, 'Pin: last of the pinned');
+    assert.deepEqual(pinInChatOrder(o, rows, 'chief', false), { pinned: ['bot:b'], keys: ['chief', 'bot:a', 'team:t1', 'bot:c', 'bot:elsewhere'] }, 'Unpin: first of the rest');
+    assert.deepEqual(pinInChatOrder({ pinned: [], keys: [] }, rows, 'chief', false).pinned, [], 'the default-pinned Chief unpins');
+    assert.deepEqual(stepInChatOrder(o, rows, 'team:t1', 'up'), { pinned: ['bot:b', 'chief'], keys: ['team:t1', 'bot:a', 'bot:c', 'bot:elsewhere'] });
+    assert.deepEqual(stepInChatOrder(o, rows, 'team:t1', 'down'), { pinned: ['bot:b', 'chief'], keys: ['bot:a', 'bot:c', 'team:t1', 'bot:elsewhere'] });
+    assert.deepEqual(stepInChatOrder(o, rows, 'bot:c', 'top'), { pinned: ['bot:b', 'chief'], keys: ['bot:c', 'bot:a', 'team:t1', 'bot:elsewhere'] });
+    assert.deepEqual(stepInChatOrder(o, rows, 'chief', 'up'), { pinned: ['chief', 'bot:b'], keys: ['bot:a', 'team:t1', 'bot:c', 'bot:elsewhere'] }, 'within the pinned ones');
+    assert.equal(stepInChatOrder(o, rows, 'bot:a', 'up'), null, 'the first of the rest never goes into the pinned ones');
+    assert.equal(stepInChatOrder(o, rows, 'chief', 'down'), null, 'the last pinned one never goes into the rest');
+    assert.equal(stepInChatOrder(o, rows, 'bot:c', 'down'), null);
+    assert.equal(sameChatOrder(o, { pinned: [...o.pinned], keys: [...o.keys] }), true);
+    assert.equal(sameChatOrder(o, order), false);
+  });
+}
 
 test('unread', () => {
   // needs-you: gold until opened; a newer question brings it back

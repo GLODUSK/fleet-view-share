@@ -17,7 +17,13 @@
 //              conversations in its chain of handoffs count as the Chief's
 //              chiefPlaceholder: with no Chief conversation, add a pinned Chief row { key: 'chief', kind: 'chief', id: null,
 //              ids: [], state: 'NEW', preview: 'Not started yet' } so the tab can start one
-//   sortContacts(list) -> Contact[]   Chief first, then needs-you (longest waiting first), then newest activity
+//   sortContacts(list, order?) -> Contact[]   order: settings.chatOrder { pinned: [keys], keys: [keys] }, Henry's own
+//       (rows never move by themselves): the pinned rows in their order, then new rows (in neither list; a Chief in
+//       neither is pinned, on top), then the rest in theirs; each row's pinned set to match. With no order: Chief
+//       first, then needs-you (longest waiting first), then newest activity (the phone's Projects list)
+//   fullChatOrder(order, list), moveInChatOrder(order, list, key, { pin, before }), pinInChatOrder(order, list, key,
+//       pin), stepInChatOrder(order, list, key, 'up' | 'down' | 'top', shown?) -> a new order (step: null when it
+//       can't go that way); sameChatOrder(a, b) -> boolean. Keys of rows not in list keep their places
 //   teamThread(team, state) -> [{ t, from, fromName, to, toName, text }]   a team's messages, oldest first
 //   createChainStore(storage = localStorage) -> ChainStore
 //       ChainStore: { keyFor(id) -> string, link(fromId, toId), save() }. A conversation that picked up another's
@@ -101,7 +107,7 @@
 //                     conversation listed: its brief's first line, else "Not started yet"
 //     at,             ms of its latest activity (for sorting and the time on the row); a bot with no conversation
 //                     listed: when it was made
-//     needsYou, busy, pinned (Chief), teamId (team rows), members (team rows: [{ id, name, lead }])
+//     needsYou, busy, pinned (the Chief; sortContacts with an order sets each row's), teamId (team rows), members (team rows: [{ id, name, lead }])
 //     turnStart, lastAction, running, waitingOn   bot and Chief rows: its conversation's, as /state has them (null
 //                     when unknown), so mascot.js mascotState can tell thinking from working and doingOf can say what
 //     shape, color,   bot rows: the bot's own pick (state.bots, bots.js), or null: the page picks one
@@ -359,14 +365,89 @@ export function buildContacts(input, opts = {}) {
   return out;
 }
 
-export function sortContacts(list) {
-  return list.slice().sort((a, b) => {
-    const ac = a.kind === 'chief' || !!a.pinned, bc = b.kind === 'chief' || !!b.pinned;
-    if (ac !== bc) return ac ? -1 : 1;
-    if (!!a.needsYou !== !!b.needsYou) return a.needsYou ? -1 : 1;
-    if (a.needsYou) return (a.at || 0) - (b.at || 0);
-    return (b.at || 0) - (a.at || 0);
-  });
+const byActivity = (a, b) => {
+  const ac = a.kind === 'chief' || !!a.pinned, bc = b.kind === 'chief' || !!b.pinned;
+  if (ac !== bc) return ac ? -1 : 1;
+  if (!!a.needsYou !== !!b.needsYou) return a.needsYou ? -1 : 1;
+  if (a.needsYou) return (a.at || 0) - (b.at || 0);
+  return (b.at || 0) - (a.at || 0);
+};
+// settings.chatOrder as given ({ pinned, keys } of strings), or null when there is none
+function orderIn(order) {
+  if (!order || typeof order !== 'object') return null;
+  const strs = (v) => (Array.isArray(v) ? v.filter((k) => typeof k === 'string' && k) : []);
+  const pinned = strs(order.pinned), p = new Set(pinned);
+  return { pinned, keys: strs(order.keys).filter((k) => !p.has(k)) };
+}
+const CHAT_ORDER_MAX = 300; // each list (fleet-view.js keeps no more)
+
+// order: settings.chatOrder { pinned: [keys], keys: [keys] } (Henry's, set by hand: rows never move by themselves).
+// The pinned rows first in that order, then the rest in theirs; a row in neither is new: at the top of the rest (the
+// newest activity first among new ones), but a Chief in neither is pinned, on top. Each row's pinned says where it
+// went. With no order (the phone's Projects list): the Chief first, then needs-you (longest waiting), then newest
+export function sortContacts(list, order) {
+  const o = orderIn(order);
+  if (!o) return list.slice().sort(byActivity);
+  const pinAt = new Map(o.pinned.map((k, i) => [k, i])), keyAt = new Map(o.keys.map((k, i) => [k, i]));
+  const top = [], fresh = [], rest = [];
+  for (const c of list) {
+    if (pinAt.has(c.key) || (c.key === 'chief' && !keyAt.has(c.key))) top.push({ ...c, pinned: true });
+    else if (keyAt.has(c.key)) rest.push({ ...c, pinned: false });
+    else fresh.push({ ...c, pinned: false });
+  }
+  top.sort((a, b) => (pinAt.has(a.key) ? pinAt.get(a.key) : -1) - (pinAt.has(b.key) ? pinAt.get(b.key) : -1));
+  rest.sort((a, b) => keyAt.get(a.key) - keyAt.get(b.key));
+  return [...top, ...fresh.sort(byActivity), ...rest];
+}
+// the whole order with the rows list shows that it lacks put where sortContacts shows them (new ones on top of the
+// rest, a Chief in neither on top of the pinned): what the page saves (chatOrderAdd) so they stay where they are
+export function fullChatOrder(order, list) {
+  const o = orderIn(order) || { pinned: [], keys: [] };
+  const have = new Set([...o.pinned, ...o.keys]);
+  const sorted = sortContacts(list, o).filter((c) => !have.has(c.key));
+  return { pinned: [...sorted.filter((c) => c.pinned).map((c) => c.key), ...o.pinned].slice(0, CHAT_ORDER_MAX),
+    keys: [...sorted.filter((c) => !c.pinned).map((c) => c.key), ...o.keys].slice(0, CHAT_ORDER_MAX) };
+}
+// a row moved by hand: into the pinned ones (pin) or the rest, in front of the row keyed before (null, or one not
+// there: last). The keys of rows not shown now (another machine's bot, a search) keep their places -> the new order
+export function moveInChatOrder(order, list, key, { pin = false, before = null } = {}) {
+  const o = fullChatOrder(order, list);
+  // in front of itself: in front of the one after it, where it is
+  if (before === key) { const from = o.pinned.includes(key) ? o.pinned : o.keys; before = from[from.indexOf(key) + 1] ?? null; }
+  const pinned = o.pinned.filter((k) => k !== key), keys = o.keys.filter((k) => k !== key);
+  const into = pin ? pinned : keys;
+  const i = before != null ? into.indexOf(before) : -1;
+  into.splice(i >= 0 ? i : into.length, 0, key);
+  return { pinned: pinned.slice(0, CHAT_ORDER_MAX), keys: keys.slice(0, CHAT_ORDER_MAX) };
+}
+// Pin (last of the pinned ones, just above where it was) or Unpin (first of the rest, just below them) -> the new order
+export function pinInChatOrder(order, list, key, pin) {
+  const o = fullChatOrder(order, list);
+  if (!pin) return moveInChatOrder(o, list, key, { pin: false, before: o.keys.find((k) => k !== key) || null });
+  return moveInChatOrder(o, list, key, { pin: true });
+}
+// the phone's Move up / Move down / Move to top: among the rows shown in its own section (pinned or not) -> the new
+// order, or null when it can't go that way
+export function stepInChatOrder(order, list, key, to, shown = null) {
+  const sorted = sortContacts(list, orderIn(order) || { pinned: [], keys: [] });
+  const me = sorted.find((c) => c.key === key);
+  if (!me) return null;
+  const vis = shown ? new Set(shown.map((c) => c.key)) : null;
+  const sec = sorted.filter((c) => c.pinned === me.pinned && (!vis || vis.has(c.key) || c.key === key));
+  const i = sec.findIndex((c) => c.key === key);
+  const j = to === 'top' ? 0 : to === 'up' ? i - 1 : to === 'down' ? i + 1 : -1;
+  if (j < 0 || j >= sec.length || j === i) return null;
+  let before = sec[j].key;
+  if (to === 'down') { // right after the one below it
+    const o = fullChatOrder(order, list), from = me.pinned ? o.pinned : o.keys;
+    before = from[from.indexOf(sec[j].key) + 1] ?? null;
+  }
+  return moveInChatOrder(order, list, key, { pin: me.pinned, before });
+}
+// two orders the same (the page's held one against /state's)
+export function sameChatOrder(a, b) {
+  const x = orderIn(a), y = orderIn(b);
+  return !!x && !!y && x.pinned.join('\n') === y.pinned.join('\n') && x.keys.join('\n') === y.keys.join('\n');
 }
 
 export function teamThread(team, state) {

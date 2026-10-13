@@ -578,6 +578,28 @@ function cleanRepoOrder(list) {
   return [...out.values()];
 }
 let repoOrder = DEMO ? [] : cleanRepoOrder(saved.repoOrder) || [];
+// the Bots list's order, Henry's alone (Henry, 2026-10-12: "dont move them up and down when one sends a message"):
+// settings.chatOrder { pinned: [keys], keys: [keys] } (sync-prefs.js cleanChatOrder), the rows' keys ('chief',
+// 'bot:<id>', 'team:<id>': web/chats-model.js) in the order they show, the pinned ones on top. Set by dragging a row
+// or Pin / Unpin on the page, Pin and Move up / down / to top on the phone; a row in neither list is new and goes at
+// the top of the rest (the Chief: pinned), and the page adds it (chatOrderAdd). The same on every device (the chatOrder group)
+const EMPTY_CHAT_ORDER = { pinned: [], keys: [] };
+let chatOrder = DEMO ? EMPTY_CHAT_ORDER : SYNC_PREFS.cleanChatOrder(saved.chatOrder) || EMPTY_CHAT_ORDER;
+// lazily, as a new order is saved: a team that is gone and a bot removed here leave it (another machine's bot stays:
+// it shows again when its chats do)
+function liveChatOrder(o) {
+  const tids = new Set(teams.map((t) => t.id));
+  const gone = new Set((BOTS ? BOTS.saveShape() : []).filter((b) => b.removed).map((b) => 'bot:' + b.id));
+  const keep = (k) => !gone.has(k) && (!k.startsWith('team:') || tids.has(k.slice(5)));
+  return { pinned: o.pinned.filter(keep), keys: o.keys.filter(keep) };
+}
+// rows the page saw that the order lacks: each list's new keys on top of it (one already in either list stays where it is)
+function addChatOrder(cur, add) {
+  const a = SYNC_PREFS.cleanChatOrder(add);
+  if (!a) return null;
+  const have = new Set([...cur.pinned, ...cur.keys]);
+  return SYNC_PREFS.cleanChatOrder({ pinned: [...a.pinned.filter((k) => !have.has(k)), ...cur.pinned], keys: [...a.keys.filter((k) => !have.has(k)), ...cur.keys] });
+}
 // where a conversation's work goes when it's done (right-click "Push to", POST /push-target): 'production' (the
 // standing rule: merge to main and ship) or 'preview' (push the branch for a preview, don't merge). A repo's choice
 // is the default for its conversations; a conversation's own choice wins over it, and a pickup of its handoff takes
@@ -803,7 +825,7 @@ function flushSettings() {
   clearTimeout(saveTimer);
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
-  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
+  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, chatOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp, pinOverrides: [...pinOverrides.values()],
     dynamicChats: [...dynamicChats.values()],
     chief: CHIEF ? CHIEF.saveShape() : saved.chief,
@@ -6332,7 +6354,7 @@ function buildState() {
     // the home folder, which the page names "no repo" like the server does
     home: DEMO ? null : os.homedir(),
     // hiddenSync: bumped when another device's hidden list was put in (sync-prefs.js): the page takes hidden whole then
-    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, hostRules, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenSync, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
+    settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, chatOrder, hostRules, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenSync, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
       mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() },
       // the Chief: { id: the live Chief's conversation id, else the last one's while its log is there, else null; watch }
       chief: CHIEF ? CHIEF.view() : { id: null, watch: false } },
@@ -6414,7 +6436,9 @@ function toolsHere() {
 }
 
 // POST /settings: any of view, zoom, query, repo, repos (several shown: 2 to 50, each like repo; null: one or all),
-// repoNames ([{ root, name }], up to 200; replaces them), repoOrder (roots, up to 300; replaces it), compact, finishedOpen, webBounds, steady, miniBounds, miniOpen,
+// repoNames ([{ root, name }], up to 200; replaces them), repoOrder (roots, up to 300; replaces it), chatOrder (the Bots list's
+// { pinned, keys }, up to 300 keys each; replaces it), chatOrderAdd ({ pinned, keys }: rows the page saw that it lacks, each put
+// on top of its list unless it is in either already), compact, finishedOpen, webBounds, steady, miniBounds, miniOpen,
 // chatsBounds ({ x, y, w, h }, at least 340x420; null forgets it), chatsOpen, chatsOnTop,
 // hidden (an array of up to 500 conversation ids, or { id, at } with the time it was hidden; replaces the list),
 // forgotten (up to 500 ids on hidden that the Removed conversations list leaves out; replaces the list),
@@ -6455,6 +6479,8 @@ function applySettings(b) {
   }
   if ('repoOrder' in b) { const o = cleanRepoOrder(b.repoOrder); if (o) repoOrder = o; }
   if ('repoOrderOps' in b) { const o = cleanRepoOrder(SYNC_PREFS.applyOps('repoOrder', repoOrder, b.repoOrderOps, REPO_ORDER_MAX)); if (o) repoOrder = o; }
+  if ('chatOrder' in b) { const o = SYNC_PREFS.cleanChatOrder(b.chatOrder); if (o) chatOrder = liveChatOrder(o); }
+  if ('chatOrderAdd' in b) { const o = addChatOrder(chatOrder, b.chatOrderAdd); if (o) chatOrder = o; }
   if ('hostRules' in b) { const h = cleanHostRules(b.hostRules); if (h) hostRules = h; }
   if (typeof b.compact === 'boolean') compact = b.compact;
   if (typeof b.finishedOpen === 'boolean') finishedOpen = b.finishedOpen;
@@ -6968,6 +6994,7 @@ const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, l
 const ACCOUNT_SYNC = SYNC_ACCOUNTS.createAccountSync({ accounts: ACCTS, log: (t) => logOnce(t, t) });
 // The shared settings (sync-prefs.js): the groups every device holds the same (hidden and removed conversations,
 // names, moves, hidden / added / renamed / ordered workspaces, workspace and conversation colours, the map's spots, teams, stays-on rules and choices,
+// the Bots list's order and pins,
 // housekeeping's keep-pins on GitHub branches, the parity rules), read from and put back into the
 // settings above; per-screen ones (view, zoom, camera, bounds, filters, map views, accounts off, push targets, bots,
 // compact, finishedOpen, steady, notify) never go. settings.prefsSync is what this device last agreed on with the table.
@@ -6978,6 +7005,7 @@ function prefsGroups() {
     names: [...names].map(([id, name]) => ({ id, name })),
     moved: [...moved.values()],
     hiddenRepos, repoNames, repoOrder, mapSpots, teams, hostRules, pinOverrides: [...pinOverrides.values()], dynamicChats: [...dynamicChats.values()],
+    chatOrder: [...chatOrder.pinned.map((key) => ({ key, pin: true })), ...chatOrder.keys.map((key) => ({ key }))],
     repoHues: [...repoHues.values()], sessHues: [...sessHues.values()],
     addedRepos: addedRepos.map((r) => ({ root: r.root, at: r.at })), keepPins: HK.remotePins(), parity: parityRules,
   };
@@ -7008,6 +7036,10 @@ function applyPrefs(group, items) {
     if (group === 'repoHues') repoHues = cleanRepoHues(items); else sessHues = cleanSessHues(items);
     for (const x of sessions.values()) x.hueAt = 0; // their colours worked out again now
   } else if (group === 'repoOrder') repoOrder = cleanRepoOrder(items) || [];
+  else if (group === 'chatOrder') {
+    const list = Array.isArray(items) ? items.filter((x) => x && typeof x.key === 'string') : [];
+    chatOrder = SYNC_PREFS.cleanChatOrder({ pinned: list.filter((x) => x.pin).map((x) => x.key), keys: list.filter((x) => !x.pin).map((x) => x.key) }) || EMPTY_CHAT_ORDER;
+  }
   else if (group === 'mapSpots') mapSpots = cleanMapSpots(items) || [];
   else if (group === 'hostRules') hostRules = cleanHostRules(items) || [];
   else if (group === 'pinOverrides') pinOverrides = cleanPinOverrides(items) || new Map();
@@ -7027,6 +7059,29 @@ const PREFS_ROOTS = SYNC_PREFS.makeTranslate({
   originOf: (root) => { const g = githubOf(root); return g ? g.slug : null; },
   exists: (root) => { try { return fs.statSync(root).isDirectory(); } catch { return false; } },
 });
+// a bot to and from the name of its folder (sync-prefs.js chatOrder): a bot's id is this machine's own, and another
+// machine's bot is listed here as an elsewhere bot (its synced chats are in ~/Bots/<that name>), whose id comes from
+// that name (bots.js elsewhereId). A name with no folder here does not translate: it rides along in the row
+let botDirsAt = 0, botDirs = [];
+function botFolders() {
+  if (Date.now() - botDirsAt > 5e3) {
+    botDirsAt = Date.now();
+    try { botDirs = fs.readdirSync(BOTS_JS.BOTS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch { botDirs = []; }
+  }
+  return botDirs;
+}
+const PREFS_BOTS = {
+  out(id) {
+    const b = (BOTS ? BOTS.saveShape() : []).find((x) => x.id === id);
+    return b ? path.basename(b.folder) : botFolders().find((n) => BOTS_JS.elsewhereId(n) === id) || null;
+  },
+  in(slug) {
+    const mine = (BOTS ? BOTS.saveShape() : []).filter((x) => path.basename(x.folder).toLowerCase() === slug);
+    const b = mine.find((x) => !x.removed) || mine[0];
+    if (b) return b.id;
+    return botFolders().some((n) => n.toLowerCase() === slug) ? BOTS_JS.elsewhereId(slug) : null;
+  },
+};
 function syncBusy(id) {
   const lp = liveProcs.get(id);
   if (!lp) return false;
@@ -7054,7 +7109,7 @@ const SYNC_RUNNER = SYNC_RUN.createSyncRunner({ sync: SYNC, dataDir: LOG_DIR, lo
   // (every one while the set-aside list can't be read: setAsideHeld)
   skip: (id) => setAsideHeld || setAside.has(String(id).toLowerCase()),
   beforeStart: (a) => freshBeforeStart(a),
-  prefs: { read: prefsGroups, apply: applyPrefs, translate: PREFS_ROOTS,
+  prefs: { read: prefsGroups, apply: applyPrefs, translate: { ...PREFS_ROOTS, bot: PREFS_BOTS },
     load: () => saved.prefsSync, save: (s) => { saved.prefsSync = s; saveSettings(); } } });
 // "Clone what's missing" (sync-clone.js): a repo whose synced chats have no checkout here is cloned into this machine's
 // clone folder and added as POST /repos/add adds one, so the materializer brings its chats; asked once, then automatic

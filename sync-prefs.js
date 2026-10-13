@@ -1,7 +1,7 @@
 // sync-prefs.js: what Henry decides about his conversations and workspaces, the same on every device. Hiding or
 // removing a conversation, renaming one, moving one to a workspace, hiding, adding, renaming or ordering a workspace,
 // the colours picked for workspaces and conversations (repoHues, sessHues), the map's spots, the teams, where a kind of work stays (hostRules), a chat kept on or let go from a machine
-// (pinOverrides), the chats whose model or effort is Dynamic (dynamicChats), housekeeping's keep-pins on GitHub
+// (pinOverrides), the chats whose model or effort is Dynamic (dynamicChats), the Bots list's order and pins (chatOrder), housekeeping's keep-pins on GitHub
 // branches (keepPins) and the parity rules (parity) are intent, not
 // a view of one screen: done on the PC, the Mac does it too. What belongs to one
 // screen (view, zoom, camera, window bounds, query, the repo filter, saved map views, accounts turned off, push
@@ -195,6 +195,30 @@ const GROUPS = {
     in: (p, tr) => rootIn(tr, p),
     key: (p) => rootKey(p), lkey: (l) => spotId(l),
   },
+  // the Bots list's order and pins (fleet-view.js chatOrder): { key, pin? } here, the pinned ones first; { k, pin? } in
+  // the row. The Chief's and a team's key go as they are; a bot's goes by its folder's name ('bots:<slug>'), since its
+  // id is each machine's own: the other machine lists it as one of its elsewhere bots (bots.js), whose id comes from
+  // that name (translate.bot: { out(bot id) -> slug | null, in(slug) -> bot id | null })
+  chatOrder: {
+    ordered: true,
+    clean(x) {
+      const k = x && typeof x.k === 'string' ? x.k : null;
+      return k && CHAT_PORTABLE_RE.test(k) ? { k, ...(x.pin === true ? { pin: true } : {}) } : null;
+    },
+    out(x, tr) {
+      if (!x || typeof x.key !== 'string' || !CHAT_KEY_RE.test(x.key)) return null;
+      let k = x.key;
+      if (k.startsWith('bot:')) { let s = null; try { s = tr.bot ? tr.bot.out(k.slice(4)) : null; } catch {} k = typeof s === 'string' && s ? 'bots:' + lower(s) : null; }
+      const p = k && this.clean({ k, pin: x.pin });
+      return p && { p, known: true };
+    },
+    in(p, tr) {
+      let key = p.k;
+      if (key.startsWith('bots:')) { let id = null; try { id = tr.bot ? tr.bot.in(key.slice(5)) : null; } catch {} key = typeof id === 'string' && /^[0-9a-f]{12}$/.test(id) ? 'bot:' + id : null; }
+      return key ? { key, ...(p.pin ? { pin: true } : {}) } : null;
+    },
+    key: (p) => p.k, lkey: (l) => l.key,
+  },
   // the map's pinned spots: { id, x, y, pin: true }. A repo's (id r:<root>) goes up as { repo, x, y, pin } and comes
   // back under this machine's root for it; a conversation's (s:<id>) and any other go as they are. Unpinned spots
   // stay on each machine: the map's spacing rule nudges them to fit that screen's groups, so two machines would keep
@@ -359,6 +383,27 @@ function cleanDynamicChat(x) {
   if (!x || typeof x !== 'object' || !UUID_RE.test(lower(x.id)) || !(num(x.at) > 0)) return null;
   const model = x.model === true, effort = x.effort === true;
   return model || effort ? { id: lower(x.id), model, effort, at: num(x.at) } : null;
+}
+
+// the Bots list's order (fleet-view.js settings.chatOrder, web/chats-model.js sortContacts): { pinned: [keys], keys:
+// [keys] }, a row's key ('chief', 'bot:<bot id>', 'team:<team id>') in one list only (pinned wins), at most max in each;
+// null when it is not one
+const CHAT_KEY_RE = /^(?:chief|bot:[0-9a-f]{12}|team:t[0-9a-f]{6,16})$/;
+const CHAT_PORTABLE_RE = /^(?:chief|team:t[0-9a-f]{6,16}|bots:[a-z0-9][a-z0-9_.-]{0,63})$/;
+const CHAT_ORDER_MAX = 300;
+function cleanChatOrder(o, max = CHAT_ORDER_MAX) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  const seen = new Set();
+  const list = (v) => {
+    const out = [];
+    for (const k of Array.isArray(v) ? v.slice(0, max * 2) : []) {
+      if (out.length >= max) break;
+      if (typeof k === 'string' && CHAT_KEY_RE.test(k) && !seen.has(k)) { seen.add(k); out.push(k); }
+    }
+    return out;
+  };
+  const pinned = list(o.pinned);
+  return { pinned, keys: list(o.keys) };
 }
 
 // local items -> portable ones, one per key: a root this machine has wins over a stale one that names the same repo
@@ -973,5 +1018,5 @@ function createPrefs(o = {}) {
   return { start, stop, tick, nudge, status };
 }
 
-module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, GONE_MS, GONE_MAX, cleanRoot, cleanHostRule, cleanPinOverride, cleanDynamicChat, spotId, portable, cleanItems,
+module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, GONE_MS, GONE_MAX, cleanRoot, cleanHostRule, cleanPinOverride, cleanDynamicChat, cleanChatOrder, CHAT_ORDER_MAX, spotId, portable, cleanItems,
   union, join, merge3, mergeOrder, weave, timeOf, applyOps, newest };

@@ -1089,6 +1089,8 @@ async function main() {
     ['POST', '/settings', { b: { repoOrder: [KNOWN, LISTED], repoNames: [{ root: KNOWN, name: 'K' }], forgotten: [SID] } }, 200],
     ['POST', '/settings', { b: { repoOrder: [ELSEWHERE] } }, 403],
     ['POST', '/settings', { b: { repoNames: [{ root: ELSEWHERE, name: 'E' }] } }, 403],
+    ['POST', '/settings', { b: { chatOrder: { pinned: ['chief'], keys: ['bot:3f9a1c2e7b4d'] } } }, 200],
+    ['POST', '/settings', { b: { chatOrderAdd: { pinned: ['chief'], keys: [] } } }, 403],
     ['POST', '/repos/add', { b: { path: HIDDEN } }, 200],
     ['POST', '/repos/add', { b: { path: KNOWN } }, 200],
     ['POST', '/repos/add', { b: { path: ELSEWHERE } }, 403],

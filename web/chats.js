@@ -24,6 +24,13 @@
 // it). Right-click a bot: Start, Edit bot..., a quick Rename and Look ▸ (its shape and colour; POST /bots/:id), Remove
 // bot (asks first; POST /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
 //
+// The list's order is Henry's (Henry, 2026-10-12: "dont move them up and down when one sends a message"):
+// settings.chatOrder (chats-model.js sortContacts), the pinned rows on top, then the rest; activity shows in the row,
+// never its place. Drag a row (mouse or pen) to move it: a line shows where it goes, among the pinned rows it is
+// pinned, among the rest not (Esc cancels); every row's right-click menu has Pin / Unpin. Each change POSTs /settings
+// { chatOrder } and shows at once (held until /state has it); a row the order lacks (a new bot or team) goes on top of
+// the rest and is added (chatOrderAdd), so it stays there.
+//
 // The avatars are alive (mascot.js): a bot wears its own shape and colour when it has one (state.bots; a bot can
 // change its own with fv look), its face follows what it does (thinking about a fresh message, working, needs you,
 // ...), it hops when you send it a message (the chat box's 'fv-chat-sent', or the box of one not running), and
@@ -66,7 +73,8 @@ import { openCtxMenu } from './ctxmenu.js';
 import { mascotSVG, mascotState, mascotAck, SHAPES } from './mascot.js';
 import { MODEL_IDS, EFFORTS, modelLabel, setDynamicBots } from './compose.js';
 import { handToChat } from './handto.js';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote } from './chats-model.js';
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote,
+  fullChatOrder, moveInChatOrder, pinInChatOrder, sameChatOrder } from './chats-model.js';
 import { mountPicker } from './picker.js';
 import { ASK_TEXT, WATCH_NOTE, BRIEF_MS, watchOn as watchFrom, watchBody, briefLines, briefSections, briefTime, fixtureBriefing } from './chief-model.js';
 
@@ -245,7 +253,7 @@ function rowHtml(state, c, now) {
   const ask = !on && asksYou(c, seen); // opening it clears the gold, as it does the unread dot
   const pin = c.pinned ? `<span class="ch-pin" title="pinned">${icon('pin', 11)}</span>` : '';
   return `<button type="button" class="ch-row${on ? ' on' : ''}${ask ? ' needs' : ''}${un ? ' unread' : ''}${c.kind !== 'team' && !c.id ? ' ghost' : ''}" role="option" aria-selected="${on}"`
-    + ` data-key="${esc(c.key)}"${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''}${c.botId ? ` data-bot="${esc(c.botId)}"` : ''} style="--rc:${esc(colorOf(c))}" title="${esc(c.name || '')}">`
+    + ` data-key="${esc(c.key)}"${c.pinned ? ' data-pin="1"' : ''}${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''}${c.botId ? ` data-bot="${esc(c.botId)}"` : ''} style="--rc:${esc(colorOf(c))}" title="${esc(c.name || '')}">`
     + `<span class="ch-av"${c.kind === 'team' ? '' : ` title="${esc(doingTip(c))}"`}>${avatar(state, c, 40)}</span>`
     + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${esc(c.name || 'bot')}</span>`
     + `<span class="ch-time">${pin}${esc(when(c.at, now))}</span></span>`
@@ -259,7 +267,90 @@ const newBotBtn = () => `<button type="button" class="btn primary ch-newbot" dat
 function listHtml(state, list, now, noBots) {
   const intro = noBots && !query ? `<div class="ch-none ch-intro"><div>${esc(BOTS_FOR)}</div>${newBotBtn()}</div>` : '';
   if (!list.length) return query ? `<div class="ch-none">No bots match “${esc(query)}”.</div>` : intro || '<div class="ch-none">No bots yet. Make one with +.</div>';
-  return list.map((c) => rowHtml(state, c, now)).join('') + intro;
+  // a hairline under the pinned rows, when the rest follow
+  return list.map((c, i) => (i && list[i - 1].pinned && !c.pinned ? '<div class="ch-pinsep" aria-hidden="true"></div>' : '') + rowHtml(state, c, now)).join('') + intro;
+}
+
+// ---------- the order: drag, Pin / Unpin ----------
+const HELD_MS = 8000; // a change made here shows until /state has it, at most this long
+const NO_ORDER = { pinned: [], keys: [] };
+let held = null; // { order, at }: the order as just changed here (?fixture=1: kept)
+// the order the list shows: the one just changed here, else /state's; null from a server that keeps none (the old sort)
+function orderNow(state) {
+  const srv = state && state.settings ? state.settings.chatOrder : undefined;
+  if (held && !FIXTURE && (Date.now() - held.at > HELD_MS || sameChatOrder(srv, held.order))) held = null;
+  return held ? held.order : srv || (FIXTURE ? NO_ORDER : null);
+}
+async function saveOrder(ui, next) {
+  if (!next) return;
+  held = { order: next, at: Date.now() };
+  ui.refresh();
+  const r = await postJson('/settings', { chatOrder: next });
+  if (!r.ok && !FIXTURE) { held = null; console.warn('chats: the order was not saved', r.status); ui.refresh(); }
+}
+// rows the saved order lacks (a new bot or team, or every row the first time): added where they show, so they stay
+let addSent = '', addAt = 0;
+function addNew(state, contacts) {
+  const srv = state.settings && state.settings.chatOrder;
+  if (FIXTURE || held || drag || !srv || !contacts.length) return;
+  const full = fullChatOrder(srv, contacts), have = new Set([...(srv.pinned || []), ...(srv.keys || [])]);
+  const add = { pinned: full.pinned.filter((k) => !have.has(k)), keys: full.keys.filter((k) => !have.has(k)) };
+  if (!add.pinned.length && !add.keys.length) return;
+  const sig = JSON.stringify(add);
+  if (sig === addSent && Date.now() - addAt < 10e3) return;
+  addSent = sig;
+  addAt = Date.now();
+  postJson('/settings', { chatOrderAdd: add });
+}
+const pinItem = (ui, c) => ({ label: c.pinned ? 'Unpin' : 'Pin', icon: 'pin', note: c.pinned ? 'back with the rest' : 'on top of the list',
+  run: () => saveOrder(ui, pinInChatOrder(orderNow(pane?._state || {}), pane?._contacts || [], c.key, !c.pinned)) });
+
+// dragging a row (mouse or pen; a touch scrolls): it starts once the pointer goes DRAG_PX, the list holds still
+// meanwhile (renderChats leaves it alone) and a line shows where it goes; dropped in the pinned rows it is pinned, in
+// the rest it is not. Esc cancels. The click that ends a drag picks nothing
+const DRAG_PX = 5;
+let drag = null; // { key, id (pointer), y0, on, slot: { pin, before, y } | null }
+let dragEnded = 0;
+function dragOver(el, y) {
+  const list = el._list, rows = [...list.querySelectorAll('.ch-row')];
+  if (!drag || !rows.length) return;
+  const box = list.getBoundingClientRect();
+  if (y < box.top + 28) list.scrollTop -= 12;
+  else if (y > box.bottom - 28) list.scrollTop += 12;
+  // the first row whose middle is below the pointer: in front of it, unless the pointer is still over the last pinned
+  // row's lower half or the line under it (then: the end of the pinned rows)
+  const i = rows.findIndex((r) => { const b = r.getBoundingClientRect(); return y < b.top + b.height / 2; });
+  const prev = i < 0 ? rows[rows.length - 1] : rows[i - 1] || null, next = i < 0 ? null : rows[i];
+  const edge = next && prev && !!prev.dataset.pin && !next.dataset.pin && y < next.getBoundingClientRect().top;
+  let slot;
+  if (next && !edge) slot = { pin: !!next.dataset.pin, before: next.dataset.key, y: next.offsetTop - 1 };
+  else slot = { pin: !!prev.dataset.pin, before: null, y: prev.offsetTop + prev.offsetHeight + 1 };
+  drag.slot = slot;
+  if (!el._drop || !el._drop.isConnected) { el._drop = document.createElement('div'); el._drop.className = 'ch-drop'; list.appendChild(el._drop); }
+  el._drop.classList.toggle('pin', slot.pin);
+  el._drop.style.top = `${slot.y}px`;
+}
+function dragKey(e) {
+  if (e.key !== 'Escape' || !drag) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (pane) endDrag(pane, pane._ui, false);
+}
+function endDrag(el, ui, drop) {
+  const d = drag;
+  drag = null;
+  document.removeEventListener('keydown', dragKey, true);
+  if (!d || !d.on) return;
+  dragEnded = Date.now();
+  el._list.classList.remove('ch-dragging');
+  el._list.querySelector('.ch-row.ch-drag')?.classList.remove('ch-drag');
+  if (el._drop) { el._drop.remove(); el._drop = null; }
+  if (drop && d.slot) {
+    const cur = orderNow(el._state || {});
+    const next = moveInChatOrder(cur, el._contacts || [], d.key, { pin: d.slot.pin, before: d.slot.before });
+    if (!sameChatOrder(next, fullChatOrder(cur, el._contacts || []))) { saveOrder(ui, next); return; }
+  }
+  ui.refresh();
 }
 
 // ---------- build ----------
@@ -313,21 +404,49 @@ function build(el, ui) {
   } catch {}
 
   el._list.addEventListener('click', (e) => {
+    if (Date.now() - dragEnded < 400) return; // the end of a drag
     if (e.target.closest('[data-newbot]')) { openForm(el, ui); return; }
     const r = e.target.closest('.ch-row');
     if (!r) return;
     pick(r.dataset.key, ui, true);
   });
+  // every row's menu starts with Pin / Unpin
   el._list.addEventListener('contextmenu', (e) => {
     const r = e.target.closest('.ch-row');
     if (!r) return;
-    const st = el._state;
-    if (r.dataset.team) { e.preventDefault(); ui.contextMenu({ kind: 'team', id: r.dataset.team }, e.clientX, e.clientY); return; }
-    if (r.dataset.bot && elsewhereBot(st || {}, r.dataset.bot)) { e.preventDefault(); return; } // run on its own machine
-    if (r.dataset.bot && botOf(st || {}, r.dataset.bot)) { e.preventDefault(); botMenu(el, ui, r.dataset.bot, e.clientX, e.clientY); return; }
-    if (r.dataset.id && inState(st, r.dataset.id)) { e.preventDefault(); ui.contextMenu({ kind: 'session', id: r.dataset.id }, e.clientX, e.clientY); return; }
-    e.preventDefault(); // the Chief stand-in and gone conversations: no menu
+    e.preventDefault();
+    const st = el._state || {};
+    const c = (el._contacts || []).find((x) => x.key === r.dataset.key);
+    const extra = c ? [pinItem(ui, c)] : [];
+    if (r.dataset.team) { ui.contextMenu({ kind: 'team', id: r.dataset.team, extra }, e.clientX, e.clientY); return; }
+    if (r.dataset.bot && botOf(st, r.dataset.bot)) { botMenu(el, ui, r.dataset.bot, e.clientX, e.clientY); return; }
+    if (r.dataset.id && inState(st, r.dataset.id) && !(r.dataset.bot && elsewhereBot(st, r.dataset.bot))) { ui.contextMenu({ kind: 'session', id: r.dataset.id, extra }, e.clientX, e.clientY); return; }
+    // another machine's bot (run on its own machine), the Chief stand-in, a gone conversation: Pin / Unpin alone
+    if (c) openCtxMenu({ x: e.clientX, y: e.clientY, title: c.name, dot: colorOf(c), items: extra });
   });
+  // drag a row to move it (see dragOver)
+  el._list.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.pointerType === 'touch' || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
+    const r = e.target.closest('.ch-row');
+    if (r && r.dataset.key) drag = { key: r.dataset.key, id: e.pointerId, y0: e.clientY, on: false, slot: null };
+  });
+  el._list.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (!drag.on) {
+      if (!(e.buttons & 1)) { drag = null; return; }
+      if (Math.abs(e.clientY - drag.y0) < DRAG_PX) return;
+      drag.on = true;
+      try { el._list.setPointerCapture(e.pointerId); } catch {}
+      el._list.classList.add('ch-dragging');
+      [...el._list.querySelectorAll('.ch-row')].find((x) => x.dataset.key === drag.key)?.classList.add('ch-drag');
+      document.addEventListener('keydown', dragKey, true);
+    }
+    e.preventDefault();
+    dragOver(el, e.clientY);
+  });
+  el._list.addEventListener('pointerup', (e) => { if (drag && e.pointerId === drag.id) endDrag(el, ui, true); });
+  el._list.addEventListener('pointercancel', (e) => { if (drag && e.pointerId === drag.id) endDrag(el, ui, false); });
+  el._list.addEventListener('lostpointercapture', (e) => { if (drag && drag.on && e.pointerId === drag.id) endDrag(el, ui, false); });
   el._search.addEventListener('input', () => { query = el._search.value.trim(); ui.refresh(); });
   el._search.addEventListener('keydown', (e) => {
     // the page's one-key shortcuts stay out of the box; arrows, Enter and Esc work the list from here
@@ -664,8 +783,8 @@ function pumpBots(state) {
   }
 }
 
-// the right-click menu of a bot's row: Start, Edit bot (its panel), a quick Rename, Look, Remove bot (the Chief keeps
-// the conversation menu)
+// the right-click menu of a bot's row: Pin / Unpin, Start, Edit bot (its panel), a quick Rename, Look, Remove bot (the
+// Chief keeps the conversation menu)
 function botMenu(el, ui, botId, x, y) {
   const b = botOf(el._state || {}, botId);
   if (!b) return;
@@ -674,6 +793,7 @@ function botMenu(el, ui, botId, x, y) {
   openCtxMenu({
     x, y, title: b.name, dot: colorOf(c), sub: b.live ? 'running' : 'not running',
     items: [
+      ...(c ? [pinItem(ui, c), { sep: true }] : []),
       ...(b.live ? [] : [u.starting || u.wait ? { label: 'Start', icon: 'shell', disabled: true, note: 'starting...' }
         : { label: 'Start', icon: 'shell', note: b.convId ? 'goes on in its last conversation' : 'its first conversation', run: () => startBot(ui, botId) }]),
       { label: 'Edit bot...', icon: 'mode', note: 'name, instructions, model, look', run: () => { pick(`bot:${botId}`, ui, true); openForm(el, ui, botId); } },
@@ -1161,9 +1281,10 @@ export function renderChats(el, view, ui) {
   if (!chains) { try { chains = createChainStore(); } catch (e) { console.warn(e); chains = undefined; } }
   let contacts = [];
   try {
-    contacts = sortContacts(buildContacts(state, { chiefId: state.settings?.chief?.id || (FIXTURE ? chief.fakeId : null), chiefPlaceholder: true, chains: chains || undefined })).map(lookOf);
+    contacts = sortContacts(buildContacts(state, { chiefId: state.settings?.chief?.id || (FIXTURE ? chief.fakeId : null), chiefPlaceholder: true, chains: chains || undefined }), orderNow(state)).map(lookOf);
   } catch (e) { console.error('chats: contacts', e); }
   el._contacts = contacts;
+  try { addNew(state, contacts); } catch (e) { console.error('chats: order', e); }
   try { pumpBots(state); } catch (e) { console.error('chats: bots', e); }
   // an overseer's conversation picked from outside (?select=, the mini window) carries over to its row
   if (ui.selectedId && ui.selectedId !== syncedSel) {
@@ -1173,8 +1294,10 @@ export function renderChats(el, view, ui) {
   }
   const noBots = !contacts.some((x) => x.kind === 'bot');
   const shown = contacts.filter((c) => matches(c, query));
-  el._shown = shown;
-  setHTML(el._list, listHtml(state, shown, now, noBots));
+  if (!(drag && drag.on)) {
+    el._shown = shown;
+    setHTML(el._list, listHtml(state, shown, now, noBots));
+  }
 
   const c = contacts.find((x) => x.key === selKey) || null;
   // the open chat stays read: new activity in it is not "unread"

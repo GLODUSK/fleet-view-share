@@ -109,6 +109,10 @@ new conversation's log, which does, so the chain and its Summary show on both ma
       one cleared by hand.
     - `moved`: `{ id, root: R | null, at }` "Move to workspace" (`settings.moved`).
     - `hiddenRepos`: `{ root: R, at }`; `repoNames`: `{ root: R, name }`; `repoOrder`: `R`, in order.
+    - `chatOrder` (since 2026-10-12): the Bots list's order and pins (`settings.chatOrder`), `{ k, pin? }` in order, the
+      pinned ones first. `k` is `chief`, `team:<id>`, or `bots:<folder name>` for a bot (its id is each machine's own;
+      the other machine lists it as an elsewhere bot, `bots.js` `elsewhereId`). A bot with no folder here rides along
+      at its place, as `repoOrder`'s repos do.
     - `addedRepos` (since 2026-10-12): `{ root: R, at }` workspaces added by hand (`settings.addedRepos`, POST /repos/add).
       One added on one machine is added on another that has a checkout of that repo, else it rides along.
     - `mapSpots`: pinned spots only (`pin: true`): `{ repo: R, x, y, pin, at? }` for a workspace's spot (`r:<root>`
