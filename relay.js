@@ -207,6 +207,7 @@ const DEVICES_MAX = 20, PENDING_MAX = 5;
 const LOG_MAX = 2 << 20;
 const ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const DEV_RE = /^[A-Za-z0-9_-]{16}$/;
+const PHONE_RE = /^[A-Za-z0-9_-]{8,40}$/; // a phone's install id (pairing by sign-in, relay-lobby.js)
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TOKEN_RE = /^[A-Za-z0-9._~+/=-]{8,4096}$/;
 const MARK_KEY_RE = /^[\x21-\x7e]{16,256}$/; // the marker's key goes in a header: printable ASCII only
@@ -615,6 +616,8 @@ function createRelay(opts = {}) {
       id: o.id, name: clip(o.name, 60) || (computer ? 'another computer' : 'iPhone'), mode: o.mode === 'local' && !computer ? 'local' : 'relay', state: o.state, createdAt: Number(o.createdAt) || now(),
       exp: o.state === 'pending' ? Number(o.exp) || 0 : undefined, pairedAt: Number(o.pairedAt) || undefined, lastSeen: Number(o.lastSeen) || undefined,
       app: o.app ? clip(o.app, 40) : undefined, device: o.device ? clip(o.device, 60) : undefined, gone: false,
+      // the phone's install id when it paired by sign-in (relay-lobby.js): its next pairing here replaces this one
+      phone: !computer && typeof o.phone === 'string' && PHONE_RE.test(o.phone) ? o.phone : undefined,
       k: null, keys: null, qr: false, until: 0, cands: [], hsN: 0, hsAt: 0, old: null,
       ch: { state: 'closed', topic: null, joinRef: null, backoff: BACKOFF_MIN, timer: null, refused: null },
       nonces: new Map(), kept: new Map(), keptGet: 0, opened: [], inFlight: 0, startLog: [], starting: 0,
@@ -624,7 +627,7 @@ function createRelay(opts = {}) {
   // (a phone's has no kind: devices.json from before computers reads the same)
   const deviceView = (dv) => {
     const o = { id: dv.id, name: dv.name, mode: dv.mode, state: dv.state, createdAt: dv.createdAt };
-    for (const k of ['exp', 'pairedAt', 'lastSeen', 'app', 'device']) if (dv[k] !== undefined) o[k] = dv[k];
+    for (const k of ['exp', 'pairedAt', 'lastSeen', 'app', 'device', 'phone']) if (dv[k] !== undefined) o[k] = dv[k];
     if (isComputer(dv)) { o.kind = 'computer'; o.peer = dv.peer; }
     return o;
   };
@@ -1664,8 +1667,10 @@ function createRelay(opts = {}) {
   }
 
   // ---------- pairing, revoking, status ----------
-  // mode 'relay' (through Supabase: sync set up and signed in) or 'local' (this PC's Wi-Fi: no sync, no sign-in)
-  async function pair(name, mode = 'relay') {
+  // mode 'relay' (through Supabase: sync set up and signed in) or 'local' (this PC's Wi-Fi: no sync, no sign-in).
+  // o.phone: the asking phone's install id (pairing by sign-in, relay-lobby.js): that phone's earlier pairings here
+  // are dropped first, so pairing again never piles devices up
+  async function pair(name, mode = 'relay', o = {}) {
     if (!started || stopped) return [503, { ok: false, message: 'the relay is not running' }];
     if (!MODES.includes(mode)) return [400, { ok: false, message: 'mode must be local or relay' }];
     let id = null, email = null, c = null;
@@ -1680,6 +1685,11 @@ function createRelay(opts = {}) {
     }
     if (name != null && typeof name !== 'string') return [400, { ok: false, message: 'name must be text' }];
     await sweep();
+    const phone = o && typeof o.phone === 'string' && PHONE_RE.test(o.phone) ? o.phone : undefined;
+    if (phone) {
+      const older = [...devices.values()].filter((dv) => !isComputer(dv) && dv.phone === phone);
+      for (const dv of older) await forgetDevice(dv, 'was paired again by the same phone: the older pairing is dropped');
+    }
     if ([...devices.values()].filter((dv) => dv.state === 'pending').length >= PENDING_MAX) return [429, { ok: false, message: `${PENDING_MAX} pairings are waiting already: use one, or wait 10 minutes` }];
     if (devices.size >= DEVICES_MAX) return [409, { ok: false, message: `${DEVICES_MAX} devices are paired: revoke one first` }];
     const dev = b64u(crypto.randomBytes(12)), K = crypto.randomBytes(32), t = now(), exp = t + PENDING_MS;
@@ -1688,7 +1698,7 @@ function createRelay(opts = {}) {
       keys.set(dev, { k: K, qr: { until: exp, next: [] } });
       await saveKeys();
     } catch (e) { if (keys) keys.delete(dev); return [500, { ok: false, message: `the device key could not be kept safe on this PC: ${clip(e.message)}` }]; }
-    const dv = makeDevice({ id: dev, name: clip(name, 60) || 'iPhone', mode, state: 'pending', createdAt: t, exp });
+    const dv = makeDevice({ id: dev, name: clip(name, 60) || 'iPhone', mode, state: 'pending', createdAt: t, exp, phone });
     withKey(dv, keys.get(dev));
     devices.set(dev, dv);
     saveDevices();
@@ -1900,7 +1910,7 @@ async function cli(argv, io = {}) {
 
 module.exports = {
   createRelay, cli, seal, open, decrypt, dirKey, aadText, topicOf, slices, pairLink, qrSvg, routeAllowed, peerRouteAllowed, PEER_ALLOW, pathOk,
-  routeTimeout, startWeight, resumeKind, resumeWeight, xPair, pairedKey, secretName, stepsOk, ALLOW, SIGNIN_LETTERS, SETTINGS_KEYS, MARKED, LABEL, PAIRED_INFO, LINK_V,
+  routeTimeout, startWeight, resumeKind, resumeWeight, xPair, xPublic, pairedKey, secretName, stepsOk, ALLOW, SIGNIN_LETTERS, SETTINGS_KEYS, MARKED, LABEL, PAIRED_INFO, LINK_V,
   PART_MAX, PARTS_MAX, C_MAX, LOCAL_UID,
   TIMES: { ROUTE_MS, WAIT_ROUTE_MS, WAIT_CAP_S, START_ROUTE_MS, RESUME_ROUTE_MS, ACTIVITY_MS, NOW_MS, MODEL_MS },
   LIMITS: { IN_FLIGHT_MAX, PER_S, PER_MIN, STARTS_AT_ONCE, STARTS_MAX, STARTS_MS, RES_DEVICE_MAX, UNPACKS_MAX, UNPACK_WAIT_MAX, INFLATE_UP_MAX, HS_GAP_MS, HS_MAX },

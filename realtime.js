@@ -27,7 +27,8 @@
 //   accessToken() -> Promise of the user's access token (S1's accessToken)
 //   presenceKey: the key this side tracks under ('peer' for link.js); presence() -> its payload
 //   ch: { topic, state: 'closed' | 'joining' | 'joined' | 'errored', send(envelope) -> bool, present(key) -> true |
-//         false | null (null while not joined, or before the first presence_state), leave(), refused }
+//         false | null (null while not joined, or before the first presence_state), track() (presence() again, while
+//         joined) -> bool, leave(), refused }
 'use strict';
 
 const HEARTBEAT_MS = 25e3, JOIN_MS = 10e3, BACKOFF_MIN = 1e3, BACKOFF_MAX = 60e3;
@@ -270,6 +271,13 @@ function createRealtime(o = {}) {
         return wire({ topic: w, event: 'broadcast', payload: { type: 'broadcast', event: 'e', payload: env }, ref: mkRef(), join_ref: ch.joinRef });
       },
       present(key) { return ch.state === 'joined' && ch.keys ? (ch.keys.get(key) || 0) > 0 : null; },
+      // the presence payload again (what presence() says now), while joined
+      track() {
+        if (ch.state !== 'joined' || channels.get(w) !== ch) return false;
+        let pl = {};
+        try { pl = presence() || {}; } catch {}
+        return wire({ topic: w, event: 'presence', ref: mkRef(), join_ref: ch.joinRef, payload: { type: 'presence', event: 'track', payload: { ...pl, at: now() } } });
+      },
       leave() {
         if (channels.get(w) !== ch) return;
         leaveWire(ch);

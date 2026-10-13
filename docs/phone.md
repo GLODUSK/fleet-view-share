@@ -142,6 +142,38 @@ Supabase sees who is connected, when, and how big each message is, but never wha
    the server. On that notice the phone wipes its pairing and its cached data. "Unpair" on the phone only forgets
    the pairing on the phone; the PC lists the device until it is revoked.
 
+## Pairing by sign-in
+
+The usual way since 2026-10-13: no QR code. The phone signs in with Google once, lists the computers signed in to
+Blackbox sync with the same account, and pairs the one Henry taps, either way (Sync with Blackbox or Work locally).
+The QR code stays behind "Use a pairing code instead".
+
+- **The lobby.** Every machine whose sync is signed in joins `fleet:<uid>:lobby` (relay-lobby.js). 0376's policies
+  already confine `fleet:<uid>:*` to that account while it is a sync member, so no migration was needed. A machine
+  whose sync is not signed in is not listed.
+- **Presence.** Key `pc-<id>`; `id` is 16 b64u, made once and kept in `<dataDir>/relay/lobby.json`. Payload
+  `{ role: 'pc', v: 1, id, name, device, platform, version, hosts, at }`, sent again every 5 minutes. `hosts` are the
+  private IPv4 addresses a Wi-Fi pairing would name. The phone joins with key `phone-<random>`.
+- **Ask** (phone, broadcast event `e`): `{ t: 'pair-ask', v: 1, to: <id>, rid, epk, mode: 'relay' | 'local', name,
+  phone, at }`. `rid` is 16-32 b64u, new for each pairing; `epk` is a fresh X25519 public key; `phone` is the
+  install id (AsyncStorage `fv.phoneId`). The phone sends the same ask every 3 s, and gives up after 25 s.
+- **Answer** (machine): it makes a pairing with relay.js `pair(name, mode, { phone, via: 'sign-in' })`, the same
+  pending device, `K` and handshake as a QR code's, after dropping that phone's older devices. It sends
+  `{ t: 'pair-link', v: 1, rid, from: <id>, epk, n, c }`, where `c` is the link text sealed with AES-256-GCM (tag
+  after the ciphertext). The key is HKDF-SHA256 of X25519(the machine's one-time secret, the ask's `epk`), salt the
+  UTF-8 `rid`, info `fleet-view lobby v1`; AAD `fleet-view lobby v1|<topic>|<rid>|<id>`. Supabase never carries `K`
+  in the clear. A refusal is `{ t: 'pair-no', v: 1, rid, from, message }`.
+- **Limits.** The same `rid` gets the same answer for 10 minutes; at most 12 asks a minute; an ask whose `at` is more
+  than 5 minutes off is ignored.
+- **The phone** opens the box (phone/src/crypto/lobby.ts), checks the link as a scanned one, and refuses a Blackbox
+  link for another account or a link of the other way. The pairing keeps the machine's lobby id (`lobby`).
+- **Trust is the account.** Anyone who can sign in as Henry's sync account can pair a phone, and the machine pairs
+  without a click on its screen (Henry's call).
+- **Afterwards.** Work locally needs the sign-in only to pair; traffic then goes straight over the Wi-Fi. The Google
+  sign-in survives Unpair. When a machine stops taking a pairing that has a lobby id and is in the lobby, the phone
+  pairs it again by itself; a revocation is never undone. A Wi-Fi pairing follows the `hosts` its machine's presence
+  names (the key stays as stored).
+
 ## The channel
 
 - Both sides join `topic` with `{ private: true, broadcast: { self: false, ack: false }, presence: { key } }`,

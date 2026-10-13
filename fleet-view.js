@@ -23,6 +23,7 @@ const UPDATER = require(path.join(__dirname, 'updater.js'));
 const HOUSEKEEPING = require(path.join(__dirname, 'housekeeping.js'));
 const SYNC_API = require(path.join(__dirname, 'sync-api.js'));
 const RELAY_JS = require(path.join(__dirname, 'relay.js'));
+const RELAY_LOBBY_JS = require(path.join(__dirname, 'relay-lobby.js'));
 const SYNC_RUN = require(path.join(__dirname, 'sync-run.js'));
 const SYNC_LIVE = require(path.join(__dirname, 'sync-live.js'));
 const SYNC_PREFS = require(path.join(__dirname, 'sync-prefs.js'));
@@ -6983,6 +6984,9 @@ const SYNC = SYNC_API.createSync({ port: PORT, demo: DEMO, dataDir: LOG_DIR, log
 const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, logDir: LOG_DIR, apiToken: API.TOKEN_FILE,
   relayKey: () => API.relayKey(), version: () => VERSION.current().version, log: (t) => logOnce(t, t),
   onComputerGone: (peer) => { const l = SYNC_RUNNER.link(); if (l) l.unlink(peer).catch(() => {}); } });
+// relay-lobby.js: while sync is signed in, this machine is listed on its account's lobby channel, and a phone signed in
+// with the same Google account pairs from that list (no QR code): relay.js makes the pairing as for a code
+const LOBBY = RELAY_LOBBY_JS.createLobby({ relay: RELAY, sync: SYNC, dataDir: LOG_DIR, version: () => VERSION.current().version, log: (t) => logOnce(t, t) });
 // sync-run.js: the uploader and the materializer, running only while sync is set up, signed in and has its key;
 // the materializer finds a synced repo here among the repos the page lists
 // host: the session host (api.js), for "Continue here": its list, and kill to end a conversation moving to another
@@ -8147,6 +8151,7 @@ function exitWith(code, reason) {
   try { REMOTE.flush(); } catch {}
   try { REMOTE.unserveSync(); } catch {}
   // every paired phone is told the PC is going (notice pc-closing), then the relay's socket closes
+  try { LOBBY.stop(); } catch {}
   try { RELAY.stop('pc-closing'); } catch {}
   try { if (histOn) saveHistory(); } catch {}
   try { tlFlushSync(); } catch {}
@@ -8256,7 +8261,7 @@ function startWeb() {
     // remote access: this PC's tailnet name, read now and every minute; with the switch on, 443 is made to point here
     REMOTE.start();
     // the phone relay: it opens a socket only once a phone is paired (Supabase: and sync is signed in)
-    if (!DEMO) RELAY.start();
+    if (!DEMO) { RELAY.start(); LOBBY.start(); }
     if (!DEMO) SYNC_RUNNER.start();
     // the fleet-view-feed mod in each Claude login: refreshed when this folder's version differs (feed-mod.js)
     FEED_MOD.start({ log: logLine, off: DEMO ? 'a demo' : null });
