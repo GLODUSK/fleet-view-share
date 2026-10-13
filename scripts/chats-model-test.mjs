@@ -7,7 +7,7 @@
 // taskWhen, taskLine, tasksHead). Plain asserts, no dependencies:
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, rawToContactsState, previewOf, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, rawToContactsState, previewOf, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
   sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
@@ -170,6 +170,11 @@ test('sortContacts: Chief, then needs-you longest waiting, then newest', () => {
 });
 
 test('unread', () => {
+  // needs-you: gold until opened; a newer question brings it back
+  assert.equal(asksYou({ key: 'k', at: 5, needsYou: true }, {}), true);
+  assert.equal(asksYou({ key: 'k', at: 5, needsYou: true }, { k: 6 }), false);
+  assert.equal(asksYou({ key: 'k', at: 7, needsYou: true }, { k: 6 }), true);
+  assert.equal(asksYou({ key: 'k', at: 5 }, {}), false);
   assert.equal(unread({ key: 'k', at: 5 }, {}), true);
   assert.equal(unread({ key: 'k', at: 5 }, { k: 5 }), false);
   assert.equal(unread({ key: 'k', at: 6 }, { k: 5 }), true);

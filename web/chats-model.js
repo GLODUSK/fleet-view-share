@@ -24,6 +24,8 @@
 //       handoff (s.pickedUpFrom.id) gets the same chain key. Only the chiefId fallback uses it: the tags keep a bot's
 //       conversations together by themselves
 //   unread(contact, seen) -> boolean  seen: { [contact.key]: ms the user last opened it }
+//   asksYou(contact, seen) -> boolean   its row shows needs-you (gold, "!"): it waits on you and you haven't opened it
+//       since (Henry, 2026-10-12: opening the chat clears it; a newer question brings it back)
 //   rawToContactsState(st) -> { ...st, sessions, allSessions, finishedSessions, pending, teams }   raw GET /state to
 //       the lists above (buildContacts calls it by itself when state has no allSessions); the tags and state.bots stay
 //   previewOf(session) -> string   a conversation's one-line preview: the question it asks, what it is doing now, or
@@ -377,6 +379,7 @@ export function doingOf(c, face) {
 }
 
 export const unread = (c, seen) => !!(c.at && (!seen || !seen[c.key] || seen[c.key] < c.at));
+export const asksYou = (c, seen) => !!c.needsYou && unread(c, seen);
 
 // ---------- a bot's chat as the Bots tab shows it (botFeed) ----------
 // Only Fleet View starts a message with "[Fleet View]": anyone else's is framed ("[Fleet View · unsigned…") or

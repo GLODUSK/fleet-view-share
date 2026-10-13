@@ -66,7 +66,7 @@ import { openCtxMenu } from './ctxmenu.js';
 import { mascotSVG, mascotState, mascotAck, SHAPES } from './mascot.js';
 import { MODEL_IDS, EFFORTS, modelLabel, setDynamicBots } from './compose.js';
 import { handToChat } from './handto.js';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote } from './chats-model.js';
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote } from './chats-model.js';
 import { mountPicker } from './picker.js';
 import { ASK_TEXT, WATCH_NOTE, BRIEF_MS, watchOn as watchFrom, watchBody, briefLines, briefSections, briefTime, fixtureBriefing } from './chief-model.js';
 
@@ -242,13 +242,14 @@ function matches(c, q) {
 function rowHtml(state, c, now) {
   const on = c.key === selKey;
   const un = !on && unread(c, seen);
+  const ask = !on && asksYou(c, seen); // opening it clears the gold, as it does the unread dot
   const pin = c.pinned ? `<span class="ch-pin" title="pinned">${icon('pin', 11)}</span>` : '';
-  return `<button type="button" class="ch-row${on ? ' on' : ''}${c.needsYou ? ' needs' : ''}${un ? ' unread' : ''}${c.kind !== 'team' && !c.id ? ' ghost' : ''}" role="option" aria-selected="${on}"`
+  return `<button type="button" class="ch-row${on ? ' on' : ''}${ask ? ' needs' : ''}${un ? ' unread' : ''}${c.kind !== 'team' && !c.id ? ' ghost' : ''}" role="option" aria-selected="${on}"`
     + ` data-key="${esc(c.key)}"${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''}${c.botId ? ` data-bot="${esc(c.botId)}"` : ''} style="--rc:${esc(colorOf(c))}" title="${esc(c.name || '')}">`
     + `<span class="ch-av"${c.kind === 'team' ? '' : ` title="${esc(doingTip(c))}"`}>${avatar(state, c, 40)}</span>`
     + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${esc(c.name || 'bot')}</span>`
     + `<span class="ch-time">${pin}${esc(when(c.at, now))}</span></span>`
-    + `<span class="ch-l2"><span class="ch-prev">${esc(previewOf(c))}</span>${c.needsYou ? '<span class="ch-flag" title="needs you">!</span>' : un ? '<span class="ch-dot" aria-label="unread"></span>' : ''}</span>`
+    + `<span class="ch-l2"><span class="ch-prev">${esc(previewOf(c))}</span>${ask ? '<span class="ch-flag" title="needs you">!</span>' : un ? '<span class="ch-dot" aria-label="unread"></span>' : ''}</span>`
     + `</span></button>`;
 }
 
