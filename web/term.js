@@ -12,11 +12,11 @@
 //                                     forkFrom: a fork of that conversation instead (claude --resume --fork-session)
 //   term.write(id, data)  term.resize(id, cols, rows)  term.kill(id)
 //   term.list() -> Promise<[{ id, pid, alive, exitCode|null, startedAt, pending, created, cwd, account, status,
-//                             interrupted, waitingFor, autoContinue, slashPanel }]>   interrupted: resumed after Fleet
-//                             View quit while it was mid-turn; waitingFor: what a 'waiting' session waits on ("dialog
-//                             open", "approve …"); autoContinue: the host types "carry on" into it by itself once it
-//                             has loaded; slashPanel: the "/" command whose panel is open ("/usage"; the host closes
-//                             it after a minute left alone)
+//                             interrupted, waitingFor, autoContinue, slashPanel, cols, rows }]>   interrupted: resumed
+//                             after Fleet View quit while it was mid-turn; waitingFor: what a 'waiting' session waits
+//                             on ("dialog open", "approve …"); autoContinue: the host types "carry on" into it by
+//                             itself once it has loaded; slashPanel: the "/" command whose panel is open ("/usage";
+//                             the host closes it after a minute left alone); cols, rows: the pty's size now
 //   term.snapshot(id) -> Promise<string>          the last ~512 KB of output, replayed when a view attaches
 //   term.onData(cb(id, chunk)) / term.onExit(cb(id, code)) / term.onRekey(cb(oldKey, id))  -> unsubscribe functions
 // In a browser termApi() is null while the session host is not running (the server says so) or the server can't be
@@ -146,7 +146,8 @@ const preview = new Set();
 // few seconds after, while the server still sees their pid file ("open elsewhere" would be about ourselves)
 const ending = new Map(); // id -> { startedAt, goneAt }
 const ENDING_GRACE = 5000;
-// the size this page last gave each pty (open, create, resize): an off-screen view takes it, so it wraps like Claude
+// the size this page last gave each pty (open, create, resize): an off-screen view takes it, so it wraps like Claude,
+// unless the host's list says the pty has another one now (ptySize: another window sized it since)
 const sizes = new Map(); // id -> { cols, rows }
 
 const notify = () => { for (const f of listeners) { try { f(); } catch (e) { console.error(e); } } };
@@ -169,6 +170,7 @@ function applyList(list) {
       slashPanel: typeof p.slashPanel === 'string' && /^\/[\w:-]{1,39}$/.test(p.slashPanel) ? p.slashPanel : null,
       handoffFrom: typeof p.handoffFrom === 'string' && ID_RE.test(p.handoffFrom) ? p.handoffFrom : null,
       role: typeof p.role === 'string' && /^(?:chief|bot:[0-9a-f]{12})$/.test(p.role) ? p.role : null,
+      cols: Number.isInteger(p.cols) && p.cols > 0 ? p.cols : 0, rows: Number.isInteger(p.rows) && p.rows > 0 ? p.rows : 0,
     });
   }
   const now = Date.now();
@@ -179,6 +181,7 @@ function applyList(list) {
   }
   for (const id of [...preview]) if (hosts.has(id) && !hosts.get(id).alive) preview.delete(id); // it ended by itself
   for (const id of [...views.keys()]) if (!hosts.has(id)) disposeView(id);
+  followSizes();
   const key = hostKey();
   if (key !== hostsKey) { hostsKey = key; notify(); }
 }
@@ -397,6 +400,7 @@ async function ensureView(id) {
     term.onResize(({ cols, rows }) => {
       clearTimeout(resizeTimer);
       if (v.quietResize) return; // an off-screen view taking the size the pty already has
+      v.resizedAt = Date.now();
       resizeTimer = setTimeout(() => { const t = termApi(); if (t && hosts.get(v.id)?.alive) { try { t.resize(v.id, cols, rows); sizes.set(v.id, { cols, rows }); } catch {} } }, 90);
     });
     // a paste counts as typing (a preview session becomes the user's)
@@ -517,6 +521,33 @@ async function replay(v, fresh = false) {
     try { v.term.write(snap, mark); } catch { mark(); }
   } else v.parsed = true;
   v.replaying = false;
+}
+
+// One pty, a view of it in each window that shows or reads it. A view of another size draws Claude Code's output in
+// the wrong cells (its full-width rows wrap where the view doesn't, so rows run into each other), and the Chat tab
+// reading it misses a question: no card, and Enter in the chat box picks the question's highlighted option. Another
+// window (its Session tab, the Chats window, a browser on the Mac) can size the pty after this page did, and nothing
+// tells this page but the host's list. So a view that isn't on screen here follows the pty: it takes the listed size
+// quietly (nothing goes to the pty) and is drawn again from a fresh snapshot, whose redraw after the resize (ConPTY's,
+// Claude Code's) is at the right size. A view on screen keeps its own: it sizes the pty when it fits its panel.
+const OWN_RESIZE_MS = 3000; // a size this page just gave the pty: the list may not say it yet
+// the pty's size as the host lists it, or null (not listed yet, or an older host)
+function ptySize(id) {
+  const h = id ? hosts.get(id) : null;
+  return h && h.cols > 0 && h.rows > 0 ? { cols: h.cols, rows: h.rows } : null;
+}
+function followSizes() {
+  for (const v of views.values()) {
+    const p = ptySize(v.id);
+    if (!p || !v.term || !v.fed || v.replaying || !hosts.get(v.id).alive) continue;
+    if (v.term.cols === p.cols && v.term.rows === p.rows) continue;
+    if (Date.now() - (v.resizedAt || 0) < OWN_RESIZE_MS) continue;
+    if (v.opened && v.wrap.isConnected && v.wrap.getClientRects().length > 0) continue; // on screen here
+    v.quietResize = true;
+    try { v.term.resize(p.cols, p.rows); } catch {} finally { v.quietResize = false; }
+    sizes.set(v.id, p);
+    replay(v, true);
+  }
 }
 
 // ---------- the Session tab ----------
@@ -1208,8 +1239,9 @@ async function prepareView(id, sizeEl) {
     const v = await ensureView(id);
     if (!v || views.get(id) !== v || v.fed) return;
     if (!v.opened) {
-      // the pty's size when this page gave it one (then nothing is sent), else a guess the pty then takes
-      const known = sizes.get(id);
+      // the pty's size as the host lists it, or as this page gave it (then nothing is sent), else a guess the pty
+      // then takes
+      const known = ptySize(id) || sizes.get(id);
       const { cols, rows } = known || (sizeEl ? guessSize(sizeEl) : { cols: 120, rows: 32 });
       v.quietResize = !!known;
       try { v.term.resize(cols, rows); } finally { v.quietResize = false; }

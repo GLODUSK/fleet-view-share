@@ -77,7 +77,7 @@
 import { esc } from './cards.js';
 import { voiceSupported, startVoice, stopVoice, onVoice } from './voice.js';
 import { icon } from './icons.js';
-import { termApi, hosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, keyNow, noTermMsg } from './term.js';
+import { termApi, hosts, refreshHosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, keyNow, noTermMsg } from './term.js';
 import { uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
 import { sizeTask, dynamicSwitch, DYNAMIC } from './chats-model.js';
@@ -1352,6 +1352,9 @@ export function mountCompose(slot, s) {
 
   // a menu on the live screen now, not the one the last poll saw (it is up to 400 ms old)
   const menuNow = (id) => (hosts.get(id)?.alive ? parseMenu(screenText(id, 40, { rows: true })) : null);
+  // the host says Claude waits on a menu (its pid file's waitingFor: a question, "approve …"), whatever the screen
+  // here shows; not a panel ("dialog open": closePanel and closeHostPanel close those)
+  const hostAsks = (id) => { const h = hosts.get(id); return !!h?.alive && h.status === 'waiting' && !!h.waitingFor && h.waitingFor !== 'dialog open'; };
   // a command's panel on the live screen now, and closing it: Esc until it is gone (one with a search box takes
   // two: the first clears the search). -> true when none is up
   const panelNow = (id) => (hosts.get(id)?.alive ? parsePanel(screenMarked(id, PANEL_LINES)) : null);
@@ -1464,9 +1467,9 @@ export function mountCompose(slot, s) {
     }
   }
   // the last question's Submit opens the review step ("Ready to submit your answers?"): its "Submit answers" too, as
-  // it comes up (at: the menu Submit was pressed on; m: the question)
+  // it comes up (at: the menu Submit was pressed on; m: the question). It can take over 2 s to come up
   async function confirmReview(id, at, m) {
-    for (const end = Date.now() + 1500; Date.now() < end;) {
+    for (const end = Date.now() + 5000; Date.now() < end;) {
       await sleep(60);
       const r = menuNow(id);
       if (!r || r.sig === at.sig) continue;
@@ -1654,8 +1657,12 @@ export function mountCompose(slot, s) {
       id = keyNow(id);
       if (st.id === id) { st.step = ''; drawNotes(); }
       if (!r.ok) { err(r.message || 'could not start the session'); return; }
-      // a permission prompt or a question may have come up since: the text would land in it and Enter would pick
-      const blocked = () => !!menuNow(id);
+      // a permission prompt or a question may have come up since: the text would land in it and Enter would pick.
+      // Also when the host says one waits (its pid file's waitingFor) though the screen here shows no menu: a backstop
+      // for a screen read wrong (term.js followSizes), so the chat box never answers a question it didn't show
+      const blocked = () => !!menuNow(id) || hostAsks(id);
+      await refreshHosts();
+      id = keyNow(id);
       if (blocked()) { err('Claude is asking something: answer it first, then send'); return; }
       // a command's panel is up: the text would land in it, so it closes first. Read from the screen; while the
       // screen can't be read yet, from the host's list (then only a panel a "/" command opened). Never both: two
