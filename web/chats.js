@@ -21,8 +21,9 @@
 // its header, its last chat read only (or, never started, a card with its instructions and a Start button) and a box of
 // its own: what you type there starts it (POST /bots/:id/start: its running conversation, else its last one resumed,
 // else a new one), and goes in once its session is up (handto.js hands it to that conversation's chat box, which sends
-// it). Right-click a bot: Start, Edit bot..., a quick Rename and Look ▸ (its shape and colour; POST /bots/:id), Remove
-// bot (asks first; POST /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
+// it). Right-click a bot: Start, Edit bot..., a quick Rename and Look ▸ (its shape and colour; POST /bots/:id), Colour ▸
+// (its conversation's own, as on the conversation menu: settings.sessHues, worn over its look), Remove bot (asks first;
+// POST /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
 //
 // The list's order is Henry's (Henry, 2026-10-12: "dont move them up and down when one sends a message"):
 // settings.chatOrder (chats-model.js sortContacts), the pinned rows on top, then the rest; activity shows in the row,
@@ -32,9 +33,10 @@
 // the rest and is added (chatOrderAdd), so it stays there.
 //
 // The avatars are alive (mascot.js): a bot wears its own shape and colour when it has one (state.bots; a bot can
-// change its own with fv look), its face follows what it does (thinking about a fresh message, working, needs you,
-// ...), it hops when you send it a message (the chat box's 'fv-chat-sent', or the box of one not running), and
-// hovering its avatar in the list or the chat's header says what it is doing now (chats-model.js doingOf).
+// change its own with fv look; a colour picked for its conversation, or the Chief's, wins: setPickedColors), its face
+// follows what it does (thinking about a fresh message, working, needs you, ...), it hops when you send it a message
+// (the chat box's 'fv-chat-sent', or the box of one not running), and hovering its avatar in the list or the chat's
+// header says what it is doing now (chats-model.js doingOf).
 //
 // Tasks and routines: above a bot's chat (running or not) a Tasks strip lists its tasks.json (state.bots[].tasks:
 // bots.js, bot-tasks.js), which the bot keeps itself as you give it work: one-offs and recurring ones with their
@@ -73,7 +75,7 @@ import { openCtxMenu } from './ctxmenu.js';
 import { mascotSVG, mascotState, mascotAck, SHAPES } from './mascot.js';
 import { MODEL_IDS, EFFORTS, modelLabel, setDynamicBots } from './compose.js';
 import { handToChat } from './handto.js';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote,
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote,
   fullChatOrder, moveInChatOrder, pinInChatOrder, sameChatOrder } from './chats-model.js';
 import { mountPicker } from './picker.js';
 import { ASK_TEXT, WATCH_NOTE, BRIEF_MS, watchOn as watchFrom, watchBody, briefLines, briefSections, briefTime, fixtureBriefing } from './chief-model.js';
@@ -190,9 +192,13 @@ function when(ms, now) {
   if (ms >= day0 - 6 * DAY) return d.toLocaleDateString([], { weekday: 'short' });
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
+// a conversation's own colour, picked with Colour on its right-click (app.js settings.sessHues): id -> CSS colour or null
+let pickedColor = () => null;
+export function setPickedColors(fn) { pickedColor = typeof fn === 'function' ? fn : () => null; }
 const colorOf = (c) => {
+  const own = ownColorOf(c, pickedColor); // its conversation's picked colour, else a bot's own look (state.bots)
+  if (own) return own;
   if (c && c.kind === 'chief') return C.gold; // the Chief keeps its own colour whatever folder it runs in
-  if (c && COLOR6.test(String(c.color || ''))) return c.color; // a bot's own pick (state.bots)
   const r = c && c.repo && c.repo.color;
   if (HEX.test(String(r || ''))) return r;
   if (c && c.kind === 'team' && HEX.test(String(c.statusColor || ''))) return c.statusColor;
@@ -201,10 +207,10 @@ const colorOf = (c) => {
 const sessionsOf = (state) => (state.allSessions || []).concat(state.finishedSessions || [], state.pending || []);
 const findSession = (state, id) => (id ? sessionsOf(state).find((x) => x.id === id) || null : null);
 const inState = (state, id) => !!id && (state.allSessions || []).some((x) => x.id === id);
-// a member's mascot: its own state and colour, from the conversation when it is listed
+// a member's mascot: its own state and colour (the one picked for it, else from the conversation when it is listed)
 function memberMascot(state, m, size) {
   const s = findSession(state, m.id);
-  const col = s && s.repo && HEX.test(String(s.repo.color || '')) ? s.repo.color : s && isAcct(s.account) ? acctColor(s.account) : C.violet;
+  const col = pickedColor(m.id) || (s && s.repo && HEX.test(String(s.repo.color || '')) ? s.repo.color : s && isAcct(s.account) ? acctColor(s.account) : C.violet);
   return mascotSVG(m.id, { state: s ? mascotState(s) : 'idle', color: col, size });
 }
 // a team's avatar: 2-3 member mascots, overlapping
@@ -799,10 +805,18 @@ function botMenu(el, ui, botId, x, y) {
       { label: 'Edit bot...', icon: 'mode', note: 'name, instructions, model, look', run: () => { pick(`bot:${botId}`, ui, true); openForm(el, ui, botId); } },
       { label: 'Rename', icon: 'edit', input: { value: b.name, placeholder: 'its name: 1 to 40 characters', hint: 'Enter saves · Esc', empty: 'a bot needs a name', busy: 'saving…', submit: (t) => saveBot(ui, botId, { name: t.trim() }) } },
       lookItem(ui, botId),
+      colorItem(el, ui, b, c),
       { sep: true },
       { label: 'Remove bot', icon: 'trash', danger: true, note: 'its folder and chats are kept', confirm: { text: `Remove ${b.name}? Its session ends. Its folder and its conversations are kept.`, yes: 'Remove' }, run: () => removeBot(ui, botId, b.name) },
     ],
   });
+}
+// Colour ▸: its conversation's own colour (the conversation menu's, app.js sessionColorItem: settings.sessHues), worn
+// over its Look's; a bot with no conversation yet has none to colour
+function colorItem(el, ui, b, c) {
+  if (!c || !c.id || typeof ui.sessionColorItem !== 'function') return { label: 'Colour', icon: 'star', disabled: true, note: 'once it has started' };
+  const s = findSession(el._state || {}, c.id);
+  return ui.sessionColorItem({ id: c.id, name: b.name, pending: !!(s && s.pending), bot: true });
 }
 // Look ▸ Shape ▸ / Colour ▸: a tick on the one it wears; picking one keeps the menu open (stay) and wears it at once
 function lookItem(ui, botId) {

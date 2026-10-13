@@ -56,6 +56,8 @@
 //                          (every member not removed, each on its own, prefixed with the team's name). Returns null
 //                          when it went off (a toast says how it went), else why it can't. ui.teamReach(teamId):
 //                          that "why" before anything is written, or null
+//   ui.sessionColorItem(s) the Bots view's bot menu: the conversation menu's Colour ▸ for s ({ id, name, pending });
+//                          the rows wear the picked colour through chats.js setPickedColors
 //   ui.solo                read only: true on the Bots pop-out window's page (?solo=chats; see SOLO)
 //   Links: any element with data-act="url" data-url="…", or data-act="reveal" data-kind="file|folder"
 //   data-path="…" [data-line="n"], or data-act="session" data-id="…" (another conversation: the handoff
@@ -164,7 +166,7 @@
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects, followProjectsPick } from './projects.js';
-import { renderChats, botFace, seenNow } from './chats.js';
+import { renderChats, botFace, seenNow, setPickedColors } from './chats.js';
 import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
@@ -373,6 +375,8 @@ const ui = {
   selectMany: (ids) => setMulti(ids, 'cards'),
   // the right-click menu is open: the map keeps its hover tooltip hidden meanwhile
   menuOpen: () => ctxMenuOpen(),
+  // the Bots view's bot menu: the conversation menu's Colour ▸ for its conversation ({ id, name, pending })
+  sessionColorItem: (s) => sessionColorItem(s),
   // the Bots view's group chat: as the team menu's "Message the team" (teamMenuItems)
   teamReach: (id) => teamReach(teamById(id)),
   messageTeam: (id, text) => {
@@ -856,9 +860,12 @@ function sessionColorItem(s) {
   return hueItem(sessHues.has(s.id) ? sessHues.get(s.id) : null, (h) => {
     if (h == null) sessHues.delete(s.id); else sessHues.set(s.id, h);
     saveSettings({ sessHue: { id: s.id, hue: h } });
-    toast(h == null ? `${s.name} follows its workspace's colour again` : `${s.name} is ${HUE_PICKS.find(([, x]) => x === h)?.[0].toLowerCase() || 'recoloured'}`, C.mint);
+    toast(h == null ? `${s.name} ${s.bot ? 'wears its own look again' : "follows its workspace's colour again"}` : `${s.name} is ${HUE_PICKS.find(([, x]) => x === h)?.[0].toLowerCase() || 'recoloured'}`, C.mint);
+    render(); // the Bots rows read sessHues itself (setPickedColors): they wear it now
   });
 }
+// the Bots view's rows (chats.js): a bot's or the Chief's conversation wears the colour picked for it
+setPickedColors((id) => (sessHues.has(id) ? hueCss(sessHues.get(id)) : null));
 function repoRenameItem(root) {
   const r = repoRootOf({ root });
   return {

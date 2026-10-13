@@ -7,7 +7,7 @@
 // taskWhen, taskLine, tasksHead). Plain asserts, no dependencies:
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, rawToContactsState, previewOf, botPreview, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, rawToContactsState, previewOf, botPreview, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
   sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
   sameChatOrder } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
@@ -391,6 +391,18 @@ test("a bot row carries its conversation's moment and the bot's own look; a bad 
   const r1 = rows.find((r) => r.botId === B1), r2 = rows.find((r) => r.botId === B2);
   assert.deepEqual([r1.turnStart, r1.lastAction.what, r1.running[0].tool, r1.shape, r1.color], [T + 5, 'a.md', 'Bash', 'heart', '#FF6B80']);
   assert.deepEqual([r2.turnStart, r2.lastAction, r2.running, r2.shape, r2.color], [null, null, null, 'blob', null]); // a shape mascot.js does not know is ignored there
+});
+test("ownColorOf: a colour picked for the row's conversation beats the bot's look; none picked: the look, else null", () => {
+  const rows = build(st({ allSessions: [S('L', { bot: B1 }), S('M', { bot: B2 }), S('C', { bot: 'chief' })], bots: [BOT(B1, { convId: 'L', live: true, color: '#ff6b80' }), BOT(B2, { convId: 'M', live: true })] }));
+  const r1 = rows.find((r) => r.botId === B1), r2 = rows.find((r) => r.botId === B2), ch = rows.find((r) => r.kind === 'chief');
+  const picked = (id) => ({ L: 'hsl(212 85% 62%)', C: 'hsl(120 85% 62%)', K: 'hsl(8 85% 62%)' })[id] || null;
+  assert.equal(ownColorOf(r1, picked), 'hsl(212 85% 62%)');
+  assert.equal(ownColorOf(r1, () => null), '#ff6b80');
+  assert.equal(ownColorOf(r1), '#ff6b80');
+  assert.equal(ownColorOf(r2, picked), null); // neither: the page's fallbacks (repo, account)
+  assert.equal(ownColorOf(ch, picked), 'hsl(120 85% 62%)'); // the Chief's beats its gold
+  assert.equal(ownColorOf({ kind: 'bot', id: null, color: null }, picked), null); // no conversation yet
+  assert.equal(ownColorOf({ kind: 'team', id: 'K', key: 'team:k' }, picked), null);
 });
 test("doingOf: what the avatar's hover says, per face", () => {
   const bot = (o) => ({ kind: 'bot', id: 'x', live: true, preview: '', ...o });

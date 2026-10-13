@@ -496,6 +496,15 @@ export const unread = (c, seen) => {
   return !!(at && (!seen || !seen[c.key] || seen[c.key] < at));
 };
 export const asksYou = (c, seen) => !!c.needsYou && unread(c, seen);
+// a bot's or the Chief's own colour, before the page's fallbacks (the Chief's gold, its repo's, its account's): the
+// one picked for its conversation (Colour on its right-click: settings.sessHues; picked(id) -> CSS colour or null)
+// wins over the bot's own look; null when it has neither. A team's is never its own: its members wear theirs
+export function ownColorOf(c, picked) {
+  if (!c || c.kind === 'team') return null;
+  const p = c.id && typeof picked === 'function' ? picked(c.id) : null;
+  if (typeof p === 'string' && p) return p;
+  return typeof c.color === 'string' && /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : null;
+}
 
 // ---------- a bot's chat as the Bots tab shows it (botFeed) ----------
 // Only Fleet View starts a message with "[Fleet View]": anyone else's is framed ("[Fleet View · unsigned…") or
