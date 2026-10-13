@@ -392,16 +392,17 @@ test("a bot row carries its conversation's moment and the bot's own look; a bad 
   assert.deepEqual([r1.turnStart, r1.lastAction.what, r1.running[0].tool, r1.shape, r1.color], [T + 5, 'a.md', 'Bash', 'heart', '#FF6B80']);
   assert.deepEqual([r2.turnStart, r2.lastAction, r2.running, r2.shape, r2.color], [null, null, null, 'blob', null]); // a shape mascot.js does not know is ignored there
 });
-test("ownColorOf: a colour picked for the row's conversation beats the bot's look; none picked: the look, else null", () => {
+test("ownColorOf: a bot wears its look's colour whatever conversation it is in; the Chief its newest picked one", () => {
   const rows = build(st({ allSessions: [S('L', { bot: B1 }), S('M', { bot: B2 }), S('C', { bot: 'chief' })], bots: [BOT(B1, { convId: 'L', live: true, color: '#ff6b80' }), BOT(B2, { convId: 'M', live: true })] }));
   const r1 = rows.find((r) => r.botId === B1), r2 = rows.find((r) => r.botId === B2), ch = rows.find((r) => r.kind === 'chief');
-  const picked = (id) => ({ L: 'hsl(212 85% 62%)', C: 'hsl(120 85% 62%)', K: 'hsl(8 85% 62%)' })[id] || null;
-  assert.equal(ownColorOf(r1, picked), 'hsl(212 85% 62%)');
-  assert.equal(ownColorOf(r1, () => null), '#ff6b80');
+  const picked = (id) => ({ L: 'hsl(212 85% 62%)', M: 'hsl(44 85% 62%)', C: 'hsl(120 85% 62%)', C0: 'hsl(8 85% 62%)', K: 'hsl(8 85% 62%)' })[id] || null;
+  assert.equal(ownColorOf(r1, picked), '#ff6b80'); // one colour per bot: a pick on its conversation is not it
   assert.equal(ownColorOf(r1), '#ff6b80');
-  assert.equal(ownColorOf(r2, picked), null); // neither: the page's fallbacks (repo, account)
+  assert.equal(ownColorOf({ ...r1, id: 'N', ids: ['L', 'N'] }, () => null), '#ff6b80'); // a new conversation keeps it
+  assert.equal(ownColorOf(r2, picked), null); // no look colour: the page's fallbacks (account)
   assert.equal(ownColorOf(ch, picked), 'hsl(120 85% 62%)'); // the Chief's beats its gold
-  assert.equal(ownColorOf({ kind: 'bot', id: null, color: null }, picked), null); // no conversation yet
+  assert.equal(ownColorOf({ ...ch, id: 'C1', ids: ['C0', 'C', 'C1'] }, picked), 'hsl(120 85% 62%)'); // a new Chief conversation: the newest pick
+  assert.equal(ownColorOf({ ...ch, id: 'C1', ids: ['C1'] }, picked), null);
   assert.equal(ownColorOf({ kind: 'team', id: 'K', key: 'team:k' }, picked), null);
 });
 test("doingOf: what the avatar's hover says, per face", () => {

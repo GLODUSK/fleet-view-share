@@ -21,9 +21,8 @@
 // its header, its last chat read only (or, never started, a card with its instructions and a Start button) and a box of
 // its own: what you type there starts it (POST /bots/:id/start: its running conversation, else its last one resumed,
 // else a new one), and goes in once its session is up (handto.js hands it to that conversation's chat box, which sends
-// it). Right-click a bot: Start, Edit bot..., a quick Rename and Look ▸ (its shape and colour; POST /bots/:id), Colour ▸
-// (its conversation's own, as on the conversation menu: settings.sessHues, worn over its look), Remove bot (asks first;
-// POST /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
+// it). Right-click a bot: Start, Edit bot..., a quick Rename, Colour ▸ and Shape ▸ (its look; POST /bots/:id), Remove
+// bot (asks first; POST /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
 //
 // The list's order is Henry's (Henry, 2026-10-12: "dont move them up and down when one sends a message"):
 // settings.chatOrder (chats-model.js sortContacts), the pinned rows on top, then the rest; activity shows in the row,
@@ -33,10 +32,10 @@
 // the rest and is added (chatOrderAdd), so it stays there.
 //
 // The avatars are alive (mascot.js): a bot wears its own shape and colour when it has one (state.bots; a bot can
-// change its own with fv look; a colour picked for its conversation, or the Chief's, wins: setPickedColors), its face
-// follows what it does (thinking about a fresh message, working, needs you, ...), it hops when you send it a message
-// (the chat box's 'fv-chat-sent', or the box of one not running), and hovering its avatar in the list or the chat's
-// header says what it is doing now (chats-model.js doingOf).
+// change its own with fv look; kept with the bot, so a new conversation wears it too; the Chief wears the colour picked
+// on its conversation's right-click: setPickedColors), its face follows what it does (thinking about a fresh message,
+// working, needs you, ...), it hops when you send it a message (the chat box's 'fv-chat-sent', or the box of one not
+// running), and hovering its avatar in the list or the chat's header says what it is doing now (chats-model.js doingOf).
 //
 // Tasks and routines: above a bot's chat (running or not) a Tasks strip lists its tasks.json (state.bots[].tasks:
 // bots.js, bot-tasks.js), which the bot keeps itself as you give it work: one-offs and recurring ones with their
@@ -196,7 +195,7 @@ function when(ms, now) {
 let pickedColor = () => null;
 export function setPickedColors(fn) { pickedColor = typeof fn === 'function' ? fn : () => null; }
 const colorOf = (c) => {
-  const own = ownColorOf(c, pickedColor); // its conversation's picked colour, else a bot's own look (state.bots)
+  const own = ownColorOf(c, pickedColor); // a bot's look (state.bots), the Chief's picked one
   if (own) return own;
   if (c && c.kind === 'chief') return C.gold; // the Chief keeps its own colour whatever folder it runs in
   const r = c && c.repo && c.repo.color;
@@ -804,39 +803,38 @@ function botMenu(el, ui, botId, x, y) {
         : { label: 'Start', icon: 'shell', note: b.convId ? 'goes on in its last conversation' : 'its first conversation', run: () => startBot(ui, botId) }]),
       { label: 'Edit bot...', icon: 'mode', note: 'name, instructions, model, look', run: () => { pick(`bot:${botId}`, ui, true); openForm(el, ui, botId); } },
       { label: 'Rename', icon: 'edit', input: { value: b.name, placeholder: 'its name: 1 to 40 characters', hint: 'Enter saves · Esc', empty: 'a bot needs a name', busy: 'saving…', submit: (t) => saveBot(ui, botId, { name: t.trim() }) } },
-      lookItem(ui, botId),
-      colorItem(el, ui, b, c),
+      lookColorItem(ui, botId),
+      lookShapeItem(ui, botId),
       { sep: true },
       { label: 'Remove bot', icon: 'trash', danger: true, note: 'its folder and chats are kept', confirm: { text: `Remove ${b.name}? Its session ends. Its folder and its conversations are kept.`, yes: 'Remove' }, run: () => removeBot(ui, botId, b.name) },
     ],
   });
 }
-// Colour ▸: its conversation's own colour (the conversation menu's, app.js sessionColorItem: settings.sessHues), worn
-// over its Look's; a bot with no conversation yet has none to colour
-function colorItem(el, ui, b, c) {
-  if (!c || !c.id || typeof ui.sessionColorItem !== 'function') return { label: 'Colour', icon: 'star', disabled: true, note: 'once it has started' };
-  const s = findSession(el._state || {}, c.id);
-  return ui.sessionColorItem({ id: c.id, name: b.name, pending: !!(s && s.pending), bot: true });
-}
-// Look ▸ Shape ▸ / Colour ▸: a tick on the one it wears; picking one keeps the menu open (stay) and wears it at once
-function lookItem(ui, botId) {
+// Colour ▸ / Shape ▸: its look (the bot's one colour, kept with the bot whatever conversation it is in; Edit bot and fv
+// look change the same); a tick (a colour: "now") on the one it wears; picking one keeps the menu open (stay) and wears it at once
+function lookNow(botId) {
   // the look just picked counts at once: the menu redraws before the list does (read here, never cleared: lookOf
   // clears it, once the list from /state agrees)
   const c = (pane?._contacts || []).find((k) => k.botId === botId) || {};
   const l = looks.get(botId) || {};
-  const set = (o) => { looks.set(botId, { ...(looks.get(botId) || {}), ...o, at: Date.now() }); ui.refresh(); saveLook(ui, botId, o); };
-  const shapeNow = ('shape' in l ? l.shape : c.shape) || null;
-  const colorNow = COLOR6.test(String(('color' in l ? l.color : c.color) || '')) ? ('color' in l ? l.color : c.color) : null;
-  // each level redraws itself after a pick (ctxmenu.js refresh): the Look submenu, or Shape / Colour drilled into
-  return { label: 'Look', icon: 'edit', refresh: () => lookItem(ui, botId), children: [
-    { label: 'Shape', badge: shapeNow ? SHAPE_NAMES[shapeNow] || shapeNow : 'auto', refresh: () => lookItem(ui, botId).children[0], children: [
-      { label: 'Pick for me', icon: shapeNow ? null : 'check', stay: true, run: () => set({ shape: null }) },
-      ...SHAPES.map((k) => ({ label: SHAPE_NAMES[k] || k, icon: shapeNow === k ? 'check' : null, stay: true, run: () => set({ shape: k }) })),
-    ] },
-    { label: 'Colour', badge: colorNow ? (PALETTE.find((x) => x[0] === colorNow) || [0, colorNow])[1] : 'auto', refresh: () => lookItem(ui, botId).children[1], children: [
-      { label: 'Its account\'s colour', icon: colorNow ? null : 'check', stay: true, run: () => set({ color: null }) },
-      ...PALETTE.map(([hex, name]) => ({ label: name, icon: colorNow === hex ? 'check' : null, stay: true, run: () => set({ color: hex }) })),
-    ] },
+  const color = ('color' in l ? l.color : c.color);
+  return { shape: ('shape' in l ? l.shape : c.shape) || null, color: COLOR6.test(String(color || '')) ? color : null };
+}
+function setLook(ui, botId, o) { looks.set(botId, { ...(looks.get(botId) || {}), ...o, at: Date.now() }); ui.refresh(); saveLook(ui, botId, o); }
+// each redraws itself after a pick (ctxmenu.js refresh)
+function lookColorItem(ui, botId) {
+  const now = lookNow(botId).color;
+  return { label: 'Colour', icon: 'star', badge: now ? (PALETTE.find((x) => x[0] === now) || [0, now])[1] : 'auto', refresh: () => lookColorItem(ui, botId), children: [
+    { label: 'Its account\'s colour', icon: now ? null : 'check', stay: true, run: () => setLook(ui, botId, { color: null }) },
+    { sep: true },
+    ...PALETTE.map(([hex, name]) => ({ label: name, swatch: hex, note: now === hex ? 'now' : null, stay: true, run: () => setLook(ui, botId, { color: hex }) })),
+  ] };
+}
+function lookShapeItem(ui, botId) {
+  const now = lookNow(botId).shape;
+  return { label: 'Shape', icon: 'edit', badge: now ? SHAPE_NAMES[now] || now : 'auto', refresh: () => lookShapeItem(ui, botId), children: [
+    { label: 'Pick for me', icon: now ? null : 'check', stay: true, run: () => setLook(ui, botId, { shape: null }) },
+    ...SHAPES.map((k) => ({ label: SHAPE_NAMES[k] || k, icon: now === k ? 'check' : null, stay: true, run: () => setLook(ui, botId, { shape: k }) })),
   ] };
 }
 // POST /bots/:id with its look; when it fails the look goes back and the bot's box says why
