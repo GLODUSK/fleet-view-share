@@ -1,4 +1,4 @@
-/* "Keeps on a machine…" (keeps.js): the Sync card's frame (.uw-pop, .sy-pop in usage.css and sync.css), in the middle
+/* "Never continue on another machine…" (keeps.js): the Sync card's frame (.uw-pop, .sy-pop in usage.css and sync.css), in the middle
    of the page, with its own fields */
 .kp-pop { top: calc(var(--top-h) + 40px); right: auto; left: 50%; transform: translateX(-50%); width: min(460px, calc(100vw - 32px)); }
 .kp-ws { margin-left: 4px; font-weight: 500; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

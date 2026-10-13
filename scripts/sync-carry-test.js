@@ -6,7 +6,8 @@
 //   The round trip, twice (the second with core.autocrlf=true on pc, standing in for Windows): a branch on origin with
 //   2 more commits that are not; staged (an edit, a rename, a deletion), unstaged (an edit, an executable bit, a
 //   binary file, a tracked symlink's target), untracked (a file in a new folder, an executable, a symlink, a binary),
-//   .env.local and an ignored file (neither carried); the cwd a subfolder. pack, putAway (the checkout clean, .env.local
+//   .env.local and an ignored file (neither carried); the cwd a subfolder. pack (again while a git command holds
+//   index.lock: the pack never takes it), putAway (the checkout clean, .env.local
 //   in place, the stash kept), unpack on mac into its own worktree (the main checkout untouched), pack there, back to
 //   pc in place: both ends verify and pc ends where it started. Then again with a commit and a change made on mac:
 //   pc's branch fast-forwards to it.
@@ -163,6 +164,14 @@ async function roundTrip(crlf) {
   ok(m1.untracked.every((e) => b1.has(e.sha256)), `pack: every untracked blob is there${tag}`);
   eq(m1.summary.files, 8 + (EXEC ? 1 : 0) + (LINKS ? 2 : 0), `pack: files changed (README, the rename, del, app, run.sh, logo, link, and 4 untracked)${tag}`);
   ok((await W.verify(cwd, m1)).ok, `verify: the source against its own manifest${tag}`);
+  // a pack while a git command of the chat holds index.lock (a snapshot mid-turn): it never takes the lock itself
+  const lock = path.join(pc, '.git', 'index.lock');
+  fs.writeFileSync(lock, 'held by the chat\n');
+  let mLocked = null, lockErr = null;
+  try { mLocked = (await W.pack(cwd, { home: HOME, p4Roots: [] })).manifest; } catch (e) { lockErr = e; }
+  ok(mLocked && JSON.stringify(mLocked.trees) === JSON.stringify(m1.trees), `pack: works while index.lock is held, the same trees${tag} (${lockErr && lockErr.message})`);
+  ok(read(lock).toString() === 'held by the chat\n', `pack: index.lock left as it was${tag}`);
+  fs.rmSync(lock);
 
   const stash = await W.putAway(pc, `fleet-view: moved to mac${tag}`);
   ok(/^[0-9a-f]{40}$/.test(stash || ''), `putAway: a stash commit${tag}`);

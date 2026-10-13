@@ -1,6 +1,6 @@
 // Tests for web/compose.js's decisions about a chat another machine runs (docs/sync-follow.md item 6, "Follow you"):
-// followPlan (what Send does: type it here, move it here first, send it there through the link, the offline card, or
-// link the machines first), hostOfChat, remoteMenu (the host's menu as the card's), movePhaseText and panelCommand.
+// followPlan (what Send does: type it here, send it there through the link, the offline card, or link the machines
+// first; remote by default, Henry 2026-10-13: typing never moves a chat), hostOfChat, remoteMenu (the host's menu as the card's), movePhaseText and panelCommand.
 // Run: node scripts/follow-plan-test.mjs
 import assert from 'node:assert/strict';
 import { followPlan, hostOfChat, remoteMenu, movePhaseText, panelCommand } from '../web/compose.js';
@@ -26,23 +26,28 @@ const how = (s, o) => followPlan(s, o).how;
 // this machine runs it, or nobody else does: typed in here as always
 assert.equal(how({ id: 'x', state: 'IDLE', workspace: { kind: 'portable', host: null } }, {}), 'local');
 assert.equal(how(chat(), { local: true }), 'local', 'running in this machine\'s session host: local');
-// portable, idle there: it moves here first
-assert.deepEqual(followPlan(chat(), { act: idle, online: true, linked: true }), { how: 'move', host, kind: 'portable' });
-assert.equal(how(chat(), {}), 'move', 'nothing read yet, idle by /state: move');
-assert.equal(how(chat({ state: 'DONE' }), { act: null, online: null, linked: null }), 'move');
+// portable, idle there: sent there, and it stays there (remote by default)
+assert.deepEqual(followPlan(chat(), { act: idle, online: true, linked: true }), { how: 'remote', host, kind: 'portable', why: 'idle' });
+assert.equal(how(chat(), {}), 'remote', 'nothing read yet, idle by /state: sent there');
+assert.equal(how(chat({ state: 'DONE' }), { act: null, online: null, linked: null }), 'remote');
 // portable, busy there: sent there, queued
 assert.deepEqual(followPlan(chat(), { act: working, online: true, linked: true }), { how: 'remote', host, kind: 'portable', why: 'busy' });
 assert.equal(how(chat(), { act: asking, online: true, linked: true }), 'remote', 'waiting on a question there counts as busy');
 for (const state of ['WORKING', 'AGENTS', 'ASKING', 'QUESTION']) assert.equal(how(chat({ state }), {}), 'remote', `${state} by /state before any read: sent there`);
-assert.equal(how(chat({ state: 'WORKING' }), { act: idle }), 'move', 'the host\'s own reading wins over /state');
-// portable, busy, not linked: the move waits for it there
-assert.deepEqual(followPlan(chat(), { act: working, linked: false }), { how: 'move', host, kind: 'portable', waits: true });
+assert.equal(followPlan(chat({ state: 'WORKING' }), { act: idle }).why, 'idle', 'the host\'s own reading wins over /state');
+// portable and not linked, busy or idle: link first, never a move
+assert.deepEqual(followPlan(chat(), { act: working, linked: false }), { how: 'link', host, kind: 'portable', why: 'busy' });
+assert.deepEqual(followPlan(chat(), { act: idle, linked: false }), { how: 'link', host, kind: 'portable', why: 'idle' });
+// nothing followPlan says is a move: only an explicit Continue on this machine moves a chat
+for (const k of [chat(), chat({ state: 'WORKING' }), chat({ workspace: { kind: 'bound', host } }), chat({ bot: 'chief' })]) {
+  for (const o of [{}, { act: idle }, { act: working }, { act: asking }, { linked: false }, { online: true, linked: true }, { online: false }]) assert.notEqual(how(k, o), 'move', JSON.stringify(o));
+}
 // bound: always sent there
 const bound = chat({ workspace: { kind: 'bound', host } });
 assert.deepEqual(followPlan(bound, { act: idle, online: true, linked: true }), { how: 'remote', host, kind: 'bound', why: 'bound' });
-assert.equal(how(bound, { act: working, online: true }), 'remote');
+assert.deepEqual(followPlan(bound, { act: working, online: true }), { how: 'remote', host, kind: 'bound', why: 'bound' });
 assert.deepEqual(followPlan(bound, { linked: false }), { how: 'link', host, kind: 'bound', why: 'bound' }, 'bound and not linked: link first');
-// bots and the Chief: never moved (a move would lose the role)
+// bots and the Chief: sent there too (a move would lose the role)
 const bot = chat({ bot: 'a1b2c3d4e5f6' }), chief = chat({ bot: 'chief' });
 assert.deepEqual(followPlan(bot, { act: idle, online: true, linked: true }), { how: 'remote', host, kind: 'bound', why: 'bot' });
 assert.equal(how(chief, { act: idle, online: true, linked: true }), 'remote');

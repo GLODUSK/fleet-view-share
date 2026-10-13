@@ -250,11 +250,12 @@ kept }` (Blackbox listed now, nothing changed), or `preview: null` and `previewE
 
 ## Linking machines
 
-While sync runs, `sync-run.js` also runs the link (`link.js`, [link.md](link.md)) beside the mover: Henry links two of
-his machines once in the Sync card (**Your machines**, **Link**, the same 6-digit code confirmed on both), and from then
-on each can call the other's routes through the other's relay, the way the phone does. The sync key carries only the
-pairing's rows; the keys the calls use come from the pairing, so the sync key alone never links a machine. With sync
-off there is no link. Tests: `node scripts/link-test.js`.
+While sync runs, `sync-run.js` also runs the link (`link.js`, [link.md](link.md)) beside the mover: every two of
+Henry's machines signed in to sync and holding the sync key link by themselves (no code, no click; **Unlink** in the
+Sync card's **Your machines** takes one out until **Link**), and from then on each can call the other's routes through
+the other's relay, the way the phone does. The sync key seals the pairing's rows; the keys the calls use come from an
+X25519 exchange, so reading the rows alone never opens a call. With sync off there is no link. Tests: `node
+scripts/link-test.js`.
 
 ## Friends' installs stay local
 

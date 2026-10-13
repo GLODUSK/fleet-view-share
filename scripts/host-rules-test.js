@@ -4,7 +4,7 @@
 // does. A tool rule with no repo holds in any workspace; two rules for two repos each hold in their own; the pins are
 // worked out again when the rules change; the old single default becomes the pair; the pathspecs. Then a rule's pinOn
 // (a shell mention, a write, a tool), whose machine a host is (hostDevice, else the name), a chat's own choice (free,
-// stay), and the "Keeps on a machine…" sheet's preview: the chats a draft pins and the files its paths keep in a checkout.
+// stay), and the "Never continue on another machine…" sheet's preview: the chats a draft pins and the files its paths keep in a checkout.
 // Run: node scripts/host-rules-test.js (exit 0 = all pass)
 'use strict';
 const path = require('path');

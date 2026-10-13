@@ -647,7 +647,7 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   `{ k, qr: { until, next, n? } }` while it pairs (`k` is `K`, which opens hellos until `until`, `next` the `K'` the
   handshakes made, and `n` how many handshakes it made, when any). `GET /relay/status` says `finished` for a paired
   device, and `handshakes` (that `n`) for one still pairing.
-- **Computers:** another of Henry's machines, linked in the Sync card ([link.md](link.md)), is a device too, with
+- **Computers:** another of Henry's machines, linked by itself through sync ([link.md](link.md)), is a device too, with
   `kind: "computer"` and `peer` (its sync device id). It never pairs with a QR code: `link.js` makes its key and adds
   it paired (`addComputer`), and unlinking removes it (`removeComputer`, the notice `revoked`). It is served like a
   phone, tracks the presence key `peer`, and may also call the `/peer/...` routes. The iPhone card does not list it.

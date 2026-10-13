@@ -6,7 +6,8 @@
 //
 //   createCarry({ api, key, dataDir, log, now, home, env, platform, device, link, roots, work, which, run, cap })
 //     -> { packOut, putAwayAfter, envFiles, logins, peerAllowed, fetchPack, newestSnapshot, dropPack, unpackIn, undo,
-//          relocateLog, secretsIn, ready, installDeps, noteText, saveNote, getNote, dropNote, snapshot }
+//          relocateLog, secretsIn, ready, installDeps, noteText, saveNote, getNote, dropNote, snapshot, snapped,
+//          forgetSnapped, putAwayTaken }
 //   api      sync-api.js createSync()'s object: rest() and storage (upload, download, remove)
 //   key      the 32-byte sync key; device() -> this machine's sync device id; link() -> link.js's object or null
 //   roots()  -> [folder]: the repos Fleet View lists here (a moved chat's checkout is found among them by its origin)
@@ -22,10 +23,11 @@
 //   w/<conversation id>/p/<pack id>              the pack's record: { v: 1, id, manifest, blobs: { <sha256>: size } }
 // and the list of a conversation's packs is the settings row work:<conversation id>, sealed like the mover's rows:
 //   { v: 1, id, packs: [{ pack, kind: 'move' | 'snapshot', by (device), at (ISO), record (sha256 of the record's
-//     JSON), blobs: { <sha256>: size }, summary, sig? }] }
+//     JSON), blobs: { <sha256>: size }, summary, sig?, checked? (ISO) }] }
 // pack ids are 16 hex digits. A move's pack goes when the new owner has laid it down (dropPack); snapshots (a
-// portable chat's work at the end of a turn, for a pickup while its host is off) are kept 3 to a conversation; a
-// blob goes when no pack left names it.
+// portable chat's work at the end of a turn, every 2 minutes mid-turn and after a takeover, when it changed, for a
+// pickup while its host is off) are kept 3 to a conversation per device (each stamps at by its own clock); a blob goes
+// when no pack left names it.
 //
 // ---------- A, the machine that had the chat ----------
 //   packOut({ id, file, canCarry, noWork, list, toName }) -> { work, local }: the folder is the log's last cwd; a
@@ -62,8 +64,18 @@
 //   installDeps(into) -> the tool it started (in the background, logged to <dataDir>/carry.log) or null
 //   noteText(f) -> the [Fleet View] note for Claude; saveNote(id, note), getNote(id), dropNote(id): <dataDir>/sync/
 //     notes.json, until the Chat tab puts it in front of the next message there
-//   snapshot({ id, file }) -> the entry uploaded, or null (not portable, nothing changed since the last one, or more
-//     than a snapshot carries: 50 MB)
+//   snapshot({ id, file, cwd?, force?, live? }) -> the entry uploaded, or null (not portable, nothing changed since the
+//     last one, or more than a snapshot carries: 50 MB); the folder is cwd, else the log's last cwd; force: one even when
+//     nothing changed, and this machine's older snapshots of it go whatever happens (so its newest is never one from an
+//     earlier stay); live: a mid-turn one, which throws CarryError 'live_big' when more than LIVE_NEW (8 MB) of it is not
+//     uploaded yet (the turn's end sends it). Nothing changed: this machine's newest snapshot gets checked (when its
+//     work was last seen the same), so a pickup knows the code is newer than its at. The mover asks at the end of every
+//     turn, every 2 minutes mid-turn (live), and right after it takes a chat over (cwd: where it resumes, force)
+//   snapped() -> [id]: the git chats this machine left a snapshot of; forgetSnapped(id) (handed over the usual way);
+//     putAwayTaken({ id, toName, list }) -> { stashed, why }: another machine took it over from its snapshot while
+//     this one was off, so the changes in that checkout are put away (putAwayAfter's rules), once
+//   noteText's f.logAt: when the conversation was last uploaded (the row's updated_at), so the note says when the
+//     code is older than the conversation (codeLag: by more than LAG_SLACK_MS past the snapshot's at or checked)
 // Secrets never go in a log, a row, the page or an error: log lines name tools and files, never what is in them.
 'use strict';
 const fs = require('fs');
@@ -80,6 +92,9 @@ const W = require(path.join(__dirname, 'sync-work.js'));
 const PIECE = 8 * 1024 * 1024;
 const KEEP_SNAPSHOTS = 3;
 const SNAP_CAP = 50 * 1024 * 1024; // the most one turn's snapshot carries (a move: sync-work.js's 200 MB)
+const LIVE_NEW = 8 * 1024 * 1024; // the most a mid-turn snapshot uploads that is not up already
+const LAG_SLACK_MS = 30e3; // a conversation uploaded this soon after the code was last seen is not newer than it
+const CHECKED_MS = 90e3; // an unchanged snapshot's checked is written at most this often
 const MOVE_PACK_MS = 24 * 3600e3; // a move's pack nobody dropped (its move failed) goes after this
 const ENV_FILE_MAX = 1024 * 1024, ENV_TOTAL_MAX = 4 * 1024 * 1024;
 const PEER_CALLS = 12, PEER_WINDOW_MS = 60e3;
@@ -122,6 +137,16 @@ const under = (base, p) => { const r = path.relative(path.resolve(base), path.re
 const iso = (ms) => new Date(ms).toISOString();
 const when = (ms) => `${iso(ms).slice(0, 16).replace('T', ' ')} UTC`;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// a pickup whose work snapshot is older than the conversation's last upload (logAt, ms; both by the old host's clock)
+// -> { code, log } as when() prints them, or null when they print the same, or either is unknown. The code is as of
+// the snapshot's at, or its checked (the work was last seen the same then), whichever is later
+function codeLag(snapshot, logAt) {
+  const at = snapshot ? Date.parse(snapshot.at) : NaN, ck = snapshot ? Date.parse(snapshot.checked) : NaN;
+  const c = Number.isFinite(ck) && ck > at ? ck : at, l = Number(logAt);
+  if (!Number.isFinite(c) || !Number.isFinite(l) || l - c <= LAG_SLACK_MS) return null;
+  const code = when(c), log = when(l);
+  return code === log ? null : { code, log };
+}
 // a machine's name made safe for a file name
 const safeName = (s) => String(s || 'other').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40) || 'other';
 const throughLink = (base, dest) => {
@@ -184,8 +209,10 @@ function createCarry(o = {}) {
   const rootsOf = typeof o.roots === 'function' ? o.roots : () => [];
   const packOpts = { home, ...(Number(o.cap) > 0 ? { cap: Number(o.cap) } : {}), ...(Array.isArray(o.p4Roots) ? { p4Roots: o.p4Roots } : {}) };
   // a turn's snapshot carries less than a move may (SNAP_CAP, o.snapCap in tests): one goes up at every turn's end
-  // whose work changed, so a big untracked file is not sent again and again; a move still carries up to the cap
+  // (and every 2 minutes mid-turn) whose work changed, so a big untracked file is not sent again and again; a move
+  // still carries up to the cap
   const snapOpts = { ...packOpts, cap: Math.min(Number(o.snapCap) > 0 ? Number(o.snapCap) : SNAP_CAP, packOpts.cap || W.CAP) };
+  const liveNew = Number(o.liveNew) > 0 ? Number(o.liveNew) : LIVE_NEW; // o.liveNew in tests
   const selfDir = typeof o.selfDir === 'string' && o.selfDir ? o.selfDir : __dirname; // the checkout Fleet View runs from
   // o.stays(mainRoot) -> [globs] of the files that stay on this machine in that repo (fleet-view.js stays-on rules;
   // the main checkout's folder, so a worktree goes by its repo): tracked or not, never packed (a move or a snapshot),
@@ -232,12 +259,16 @@ function createCarry(o = {}) {
       try { await storage().remove([...new Set(rels.slice(i, i + 900))]); } catch (e) { log(`${short(id)}: old pack objects could not be removed (${clip(e.message)})`); }
     }
   }
-  // upload a pack (the blobs the list does not name yet) and add it to the list -> its entry
-  function uploadPack(id, packed, kind, extra = {}) {
+  // upload a pack (the blobs the list does not name yet) and add it to the list -> its entry; maxNew: the most it may
+  // upload that is not up already (CarryError 'live_big' before anything goes up)
+  function uploadPack(id, packed, kind, extra = {}, maxNew = Infinity) {
     return serial(id, async () => {
       const st = storage();
       const idx = await readIndex(id);
       const have = new Set(idx.packs.flatMap((p) => Object.keys(p.blobs)));
+      let fresh = 0;
+      for (const [h, buf] of packed.blobs) if (!have.has(h)) fresh += buf.length;
+      if (fresh > maxNew) throw new CarryError(`no snapshot mid-turn: ${Math.ceil(fresh / 1048576)} MB of it is new, more than one sends; the turn's end sends it`, 'live_big');
       const sizes = {};
       for (const [h, buf] of packed.blobs) {
         sizes[h] = buf.length;
@@ -251,10 +282,15 @@ function createCarry(o = {}) {
       const record = Buffer.from(JSON.stringify({ v: 1, id, manifest: packed.manifest, blobs: sizes }), 'utf8');
       await st.upload(recordRel(id, pack), K.sealChunk(record, key, recordRel(id, pack)), { upsert: true });
       const entry = { pack, kind, by: device(), at: iso(now()), record: sha(record), blobs: sizes, summary: packed.manifest.summary || null, ...extra };
-      // keep: the newest KEEP_SNAPSHOTS snapshots, and move packs younger than a day
+      // keep: the newest KEEP_SNAPSHOTS snapshots of each device (each stamps at by its own clock, so one running ahead
+      // never pushes another's out) and the one just made, and move packs younger than a day
       const all = [...idx.packs, entry];
       const snaps = all.filter((p) => p.kind === 'snapshot').sort((a, b) => (a.at < b.at ? 1 : -1));
-      const oldSnaps = new Set(snaps.slice(KEEP_SNAPSHOTS).map((p) => p.pack));
+      const per = new Map(), oldSnaps = new Set();
+      for (const p of snaps) {
+        const n = per.get(lower(p.by)) || 0;
+        if (p !== entry && n >= KEEP_SNAPSHOTS) oldSnaps.add(p.pack); else per.set(lower(p.by), n + 1);
+      }
       const t = now();
       const keepIt = (p) => !oldSnaps.has(p.pack) && !(p.kind === 'move' && p !== entry && t - Date.parse(p.at) > MOVE_PACK_MS);
       const left = all.filter(keepIt), gone = all.filter((p) => !keepIt(p));
@@ -379,6 +415,7 @@ function createCarry(o = {}) {
       local: { cwd, root: info.root, kind: m.kind, envBase, env, pack: entry.pack, left: ws.left.slice(), ...(stay ? { stay } : {}) },
     };
   }
+  // f.taken: it was taken over from its last snapshot while this machine was off (putAwayTaken), not handed over
   async function putAwayAfter(local, f = {}) {
     if (!local || local.kind !== 'git') return { stashed: null, why: 'nothing to put away' };
     // never the checkout this Fleet View runs from (its own files would change under the running server); o.selfDir
@@ -391,8 +428,9 @@ function createCarry(o = {}) {
       log(`${short(f.id)}: its changes stay in ${local.root}: another chat here works in it`);
       return { stashed: null, why: 'another chat here works in that checkout' };
     }
-    const stashed = await work.putAway(local.cwd, `fleet-view: moved to ${f.toName || 'another machine'} ${iso(now())} (${lower(f.id)})`, { keep: local.left || [], ...(Array.isArray(local.stay) ? { stay: local.stay } : {}) });
-    log(`${short(f.id)}: its changes here are put away${stashed ? ` (stash ${stashed.slice(0, 8)})` : ' (there were none)'}: they went to ${f.toName || 'the other machine'}`);
+    const to = f.toName || 'another machine';
+    const stashed = await work.putAway(local.cwd, `fleet-view: ${f.taken ? `taken over by ${to} while this machine was off` : `moved to ${to}`} ${iso(now())} (${lower(f.id)})`, { keep: local.left || [], ...(Array.isArray(local.stay) ? { stay: local.stay } : {}) });
+    log(`${short(f.id)}: its changes here are put away${stashed ? ` (stash ${stashed.slice(0, 8)})` : ' (there were none)'}: ${f.taken ? `${to} took it over from its last snapshot while this machine was off` : `they went to ${f.toName || 'the other machine'}`}`);
     return { stashed, why: null };
   }
   function envFiles(local) {
@@ -750,6 +788,8 @@ function createCarry(o = {}) {
       else if (f.forced) s.push(`${from} was offline, so only the conversation came (as of its last upload): its work is still on ${from}.`);
       else s.push(`${from} runs an older Fleet View, so its work did not come with it: it is still on ${from}.`);
     }
+    const lag = res ? codeLag(f.snapshot, f.logAt) : null;
+    if (lag) s.push(`Careful: the code here is as of ${lag.code}, the conversation as of ${lag.log}. What this chat changed after ${lag.code} is not in these files (${res.manifest && res.manifest.kind === 'git' ? `${from} puts it in a git stash once it is back on` : `it is still on ${from}`}): check the files before going on.`);
     for (const n of (res && Array.isArray(res.notes) ? res.notes : []).slice(0, 2)) s.push(`Note: ${n}.`);
     const left = (w && Array.isArray(w.left) ? w.left : f.snapshot && Array.isArray(f.snapshot.left) ? f.snapshot.left : []).filter((x) => typeof x === 'string');
     if (left.length) s.push(`Not carried, as ${left.length === 1 ? 'it looks' : 'they look'} like ${left.length === 1 ? 'a secret' : 'secrets'} (still on ${from}): ${left.slice(0, 5).join(', ')}.`);
@@ -763,7 +803,7 @@ function createCarry(o = {}) {
   const notes = notesStore(dataDir, now);
   const saveNote = (id, note) => notes.save(id, note), getNote = (id) => notes.get(id), dropNote = (id) => notes.drop(id);
 
-  // ---------- snapshots: a portable chat's work at the end of a turn ----------
+  // ---------- snapshots: a portable chat's work at the end of a turn, and mid-turn ----------
   const lastSig = new Map(); // id -> the last snapshot's signature here
   async function signature(info) {
     const h = crypto.createHash('sha256');
@@ -796,20 +836,57 @@ function createCarry(o = {}) {
     walk(dir, '');
     return h.digest('hex');
   }
+  // this machine's snapshots of it but keep (a pack id) go: its older stays' ones, at a takeover
+  function dropMine(id, keep) {
+    return serial(id, async () => {
+      const idx = await readIndex(id);
+      const mine = (p) => p.kind === 'snapshot' && lower(p.by) === lower(device()) && p.pack !== keep;
+      const gone = idx.packs.filter(mine);
+      if (!gone.length) return 0;
+      const left = idx.packs.filter((p) => !mine(p));
+      await writeIndex(id, { v: 1, id, packs: left });
+      await removeObjects(id, gone, left);
+      return gone.length;
+    });
+  }
+  // nothing changed since this machine's newest snapshot (sig): its checked says when the work was last seen the same
+  // (best effort: without it a pickup's note only warns more than it needs to)
+  const checkedAt = new Map(); // id -> when checked was last written here
+  async function markChecked(id, sig) {
+    if (now() - (checkedAt.has(id) ? checkedAt.get(id) : -Infinity) < CHECKED_MS) return;
+    checkedAt.set(id, now());
+    await serial(id, async () => {
+      const idx = await readIndex(id);
+      const mine = idx.packs.filter((p) => p.kind === 'snapshot' && lower(p.by) === lower(device())).sort((a, b) => (a.at < b.at ? 1 : -1))[0];
+      if (!mine || mine.sig !== sig) return;
+      mine.checked = iso(now());
+      await writeIndex(id, idx);
+    });
+  }
   async function snapshot(f) {
+    if (!f.force) return snapOnce(f);
+    let entry = null;
+    try { entry = await snapOnce(f); return entry; } finally {
+      try { await dropMine(lower(f.id), entry && entry.pack); } catch (e) { log(`${short(f.id)}: its older snapshots here could not be removed (${clip(e && e.message)})`); }
+    }
+  }
+  async function snapOnce(f) {
     const id = lower(f.id);
     if (pinnedHere(id)) return null;
-    const cwd = f.file ? C.lastMeta(f.file).cwd : null;
+    const cwd = typeof f.cwd === 'string' && f.cwd ? f.cwd : f.file ? C.lastMeta(f.file).cwd : null;
     if (typeof cwd !== 'string' || !cwd || !isDir(cwd)) return null;
     const info = await work.inspect(cwd, packOpts);
     if (info.kind !== 'portable') return null;
     const sig = await signature(info);
     if (!sig) return null;
-    if (!lastSig.has(id)) {
+    if (!f.force && !lastSig.has(id)) {
       const prev = await newestSnapshot(id, device());
       if (prev && prev.sig) lastSig.set(id, prev.sig);
     }
-    if (lastSig.get(id) === sig) return null;
+    if (!f.force && lastSig.get(id) === sig) {
+      try { await markChecked(id, sig); } catch {}
+      return null;
+    }
     let packed;
     const stay = staysOf(info.mainRoot || info.root);
     try { packed = await work.pack(cwd, stay ? { ...snapOpts, stay } : snapOpts); } catch (e) {
@@ -818,15 +895,59 @@ function createCarry(o = {}) {
     }
     const ws = withoutSecrets(packed);
     packed = ws.packed;
-    const entry = await uploadPack(id, packed, 'snapshot', { sig, left: ws.left.slice(0, 20) });
+    const entry = await uploadPack(id, packed, 'snapshot', { sig, left: ws.left.slice(0, 20) }, f.live ? liveNew : Infinity);
     lastSig.set(id, sig);
+    checkedAt.set(id, now());
+    if (info.git) markSnapped(id, { cwd, head: info.head || null, left: ws.left.slice(0, 100) });
     log(`${short(id)}: a snapshot of its work (${plural(packed.manifest.summary.files, 'file', 'files')}) for a pickup while this machine is off`);
     return entry;
   }
 
+  // ---------- back after a pickup while this machine was off ----------
+  // The git chats this machine left a snapshot of: <dataDir>/sync/snapped.json { v: 1, ids: { <id>: { cwd, head, left, at } } },
+  // the newest 500. When another machine took one over from its snapshot while this one was off, the mover finds it
+  // here and putAwayTaken puts this checkout's changes away, once; a chat handed over the usual way is forgotten
+  // (forgetSnapped), as its own put-away happened then.
+  const snappedFile = () => path.join(S.syncDir(dataDir), 'snapped.json');
+  const readSnapped = () => { if (!dataDir) return {}; const j = C.readState(snappedFile(), null); return j && j.v === 1 && j.ids && typeof j.ids === 'object' ? j.ids : {}; };
+  function markSnapped(id, rec) {
+    if (!dataDir) return;
+    try {
+      const all = readSnapped();
+      all[id] = { cwd: rec.cwd, head: rec.head, left: rec.left, at: iso(now()) };
+      const keep = Object.entries(all).sort((a, b) => (a[1].at < b[1].at ? 1 : -1)).slice(0, 500);
+      C.writeState(snappedFile(), { v: 1, ids: Object.fromEntries(keep) });
+    } catch (e) { log(`${short(id)}: snapped.json could not be written (${clip(e && e.message)})`); }
+  }
+  const snapped = () => Object.keys(readSnapped()).filter((id) => UUID_RE.test(id));
+  function forgetSnapped(id) {
+    const all = readSnapped();
+    if (!all[lower(id)]) return false;
+    delete all[lower(id)];
+    C.writeState(snappedFile(), { v: 1, ids: all });
+    return true;
+  }
+  // putAwayTaken({ id, toName, list }) -> { stashed, why }: the changes in the checkout of its last snapshot here go
+  // in a stash (putAwayAfter's rules: never the checkout Fleet View runs from, nor one another live chat works in;
+  // the secret-looking files that snapshot left out and the env files stay), and it is forgotten whatever happens
+  async function putAwayTaken(f) {
+    const id = lower(f.id), rec = readSnapped()[id];
+    if (!rec) return { stashed: null, why: 'no snapshot of it here' };
+    forgetSnapped(id);
+    if (typeof rec.cwd !== 'string' || !isDir(rec.cwd)) return { stashed: null, why: 'its folder is gone' };
+    const info = await work.inspect(rec.cwd, packOpts);
+    if (info.kind !== 'portable' || !info.git) return { stashed: null, why: info.why || 'not a git checkout' };
+    // HEAD moved since that snapshot (commits, another branch, the worktree made again): what is there now is newer
+    // work than the chat's, so it stays as it is
+    if (rec.head && info.head !== rec.head) return { stashed: null, why: 'its checkout moved on since (another commit or branch), so it stays as it is' };
+    const stay = staysOf(info.mainRoot || info.root);
+    const local = { kind: 'git', cwd: rec.cwd, root: info.root, left: Array.isArray(rec.left) ? rec.left.filter((x) => typeof x === 'string') : [], ...(stay ? { stay } : {}) };
+    return putAwayAfter(local, { id, toName: f.toName, list: f.list, taken: true });
+  }
+
   return {
     packOut, putAwayAfter, envFiles, logins, peerAllowed, fetchPack, newestSnapshot, dropPack, unpackIn, undo, relocateLog,
-    secretsIn, ready, installDeps, noteText, saveNote, getNote, dropNote, snapshot, readIndex,
+    secretsIn, ready, installDeps, noteText, saveNote, getNote, dropNote, snapshot, readIndex, snapped, forgetSnapped, putAwayTaken, codeLag,
   };
 }
 
@@ -854,4 +975,4 @@ function notesStore(dataDir, now = Date.now) {
   };
 }
 
-module.exports = { createCarry, notesStore, CarryError, TOOLS, PIECE, KEEP_SNAPSHOTS };
+module.exports = { createCarry, notesStore, codeLag, CarryError, TOOLS, PIECE, KEEP_SNAPSHOTS };

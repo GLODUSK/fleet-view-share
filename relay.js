@@ -1729,7 +1729,7 @@ function createRelay(opts = {}) {
     return [200, { ok: true, id: dv.id }];
   }
   // ---------- linked computers (link.js, docs/link.md) ----------
-  // another of Henry's machines, its key made by link.js's pairing (confirmed on both screens): a paired device of kind
+  // another of Henry's machines, its key made by link.js's pairing (which runs by itself): a paired device of kind
   // 'computer' from the start, with no QR code and no handshake. One per peer: a newer link replaces the older one.
   // -> its view; throws when it can't be kept
   async function addComputer(o = {}) {

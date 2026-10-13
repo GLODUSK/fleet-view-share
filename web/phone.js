@@ -148,7 +148,7 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
   function listHtml() {
     if (!status) return '';
     const t = Date.now();
-    // (another of Henry's computers, linked in the Sync card, is a device of the relay too: not listed here)
+    // (another of Henry's computers, linked through sync, is a device of the relay too: not listed here)
     const rows = status.devices.filter((d) => d.kind !== 'computer' && (d.state === 'paired' || (d.state === 'pending' && !(code && d.id === code.id) && d.exp > t)));
     if (!rows.length) return '<div class="sy-line sy-dim">No phone is paired yet.</div>';
     return rows.map((d) => {

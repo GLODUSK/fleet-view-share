@@ -25,8 +25,10 @@
 //     the link, runs the ready check; any failure fails the job before the claim (what it laid down goes again).
 //     ready gets cwd (that folder), missing [{ what, how }], notes, note (a [Fleet View] note for Claude is kept:
 //     <dataDir>/sync/notes.json) and work; the move's pack is dropped after the claim, and dependencies install.
-//   Every device, at the end of each turn of a portable chat it hosts and owns (busy, then idle, in the host's list):
-//     carry.snapshot, a pack of its work when it changed, for a pickup while this device is off.
+//   Every device, for a portable chat it hosts and owns: carry.snapshot, a pack of its work when it changed, for a
+//     pickup while this device is off: at the end of each turn (busy, then idle, in the host's list), every 2 minutes
+//     while a turn runs, and right after it took the chat over. Back after another device took one over from its
+//     snapshot while this one was off: its changes here go in a stash (takenAway, carry.putAwayTaken).
 //
 //   createMover({ api, dataDir, key, log, now, up, down, host, isOpen, me, home, projects, isLive, findLog, trusted,
 //                 trust, timing, carry })
@@ -84,8 +86,10 @@
 //   reply that stopped changing for 60 s), cancelled. waiting (A busy; not for a terminal outside the host), offline
 //   and noanswer can be forced: in waiting the ask goes out again with force (A ends the session mid-turn); offline or
 //   noanswer, B takes the last copy A uploaded: pull, then the same conditional claim on owner A and the sha256 B laid
-//   down. Not while A's lease_until on it is ahead (A ran it in the last 3 minutes), and not when A's reply changed
-//   after the force (A is there after all: the ask, now with force, has A hand it over itself). After a forced claim
+//   down. Not while A's lease_until on it is ahead (A ran it in the last 3 minutes), unless A is offline and its lease
+//   has not moved for 2 minutes on this clock (a dead host's lease, or one its clock put far ahead, holds nobody up
+//   longer than it takes to see the host is off), and not when A's reply changed after the force (A is there after
+//   all: the ask, now with force, has A hand it over itself). After a forced claim
 //   the uploader stays held 30 s more, then forget() again: a chunk A still had on its way (its uploader looks at the
 //   owner every 20 s) lands before this device writes one of the same number, and the uploader takes over what the
 //   server has by then. A pull that finds this PC's copy longer or different fails the job ("This PC has lines in this
@@ -149,6 +153,8 @@ const TIMING = {
   pendingTries: 3, // a pull that finds a side file mid-upload is tried this many times...
   pendingWaitMs: 2e3, // ...this far apart
   unwatchedMs: 5 * 60e3, // a job nobody asked about (move() or status()) this long is cancelled while A has not started
+  snapLiveMs: 2 * 60e3, // mid-turn, a snapshot of a portable chat's work this often (it goes up only when it changed)
+  liveBigMs: 10 * 60e3, // ...or this long after one that had more new bytes than a mid-turn one sends (sync-carry.js LIVE_NEW)
 };
 // B's job phases that are still under way (the rest: ready, failed, cancelled)
 const ACTIVE = new Set(['asking', 'waiting', 'ending', 'uploading', 'downloading', 'claiming', 'offline', 'noanswer']);
@@ -282,6 +288,7 @@ function createMover(o = {}) {
   const afterForce = new Map(); // id -> until when the uploader stays held after a forced claim here
   const staleAsks = new Map(); // id -> 'nonce|at' of an ask this device dropped as stale (its delete may not have gone)
   const nullSince = new Map(); // id -> since when a hosted session has had no status
+  const leases = new Map(); // id -> { until, at }: B's jobs: the newest lease_until of A's seen on it, and when (this clock)
   const devices = { at: -Infinity, byId: new Map() }; // id -> { name, lastSeen (ms, as written), changedAt (this clock) }
   let asks = new Map(), replies = new Map(); // id -> opened row, from the last poll
   let lastTouch = -Infinity, lastLease = -Infinity, lastWatch = -Infinity;
@@ -581,6 +588,9 @@ function createMover(o = {}) {
       gone.set(x.id, { device: x.to, at: now() });
       claimed.delete(x.id); // claimed here once, and gone again since
       log(`${short(x.id)}: it continues on ${name} now`);
+      // let go here (released): its snapshot here no longer says it was taken while this machine was off (takenAway);
+      // one taken by force before this machine released it is put away there
+      if (x.final && carry && typeof carry.forgetSnapped === 'function') { try { carry.forgetSnapped(x.id); } catch {} }
       // its work went with it: what is left here is put away (a stash, never deleted), unless another chat works there
       if (carry && x.local) {
         const local = x.local;
@@ -678,7 +688,7 @@ function createMover(o = {}) {
   const envPathsOf = (c) => (c.work && Array.isArray(c.work.envPaths) ? c.work.envPaths : undefined);
   async function carryIn(j, r, f = {}) {
     const name = j.from.name;
-    const c = { work: f.work || null, ref: f.ref || null, snapshot: f.snapshot || null, forced: !!f.forced, res: null, copied: null, missing: [], notes: [], undone: false };
+    const c = { work: f.work || null, ref: f.ref || null, snapshot: f.snapshot || null, forced: !!f.forced, logAt: f.logAt || null, res: null, copied: null, missing: [], notes: [], undone: false };
     j.laid.carry = c;
     if (!carry || !c.ref || !c.ref.pack) return true;
     setJob(j, 'downloading', { note: c.snapshot ? `laying down ${name}'s last snapshot of the work` : 'laying the work down' });
@@ -720,8 +730,32 @@ function createMover(o = {}) {
   // offline or noanswer: force takes the last copy A uploaded, though not while A's lease on it is ahead (A's
   // heartbeat: A runs it in its host), as the last listing has it or the row the last forced pull read
   function stuck(j, phase, note) {
-    const left = Math.max(secsTo((ownersRaw().get(j.id) || {}).leaseUntil), secsTo(j.leaseUntil));
+    const left = leaseLeft(j);
     return setJob(j, phase, { note: left ? `${note}; it was running it there moments ago, so it can be taken over in ${left} s` : note, canForce: !left });
+  }
+  // a lease_until of A's on it (the listing's or the row's, ms): a newer one than seen before was renewed just now
+  // (A renews by putting it further ahead, so an older listing never counts as a change)
+  function seeLease(id, ms) {
+    if (!Number.isFinite(ms)) return;
+    const s = leases.get(id);
+    if (!s || ms > s.until) leases.set(id, { until: ms, at: now() });
+  }
+  // every tick: the leases the listing has on the rows other devices own, so a pickup asked for later knows how long
+  // A's lease has stood still (since this device started, at the least); the rest are forgotten
+  function watchLeases() {
+    const own = ownersRaw();
+    for (const [id, v] of own) seeLease(lower(id), v && v.leaseUntil);
+    for (const id of [...leases.keys()]) if (!own.has(id) && !jobs.has(id)) leases.delete(id);
+  }
+  // the whole seconds A's lease still holds a forced pickup up, or 0. None once A is offline and its lease has not
+  // moved for offlineMs on this clock: A renews it every leaseEveryMs while it runs the chat, so its host stopped (off,
+  // asleep, out of reach), and a dead host's lease (or one its clock put far ahead) holds nobody up for longer than it
+  // takes to see the host is off. A lease that moved since (A runs it after all) holds it up again.
+  function leaseLeft(j) {
+    const left = Math.max(secsTo((ownersRaw().get(j.id) || {}).leaseUntil), secsTo(j.leaseUntil));
+    if (!left) return 0;
+    const s = leases.get(j.id);
+    return s && isOffline(j.from.device) && now() - s.at >= tm.offlineMs ? 0 : left;
   }
   // forced, with A offline or not answering: the last copy A uploaded
   async function takeLast(j) {
@@ -732,16 +766,21 @@ function createMover(o = {}) {
     const row = r.row || {};
     if (lower(row.owner_device) !== j.from.device) return failJob(j, `it changed on ${name} meanwhile; try again`);
     if (!HEX64_RE.test(String(row.sha256 || ''))) return failJob(j, `${name} never uploaded any of it`);
+    // the row as read now: a lease renewed since the listing (A runs it after all) holds it up again
     const lease = Date.parse(row.lease_until);
-    if (secsTo(lease)) { j.leaseUntil = lease; return stuck(j, j.forceFrom || 'noanswer', j.forceFrom === 'offline' ? `${name} is offline` : `${name} stopped answering`); }
+    j.leaseUntil = Number.isFinite(lease) ? lease : null;
+    seeLease(j.id, j.leaseUntil);
+    if (leaseLeft(j)) return stuck(j, j.forceFrom || 'noanswer', j.forceFrom === 'offline' ? `${name} is offline` : `${name} stopped answering`);
     if (!sameBytes(path.join(r.dir, `${j.id}.jsonl`), Number(row.size), row.sha256)) return failJob(j, `it changed on ${name} meanwhile; try again`);
     j.final = { size: Number(row.size), sha256: row.sha256, generation: Number(row.generation) };
     j.laid = { dir: r.dir, folder: r.folder, row };
     j.forced = true;
-    // the work: A's newest snapshot (a portable chat's work at the end of its last turn there), if it left one
+    // the work: A's newest snapshot (a portable chat's work at the end of a turn there, or mid-turn every snapLiveMs),
+    // if it left one; logAt, when the log went up last (A's clock, as the snapshot's at), says how far the code lags
     let snap = null;
     if (carry) { try { snap = await carry.newestSnapshot(j.id, j.from.device); } catch (e) { log(`${short(j.id)}: ${name}'s snapshots could not be read (${clip(e && e.message)})`); } }
-    if (!(await carryIn(j, r, { ref: snap, snapshot: snap, forced: true }))) return;
+    const logAt = Date.parse(row.updated_at);
+    if (!(await carryIn(j, r, { ref: snap, snapshot: snap, forced: true, logAt: Number.isFinite(logAt) ? logAt : null }))) return;
     log(`${short(j.id)}: taking the last copy ${name} uploaded`);
     await claim(j);
   }
@@ -803,10 +842,18 @@ function createMover(o = {}) {
       let installing = null;
       try { installing = c.res ? carry.installDeps(c.res.into) : null; } catch {}
       try {
-        carry.saveNote(j.id, carry.noteText({ fromName: name, toName: myName(), at: now(), cwd, work: c.work, res: c.res, snapshot: c.snapshot, forced: c.forced, copied: c.copied, missing, installing }));
+        carry.saveNote(j.id, carry.noteText({ fromName: name, toName: myName(), at: now(), cwd, work: c.work, res: c.res, snapshot: c.snapshot, forced: c.forced, logAt: c.logAt, copied: c.copied, missing, installing }));
         noted = true;
       } catch (e) { log(`${short(j.id)}: its note could not be kept (${clip(e && e.message)})`); }
-      if (c.res && c.ref && c.ref.pack && !c.snapshot) { const pack = c.ref.pack; track(carry.dropPack(j.id, pack).catch((e) => log(`${short(j.id)}: its move's pack could not be removed (${clip(e && e.message)})`))); }
+      // the page's missing list says it too: the code laid down is older than the conversation
+      const lag = c.res && typeof carry.codeLag === 'function' ? carry.codeLag(c.snapshot, c.logAt) : null;
+      if (lag) missing.unshift({ what: `what this chat changed after ${lag.code}`, how: `the code here is as of ${lag.code}, the conversation as of ${lag.log}: the newer changes are still on ${name}` });
+      const pack = c.res && c.ref && c.ref.pack && !c.snapshot ? c.ref.pack : null;
+      const drop = pack ? () => carry.dropPack(j.id, pack).catch((e) => log(`${short(j.id)}: its move's pack could not be removed (${clip(e && e.message)})`)) : null;
+      // the work as it is here now is this machine's first snapshot of it, so a pickup while this one is off never
+      // finds an older one it left in an earlier stay; the move's pack goes after it (their blobs go up once)
+      if (typeof carry.snapshot === 'function') snapSoon(j.id, { cwd, after: drop });
+      else if (drop) track(drop());
     }
     j.ready = { cwd, account, trusted: ok2, missing, notes, note: noted, work: c && c.res ? { branch: c.res.branch || null, into: c.res.into, summary: (c.res.manifest && c.res.manifest.summary) || null, snapshot: !!c.snapshot } : null };
     j.endedAt = now();
@@ -997,6 +1044,33 @@ function createMover(o = {}) {
       try { await host.kill(p.id); log(`${short(id)}: ended here: ${nameOf(owner)} has it now`); } catch (e) { logOnce(`kill|${id}`, `${short(id)}: the session could not be ended (${clip(e && e.message)})`); }
     }
   }
+  // Back after another device took a chat over from this one's snapshot while this one was off (asleep, crashed, out of
+  // reach): a git chat this device left a snapshot of (sync-carry.js snapped()) that another device owns now, though
+  // this one never let it go (a hand-over forgets it: finishOut). What its checkout here has is what the other device
+  // laid down or newer, so it goes in a stash ("taken over by <B> while this machine was off"; never deleted, never the
+  // checkout Fleet View runs from, nor one another live chat here works in), once its session here has ended (the
+  // watcher ends it once idle) and the row says so. Same round as the watcher.
+  // Never without the host's list (a host still starting would look like no chat works in that checkout).
+  async function takenAway(list) {
+    if (!Array.isArray(list) || !host) return;
+    if (!carry || typeof carry.snapped !== 'function' || typeof carry.putAwayTaken !== 'function') return;
+    const own = ownersRaw(), held = heldNow();
+    for (const id of carry.snapped()) {
+      if (stopping) return;
+      const d = lower((own.get(id) || {}).device);
+      const j = jobs.get(id);
+      if (!d || d === me || held.has(id) || outs.has(id) || recentlyClaimed(id) || (j && ACTIVE.has(j.phase))) continue;
+      if (hostedIn(list, id) || live(id)) continue;
+      let row;
+      try { row = await getRow(id); } catch { continue; }
+      const owner = row ? lower(row.owner_device) : '';
+      if (!owner || owner === me) continue;
+      try {
+        const r = await carry.putAwayTaken({ id, toName: nameOf(owner), list });
+        if (!r.stashed && r.why) log(`${short(id)}: ${nameOf(owner)} took it over while this machine was off; nothing put away here (${r.why})`);
+      } catch (e) { log(`${short(id)}: its changes here could not be put away (${clip(e && e.message)})`); }
+    }
+  }
   async function heartbeat(list) {
     const t = now();
     if (t - lastTouch >= tm.touchMs) {
@@ -1039,16 +1113,28 @@ function createMover(o = {}) {
     return [404, { ok: false, message: 'no such route' }];
   }
 
-  // ---------- the end of a turn: a snapshot of a portable chat's work, for a pickup while this machine is off ----------
-  // A hosted chat this device owns that was working and is idle now (its status in the host's list): sync-carry.js
-  // packs its work and uploads it when it changed since the last snapshot. One at a time, in the background.
+  // ---------- snapshots of a portable chat's work, for a pickup while this machine is off ----------
+  // A hosted chat this device owns: at the end of each turn (busy, then idle in the host's list), every snapLiveMs while
+  // a turn runs (a crash in a long turn then loses minutes of its code, not the whole turn), and right after it was
+  // taken over here (snapSoon with cwd: where it resumes). sync-carry.js packs its work and uploads it only when it
+  // changed since the last snapshot (git status first, so a turn that changed nothing costs one look). One at a time,
+  // in the background; a mid-turn one that fails or is skipped leaves the next one, or the turn's end, to try again.
   const wasBusy = new Map(); // id -> busy at the last look
-  const snapQueue = [];
+  const liveSnapAt = new Map(); // id -> when its turn was first seen running here, or its last mid-turn snapshot asked
+  const snapQueue = []; // [{ id, cwd, force, live, after }]
   let snapping = null;
+  // cwd: the folder (else the log's last cwd), and always a new snapshot (the one at a takeover); live: a mid-turn one,
+  // which uploads only a little that is new (sync-carry.js LIVE_NEW); after(): runs once it is done or failed (the
+  // move's pack goes then)
+  function snapSoon(id, f = {}) {
+    const queued = !f.cwd && snapQueue.find((e) => e.id === id && !e.cwd);
+    if (queued) { if (!f.live) queued.live = false; return; }
+    snapQueue.push({ id, cwd: f.cwd || null, force: !!f.cwd, live: !f.cwd && !!f.live, after: typeof f.after === 'function' ? f.after : null });
+  }
   function turnEnds(list) {
-    if (!carry || typeof carry.snapshot !== 'function' || !Array.isArray(list)) return;
-    const own = ownersRaw(), seen = new Set();
-    for (const p of list) {
+    if (!carry || typeof carry.snapshot !== 'function') return;
+    const own = ownersRaw(), seen = new Set(), t = now();
+    for (const p of Array.isArray(list) ? list : []) {
       if (!p || !p.alive || typeof p.id !== 'string') continue;
       const id = lower(p.id);
       if (!UUID_RE.test(id)) continue;
@@ -1056,18 +1142,33 @@ function createMover(o = {}) {
       const busy = p.status === 'busy' || p.status === 'shell' || (p.status === 'waiting' && p.waitingFor !== 'dialog open');
       const was = wasBusy.get(id);
       wasBusy.set(id, busy);
-      if (was === true && !busy && !own.has(id) && !outs.has(id) && !snapQueue.includes(id)) snapQueue.push(id);
+      const mine = !own.has(id) && !outs.has(id);
+      if (!busy) { liveSnapAt.delete(id); if (was === true && mine) snapSoon(id); continue; }
+      if (!liveSnapAt.has(id)) liveSnapAt.set(id, t);
+      else if (t - liveSnapAt.get(id) >= tm.snapLiveMs && mine) { liveSnapAt.set(id, t); snapSoon(id, { live: true }); }
     }
-    for (const id of [...wasBusy.keys()]) if (!seen.has(id)) wasBusy.delete(id);
+    if (Array.isArray(list)) for (const id of [...wasBusy.keys()]) if (!seen.has(id)) { wasBusy.delete(id); liveSnapAt.delete(id); }
     if (snapping || !snapQueue.length) return;
-    const id = snapQueue.shift();
+    const e = snapQueue.shift();
     snapping = track((async () => {
       try {
-        const row = await getRow(id);
+        const row = await getRow(e.id);
         if (!row || lower(row.owner_device) !== me || row.state !== 'active') return;
-        const file = findLog(id);
-        if (file) await carry.snapshot({ id, file });
-      } catch (e) { logOnce(`snap|${id}`, `${short(id)}: no snapshot of its work (${clip(e && e.message)})`); }
+        const file = e.cwd ? null : findLog(e.id);
+        if (!e.cwd && !file) return;
+        const entry = await carry.snapshot({ id: e.id, file, cwd: e.cwd, force: e.force, live: e.live });
+        // handed over while it uploaded: it is not one this machine was off for (takenAway), so it is forgotten again
+        if (entry && typeof carry.forgetSnapped === 'function') {
+          const r2 = await getRow(e.id).catch(() => null);
+          if (outs.has(e.id) || gone.has(e.id) || !r2 || lower(r2.owner_device) !== me) carry.forgetSnapped(e.id);
+        }
+      } catch (err) {
+        // a mid-turn one with too much that is new: the turn's end sends it, and the next mid-turn one waits longer
+        if (err && err.code === 'live_big') { liveSnapAt.set(e.id, now() + tm.liveBigMs - tm.snapLiveMs); logOnce(`snapbig|${e.id}`, `${short(e.id)}: ${clip(err.message)}`); }
+        else logOnce(`snap|${e.id}`, `${short(e.id)}: no snapshot of its work (${clip(err && err.message)})`);
+      } finally {
+        if (e.after) await e.after();
+      }
     })().finally(() => { snapping = null; }));
   }
 
@@ -1081,12 +1182,16 @@ function createMover(o = {}) {
     try { await loadDevices(); } catch (e) { logOnce('devices', `the device names could not be read (${clip(e && e.message)})`); }
     letGo();
     try { await poll(); said.delete('poll'); } catch (e) { logOnce('poll', `the move requests could not be read (${clip(e && e.message)})`); writeAway(); return; }
+    watchLeases();
     const list = await hostList();
     turnEnds(list);
     const guard = async (what, fn) => { try { await fn(); } catch (e) { log(`${what} failed: ${clip(e && e.message)}`); } };
     await guard('answering the requests', () => stepOwner(list));
     for (const j of [...jobs.values()]) { if (stopping) break; await guard(`${short(j.id)}`, () => stepJob(j)); }
-    if (!stopping && now() - lastWatch >= tm.watchMs) await guard('the watcher', () => watch(list));
+    if (!stopping && now() - lastWatch >= tm.watchMs) {
+      await guard('the watcher', () => watch(list));
+      await guard('the put-away after a takeover', () => takenAway(list));
+    }
     if (!stopping) await guard('the heartbeat', () => heartbeat(list));
     writeAway();
     const t = now();

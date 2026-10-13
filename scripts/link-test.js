@@ -1,21 +1,28 @@
 // The link between machines: a test of link.js and realtime.js with two real relay.js instances, run with the system
 // node:   node scripts/link-test.js
-// Two machines, a Mac (R, the one that asks) and a PC (A), each with its relay and its link, meet in fakes the test
-// plays: Supabase's settings and devices tables (an in-memory REST with like./in./eq. filters, each machine's reads
-// passing a hook a man in the middle can use), Supabase Realtime (a hub that joins channels, answers heartbeats, carries
+// Two machines, a Mac (R, the lower device id, so the one that asks) and a PC (A), each with its relay and its link,
+// meet in fakes the test plays: Supabase's settings and devices tables (an in-memory REST with like./in./eq. filters,
+// each machine's reads passing a hook a man in the middle can use; every machine marked alive gets its last_seen_at
+// moved every 30 s, as the mover does), Supabase Realtime (a hub that joins channels, answers heartbeats, carries
 // broadcasts to the others on a topic and keeps presence), and each machine's Fleet View (an HTTP server on a spare
 // port that checks the API token, the marker and the peer header). One fake clock and one timer queue for all.
-// It checks: nothing opens (no socket, no key read) with nothing linked; pairing end to end with the same 6-digit code
-// on both, nothing kept until BOTH confirmed, both relays then serving each other as a computer and the keys agreeing
-// across the two machines, the rows gone after; calls both ways (GET /peer/status through the relay with the peer
-// header and the marker, a message with the marker, a big answer in parts down, a big body in parts up, a 429 passed
-// on, a lost answer asked again with the same id getting the kept answer and the server hit once); a phone still
-// refused the /peer/ routes; presence (offline at once when the other relay's socket drops, online again when it
-// rejoins); a man in the middle swapping keys gets two different codes, and a reveal that does not match its commitment
-// is refused with nothing linked; decline; a pairing that runs out; unlink taking effect on both at once (the notice);
-// unlink while the other machine is off (the gone row, read when it comes back); linking again after an unlink; and the
-// pace (the flows above poll every 5 s by a timing option): by default the rows are read every 60 s while nothing
-// pairs, and every second while a pairing is under way.
+// It checks: nothing opens (no socket, no key read) with nothing linked; the lower id asks by itself, and the other
+// machine, started later, links within a minute with no click and no code, one pairing only, both relays then serving
+// each other as a computer and the keys agreeing across the two machines, the rows gone after; calls both ways (GET
+// /peer/status through the relay with the peer header and the marker, a message with the marker, a big answer in parts
+// down, a big body in parts up, a 429 passed on, a lost answer asked again with the same id getting the kept answer and
+// the server hit once); a phone still refused the /peer/ routes; presence (offline at once when the other relay's
+// socket drops, online again when it rejoins); unlink taking effect on both at once (the notice) and sticking (the mark:
+// neither links by itself for ten minutes); Link after it (the higher id pressing it) linking again; unlink while the
+// other machine is off (the mark, read when it comes back, and it sticks there too); a restart keeping the link (no new
+// pairing); an older version's gone row still unlinking, and the link coming back by itself with no mark; a reveal
+// that does not match its commitment refused with nothing linked, then the retry linking by itself; both pressing Link
+// at once (one pairing goes on, the higher id drops its own); and, with a third machine and two that never answer:
+// the higher id waits graceMs before it asks, the lower asks at once, a pairing runs out, a machine that went away is
+// not asked again, and is asked at once when its last_seen_at moves again; and the pace (the flows above poll every
+// 5 s by a timing option): by default the rows are read every 60 s while nothing pairs, every second while one does.
+// Since 2026-10-13 nothing is compared on screen: whoever has the sync key and Henry's sign-in can link a machine (a man
+// in the middle who swaps both keys links each side with himself), the trust docs/link.md "The locks" states.
 // Exit 0 = all pass. Everything in a temp folder, deleted at the end. No network.
 'use strict';
 const fs = require('fs');
@@ -98,7 +105,8 @@ const pick = (row, sel) => (!sel || sel === '*' ? { ...row } : Object.fromEntrie
 const calls = [];
 async function rest(who, method, table, o = {}) {
   const q = o.query || {};
-  calls.push({ who, method, table, query: { ...q } });
+  const one = o.body && !Array.isArray(o.body) && typeof o.body.key === 'string' ? o.body : null;
+  calls.push({ who, method, table, query: { ...q }, key: one ? one.key : null, v: one && /^link/.test(one.key) ? openRow(one) : null });
   if (!db[table]) throw new Error(`no table ${table}`);
   if (method === 'GET') {
     const rows = db[table].filter((r) => match(r, q)).map((r) => pick(r, q.select));
@@ -118,6 +126,13 @@ async function rest(who, method, table, o = {}) {
 const linkRows = () => db.settings.filter((r) => /^link/.test(r.key)).map((r) => r.key).sort();
 const openRow = (r) => JSON.parse(K.openText(r.value_enc, SYNC_KEY, `setting:${r.key}`));
 const sealRow = (k, v) => K.sealText(JSON.stringify(v), SYNC_KEY, `setting:${k}`);
+// the asks written so far, by whom (and to whom)
+const asks = (who, to) => calls.filter((c) => c.method === 'POST' && /^link:[0-9a-f]{16}:ask$/.test(c.key || '') && (!who || c.who === who) && (!to || c.v.to === to));
+// the mover's heartbeat: every machine marked alive gets its last_seen_at moved every 30 s
+function beat() {
+  for (const d of db.devices) if (d.alive) d.last_seen_at = new Date(clock.t).toISOString();
+  timers.setTimeout(beat, 30e3);
+}
 
 // ---------- Supabase Realtime: a hub ----------
 const hub = { topics: new Map(), socks: [], drop: null };
@@ -214,10 +229,10 @@ function memStore() {
   const s = { kind: 'memory', reads: 0, writes: 0, read: async () => { s.reads++; return text; }, write: async (t) => { s.writes++; text = t; }, clear: async () => { s.writes++; text = null; }, peek: () => text, stamp: () => null };
   return s;
 }
-async function machine(name, platform) {
-  const m = { name, id: crypto.randomUUID(), dataDir: path.join(T, name), seen: [], logs: [], apiToken: crypto.randomBytes(32).toString('hex'), relayKey: crypto.randomBytes(32).toString('hex'), tamper: null };
+async function machine(name, platform, id) {
+  const m = { name, id, dataDir: path.join(T, name), seen: [], logs: [], apiToken: crypto.randomBytes(32).toString('hex'), relayKey: crypto.randomBytes(32).toString('hex'), tamper: null };
   fs.mkdirSync(m.dataDir, { recursive: true });
-  db.devices.push({ id: m.id, user_id: UID, name, platform, last_seen_at: new Date(clock.t).toISOString() });
+  db.devices.push({ id: m.id, user_id: UID, name, platform, last_seen_at: new Date(clock.t).toISOString(), alive: true });
   m.srv = await fleetView(m);
   m.relayKeys = memStore();
   m.linkKeys = memStore();
@@ -242,49 +257,47 @@ async function machine(name, platform) {
 const pairOf = (m, pid) => (m.link.status().pairings || []).find((p) => p.pid === pid) || null;
 const pairWith = (m, other) => (m.link.status().pairings || []).find((p) => p.peer.id === other.id) || null;
 const linked = (m, other) => !!(m.link.status().machines || []).find((x) => x.id === other.id && x.linked);
+const machineOf = (m, other) => (m.link.status().machines || []).find((x) => x.id === other.id) || {};
 const comps = (m) => m.relay.computers();
 
 async function main() {
-  const R = await machine('MAC', 'darwin');
-  const A = await machine('PC', 'win32');
+  beat();
+  const [lo, hi] = [crypto.randomUUID(), crypto.randomUUID()].sort();
+  const R = await machine('MAC', 'darwin', lo);
+  const A = await machine('PC', 'win32', hi);
+  const offRow = L.offKey(R.id, A.id);
 
-  // ---------- off: nothing linked, nothing opens ----------
+  // ---------- one machine alone: nothing linked, nothing opens, and it asks by itself ----------
   await R.link.start();
-  await A.link.start();
-  await advance(20e3);
+  await advance(2e3);
   eq(hub.socks.length, 0, 'nothing linked: no socket at all (relay or link)');
   eq([R.linkKeys.reads, A.linkKeys.reads, R.relayKeys.reads, A.relayKeys.reads], [0, 0, 0, 0], 'nothing linked: no key read');
   const st0 = R.link.status();
   ok(st0.running && st0.me && st0.me.id === R.id, 'status says running, and this machine');
-  eq(st0.machines.map((x) => [x.id, x.name, x.linked]), [[A.id, 'PC', false]], 'the other machine listed, not linked');
+  eq(st0.machines.map((x) => [x.id, x.name, x.linked, x.unlinked, x.linking]), [[A.id, 'PC', false, false, true]], 'the other machine listed: not linked, linking');
   const notYet = await R.link.call(A.id, 'GET', '/peer/status');
   eq([notYet.s, notYet.b.code], [0, 'not_linked'], 'a call to a machine not linked: s 0, not_linked');
   eq((await R.link.request(R.id))[0], 400, 'linking with itself: 400');
   eq((await R.link.request(crypto.randomUUID()))[0], 404, 'linking with a machine sync does not list: 404');
-
-  // ---------- pairing ----------
-  const [c1, r1] = await R.link.request(A.id);
-  ok(c1 === 200 && /^[0-9a-f]{16}$/.test(r1.pid), `request: 200 with a pid (${c1})`);
-  const pid = r1.pid;
-  eq((await R.link.request(A.id))[0], 409, 'a second request while one is under way: 409');
-  ok(await until(() => pairOf(A, pid) && pairOf(R, pid) && pairOf(A, pid).state === 'confirm' && pairOf(R, pid).state === 'confirm', 20e3), 'both sides reach confirm');
-  const codeR = pairOf(R, pid).code, codeA = pairOf(A, pid).code;
-  ok(/^\d{6}$/.test(codeR), `a 6-digit code (${codeR})`);
-  eq(codeA, codeR, 'the same code on both machines');
-  eq(pairOf(A, pid).role, 'answer', 'the PC answers');
-  eq(pairOf(A, pid).peer.name, 'MAC', 'the PC sees who asks');
+  eq(asks(R, A.id).length, 1, 'the Mac (the lower id) asked the PC by itself, with no click');
+  const pid = asks(R, A.id)[0].key.split(':')[1];
+  eq(pairOf(R, pid) && pairOf(R, pid).state, 'asking', 'and waits for its answer');
+  eq((await R.link.request(A.id))[0], 409, 'Link while it is being made: 409');
   // the rows as Supabase holds them: sealed, and the ask carries only a commitment
   const askRow = db.settings.find((r) => r.key === `link:${pid}:ask`);
   ok(askRow && !/epk/.test(askRow.value_enc) && typeof openRow(askRow).commit === 'string' && !('epk' in openRow(askRow)), 'the ask is sealed and holds a commitment, no key');
-  // only one side confirmed: nothing kept
-  eq((await R.link.confirm(pid))[0], 200, 'confirm on the Mac: 200');
-  eq((await R.link.confirm(pid))[0], 409, 'confirm again: 409');
+
+  // ---------- the other machine starts: linked within a minute, no click, no code ----------
   await advance(30e3);
-  eq([comps(R).length, comps(A).length, linked(R, A), linked(A, R)], [0, 0, false, false], 'confirmed on one side only: nothing kept on either');
-  eq([pairOf(R, pid).state, pairOf(A, pid).state], ['confirmed', 'confirm'], 'the Mac waits for the PC');
-  eq((await A.link.confirm(pid))[0], 200, 'confirm on the PC: 200');
-  ok(await until(() => linked(R, A) && linked(A, R), 20e3), 'both linked once both confirmed');
-  eq([pairOf(R, pid).state, pairOf(A, pid).state], ['linked', 'linked'], 'both pairings say linked');
+  const t0 = clock.t;
+  await A.link.start();
+  ok(await until(() => linked(R, A) && linked(A, R), 60e3), 'the PC starts: both linked, with nothing pressed');
+  ok(clock.t - t0 <= 60e3, `within a minute (${Math.round((clock.t - t0) / 1000)} s)`);
+  eq([pairOf(R, pid) && pairOf(R, pid).state, pairOf(A, pid) && pairOf(A, pid).state], ['linked', 'linked'], 'both pairings say linked');
+  eq(pairOf(A, pid).role, 'answer', 'the PC answered');
+  eq(pairOf(A, pid).peer.name, 'MAC', 'the PC knows who asked');
+  eq([asks().length, asks(A).length], [1, 0], 'one pairing only: the PC (the higher id) never asked');
+  ok(!('code' in pairOf(R, pid)), 'no code anywhere');
   eq(comps(A).map((c) => [c.peer, c.name]), [[R.id, 'MAC']], 'the PC\'s relay serves the Mac as a computer');
   eq(comps(R).map((c) => [c.peer, c.name]), [[A.id, 'PC']], 'the Mac\'s relay serves the PC as a computer');
   // the keys agree across the machines: what one calls with is what the other's relay opens with
@@ -298,7 +311,7 @@ async function main() {
   const peersJson = JSON.parse(fs.readFileSync(path.join(R.dataDir, 'link', 'peers.json'), 'utf8'));
   ok(peersJson.peers.length === 1 && peersJson.peers[0].peer === A.id && !JSON.stringify(peersJson).includes(rToA.k), 'peers.json: the PC, no key');
   ok(await until(() => linkRows().length === 0, 20e3), 'the rows are deleted once both kept it');
-  ok(!R.logs.concat(A.logs).some((t) => t.includes(codeR) || t.includes(rToA.k)), 'no code or key in the logs');
+  ok(!R.logs.concat(A.logs).some((t) => t.includes(rToA.k) || t.includes(aToR.k)), 'no key in the logs');
 
   // ---------- calls ----------
   ok(await until(() => R.link.online(A.id) === true && A.link.online(R.id) === true, 20e3), 'each sees the other online');
@@ -386,114 +399,141 @@ async function main() {
   r = await pass(R.link.call(A.id, 'GET', '/peer/status'));
   eq(r.s, 200, 'and calls go through again');
 
-  // ---------- unlink: both at once ----------
+  // ---------- unlink: both at once, and it sticks ----------
   const [uc] = await R.link.unlink(A.id);
   eq(uc, 200, 'unlink on the Mac: 200');
   eq([comps(R).length, linked(R, A)], [0, false], 'the Mac forgot the PC at once');
   ok(await until(() => !linked(A, R) && comps(A).length === 0, 10e3), 'the PC unlinked too (the notice)');
   r = await pass(A.link.call(R.id, 'GET', '/peer/status'));
   eq(r.b.code, 'not_linked', 'the PC can no longer call the Mac');
-  ok(await until(() => linkRows().length === 0, 20e3), 'the gone row is read and deleted');
   eq(JSON.parse(R.linkKeys.peek() || 'null'), null, 'the Mac\'s link keys are cleared');
+  ok(linkRows().includes(offRow), 'the unlink mark is written');
+  eq(openRow(db.settings.find((x) => x.key === offRow)).by, R.id, 'naming who unlinked');
+  const asked0 = asks().length;
+  await advance(10 * 60e3);
+  eq([linked(R, A), linked(A, R), asks().length - asked0], [false, false, 0], 'ten minutes on: still unlinked, and neither asked');
+  eq([machineOf(R, A).unlinked, machineOf(A, R).unlinked, machineOf(R, A).linking], [true, true, false], 'both say unlinked');
+  eq(linkRows(), [offRow], 'the mark stays');
 
-  // ---------- linking again ----------
-  async function linkBoth(asker, other) {
-    const [, out] = await asker.link.request(other.id);
-    if (!(await until(() => pairOf(other, out.pid) && pairOf(other, out.pid).state === 'confirm' && pairOf(asker, out.pid) && pairOf(asker, out.pid).state === 'confirm', 20e3))) return false;
-    await other.link.confirm(out.pid);
-    await asker.link.confirm(out.pid);
-    return until(() => linked(asker, other) && linked(other, asker), 20e3);
-  }
-  ok(await linkBoth(A, R), 'linked again, the PC asking this time');
+  // ---------- Link after it: from either machine ----------
+  const [lc, lo1] = await A.link.request(R.id);
+  ok(lc === 200 && lo1.pid, `Link on the PC (the higher id): 200 (${lc})`);
+  ok(!linkRows().includes(offRow), 'Link takes the mark away');
+  ok(await until(() => linked(R, A) && linked(A, R), 30e3), 'linked again, no code');
+  eq(pairOf(R, lo1.pid) && pairOf(R, lo1.pid).role, 'answer', 'the Mac answered the PC this time');
   ok(await until(() => R.link.online(A.id) === true, 20e3), 'online again');
   r = await pass(R.link.call(A.id, 'GET', '/peer/status'));
   eq(r.s, 200, 'calls work on the new link');
+  ok(await until(() => linkRows().length === 0, 20e3), 'its rows go');
 
-  // ---------- unlink while the other machine is off: the gone row ----------
+  // ---------- unlink while the other machine is off: the mark ----------
   await A.link.stop();
   await R.link.unlink(A.id);
-  ok(linkRows().some((k) => k === `link-gone:${A.id}:${R.id}`), 'a gone row waits for the PC');
+  ok(linkRows().includes(offRow), 'the mark waits for the PC');
   eq(comps(A).length, 1, 'the PC (its link off) still has the Mac');
   A.link = A.makeLink();
   await A.link.start();
   eq(A.link.peers().map((p) => p.id), [R.id], 'the PC\'s link starts with the Mac from peers.json');
-  ok(await until(() => A.link.peers().length === 0 && comps(A).length === 0, 20e3), 'it reads the gone row and unlinks');
-  ok(await until(() => linkRows().length === 0, 10e3), 'and deletes the row');
-  ok(await linkBoth(R, A), 'and they can link again after that');
+  ok(await until(() => A.link.peers().length === 0 && comps(A).length === 0, 20e3), 'it reads the mark and unlinks');
+  await advance(5 * 60e3);
+  eq([linked(R, A), linked(A, R), linkRows()], [false, false, [offRow]], 'and stays unlinked: the mark holds there too');
+  const [lc2] = await R.link.request(A.id);
+  eq(lc2, 200, 'Link on the Mac');
+  ok(await until(() => linked(R, A) && linked(A, R), 30e3), 'and they link again');
+  ok(await until(() => linkRows().length === 0, 20e3), 'the mark and the pairing\'s rows go');
 
-  // ---------- a man in the middle (he has the sync key and serves each side its own rows) ----------
+  // ---------- a restart keeps the link ----------
+  const lk2 = (m) => JSON.parse(m.linkKeys.peek() || '{}');
+  const devBefore = lk2(R)[A.id] && lk2(R)[A.id].dev;
+  await R.link.stop();
+  await A.link.stop();
+  R.link = R.makeLink();
+  A.link = A.makeLink();
+  const asked1 = asks().length;
+  await A.link.start();
+  await R.link.start();
+  ok(await until(() => R.link.online(A.id) === true && A.link.online(R.id) === true, 30e3), 'both restarted: online on the same link');
+  await advance(5 * 60e3);
+  eq([linked(R, A), linked(A, R), lk2(R)[A.id] && lk2(R)[A.id].dev, asks().length - asked1], [true, true, devBefore, 0], 'the link from before is kept: no new pairing');
+  r = await pass(R.link.call(A.id, 'GET', '/peer/status'));
+  eq(r.s, 200, 'and calls go through');
+
+  // ---------- an older version's gone row: it unlinks, and with no mark the two link again by themselves ----------
+  const goneKey = `link-gone:${A.id}:${R.id}`;
+  db.settings.push({ key: goneKey, value_enc: sealRow(goneKey, { v: 1, from: R.id, to: A.id, devs: [lk2(A)[R.id].dev], at: clock.t }), user_id: UID });
+  ok(await until(() => !linked(A, R), 20e3), 'the PC reads the gone row and unlinks');
+  ok(!linkRows().includes(goneKey), 'and deletes it');
+  ok(await until(() => linked(R, A) && linked(A, R) && lk2(R)[A.id].dev !== devBefore, 60e3), 'no mark: they link again by themselves, with new keys');
+
+  // ---------- a reveal that does not match its commitment, then the retry ----------
   await R.link.unlink(A.id);
   await until(() => !linked(A, R), 10e3);
-  await until(() => linkRows().length === 0, 20e3);
-  const m1 = RL.xPair(), m2 = RL.xPair(), n1 = crypto.randomBytes(16);
+  const m1 = RL.xPair();
   const swap = (rows, step, fn) => rows.map((row) => {
     if (!row.key || !row.key.endsWith(`:${step}`) || !row.value_enc) return row;
-    const v = fn(openRow(row));
-    return { ...row, value_enc: sealRow(row.key, v) };
+    return { ...row, value_enc: sealRow(row.key, fn(openRow(row))) };
   });
-  A.tamper = (table, rows) => (table !== 'settings' ? rows : swap(swap(rows, 'ask', (v) => ({ ...v, commit: L.commitOf(m1.pub, n1) })), 'reveal', (v) => ({ ...v, epk: m1.pub.toString('base64url'), n: n1.toString('base64url') })));
-  R.tamper = (table, rows) => (table !== 'settings' ? rows : swap(rows, 'answer', (v) => ({ ...v, epk: m2.pub.toString('base64url') })));
-  const [, mo] = await R.link.request(A.id);
-  ok(await until(() => pairOf(A, mo.pid) && pairOf(A, mo.pid).state === 'confirm' && pairOf(R, mo.pid) && pairOf(R, mo.pid).state === 'confirm', 20e3), 'with a man in the middle both reach confirm');
-  ok(pairOf(A, mo.pid).code !== pairOf(R, mo.pid).code, `but the two codes differ (${pairOf(R, mo.pid).code} / ${pairOf(A, mo.pid).code})`);
-  await R.link.decline(mo.pid);
-  ok(await until(() => pairOf(A, mo.pid) && pairOf(A, mo.pid).state === 'declined', 20e3), 'Henry declines on the Mac: the PC says declined');
-  eq([comps(R).length, comps(A).length], [0, 0], 'nothing linked');
-  // a reveal that does not match its commitment (he swaps only the reveal)
   A.tamper = (table, rows) => (table !== 'settings' ? rows : swap(rows, 'reveal', (v) => ({ ...v, epk: m1.pub.toString('base64url') })));
-  R.tamper = null;
-  await until(() => linkRows().length === 0, 70e3);
   const [, wo] = await R.link.request(A.id);
   ok(await until(() => pairOf(A, wo.pid) && pairOf(A, wo.pid).state === 'failed', 20e3), 'a reveal that does not match the commitment: the PC refuses');
   ok(/someone may be in the middle/.test(pairOf(A, wo.pid).message || ''), 'and says why');
   ok(await until(() => pairOf(R, wo.pid) && pairOf(R, wo.pid).state === 'failed', 20e3), 'the Mac hears no and fails too');
   eq([comps(R).length, comps(A).length, linked(R, A), linked(A, R)], [0, 0, false, false], 'nothing linked');
   A.tamper = null;
-  await until(() => linkRows().length === 0, 70e3);
+  ok(await until(() => linked(R, A) && linked(A, R), L.TIMING.retryMs + 30e3), 'a minute later it tries again by itself, and links');
 
-  // ---------- decline, and a pairing that runs out ----------
-  const [, d1] = await R.link.request(A.id);
-  await until(() => pairOf(A, d1.pid) && pairOf(A, d1.pid).state === 'confirm', 20e3);
-  await A.link.decline(d1.pid);
-  ok(await until(() => pairOf(R, d1.pid) && pairOf(R, d1.pid).state === 'declined', 20e3), 'declined on the PC: the Mac says declined');
-  ok(/Declined on PC/.test(pairOf(R, d1.pid).message || ''), 'naming where');
-  await until(() => linkRows().length === 0, 70e3);
-  const [, e1] = await R.link.request(A.id);
-  await until(() => pairOf(A, e1.pid) && pairOf(A, e1.pid).state === 'confirm', 20e3);
-  await advance(L.TIMING.pairMs + 5e3);
-  ok(await until(() => pairOf(R, e1.pid) && pairOf(R, e1.pid).state === 'expired' && pairOf(A, e1.pid) && pairOf(A, e1.pid).state === 'expired', 30e3), 'a pairing nobody confirms runs out on both');
-  ok(await until(() => linkRows().length === 0, 70e3), 'and its rows go');
-  eq([comps(R).length, comps(A).length], [0, 0], 'nothing linked');
-
-  // ---------- the pace: every 60 s while nothing pairs, every second while one does ----------
-  {
-    const Z = { name: 'ZED', id: crypto.randomUUID(), tamper: null };
-    const GHOST = crypto.randomUUID(); // a machine sync lists that never answers
-    db.devices.push({ id: Z.id, user_id: UID, name: 'ZED', platform: 'linux', last_seen_at: new Date(clock.t).toISOString() }, { id: GHOST, user_id: UID, name: 'GHOST', platform: 'linux', last_seen_at: new Date(clock.t).toISOString() });
-    const zSync = { enabled: () => true, uid: async () => UID, email: async () => 'henry@example.com', accessToken: async () => 'test-token', onChange: () => () => {}, rest: (method, table, o) => rest(Z, method, table, o) };
-    const zl = L.createLink({ api: zSync, key: SYNC_KEY, dataDir: path.join(T, 'ZED'), log: () => {}, relay: { addComputer: async () => {}, removeComputer: async () => 0, computers: () => [] }, device: () => Z.id, name: 'ZED', now, timers, WebSocketImpl: wsClass('link:ZED'), keyStore: memStore(), readConfig: () => CONFIG });
-    const reads = () => calls.filter((c) => c.who === Z && c.method === 'GET' && c.table === 'settings').length;
-    eq([L.TIMING.pollMs, L.TIMING.pairPollMs], [60e3, 1e3], 'pace: the rows every 60 s while nothing pairs, every second while one does');
-    await zl.start();
-    await advance(1e3);
-    const r0 = reads();
-    await advance(300e3);
-    ok(r0 >= 1 && reads() - r0 === 5, `pace: idle, 5 reads in 5 minutes (${reads() - r0})`);
-    const [cz] = await zl.request(GHOST);
-    eq(cz, 200, 'pace: a pairing asked');
-    const r1 = reads();
-    await advance(10e3);
-    ok(reads() - r1 >= 9, `pace: while it pairs, a read every second (${reads() - r1} in 10 s)`);
-    await zl.stop();
-    db.devices = db.devices.filter((d) => d.id !== Z.id && d.id !== GHOST);
-    db.settings = db.settings.filter((r) => !/^link/.test(r.key));
-  }
+  // ---------- both press Link at once: one pairing goes on ----------
+  await R.link.unlink(A.id);
+  await until(() => !linked(A, R), 10e3);
+  const [[bc1, bo1], [bc2, bo2]] = await Promise.all([R.link.request(A.id), A.link.request(R.id)]);
+  eq([bc1, bc2], [200, 200], 'Link on both: 200 each');
+  ok(await until(() => linked(R, A) && linked(A, R), 30e3), 'linked');
+  eq([pairOf(R, bo1.pid) && pairOf(R, bo1.pid).state, pairOf(A, bo2.pid) && pairOf(A, bo2.pid).state], ['linked', 'cancelled'], 'the Mac\'s ask (the lower id) went on; the PC dropped its own');
+  eq([comps(R).length, comps(A).length], [1, 1], 'one link each way');
+  ok(await until(() => linkRows().length === 0, 20e3), 'and every row goes');
 
   // ---------- off ----------
   await R.link.stop();
   await A.link.stop();
   ok(openSocks('link:MAC').length === 0 && openSocks('link:PC').length === 0, 'stopped: the links\' sockets are closed');
   eq((await pass(R.link.call(A.id, 'GET', '/peer/status'))).b.code, 'stopped', 'a call after stop: stopped');
+
+  // ---------- who asks, machines that go away, and the pace (a third machine, and two that never answer) ----------
+  {
+    const LOW = '00000000-0000-4000-8000-000000000000', HIGH = 'ffffffff-ffff-4fff-bfff-ffffffffffff';
+    const Z = { name: 'ZED', id: `8${crypto.randomUUID().slice(1)}`, tamper: null };
+    db.devices = [LOW, HIGH, Z.id].map((id) => ({ id, user_id: UID, name: id === Z.id ? 'ZED' : id === LOW ? 'LOW' : 'HIGH', platform: 'linux', last_seen_at: new Date(clock.t).toISOString(), alive: true }));
+    db.settings = db.settings.filter((x) => !/^link/.test(x.key));
+    const zSync = { enabled: () => true, uid: async () => UID, email: async () => 'henry@example.com', accessToken: async () => 'test-token', onChange: () => () => {}, rest: (method, table, o) => rest(Z, method, table, o) };
+    const zl = L.createLink({ api: zSync, key: SYNC_KEY, dataDir: path.join(T, 'ZED'), log: () => {}, relay: { addComputer: async () => {}, removeComputer: async () => 0, computers: () => [] }, device: () => Z.id, name: 'ZED', now, timers, WebSocketImpl: wsClass('link:ZED'), keyStore: memStore(), readConfig: () => CONFIG });
+    const reads = () => calls.filter((c) => c.who === Z && c.method === 'GET' && c.table === 'settings').length;
+    const zm = (id) => zl.status().machines.find((x) => x.id === id) || {};
+    eq([L.TIMING.pollMs, L.TIMING.pairPollMs], [60e3, 1e3], 'pace: the rows every 60 s while nothing pairs, every second while one does');
+    await zl.start();
+    await advance(1e3);
+    eq([asks(Z, HIGH).length, asks(Z, LOW).length], [1, 0], 'who asks: a higher id is asked at once, a lower one is left to ask');
+    await advance(L.TIMING.graceMs - 10e3);
+    eq(asks(Z, LOW).length, 0, 'not before graceMs');
+    await advance(15e3);
+    eq(asks(Z, LOW).length, 1, 'after graceMs with no ask from it, the higher id asks itself');
+    // both go away (their last_seen_at stops), and their pairings run out
+    for (const d of db.devices) if (d.id !== Z.id) d.alive = false;
+    await advance(L.TIMING.pairMs + 5e3);
+    ok(zl.status().pairings.every((p) => p.state === 'expired'), `a pairing nobody answers runs out (${zl.status().pairings.map((p) => p.state)})`);
+    eq([zm(HIGH).linking, zm(LOW).linking, zm(HIGH).unlinked], [false, false, false], 'machines gone away: offline, not linking');
+    const n0 = asks(Z).length, r0 = reads();
+    await advance(300e3);
+    eq(asks(Z).length - n0, 0, 'they are not asked again while away');
+    ok(reads() - r0 === 5, `pace: idle, 5 reads in 5 minutes (${reads() - r0})`);
+    // HIGH comes back (its last_seen_at moves): asked at once, whatever the backoff
+    db.devices.find((d) => d.id === HIGH).alive = true;
+    ok(await until(() => asks(Z, HIGH).length === 2, 120e3), 'a machine back after being away is asked again at once');
+    const r1 = reads();
+    await advance(10e3);
+    ok(reads() - r1 >= 9, `pace: while it pairs, a read every second (${reads() - r1} in 10 s)`);
+    await zl.stop();
+  }
+
   await R.relay.stop();
   await A.relay.stop();
   R.srv.close();

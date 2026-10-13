@@ -29,8 +29,9 @@
 //   origin/HEAD), or null. bundle: a git bundle of the commits no refs/remotes/origin/* has (bundleRef: refs/heads/<branch>,
 //   or HEAD when detached), or null when there are none. staged: `git diff --cached`, unstaged: `git diff`, both
 //   --binary --full-index with renames, a/ b/ prefixes and no external diff or textconv whatever the machine's config
-//   says, or null when empty. trees: the tree ids of the index (`git write-tree`) and of the working tree's tracked
-//   files (the same through a copy of the index after `git add -u`): git's own view of the files, after its clean
+//   says, or null when empty. trees: the tree ids of the index (`git write-tree` on a copy of it, so a pack never
+//   takes index.lock from a git command the chat runs meanwhile) and of the working tree's tracked files (the same
+//   through a copy of the index after `git add -u`): git's own view of the files, after its clean
 //   filters, so CRLF on one machine and LF on the other compare equal. untracked: `git ls-files --others
 //   --exclude-standard` (what this machine ignores stays), as mode 100644, 100755 or 120000 (a symlink: its target
 //   is the blob), never a file or folder named .env or .env.* (any case): those are listed by path in env and travel
@@ -258,7 +259,9 @@ async function workTree(root, stay = null, index = false) {
   const idx = await gitText(root, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
   const d = tmpDir(), copy = path.join(d, 'index');
   try {
-    try { fs.copyFileSync(idx, copy); } catch {}
+    // no index yet (nothing ever added): an empty one; one that is there but did not copy fails the pack, never an
+    // empty tree that looks like every file was deleted
+    try { fs.copyFileSync(idx, copy); } catch (e) { if (fs.existsSync(idx)) throw new WorkError(`the index could not be read (${clip(e && e.message)})`, 'git'); }
     const env = { GIT_INDEX_FILE: copy };
     if (stay) await git(root, ['reset', '-q', 'HEAD', '--', ...stay.pick], { env });
     if (!index) await git(root, ['add', '-u', '--', ':/', ...(stay ? stay.skip : [])], { env });
@@ -338,7 +341,9 @@ async function pack(cwd, o = {}) {
   const unstagedDiff = await git(root, [...DIFF, ...only], diffOpts);
   const stagedSha = stagedDiff.length ? bag.add(stagedDiff, 'the staged changes') : null;
   const unstagedSha = unstagedDiff.length ? bag.add(unstagedDiff, 'the unstaged changes') : null;
-  const trees = { index: stay ? await workTree(root, stay, true) : await gitText(root, ['write-tree']), work: await workTree(root, stay) };
+  // both through a copy of the index: write-tree on the index itself takes index.lock, and a snapshot mid-turn must
+  // never make a git command of the chat's fail ("index.lock exists")
+  const trees = { index: await workTree(root, stay, true), work: await workTree(root, stay) };
 
   // files changed, as a person counts them: HEAD to the working tree with renames, plus the untracked ones
   const files = zList(await git(root, ['diff', 'HEAD', '-M', '--name-only', '-z', '--no-ext-diff', ...only])).length + untracked.length;

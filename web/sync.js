@@ -46,14 +46,11 @@
 // Set aside on this machine (N): five rows (title, repo, when), Show all for the rest, each with Bring back (POST
 // /sync/fresh { bringBack: [id] }), and Bring all back ({ bringBack: 'all' }) after a second click.
 //
-// Your machines (link.js, docs/link.md): the other machines sync knows, whether each is linked (and online), and:
-//   Link       POST /link/request { device }: the other machine's Sync card opens by itself with the request
-//   the code   both cards show the same 6 digits; "The codes match" (POST /link/confirm { pid }) on BOTH machines
-//              links them, each one then running what the other sends; Decline (POST /link/decline { pid }) on either
-//              ends it
-//   Unlink     POST /link/unlink { device }, after a second click
-// GET /link/status is read with the rest while the card is open, and every 5 seconds while it is closed (this
-// machine's own page only), so a request from another machine opens the card once, and marks the header button.
+// Your machines (link.js, docs/link.md): the other machines sync knows, each linked (online or offline), linking (they
+// link by themselves, no click), unlinked (Henry unlinked it) or offline (not linked, and not seen lately), and:
+//   Unlink     POST /link/unlink { device }, after a second click: it stays unlinked on both until Link
+//   Link       POST /link/request { device }: link it now (after an unlink, or when it did not link by itself)
+// GET /link/status is read with the rest while the card is open (this machine's own page only).
 //
 // The header pill's colour: GET /sync/activity's health (sync-run.js health(): ok, warn, bad or off, and a tip naming
 // the worst part and its error), read with the rest while the card is open and every 10 seconds while it is closed
@@ -66,10 +63,7 @@ import { icon } from './icons.js';
 import { cloneSection } from './clone.js';
 
 const POLL_MS = 3000;
-const LINK_WATCH_MS = 5000; // GET /link/status while the card is closed: a link request opens it
 const FINAL_STATES = new Set(['linked', 'declined', 'failed', 'expired', 'cancelled']);
-// a pairing that waits for Henry here: its code to compare, or a request that just came in
-const needsYou = (p) => p.state === 'confirm' || (p.role === 'answer' && p.state === 'waiting');
 const POLL_WAIT_MS = 1500; // while a sign-in is going on in the browser
 const HEALTH_WATCH_MS = 10e3; // GET /sync/activity while the card is closed: the pill's colour
 const ASIDE_SHOWN = 5; // Set aside rows before "Show all"
@@ -338,52 +332,46 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
   }
 
   // ---------- your machines (link.js) ----------
-  function pairingHtml(p) {
-    const who = `<b>${esc(p.peer.name || 'the other machine')}</b>`;
-    const digits = (s) => s.split('').map((d) => `<span>${esc(d)}</span>`).join('');
-    const code = p.code ? `<div class="sy-code" role="img" aria-label="code ${esc(p.code.split('').join(' '))}">${digits(p.code.slice(0, 3))}<i></i>${digits(p.code.slice(3))}</div>` : '';
-    const b = (c, label, cls = '') => btn(c, label, { cls, attrs: ` data-pid="${esc(p.pid)}"` });
-    const btns = (...x) => (remote() ? '' : `<div class="sy-btns">${x.join('')}</div>`);
-    if (p.state === 'asking') return `<div class="sy-pair"><div class="sy-line">${spin}Asking ${who} to link…</div><div class="sy-line sy-dim">Fleet View there opens its Sync card with a code.</div>${btns(b('link-decline', 'Cancel'))}</div>`;
-    if (p.state === 'waiting') return `<div class="sy-pair"><div class="sy-line">${spin}${who} asks to link with this machine…</div><div class="sy-line sy-dim">The code shows in a moment.</div>${btns(b('link-decline', 'Decline'))}</div>`;
-    if (p.state === 'confirm') {
-      return `<div class="sy-pair sy-pair-on">${code}<div class="sy-line sy-center">Does ${who} show the same code?</div>`
-        + '<div class="sy-line sy-dim sy-center">Confirm only if you pressed Link on one of the two just now and both screens show these digits. Once linked, each machine runs what the other sends.</div>'
-        + `${btns(b('link-confirm', 'The codes match', 'sy-go'), b('link-decline', 'Decline'))}</div>`;
-    }
-    if (p.state === 'confirmed') return `<div class="sy-pair">${code}<div class="sy-line sy-center">Confirmed here. Now confirm on ${who} too.</div>${btns(b('link-decline', 'Cancel'))}</div>`;
+  // the last pairing's word: that it just linked, or why it did not (it tries again by itself)
+  function pairingNote(m, p) {
+    if (!p || !FINAL_STATES.has(p.state) || !p.message) return '';
     const good = p.state === 'linked';
-    return `<div class="sy-line ${good ? 'sy-ok' : 'sy-warn'}">${good ? `${icon('check', 12)} ` : ''}${esc(p.message || (good ? 'Linked.' : 'It did not link.'))}</div>`;
+    if (!good && (m.linked || m.unlinked)) return '';
+    return `<div class="sy-line ${good ? 'sy-ok' : 'sy-warn'}">${good ? `${icon('check', 12)} ` : ''}${esc(p.message)}${good ? '' : ' It tries again by itself.'}</div>`;
   }
   function machineHtml(m, pairing) {
+    const linking = !m.linked && !m.unlinked && (!!m.linking || (!!pairing && !FINAL_STATES.has(pairing.state)));
     const pill = m.linked
       ? `<span class="sy-pill ${m.online === true ? 'on' : m.online === false ? 'off' : ''}">${m.online === true ? 'linked · online' : m.online === false ? 'linked · offline' : 'linked'}</span>`
-      : '<span class="sy-pill off">not linked</span>';
+      : m.unlinked ? '<span class="sy-pill off">unlinked</span>' : linking ? '<span class="sy-pill">linking…</span>' : '<span class="sy-pill off">offline</span>';
     const seen = !m.linked && m.lastSeenAt ? `<span class="sy-seen">seen ${esc(ago(m.lastSeenAt))}</span>` : '';
     let action = '', conf = '';
-    if (!remote() && (!pairing || FINAL_STATES.has(pairing.state))) {
+    if (!remote()) {
       if (confirmUnlink === m.id) {
-        conf = confirmHtml(`Unlink ${esc(m.name)}?`, 'Neither machine can call the other until you link them again.',
+        conf = confirmHtml(`Unlink ${esc(m.name)}?`, 'Neither machine can call the other, and they stay unlinked until you press Link.',
           btn('do-unlink', 'Unlink', { cls: 'sy-danger', attrs: ` data-dev="${esc(m.id)}"` }) + btn('keep-link', 'Keep', { off: false }), true);
-      } else action = btn(m.linked ? 'unlink' : 'link', m.linked ? 'Unlink' : 'Link', { cls: m.linked ? '' : 'sy-go', attrs: ` data-dev="${esc(m.id)}"` });
+      } else action = btn(m.linked || linking ? 'unlink' : 'link', m.linked || linking ? 'Unlink' : 'Link', { cls: m.linked || linking ? '' : 'sy-go', attrs: ` data-dev="${esc(m.id)}"` });
     }
+    const off = m.unlinked && !conf ? '<div class="sy-line sy-dim">Unlinked: these two don\'t link by themselves until you press Link.</div>' : '';
     return `<div class="sy-mach${m.linked ? ' linked' : ''}"><div class="sy-mrow"><span class="sy-mic">${icon('computer', 16)}</span>`
       + `<span class="sy-mt"><b title="${esc(m.name)}">${esc(m.name)}</b><span class="sy-msub">${pill}${seen}</span></span>${action}</div>`
-      + `${pairing ? pairingHtml(pairing) : ''}${conf}</div>`;
+      + `${off}${pairingNote(m, pairing)}${conf}</div>`;
   }
   function linkHtml() {
     const st = status;
     if (remote() || !st || !st.configured || !st.signedIn || !link) return '';
-    if (!link.running) return '<div class="sy-line sy-dim">Linking with your other machines works while sync runs here.</div>';
+    if (!link.running) return '<div class="sy-line sy-dim">Your machines link while sync runs here.</div>';
     const pairs = Array.isArray(link.pairings) ? link.pairings.filter((p) => p && p.peer) : [];
     const machines = Array.isArray(link.machines) ? link.machines : [];
-    const byPeer = new Map();
-    for (const p of pairs) if (!byPeer.has(p.peer.id) || needsYou(p) || !FINAL_STATES.has(p.state)) byPeer.set(p.peer.id, p);
+    const byPeer = new Map(); // one pairing each: one under way, else the newest
+    for (const p of pairs) { const was = byPeer.get(p.peer.id); if (!was || FINAL_STATES.has(was.state)) byPeer.set(p.peer.id, p); }
     const rows = machines.map((m) => machineHtml(m, byPeer.get(m.id)));
-    // a request from a machine not in the list (yet)
-    for (const p of pairs) if (!machines.some((m) => m.id === p.peer.id)) rows.push(`<div class="sy-mach">${pairingHtml(p)}</div>`);
+    // a machine not in the list (yet) that links with this one
+    for (const p of byPeer.values()) {
+      if (!machines.some((m) => m.id === p.peer.id) && !FINAL_STATES.has(p.state)) rows.push(`<div class="sy-mach"><div class="sy-line">${spin}Linking with <b>${esc(p.peer.name || 'another machine')}</b>…</div></div>`);
+    }
     if (!rows.length) return '<div class="sy-line sy-dim">No other machine syncs with this one yet.</div>';
-    return `${rows.join('')}<div class="sy-line sy-dim">Linked machines can reach each other's chats, with keys only the two of them hold.</div>`;
+    return `${rows.join('')}<div class="sy-line sy-dim">Your machines signed in to sync link by themselves, and can then reach each other's chats, with keys only the two of them hold.</div>`;
   }
 
   // the sync key: here, or being fetched from Blackbox (sync-run.js says why when it can't)
@@ -460,10 +448,9 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       if (r && r.ok) { waiting = true; note = { text: r.message || 'Your browser is opening the Google sign-in.' }; schedule(); }
       else if (r) note = { text: r.message || 'The sign-in did not start.', bad: true };
     } else if (c === 'setup') { close(); openSetup(); return; }
-    else if (c === 'link' || c === 'do-unlink' || c === 'link-confirm' || c === 'link-decline') {
+    else if (c === 'link' || c === 'do-unlink') {
       if (busy) return;
-      const url = { link: '/link/request', 'do-unlink': '/link/unlink', 'link-confirm': '/link/confirm', 'link-decline': '/link/decline' }[c];
-      const r = await act(url, c === 'link' || c === 'do-unlink' ? { device: b.dataset.dev } : { pid: b.dataset.pid });
+      const r = await act(c === 'link' ? '/link/request' : '/link/unlink', { device: b.dataset.dev });
       if (c === 'do-unlink') confirmUnlink = null;
       if (r && r.ok) note = c === 'do-unlink' ? { text: 'Unlinked.' } : null;
       else if (r) note = { text: r.message || 'It did not work.', bad: true };
@@ -570,7 +557,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
   // the header button shows only where sync is set up (a friend's install has no config): asked once at start
   // and on Henry's own machines (private), where it is how to switch between Blackbox and working locally
   if (!fixture) {
-    get('/sync/status').then((st) => { if (st && st.configured) { document.body.classList.add('sync-on'); watchLinks(); watchHealth(); } });
+    get('/sync/status').then((st) => { if (st && st.configured) { document.body.classList.add('sync-on'); watchHealth(); } });
     get('/sync/setup').then((su) => { if (su && su.private) { document.body.classList.add('sync-on'); watchHealth(); } });
   }
   // the pill's colour while the card is closed (refresh() reads it while it is open)
@@ -583,21 +570,5 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       await new Promise((r) => setTimeout(r, HEALTH_WATCH_MS));
     }
   }
-  // a link request from another machine: the card opens by itself, once per request, and the header button is marked
-  // while one waits for an answer here
-  const shown = new Set();
-  async function watchLinks() {
-    if (remote()) return;
-    if (!card) {
-      const st = await get('/link/status');
-      const waiting = st && st.running && Array.isArray(st.pairings) ? st.pairings.filter((p) => p && needsYou(p)) : [];
-      document.body.classList.toggle('link-ask', waiting.length > 0);
-      const ask = waiting.find((p) => !shown.has(p.pid));
-      for (const p of waiting) shown.add(p.pid);
-      if (ask && !card) open();
-    } else document.body.classList.remove('link-ask');
-    setTimeout(watchLinks, LINK_WATCH_MS);
-  }
-
   return { open, close, isOpen: () => !!card, toggle: () => (card ? close() : open()), health: () => health };
 }

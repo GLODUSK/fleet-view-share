@@ -15,32 +15,62 @@ the work a move carries. It is the phone's relay ([phone.md](phone.md)) with a m
 Each machine runs both halves, so a linked pair can call each other both ways. Nothing new goes in Supabase's schema:
 pairing uses `fleet_sync.settings` rows, and calls go over the same private Realtime channels the phone uses.
 
+**Linking is automatic** (Henry, 2026-10-13: "it should happen because it's Fleet View on both PCs and that's it").
+Every machine signed in to sync as Henry and holding the sync key links with every other such machine by itself, within
+about a minute of both being online: no code to compare, no click, nothing to do on the other machine. Henry only
+presses **Unlink** to take a machine out, and **Link** to let it back in.
+
 ## The locks
 
 1. **Supabase sign-in.** Both machines are signed in to sync as Henry. The channels are private (`fleet:<uid>:*`, only
    while `fleet_sync.is_member()`), and the pairing rows are his own settings rows.
-2. **The keys a pairing makes.** The sync key opens the pairing rows, but the sync key alone never links a machine:
-   anyone who can read the settings table as Henry has it. The keys come from an X25519 exchange whose 6-digit code
-   Henry compares on both screens, and the requester commits to its key before it sees the other's, so whoever carries
-   the rows can't make the two codes match (see "Pairing"). Every call is AES-256-GCM under those keys, one per
-   direction, as for the phone.
-3. **The allowlist.** A computer may call what a phone may (`ALLOW`, with every narrower check), plus `PEER_ALLOW`: the
+2. **The sync key.** The pairing rows are sealed with it, so only a machine that holds it can ask, answer or read them.
+   Sign-in and the sync key together are the trust root: the same two things that already guard every conversation log
+   sync carries. A machine that has both is one of Henry's, and links.
+3. **The keys a pairing makes.** The keys the calls use still come from an X25519 exchange (see "Pairing"), and the
+   private halves never leave each machine's memory. So someone who can only read the rows (a copy of the settings
+   table and the sync key) can't open the calls. Every call is AES-256-GCM under those keys, one per direction, as for
+   the phone.
+4. **The allowlist.** A computer may call what a phone may (`ALLOW`, with every narrower check), plus `PEER_ALLOW`: the
    `/peer/...` routes, which a phone may never call. The relay passes those on with the marker's key and the
    computer's peer (below), and Fleet View serves them only so.
 
-What it does not protect against: a process running as Henry on either machine (it can read the keys), and Henry
-confirming a code without looking at the other screen. A machine that holds the sync key can still make noise (a link
-request shows on the other machine's page; an unlink row unlinks), never a link.
+What it no longer protects against (until 2026-10-13 Henry compared a 6-digit code on both screens, which did): someone
+who stole the sync key **and** can sign in to sync as Henry can link a machine of his own, or stand in the middle of a
+pairing and link each side with himself, and then call both machines' routes as Henry's phone can. Whoever has both can
+already read and write every synced conversation, so the link adds no new way in. What it never protected against: a
+process running as Henry on either machine (it can read the keys).
 
 ## Names
 
 | Name | Meaning |
 |---|---|
 | machine id | a sync device id (`devices.id`, a lowercase UUID kept in `<dataDir>/sync/device.json`); the devices table names it by its hostname |
-| R, A | the requester (the machine where Henry pressed **Link**) and the answerer |
+| R, A | the requester (see "Who asks") and the answerer |
 | `pid` | one pairing: 16 hex digits |
 | `dev` | a relay device id: 16 characters of b64u (12 bytes), as for a phone. A link makes two: R to A, and A to R |
 | topic | `fleet:<uid>:<dev>`, as for a phone. The calling machine's link joins it with presence key `peer`, the serving machine's relay with `pc` |
+
+## Who asks
+
+Each machine, every time it reads the rows, looks at every other machine the devices table lists, and asks it to link
+when that machine is:
+
+- not linked with this one (no key for it in `peers.json`: a link both sides already keep is never made again);
+- not unlinked by Henry (no `link-off` mark between the two, see "Unlinking");
+- awake: its `last_seen_at` moved within the last 3 minutes on this machine's clock (the mover touches it every 30 s
+  while sync runs there; a machine counts as awake from the moment this one first sees it, so each start asks once);
+- with no pairing under way between the two.
+
+**The lower device id asks** (the ids compared as strings), at once. The higher one waits 3 minutes first and asks only
+when no ask came, so the two don't both ask, yet it still links when the lower one can't (an older Fleet View there, or
+a link kept there that this machine lost). If both asked anyway (both pressed **Link** at the same moment), the lower
+id's ask goes on: the higher machine drops its own (it deletes its rows: nobody answered them) and answers.
+
+A pairing that did not link (it ran out, failed or was stopped) is asked again after 1 minute, then 2, 4 and so on up
+to an hour, and at once when that machine's `last_seen_at` moves again after it was away. So a machine that was off for
+days links within about a minute of coming back: it asks at its start when its id is the lower, and otherwise the other
+machine sees it awake at its next read (every 60 s) and asks.
 
 ## Pairing
 
@@ -54,36 +84,30 @@ sees a new ask within a minute, and the rest of the pairing runs at once:
 | `link:<pid>:ask` | R | `{ v: 1, pid, from: R, fromName, to: A, commit, at }`, `commit` = b64u(sha256(`fleet-view link v1 commit` ‖ epkR ‖ nR)), nR 16 random bytes |
 | `link:<pid>:answer` | A | `{ v: 1, pid, from: A, fromName, to: R, epk, at }`, epk A's X25519 public key (b64u) |
 | `link:<pid>:reveal` | R, only after it read the answer | `{ v: 1, pid, epk, n, at }`: R's key and nR. A checks them against the commitment |
-| `link:<pid>:ok-r`, `ok-a` | that side | `{ v: 1, pid, at }`: Henry confirmed the code there |
+| `link:<pid>:ok-r`, `ok-a` | that side | `{ v: 1, pid, at }`: that side made the keys |
 | `link:<pid>:done-r`, `done-a` | that side | `{ v: 1, pid, at }`: that side keeps the link now |
 | `link:<pid>:no` | either | `{ v: 1, pid, by: 'r' \| 'a', why: 'declined' \| 'mismatch' \| 'expired' \| 'restarted', at }` |
 
-1. **Ask.** Henry presses **Link** on R (`POST /link/request { device: A }`). R makes a fresh X25519 key pair and nR,
-   and writes the ask. A answers only an ask addressed to it, from a machine the devices table lists, at most 3 at once.
-2. **Answer.** A makes its own key pair and writes the answer. Its Sync card opens by itself with the request.
+1. **Ask.** R makes a fresh X25519 key pair and nR, and writes the ask. A answers only an ask addressed to it, from a
+   machine the devices table lists and Henry did not unlink, at most 3 at once.
+2. **Answer.** A makes its own key pair and writes the answer.
 3. **Reveal.** R reads the answer and only then reveals its key and nR. A refuses a reveal that does not match the
-   commitment (`no`, `mismatch`): someone may be in the middle, and nothing is linked.
-4. **The code.** Both sides derive, from the X25519 shared secret (an all-zero one is refused) and the transcript T,
+   commitment (`no`, `mismatch`): nothing is linked. (The commitment made the codes Henry used to compare safe; with no
+   code it only catches rows that were changed on the way.)
+4. **The keys.** Both sides derive, from the X25519 shared secret (an all-zero one is refused) and the transcript T,
    which is the length-prefixed `fleet-view link v1`, pid, R, A, commit, epkA, epkR and nR:
    `salt = sha256(T)`, then HKDF-SHA256(shared, salt, info `fleet-view link v1 <x>`) for x in
    - `key r-a`, `key a-r`: 32 bytes each, R's calls to A and A's calls to R;
-   - `dev r-a`, `dev a-r`: 12 bytes each (b64u), the relay device ids of those two;
-   - `code`: 4 bytes, read as a big-endian number mod 1,000,000, six digits.
+   - `dev r-a`, `dev a-r`: 12 bytes each (b64u), the relay device ids of those two.
 
-   R shows the code once it has the answer, A once it has checked the reveal.
-5. **Confirm on both.** Henry compares the codes and presses **The codes match** on each machine
-   (`POST /link/confirm { pid }`, which writes `ok-<side>`). Each machine will run what the other sends, so a side keeps
-   the link only when it has its own confirm and sees the other's. Then:
+   Each side writes its `ok` once it has them: R right after the reveal, A once it has checked the reveal.
+5. **Keep.** A side keeps the link when it has written its own `ok` and sees the other's. Then:
    - its relay keeps the other machine: `relay.addComputer({ dev: the incoming id, name, peer, key: the incoming key })`,
      a paired device of kind `computer` in `devices.json` (no key) and `relay-keys`;
    - its link keeps the outgoing id and key: `<dataDir>/link/peers.json` `{ v: 1, peers: [{ peer, name, dev, pairedAt }] }`
      (no key), and the keys in `protectedStore(<dataDir>/link, 'link-keys')` (DPAPI, the Keychain or a 0600 file) as
      `{ <peer>: { dev, k } }`;
    - it writes `done-<side>`. A newer link with the same machine replaces the older one.
-
-**Why a man in the middle fails.** To show both machines one code, he must commit to the key he reveals to A before A's
-key is known, and pick the key he answers R with before R's key is known. Each code is then a fresh random number to
-him: they match one time in a million, and Henry sees two different codes otherwise.
 
 **Who deletes the rows.** The side that reads the other's `no` (after it took back a link it kept), R once it read
 `done-a`, and A when its own pairing ran out. A side that says `no` leaves the rows for the other to read. So a link kept
@@ -92,8 +116,11 @@ deleted 10 minutes after it ended.
 
 **Running out and restarts.** A pairing runs out 10 minutes after it began on each side's own clock (never compared with
 the other machine's). R then says `no` (`expired`), A drops what it has. The private keys live in memory only: an ask
-this machine answered (or made) before it restarted is answered `no` (`restarted`). **Decline** (`POST /link/decline
-{ pid }`) on either side says `no` (`declined`).
+this machine answered (or made) before it restarted is answered `no` (`restarted`). **Unlink** during a pairing says
+`no` (`declined`). Either way, "Who asks" asks again later by itself.
+
+Links made before 2026-10-13 (with the code) are kept as they are: `peers.json` and the relay's keys don't change, so
+nothing links again.
 
 ## Calls
 
@@ -141,14 +168,24 @@ files and tools, never what is in them.
 
 **Unlink** (`POST /link/unlink { device }`) on either machine:
 
+- a pairing under way with that machine stops (`no`, `declined`);
 - its relay revokes the other machine (`removeComputer`: the notice `revoked`, then the key is gone), and its link forgets
   its key;
 - the other machine's link hears `revoked` on its channel and unlinks too, at once;
-- for a machine that is off, it also writes `link-gone:<to>:<from>` `{ v: 1, from, to, devs, at }`. The other machine
-  unlinks when it reads it (only a link whose ids are in `devs`, so an older row never takes a newer link away) and
-  deletes it. Keeping a new link deletes the gone rows between the two machines.
+- it writes the mark `link-off:<the lower id>:<the higher id>` `{ v: 1, by, devs, at }` (`by` the machine where Henry
+  pressed it, `devs` the relay ids of the link it took away). While the mark is there **neither machine links with the
+  other by itself**, and neither answers the other's ask. A machine that was off unlinks when it reads it (only a link
+  whose ids are in `devs`), and the mark stays.
 
-`node relay.js revoke <dev>` on a computer's device unlinks both too (fleet-view.js `onComputerGone`).
+**Link** (`POST /link/request { device }`) on either machine deletes the mark and asks at once, whichever id is lower;
+from then on the two link by themselves again. It is also how to link now a machine that did not link by itself.
+
+When the mark could not be written, this machine keeps it in memory (it does not link with that one until it restarts)
+and logs why. Versions before 2026-10-13 wrote `link-gone:<to>:<from>` `{ v: 1, from, to, devs, at }` instead: the
+machine it names still unlinks when it reads it (only a link whose ids are in `devs`) and deletes it, but it leaves no
+mark, so the two then link again by themselves.
+
+`node relay.js revoke <dev>` on a computer's device unlinks both too, with the mark (fleet-view.js `onComputerGone`).
 
 ## Routes and the page
 
@@ -158,26 +195,29 @@ does (`sync-run.js`: set up, signed in, the key here), beside the mover, whose d
 
 | Route | Does |
 |---|---|
-| `GET /link/status` | `{ running, me, machines: [{ id, name, platform, lastSeenAt, linked, online, pairedAt, version }], pairings: [{ pid, role, peer, state, code?, confirmedHere, message?, at }] }`, or `{ running: false, reason }` |
-| `POST /link/request { device }` | ask that machine to link: `{ ok, pid }` |
-| `POST /link/confirm { pid }` | the code here matches the other machine's |
-| `POST /link/decline { pid }` | no |
-| `POST /link/unlink { device }` | unlink it, here and there |
+| `GET /link/status` | `{ running, me, machines: [{ id, name, platform, lastSeenAt, linked, online, pairedAt, version, unlinked, linking }], pairings: [{ pid, role, peer, state, message?, at }] }`, or `{ running: false, reason }` |
+| `POST /link/request { device }` | **Link**: delete the unlink mark and ask that machine now: `{ ok, pid }` (409 while a pairing with it is under way) |
+| `POST /link/unlink { device }` | **Unlink**: unlink it, here and there, and leave the mark: `{ ok, linked }` (`linked`: there was a link to take away) |
 
-A pairing's state: `asking` (R waits for the answer), `waiting` (A waits for the reveal), `confirm` (the code is shown),
-`confirmed` (Henry confirmed here, waiting for the other machine), then `linked`, `declined`, `failed`, `expired` or
-`cancelled`.
+A machine's `unlinked`: Henry unlinked it (the mark). `linking`: not linked and not unlinked, and it links by itself (a
+pairing is under way, or it is awake). Neither, and not linked: it is away, and links once it is back. A pairing's
+state: `asking` (R waits for the answer), `waiting` (A waits for the reveal), `linking` (this side made the keys and
+waits for the other's `ok`), then `linked`, `declined`, `failed`, `expired` or `cancelled`.
 
-The Sync card (`web/sync.js`) lists the other machines under **Your machines**: linked (online or offline) or not,
-**Link**, the code with **The codes match** and **Decline**, and **Unlink** after a second click. While the card is
-closed it reads `GET /link/status` every 5 seconds, so a request from another machine opens it once and marks the
-header's sync button. The phone card (`web/phone.js`) leaves computers out of its list.
+The Sync card (`web/sync.js`) lists the other machines under **Your machines**, each with one pill: **linked · online**,
+**linked · offline**, **linking…**, **unlinked** or **offline** (not linked, not seen lately), and when it was last seen
+for one not linked. **Unlink** (after a second click) shows for one linked or linking, **Link** for one unlinked or
+away. Under a machine: that it just linked, or why its last pairing did not link ("It tries again by itself"), and for an
+unlinked one that it stays so until Link. Nothing waits for Henry, so the card never opens by itself. The phone card
+(`web/phone.js`) leaves computers out of its list.
 
 ### The Chat tab's routes (typing into a chat the other machine runs)
 
 `link-send.js` (docs/sync-follow.md item 6, "Follow you"). For a chat another machine runs (sync-run.js `owners()`),
 the Chat tab sends, answers, stops and reads it through these, and each goes to that machine's own route through the
-link (`call()`), so its relay checks it and marks it as Henry's like the phone's. Only the fields listed go on.
+link (`call()`), so its relay checks it and marks it as Henry's like the phone's. Only the fields listed go on. Every
+chat another machine hosts goes through these, portable or bound, idle or busy: typing never moves it (remote by
+default, Henry 2026-10-13); only Continue on this machine does (`/sync/move`).
 
 | Route | Goes to (on the host) |
 |---|---|
@@ -190,7 +230,8 @@ link (`call()`), so its relay checks it and marks it as Henry's like the phone's
 
 The host's answer comes back as it is. When it can't be reached the answer is `{ ok: false, code, message }`: `bad_id`
 or `bad_request` 400, `not_elsewhere` 409 (this machine runs it), `moving` 409, `not_running` 409 (sync isn't running
-here), `not_linked` 409 ("Link <host> in the Sync card to type here"), `revoked` 409, `pc-restarted` 409, `too_large`
+here), `not_linked` 409 ("<host> isn't linked with this machine yet: they link by themselves while both are online (press Link
+in the Sync card if you unlinked it)"), `revoked` 409, `pc-restarted` 409, `too_large`
 413, `bad_answer` 502, `offline` 503, `stopped` 503, `timeout` 504.
 
 `GET /conversation?id=` for such a chat is read on the host through the link while the link to it is up (online), and
@@ -204,14 +245,19 @@ scripts/follow-plan-test.mjs` (what the Chat tab's Send does).
 ## Off
 
 With sync off there is no link: no socket, no timer and no key read. With sync on and nothing linked, the link reads
-its rows every 60 s and opens no socket. The link's keys are read only while `peers.json` lists a machine.
+its rows every 60 s (every second while it pairs) and opens no socket. The link's keys are read only while
+`peers.json` lists a machine.
 
 ## Tests
 
 `node scripts/link-test.js` (about a second, no network): two machines, each with a real relay.js and link, over a fake
-Supabase (the tables, and a Realtime hub with presence), with a fake Fleet View server each. It covers pairing end to end
-(the same code on both, nothing kept until both confirmed, the keys agreeing across the two machines, the rows deleted),
-calls both ways (`/peer/status` with the marker and the peer header, a message with the marker, parts down and up, a
-429, a lost answer asked again with the same id and run once), a phone refused the `/peer/` routes, presence, a man in
-the middle (two different codes; a reveal that does not match its commitment refused), decline, running out, unlink at
-once and through the gone row, and linking again. `node scripts/relay-test.js` still checks the relay for phones.
+Supabase (the tables, the mover's `last_seen_at` heartbeat, and a Realtime hub with presence), with a fake Fleet View
+server each. It covers linking by itself (the lower id asks with no click, the other machine started later links within
+a minute, one pairing only, the keys agreeing across the two machines, the rows deleted), calls both ways
+(`/peer/status` with the marker and the peer header, a message with the marker, parts down and up, a 429, a lost answer
+asked again with the same id and run once), a phone refused the `/peer/` routes, presence, unlink at once and sticking
+for ten minutes, Link after it from the higher id, unlink while the other machine is off (the mark read when it comes
+back), a restart keeping the link, an older version's gone row, a reveal that does not match its commitment refused and
+the retry linking, both pressing Link at once, and with machines that never answer: the higher id waiting before it
+asks, running out, a machine away not asked again and asked at once when it is back, and the pace. `node
+scripts/relay-test.js` still checks the relay for phones.

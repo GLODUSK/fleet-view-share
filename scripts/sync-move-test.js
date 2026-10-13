@@ -14,8 +14,13 @@
 //   moves it; the claim fails when the row changed; cancel deletes the rows; an ask left behind by a dead B never ends
 //   a session on A; the heartbeat and the lease; a claim counts on both sides until a listing that began after it,
 //   however late; a force from offline is dropped when A answers after all; offline is judged by last_seen_at
-//   changing, with A's clock slow or fast; force waits for A's lease (the listing's, and the row's at the pull), and a
-//   forced claim keeps the uploader held 30 s, then forgets it again; the rows are sealed; the helpers.
+//   changing, with A's clock slow or fast; force waits for A's lease while it moved lately (the listing's, and the
+//   row's at the pull), but not for a dead A's lease that stood still 2 minutes (an hour ahead by A's clock), and a
+//   forced claim keeps the uploader held 30 s, then forgets it again; the rows are sealed; the helpers. With the work
+//   (17): snapshots at a turn's end and every 2 minutes mid-turn; A off mid-turn: the pickup lays the mid-turn one
+//   down and the note and the missing list say the code is older than the conversation; the new owner snapshots at
+//   once; A back on ends its session once idle, then puts its changes away once ("taken over by ..."), never after a
+//   hand-over of its own.
 // Run: node scripts/sync-move-test.js   (exit 0 = all pass; SYNC_TEST_DIR sets the temp folder's parent)
 'use strict';
 const fs = require('fs');
@@ -76,7 +81,7 @@ const objects = new Map(); // the fleet-sync bucket: path -> bytes
 const api = {
   calls: [], rest,
   storage: {
-    async upload(rel, buf) { S.checkRel(rel); objects.set(rel, Buffer.from(buf)); return { path: rel, size: buf.length }; },
+    async upload(rel, buf) { if (api.failUploads) throw new S.SyncError('storage is out of reach', 0, 'network'); S.checkRel(rel); objects.set(rel, Buffer.from(buf)); return { path: rel, size: buf.length }; },
     async download(rel) { if (!objects.has(rel)) throw new S.SyncError('Object not found', 404, 'not_found'); return objects.get(rel); },
     async remove(rels) { for (const r of rels) objects.delete(r); return []; },
   },
@@ -778,24 +783,32 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       await step(A); // pc's heartbeat: a lease on the conversation it runs
       const leaseAt = Date.parse(rowOf(id).lease_until);
       ok(leaseAt > now(), 'lease: pc leased it');
+      // pc's clock runs an hour fast: its lease is far ahead on B's clock
+      rowOf(id).lease_until = iso(Date.parse(rowOf(id).lease_until) + 3600e3);
+      await step(B);
       A.asleep = true;
       await until(() => false, { who: [B], max: 1, stepMs: 31e3 });
       B.mover.move(id);
-      ok(await until(() => phaseOf(B, id) === 'offline', { who: [B], max: 200 }), 'lease: B sees pc offline');
+      // offline while the lease has moved within 2 minutes (pc renewed it, so it ran it there moments ago): no force
+      ok(await until(() => phaseOf(B, id) === 'noanswer' || phaseOf(B, id) === 'offline', { who: [B], max: 200 }), 'lease: B gets no answer from pc');
       let j = jobOf(B, id);
-      ok(now() < leaseAt && j.canForce === false && /^pc is offline; it was running it there moments ago, so it can be taken over in \d+ s$/.test(j.note), `lease: no force while pc's lease is ahead (${j.note})`);
+      ok(j.canForce === false && /; it was running it there moments ago, so it can be taken over in \d+ s$/.test(j.note), `lease: no force while pc's lease is ahead and moved lately (${j.note})`);
       B.mover.move(id, { force: true });
       await step(B);
-      ok(phaseOf(B, id) === 'offline' && rowOf(id).owner_device === A.me, 'lease: force did nothing');
-      ok(await until(() => jobOf(B, id).canForce, { who: [B], max: 200 }), 'lease: force once it lapsed');
-      ok(now() >= leaseAt && jobOf(B, id).note === 'pc is offline', 'lease: lapsed, the note says offline');
-      // the listing says it lapsed, but the row the pull reads has a lease again: no takeover either
-      rowOf(id).lease_until = iso(now() + 60e3);
+      ok(rowOf(id).owner_device === A.me, 'lease: force did nothing');
+      // a dead host's lease holds nobody up past the time it takes to see it is off: offline, and its lease unchanged
+      // for 2 minutes, though an hour is still left on it
+      ok(await until(() => jobOf(B, id).canForce, { who: [B], max: 200 }), 'lease: force once pc is offline and its lease stood still');
+      const leaseNow = Date.parse(rowOf(id).lease_until);
+      ok(phaseOf(B, id) === 'offline' && now() < leaseNow - 50 * 60e3 && jobOf(B, id).note === 'pc is offline', `lease: offline, the lease still far ahead, the note says offline (${jobOf(B, id).note})`);
+      // the listing has the old lease, but the row the pull reads has a newer one (pc renewed it after all): no takeover
+      rowOf(id).lease_until = iso(leaseNow + 60e3);
       B.mover.move(id, { force: true });
       await B.mover.tick(); await B.mover.settle();
       j = jobOf(B, id);
-      ok(j.phase === 'offline' && j.canForce === false && rowOf(id).owner_device === A.me, `lease: a lease the row has again stops it too (${j.phase}, ${j.note})`);
-      ok(await until(() => jobOf(B, id).canForce, { who: [B], max: 100 }), 'lease: force once that one lapsed too');
+      ok(j.phase === 'offline' && j.canForce === false && rowOf(id).owner_device === A.me, `lease: a lease the row moved again stops it too (${j.phase}, ${j.note})`);
+      ok(await until(() => jobOf(B, id).canForce, { who: [B], max: 200 }), 'lease: force once that one stood still for 2 minutes too');
+      ok(now() < leaseNow, 'lease: still before the lease ran out');
       B.mover.move(id, { force: true });
       await step(B);
       eq(phaseOf(B, id), 'ready', 'forced: ready');
@@ -966,8 +979,12 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       ok(await until(() => g(pcRepo, 'status', '--porcelain') === '?? credentials.json', { who: [PC], max: 10 }), 'carried: pc2 put its changes away once mac2 claimed it');
       ok(g(pcRepo, 'stash', 'list').includes('fleet-view: moved to mac2') && read(path.join(pcRepo, '.env.local')) !== null && read(path.join(pcRepo, 'credentials.json')) !== null, 'carried: in a stash named for the move; its env file and the secret-looking file left in place');
       fs.rmSync(path.join(pcRepo, 'credentials.json')); // Henry puts it elsewhere
+      await step(MAC);
       await MAC.mover.settle();
-      ok(!(await MAC.carry.readIndex(id)).packs.some((p) => p.kind === 'move') && ![...objects.keys()].some((k) => k.startsWith(`w/${id}/`)), 'carried: the move\'s pack is gone once laid down');
+      const idx = await MAC.carry.readIndex(id);
+      const snapAt = idx.packs.filter((p) => p.kind === 'snapshot' && p.by === MAC.me);
+      ok(!idx.packs.some((p) => p.kind === 'move') && [...objects.keys()].filter((k) => k.startsWith(`w/${id}/p/`)).join() === idx.packs.map((p) => `w/${id}/p/${p.pack}`).join(), 'carried: the move\'s pack is gone once laid down');
+      ok(snapAt.length === 1 && snapAt[0].summary.files === 3 && MAC.carry.snapped().includes(id), 'carried: mac2 left a snapshot of the work as it laid it down (a pickup while it is off never finds an older one)');
       // the peer routes answer only while this machine hands that conversation to that machine, and only so often
       eq((await PC.mover.peer('/peer/env', { id }, MAC.me))[0], 403, 'peer: no env files while nothing is being handed over');
       eq((await PC.mover.peer('/peer/logins', { id }, MAC.me))[0], 403, 'peer: no sign-ins either');
@@ -989,6 +1006,7 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       eq([read(path.join(pcRepo, 'src', 'app.js')), g(pcRepo, 'rev-parse', 'HEAD'), g(pcRepo, 'diff', '--cached', '--name-only')], ['export const a = 4;\n', pcHead, 'README.md'], 'back: mac2\'s change, the same commit, the staged change');
       ok(PC.installs.some((x) => x.tool === 'pnpm' && x.cwd === pcRepo), 'back: its dependencies install in the background (pnpm, by the lockfile)');
       ok(await until(() => g(wt, 'status', '--porcelain') === '', { who: [MAC], max: 10 }), 'back: mac2 put its changes away');
+      ok(!MAC.carry.snapped().includes(id) && !g(wt, 'stash', 'list').includes('taken over'), 'back: mac2 handed it over itself, so its snapshot record is gone (no second put-away)');
       ok(PC.gh === 'gho_PCTOKEN_0123456789' && JSON.parse(read(path.join(PC.home, '.local', 'share', 'com.vercel.cli', 'auth.json'))).token === 'vcl_PCTOKEN_abcdef123', 'back: no sign-in here was overwritten');
 
       // a checkout another live chat works in: its changes stay there after the move, and the note says so
@@ -1081,14 +1099,66 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
         const pa = await guard.putAwayAfter({ kind: 'git', root: snapPc, cwd: snapPc }, { id: id7, toName: 'mac', list: [] });
         eq([pa.stashed, pa.why], [null, 'Fleet View runs from that checkout'], 'put-away: never in the checkout Fleet View runs from');
         eq(read(path.join(snapPc, 'src', 'snap.js')), 'snap 1\n', 'put-away: its files there stay as they were');
+        // a mid-turn one with more new bytes than one sends (8 MB; 1 byte here) uploads nothing
+        const sent = [];
+        const live = CARRY.createCarry({ api: { rest: async () => [], storage: { upload: async (rel) => { sent.push(rel); } } }, key: KEY, dataDir: path.join(T, 'guard2'), log: () => {}, now: () => clock.t,
+          home: path.join(T, 'P', 'home'), device: () => PC.me, liveNew: 1 });
+        let code = null;
+        try { await live.snapshot({ id: id7, file: PC.logPath(id7), live: true }); } catch (e) { code = e.code; }
+        eq([code, sent.length], ['live_big', 0], 'mid-turn: more new bytes than one sends, none uploaded');
       }
+      clock.t += 91e3;
       await turn();
-      eq((await PC.carry.newestSnapshot(id7, PC.me)).pack, s1.pack, 'snapshot: nothing changed, no new one');
+      const s1b = await PC.carry.newestSnapshot(id7, PC.me);
+      eq(s1b.pack, s1.pack, 'snapshot: nothing changed, no new one');
+      ok(Date.parse(s1b.checked) > Date.parse(s1.at), 'snapshot: nothing changed, its checked says when it was last seen the same');
+      // the code is as old as the snapshot's at or checked, with 30 s of slack
+      {
+        const at = Date.parse('2026-10-13T10:00:58Z');
+        eq(CARRY.codeLag({ at: iso(at) }, at + 5e3), null, 'codeLag: a log 5 s after the code is not newer');
+        eq(CARRY.codeLag({ at: iso(at), checked: iso(at + 600e3) }, at + 610e3), null, 'codeLag: checked since, not newer');
+        ok(!!CARRY.codeLag({ at: iso(at), checked: iso(at + 600e3) }, at + 700e3), 'codeLag: a log well after checked is newer');
+      }
       for (let i = 2; i <= 5; i++) { write(path.join(snapPc, 'src', 'snap.js'), `snap ${i}\n`); clock.t += 1000; await turn(); }
       const snaps = (await PC.carry.readIndex(id7)).packs.filter((p) => p.kind === 'snapshot');
       eq(snaps.length, 3, 'snapshot: the newest 3 are kept');
       eq([...objects.keys()].filter((k) => k.startsWith(`w/${id7}/p/`)).length, 3, 'snapshot: the older ones\' records are gone from storage');
-      write(path.join(snapPc, 'src', 'snap.js'), 'snap 6, never in a snapshot\n');
+      // a long turn: its work goes up every 2 minutes while it runs, only when it changed
+      const newest7 = async () => (await PC.carry.newestSnapshot(id7, PC.me)).pack;
+      const s5 = await newest7();
+      PC.hosted.get(id7).status = 'busy';
+      await step(PC); // the turn begins
+      write(path.join(snapPc, 'src', 'snap.js'), 'snap 6, mid-turn\n');
+      clock.t += 60e3; await step(PC);
+      eq(await newest7(), s5, 'mid-turn: none in the turn\'s first 2 minutes');
+      clock.t += 61e3; await step(PC);
+      const mid = await PC.carry.newestSnapshot(id7, PC.me);
+      ok(mid.pack !== s5 && mid.summary.files === 1, 'mid-turn: one 2 minutes into the turn');
+      clock.t += 121e3; await step(PC);
+      eq(await newest7(), mid.pack, 'mid-turn: nothing changed since, so none 2 minutes later');
+      // a mid-turn one that fails (storage out of reach) leaves the turn's end to send it
+      write(path.join(snapPc, 'src', 'snap.js'), 'snap 6, end of the turn\n');
+      api.failUploads = true;
+      clock.t += 121e3; await step(PC);
+      api.failUploads = false;
+      ok(await newest7() === mid.pack && PC.logs.some((t) => t.includes(`${id7.slice(0, 8)}: no snapshot of its work`)), 'mid-turn: a failed one leaves no snapshot, and says why');
+      PC.hosted.get(id7).status = 'idle';
+      await step(PC);
+      const end7 = await PC.carry.newestSnapshot(id7, PC.me);
+      ok(end7.pack !== mid.pack, 'mid-turn: the turn\'s end sent it after all');
+      // the next turn: one 2 minutes in again
+      PC.hosted.get(id7).status = 'busy';
+      await step(PC);
+      write(path.join(snapPc, 'src', 'snap.js'), 'snap 7, mid-turn\n');
+      clock.t += 121e3; await step(PC);
+      const mid2 = await PC.carry.newestSnapshot(id7, PC.me);
+      ok(mid2.pack !== end7.pack, 'mid-turn: one 2 minutes into the next turn');
+      // the conversation goes on (uploaded), the code changes again, and pc2 goes off mid-turn before the next one
+      clock.t += 60e3;
+      append(PC, id7, 2, snapPc);
+      PC.up.scan();
+      const logAt7 = Date.parse(rowOf(id7).updated_at);
+      write(path.join(snapPc, 'src', 'snap.js'), 'snap 8, never in a snapshot\n');
       PC.asleep = true;
       clock.t += 4 * 60e3;
       await step(MAC);
@@ -1100,9 +1170,32 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       const j7 = jobOf(MAC, id7);
       eq(j7.phase, 'ready', `snapshot: ready (${j7.error || ''})`);
       const wt7 = path.join(macRepo, '.claude', 'worktrees', 'fv-snap');
-      eq([j7.ready.cwd, read(path.join(wt7, 'src', 'snap.js'))], [wt7, 'snap 5\n'], 'snapshot: the newest snapshot laid down in its own worktree');
-      ok(/last snapshot, as of .*Anything newer is still on pc2/.test(noteOf(MAC, id7)), 'snapshot: the note says how old the work is');
+      eq([j7.ready.cwd, read(path.join(wt7, 'src', 'snap.js'))], [wt7, 'snap 7, mid-turn\n'], 'snapshot: the newest snapshot (the mid-turn one) laid down in its own worktree');
+      eq(MAC.bytes(id7).length, server.get(id7).length, 'snapshot: the conversation as of its last upload');
+      const note7 = noteOf(MAC, id7);
+      const lag7 = CARRY.codeLag(mid2, logAt7);
+      ok(/last snapshot, as of .*Anything newer is still on pc2/.test(note7), 'snapshot: the note says how old the work is');
+      ok(!!lag7 && note7.includes(`Careful: the code here is as of ${lag7.code}, the conversation as of ${lag7.log}.`) && note7.includes('pc2 puts it in a git stash once it is back on'), `snapshot: the note says the code is older than the conversation (${note7})`);
+      ok(/^what this chat changed after \d{4}-\d\d-\d\d \d\d:\d\d UTC$/.test(j7.ready.missing[0] && j7.ready.missing[0].what) && /the newer changes are still on pc2/.test(j7.ready.missing[0].how), `snapshot: the missing list says it first (${JSON.stringify(j7.ready.missing[0])})`);
+      await step(MAC);
+      await MAC.mover.settle();
+      const macSnap = await MAC.carry.newestSnapshot(id7, MAC.me);
+      ok(macSnap && Date.parse(macSnap.at) > Date.parse(mid2.at) && MAC.carry.snapped().includes(id7), 'snapshot: mac2 left its own snapshot right after the takeover');
+      const byDev = (d) => async () => (await MAC.carry.readIndex(id7)).packs.filter((p) => p.kind === 'snapshot' && p.by === d).length;
+      eq([await byDev(PC.me)(), await byDev(MAC.me)()], [3, 1], 'snapshot: kept 3 to a device, so mac2\'s never pushes pc2\'s out');
+
+      // pc2 comes back (it was asleep, its session still mid-turn): it never writes the chat again, ends its session
+      // once idle, and only then puts its changes away, once, in a stash named for the takeover
       PC.asleep = false;
+      await until(() => false, { who: [PC], max: 20 });
+      eq([PC.hosted.get(id7).alive, read(path.join(snapPc, 'src', 'snap.js'))], [true, 'snap 8, never in a snapshot\n'], 'back on: nothing put away while its session still works');
+      eq(rowOf(id7).owner_device, MAC.me, 'back on: the row stays mac2\'s');
+      PC.hosted.get(id7).status = 'idle';
+      ok(await until(() => g(snapPc, 'stash', 'list').includes('taken over by mac2 while this machine was off'), { who: [PC], max: 60 }), 'back on: its changes went in a stash named for the takeover');
+      ok(!PC.hosted.get(id7).alive && read(path.join(snapPc, 'src', 'snap.js')) === null && g(snapPc, 'status', '--porcelain') === '', 'back on: its session ended first, and the checkout is clean');
+      await until(() => false, { who: [PC], max: 30 });
+      ok(g(snapPc, 'stash', 'list').split('\n').filter((l) => l.includes('taken over')).length === 1 && !PC.carry.snapped().includes(id7), 'back on: put away once');
+      ok(PC.logs.some((t) => /put away \(stash [0-9a-f]{8}\): mac2 took it over from its last snapshot while this machine was off/.test(t)), 'back on: logged');
       PC.hosted.delete(id7);
       await MAC.mover.settle();
       await PC.mover.settle();

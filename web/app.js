@@ -85,15 +85,16 @@
 // window.__fv exposes the shell's state for tests (with ?fixture=1, POSTs are recorded in window.__fvPosts).
 //
 // Right-click (ctxmenu.js): a repo (map anchor, repo chip) offers New session · A / B (desktop window), Give orders ▸,
-// Open folder, Show ▸ (only it / too), Workspace settings ▸ (Rename, Colour, Push to, Keeps on a machine…), its
+// Open folder, Show ▸ (only it / too), Workspace settings ▸ (Rename, Colour, Push to, Never continue on another machine…), its
 // removed conversations and Remove workspace; a conversation offers Remove (ends it if hosted here and takes it off the map; was End session / Hide from map),
 // Send elsewhere ▸ (the other accounts), Rename (renameMenuItem) and Move to workspace (moveMenuItem). A repo also offers "Removed conversations"
 // (a submenu of state.removed, all of them): each one's own ▸ has Continue (see continueConversation), Show again
 // (un-hidden, nothing starts) and Forget (off the list for good: settings.forgotten), and the top of it "Show all
 // again", "Continue all" and "Forget all" (one Undo each but Continue). A repo also offers "Remove repo", and
 // empty space "Add workspace", "Removed workspaces ▸" (every removed repo, to add one back) and "Removed
-// conversations ▸" (every removed conversation, its workspace in the note, those with none too). A repo's "Keeps on a
-// machine…" (in Workspace settings) opens keeps.js's sheet for its stays-on rule (settings.hostRules). The browser's own menu
+// conversations ▸" (every removed conversation, its workspace in the note, those with none too). A repo's "Never continue
+// on another machine…" (in Workspace settings) opens keeps.js's sheet for its stays-on rule (settings.hostRules): the
+// chats it pins stay on that machine, Continue on this machine can't take them off it. The browser's own menu
 // is kept only in text inputs and the live terminal (and in Edge outside those targets).
 //
 // New sessions (term.js createSession) are listed in state.pending (and state.allSessions) as stand-ins
@@ -168,7 +169,7 @@ import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
-import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote } from './term.js';
+import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote, requestMove } from './term.js';
 import { pickFolder, canPickFolder, uploads, upload, sizeText, droppedFolders } from './pcfiles.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued, onTeamJoin, setServerQueued, sendWhenUp } from './orders.js';
@@ -180,7 +181,7 @@ import { mountClone } from './clone.js';
 import { mountSetup } from './setup.js';
 import { mountPhone } from './phone.js';
 import { mountHousekeeping } from './housekeeping.js';
-import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults } from './compose.js';
+import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults, hostOfChat } from './compose.js';
 import { forkAt } from './forkat.js';
 import { handToChat } from './handto.js';
 import { openKeeps, setRules } from './keeps.js';
@@ -2448,6 +2449,7 @@ function openContextMenu(target, x, y) {
   items.push(renameMenuItem(s), sessionColorItem(s));
   if (desk && !s.pending && !s.demo) items.push(forkMenuItem(s));
   if (!s.pending && !s.demo) { const mv = moveMenuItem(s); if (mv) items.push(mv); }
+  if (desk && !s.pending && !s.demo && !hosted) { const ci = continueItem(s); if (ci) items.push(ci); }
   if (desk && !s.pending && !s.demo && !singleAccount()) { const se = sendElsewhereItem(s, hosted); if (se) items.push(se); }
   items.push(...teamItems(s));
   if (waitingOrderItem(s)) items.push(waitingOrderItem(s));
@@ -2464,14 +2466,14 @@ function openContextMenu(target, x, y) {
   openCtxMenu({ x, y, title: s.name, dot: s.pending ? s.hue : statusColor(s), sub, items });
 }
 const statusColor = (s) => s.stateColor || C.dim;
-// "Keeps on a machine…": the sheet for the workspace's stays-on rule (keeps.js). The whole list goes back with POST
+// "Never continue on another machine…": the sheet for the workspace's stays-on rule (keeps.js). The whole list goes back with POST
 // /settings { hostRules }, so it syncs to the other machines; the page takes the server's list on the next poll
 function keepsItem(root, name) {
   const save = (list) => post('/settings', { hostRules: list }).then((r) => {
     if (!r && !FIXTURE) throw new Error('Fleet View did not answer: it was not saved');
     if (state && state.settings) { state.settings.hostRules = list; setRules(list); }
   });
-  return { label: 'Keeps on a machine…', icon: 'pin', run: () => openKeeps({ root, name, rules: () => state?.settings?.hostRules || [], save, toast: (t) => toast(t, C.dim) }) };
+  return { label: 'Never continue on another machine…', icon: 'pin', run: () => openKeeps({ root, name, rules: () => state?.settings?.hostRules || [], save, toast: (t) => toast(t, C.dim) }) };
 }
 // "Push to": where the work goes when it's done. Production is the standing rule (merge to main and ship); Preview
 // pushes the branch for a preview and doesn't merge. A repo's choice is the default for its conversations, a
@@ -2520,6 +2522,28 @@ function moveMenuItem(s) {
   if (s.moved) children.unshift({ label: 'Back to the workspace it started in', icon: 'reply', run: () => moveConversation(s, null) }, ...(children.length ? [{ sep: true }] : []));
   if (!children.length) return { label: 'Move to workspace', icon: 'folder', disabled: true, note: 'no other workspace listed' };
   return { label: 'Move to workspace', icon: 'folder', children };
+}
+// "Continue on this machine": a chat another machine runs stays there (typed here, it goes there: compose.js
+// followPlan, Henry 2026-10-13) until asked here. Only while another machine hosts it (compose.js hostOfChat, as the
+// chat box tells) and no move is under way. It opens the chat's Session tab, which starts the move (term.js
+// requestMove, POST /sync/move) and shows its phases, Cancel and the rest, as that tab's own button does. A chat
+// pinned there (workspace.pin): one Henry pinned by hand is let go first ("Unpin and continue on this machine",
+// keeps.js setPin free, in that tab); one a stays-on rule pins never continues on another machine (shown, disabled)
+function continueItem(s) {
+  const host = hostOfChat(s);
+  if (!host || !s.syncOwner || s.syncOwner.moving) return null;
+  const pin = s.workspace?.pin;
+  if (pin && !pin.manual) return { label: 'Continue on this machine', icon: 'sync', disabled: true, note: `a rule keeps it on ${pin.host || host.name}` };
+  const bound = !!s.bot || s.workspace?.kind === 'bound';
+  return {
+    label: pin ? 'Unpin and continue on this machine' : 'Continue on this machine', icon: 'sync', note: bound ? `its files stay on ${host.name}` : `from ${host.name}`,
+    run: () => {
+      requestMove(s.id, { unpin: !!pin });
+      tabWant = { id: s.id, tab: 'session' };
+      if (local.view === 'projects' || local.view === 'chats') projPanel = true;
+      ui.showDetail(s.id); // (no pick: an explicit one would start a session here first)
+    },
+  };
 }
 function moveConversation(s, root) {
   const before = s.moved && s.repo ? s.repo.root : null;

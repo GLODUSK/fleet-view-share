@@ -13,9 +13,6 @@ body:not(.sync-on) .count.sync { display: none; } /* sync not set up on this PC 
 .count.sync.sync-warn { border-color: rgba(255, 194, 74, 0.45); }
 .count.sync.sync-bad { border-color: rgba(255, 77, 141, 0.55); }
 .count.sync { position: relative; }
-body.link-ask .count.sync::after {
-  content: ''; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--gold);
-}
 
 /* ---------- the frame: sections with small-caps headings ---------- */
 .sy-pop { width: min(440px, calc(100vw - 32px)); }
@@ -35,7 +32,6 @@ body.link-ask .count.sync::after {
 .sy-bad { color: var(--rose); font-size: 12.5px; }
 .sy-warn { color: var(--gold); font-size: 12.5px; }
 .sy-ok { color: var(--mint); font-size: 12.5px; display: inline-flex; align-items: center; gap: 6px; }
-.sy-center { text-align: center; }
 .sy-vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .sy-who { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
 .sy-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
@@ -208,7 +204,7 @@ body.link-ask .count.sync::after {
 }
 .sy-note.bad { color: #ffd0dd; background: rgba(255, 77, 141, 0.08); border-color: rgba(255, 77, 141, 0.3); }
 
-/* ---------- your machines (link.js): a row each, a link being made with its code ---------- */
+/* ---------- your machines (link.js): a row each ---------- */
 .sy-mach { display: flex; flex-direction: column; gap: 9px; padding: 10px; border-radius: 12px; background: rgba(255, 255, 255, 0.025); border: 1px solid var(--line); }
 .sy-mrow { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .sy-mic {
@@ -228,15 +224,6 @@ body.link-ask .count.sync::after {
 .sy-pill::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .sy-pill.on { color: var(--mint); border-color: rgba(61, 255, 168, 0.3); background: rgba(61, 255, 168, 0.06); }
 .sy-pill.off::before { opacity: 0.5; }
-.sy-pair { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); }
-.sy-pair-on { border: 1px solid rgba(63, 216, 255, 0.45); background: rgba(63, 216, 255, 0.06); }
-.sy-pair .sy-btns { justify-content: center; }
-.sy-code { display: flex; justify-content: center; align-items: center; gap: 5px; padding: 4px 0 2px; }
-.sy-code span {
-  width: 34px; height: 44px; display: grid; place-items: center; border-radius: 9px; color: var(--text);
-  font: 600 24px/1 var(--font-mono, ui-monospace, monospace); background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(63, 216, 255, 0.3);
-}
-.sy-code i { width: 10px; }
 
 @media (max-width: 420px) {
   .sy-sec { padding: 12px 14px; }
@@ -244,7 +231,6 @@ body.link-ask .count.sync::after {
   .sy-tile { padding: 8px 9px 7px; }
   .sy-tv { font-size: 17px; }
   .sy-loop b { width: 70px; }
-  .sy-code span { width: 30px; height: 40px; font-size: 21px; }
 }
 @media (max-width: 340px) {
   .sy-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }

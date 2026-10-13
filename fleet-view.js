@@ -540,10 +540,11 @@ let sessHues = DEMO ? new Map() : cleanSessHues(saved.sessHues);
 // (workspaceOf), so typing into it on another machine sends the message there and never moves it (nor its files).
 // Until set, host-rules.js's default pair (the configurator's 3D files, and Blender's tools anywhere); the old single
 // default is replaced by the pair. A list set anew is a new array, so every conversation's pins are worked out again
-// (host-rules.js pinsOf). The page's "Keeps on a machine…" (web/keeps.js) keeps one rule per workspace, id ws-<slug>
+// (host-rules.js pinsOf). The page's "Never continue on another machine…" (web/keeps.js) keeps one rule per workspace, id ws-<slug>
 const cleanHostRules = (list) => (Array.isArray(list) ? HOST_RULES.migrate(list.map((x) => SYNC_PREFS.cleanHostRule(x)).filter(Boolean).slice(0, 50)) : null);
 let hostRules = DEMO ? [] : cleanHostRules(saved.hostRules) || cleanHostRules(HOST_RULES.DEFAULT_RULES);
-// A chat's own choice over the rules (the chip's "Let it follow me" / "Keep on <host>", POST /sync/pin):
+// A chat's own choice over the rules (POST /sync/pin: the page's "Unpin and continue on this machine" frees one; stay
+// comes from older pages' "Keep on <host>"):
 // settings.pinOverrides, [{ id, mode: 'free' | 'stay', host?, hostDevice?, at }] (sync-prefs.js cleanPinOverride), at
 // most 500 (the newest), the same on every device (the pinOverrides group). free: never pinned, whatever it did (the
 // host lets it go, no 409); stay: pinned to that host even with no rule's evidence. Kept as a Map id -> item
@@ -1122,7 +1123,7 @@ function folderKind(folder) {
 // (sync-live.js live().bound, kept while it sleeps); this machine's: a placeholder is bound, else its folder's kind.
 // pin: pinned to the device that runs it (pinView: { rule, host, why?, manual? }; why, the evidence, only where it
 // runs: the other device publishes { rule, host } alone, and the page shows the synced rule's note, tools or paths);
-// free: { host, rule } when Henry let it follow him (pinOverrides) from the host it was, or would be, pinned to (rule: the
+// free: { host, rule } when Henry unpinned it (pinOverrides) from the host it was, or would be, pinned to (rule: the
 // rules here would pin it, so "Keep on <host>" only drops the choice). owners:
 // syncOwners()
 function workspaceOf(s, owners) {
@@ -7509,8 +7510,8 @@ function syncNote(req, res) {
   });
 }
 // /sync/pin: a chat's own stays-on choice (pinOverrides, shared with the other devices as the pinOverrides group): the
-// chip's "Let it follow me" (free), "Keep on <host>" (stay, or clear when the rules pin it there anyway), and the
-// offline card's "Unpin and continue here" (free, then the move). This PC's page and approved remote browsers, as
+// page's "Unpin and continue on this machine" (free, then the move: the right-click menu and the Session tab for a chat
+// pinned by hand, the offline cards); stay and clear are kept for older pages' "Keep on <host>". This PC's page and approved remote browsers, as
 // /sync/move; never another site's page. Works with sync off too (the choice holds here).
 //   POST { id, mode: 'free' | 'stay' | 'clear', host?, hostDevice? } -> 200 { ok, override: the item | null, pin: /state's
 //     workspace.pin for it now | null } | 400 { ok: false, message }
@@ -7595,7 +7596,7 @@ async function switchDynamicChat(b) {
   return [code, out];
 }
 
-// /rules/*: what the page's "Keeps on a machine…" sheet (web/keeps.js) reads while Henry sets a workspace's rule. This
+// /rules/*: what the page's "Never continue on another machine…" sheet (web/keeps.js) reads while Henry sets a workspace's rule. This
 // PC's page and approved remote browsers; never another site's page. The rule itself is saved with POST /settings
 // { hostRules } (the whole list), so it syncs as the hostRules group.
 //   GET /rules/workspace?root=<a workspace's main checkout> -> { ok, me: { id, name } | null, machines: [{ id, name }],
@@ -7726,9 +7727,8 @@ function conversationRoute(req, res) {
 // browser, never another site's page), POSTs with its Origin; 404 while sync is not set up here (a friend's install),
 // as /sync/* answer then.
 //   GET  /link/status              link.js status(): { running, me, machines, pairings }, or { running: false, reason }
-//   POST /link/request { device }  ask that machine (a sync device id) to link -> { ok, pid }
-//   POST /link/confirm { pid }     the code here matches the other machine's      POST /link/decline { pid }
-//   POST /link/unlink { device }   unlink it, here and there
+//   POST /link/request { device }  Link: link with that machine (a sync device id) now, after an unlink -> { ok, pid }
+//   POST /link/unlink { device }   unlink it, here and there, until Link (machines link by themselves otherwise)
 // and the Chat tab's, for a chat another machine runs (link-send.js: send, answer, interrupt, now, unsend, activity,
 // menu, image), answered with that machine's answer or { ok: false, code, message }
 function linkRoute(req, res, pathname) {
@@ -7754,7 +7754,7 @@ function linkRoute(req, res, pathname) {
       answer(LINK_SEND.route('POST', pathname, null, b));
     });
   }
-  const acts = { '/link/request': (b) => link.request(b.device), '/link/confirm': (b) => link.confirm(b.pid), '/link/decline': (b) => link.decline(b.pid), '/link/unlink': (b) => link.unlink(b.device) };
+  const acts = { '/link/request': (b) => link.request(b.device), '/link/unlink': (b) => link.unlink(b.device) };
   if (!acts[pathname]) return no(404, 'no such route');
   if (req.method !== 'POST') return no(405, 'POST');
   const origin = req.headers.origin;

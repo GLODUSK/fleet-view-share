@@ -3,39 +3,50 @@
 // two machines can open. This is the phone's side of docs/phone.md in Node (no npm package), with the machine in the
 // phone's place; relay.js serves the other side, where this machine is a device of kind 'computer'.
 //
-// Pairing (once per pair of machines) runs over fleet_sync.settings rows, sealed with the sync key like the mover's
-// (sync-crypto.js sealText(json, key, 'setting:<key>'), upserted on (user_id, key)). The sync key alone must never be
-// enough to link a machine (anyone who can read the settings table as Henry has it), so the keys come from an X25519
-// exchange whose 6-digit code Henry compares on both screens, and the requester commits to its key before it sees the
-// other's (as ZRTP and Bluetooth's numeric comparison do): whoever carries the rows can't steer the two codes to match.
+// Linking is automatic: every machine signed in to sync as Henry and holding the sync key links with every other such
+// machine by itself, with no code to compare and no click (Henry, 2026-10-13: "it should happen because it's Fleet View
+// on both PCs and that's it"). So the trust root is what already guards every conversation log: his Supabase sign-in
+// and the sync key. Whoever has both can link a machine of his own.
+//
+// Pairing runs over fleet_sync.settings rows, sealed with the sync key like the mover's (sync-crypto.js sealText(json,
+// key, 'setting:<key>'), upserted on (user_id, key)). The keys still come from an X25519 exchange, so someone who can
+// only read the rows (the sync key, but not the private keys in each machine's memory) can't open the calls:
 //   link:<pid>:ask      the requester R: { v: 1, pid, from: R, fromName, to: A, commit, at }, commit = b64u(sha256(
 //                       'fleet-view link v1 commit' || epkR || nR)), nR 16 random bytes
 //   link:<pid>:answer   the answerer A: { v: 1, pid, from: A, fromName, to: R, epk: b64u(epkA), at }
 //   link:<pid>:reveal   R, only after it read the answer: { v: 1, pid, epk: b64u(epkR), n: b64u(nR), at }. A checks it
 //                       against the commit (a mismatch: "no", nothing is linked)
-//   link:<pid>:ok-r / ok-a     Henry confirmed the code on that side: { v: 1, pid, at }
+//   link:<pid>:ok-r / ok-a     that side made the keys: { v: 1, pid, at }
 //   link:<pid>:done-r / done-a that side keeps the link now: { v: 1, pid, at }
 //   link:<pid>:no       { v: 1, pid, by: 'r' | 'a', why: 'declined' | 'mismatch' | 'expired' | 'restarted', at }
 // pid: 16 hex digits. Both sides derive, from the shared secret and the whole transcript T (the length-prefixed
 // 'fleet-view link v1', pid, R, A, commit, epkA, epkR, nR): salt = sha256(T), then HKDF-SHA256(shared, salt, info
-// 'fleet-view link v1 <x>') for x in 'key r-a' and 'key a-r' (32 bytes each: R's calls to A, and A's calls to R),
-// 'dev r-a' and 'dev a-r' (12 bytes each, b64u: the two relay device ids), and 'code' (4 bytes, mod 1,000,000, six
-// digits). The code shows on both pages once each side has what it needs (R after the answer, A after the reveal).
-// Nothing is kept until Henry confirmed on BOTH machines (each will run what the other sends): a side keeps the link
-// when it has its own confirm and sees the other's ok row, then writes done. The requester deletes the rows once it
-// sees the answerer's done. A "no" from the other side ends it (and takes back a link already kept). A pairing runs out
-// 10 minutes after it began on that side's clock (never compared with the other machine's); R then says no, and A
-// drops what it has. An ask whose answer row is there but which this machine has no memory of (it restarted mid-way)
-// is answered no ('restarted'). Rows are polled every 60 s, every second while a pairing is under way here (one
-// asked here, or one the other machine asked for that this one took up at its last poll).
+// 'fleet-view link v1 <x>') for x in 'key r-a' and 'key a-r' (32 bytes each: R's calls to A, and A's calls to R), and
+// 'dev r-a' and 'dev a-r' (12 bytes each, b64u: the two relay device ids). Each side writes its ok once it has the keys
+// (R after the answer, A after the reveal), and keeps the link when it sees the other's ok, then writes done. The
+// requester deletes the rows once it sees the answerer's done. A "no" from the other side ends it (and takes back a
+// link already kept). A pairing runs out 10 minutes after it began on that side's clock (never compared with the
+// other machine's); R then says no, and A drops what it has. An ask whose answer row is there but which this machine
+// has no memory of (it restarted mid-way) is answered no ('restarted'). Rows are polled every 60 s, every second while
+// a pairing is under way here (one asked here, or one the other machine asked for that this one took up at its last
+// poll).
+//
+// Who asks: every machine the devices table lists that is not linked, not unlinked by Henry (below), awake (its
+// last_seen_at moved within awayMs on this clock: the mover touches it every 30 s) and with no pairing under way. The
+// lower device id asks at once; the higher one waits graceMs first, so the two don't both ask, yet it still links when
+// the lower one can't (an older Fleet View there, or a link kept there that this machine lost). If both asked anyway,
+// the lower id's ask goes on: the higher machine drops its own and answers. A pairing that did not link is asked again
+// after retryMs, doubling up to retryMaxMs, and at once when that machine comes back after being away.
 //
 // Keeping a link: relay.addComputer({ dev: the incoming id, name, peer, key: the incoming key }), so the other machine
 // may call this one; and here the outgoing id and key, so this one may call it: <dataDir>/link/peers.json { v: 1,
 // peers: [{ peer, name, dev, pairedAt }] } (no key), the keys in sync-api.js protectedStore(<dataDir>/link,
 // 'link-keys') as { <peer>: { dev, k } } (read only while a peer is listed). Unlink takes both away (relay
-// removeComputer sends the other machine's link the notice 'revoked', and it unlinks too) and writes
-// link-gone:<to>:<from> { v: 1, from, to, devs, at } for a machine that is off: it unlinks when it reads it (only a link
-// whose ids are in devs), and deletes the row. Keeping a new link deletes the gone rows between the two.
+// removeComputer sends the other machine's link the notice 'revoked', and it unlinks too) and writes the mark
+// link-off:<lower id>:<higher id> { v: 1, by, devs, at }: while it is there neither machine links with the other by
+// itself, and a machine that was off unlinks when it reads it (only a link whose ids are in devs). Only Link (request)
+// deletes it. Older versions wrote link-gone:<to>:<from> { v: 1, from, to, devs, at } instead: read the same way once,
+// and deleted.
 //
 // Calls: one channel per linked machine, fleet:<uid>:<its outgoing dev>, joined with presence key 'peer' (the relay
 // tracks 'pc' there: online). Envelopes, keys (dirKey up/down of the outgoing key), the AAD, compression, parts (at
@@ -49,7 +60,7 @@
 //   createLink({ api, key, dataDir, log, relay, device, now, timing, name, version, WebSocketImpl, timers, keyStore,
 //                readConfig })
 //     -> { start(), stop(), tick(), status(), peers(), online(deviceId), call(deviceId, m, p, { q, b, etag, timeoutMs }),
-//          request(deviceId), confirm(pid), decline(pid), unlink(deviceId) }
+//          request(deviceId), unlink(deviceId) }
 //   api: sync-api.js createSync()'s object (rest, uid, accessToken); key: the 32-byte sync key (the rows); relay:
 //   relay.js createRelay()'s object (addComputer, removeComputer); device() -> this machine's sync device id (or
 //   { id }), null until the mover made it; name: this machine's (os.hostname()); version (string or function)
@@ -57,10 +68,13 @@
 //   call(...) -> Promise of { s, b?, b64?, ct?, etag? }, never rejected: the other server's answer, or s 0 and
 //     b: { ok: false, code, message } when none came: code 'not_linked', 'offline', 'timeout', 'pc-restarted',
 //     'revoked', 'stopped', 'too_large'
-//   request / confirm / decline / unlink -> Promise of [http status, json] (the routes' answers)
+//   request(id): Link (link it now, and take away Henry's unlink mark); unlink(id): Unlink (and the mark)
+//     -> Promise of [http status, json] (the routes' answers)
 //   status() -> { running, me: { id, name }, machines: [{ id, name, platform, lastSeenAt, linked, online, pairedAt,
-//     version }], pairings: [{ pid, role: 'request' | 'answer', peer: { id, name }, state, code?, confirmedHere,
-//     message?, at }] }; state: asking | waiting | confirm | confirmed | linked | declined | failed | expired | cancelled
+//     version, unlinked, linking }], pairings: [{ pid, role: 'request' | 'answer', peer: { id, name }, state, message?,
+//     at }] }; unlinked: Henry unlinked it (it links again only with Link); linking: not linked, and it links by itself
+//     (a pairing under way, or it is awake); state: asking | waiting | linking | linked | declined | failed | expired |
+//     cancelled
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -76,6 +90,10 @@ const TIMING = {
   pollMs: 60e3, // the rows, while no pairing is under way (an ask from the other machine waits this long at most)
   pairPollMs: 1e3, // and while one is
   pairMs: 10 * 60e3, // a pairing runs out this long after it began (on each side's own clock)
+  awayMs: 3 * 60e3, // a machine whose last_seen_at did not move this long (on this clock) is not asked
+  graceMs: 3 * 60e3, // the higher device id waits this long for the lower one to ask before it asks itself
+  retryMs: 60e3, // a pairing that did not link is asked again after this, doubling each time
+  retryMaxMs: 60 * 60e3, // up to this
   keepFinalMs: 60e3, // a finished pairing stays in status() this long
   devicesMs: 30e3, // the devices table (names) at most this often
   resendMs: 8e3, // a request still waiting goes again this often
@@ -88,6 +106,8 @@ const PID_RE = /^[0-9a-f]{16}$/;
 const DEV_RE = /^[A-Za-z0-9_-]{16}$/;
 const ROW_RE = /^link:([0-9a-f]{16}):(ask|answer|reveal|ok-r|ok-a|done-r|done-a|no)$/;
 const GONE_RE = /^link-gone:([0-9a-f-]{36}):([0-9a-f-]{36})$/;
+const OFF_RE = /^link-off:([0-9a-f-]{36}):([0-9a-f-]{36})$/;
+const offKey = (a, b) => (a < b ? `link-off:${a}:${b}` : `link-off:${b}:${a}`);
 const SKEW_MS = 5 * 60e3, NONCE_MS = 10 * 60e3, ASSEMBLY_MS = 60e3, ASSEMBLIES_MAX = 4, INFLATE_MAX = 64 << 20;
 const WAIT_CAP_S = 50;
 const FINAL = new Set(['linked', 'declined', 'failed', 'expired', 'cancelled']);
@@ -120,14 +140,11 @@ function transcript(f) {
   const parts = [PREFIX, f.pid, f.r, f.a, f.commit, f.epkA, f.epkR, f.nR].map((x) => (Buffer.isBuffer(x) ? x : Buffer.from(String(x), 'utf8')));
   return Buffer.concat(parts.flatMap((b) => { const l = Buffer.alloc(4); l.writeUInt32BE(b.length); return [l, b]; }));
 }
-// -> { kRA, kAR, devRA, devAR, code }
+// -> { kRA, kAR, devRA, devAR }
 function derive(shared, f) {
   const salt = crypto.createHash('sha256').update(transcript(f)).digest();
   const hk = (info, n) => Buffer.from(crypto.hkdfSync('sha256', shared, salt, Buffer.from(`${PREFIX} ${info}`, 'utf8'), n));
-  return {
-    kRA: hk('key r-a', 32), kAR: hk('key a-r', 32), devRA: b64u(hk('dev r-a', 12)), devAR: b64u(hk('dev a-r', 12)),
-    code: String(hk('code', 4).readUInt32BE(0) % 1e6).padStart(6, '0'),
-  };
+  return { kRA: hk('key r-a', 32), kAR: hk('key a-r', 32), devRA: b64u(hk('dev r-a', 12)), devAR: b64u(hk('dev a-r', 12)) };
 }
 
 function writeAtomic(file, data) {
@@ -166,18 +183,28 @@ function createLink(o = {}) {
   let me = null, uid = null, running = false, timer = null, ticking = null, again = false;
   // ---------- the machines (the devices table) ----------
   const devices = { at: -Infinity, byId: new Map() }; // id -> { name, platform, lastSeenAt }
+  const moved = new Map(); // id -> { v: its last_seen_at, at: when this machine saw it change (this clock) }
   async function loadDevices(force) {
     if (!force && now() - devices.at < tm.devicesMs) return;
     const rows = await api.rest('GET', 'devices', { query: { select: 'id,name,platform,last_seen_at' } });
-    const byId = new Map();
+    const byId = new Map(), t = now();
     for (const d of Array.isArray(rows) ? rows : []) {
       if (!d || !UUID_RE.test(lower(d.id))) continue;
-      byId.set(lower(d.id), { name: clip(d.name, 100) || null, platform: clip(d.platform, 20) || null, lastSeenAt: typeof d.last_seen_at === 'string' ? d.last_seen_at : null });
+      const id = lower(d.id), seen = typeof d.last_seen_at === 'string' ? d.last_seen_at : null;
+      byId.set(id, { name: clip(d.name, 100) || null, platform: clip(d.platform, 20) || null, lastSeenAt: seen });
+      const was = moved.get(id);
+      if (!was || was.v !== seen) {
+        // back after being away: ask it at once, whatever the last pairings with it did
+        if (was && t - was.at > tm.awayMs) retry.delete(id);
+        moved.set(id, { v: seen, at: t });
+      }
     }
     devices.byId = byId;
-    devices.at = now();
+    devices.at = t;
   }
   const nameOf = (id, fallback) => (devices.byId.get(lower(id)) || {}).name || fallback || 'another computer';
+  // a machine counts as awake from when this one first saw it, and while its last_seen_at keeps moving
+  const awake = (id) => { const m = moved.get(id); return !!m && now() - m.at <= tm.awayMs; };
 
   // ---------- the linked machines ----------
   const peers = new Map(); // peer id -> { peer, name, dev, k, pairedAt }
@@ -192,7 +219,7 @@ function createLink(o = {}) {
     for (const p of list) {
       const id = lower(p.peer), e = ks && ks[id];
       const k = e && e.dev === p.dev ? fromB64u(e.k, 32) : null;
-      if (!k) { logOnce(`nokey|${id}`, `${short(id)} has no key here: link it again`); continue; }
+      if (!k) { logOnce(`nokey|${id}`, `${short(id)} has no key here: it links again by itself`); continue; }
       peers.set(id, { peer: id, name: clip(p.name, 100) || 'another computer', dev: p.dev, k, pairedAt: Number(p.pairedAt) || null });
     }
   }
@@ -382,34 +409,57 @@ function createLink(o = {}) {
   }
   const putStep = (x, step, v) => putRow(`link:${x.pid}:${step}`, { v: 1, pid: x.pid, at: now(), ...v });
   const dropRows = (pid) => api.rest('DELETE', 'settings', { query: { key: `like.link:${pid}:*` }, prefer: 'return=minimal' }).catch((e) => log(`${pid}: the rows could not be deleted (${errText(e)})`));
-  // -> { pids: Map pid -> { <step>: value }, gone: [{ key, v }] }
+  // -> { pids: Map pid -> { <step>: value }, gone: [{ key, v }], offs: Map other machine's id -> value (the unlink
+  // marks between this machine and another) }
   async function readRows() {
     const rows = await api.rest('GET', 'settings', { query: { select: 'key,value_enc', key: 'like.link*' } });
-    const pids = new Map(), gone = [];
+    const pids = new Map(), gone = [], offs = new Map();
     for (const row of Array.isArray(rows) ? rows : []) {
       const k = row && typeof row.key === 'string' ? row.key : '';
-      const m = ROW_RE.exec(k), g = GONE_RE.exec(k);
-      if (!m && !g) continue;
+      const m = ROW_RE.exec(k), g = GONE_RE.exec(k), off = OFF_RE.exec(k);
+      if (!m && !g && !off) continue;
+      if (off && off[1] !== me && off[2] !== me) continue;
       let v = null;
       try { v = JSON.parse(K.openText(row.value_enc, key, `setting:${k}`)); } catch {}
       if (!v || v.v !== 1) { logOnce(`bad|${k}`, `a row that does not open with this key (${k.slice(0, 30)}): ignored`); continue; }
+      if (off) { offs.set(off[1] === me ? off[2] : off[1], v); continue; }
       if (g) { gone.push({ key: k, to: g[1], from: g[2], v }); continue; }
       if (v.pid !== m[1]) continue;
       if (!pids.has(m[1])) pids.set(m[1], {});
       pids.get(m[1])[m[2]] = v;
     }
-    return { pids, gone };
+    return { pids, gone, offs };
   }
 
   // ---------- pairings ----------
   const pairings = new Map(); // pid -> x
   const seenPids = new Map(); // pid -> when this machine was done with it (so leftovers are not taken up again)
   const active = () => [...pairings.values()].some((x) => !FINAL.has(x.state));
+  const under = (peer) => [...pairings.values()].find((x) => x.peer === peer && !FINAL.has(x.state)) || null;
+  const retry = new Map(); // peer -> { at, gap }: a pairing with it did not link, so it is asked again at at
+  const since = new Map(); // peer -> since when it waits to be asked (the higher id waits graceMs)
+  const offHere = new Set(); // peers unlinked here whose unlink mark could not be written yet
+  let offs = new Map(); // peer -> its unlink mark, as the rows last said
   function setState(x, state, message) {
     x.state = state;
     if (message !== undefined) x.message = message;
-    if (FINAL.has(state)) { x.endedAt = now(); seenPids.set(x.pid, now()); x.priv = null; }
+    if (!FINAL.has(state)) return;
+    x.endedAt = now(); seenPids.set(x.pid, now()); x.priv = null;
+    if (state === 'linked') { retry.delete(x.peer); return; }
+    const gap = Math.min(tm.retryMaxMs, retry.has(x.peer) ? retry.get(x.peer).gap * 2 : tm.retryMs);
+    retry.set(x.peer, { at: now() + gap, gap });
   }
+  // write an ask to that machine -> the pairing (throws when the row could not be written)
+  async function ask(peer) {
+    const pid = crypto.randomBytes(8).toString('hex'), pair = R.xPair(), n = crypto.randomBytes(16);
+    const x = { pid, role: 'r', peer, peerName: nameOf(peer), state: 'asking', startedAt: now(), priv: pair.priv, pub: pair.pub, n, commit: commitOf(pair.pub, n), derived: null, okMine: false, message: null };
+    await putStep(x, 'ask', { from: me, fromName: myName(), to: peer, commit: x.commit });
+    pairings.set(pid, x);
+    since.delete(peer);
+    log(`${pid}: asked ${x.peerName} to link`);
+    return x;
+  }
+  // Link: now, whatever the rule on who asks, and Henry's unlink mark goes (both machines link by themselves again)
   async function request(deviceId) {
     if (!running) return [503, { ok: false, message: 'the link is not running' }];
     if (!me) return [503, { ok: false, message: 'this machine has no sync device id yet: try again in a moment' }];
@@ -417,33 +467,26 @@ function createLink(o = {}) {
     if (!UUID_RE.test(peer) || peer === me) return [400, { ok: false, message: 'device must be another machine\'s sync device id' }];
     try { await loadDevices(true); } catch {}
     if (devices.at > -Infinity && !devices.byId.has(peer)) return [404, { ok: false, message: 'no such machine in sync' }];
-    for (const x of pairings.values()) if (x.peer === peer && !FINAL.has(x.state)) return [409, { ok: false, message: `a link with ${nameOf(peer)} is being made already`, pid: x.pid }];
-    const pid = crypto.randomBytes(8).toString('hex'), pair = R.xPair(), n = crypto.randomBytes(16);
-    const x = { pid, role: 'r', peer, peerName: nameOf(peer), state: 'asking', startedAt: now(), priv: pair.priv, pub: pair.pub, n, commit: commitOf(pair.pub, n), code: null, derived: null, okMine: false, message: null };
-    try { await putStep(x, 'ask', { from: me, fromName: myName(), to: peer, commit: x.commit }); } catch (e) { return [502, { ok: false, message: `the request could not be written: ${errText(e)}` }]; }
-    pairings.set(pid, x);
-    log(`${pid}: asked ${x.peerName} to link`);
+    const x0 = under(peer);
+    if (x0) return [409, { ok: false, message: `a link with ${nameOf(peer)} is being made already`, pid: x0.pid }];
+    try { await api.rest('DELETE', 'settings', { query: { key: `eq.${offKey(me, peer)}` }, prefer: 'return=minimal' }); } catch (e) { return [502, { ok: false, message: `the unlink mark could not be taken away: ${errText(e)}` }]; }
+    offHere.delete(peer); offs.delete(peer); retry.delete(peer);
+    let x;
+    try { x = await ask(peer); } catch (e) { return [502, { ok: false, message: `the request could not be written: ${errText(e)}` }]; }
     kick();
-    return [200, { ok: true, pid }];
+    return [200, { ok: true, pid: x.pid }];
   }
-  async function confirm(pid) {
-    const x = pairings.get(String(pid || ''));
-    if (!x) return [404, { ok: false, message: 'no such link request' }];
-    if (x.state !== 'confirm') return [409, { ok: false, message: x.state === 'confirmed' ? 'confirmed already' : `it can't be confirmed now (${x.state})` }];
-    try { await putStep(x, x.role === 'r' ? 'ok-r' : 'ok-a', {}); } catch (e) { return [502, { ok: false, message: `the confirmation could not be written: ${errText(e)}` }]; }
-    x.okMine = true;
-    setState(x, 'confirmed');
-    kick();
-    return [200, { ok: true }];
-  }
-  async function decline(pid) {
-    const x = pairings.get(String(pid || ''));
-    if (!x) return [404, { ok: false, message: 'no such link request' }];
-    if (FINAL.has(x.state)) return [200, { ok: true }];
-    // the rows stay: the other machine reads the "no" (and takes back a link it may have kept), then deletes them
-    await say(x, 'declined');
-    setState(x, 'declined', 'Declined here.');
-    return [200, { ok: true }];
+  // the machines that link by themselves now: not linked, not unlinked by Henry, awake, with no pairing under way. The
+  // lower id asks at once, the higher one after graceMs (when the lower one did not), each after its retry time.
+  async function autoLink() {
+    const t = now();
+    for (const id of devices.byId.keys()) {
+      if (id === me || peers.has(id) || offs.has(id) || offHere.has(id) || !awake(id) || under(id)) { since.delete(id); continue; }
+      if (!since.has(id)) since.set(id, t);
+      const r = retry.get(id);
+      if ((r && t < r.at) || (me > id && t - since.get(id) < tm.graceMs)) continue;
+      try { await ask(id); } catch (e) { logOnce(`ask|${id}`, `${nameOf(id)} could not be asked to link (${errText(e)})`); }
+    }
   }
   const say = (x, why) => putStep(x, 'no', { by: x.role, why }).catch((e) => log(`${x.pid}: "no" could not be written (${errText(e)})`));
   // both sides' keys and ids, from the shared secret and the transcript
@@ -490,7 +533,7 @@ function createLink(o = {}) {
     if (FINAL.has(x.state)) return;
     if (no) {
       const why = no.why === 'mismatch' ? `${x.peerName} refused it: the keys did not match what was promised, so someone may be in the middle. Nothing was linked.`
-        : no.why === 'expired' ? 'The request ran out: try again.' : no.why === 'restarted' ? `Fleet View on ${x.peerName} restarted mid-way: try again.` : `Declined on ${x.peerName}.`;
+        : no.why === 'expired' ? 'It ran out before it finished.' : no.why === 'restarted' ? `Fleet View on ${x.peerName} restarted mid-way.` : `Stopped on ${x.peerName}.`;
       setState(x, no.why === 'mismatch' ? 'failed' : no.why === 'expired' ? 'expired' : 'declined', why);
       await dropRows(x.pid);
       x.cleaned = true;
@@ -498,7 +541,7 @@ function createLink(o = {}) {
     }
     if (!rows || (x.role === 'r' && !r.ask)) { setState(x, 'cancelled', 'The request went away.'); x.cleaned = true; return; }
     if (t - x.startedAt > tm.pairMs) {
-      setState(x, 'expired', 'The request ran out: try again.');
+      setState(x, 'expired', `${x.peerName} did not finish linking in time.`);
       if (x.role === 'r') await say(x, 'expired'); else { await dropRows(x.pid); x.cleaned = true; }
       return;
     }
@@ -510,9 +553,10 @@ function createLink(o = {}) {
         if (!d) { setState(x, 'failed', 'The other machine\'s key is not usable.'); await say(x, 'mismatch'); return; }
         if (typeof v.fromName === 'string' && v.fromName) x.peerName = clip(v.fromName, 100);
         await putStep(x, 'reveal', { epk: b64u(x.pub), n: b64u(x.n) });
+        await putStep(x, 'ok-r', {});
         x.derived = d;
-        x.code = d.code;
-        setState(x, 'confirm');
+        x.okMine = true;
+        setState(x, 'linking');
       }
     } else if (x.state === 'waiting' && r.reveal) {
       const epkR = fromB64u(r.reveal.epk, 32), nR = fromB64u(r.reveal.n, 16);
@@ -523,11 +567,12 @@ function createLink(o = {}) {
       }
       const d = deriveFor(x, x.pub, epkR, nR);
       if (!d) { setState(x, 'failed', 'The other machine\'s key is not usable.'); await say(x, 'mismatch'); return; }
+      await putStep(x, 'ok-a', {});
       x.derived = d;
-      x.code = d.code;
-      setState(x, 'confirm');
+      x.okMine = true;
+      setState(x, 'linking');
     }
-    if (x.state === 'confirmed' && x.okMine && r[other === 'a' ? 'ok-a' : 'ok-r']) {
+    if (x.state === 'linking' && x.okMine && r[other === 'a' ? 'ok-a' : 'ok-r']) {
       if (x.role === 'r') x.sawOkA = true;
       try { await keep(x); } catch (e) { setState(x, 'failed', `It could not be kept on this machine: ${errText(e)}`); await say(x, 'declined'); return; }
       await putStep(x, x.role === 'r' ? 'done-r' : 'done-a', {}).catch((e) => log(`${x.pid}: done could not be written (${errText(e)})`));
@@ -552,8 +597,18 @@ function createLink(o = {}) {
       const from = lower(r.ask.from);
       if (!UUID_RE.test(from) || from === me || typeof r.ask.commit !== 'string' || !fromB64u(r.ask.commit, 32)) continue;
       if (r.no) continue;
-      // only a machine sync lists (once the table was read)
+      // only a machine sync lists (once the table was read), and none Henry unlinked (Link there takes the mark away first)
       if (devices.at > -Infinity && !devices.byId.has(from)) continue;
+      if (offs.has(from) || offHere.has(from)) continue;
+      // both asked at once: the lower id's ask goes on, and the higher machine drops its own (its rows: nobody answered)
+      const mineOut = [...pairings.values()].find((x) => x.peer === from && x.role === 'r' && !FINAL.has(x.state));
+      if (mineOut) {
+        if (me < from) continue;
+        setState(mineOut, 'cancelled', `${mineOut.peerName} asked at the same time: its ask goes on.`);
+        retry.delete(from);
+        await dropRows(mineOut.pid);
+        mineOut.cleaned = true;
+      }
       if (r.answer) {
         // answered before this machine restarted: the key that answer named is gone
         seenPids.set(pid, now());
@@ -562,13 +617,24 @@ function createLink(o = {}) {
       }
       if ([...pairings.values()].filter((x) => x.role === 'a' && !FINAL.has(x.state)).length >= INCOMING_MAX) continue;
       const pair = R.xPair();
-      const x = { pid, role: 'a', peer: from, peerName: clip(r.ask.fromName, 100) || nameOf(from), state: 'waiting', startedAt: now(), priv: pair.priv, pub: pair.pub, commit: r.ask.commit, code: null, derived: null, okMine: false, message: null };
+      const x = { pid, role: 'a', peer: from, peerName: clip(r.ask.fromName, 100) || nameOf(from), state: 'waiting', startedAt: now(), priv: pair.priv, pub: pair.pub, commit: r.ask.commit, derived: null, okMine: false, message: null };
       try { await putStep(x, 'answer', { from: me, fromName: myName(), to: from, epk: b64u(pair.pub) }); } catch (e) { log(`${pid}: the answer could not be written (${errText(e)})`); continue; }
       pairings.set(pid, x);
       log(`${pid}: ${x.peerName} asks to link`);
     }
   }
-  // gone rows addressed to this machine: the other one unlinked while this one was away
+  // the unlink marks: a link here whose ids the mark names goes (Henry unlinked it on the other machine while this one
+  // was away); one made after the mark (Link) stays
+  async function takeOffs(list) {
+    offs = list;
+    for (const [peer, v] of list) {
+      const devs = Array.isArray(v.devs) ? v.devs : [];
+      const p = peers.get(peer);
+      const theirs = (typeof relay.computers === 'function' ? relay.computers() : []).filter((c) => c.peer === peer);
+      if ((p && devs.includes(p.dev)) || (!p && theirs.some((c) => devs.includes(c.id)))) await unlinkHere(peer, 'unlinked on the other machine');
+    }
+  }
+  // gone rows (an older version's unlink) addressed to this machine: the other one unlinked while this one was away
   async function takeGone(gone) {
     for (const g of gone) {
       if (lower(g.to) !== me) continue;
@@ -591,15 +657,23 @@ function createLink(o = {}) {
     if (had || n) log(`unlinked ${nameOf(id)} (${why || 'here'})`);
     return had || n > 0;
   }
+  // Unlink: here, there (the notice, or the mark for a machine that is off), and neither links with the other by itself
+  // again until Link. A pairing under way with it stops too.
   async function unlink(deviceId) {
     const peer = lower(deviceId);
-    if (!UUID_RE.test(peer)) return [400, { ok: false, message: 'device must be a sync device id' }];
+    if (!UUID_RE.test(peer) || peer === me) return [400, { ok: false, message: 'device must be another machine\'s sync device id' }];
+    if (!me) return [503, { ok: false, message: 'this machine has no sync device id yet: try again in a moment' }];
+    for (const x of pairings.values()) if (x.peer === peer && !FINAL.has(x.state)) { await say(x, 'declined'); setState(x, 'cancelled', 'Unlinked here.'); }
     const p = peers.get(peer);
     const devs = [p && p.dev, ...((typeof relay.computers === 'function' ? relay.computers() : []).filter((c) => c.peer === peer).map((c) => c.id))].filter(Boolean);
     const had = await unlinkHere(peer, 'was unlinked here');
-    // for a machine that is off now: it unlinks when it reads this
-    if (me && devs.length) await putRow(`link-gone:${peer}:${me}`, { v: 1, from: me, to: peer, devs, at: now() }).catch((e) => log(`the unlink row could not be written: ${errText(e)}`));
-    return had ? [200, { ok: true }] : [404, { ok: false, message: 'that machine is not linked' }];
+    offHere.add(peer);
+    try {
+      await putRow(offKey(me, peer), { v: 1, by: me, devs, at: now() });
+      offHere.delete(peer);
+      offs.set(peer, { v: 1, by: me, devs });
+    } catch (e) { log(`the unlink mark could not be written (this machine won't link with ${nameOf(peer)} until it restarts): ${errText(e)}`); }
+    return [200, { ok: true, linked: had }];
   }
 
   // ---------- the loop ----------
@@ -617,12 +691,14 @@ function createLink(o = {}) {
     try { await loadDevices(); said.delete('devices'); } catch (e) { logOnce('devices', `the machines could not be read (${errText(e)})`); }
     let rows;
     try { rows = await readRows(); said.delete('rows'); } catch (e) { logOnce('rows', `the link rows could not be read (${errText(e)})`); return; }
+    await takeOffs(rows.offs);
     await takeGone(rows.gone);
     await takeAsks(rows.pids);
     const t = now();
     for (const x of [...pairings.values()]) {
       try { await stepPairing(x, rows.pids.get(x.pid) || null, t); } catch (e) { log(`${x.pid}: ${errText(e)}`); }
     }
+    if (running) await autoLink();
     // a finished pairing leaves status() after keepFinalMs; its rows, when the other side never deleted them, after pairMs
     for (const [pid, x] of [...pairings]) {
       if (!FINAL.has(x.state) || t - x.endedAt <= tm.keepFinalMs) continue;
@@ -671,20 +747,22 @@ function createLink(o = {}) {
     const machines = [];
     for (const [id, d] of devices.byId) {
       if (id === me) continue;
-      const p = peers.get(id), conn = conns.get(id);
-      machines.push({ id, name: d.name || 'another computer', platform: d.platform, lastSeenAt: d.lastSeenAt, linked: !!p, online: p ? online(id) : null, pairedAt: p ? p.pairedAt : null, version: conn ? conn.version : null });
+      const p = peers.get(id), conn = conns.get(id), unlinked = !p && (offs.has(id) || offHere.has(id));
+      machines.push({
+        id, name: d.name || 'another computer', platform: d.platform, lastSeenAt: d.lastSeenAt, linked: !!p, online: p ? online(id) : null,
+        pairedAt: p ? p.pairedAt : null, version: conn ? conn.version : null, unlinked, linking: !p && !unlinked && (!!under(id) || awake(id)),
+      });
     }
     // a linked machine the table no longer lists still shows (so it can be unlinked)
-    for (const p of peers.values()) if (!devices.byId.has(p.peer)) machines.push({ id: p.peer, name: p.name, platform: null, lastSeenAt: null, linked: true, online: online(p.peer), pairedAt: p.pairedAt, version: null });
+    for (const p of peers.values()) if (!devices.byId.has(p.peer)) machines.push({ id: p.peer, name: p.name, platform: null, lastSeenAt: null, linked: true, online: online(p.peer), pairedAt: p.pairedAt, version: null, unlinked: false, linking: false });
     const list = [...pairings.values()].filter((x) => !FINAL.has(x.state) || t - x.endedAt <= tm.keepFinalMs).map((x) => ({
-      pid: x.pid, role: x.role === 'r' ? 'request' : 'answer', peer: { id: x.peer, name: x.peerName }, state: x.state,
-      ...(x.state === 'confirm' || x.state === 'confirmed' ? { code: x.code } : {}), confirmedHere: !!x.okMine, ...(x.message ? { message: x.message } : {}), at: x.startedAt,
+      pid: x.pid, role: x.role === 'r' ? 'request' : 'answer', peer: { id: x.peer, name: x.peerName }, state: x.state, ...(x.message ? { message: x.message } : {}), at: x.startedAt,
     }));
     return { running, me: me ? { id: me, name: myName() } : null, machines, pairings: list };
   }
   const peerList = () => [...peers.values()].map((p) => ({ id: p.peer, name: p.name, pairedAt: p.pairedAt, online: online(p.peer) }));
 
-  return { start, stop, tick, status, peers: peerList, online, call, request, confirm, decline, unlink };
+  return { start, stop, tick, status, peers: peerList, online, call, request, unlink };
 }
 
-module.exports = { createLink, derive, commitOf, transcript, sharedSecret, TIMING };
+module.exports = { createLink, derive, commitOf, transcript, sharedSecret, offKey, TIMING };

@@ -24,7 +24,7 @@
 //   hostIs(rule, { id, name }): its host is that device (hostDevice when set, else by name)
 //   overridePin(choice) -> undefined (no choice) | null (let go) | a rule of its own (kept by hand); see pinOverrides
 //   draftPins(seen, rules, draft) / withDraft(rules, draft) / countKept(root, globs) -> Promise { files, more }: the
-//     "Keeps on a machine…" sheet's preview (fleet-view.js /rules/preview)
+//     "Never continue on another machine…" sheet's preview (fleet-view.js /rules/preview)
 //   excludeSpecs(globs) / pickSpecs(globs) -> git pathspecs leaving those paths out / picking them, with the same
 //     tail match (:(exclude,top,glob,icase)**/<glob>)
 //   DEFAULT_RULES; migrate(list) -> the list, the old single built-in default replaced by DEFAULT_RULES

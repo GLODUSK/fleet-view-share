@@ -296,7 +296,10 @@ no fork; its header has the whole order. What it adds to the rows:
   after it let go makes the claim fail; ownership never moves any other way.
 - **`lease_until`**: the owner puts it 3 minutes ahead every 60 s on the conversations it runs in its session host
   (one PATCH, conditional on `owner_device` = itself), and a claim sets it. A forced takeover (A offline or not
-  answering) waits while it is ahead, and after one the new owner's uploader stays held 30 s, then takes over what the
+  answering) waits while it is ahead, unless A is offline and its lease has not moved for 2 minutes on B's clock (B
+  watches the listing's leases every tick; the newest one seen counts, so an older listing is never a move): a dead
+  host's lease, or one its clock put far ahead, holds nobody up longer than it takes to see the host is off, and a
+  lease that moves again holds it up again. After one the new owner's uploader stays held 30 s, then takes over what the
   server has, so a chunk A still had on its way never replaces one the new owner wrote. What the server has can be
   behind A's log: mid-turn, A's uploader sends a chat at most every 45 s (the uploader's rule 7), so a forced takeover
   of a chat A went offline in mid-turn can lack up to that turn's last 45 s.
@@ -391,8 +394,10 @@ What `sync-work.js` gives for the code a chat was changing (docs/sync-follow.md,
     are 16 hex digits.
 - **The list** of a conversation's packs: the settings row `work:<conversation id>`, sealed like the move rows:
   `{ v: 1, id, packs: [{ pack, kind: 'move' | 'snapshot', by (device), at, record (sha256 of the record's JSON),
-  blobs: { <sha256>: size }, summary, sig? }] }`. A move's pack goes once the new owner laid it down (or after a day,
-  its move failed); snapshots are kept 3 to a conversation; a blob goes when no pack left names it.
+  blobs: { <sha256>: size }, summary, sig?, checked? }] }`. A move's pack goes once the new owner laid it down (or
+  after a day, its move failed); snapshots are kept 3 to a conversation per device (each stamps `at` by its own
+  clock, so one running ahead never pushes another's out); a blob goes when no pack left names it. `checked`: when
+  the device last saw that snapshot's work unchanged (written at most every 90 s).
 - **The move** (`move:<id>:ask` and `:reply`, above): an ask with `carry: 1` (B lays packs down; an older B never
   says so, and A then packs nothing) and `noWork: true` (Henry's "Move it without the work"). A's released reply's
   `final.work`: `{ pack, record, kind, branch, summary, notes, shared, envPaths }` (`shared`: another live chat on A
@@ -407,10 +412,22 @@ What `sync-work.js` gives for the code a chat was changing (docs/sync-follow.md,
   (`<dataDir>/sync/notes.json`, `GET`/`POST /sync/note`), the move's pack dropped, the dependencies installed in
   the background by the lockfile (`<dataDir>/carry.log`). On A, once it sees B's claim: `putAway`, a stash named
   "fleet-view: moved to <B> <time> (<id>)", unless another live chat there works in that checkout.
-- **Snapshots**: at the end of each turn of a portable chat a device hosts and owns (busy, then idle), a pack of its
-  work when it changed since the last one (HEAD, `git status`, and the listed files' sizes and times; a plain
-  folder's files' sizes and times). A forced takeover while the owner is off lays the owner's newest snapshot down,
-  and the note says how old it is.
+- **Snapshots**: for a portable chat a device hosts and owns, a pack of its work when it changed since the last one
+  (HEAD, `git status`, and the listed files' sizes and times; a plain folder's files' sizes and times): at the end of
+  each turn (busy, then idle), every 2 minutes while a turn runs (only when at most 8 MB of it is not up already;
+  else the turn's end sends it, and the next mid-turn one waits 10 minutes), and right after the device took the chat
+  over (always one then, and the device's older snapshots of it go even when that one fails, so its newest is never
+  one from an earlier stay; the move's pack is dropped after it, so their blobs go up once). Unchanged, the device's
+  newest snapshot gets `checked`. A pack never takes `index.lock` (the index's tree comes from a copy), so a snapshot mid-turn
+  never makes the chat's own git commands fail. A forced takeover while the owner is off lays the owner's newest
+  snapshot down, and the note says how old it is, and when it is older than the conversation (the row's `updated_at`
+  more than 30 s past the snapshot's `at` or `checked`, both by the owner's clock), says both times; the missing
+  list says it too. The device keeps the git chats it left a
+  snapshot of in `<dataDir>/sync/snapped.json` (`{ v: 1, ids: { <id>: { cwd, head, left, at } } }`, the newest 500;
+  a snapshot that finishes after a release forgets it again); one another device owns now that it never released (a
+  release forgets it) is put away once its session there has ended and the host's list is in: a stash named
+  "fleet-view: taken over by <B> while this machine was off" (`putAway`'s rules), unless HEAD moved since that
+  snapshot (that checkout then holds newer work, and stays as it is).
 
 ## Done means
 

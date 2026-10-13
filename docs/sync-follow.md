@@ -1,7 +1,7 @@
 # Chats follow you between machines (plan)
 
 Status: built 2026-10-11 (Henry: "do all of it"), every part below merged; not yet tried between the two real machines
-(that needs both signed in to sync, linked once in the Sync card, and the phone app's next build). It replaces an earlier draft that only passed
+(that needs both signed in to sync, which links them by itself, and the phone app's next build). It replaces an earlier draft that only passed
 messages through to the machine running a chat.
 
 What Henry asked for (2026-10-11): a chat can live on either machine and keeps its workspace. A repo that is on
@@ -23,15 +23,33 @@ Every chat's workspace is one of two kinds:
   folder outside the home folder in no repo. Today sync doesn't carry these chats at all. From now on their logs are
   synced too, so the other machine lists them, marked "on BlackBox", and can read them.
 
+**Remote by default (Henry, 2026-10-13).** Typing never moves a chat. Every chat stays on its host, and what Henry
+types on the other machine goes to the host through the link, like a remote port to it: idle or working, portable or
+bound. Sync still copies every log, so both machines list and read every chat. Why: the host already has the files,
+the logins and the `node_modules`; moving all of that because of one line was wrong. A chat moves only when Henry asks:
+**Continue on this machine** in the chat's right-click menu, or in its Session tab. (Until 2026-10-13 typing into an
+idle portable chat moved it here first.)
+
 What happens when Henry types into a chat on the machine that isn't its host:
 
 | The chat | Its host | What happens |
 |---|---|---|
-| portable, idle | on | It moves here with everything it needs (below), then the message goes in |
-| portable, working | on | The message is queued on the host. The chat moves the next time he types while it's idle, or now with **Take over now** |
-| portable | off | It moves here from what the host last uploaded, its code included (see "When the host is off") |
-| bound | on | The message goes to the host, and the chat stays there |
-| bound | off | "This workspace is only on BlackBox, which is off". **Continue here anyway** moves the conversation, but its files aren't here |
+| portable or bound, idle or working | on, linked | The message goes to the host (queued there while Claude works), and the chat stays there |
+| any | on, not linked | Nothing is sent and nothing moves: "BlackBox isn't linked with this machine yet" (they link by themselves while both are on), with **Continue on this machine** as the other way |
+| portable | off | Nothing moves by itself: "BlackBox is offline. Continue on this machine from its last copy?" A click moves it from what the host last uploaded, its code included (see "When the host is off") |
+| bound | off | "This workspace is only on BlackBox, which is off". **Continue on this machine anyway** moves the conversation, but its files aren't here |
+
+**Continue on this machine** (the right-click menu, the Session tab, the cards) moves it with everything it needs
+(below), as moves always did. What only works in a session on the machine itself (a "/" command that opens a panel,
+the mode and model buttons, Rewind and Edit, bash mode, attaching files that aren't images) says so, with the button.
+
+**Pinned chats never continue on another machine.** A workspace's **Never continue on another machine…** (its
+right-click → Workspace settings; `web/keeps.js`, the stays-on rules) pins its chats to one machine: "Stays on
+BlackBox: it used Blender…". Typed elsewhere, a pinned chat's messages go there like any chat's; Continue on this
+machine is offered disabled ("a rule keeps it on BlackBox"), and the Session tab has no move button. A chat pinned by
+hand (an older page's "Keep on <host>") offers **Unpin and continue on this machine** instead: unpinned for good, then
+moved like any chat. When the host is off, the offline cards offer the same for any pinned chat. ("Let it follow me"
+and "Follows you … Keep on <host>" are gone with the old rule: nothing follows Henry now.)
 
 The phone follows the same rules but never hosts: it sends each chat's messages to that chat's host.
 
@@ -87,10 +105,37 @@ the others. So:
 
 ## When the host is off
 
-A live handover can't happen if the host is asleep. So the host also uploads each portable chat's work (item 2,
-sealed like the logs) at the end of every turn. A pickup from the cloud copy then gets the code as of the last
-finished turn. The secrets come from the last time the machines were linked. Anything newer is in the stash on the old
-host, and the `[Fleet View]` note says so.
+A live handover can't happen if the host is asleep, crashed or lost power. So the host also uploads each portable
+chat's work (item 2, sealed like the logs) at the end of every turn, every 2 minutes while a turn runs, and right
+after it takes a chat over. Each time it first checks whether the work changed (one `git status`), and uploads only
+then. Mid-turn it sends at most 8 MB that is not up already; more waits for the turn's end, and the next mid-turn
+snapshot comes 10 minutes later, so a file that keeps changing never goes up every 2 minutes. The conversation itself goes up at most every 45 s mid-turn, and at once when a turn ends.
+
+So with the old host dead, "Continue on this machine" (forced, "Use the cloud copy") gets:
+
+- the conversation as of its last upload: at most about 45 s old;
+- the code as of the newest snapshot: at most about 2 minutes old (plus the upload's own time);
+- the secrets from the last time the machines were linked.
+
+When the code is older than the conversation, the `[Fleet View]` note and the missing list both say so ("the code
+here is as of 14:02 UTC, the conversation as of 14:05 UTC"). A turn that changed no code doesn't count: the host
+notes when it last saw the work unchanged.
+
+The other machine sees the old host offline about 2 to 2.5 minutes after it died (no heartbeat for 2 minutes), or
+gets "no answer" 60 s after asking. The old host's lease does not hold the pickup up any longer than that: once the
+host is offline and its lease has not moved for 2 minutes, the lease no longer counts, even if the dead host's clock
+put it far ahead. A lease that moves again means the host is back and running the chat, and it holds the pickup
+up again.
+
+When the old host comes back, it sees the chat is the other machine's now:
+
+- its uploader never writes the chat again (it checks the owner first);
+- its session, if it survived (sleep), ends once Claude is idle;
+- its copy of the log, with any lines that never went up, stays as a conflict, never merged;
+- once that session has ended, its changes in that checkout go in a git stash named "fleet-view: taken over by
+  <machine> while this machine was off" (never deleted). Not in the checkout Fleet View runs from, not where
+  another live chat works, not before the session host's list is in, and not when HEAD moved since the snapshot
+  (new commits or another branch there are newer work, so the checkout stays as it is).
 
 ## Clone what's missing
 
@@ -109,7 +154,7 @@ machine can call the other.
 What it carries:
 
 - **Live handovers:** the work, the secrets and the logins.
-- **Messages to a host:** for a bound chat, or a portable one that's working. These routes are already on the
+- **Messages to a host:** for every chat another machine hosts (remote by default, 2026-10-13). These routes are already on the
   relay's allowlist:
 
 | The Chat tab does | The host's route |
@@ -124,10 +169,10 @@ What it carries:
 
 - **Online or not, at once:** the channel's presence, instead of the 2-minute heartbeat moves use now.
 
-**Pairing, once:** in the Sync card on the Mac, **Link with BlackBox**. Both screens show a 6-digit code, and Henry
-clicks **Allow** on BlackBox when they match. The handshake commits to its keys before the code shows (as
-Bluetooth's numeric comparison does), so whoever carries the messages can't make the codes match. One step links both
-ways. **Unlink** on either machine ends it at once.
+**Linking, by itself (Henry, 2026-10-13):** every machine signed in to sync as Henry with the sync key links with
+every other one within about a minute of both being on, with no code to compare and no click ("it should happen
+because it's Fleet View on both PCs and that's it"). The sign-in and the sync key are the trust root, as for the logs
+([link.md](link.md), "The locks"). **Unlink** on either machine ends it at once, and they stay unlinked until **Link**.
 
 ## Parity: Fleet View itself on both
 
@@ -164,13 +209,17 @@ One item each, ready for "Go with these". Items 1 and 2 can start now. 3 needs 2
    `[Fleet View]` note (done: #314: sync-carry.js, /peer/env and /peer/logins, /sync/note)
 5. Clone what's missing: ask once per repo, then automatic, and install dependencies · Sonnet, medium (done: #308; by itself only from accounts the machine has a checkout from)
 6. Follow you: typing moves a portable chat here (queued on the host while it works), bound chats go through the
-   link, and the Chat tab shows which · Opus, high (done: #312)
+   link, and the Chat tab shows which · Opus, high (done: #312). Changed 2026-10-13 to remote by default: every chat's
+   messages go to its host, and it moves only on **Continue on this machine** (the right-click menu, the Session tab)
 7. The phone follows the host: it pairs with both machines and sends each chat's messages to its host · Opus, medium (done: #309; ships with the app's next build)
 8. Fleet View's parity: a Mac form of every CLAUDE.md step, chosen by the machine the chat runs on (done: #301)
 
 ## Decided
 
-- Chats follow Henry: the machine he types on hosts a portable chat (Henry, 2026-10-11).
+- ~~Chats follow Henry: the machine he types on hosts a portable chat (Henry, 2026-10-11).~~ Replaced: remote by
+  default. A chat stays on its host and the other machine sends to it; it moves only when Henry clicks **Continue on
+  this machine** (Henry, 2026-10-13: one machine already has the files, the logins and the `node_modules`, so nothing
+  should move because of one line).
 - A move carries everything the chat needs, logins and keys included (Henry, 2026-10-11). Secrets go only over the
   link.
 
@@ -197,8 +246,8 @@ hostname. Everything below names a peer by that id.
   every 60 s (1 s while a pairing is under way). It is a commit-then-reveal X25519 exchange (as ZRTP and Bluetooth's
   numeric comparison do): the requester writes `sha256(its public key)`, the other machine answers with its public
   key, and only then does the requester reveal its key. Both derive the keys with HKDF over the shared secret and
-  the whole transcript, plus a 6-digit code that both pages show. The pairing counts only once Henry confirms the
-  code on **both** machines, since each one will run what the other sends. One handshake makes both directions: a
+  the whole transcript. Since 2026-10-13 it runs by itself (no code to compare: each side confirms as soon as it has
+  the keys; link.md "Who asks"). One handshake makes both directions: a
   key and device id for requester to answerer, and another for answerer to requester.
 - Each machine's `relay.js` then keeps the other as a device of kind `computer` (`peer`: its sync device id) in
   `devices.json` and `relay-keys`, joins its channel, and serves it like a paired phone (envelopes, replays, parts,
@@ -240,19 +289,26 @@ synced under the host's bound row (`bound:<device>` origin) stays bound.
 `/link/interrupt`, `/link/now`, `/link/unsend`, `GET /link/activity`, `/link/menu`, and `/conversation` for a chat
 hosted elsewhere.
 
-As built (`link-send.js`, `web/compose.js` followPlan; docs/link.md "The Chat tab's routes"), Send in the Chat tab of a
-chat another machine runs does one of these:
+As built (`link-send.js`, `web/compose.js` followPlan; docs/link.md "The Chat tab's routes"), and remote by default
+since 2026-10-13, Send in the Chat tab of a chat another machine runs does one of these. Typing never moves it:
 
 | The chat | What Send does |
 |---|---|
-| portable, idle there | moves it here (`POST /sync/move`, its phase in the box's status line, Cancel), opens it here in the folder the move gives, then types the message here, with the move's `[Fleet View]` note before it once (`GET /sync/note`, then `POST /sync/note { id, done: true }`) |
-| portable, busy there (working, or asking) | `/link/send`: queued there. "Sent to <host>: it's working there. This chat moves here once it's idle and you type again." |
-| portable, busy there, machines not linked | moves it here anyway: the move waits until Claude is done there (or Take over now in the Session tab) |
-| bound, or a bot or the Chief (a move would lose the role) | `/link/send`: it stays there. Not linked: "Link <host> in the Sync card to type here" |
-| host offline (the link's presence) | a card: "<host> is offline. Continue here from its last copy?" (a forced move), or for a bound one "Only on <host>, which is offline", with Continue here anyway (the conversation, not its files) |
+| any, linked (portable or bound, idle or busy, a bot or the Chief) | `/link/send`: it goes in there (queued there while Claude works or asks; resumed there when it isn't running) and the chat stays there. "Runs on <host>: your messages go there" (busy: "Working on <host>: what you send goes there"; bound: "Its workspace is only on <host>") |
+| any, machines not linked | nothing is sent: "<host> isn't linked with this machine yet" (they link by themselves while both are on), with **Continue on this machine** (not for a bot or the Chief: a move would lose the role) |
+| host offline (the link's presence) | a card: "<host> is offline. Continue on this machine from its last copy?" (a forced move; a draft then goes in here), or for a bound one "Only on <host>, which is offline", with Continue on this machine anyway (the conversation, not its files) |
+
+**Continue on this machine** in the chat's right-click menu (`web/app.js` continueItem, shown on the desktop window
+while another machine hosts the chat and no move is under way) opens its Session tab, which starts the move (`term.js`
+requestMove, `POST /sync/move`) and shows its phases, Cancel, Take over now and the rest, as that tab's own button
+does. A pinned chat (`/state`'s `workspace.pin`): a rule's pin shows the item disabled (the server's move answers 409
+`pinned` anyway); one pinned by hand (`pin.manual`) reads "Unpin and continue on this machine", and the tab first sends
+`POST /sync/pin { id, mode: 'free' }` (keeps.js setPin), then the move. Once ready it opens here in the folder the move gives, and the move's `[Fleet View]` note goes before the next
+message once (`GET /sync/note`, then `POST /sync/note { id, done: true }`).
 
 While it runs there, the box reads that machine: the activity line and the question cards from `/link/activity` and
 `/link/menu` (every 1.5 s while Claude works there, else 5 s), and the card's answers, Stop, the queue's Interrupt and
 Unsend, and images go there. Rewind and Edit, bash mode, a "/" command that opens a panel, the permission mode, the
-model and Remote Control say "Continue here to use this" with the button. The feed reads the host while the link is up
-(`source`). The Session tab's card adds "Or just type in the Chat tab: your messages go there."
+model and Remote Control say "… Continue on this machine to use this" with the button. The feed reads the host while
+the link is up (`source`). The Session tab's card adds "Or just type in the Chat tab: your messages go to <host>, and it
+runs there."

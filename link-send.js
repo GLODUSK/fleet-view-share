@@ -30,8 +30,8 @@
 // { ok: false, code, message } with code
 //   bad_id 400, bad_request 400 (a field that isn't right), too_large 413,
 //   not_elsewhere 409 (this machine runs it, or nobody else owns it), moving 409 (a move under way: wait),
-//   not_running 409 (sync isn't running here, so the link isn't either), not_linked 409 ("Link <host> in the Sync
-//   card to type here"), revoked 409, pc-restarted 409 (the host restarted mid-request: a POST may have gone in),
+//   not_running 409 (sync isn't running here, so the link isn't either), not_linked 409 ("<host> isn't linked with
+//   this machine yet: …"), revoked 409, pc-restarted 409 (the host restarted mid-request: a POST may have gone in),
 //   offline 503, stopped 503, timeout 504, and bad_answer 502 (the host answered with something that isn't JSON).
 // Only the routes' own fields go on, and never a body field the page did not set here: a page can't reach any other
 // route of the host's through these.
@@ -52,8 +52,8 @@ const CONV_MS = 15000; // a feed read from the host: the page asks again a secon
 // what a call that reached no answer means for the page -> [status, code, message]
 function unreached(code, name) {
   switch (code) {
-    case 'not_linked': return [409, 'not_linked', `Link ${name} in the Sync card to type here`];
-    case 'revoked': return [409, 'revoked', `${name} unlinked this machine: link them again in the Sync card`];
+    case 'not_linked': return [409, 'not_linked', `${name} isn't linked with this machine yet: they link by themselves while both are online (press Link in the Sync card if you unlinked it)`];
+    case 'revoked': return [409, 'revoked', `${name} unlinked this machine: press Link in the Sync card to link them again`];
     case 'offline': return [503, 'offline', `${name} is offline`];
     case 'timeout': return [504, 'timeout', `${name} didn't answer in time`];
     case 'pc-restarted': return [409, 'pc-restarted', `${name} restarted while this was being sent: check before sending it again`];

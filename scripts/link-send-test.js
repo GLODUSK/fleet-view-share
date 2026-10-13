@@ -128,7 +128,7 @@ async function main() {
   {
     const t = setup();
     for (const [code, s, re] of [
-      ['not_linked', 409, /^Link BlackBox in the Sync card to type here$/], ['offline', 503, /BlackBox is offline/], ['timeout', 504, /didn't answer/],
+      ['not_linked', 409, /^BlackBox isn't linked with this machine yet: they link by themselves/], ['offline', 503, /BlackBox is offline/], ['timeout', 504, /didn't answer/],
       ['pc-restarted', 409, /restarted/], ['revoked', 409, /unlinked/], ['stopped', 503, /stopped/], ['too_large', 413, /too large/], ['weird', 502, /could not be reached/],
     ]) {
       t.answer = () => ({ s: 0, b: { ok: false, code, message: 'from the link' } });
