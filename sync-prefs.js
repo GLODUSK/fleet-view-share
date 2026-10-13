@@ -1,11 +1,11 @@
 // sync-prefs.js: what Henry decides about his conversations and workspaces, the same on every device. Hiding or
 // removing a conversation, renaming one, moving one to a workspace, hiding, adding, renaming or ordering a workspace,
 // the colours picked for workspaces and conversations (repoHues, sessHues), the map's spots, the teams, where a kind of work stays (hostRules), a chat kept on or let go from a machine
-// (pinOverrides), the chats whose model or effort is Dynamic (dynamicChats), the Bots list's order and pins (chatOrder), housekeeping's keep-pins on GitHub
-// branches (keepPins) and the parity rules (parity) are intent, not
+// (pinOverrides), the chats whose model or effort is Dynamic (dynamicChats), the Bots list's order and pins (chatOrder), a bot's look
+// (botLooks), housekeeping's keep-pins on GitHub branches (keepPins) and the parity rules (parity) are intent, not
 // a view of one screen: done on the PC, the Mac does it too. What belongs to one
 // screen (view, zoom, camera, window bounds, query, the repo filter, saved map views, accounts turned off, push
-// targets, bots, compact, finishedOpen, steady, notify) never leaves the machine.
+// targets, bots (the registry; only their looks go), compact, finishedOpen, steady, notify) never leaves the machine.
 //
 //   createPrefs({ api, key, log, now, device, read, apply, translate, load, save, timing })
 //     -> { start(), stop(), tick(), nudge(), status() }
@@ -219,6 +219,16 @@ const GROUPS = {
     },
     key: (p) => p.k, lkey: (l) => l.key,
   },
+  // a bot's look (its avatar's shape and colour: bots.js) by its folder's name, lower case (fleet-view.js botLooks):
+  // { slug, shape?, color?, at? }, one of shape and color at least, at when the look last changed. A bot's registry is
+  // its machine's own, but the other machine lists it as an elsewhere bot from that folder, which wears this look. Each
+  // machine's items for its own bots are made from its registry every read (that machine alone changes them); a bot back
+  // to Default on both, or removed, has none (its elsewhere bot is its account's colour again)
+  botLooks: {
+    clean: (x) => cleanBotLook(x),
+    out(x) { const p = this.clean(x); return p && { p, known: true }; },
+    in: (p) => p, key: (p) => p.slug, lkey: (l) => l.slug,
+  },
   // the map's pinned spots: { id, x, y, pin: true }. A repo's (id r:<root>) goes up as { repo, x, y, pin } and comes
   // back under this machine's root for it; a conversation's (s:<id>) and any other go as they are. Unpinned spots
   // stay on each machine: the map's spacing rule nudges them to fit that screen's groups, so two machines would keep
@@ -383,6 +393,18 @@ function cleanDynamicChat(x) {
   if (!x || typeof x !== 'object' || !UUID_RE.test(lower(x.id)) || !(num(x.at) > 0)) return null;
   const model = x.model === true, effort = x.effort === true;
   return model || effort ? { id: lower(x.id), model, effort, at: num(x.at) } : null;
+}
+
+// a bot's look (the botLooks group): { slug: its folder's name, lower case, shape?: one of BOT_SHAPES, color?: #rrggbb
+// (lower case), at? }; null when the slug, a shape or a colour given is not one, or it has neither
+const BOT_SHAPES = ['hex', 'drop', 'round', 'pill', 'tri', 'square', 'star', 'clover', 'flower', 'heart']; // bots.js SHAPES (scripts/sync-prefs-test.js checks the two agree)
+const BOT_SLUG_RE = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+function cleanBotLook(x) {
+  if (!x || typeof x !== 'object' || typeof x.slug !== 'string' || !BOT_SLUG_RE.test(lower(x.slug))) return null;
+  if (x.shape != null && !BOT_SHAPES.includes(x.shape)) return null;
+  if (x.color != null && (typeof x.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(x.color))) return null;
+  if (!x.shape && !x.color) return null;
+  return { slug: lower(x.slug), ...(x.shape ? { shape: x.shape } : {}), ...(x.color ? { color: lower(x.color) } : {}), ...(num(x.at) > 0 ? { at: num(x.at) } : {}) };
 }
 
 // the Bots list's order (fleet-view.js settings.chatOrder, web/chats-model.js sortContacts): { pinned: [keys], keys:
@@ -1018,5 +1040,5 @@ function createPrefs(o = {}) {
   return { start, stop, tick, nudge, status };
 }
 
-module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, GONE_MS, GONE_MAX, cleanRoot, cleanHostRule, cleanPinOverride, cleanDynamicChat, cleanChatOrder, CHAT_ORDER_MAX, spotId, portable, cleanItems,
+module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, GONE_MS, GONE_MAX, cleanRoot, cleanHostRule, cleanPinOverride, cleanDynamicChat, cleanChatOrder, CHAT_ORDER_MAX, cleanBotLook, BOT_SHAPES, spotId, portable, cleanItems,
   union, join, merge3, mergeOrder, weave, timeOf, applyOps, newest };

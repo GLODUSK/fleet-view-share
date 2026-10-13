@@ -135,9 +135,18 @@ new conversation's log, which does, so the chain and its Summary show on both ma
       `at` when it was picked (a pick after a "Default" elsewhere wins). Its conversations' shades follow it.
     - `sessHues` (since 2026-10-12): `{ id, hue, at? }` a conversation's own colour (`settings.sessHues`, POST /settings
       `sessHue`), one per chat; it wins over its workspace's. "Default" takes an item out of either group.
+    - `botLooks` (since 2026-10-13): `{ slug, shape?, color?, at? }` a bot's look (its avatar's shape, one of `bots.js`
+      `SHAPES`, and `#rrggbb` colour in lower case; one of them at least), keyed by the bot's folder name under `~/Bots`
+      in lower case; `at` when the look last changed (the registry's `lookAt`, else when the bot was made). A machine's
+      items for its own bots (not removed) are made from its registry (`bots.js` `looks()`) every read, so only that
+      machine changes them, and an item that comes in for a folder one of its bots owns is never put in there. The rest
+      are kept in `settings.botLooks` (at most 200) and worn by the elsewhere bot of that folder (`bots.js`
+      `elsewhereView`). A bot back to Default (no shape, no colour) or removed has no item: the other machine draws its
+      elsewhere bot in its account's colour again.
 
     Never synced (each screen's own): view, zoom, the map's camera and saved views, window bounds, query, the
-    workspace filter (`repo`, `repos`), `offAccounts`, `pushTargets`, bots, compact, finishedOpen, steady, notify.
+    workspace filter (`repo`, `repos`), `offAccounts`, `pushTargets`, bots (the registry; only their looks go, in
+    `botLooks`), compact, finishedOpen, steady, notify.
     A root goes up as `{ origin, name }` and comes back as the root here with that origin (the one with that folder
     name first), else one with that folder name and no other origin; root keys compare in lower case, `\` and `/`
     alike. A path this machine does not list (stale data, another machine's path) goes up as the repo here with its
@@ -181,7 +190,7 @@ new conversation's log, which does, so the chain and its Summary show on both ma
 
     **Compatibility** (one machine may run the older release for a while):
     - New row field `gone`, new item field `at` on map spots, and the groups `addedRepos`, `keepPins`, `parity`,
-      `dynamicChats`, `repoHues`, `sessHues`: an
+      `dynamicChats`, `repoHues`, `sessHues`, `botLooks`: an
       older device ignores them (its `openRow` reads only `v, device, at, after, items`; its `GROUPS` has no such
       group, so it never lists or writes those rows; its `mapSpots` clean drops `at`). Its rows carry no `gone` and no
       spot `at`, and a newer device merges them as before (no tombstone to compare: what changed here wins).

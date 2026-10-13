@@ -4,10 +4,11 @@
 // fleet-view.js requires it and hands it what it needs (createBots below).
 //
 // - The registry: settings.bots in ~/.fleet-view.json, [{ id, name, brief, account, model, effort, folder, createdAt,
-//   ids: [its conversations, oldest first, at most 50], told: [the ids told theirs], removed?, shape?, color? }]. A
-//   removed bot keeps its folder, its logs and its ids: they stay tagged in /state, so its conversations never show on
+//   ids: [its conversations, oldest first, at most 50], told: [the ids told theirs], removed?, shape?, color?, lookAt? }].
+//   A removed bot keeps its folder, its logs and its ids: they stay tagged in /state, so its conversations never show on
 //   the map. shape and color are its avatar's look (web/mascot.js), set when it is made or changed, or by the bot
-//   itself (look below: POST /api/bots/look, fv look); left out, the page picks them. model and effort may each be
+//   itself (look below: POST /api/bots/look, fv look); left out, the page picks them. lookAt: when they last changed
+//   (lookItems below: the look goes to Henry's other machines, sync-prefs.js botLooks). model and effort may each be
 //   'dynamic' (a new bot's are): its sessions start on DYNAMIC_START, and the page sizes each message Henry sends it
 //   and switches first when needed (switchTo below: POST /bots/:id/switch, the page only).
 // - Start, one at a time per bot: the conversation running already is taken as it is; else its newest one is resumed
@@ -21,7 +22,9 @@
 // - Another machine's bots: registries never sync (sync-prefs.js), but sync brings their chats here, into ~/Bots/<slug>.
 //   elsewhere() makes one bot of each such folder that no bot here owns, from its conversations: tagged like a bot's,
 //   so they are the Bots tab's alone too, and listed in state.bots with elsewhere: true (no Start, Edit, Remove or
-//   Tasks here: it is run and changed on its own machine). Henry, 2026-10-11: the PC's Panchito on the Mac.
+//   Tasks here: it is run and changed on its own machine). Henry, 2026-10-11: the PC's Panchito on the Mac. Its look is
+//   the one its machine gave it: each bot's look syncs by its folder's name (lookItems, sync-prefs.js botLooks), and
+//   elsewhereView wears it (fleet-view.js settings.botLooks keeps the other machines').
 // - Who is talking: api.js frames what reaches a bot as it does for the Chief (isOverseer).
 // - Tasks and routines: each bot keeps its task list in tasks.json in its folder (bot-tasks.js has the format), one-off
 //   and recurring, updated by the bot itself as Henry gives, finishes, changes or cancels work (bot/BRIEF.md says so).
@@ -176,14 +179,34 @@ function checkLook(b) {
   }
   return out;
 }
-// a look from checkLook laid on a bot: a value is set, null takes the key away
-function applyLook(bot, look) {
+// a look from checkLook laid on a bot: a value is set, null takes the key away; lookAt is now when that changed it
+function applyLook(bot, look, now = Date.now()) {
+  const was = `${bot.shape || ''}|${bot.color || ''}`;
   for (const k of ['shape', 'color']) {
     if (!(k in look)) continue;
     if (look[k] === null) delete bot[k];
     else bot[k] = look[k];
   }
+  if (`${bot.shape || ''}|${bot.color || ''}` !== was) bot.lookAt = now;
 }
+// a bot's folder's name, lower case: its key on every machine (sync-prefs.js botLooks, chatOrder's bots:<slug>)
+const slugKey = (folder) => path.basename(String(folder)).toLowerCase();
+// its look as the botLooks group carries it, or null with none: { slug, shape?, color?, at? } (at: lookAt, else
+// when it was made)
+function lookItem(b) {
+  if (!b || (!b.shape && !b.color)) return null;
+  const at = Number.isFinite(b.lookAt) && b.lookAt > 0 ? b.lookAt : Number.isFinite(b.createdAt) && b.createdAt > 0 ? b.createdAt : 0;
+  return { slug: slugKey(b.folder), ...(b.shape ? { shape: b.shape } : {}), ...(b.color ? { color: b.color } : {}), ...(at ? { at: Math.round(at) } : {}) };
+}
+// the folder names the bots here own (not a removed one's: another machine's bot of that name may show here)
+const ownSlugs = (bots) => new Set((bots || []).filter((b) => b && !b.removed && typeof b.folder === 'string').map((b) => slugKey(b.folder)));
+const notOwn = (own) => (x) => !!x && typeof x.slug === 'string' && !own.has(x.slug.toLowerCase());
+// The botLooks group as this machine holds it: its own bots' looks, one per bot not removed that has one, made from the
+// registry each time (so this machine alone says how its bots look), then others' (another machine's bots, kept in
+// fleet-view.js settings.botLooks) for the folders none of its bots owns
+const lookItems = (bots, others) => [...(bots || []).filter((b) => b && !b.removed).map(lookItem).filter(Boolean), ...(Array.isArray(others) ? others : []).filter(notOwn(ownSlugs(bots)))];
+// the group's items as they come in, less those for a folder a bot here owns (never put in over its registry)
+const othersOf = (bots, items) => (Array.isArray(items) ? items : []).filter(notOwn(ownSlugs(bots)));
 
 // ---------- the folder and its CLAUDE.md ----------
 // the folder name a bot's name gives: lower case letters, digits and dashes (accents dropped), at most 32; "bot" when
@@ -236,7 +259,8 @@ function tagState(st, tagOf) {
 // another machine's bots, from the conversations here (each { id, root?, cwd?, name, last, account }): one per folder
 // ~/Bots/<slug> that holds some and that no bot here (bots, a removed one's too) owns. Its id is made from the slug, so
 // it stays the same from one /state to the next; its name is its newest conversation's (a bot names its sessions
-// after itself), else the slug. -> [{ id, name, folder, ids (oldest first), convId (the newest), account, at }]
+// after itself), else the slug. -> [{ id, name, folder, slug (its folder's name, lower case), ids (oldest first), convId
+// (the newest), account, at }]
 const elsewhereId = (slug) => crypto.createHash('sha1').update(`elsewhere:${String(slug).toLowerCase()}`).digest('hex').slice(0, 12);
 function elsewhereBots(convs, base = BOTS_DIR, bots = []) {
   const groups = new Map(); // folder key -> { folder, slug, convs }
@@ -254,13 +278,16 @@ function elsewhereBots(convs, base = BOTS_DIR, bots = []) {
     const cs = g.convs.sort((x, y) => (x.last || 0) - (y.last || 0));
     const top = cs[cs.length - 1];
     return { id: elsewhereId(g.slug),
-      name: (typeof top.name === 'string' && top.name.trim()) || g.slug, folder: g.folder, ids: cs.map((x) => x.id),
+      name: (typeof top.name === 'string' && top.name.trim()) || g.slug, folder: g.folder, slug: g.slug.toLowerCase(), ids: cs.map((x) => x.id),
       convId: top.id, account: top.account || null, at: top.last || 0 };
   });
 }
-// one of those as state.bots shows it: it never runs here and has nothing to change here
-const elsewhereView = (e) => ({ id: e.id, name: e.name, brief: '', account: e.account, model: null, effort: null, folder: e.folder,
-  createdAt: e.at, convId: e.convId, ids: [...e.ids], live: false, shape: null, color: null, tasks: [], elsewhere: true });
+// one of those as state.bots shows it: it never runs here and has nothing to change here. look: the one its machine
+// gave it ({ shape?, color? }: sync-prefs.js botLooks), if any; else the page draws it in its account's colour
+const elsewhereView = (e, look) => ({ id: e.id, name: e.name, brief: '', account: e.account, model: null, effort: null, folder: e.folder,
+  createdAt: e.at, convId: e.convId, ids: [...e.ids], live: false,
+  shape: look && SHAPES.includes(look.shape) ? look.shape : null, color: look && typeof look.color === 'string' && COLOR_RE.test(look.color) ? look.color.toLowerCase() : null,
+  tasks: [], elsewhere: true });
 // one bot as state.bots and the answers show it; l: its running session from the host's list ({ id }), if any. ids:
 // every conversation it went through, oldest first (the Bots tab shows them as one chat: web/chat.js opts.history)
 function viewOf(b, l) {
@@ -284,7 +311,8 @@ function loadBots(saved, base = BOTS_DIR) {
     out.push({ id: b.id, name: b.name, brief: str(b.brief, ''), account: str(b.account, CHIEF.DEFAULTS.account), model: str(b.model, CHIEF.DEFAULTS.model),
       effort: str(b.effort, CHIEF.DEFAULTS.effort), folder: b.folder, createdAt: Number.isFinite(b.createdAt) ? b.createdAt : 0, ids,
       told: Array.isArray(b.told) ? [...new Set(b.told.map(convId).filter(Boolean))] : [], ...(b.removed === true ? { removed: true } : {}),
-      ...(SHAPES.includes(b.shape) ? { shape: b.shape } : {}), ...(typeof b.color === 'string' && COLOR_RE.test(b.color) ? { color: b.color.toLowerCase() } : {}) });
+      ...(SHAPES.includes(b.shape) ? { shape: b.shape } : {}), ...(typeof b.color === 'string' && COLOR_RE.test(b.color) ? { color: b.color.toLowerCase() } : {}),
+      ...(Number.isFinite(b.lookAt) && b.lookAt > 0 ? { lookAt: Math.round(b.lookAt) } : {}) });
   }
   return out;
 }
@@ -809,10 +837,14 @@ function createBots(deps) {
     inBots: (p) => inBots(p, base),
     // another machine's bots, from these conversations (elsewhereBots)
     elsewhere: (convs) => (d.demo ? [] : elsewhereBots(convs, base, bots)),
+    // the botLooks group (sync-prefs.js) as this machine holds it, with others (fleet-view.js settings.botLooks); and
+    // the items that come in, less the ones a bot here owns (what settings.botLooks keeps)
+    lookItems: (others) => (d.demo ? [] : lookItems(bots, others)),
+    othersOf: (items) => othersOf(d.demo ? [] : bots, items),
     // for tests
     _state: () => ({ bots, live, starting: [...starting] }),
   };
 }
 
-module.exports = { createBots, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkOpts, checkLook, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
+module.exports = { createBots, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
   startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX };

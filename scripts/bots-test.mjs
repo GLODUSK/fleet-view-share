@@ -144,7 +144,13 @@ test('another machine\'s bots: one per ~/Bots folder no bot here owns, from its 
   assert.equal(B.elsewhereBots(convs.slice(0, 1), base, []).find((x) => x.folder === pan).id, p.id); // the same id each time
   assert.equal(q.name, 'quiet'); // no name: the folder's
   const v = B.elsewhereView(p);
-  assert.deepEqual([v.id, v.name, v.convId, v.live, v.elsewhere, v.tasks], [p.id, 'Panchito', 'p2', false, true, []]);
+  assert.deepEqual([v.id, v.name, v.convId, v.live, v.elsewhere, v.tasks, v.shape, v.color], [p.id, 'Panchito', 'p2', false, true, [], null, null]);
+  // the look its machine gave it (sync-prefs.js botLooks), by its folder's name; a bad one is not worn
+  assert.equal(p.slug, 'panchito');
+  const worn = B.elsewhereView(p, { slug: 'panchito', shape: 'heart', color: '#FF6B80' });
+  assert.deepEqual([worn.shape, worn.color], ['heart', '#ff6b80']);
+  assert.deepEqual([B.elsewhereView(p, { color: '#58a6ff' }).shape, B.elsewhereView(p, { color: '#58a6ff' }).color], [null, '#58a6ff']);
+  assert.deepEqual([B.elsewhereView(p, { shape: 'blob', color: 'red' }).shape, B.elsewhereView(p, { shape: 'blob', color: 'red' }).color], [null, null]);
   assert.deepEqual(B.elsewhereBots(convs, base, [mine, gone, { id: 'cccccccccccc', folder: pan }, { id: 'dddddddddddd', folder: path.join(base, 'quiet') }]), []);
 });
 test('CLAUDE.md: the template with the name and the brief, in one pass', () => {
@@ -213,6 +219,25 @@ test('the registry as saved keeps a valid look and drops a bad one', () => {
   assert.deepEqual([one({ shape: 'clover', color: '#ABCDEF' }).shape, one({ shape: 'clover', color: '#ABCDEF' }).color], ['clover', '#abcdef']);
   const bad = one({ shape: 'blob', color: 'red' });
   assert.ok(!('shape' in bad) && !('color' in bad));
+  assert.equal(one({ shape: 'clover', lookAt: T + 5 }).lookAt, T + 5);
+  assert.ok(!('lookAt' in one({ lookAt: 'soon' })));
+});
+test('a look goes to the other machines by its folder\'s name (botLooks): lookAt when it changed, the bots here from the registry', () => {
+  const bot = { id: BID, folder: path.join(dir, 'Bots', 'Petal'), createdAt: T };
+  B.applyLook(bot, {}, T + 1);
+  assert.ok(!('lookAt' in bot)); // nothing changed
+  B.applyLook(bot, { shape: 'flower', color: '#f78fd0' }, T + 2);
+  assert.equal(bot.lookAt, T + 2);
+  B.applyLook(bot, { shape: 'flower' }, T + 3);
+  assert.equal(bot.lookAt, T + 2); // the same look: not changed
+  assert.deepEqual(B.lookItem(bot), { slug: 'petal', shape: 'flower', color: '#f78fd0', at: T + 2 });
+  assert.deepEqual(B.lookItem({ folder: '/b/Web', createdAt: T, color: '#000000' }), { slug: 'web', color: '#000000', at: T }); // no lookAt: when it was made
+  assert.equal(B.lookItem({ folder: '/b/plain', createdAt: T }), null);
+  const reg = [bot, { id: BID2, folder: '/b/gone', createdAt: T, shape: 'heart', removed: true }, { id: 'cccccccccccc', folder: '/b/plain', createdAt: T }];
+  const others = [{ slug: 'petal', shape: 'heart' }, { slug: 'gone', shape: 'star' }, { slug: 'panchito', color: '#58a6ff' }];
+  // its own bots' looks (not a removed one's), then the others' for folders none of its bots owns (a removed one's is free)
+  assert.deepEqual(B.lookItems(reg, others), [B.lookItem(bot), { slug: 'gone', shape: 'star' }, { slug: 'panchito', color: '#58a6ff' }]);
+  assert.deepEqual(B.othersOf(reg, [...others, { slug: 'PETAL', shape: 'tri' }, null]), [{ slug: 'gone', shape: 'star' }, { slug: 'panchito', color: '#58a6ff' }]);
 });
 test('api.js: the Chief and the bots are overseers; the API lists the bot routes', () => {
   assert.equal(API.isOverseer('chief'), true);
@@ -349,6 +374,8 @@ await (async () => {
     assert.equal(h.calls.startBot.length, 0);
     const [, made] = await h.bots.create({ name: 'Petal', shape: 'flower', color: '#F78FD0' });
     assert.deepEqual([made.bot.shape, made.bot.color], ['flower', '#f78fd0']);
+    assert.ok(h.saved()[0].lookAt > 0); // when the look was given (botLooks)
+    assert.deepEqual(h.bots.lookItems([]).map((x) => [x.slug, x.shape, x.color]), [['petal', 'flower', '#f78fd0']]);
     const bid = made.bot.id, conv = made.id;
     const md = fs.readFileSync(path.join(made.bot.folder, 'CLAUDE.md'), 'utf8');
     const [uc, uo] = await h.bots.update(bid, { shape: 'heart' });
@@ -373,6 +400,7 @@ await (async () => {
     // a removed bot's conversation changes nothing
     await h.bots.remove(bid);
     assert.equal(h.bots.look({ from: conv, shape: 'heart' })[0], 403);
+    assert.deepEqual(h.bots.lookItems([]), []); // removed: its look leaves the other machines
     n++; console.log('ok a look: made with one, changed by the page, and by the bot itself from its own conversation only');
   }
   // start: the running one is taken; else the newest conversation resumed; else a new one. Two at once start one

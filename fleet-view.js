@@ -531,6 +531,16 @@ function cleanSessHues(list) {
 }
 let repoHues = DEMO ? new Map() : cleanRepoHues(saved.repoHues);
 let sessHues = DEMO ? new Map() : cleanSessHues(saved.sessHues);
+// another machine's bots' looks (sync-prefs.js botLooks): settings.botLooks, [{ slug, shape?, color?, at? }] by bot
+// folder name, at most 200 (the newest), for the folders no bot here owns; the elsewhere bot of that folder wears it
+// (bots.js elsewhereView). The bots here go up from the registry (bots.js lookItems) and are never taken from the group
+const BOT_LOOKS_MAX = 200;
+function cleanBotLooks(list) {
+  const out = new Map();
+  for (const x of Array.isArray(list) ? list.slice(-BOT_LOOKS_MAX * 2) : []) { const p = SYNC_PREFS.cleanBotLook(x); if (p) { out.delete(p.slug); out.set(p.slug, p); } }
+  return SYNC_PREFS.newest([...out.values()], BOT_LOOKS_MAX);
+}
+let botLooks = DEMO ? [] : cleanBotLooks(saved.botLooks);
 // Where a kind of work stays (Henry, 2026-10-12: 3D work on the configurator's meshes happens on BlackBox, never on the
 // Mac): settings.hostRules, [{ id, repo: { origin, name } | null, paths: [globs], tools: [names, a trailing * for a
 // prefix], host: a device's name, hostDevice?: its sync device id, pinOn?: 'edits' | 'tools' | 'none', note? }]
@@ -829,7 +839,7 @@ function flushSettings() {
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, chatOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp, pinOverrides: [...pinOverrides.values()],
-    dynamicChats: [...dynamicChats.values()],
+    dynamicChats: [...dynamicChats.values()], botLooks,
     chief: CHIEF ? CHIEF.saveShape() : saved.chief,
     bots: BOTS ? BOTS.saveShape() : saved.bots,
     remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
@@ -6409,7 +6419,8 @@ function buildState() {
     // the bots (bots.js), newest first: { id, name, brief, account, model, effort, folder, createdAt, convId, live, shape, color,
     // tasks: its tasks.json as the Tasks list shows it (bot-tasks.js viewTask), tasksError? }
     // and another machine's, elsewhere: true (bots.js elsewhereView)
-    bots: BOTS ? [...BOTS.view(), ...away.map(BOTS_JS.elsewhereView)] : [],
+    // wearing the look its machine gave it (botLooks)
+    bots: BOTS ? [...BOTS.view(), ...away.map((e) => BOTS_JS.elsewhereView(e, botLooks.find((x) => x.slug === e.slug)))] : [],
   }, tagOf);
 }
 
@@ -7002,7 +7013,7 @@ const LOBBY = RELAY_LOBBY_JS.createLobby({ relay: RELAY, sync: SYNC, dataDir: LO
 const ACCOUNT_SYNC = SYNC_ACCOUNTS.createAccountSync({ accounts: ACCTS, log: (t) => logOnce(t, t) });
 // The shared settings (sync-prefs.js): the groups every device holds the same (hidden and removed conversations,
 // names, moves, hidden / added / renamed / ordered workspaces, workspace and conversation colours, the map's spots, teams, stays-on rules and choices,
-// the Bots list's order and pins,
+// the Bots list's order and pins, the bots' looks (botLooks: by folder name; a bot here goes up from its registry),
 // housekeeping's keep-pins on GitHub branches, the parity rules), read from and put back into the
 // settings above; per-screen ones (view, zoom, camera, bounds, filters, map views, accounts off, push targets, bots,
 // compact, finishedOpen, steady, notify) never go. settings.prefsSync is what this device last agreed on with the table.
@@ -7014,7 +7025,7 @@ function prefsGroups() {
     moved: [...moved.values()],
     hiddenRepos, repoNames, repoOrder, mapSpots, teams, hostRules, pinOverrides: [...pinOverrides.values()], dynamicChats: [...dynamicChats.values()],
     chatOrder: [...chatOrder.pinned.map((key) => ({ key, pin: true })), ...chatOrder.keys.map((key) => ({ key }))],
-    repoHues: [...repoHues.values()], sessHues: [...sessHues.values()],
+    repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], botLooks: BOTS ? BOTS.lookItems(botLooks) : botLooks,
     addedRepos: addedRepos.map((r) => ({ root: r.root, at: r.at })), keepPins: HK.remotePins(), parity: parityRules,
   };
 }
@@ -7049,6 +7060,10 @@ function applyPrefs(group, items) {
     chatOrder = SYNC_PREFS.cleanChatOrder({ pinned: list.filter((x) => x.pin).map((x) => x.key), keys: list.filter((x) => !x.pin).map((x) => x.key) }) || EMPTY_CHAT_ORDER;
   }
   else if (group === 'mapSpots') mapSpots = cleanMapSpots(items) || [];
+  else if (group === 'botLooks') {
+    // a bot here keeps its own look (its registry says it; it goes up again from there): only the others' are kept
+    botLooks = cleanBotLooks(BOTS ? BOTS.othersOf(items) : items);
+  }
   else if (group === 'hostRules') hostRules = cleanHostRules(items) || [];
   else if (group === 'pinOverrides') pinOverrides = cleanPinOverrides(items) || new Map();
   else if (group === 'dynamicChats') dynamicChats = cleanDynamicChats(items) || new Map();

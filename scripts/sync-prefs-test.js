@@ -89,7 +89,7 @@ const trMac = P.makeTranslate({ roots: () => Object.values(MACR), originOf: (r) 
 
 // a machine's settings, as fleet-view.js's prefsGroups gives them
 function machine() {
-  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoHues: [], sessHues: [], repoOrder: [], chatOrder: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], dynamicChats: [], keepPins: [], parity: [] };
+  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoHues: [], sessHues: [], repoOrder: [], chatOrder: [], botLooks: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], dynamicChats: [], keepPins: [], parity: [] };
 }
 const pcSet = machine(), macSet = machine();
 const T0 = Date.parse('2026-10-11T12:00:00Z');
@@ -640,6 +640,63 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
     eq(X.B.chatOrder.map((x) => `${x.pin ? '*' : ''}${x.key}`), ['*chief', 'team:t0123456789', `bot:${elsewhereId('panchito')}`, `bot:${MACBOT}`],
       "chatOrder: a reorder on the PC keeps the Mac's own bot (riding there) after the one it stood after");
+  }
+
+  // a bot's look (botLooks): by its folder's name; each machine's own bots' items made from its registry every read
+  // (bots.js lookItems), the other machine's kept (othersOf: never one for a folder a bot here owns) and worn by its
+  // elsewhere bot there (elsewhereView)
+  {
+    const BJ = require(path.join(ROOT, 'bots.js'));
+    eq(P.BOT_SHAPES, BJ.SHAPES, 'botLooks: the shapes are bots.js SHAPES');
+    eq(P.cleanBotLook({ slug: 'Panchito', shape: 'heart', color: '#FF6B80', at: 5.4, x: 1 }), { slug: 'panchito', shape: 'heart', color: '#ff6b80', at: 5 }, 'botLooks clean: slug and colour in lower case');
+    eq(P.cleanBotLook({ slug: 'web-2', color: '#000000' }), { slug: 'web-2', color: '#000000' }, 'botLooks clean: a colour alone, at left out when none');
+    ok([{ slug: 'p' }, { slug: 'p', shape: 'blob' }, { slug: 'p', shape: 'heart', color: 'red' }, { slug: 'p', color: '#fff' }, { slug: 'p', shape: '', color: '#000000' }, { slug: '-bad', shape: 'heart' },
+      { slug: 'a/b', shape: 'heart' }, { slug: 'x'.repeat(65), shape: 'heart' }, { shape: 'heart' }, null, 'x'].every((x) => P.cleanBotLook(x) === null), 'botLooks clean: no look, a bad shape, colour or slug is nothing');
+    ok(P.GROUP_NAMES.includes('botLooks') && P.GROUPS.botLooks.key({ slug: 'panchito' }) === 'panchito', 'botLooks: a shared group, one per bot folder');
+    const X = pair();
+    const regA = [{ id: 'a1a1a1a1a1a1', folder: '/pc/Bots/Panchito', createdAt: X.ca.t - 9e3, shape: 'heart', color: '#ff6b80', lookAt: X.ca.t - 5e3 },
+      { id: 'a2a2a2a2a2a2', folder: '/pc/Bots/plain', createdAt: X.ca.t - 9e3 }];
+    const regB = [{ id: 'b2b2b2b2b2b2', folder: '/mac/Bots/mateo', createdAt: X.cb.t - 9e3, shape: 'star' }];
+    const others = { A: [], B: [] };
+    // as fleet-view.js prefsGroups / applyPrefs: read = BOTS.lookItems(settings.botLooks), apply keeps BOTS.othersOf(items)
+    const wire = (set, reg, k) => Object.defineProperty(set, 'botLooks', { configurable: true, enumerable: true,
+      get: () => BJ.lookItems(reg, others[k]), set: (items) => { others[k] = BJ.othersOf(reg, items); } });
+    wire(X.A, regA, 'A'); wire(X.B, regB, 'B');
+    await X.a.tick(); X.step(10e3); await X.b.tick();
+    const pan = { slug: 'panchito', shape: 'heart', color: '#ff6b80', at: T1 - 5e3 };
+    eq(others.B, [pan], "botLooks: the PC's bot's look reaches the Mac, by its folder's name (a bot with no look sends none)");
+    X.step(10e3); await X.a.tick();
+    eq(others.A, [{ slug: 'mateo', shape: 'star', at: T1 - 2e3 - 9e3 }], "botLooks: ...and the Mac's bot's reaches the PC (at: when it was made, with no lookAt)");
+    // the Mac's elsewhere bot for the PC's Panchito wears it
+    const away = BJ.elsewhereBots([{ id: 'p1', root: '/mac/Bots/Panchito', name: 'Panchito', last: 1, account: 'A' }], '/mac/Bots', regB)[0];
+    const lookOf = (k, e) => others[k].find((x) => x.slug === e.slug);
+    const v = BJ.elsewhereView(away, lookOf('B', away));
+    eq([away.slug, v.shape, v.color, v.elsewhere], ['panchito', 'heart', '#ff6b80', true], "botLooks: the Mac's elsewhere bot wears the PC bot's look");
+    // changed on the PC (the page, or the bot itself): the Mac follows
+    BJ.applyLook(regA[0], { color: '#58a6ff' }, X.ca.t);
+    X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    eq(others.B, [{ ...pan, color: '#58a6ff', at: X.ca.t - 15e3 }], 'botLooks: a look changed on the PC reaches the Mac, with when it changed');
+    // a bot made on the PC in a folder named as the Mac's own bot's: the Mac's bot keeps its own look (its registry)
+    regA.push({ id: 'a3a3a3a3a3a3', folder: '/pc/Bots/mateo', createdAt: X.ca.t, shape: 'drop', lookAt: X.ca.t });
+    X.step(5e3); await X.a.tick();
+    ok(rowOf('botLooks').items.some((x) => x.slug === 'mateo' && x.shape === 'drop'), "botLooks: the PC's own mateo goes up from its registry");
+    X.step(10e3); await X.b.tick();
+    const n0 = posts().length;
+    eq([X.B.botLooks.find((x) => x.slug === 'mateo').shape, regB[0].shape, others.B.some((x) => x.slug === 'mateo')], ['star', 'star', false], "botLooks: an item for a folder the Mac's own bot has never goes in over its registry");
+    for (let i = 0; i < 2; i++) { X.step(10e3); await X.a.tick(); X.step(10e3); await X.b.tick(); }
+    eq([posts().length - n0, regA[2].shape, regB[0].shape], [0, 'drop', 'star'], 'botLooks: ...and neither machine writes it back and forth');
+    // a look given to plain, then plain removed on the PC: the Mac's item goes (tombstone), its elsewhere bot is plain again
+    BJ.applyLook(regA[1], { shape: 'tri' }, X.ca.t);
+    X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    ok(others.B.some((x) => x.slug === 'plain' && x.shape === 'tri'), 'botLooks: a look given later goes too');
+    regA[1].removed = true;
+    X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    ok(!others.B.some((x) => x.slug === 'plain') && (rowOf('botLooks').gone || []).some(([k]) => k === 'plain'), 'botLooks: a bot removed on the PC: its look leaves the Mac (a tombstone in the row)');
+    // Default on the PC: the Mac's elsewhere bot is its account's colour again
+    BJ.applyLook(regA[0], { shape: null, color: null }, X.ca.t);
+    X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    const v2 = BJ.elsewhereView(away, lookOf('B', away));
+    eq([others.B.map((x) => x.slug), v2.shape, v2.color], [[], null, null], 'botLooks: Default on the PC: the Mac draws its elsewhere bot in its account\'s colour again');
   }
 
   // D8: repoOrder keeps the other machine's repos in place
