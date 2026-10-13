@@ -1122,9 +1122,12 @@ export function mountCompose(slot, s) {
   // ----- Send -----
   // (in bash mode only the command goes: the quote and attachments wait for a message)
   const hasDraft = () => !!(ta.value.trim() || (!st.d.shell && (st.d.atts.length || st.d.quote)));
+  // what the question card's "Type something" box holds while the question is up ('' when none): Send sends it
+  // when the chat box is empty
+  const freeText = () => (st.menu && st.menu.options.some((o) => o.free) ? (card.querySelector('.cmp-free-in')?.value || '').trim() : '');
   function drawSend() {
     const t = termApi();
-    const empty = !hasDraft() && !liveText(); // words still being written out count: Send waits for them
+    const empty = !hasDraft() && !liveText() && !freeText(); // words still being written out count: Send waits for them
     // Claude is working and there's nothing to send: the button stops it instead
     const halt = empty && st.busy && !st.sending;
     const key = `${!!t}|${empty}|${st.sending}|${halt}`;
@@ -1353,7 +1356,9 @@ export function mountCompose(slot, s) {
   }
   // the question's own answer, typed: onto "Type something" (its digit in a one-answer question, ↑/↓ in a
   // multiple-choice one, where a digit would tick it), what is there already cleared, the text pasted (one line),
-  // then Enter in a one-answer question; in a multiple-choice one it is ticked and Submit sends it. -> true when in
+  // then Enter in a one-answer question. In a multiple-choice one the text ticks it (Enter there would untick it), so
+  // Submit sends it with whatever else is ticked, and on the last question the review step's "Submit answers" too:
+  // sending a typed answer sends it. -> true when in
   async function answerFree(text) {
     const id = st.id, t = termApi();
     const v = cleanText(text).split(/\s*\n\s*/).filter(Boolean).join(' ').trim();
@@ -1361,7 +1366,13 @@ export function mountCompose(slot, s) {
     if (remoteOn() && st.menu?.remote) {
       const free = st.menu.options.find((o) => o.free);
       if (!free) { err('This question takes no typed answer: pick an option'); return false; }
-      return answerRemote(free.n, { text: v });
+      const sig = st.menu.sig;
+      if (!(await answerRemote(free.n, { text: v }))) return false;
+      if (free.check == null) return true;
+      // ticked there: Submit once the page has read the ticked menu back (its sig changed)
+      for (const end = Date.now() + 3000; st.id === id && st.menu?.sig === sig && Date.now() < end;) await sleep(100);
+      if (st.id === id && st.menu?.submit && st.menu.sig !== sig) await answerRemote('submit');
+      return true;
     }
     if (!t || !hosts.get(id)?.alive || st.answering) return false;
     st.answering = true;
@@ -1385,11 +1396,25 @@ export function mountCompose(slot, s) {
       keepSession(id);
       m = await settle(id, m, (x) => { const f = x.options.find((o) => o.free); return f.on && hasText(f); });
       if (!m) { err('The answer didn\'t show up in the question: check it in the Session tab'); return false; }
+      st.freeDraft = null;
       if (!multi) {
         if (!writeKey('\r')) return false;
         st.answeredSig = m.sig; st.answeredAt = Date.now();
+        return true;
       }
-      st.freeDraft = null;
+      const at = await pointTo(id, 'submit');
+      if (!at || !at.submit?.on) { err('Your answer is ticked in the question: press Submit to send it'); return true; }
+      if (!writeKey('\r')) return true;
+      st.answeredSig = at.sig; st.answeredAt = Date.now();
+      // the last question's Submit opens the review step ("Ready to submit your answers?"): its "Submit answers"
+      for (const end = Date.now() + 1500; Date.now() < end;) {
+        await sleep(60);
+        const r = menuNow(id);
+        if (!r || r.sig === at.sig) continue;
+        const go = r.options.find((o) => /^submit answers$/i.test(o.label));
+        if (go && writeKey(r.options.find((o) => o.on) === go ? '\r' : String(go.n))) { st.answeredSig = r.sig; st.answeredAt = Date.now(); }
+        if (go || !sameQuestion(r, m)) break;
+      }
       return true;
     } finally {
       st.answering = false;
@@ -1490,6 +1515,8 @@ export function mountCompose(slot, s) {
     // the quote's "> " lines, a blank line, then what was typed (chat.js shows the quote as its own block)
     let text = cleanText(quote ? `${quote}\n${raw.replace(/^\n+/, '')}` : raw);
     const list = fromBox && !shell ? st.d.atts.slice() : [];
+    // nothing here but an answer in the question card's "Type something" box: Send sends that
+    if (fromBox && !shell && !text.trim() && !list.length && freeText()) return answerFree(freeText());
     if (shell && !text.trim()) return false;
     if (!text.trim() && !list.length) return false;
     if (fromBox) stopDictation(false);
@@ -2010,7 +2037,7 @@ export function mountCompose(slot, s) {
   function drawCard() {
     const m = st.menu;
     card.hidden = !m;
-    if (!m) { st.drawn.card = ''; return; }
+    if (!m) { st.drawn.card = ''; drawSend(); return; }
     const sent = st.answeredSig === m.sig && Date.now() - st.answeredAt < 1500;
     const busy = !!st.answering;
     const key = `${m.sig}|${m.context.join('\n')}|${sent}|${busy}`;
@@ -2027,7 +2054,7 @@ export function mountCompose(slot, s) {
       if (o.free) {
         return `<div class="cmp-opt cmp-free${o.on ? ' on' : ''}" data-free="${o.n}"><span class="cmp-n">${o.n}</span>${box}`
           + `<input type="text" class="cmp-free-in" placeholder="Type something…" spellcheck="true" autocomplete="off" aria-label="your own answer"${busy ? ' disabled' : ''}>`
-          + `<button type="button" class="cmp-free-go" data-c="free" title="${multi ? 'Put it in (it gets ticked)' : 'Send this answer'}" aria-label="send this answer"${dis}>${ic('send', 13)}</button></div>`;
+          + `<button type="button" class="cmp-free-go" data-c="free" title="${multi ? 'Send this answer (with any ticked above)' : 'Send this answer'}" aria-label="send this answer"${dis}>${ic('send', 13)}</button></div>`;
       }
       const label = esc(o.label).replace(/\s*\((esc|shift\+tab)\)$/i, ' <span class="cmp-k">($1)</span>');
       return `<button type="button" class="cmp-opt${o.on ? ' on' : ''}" data-n="${o.n}"${dis}${o.on ? ' aria-current="true"' : ''}${o.check != null ? ` role="checkbox" aria-checked="${o.check}"` : ''}>`
@@ -2046,6 +2073,7 @@ export function mountCompose(slot, s) {
       fi.value = st.freeDraft ? st.freeDraft.text : hasText(f) ? f.label : '';
       if (had) { fi.focus({ preventScroll: true }); try { fi.setSelectionRange(had.a, had.b); } catch { /* gone */ } }
     }
+    drawSend(); // Send sends what the box holds when the chat box is empty
   }
   function focusFree() {
     const fi = card.querySelector('.cmp-free-in');
@@ -2711,7 +2739,7 @@ export function mountCompose(slot, s) {
   });
   panelEl.addEventListener('keydown', panelKeydown);
   card.addEventListener('input', (e) => {
-    if (e.target.closest?.('.cmp-free-in') && st.menu) st.freeDraft = { title: st.menu.title, text: e.target.value };
+    if (e.target.closest?.('.cmp-free-in') && st.menu) { st.freeDraft = { title: st.menu.title, text: e.target.value }; drawSend(); }
   });
   // a click on the "Type something" row, beside its box: into the box
   card.addEventListener('click', (e) => { if (e.target.closest('[data-free]') && !e.target.closest('input, button')) focusFree(); });
