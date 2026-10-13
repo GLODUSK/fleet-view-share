@@ -23,7 +23,7 @@ Run it by hand: `powershell -NoProfile -ExecutionPolicy Bypass -File Z:\Github\f
 
 ## The contract
 
-`node scripts/codegraph-contract.js [--bin <codegraph.cmd>]` builds a one-file project in a temp folder (about 10 s) and checks everything we rely on:
+`node scripts/codegraph-contract.js [--bin <codegraph.cmd>]` builds a one-file project in a temp folder, and a 1,500-file one for the restart check (about 30 s in all), and checks everything we rely on:
 
 | Check | What relies on it |
 |---|---|
@@ -34,10 +34,17 @@ Run it by hand: `powershell -NoProfile -ExecutionPolicy Bypass -File Z:\Github\f
 | `serve --mcp`, started like the accounts' `.claude.json` start it, lists `codegraph_explore`, and a call returns the project's code | The MCP server in all three accounts; CLAUDE.md and the agent prompts name `codegraph_explore` |
 | The npm package has no install scripts | An `npm i -g` must not touch agent configs |
 | Telemetry is off (it turns it off first, then checks it stuck) | A CodeGraph's first run can write a fresh "enabled" default over the saved choice |
+| A build started as `code-index.js` starts it (`CODEGRAPH_PPID_POLL_MS=0`, stderr to a file) outlives the process that started it; meanwhile `code-index.js` finds it running (a node process running `codegraph init` with the folder last), `.codegraph\codegraph.lock` holds its pid, and `index_state` reads not complete | Builds that survive Fleet View's restart after every update; picking them up, and rebuilding at once an index whose build is gone |
 
 Commands the test runs get `CODEGRAPH_TELEMETRY=0`, as does Henry's user environment.
 
 A new dependency on CodeGraph gets a check here in the same change. That's what makes the updater safe: anything missing from this list can break without anyone noticing.
+
+## Builds and restarts
+
+Fleet View restarts its server after every update, often mid-build. A build goes on regardless: the server's own child (`cmd.exe`) dies with it, since node ends its children when it exits, but the build below it keeps running. CodeGraph would stop it by itself (its PPID watchdog sees `cmd.exe` gone: `[CodeGraph init] Parent process exited (host pid N exited); aborting.`), so `code-index.js` turns that watchdog off for its builds with `CODEGRAPH_PPID_POLL_MS=0` and sends their stderr to a file, `%LOCALAPPDATA%\fleet-view\codegraph-builds\<id>.log`, instead of a pipe into the server.
+
+Each build Fleet View starts has a `codegraph-builds\<id>.json`. The next server finds the build still running by its command line, logs `still building`, waits for it as for its own (no other build starts meanwhile), logs `built` or `failed`, and stops it after 30 minutes like its own. An index left part way (`index_state` not `complete`) with no build of it running is built again at once; a `codegraph.lock` that names a process that is gone, or no CodeGraph (its pid reused), is deleted first. A failed build's file keeps its hour's wait across restarts.
 
 ## Indexes after an update
 

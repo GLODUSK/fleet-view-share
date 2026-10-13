@@ -14,13 +14,18 @@
 //   7. telemetry is off. A CodeGraph's first run can write a fresh default ("enabled") over the saved choice, so this
 //      turns it off first and then checks that it stuck (the `telemetry` status, read without CODEGRAPH_TELEMETRY=0,
 //      which every other command here gets).
+//   8. a build outlives the process that started it, as code-index.js starts it (CODEGRAPH_PPID_POLL_MS=0, stderr to
+//      a file): Fleet View restarts itself after every update. Meanwhile code-index.js finds it running (runs(): a
+//      node process running codegraph init with the folder last), codegraph.lock holds that build's pid
+//      (lockPid()), and check() reads the index as not complete. About 20 s: a build long enough to outlast the
+//      5 s CodeGraph waits between looks at its parent.
 // Exit code 0 when all pass, 1 when any fails. The updater (scripts/codegraph-update.ps1) runs it after every
 // CodeGraph update and goes back to the last good version on a failure; docs/codegraph-update.md says what then.
 'use strict';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, spawnSync, execFileSync } = require('child_process');
 
 const argv = process.argv.slice(2);
 const binArg = argv.indexOf('--bin') >= 0 ? argv[argv.indexOf('--bin') + 1] : null;
@@ -121,6 +126,48 @@ async function rmrf(dir) {
   console.log(`note: could not delete ${dir}`);
 }
 
+// 8: a launcher starts the build the way code-index.js next() does and exits 2 s later, as the server does for an
+// update (on Windows its cmd.exe dies with it, in node's job); the build must go on and finish
+const LAUNCH = `const [bin, dir, errFile, env] = process.argv.slice(1);
+const fs = require('fs'), { spawn } = require('child_process');
+const e = { ...process.env, CODEGRAPH_TELEMETRY: '0', ...JSON.parse(env) }, stdio = ['ignore', 'ignore', fs.openSync(errFile, 'w')];
+const line = [bin, 'init', '--yes', dir].map((a) => (/^[\\w.-]+$/.test(a) ? a : '"' + a + '"')).join(' '); // quoted as code-index.js quotes
+if (process.platform === 'win32') spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', '"' + line + '"'], { cwd: dir, windowsHide: true, windowsVerbatimArguments: true, stdio, env: e });
+else spawn(bin, ['init', '--yes', dir], { cwd: dir, stdio, env: e, detached: true });
+setTimeout(() => process.exit(0), 2000);`;
+async function survives() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fv-codegraph-contract-')), errFile = `${dir}.stderr`;
+  const nodes = () => new Promise((r) => CI.nodes(r));
+  let seen = false, lockOk = false, partialOk = false, pids = [];
+  try {
+    for (let i = 0; i < 1500; i++) {
+      let s = '';
+      for (let j = 0; j < 25; j++) s += `function f${i}_${j}(a) { return ${j ? `f${i}_${j - 1}(a) + ` : ''}${i ? `require('./m${i - 1}').f${i - 1}_${j}(a)` : 'a'}; }\n`;
+      fs.writeFileSync(path.join(dir, `m${i}.js`), `${s}module.exports = { ${Array.from({ length: 25 }, (_, j) => `f${i}_${j}`).join(', ')} };\n`);
+    }
+    const l = spawnSync(process.execPath, ['-e', LAUNCH, BIN, dir, errFile, JSON.stringify(CI.BUILD_ENV)], { windowsHide: true, timeout: 60e3 });
+    if (l.status !== 0) return fail(`restart: the launcher failed (exit ${l.status})`);
+    for (const t0 = Date.now(); Date.now() - t0 < 10 * 60e3; await new Promise((r) => setTimeout(r, 2000))) {
+      const list = await nodes();
+      if (!list) return fail('restart: code-index.js cannot list processes (platform.js commandLines)');
+      pids = list.filter((p) => CI.runs(p.command, dir)).map((p) => p.pid);
+      if (!pids.length) break;
+      seen = true;
+      if (pids.includes(CI.lockPid(dir))) lockOk = true;
+      if ((await checkIndex(dir)).state === 'partial') partialOk = true;
+    }
+    if (pids.length) { for (const pid of pids) kill({ pid }); return fail('restart: the build still ran after 10 min'); }
+    const end = await checkIndex(dir);
+    let err = '';
+    try { err = fs.readFileSync(errFile, 'utf8').trim().slice(-400); } catch {}
+    if (end.state !== 'done') fail(`restart: the build did not outlive the process that started it (index "${end.state}")${err ? `: ${err}` : ''}`);
+    else if (!seen) fail('restart: code-index.js never found the build running (runs(): a node process, codegraph init, the folder last)');
+    else if (!lockOk) fail('restart: .codegraph\\codegraph.lock never held the pid of a process running the build (lockPid())');
+    else if (!partialOk) fail('restart: check() never read the index as part way (index_state not "complete") while it was built');
+    else ok('restart: a build outlives the process that started it; code-index.js finds it running, its lock, its index part way');
+  } finally { await rmrf(dir); try { fs.rmSync(errFile, { force: true }); } catch {} }
+}
+
 (async () => {
   console.log(`CodeGraph contract test: ${BIN}`);
   // 1
@@ -186,6 +233,9 @@ async function rmrf(dir) {
   const tel = await run(['telemetry'], { env: saved });
   if (/Telemetry:\s*disabled/i.test(tel.out)) ok('telemetry: off');
   else fail(`telemetry: not off after \`telemetry off\`: "${(tel.out + tel.err).trim().split('\n')[0]}"`);
+
+  // 8
+  await survives();
 
   finish(version);
 })().catch((e) => { fail(e.stack || e.message); finish(); });

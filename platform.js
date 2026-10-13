@@ -10,6 +10,8 @@
 //   detachGroup             spawn option: on macOS and Linux a child started with it leads its own process group,
 //                           so killTree can end the group; Windows keeps its old spawn options
 //   processes(cb), processesSync()   [{ pid, ppid, command }] of every process (macOS and Linux only, through ps)
+//   commandLines(cb, image) [{ pid, command }] of every process with its whole command line, or null when it can't
+//                           tell (Windows: Win32_Process in a hidden PowerShell, only the image named, e.g. node.exe)
 //   which(name)             the full path of a command on PATH (the login shell's PATH on macOS), or null
 //   loginShellPath()        PATH as the user's login shell sets it (macOS: an app started from Finder or launchd
 //                           gets a bare PATH without Homebrew, npm or ~/.local/bin); the process's own PATH elsewhere
@@ -68,6 +70,15 @@ function processesSync() {
 function processes(cb) {
   if (isWin) return cb(null);
   execFile('ps', PS_ARGS, { encoding: 'utf8', timeout: 20000, maxBuffer: 16 << 20 }, (err, out) => cb(err ? null : parsePs(out)));
+}
+function commandLines(cb, image) {
+  if (!isWin) return processes((list) => cb(list && list.map(({ pid, command }) => ({ pid, command }))));
+  const only = image ? ` -Filter "Name='${String(image).replace(/[^\w.-]/g, '')}'"` : '';
+  const ps = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Process${only} | ForEach-Object { [string]$_.ProcessId + [char]9 + $_.CommandLine }`;
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 16 << 20 }, (err, out) => {
+    if (err) return cb(null);
+    cb(String(out).split(/\r?\n/).flatMap((l) => { const m = /^(\d+)\t(.*)$/.exec(l); return m ? [{ pid: Number(m[1]), command: m[2] }] : []; }));
+  });
 }
 // every process below pid (children, their children, ...), from one ps table
 function descendants(pid, list) {
@@ -298,6 +309,6 @@ function electronBinary(desktopDir) {
 }
 
 module.exports = {
-  isWin, isMac, dataDir, hostSocketPath, foldCase, detachGroup, processes, processesSync, descendants, killTree,
+  isWin, isMac, dataDir, hostSocketPath, foldCase, detachGroup, processes, processesSync, commandLines, descendants, killTree,
   loginShellPath, applyLoginPath, which, shellQuote, openTerminal, resumeCommand, keychainCredentials, electronBinary,
 };
