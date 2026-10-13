@@ -37,6 +37,7 @@ const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
 const FEED_MOD = require(path.join(__dirname, 'feed-mod.js'));
+const TT = require(path.join(__dirname, 'team-tree.js'));
 
 // ---------- options ----------
 const argv = process.argv.slice(2);
@@ -426,18 +427,18 @@ let parityRules = cleanParity(saved.parity) || [];
 // and the API's `from`; an ask's questions and answers too), successors the
 // last 10 members that handed off (or ran /clear) and were swapped for the conversation that carries on, seenAt the
 // last time a member was in the session list. At most 50 teams of up to 12 members, saved with the rest; a team
-// whose members have all been gone for 24 hours is dropped (pruneTeams).
+// whose members have all been gone for 24 hours is dropped (pruneTeams). Teams nest (team-tree.js): a conversation is a
+// plain member of at most one team and leads at most one, so a lead can report to the lead of a team above it.
 const TEAMS_MAX = 50, TEAM_MEMBERS_MAX = 12, TEAM_MSGS_MAX = 50, TEAM_GONE_MS = 24 * 3600e3;
 const TEAM_COLORS = ['#ff9f43', '#3fd8ff', '#3dffa8', '#a47bff', '#ff4d8d', '#ffc24a', '#4d9bff', '#7cf06a', '#ff6a2b', '#e58bff'];
 const MEMBER_RE = /^[\w.-]{1,80}$/;
 function cleanTeams(list, now = Date.now()) {
   if (!Array.isArray(list)) return null;
-  const out = [], taken = new Set();
+  const out = [];
   for (const x of list.slice(-TEAMS_MAX)) {
     if (!x || typeof x !== 'object' || typeof x.id !== 'string' || !/^t[0-9a-f]{6,16}$/.test(x.id)) continue;
-    const members = [...new Set((Array.isArray(x.members) ? x.members : []).filter((m) => typeof m === 'string' && MEMBER_RE.test(m)).map((m) => m.toLowerCase()))].filter((m) => !taken.has(m)).slice(0, TEAM_MEMBERS_MAX);
+    const members = [...new Set((Array.isArray(x.members) ? x.members : []).filter((m) => typeof m === 'string' && MEMBER_RE.test(m)).map((m) => m.toLowerCase()))].slice(0, TEAM_MEMBERS_MAX);
     if (members.length < 2) continue;
-    members.forEach((m) => taken.add(m));
     const at = Number.isFinite(x.at) && x.at > 0 && x.at <= now + 60e3 ? Math.round(x.at) : now;
     const msgs = (Array.isArray(x.messages) ? x.messages : []).filter((m) => m && Number.isFinite(m.t) && typeof m.from === 'string' && typeof m.to === 'string' && typeof m.text === 'string')
       .slice(-TEAM_MSGS_MAX).map((m) => ({ t: Math.round(m.t), from: m.from.slice(0, 80), to: m.to.slice(0, 80), text: m.text.slice(0, 300) }));
@@ -450,7 +451,8 @@ function cleanTeams(list, now = Date.now()) {
       // whose members this machine never listed: only a machine that saw them lets it go, pruneTeams)
       here: x.here !== false });
   }
-  return out;
+  // one plain seat and one team led each, and no loop: the extra ones go, in list order (team-tree.js enforce)
+  return TT.enforce(out);
 }
 // (plain is defined with the web helpers further down; this one is for settings read before them)
 function plainText(s, n) { s = String(s || '').replace(/\s+/g, ' ').trim(); return n && s.length > n ? s.slice(0, n - 1) + '…' : s; }
@@ -4701,7 +4703,7 @@ function sessionJson(s, now, owners = syncOwners()) {
   const shp = s.lastPr ? ships.get(`${s.repo}#${s.lastPr}`) : null;
   const ended = s.state === 'DONE' || s.state === 'QUESTION';
   const side = sideOf(s, root);
-  const team = teamOf(s.id);
+  const team = teamOf(s.id), led = ledTeamOf(s.id);
   // another device runs it (sync-live.js): its state, label, name, account and times as that device shows them
   const rm = s.remote && s.remote.entry;
   return {
@@ -4748,7 +4750,10 @@ function sessionJson(s, now, owners = syncOwners()) {
     // (filled in by buildState, which sees every conversation); null in a repo with no parity rule
     side,
     parity: side ? { partner: null, missing: null } : null,
+    // its team: the one it is a plain member of, else the one it leads; leads: the one it leads (a mid-level lead's
+    // differs from team: it reports in team and leads this one), or null (team-tree.js)
     team: team ? team.id : null,
+    leads: led ? led.id : null,
     dynamic: dynamicView(s.id),
     planSteps: prog.mode === 'plan' ? wf.phases.map((p, i) => {
       const done = wf.done === 'completed';
@@ -5051,7 +5056,22 @@ function worktreesOf(roots, list, now) {
 }
 
 // ---------- teams (see TEAMS_MAX) ----------
-const teamOf = (id) => (id ? teams.find((t) => t.members.includes(String(id).toLowerCase())) || null : null);
+// a conversation's teams (team-tree.js): teamOf its upper team (where it is a plain member), else the one it leads;
+// ledTeamOf the one it leads; teamsOf both, upper first
+const teamOf = (id) => (id ? TT.teamOf(teams, String(id).toLowerCase()) : null);
+const ledTeamOf = (id) => (id ? TT.ledOf(teams, String(id).toLowerCase()) : null);
+const teamsOf = (id) => (id ? TT.teamsOf(teams, String(id).toLowerCase()) : []);
+// the teams as they are now -> a function that puts them back (a change that would make a loop is undone)
+function teamsSnap() {
+  const list = teams.slice(), was = list.map((t) => [t, [...t.members], t.lead]);
+  return () => { teams = list; for (const [t, m, l] of was) { t.members = m; t.lead = l; } };
+}
+// null when the teams don't loop, else why not, naming who would report to itself (me when it is in the loop)
+function loopWhy(me) {
+  const c = TT.cycleIn(teams);
+  if (!c) return null;
+  return `that would make ${memberOf(c.includes(me) ? me : c[0]).name} report to itself`;
+}
 const teamJson = (t) => ({ id: t.id, name: t.name, color: t.color, members: [...t.members], lead: t.lead || null, order: t.order, at: t.at, messages: t.messages.slice(-TEAM_MSGS_MAX).map((m) => ({ ...m })),
   successors: (t.successors || []).map((x) => ({ ...x })) });
 // a member as briefs and notes name it: its name, repo and branch, as /state shows them
@@ -5071,7 +5091,7 @@ function teamBrief(t, me) {
   const others = t.members.filter((m) => m !== me).map(memberOf);
   return [`[Fleet View order · team "${t.name}"]`, t.order, '', 'You are working together with:', ...others.map(memberLine),
     `${talkLine(me)} Their messages reach you starting with [Message from teammate]. Agree who changes which files before `
-    + 'editing, tell them when you push or merge, and reply to their messages.'].join('\n');
+    + 'editing, tell them when you push or merge, and reply to their messages.', ...levelLines(t, me)].join('\n');
 }
 // the fv commands a lead works with (its brief, and the note that makes it the lead) -> [lines]
 function leadCommands(t, me) {
@@ -5092,7 +5112,7 @@ function leadBrief(t, me) {
     + 'two of them edit the same files. The user talks to you; you talk to them. They carry on with what they were doing until '
     + 'you give them their part, so start by giving each its part.',
     ...leadCommands(t, me),
-    'Their reports reach you starting with [Message from teammate].'].join('\n');
+    'Their reports reach you starting with [Message from teammate].', ...levelLines(t, me)].join('\n');
 }
 // the lines that tell a member of a team with a lead who leads it and how to report to it -> [lines]
 function leadLines(t, me) {
@@ -5108,7 +5128,21 @@ function memberBrief(t, me) {
   return [`[Fleet View order · team "${t.name}"]`, 'The team\'s order, for context:', t.order, '',
     ...leadLines(t, me).map((l, i) => (i ? l : `${l} Carry on with what you're doing until it does.`)),
     ...(others.length ? ['', 'The others in the team (so you know who is who; don\'t message them unless your lead says so):', ...others.map(memberLine)] : []),
+    ...levelLines(t, me),
   ].join('\n');
+}
+// A conversation in two teams (team-tree.js): what its brief for one says about the other -> [lines]. A mid-level
+// lead's brief for the team it leads says where it reports and to whom; its brief for the team above, the team it leads
+function levelLines(t, me) {
+  const o = teamsOf(me).find((x) => x !== t);
+  if (!o) return [];
+  if (o.lead === me) {
+    return ['', `You also lead team "${o.name}" (id ${o.id}), below this one: pass your part on to its members, and report what they do here.`,
+      `fv status ${o.id} shows what they are doing, fv send <id> "instruction" --from ${me} directs one, fv team say ${o.id} "text" --from ${me} tells them all.`];
+  }
+  if (o.lead) return ['', `You also report upward, in team "${o.name}" (id ${o.id}), above this one: its lead gives you the work you split here, and you report back what your team did.`, ...leadLines(o, me)];
+  return ['', `You also work with peers in team "${o.name}" (id ${o.id}), above this one: agree the work with them, and tell them what your team does.`,
+    ...contactLines(me, o.members, o).split('\n')];
 }
 // the brief a member gets: the lead's, a led member's, or the peers' teamBrief
 const briefFor = (t, me) => (!t.lead ? teamBrief(t, me) : me === t.lead ? leadBrief(t, me) : memberBrief(t, me));
@@ -5150,15 +5184,17 @@ function noteEach(t, ids, text, contacts) {
 const toldJson = (rs) => rs.map((r) => ({ id: r.id, name: r.name, ok: r.ok, ...(r.queued ? { queued: true } : {}), message: r.message }));
 
 // Members taken out of the teams they were in (into a new team, or added to another): the teams that lost some,
-// with a team left with one member dropped; one that loses its lead has none now (leadGone).
+// with a team left with one member dropped; one that loses its lead has none now (leadGone). Teams nest
+// (team-tree.js): ids join as plain members, so each leaves the team it was a plain member of and keeps leading its
+// own; leads join as the lead, so each leaves the team it led (the lead moves) and keeps its plain seat.
 // -> [{ team, gone: [ids], disbanded, leadGone }]
-function pullOut(ids, into) {
+function pullOut(ids, into, leads = []) {
   const out = [];
   for (const x of teams) {
     if (x === into) continue;
-    const gone = x.members.filter((m) => ids.includes(m));
+    const gone = x.members.filter((m) => (x.lead === m ? leads : ids).includes(m));
     if (!gone.length) continue;
-    x.members = x.members.filter((m) => !ids.includes(m));
+    x.members = x.members.filter((m) => !gone.includes(m));
     const leadGone = !!x.lead && gone.includes(x.lead);
     if (leadGone) x.lead = null;
     out.push({ team: x, gone, disbanded: x.members.length < 2, leadGone });
@@ -5177,13 +5213,42 @@ function tellPulled(pulled, into) {
     return { id: x.id, name: x.name, members: [...x.members], disbanded, told: toldJson(told) };
   }));
 }
+// t's lead goes from was to m (null: none). m leaves the team it led before (the lead moves, as when it joins another
+// team as its lead). was stays in t as a plain member, so its plain seat in the team above (where it reported for t)
+// goes to m when m has no plain seat of its own, else was leaves that team. -> { pulled (as pullOut's), seat: { team,
+// from, to } | null }
+function leadMoves(t, was, m) {
+  const pulled = m ? pullOut([], t, [m]) : [];
+  const plainIn = (id) => teams.find((x) => x !== t && x.members.includes(id) && x.lead !== id) || null;
+  const up = was && was !== m && t.members.includes(was) ? plainIn(was) : null;
+  let seat = null;
+  if (up && m && !plainIn(m)) { up.members = up.members.map((x) => (x === was ? m : x)); seat = { team: up, from: was, to: m }; }
+  else if (up) pulled.push(...pullOut([was], t));
+  return { pulled, seat };
+}
+// what the lead that was is told besides: where its seat above went (leadMoves)
+function seatNote(r, was) {
+  if (r.seat) return ` ${memberOf(r.seat.to).name} takes your place in "${r.seat.team.name}" too.`;
+  const p = was && r.pulled.find((x) => x.gone.includes(was));
+  return p ? ` You are out of "${p.team.name}" now.` : '';
+}
+// tells the team above that its seat for t went from one lead to the next -> Promise of [] or [{ id, name, members,
+// disbanded: false, told }] (with tellPulled's, the reply's left)
+async function tellSeat(seat, t) {
+  if (!seat) return [];
+  const x = seat.team, from = memberOf(seat.from).name, to = memberOf(seat.to).name;
+  const told = await noteEach(x, x.members.filter((m) => m !== seat.to), `${to} (id ${seat.to}) leads "${t.name}" now, in ${from}'s place, and is in this team for it; ${from} isn't any more.`, x.members);
+  return [{ id: x.id, name: x.name, members: [...x.members], disbanded: false, told: toldJson(told) }];
+}
 
 // POST /teams { members: [ids] (2..12), order, name?, lead? }: a team of exactly those members, led by lead (one of
 // them) or of peers (lead null or left out). Each member's brief is briefFor's: the lead's, a led member's, or the
 // peers'. The same set as a team that is there already gives that team the new order (and name, and lead when
 // lead is given); any other set is a new team, and members pulled
-// out of other teams leave them (those teams are told; one left with one member is disbanded). The reply carries
-// briefs ({ id: the text that member gets }) and left: the teams pulled from.
+// out of other teams leave them (those teams are told; one left with one member is disbanded): each its plain seat,
+// the lead the team it led (leadMoves, pullOut). A member that leads a team of its own keeps leading it: leads made
+// into a team under a lead of their own make the levels. One that would loop (a lead reporting to itself) is 409. The
+// reply carries briefs ({ id: the text that member gets }) and left: the teams pulled from.
 // o.send (the API's POST /api/teams, and the page's with send: true): the server sends each member its brief itself,
 // as an order, and the reply's sent says how each went. One writer for every team text, so a brief never mixes with
 // a note or a teammate's message typed into the same prompt (api.js typeOne).
@@ -5206,30 +5271,38 @@ async function postTeam(b, o = {}) {
   } else if ('lead' in b) lead = null;
   const now = Date.now(), order = b.order.replace(/\r\n?/g, '\n').trim();
   const name = plain(b.name, 80) || clipWords(order.split(/\s+/).slice(0, 5).join(' '), 40) || 'team';
-  const same = teamOf(members[0]);
-  let t, pulled = [];
-  if (same && same.members.length === members.length && members.every((m) => same.members.includes(m))) {
+  const same = teams.find((x) => x.members.length === members.length && members.every((m) => x.members.includes(m)));
+  const undo = teamsSnap();
+  let t, moved = { pulled: [], seat: null };
+  if (same) {
     t = same;
-    t.order = order; t.at = now; t.seenAt = now;
-    if (b.name) t.name = name;
-    if (lead !== undefined) t.lead = lead;
+    if (lead !== undefined && lead !== (t.lead || null)) { moved = leadMoves(t, t.lead || null, lead); t.lead = lead; }
   } else {
-    pulled = pullOut(members, null);
+    // the members join as plain members (one that leads a team of its own keeps leading it), the lead as the lead
+    moved.pulled = pullOut(members.filter((m) => m !== lead), null, lead ? [lead] : []);
     const used = new Set(teams.map((x) => x.color));
     t = { id: 't' + require('crypto').randomBytes(5).toString('hex'), name, color: TEAM_COLORS.find((c) => !used.has(c)) || TEAM_COLORS[teams.length % TEAM_COLORS.length],
       members, lead: lead || null, order, at: now, messages: [], successors: [], seenAt: now };
     teams.push(t);
     if (teams.length > TEAMS_MAX) teams.splice(0, teams.length - TEAMS_MAX);
   }
+  const loop = loopWhy(lead || members[0]);
+  if (loop) { undo(); return [409, { ok: false, message: loop }]; }
+  if (same) {
+    t.order = order; t.at = now; t.seenAt = now;
+    if (b.name) t.name = name;
+  }
   saveSettings();
   const briefs = Object.fromEntries(t.members.map((m) => [m, briefFor(t, m)]));
-  const [left, sent] = await Promise.all([tellPulled(pulled, t), o.send ? Promise.all(t.members.map((m) => tell(m, briefs[m], 'order'))) : null]);
+  const [left, above, sent] = await Promise.all([tellPulled(moved.pulled, t), tellSeat(moved.seat, t), o.send ? Promise.all(t.members.map((m) => tell(m, briefs[m], 'order'))) : null]);
+  left.push(...above);
   return [200, { ok: true, team: teamJson(t), briefs, ...(left.length ? { left } : {}), ...(sent ? { sent: toldJson(sent) } : {}) }];
 }
 // POST /teams/add { id, member, lead? }: one more member. The team keeps its id, colour, order and messages; the member
-// leaves the team it was in (told as above). The newcomer gets its brief as an order, the others a note with every
-// member's id, the newcomer's too. lead true: the newcomer joins as the team's lead (in place of the lead it had),
-// and the others' note says so. -> { ok, team, brief: what the newcomer got, told: the notes, left? }
+// leaves the team it was a plain member of (told as above), and keeps leading its own. The newcomer gets its brief as
+// an order, the others a note with every member's id, the newcomer's too. lead true: the newcomer joins as the team's
+// lead (in place of the lead it had), leaves the team it led and keeps its plain seat (leadMoves), and the others'
+// note says so. 409 when it would loop. -> { ok, team, brief: what the newcomer got, told: the notes, left? }
 async function addMember(b) {
   if (b && 'lead' in b && typeof b.lead !== 'boolean') return [400, { ok: false, message: 'lead must be true or false' }];
   if (!b || typeof b.id !== 'string' || typeof b.member !== 'string') return [400, { ok: false, message: 'give the team and the member' }];
@@ -5241,20 +5314,26 @@ async function addMember(b) {
   if (!MEMBER_RE.test(m) || (!sessions.has(m) && !UUID_RE.test(m))) return [400, { ok: false, message: 'member must be a conversation id' }];
   if (t.members.includes(m)) return [409, { ok: false, message: m === b.member.toLowerCase() ? 'it is in that team already' : `${memberOf(m).name} carries on for it, and is in that team already` }];
   if (t.members.length >= TEAM_MEMBERS_MAX) return [409, { ok: false, message: `a team has at most ${TEAM_MEMBERS_MAX} conversations` }];
-  const pulled = pullOut([m], t);
+  const undo = teamsSnap();
   const old = [...t.members], was = t.lead || null;
+  // a plain member leaves its plain seat and keeps the team it leads; a lead the team it led, and keeps its plain seat
+  const moved = b.lead === true ? leadMoves(t, was, m) : { pulled: pullOut([m], t), seat: null };
   t.members.push(m);
   if (b.lead === true) t.lead = m;
+  const loop = loopWhy(m);
+  if (loop) { undo(); return [409, { ok: false, message: loop }]; }
   t.seenAt = Date.now();
   saveSettings();
   const who = memberOf(m).name;
   const note = b.lead !== true ? `${who} joined the team.`
-    : (id) => (id === was ? `${who} joined the team and leads it now, in your place: you are a member and report to it.` : `${who} joined the team and leads it now.`);
-  const [brief, told, left] = await Promise.all([
+    : (id) => (id === was ? `${who} joined the team and leads it now, in your place: you are a member and report to it.${seatNote(moved, was)}` : `${who} joined the team and leads it now.`);
+  const [brief, told, left, above] = await Promise.all([
     tell(m, briefFor(t, m), 'order'),
     noteEach(t, old, note, t.members),
-    tellPulled(pulled, t),
+    tellPulled(moved.pulled, t),
+    tellSeat(moved.seat, t),
   ]);
+  left.push(...above);
   return [200, { ok: true, team: teamJson(t), brief: toldJson([brief])[0], told: toldJson(told), ...(left.length ? { left } : {}) }];
 }
 // POST /teams/remove { id }: disbands it; every member is told. -> { ok, team (as it was), told }
@@ -5325,7 +5404,9 @@ async function leaveTeam(b) {
 }
 // POST /teams/lead { id, member: <id> | null } (and the API's POST /api/teams/:id/lead): sets the team's lead, or
 // clears it (null). A new lead gets its brief as an order; the rest a note naming it and how to report to it. Clearing:
-// each a note that the team has no lead now, peers again, with their contact lines. -> { ok, team, brief?, told }
+// each a note that the team has no lead now, peers again, with their contact lines. A new lead leaves the team it led
+// before; the lead that was stays a member, and its seat in the team above goes to the new lead (leadMoves; those
+// teams are told, the reply's left). 409 when it would loop. -> { ok, team, brief?, told, left? }
 async function setLead(b) {
   if (!b || typeof b.id !== 'string') return [400, { ok: false, message: 'give the team' }];
   const t = teams.find((x) => x.id === b.id);
@@ -5335,27 +5416,32 @@ async function setLead(b) {
   const m = b.member == null ? null : t.members.includes(b.member.toLowerCase()) ? b.member.toLowerCase() : successorOf(b.member) || b.member.toLowerCase();
   if (m && !t.members.includes(m)) return [409, { ok: false, message: 'not a member of that team' }];
   if (m === (t.lead || null)) return [200, { ok: true, team: teamJson(t), told: [], message: m ? `${memberOf(m).name} leads it already` : 'the team has no lead already' }];
+  const undo = teamsSnap();
   const was = t.lead || null;
+  const moved = leadMoves(t, was, m);
   t.lead = m;
+  const loop = loopWhy(m || was);
+  if (loop) { undo(); return [409, { ok: false, message: loop }]; }
   t.seenAt = Date.now();
   saveSettings();
+  const elsewhere = () => Promise.all([tellPulled(moved.pulled, t), tellSeat(moved.seat, t)]).then(([a, c]) => [...a, ...c]);
   if (!m) {
-    const told = await noteEach(t, t.members, `${memberOf(was).name} doesn't lead the team any more. ${NO_LEAD}`, t.members);
-    return [200, { ok: true, team: teamJson(t), told: toldJson(told) }];
+    const [told, left] = await Promise.all([noteEach(t, t.members, (id) => `${memberOf(was).name} doesn't lead the team any more.${id === was ? seatNote(moved, was) : ''} ${NO_LEAD}`, t.members), elsewhere()]);
+    return [200, { ok: true, team: teamJson(t), told: toldJson(told), ...(left.length ? { left } : {}) }];
   }
   const who = memberOf(m).name;
-  const note = (id) => (id === was ? `${who} (id ${m}) leads the team now, in your place: you are a member, it gives you your part, and you report to it.`
+  const note = (id) => (id === was ? `${who} (id ${m}) leads the team now, in your place: you are a member, it gives you your part, and you report to it.${seatNote(moved, was)}`
     : `${who} (id ${m}) leads the team now: it gives you your part, and you report to it.`);
-  const [brief, told] = await Promise.all([tell(m, leadBrief(t, m), 'order'), noteEach(t, t.members.filter((x) => x !== m), note, t.members)]);
-  return [200, { ok: true, team: teamJson(t), brief: toldJson([brief])[0], told: toldJson(told) }];
+  const [brief, told, left] = await Promise.all([tell(m, leadBrief(t, m), 'order'), noteEach(t, t.members.filter((x) => x !== m), note, t.members), elsewhere()]);
+  return [200, { ok: true, team: teamJson(t), brief: toldJson([brief])[0], told: toldJson(told), ...(left.length ? { left } : {}) }];
 }
 // a conversation removed from the map (the page's Remove, the API's remove, a temp session that ended) leaves its
-// team; it is ending, so only the rest are told
+// team (both, when it leads one and reports in another); it is ending, so only the rest are told
 function leaveOnHide(id) {
-  const t = teamOf(id);
-  if (!t) return;
-  leaveTeam({ id: t.id, member: id, why: 'removed', hidden: true })
-    .catch((e) => logOnce('team-hide:' + (e && e.message), `teams: taking a removed conversation out failed\n${errorText(e)}`));
+  for (const t of teamsOf(id)) {
+    leaveTeam({ id: t.id, member: id, why: 'removed', hidden: true })
+      .catch((e) => logOnce('team-hide:' + (e && e.message), `teams: taking a removed conversation out failed\n${errorText(e)}`));
+  }
 }
 // one removed from the map, unless it worked again since (the page's isHidden)
 function hiddenNow(id) {
@@ -5374,11 +5460,12 @@ function teamsList() {
   return teams.map((t) => ({ ...teamJson(t), roster: t.members.map((m) => ({ ...memberOf(m), state: sessions.get(m)?.state || null, removed: hiddenNow(m), lead: t.lead === m })) }));
 }
 // GET /api/status: what members are doing, free (nothing is typed into them). q: { team, ids, from }: a team's
-// members, these conversations, or from's team; none of them: every unfinished conversation not removed from the
-// map. Each row: { id, name, repo, branch, state, label, doing, lastReply (≤ 600), lastReplyAt, pr, ctx (0..1), cost,
-// removed, lead } (api.js adds queued). -> [code, { ok, team?, members }]
+// members, these conversations, or from's teams (the one it leads first, then the one it reports in, each member
+// once); none of them: every unfinished conversation not removed from the map. Each row: { id, name, repo, branch,
+// state, label, doing, lastReply (≤ 600), lastReplyAt, pr, ctx (0..1), cost, removed, lead } (api.js adds queued).
+// -> [code, { ok, team? (from's: the one it leads), teams? (from's two), members }]
 function statusOf(q) {
-  let t = null, ids;
+  let t = null, ids, both = null;
   if (q.team) {
     t = teams.find((x) => x.id === q.team);
     if (!t) return [404, { ok: false, message: 'no such team' }];
@@ -5386,16 +5473,19 @@ function statusOf(q) {
   } else if (q.ids && q.ids.length) {
     ids = [...new Set(q.ids.map((m) => successorOf(m) || m.toLowerCase()))];
   } else if (q.from) {
-    t = teamOf(successorOf(q.from) || q.from.toLowerCase());
-    if (!t) return [404, { ok: false, message: 'that conversation is in no team: give a team or ids' }];
-    ids = [...t.members];
+    const f = successorOf(q.from) || q.from.toLowerCase();
+    const ts = teamsOf(f).sort((a, b) => (b.lead === f) - (a.lead === f));
+    if (!ts.length) return [404, { ok: false, message: 'that conversation is in no team: give a team or ids' }];
+    t = ts[0];
+    if (ts.length > 1) both = ts;
+    ids = [...new Set(ts.flatMap((x) => x.members))];
   }
   const st = buildState();
   const byId = new Map(st.sessions.map((s) => [s.id, s]));
   if (!ids) ids = st.sessions.filter((s) => s.state !== 'DONE' && !hiddenNow(s.id)).map((s) => s.id);
   const members = ids.map((id) => {
     const s = byId.get(id), raw = sessions.get(id), m = memberOf(id);
-    const lead = t ? t.lead === id : !!(teamOf(id) && teamOf(id).lead === id);
+    const lead = t ? (both || [t]).some((x) => x.lead === id) : !!ledTeamOf(id);
     if (!s) return { id, name: m.name, repo: m.repo, branch: m.branch, state: raw ? raw.state || null : null, label: null, doing: null, lastReply: null, lastReplyAt: null, pr: null, ctx: null, cost: 0, removed: hiddenNow(id), lead };
     const doing = doingOf(s);
     const shp = raw && raw.lastPr ? ships.get(`${raw.repo}#${raw.lastPr}`) : null;
@@ -5407,7 +5497,8 @@ function statusOf(q) {
       cost: Math.round((s.cost || 0) * 100) / 100, removed: hiddenNow(id), lead,
     };
   });
-  return [200, { ok: true, ...(t ? { team: { id: t.id, name: t.name, lead: t.lead || null } } : {}), members }];
+  const brief = (x) => ({ id: x.id, name: x.name, lead: x.lead || null });
+  return [200, { ok: true, ...(t ? { team: brief(t) } : {}), ...(both ? { teams: both.map(brief) } : {}), members }];
 }
 
 // what a conversation (as /state lists it) is doing, in a few words: the tool running, the question it asks, why it
@@ -5440,20 +5531,22 @@ function successorOf(id) {
   return found;
 }
 // a member handed off (or ran /clear): its successor gets the brief (as an order: it runs, it just started; the
-// lead's when it took over the lead), the others a note
-function handedOn(t, from, to) {
+// lead's when it took over the lead), the others a note. brief false: it got one for its other team already (a brief
+// names both of a mid-level lead's teams)
+function handedOn(t, from, to, brief = true) {
   const was = memberOf(from).name, now = memberOf(to).name;
   const how = cleared.get(from)?.to === to ? `${was} ran /clear and goes on as ${now} (id ${to}).` : `${was} handed off; ${now} (id ${to}) carries on its part.`;
   const note = t.lead === to ? (id) => `${how} It leads the team now: report to it with fv send ${to} "…" --from ${id} from now on.` : `${how} Message that id from now on.`;
   Promise.all([
-    tell(to, briefFor(t, to), 'order'),
+    brief ? tell(to, briefFor(t, to), 'order') : null,
     noteEach(t, t.members.filter((x) => x !== to), note),
-  ]).then(([a, rest]) => logLine(`teams: ${from} handed off to ${to} in "${t.name}": brief ${a.ok ? (a.queued ? 'queued' : 'sent') : `not sent (${a.message})`}, ${rest.filter((x) => x.ok).length} told`),
+  ]).then(([a, rest]) => logLine(`teams: ${from} handed off to ${to} in "${t.name}": brief ${!a ? 'with its other team\'s' : a.ok ? (a.queued ? 'queued' : 'sent') : `not sent (${a.message})`}, ${rest.filter((x) => x.ok).length} told`),
     (e) => logOnce('team-handoff:' + (e && e.message), `teams: telling a handoff failed\n${errorText(e)}`));
 }
-// Every poll: a member that handed off or ran /clear is swapped for the conversation that carries on, unless that
-// one is in another team. Teams whose members have all been gone from the session list for 24 hours leave; seenAt is
-// saved every 10 minutes.
+// Every poll: a member that handed off or ran /clear is swapped for the conversation that carries on, in each of its
+// teams (a mid-level lead's two), unless that one holds that kind of place in another team already (a plain seat,
+// or a team it leads) or the swap would loop. Teams whose members have all been gone from the session list for 24
+// hours leave; seenAt is saved every 10 minutes.
 let teamsSavedAt = 0;
 function pruneTeams(now) {
   if (!teams.length) return;
@@ -5463,20 +5556,20 @@ function pruneTeams(now) {
     for (const m of [...t.members]) {
       const to = successorOf(m);
       if (!to || to === m) continue;
-      const other = teamOf(to);
-      if (other && other !== t) continue;
-      // in this team already (added by hand): the old one just goes
-      t.members = other === t ? t.members.filter((x) => x !== m) : t.members.map((x) => (x === m ? to : x));
-      // the successor of the lead is the lead
-      if (t.lead === m) t.lead = to;
+      // the successor of the lead is the lead; in this team already (added by hand): the old one just goes
+      const how = TT.carryOn(teams, t, m, to);
+      if (!how) continue;
       t.successors = [...(t.successors || []), { from: m, to, at: now }].slice(-10);
       changed = true;
-      if (other !== t) swaps.push([t, m, to]);
+      if (how === 'swapped') swaps.push([t, m, to]);
     }
   }
   if (changed) teams = teams.filter((t) => t.members.length >= 2);
-  // told once every member is swapped, so each brief and note names (and goes to) the ones that carry on
-  for (const [t, m, to] of swaps) if (teams.includes(t)) handedOn(t, m, to);
+  // told once every member is swapped, so each brief and note names (and goes to) the ones that carry on; one brief
+  // each (the team it leads first: its brief names the team above too)
+  const briefed = new Set();
+  swaps.sort((a, b) => (b[0].lead === b[2]) - (a[0].lead === a[2]));
+  for (const [t, m, to] of swaps) if (teams.includes(t)) { handedOn(t, m, to, !briefed.has(to)); briefed.add(to); }
   for (const t of teams) if (t.members.some((m) => sessions.has(m))) { t.seenAt = now; if (!t.here) { t.here = true; changed = true; } }
   // a team whose members this machine never listed (another device's, sync-prefs.js) is that device's to let go
   const keep = teams.filter((t) => !t.here || now - (t.seenAt || 0) < TEAM_GONE_MS);
@@ -5496,8 +5589,8 @@ function noteMessage(from, to, text, o = {}) {
   to = UUID_RE.test(to) ? to.toLowerCase() : to;
   const now = Date.now();
   const nameOf = (id) => { const x = sessions.get(id); return x ? x.name || plain(baseName(x) || '', 80) || id.slice(0, 8) : id.slice(0, 8); };
-  const t = teamOf(from);
-  const shared = t && t.members.includes(to) ? t : null;
+  // the team both are in: either of a mid-level lead's two (the one it leads, or the one it reports in)
+  const shared = teamsOf(from).find((x) => x.members.includes(to)) || null;
   if (shared) {
     shared.messages.push({ t: now, from, to, text: plain(text, 300) });
     if (shared.messages.length > TEAM_MSGS_MAX) shared.messages.splice(0, shared.messages.length - TEAM_MSGS_MAX);
@@ -5563,7 +5656,7 @@ function frameOf(s, now) {
   const st = STATE[s.state] || STATE.IDLE;
   const root = s.root || null;
   const used = s.ctxUsed || 0;
-  const team = teamOf(s.id);
+  const team = teamOf(s.id), led = ledTeamOf(s.id);
   return {
     id: s.id, name: plain(baseName(s) || s.name || s.id.slice(0, 8)), state: s.state, label: st.label, stateColor: toHex(st.color), hue: toHex(s.hue),
     account: shownAccount(s), repo: root ? { root, name: repoName(root), color: toHex(familyColor(root)) } : null, branch: branchInfo(s).branch,
@@ -5571,6 +5664,8 @@ function frameOf(s, now) {
     cost: Math.round((s.cost || 0) * 100) / 100, tokens: Math.round((s.tokens || 0) / 1000) * 1000, ctx: used ? Math.round((used / ctxLimit(s)) * 100) / 100 : null,
     lastAction: s.lastAction ? { t: Math.round(s.lastAction.t), who: s.lastAction.who, verb: s.lastAction.verb, what: s.lastAction.what } : null,
     team: team ? team.id : null,
+    // a mid-level lead: the team it leads below the one above (only then, to keep frames small; web/replay.js)
+    ...(led && led !== team ? { leads: led.id } : {}),
   };
 }
 // adds a frame of these conversations at time t (a keyframe when one is due, else a delta from the one before)
@@ -6705,8 +6800,10 @@ const apiCtx = {
   openElsewhere: (id) => !DEMO && liveProcs.has(String(id || '').toLowerCase()),
   // removed from the map (the page's Remove), unless it worked again since: an ask's answers aren't typed into it
   isRemoved: (id) => hiddenNow(String(id || '').toLowerCase()),
-  // the team a conversation is in: { id, name, lead, members } or null
+  // the team a conversation is in: { id, name, lead, members } or null (the one it reports in, else the one it leads);
+  // teamsOf: both of a mid-level lead's, the one above first
   teamOf: (id) => { const t = teamOf(id); return t ? { id: t.id, name: t.name, lead: t.lead || null, members: [...t.members] } : null; },
+  teamsOf: (id) => teamsOf(id).map((t) => ({ id: t.id, name: t.name, lead: t.lead || null, members: [...t.members] })),
   // the API's /api/teams: each answers [code, json] or a Promise of one
   teams: {
     list: () => [200, { ok: true, teams: teamsList() }],

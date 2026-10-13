@@ -175,7 +175,7 @@ export function buildReplayState(timeline, t, live) {
       id: f.id, name: f.name || f.id, account: f.account || null, state: f.state || 'IDLE', label: f.label || f.state || '',
       stateColor: f.stateColor || null, hue: f.hue || null, repo: f.repo || null, branch: f.branch || null,
       worktree: (ls && ls.worktree) || null, model: (ls && ls.model) || null, effort: null, goal: (ls && ls.goal) || null,
-      context: ctx, cost: +f.cost || 0, tokens: +f.tokens || 0, lastAction: f.lastAction || null, team: f.team || null,
+      context: ctx, cost: +f.cost || 0, tokens: +f.tokens || 0, lastAction: f.lastAction || null, team: f.team || null, leads: f.leads || null,
       last: act.last || began, turnStart: busy ? began : null, calls20: act.calls20,
       agents: f.state === 'DONE' ? [] : act.agents, files: f.state === 'DONE' ? [] : act.files,
       ship: shipAt(X.shipBySid.get(f.id), t),
@@ -195,10 +195,10 @@ export function buildReplayState(timeline, t, live) {
   }
   for (const r of L.repos || []) if (r && r.root && !repos.has(norm(r.root))) repos.set(norm(r.root), { root: r.root, name: r.name, color: r.color, live: 0 });
   const repoList = [...repos.values()];
-  // teams: live teams with the members the frame puts in them
+  // teams: live teams with the members the frame puts in them (a mid-level lead's frame names the team it leads too)
   const teams = [];
   for (const tm of L.teams || []) {
-    const members = sessions.filter((s) => s.team === tm.id).map((s) => s.id);
+    const members = sessions.filter((s) => s.team === tm.id || s.leads === tm.id).map((s) => s.id);
     if (members.length < 2) continue;
     teams.push({ ...tm, members, messages: (tm.messages || []).filter((m) => m && m.t <= t) });
   }

@@ -1059,6 +1059,9 @@ function rebuild() {
     // its lead (★), when it leads and is on the map: the links become spokes from it
     teams.push({ t, members: ms, pairs: [], lead: t.lead && ms.includes(t.lead) ? t.lead : null });
   }
+  // levels (teams nest): a team's lead may be a plain member of a team above (up), led by another lead; that team's
+  // spoke to it is drawn stronger, and its ★ badge carries a ring in the colour above
+  for (const tm of teams) tm.up = tm.lead ? teams.find((u) => u !== tm && u.lead !== tm.lead && u.members.includes(tm.lead)) || null : null;
   // parity partners (one line per pair, from the web side to the app side) and one-sided changes
   const parity = [], seenPair = new Set();
   for (const s of list) {
@@ -2686,10 +2689,14 @@ const onScreen = (n) => n && n.sx !== undefined && n.sy !== undefined;
 // (motion only). The pill with the team's name sits at the link's middle (the members' middle for 3+); comets
 // of a new order start there (a virtual comet end, 'T:<team id>'). A team with a lead: one spoke from the lead to
 // each member instead (chain of command: they report to it, not to each other); its ★ badge is drawn over the
-// nodes (drawLeadBadges).
+// nodes (drawLeadBadges). A spoke to a member that leads a team of its own (a mid-level lead: teams nest) is the
+// level link: stronger and brighter, in the colour of the team above.
+const LEVEL_ALPHA = 0.72;
 function drawTeams(ctx, ks) {
   const N = 28, ph = I.still ? 0 : I.time / 2600;
   for (const tm of I.teams) {
+    // the members here that lead the teams below this one
+    const below = new Set(I.teams.filter((x) => x.up === tm).map((x) => x.lead));
     const ns = tm.members.map((id) => I.byId.get('s:' + id)).filter(onScreen);
     tm.pairs = []; tm.pill = null; tm.rect = null;
     if (ns.length < 2) continue;
@@ -2704,9 +2711,10 @@ function drawTeams(ctx, ks) {
       ring.forEach((n, i) => tm.pairs.push([n, ring[(i + 1) % ring.length]]));
     }
     const col = /^#[0-9a-f]{6}$/i.test(tm.t.color || '') ? tm.t.color : COL.violet;
-    ctx.strokeStyle = rgba(col, TEAM_ALPHA); ctx.lineWidth = 1.1;
     let mid = null;
     for (const [a, b] of tm.pairs) {
+      const level = !!hub && below.has(b.sid);
+      ctx.strokeStyle = rgba(col, level ? LEVEL_ALPHA : TEAM_ALPHA); ctx.lineWidth = level ? 1.7 : 1.1;
       const pts = curvePts(a, b, N);
       const d = Math.hypot(b.sx - a.sx, b.sy - a.sy), amp = Math.min(3.4 * ks, d * 0.05), tw = Math.max(2, Math.round(d / 60));
       for (const sg of [1, -1]) {
@@ -2730,7 +2738,8 @@ function drawTeams(ctx, ks) {
   }
 }
 
-// A team's lead: a small ★ badge on its node's upper right, in the team's colour on a dark disc (steady: no motion)
+// A team's lead: a small ★ badge on its node's upper right, in the team's colour on a dark disc (steady: no motion).
+// A mid-level lead's (it reports in a team above, tm.up) has a thin outer ring in that team's colour too.
 function drawLeadBadges(ctx, ks) {
   for (const tm of I.teams) {
     if (!tm.lead) continue;
@@ -2739,6 +2748,11 @@ function drawLeadBadges(ctx, ks) {
     const col = /^#[0-9a-f]{6}$/i.test(tm.t.color || '') ? tm.t.color : COL.violet;
     const r = 5.2 * ks, d = (n.RG || n.R) * (n.bs || 1) + r * 0.35, a = -Math.PI / 4;
     const x = n.sx + Math.cos(a) * d, y = n.sy + Math.sin(a) * d;
+    if (tm.up) {
+      const upCol = /^#[0-9a-f]{6}$/i.test(tm.up.t.color || '') ? tm.up.t.color : COL.violet;
+      ctx.fillStyle = HOLE; circle(ctx, x, y, r + 1.8 * ks); ctx.fill();
+      ctx.strokeStyle = rgba(upCol, 0.85); ctx.lineWidth = 1.2; circle(ctx, x, y, r + 1.2 * ks); ctx.stroke();
+    }
     ctx.fillStyle = HOLE; circle(ctx, x, y, r); ctx.fill();
     ctx.strokeStyle = rgba(col, 0.75); ctx.lineWidth = 1; ctx.stroke();
     starPath(ctx, x, y + 0.2 * ks, r * 0.72, r * 0.3); ctx.fillStyle = col; ctx.fill();
@@ -4179,8 +4193,9 @@ function fillTip(n) {
       const me = c.sessions.find((x) => x.id === s.id);
       row(tip, '⚠', `also ${me && me.wrote ? 'editing' : 'reading'} ${lastParts(c.rel)} with ${others.join(', ')}`, c.writers >= 2 ? COL.red : COL.gold);
     }
-    const tm = s.team && I.teams.find((x) => x.t.id === s.team);
-    if (tm) {
+    // its teams: the one it leads first, then the one it reports in (a mid-level lead is in both)
+    const tms = I.teams.filter((x) => x.t.members.includes(s.id)).sort((a, b) => (b.lead === s.id) - (a.lead === s.id));
+    for (const tm of tms) {
       const others = tm.t.members.filter((id) => id !== s.id).map(nameOf);
       const lead = tm.t.lead && tm.t.members.includes(tm.t.lead) ? tm.t.lead : null;
       row(tip, 'team', lead === s.id ? `★ leads ${tm.t.name || 'team'} · ${others.join(', ')} report to it`

@@ -3335,47 +3335,58 @@ function joinWhy(s, t) {
   if (t.members.length >= TEAM_MAX) return `a team has at most ${TEAM_MAX} conversations`;
   return unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
 }
+// a conversation's teams: up, the one it is a plain member of (where it reports), and own, the one it leads. Teams
+// nest (fleet-view.js team-tree.js): a lead can report in a team above, so a conversation may be in both
+function teamsOfS(s) {
+  const own = teamById(s.leads) || (leadOf(teamById(s.team)) === s.id ? teamById(s.team) : null);
+  const t = teamById(s.team), up = t && t !== own && leadOf(t) !== s.id ? t : null;
+  return { up, own, all: [up, own].filter(Boolean) };
+}
 // a conversation's menu: one "Team ▸" row (Henry, 2026-10-10: few rows on the right-click, more in sub and
 // sub-submenus) holding "Start team ▸" (tick who joins from its workspace), "Add to team ▸" (one row per team it
-// isn't in), "Lead team ▸" (make it the lead of its own team, or join another team as its lead) and, when it is in
-// one, 'Team "x" ▸' (Message the team, Lead ▸, Leave team, Disband team: a second step asks first)
+// isn't in), "Lead team ▸" (make it the lead of its own team, or join another team as its lead) and, for each team it
+// is in (the one it reports in, the one it leads), 'Team "x" ▸' (Message the team, Lead ▸, Leave team, Disband team:
+// a second step asks first). Joining a team as a member keeps the team it leads; joining one as its lead keeps the
+// team it reports in (it leaves the one it led)
 function teamItems(s) {
   if (s.pending || s.demo) return [];
-  const mine = teamById(s.team), others = (state?.teams || []).filter((t) => t !== mine);
+  const { up, own, all: mine } = teamsOfS(s), others = (state?.teams || []).filter((t) => !mine.includes(t));
   const why = unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
   const out = [startTeamItem(s, why)];
   if (others.length) {
     out.push(why ? { label: 'Add to team', icon: 'plus', disabled: true, note: why }
       : { label: 'Add to team', icon: 'plus', children: others.map((t) => {
         const full = t.members.length >= TEAM_MAX;
-        return { label: t.name, icon: 'merge', disabled: full, note: full ? `full (${TEAM_MAX})` : `${t.members.length} conversations${mine ? ` · it leaves "${mine.name}"` : ''}`, run: () => addToTeam(t, s) };
+        return { label: t.name, icon: 'merge', disabled: full, note: full ? `full (${TEAM_MAX})`
+          : `${t.members.length} conversations${up ? ` · it leaves "${up.name}"` : ''}${own ? ` · still leads "${own.name}"` : ''}`, run: () => addToTeam(t, s) };
       }) });
   }
   // it can only join another team when this window can reach it (as Add to team)
-  if (!mine && others.length && why) out.push({ label: 'Lead team', icon: 'star', disabled: true, note: why });
-  else if (mine || others.length) {
+  if (!mine.length && others.length && why) out.push({ label: 'Lead team', icon: 'star', disabled: true, note: why });
+  else if (mine.length || others.length) {
     const kids = [];
-    if (mine) {
-      kids.push(leadOf(mine) === s.id ? { label: `It leads "${mine.name}"`, icon: 'check', disabled: true, note: 'its team' }
-        : { label: 'Make it the lead', icon: 'star', note: `of "${mine.name}", its team${leadOf(mine) ? `: takes over from ${nameOfId(leadOf(mine))}` : ''}`, run: () => setLead(mine, s) });
-      if (others.length) kids.push({ sep: true });
+    if (own) kids.push({ label: `It leads "${own.name}"`, icon: 'check', disabled: true, note: 'its team' });
+    if (up) {
+      kids.push({ label: 'Make it the lead', icon: 'star', note: `of "${up.name}"${leadOf(up) ? `: takes over from ${nameOfId(leadOf(up))}` : ''}${own ? ` · it leaves "${own.name}"` : ''}`, run: () => setLead(up, s) });
     }
+    if (mine.length && others.length) kids.push({ sep: true });
     for (const t of others) {
       const full = t.members.length >= TEAM_MAX, cur = leadOf(t);
       kids.push({ label: t.name, icon: 'star', disabled: !!why || full, note: why || (full ? `full (${TEAM_MAX})`
-        : `joins it as the lead · ${t.members.length} report to it${cur ? ` · takes over from ${nameOfId(cur)}` : ''}${mine ? ` · it leaves "${mine.name}"` : ''}`),
+        : `joins it as the lead · ${t.members.length} report to it${cur ? ` · takes over from ${nameOfId(cur)}` : ''}${own ? ` · it leaves "${own.name}"` : ''}`),
       run: () => addToTeam(t, s, true) });
     }
     out.push({ label: 'Lead team', icon: 'star', children: kids });
   }
-  if (mine) {
-    out.push({ label: `Team "${mine.name}"`, icon: 'merge', children: [
-      ...teamMenuItems(mine, false),
-      { label: 'Leave team', icon: 'close', run: () => leaveTeam(mine, s, 'left') },
-      { label: 'Disband team', icon: 'close', danger: true, children: [{ label: `Disband "${mine.name}": each is told`, icon: 'close', danger: true, run: () => disbandTeam(mine) }] },
+  for (const t of mine) {
+    out.push({ label: `Team "${t.name}"`, icon: 'merge', children: [
+      ...teamMenuItems(t, false),
+      { label: 'Leave team', icon: 'close', run: () => leaveTeam(t, s, 'left') },
+      { label: 'Disband team', icon: 'close', danger: true, children: [{ label: `Disband "${t.name}": each is told`, icon: 'close', danger: true, run: () => disbandTeam(t) }] },
     ] });
   }
-  return [{ label: 'Team', icon: 'merge', note: mine ? `in "${mine.name}"${leadOf(mine) === s.id ? ', leads it' : ''}` : null, children: out }];
+  const note = [up ? `in "${up.name}"` : '', own ? `leads "${own.name}"` : ''].filter(Boolean).join(', ');
+  return [{ label: 'Team', icon: 'merge', note: note || null, children: out }];
 }
 // "Start team ▸": a checklist of the other conversations in its workspace (ticking keeps the menu open), "<it>
 // leads" (on: it gets the order and the others report to it; off: one team of peers), then "Start team" opens the
@@ -3396,8 +3407,9 @@ function startTeamItem(s, why) {
     for (const c of cands) {
       const on = picked.has(c.id);
       const off = unreachable(c) || (isConvId(c.id) ? null : 'not started yet') || (!on && n + 1 >= TEAM_MAX ? `a team has at most ${TEAM_MAX}` : null);
-      const t = teamById(c.team);
-      rows.push({ label: c.name, icon: on ? 'check' : null, disabled: !!off, note: off || (t ? `in "${t.name}": it leaves it` : c.label || c.state || null),
+      // one that leads a team keeps leading it; its seat in a team it reports in moves here
+      const { up, own } = teamsOfS(c);
+      rows.push({ label: c.name, icon: on ? 'check' : null, disabled: !!off, note: off || (up ? `in "${up.name}": it leaves it` : own ? `leads "${own.name}": still does` : c.label || c.state || null),
         stay: true, run: () => { if (on) picked.delete(c.id); else picked.add(c.id); } });
     }
     rows.push({ sep: true });
@@ -3462,10 +3474,9 @@ async function disbandTeam(t) {
   if (!r || !r.ok) { toast((r && r.message) || 'could not disband it', C.red); return; }
   toast(`Disbanded "${t.name}" · ${toldN(r.told)}`, C.dim);
 }
-// a conversation removed from the page leaves its team (the server does the same when the hidden list reaches it)
+// a conversation removed from the page leaves its teams (the server does the same when the hidden list reaches it)
 function leaveOnRemove(s) {
-  const t = teamById(s.team);
-  if (t && isConvId(s.id)) leaveTeam(t, s, 'removed', true);
+  if (isConvId(s.id)) for (const t of teamsOfS(s).all) leaveTeam(t, s, 'removed', true);
 }
 // a new session that had no id yet when its team was made joined it once it had one (orders.js)
 onTeamJoin((name, teamName, r, lead) => {

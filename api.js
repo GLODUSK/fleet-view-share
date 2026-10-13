@@ -41,6 +41,7 @@ const SCREEN = require(path.join(__dirname, 'screen.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CHIEF = require(path.join(__dirname, 'chief.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
+const TT = require(path.join(__dirname, 'team-tree.js'));
 
 const P = require(path.join(__dirname, 'platform.js'));
 const DATA_DIR = P.dataDir();
@@ -984,11 +985,11 @@ async function sendMessage(key, b, ctx, gone, via = null) {
   if (from && b.now === true) return [400, { ok: false, message: 'now goes only with a message of your own (no from)' }];
   if (!from) return deliverText(key, text, { kind: 'message', wait: ms, queue, open, via, now: b.now === true }, ctx, gone);
   const name = headName(from, ctx);
-  // "your lead" when from leads a team the receiver is in, "teammate" when they share one without that
+  // "your lead" when from leads a team the receiver is in, "teammate" when they share one without that (either of a
+  // mid-level lead's two teams: the one it leads, the one above where it reports)
   const head = (to) => {
-    const t = ctx.teamOf ? ctx.teamOf(from) : null;
-    const mate = !!t && !!convId(to) && t.members.includes(convId(to));
-    const who = mate && t.lead === from ? 'your lead ' : mate ? 'teammate ' : '';
+    const id = convId(to), rel = id ? TT.relation(teamsIn(from, ctx), from, id) : null;
+    const who = rel === 'lead' ? 'your lead ' : rel === 'mate' ? 'teammate ' : '';
     return `[Message from ${who}"${name}" (${from}). Reply with: fv send ${from} "message" --from ${convId(to) || to}]\n${text}`;
   };
   return deliverText(key, head, { kind: 'message', from, original: text, wait: ms, queue, open }, ctx, gone);
@@ -999,6 +1000,8 @@ async function sendMessage(key, b, ctx, gone, via = null) {
 function headName(from, ctx) {
   return CHIEF.headName(nameFor(from, ctx), 80) || from.slice(0, 8);
 }
+// a conversation's teams (both of a mid-level lead's), for the heads above (team-tree.js relation)
+const teamsIn = (id, ctx) => (ctx.teamsOf ? ctx.teamsOf(id) : ctx.teamOf && ctx.teamOf(id) ? [ctx.teamOf(id)] : []);
 
 // ---------- teams ----------
 // GET /api/teams, POST /api/teams { members, order, name?, lead? }, POST /api/teams/:id/add { member, lead? },
@@ -1068,8 +1071,9 @@ async function messageTeam(tid, b, ctx, gone, via = null) {
 }
 
 // ---------- status: what conversations are doing, free ----------
-// GET /api/status?team=<id> | ids=<id>,<id> | from=<id>: a team's members, these conversations, or from's team (none
-// of them: every unfinished conversation not removed from the map), each as fleet-view.js's statusOf shows it, plus
+// GET /api/status?team=<id> | ids=<id>,<id> | from=<id>: a team's members, these conversations, or from's team (both
+// of a mid-level lead's, the one it leads first; none of them: every unfinished conversation not removed from the
+// map), each as fleet-view.js's statusOf shows it, plus
 // queued (text waits here for it, behind a menu). Nothing is typed into them: it costs them no turn.
 async function readStatus(query, ctx) {
   const q = {};
@@ -1300,11 +1304,10 @@ async function postAsk(b, ctx) {
   a.withinTimer = setTimeout(() => flushAsk(a), within * 1000);
   a.keepTimer = setTimeout(() => dropAsk(a), ASK_KEEP_MS);
   for (const t of [a.withinTimer, a.keepTimer]) if (t.unref) t.unref();
-  // "your lead" for a target in a team the asker leads
+  // "your lead" for a target in a team the asker leads (a mid-level lead asking its own members, not the team above)
   const name = headName(from, ctx);
   const text = (to) => {
-    const t = ctx.teamOf ? ctx.teamOf(convId(to) || to) : null;
-    const who = t && t.lead === from ? 'your lead ' : '';
+    const who = TT.relation(teamsIn(from, ctx), from, convId(to) || to) === 'lead' ? 'your lead ' : '';
     return `[Question from ${who}"${name}" (${from}) · answer it in your reply: Fleet View passes your reply back. Don't fv send it.]\n${question}`;
   };
   // this request counts as a poll while it types the questions (each waits up to TAKE_MS): an answer that comes
@@ -2063,6 +2066,7 @@ async function listConversations(query, ctx) {
 //        conversations({ state, repo, all, limit }) -> [row], transcript(id, { since, limit }) -> Promise of { ..., queue },
 //        whereIs(id) -> { known, cwd, account }, successorOf(id) -> the one that carries on or null,
 //        openElsewhere(id) -> open in a claude outside Fleet View, isRemoved(id) -> removed from the map, teamOf(id) -> { id, name, lead, members } or null,
+//        teamsOf(id) -> [those]: both of a mid-level lead's teams, the one above first,
 //        teams: { list(), get(id) -> { id, name, lead, members } or null, make(b), add(id, member, lead),
 //        remove(id, member), lead(id, member | null), disband(id) } each -> [code, json] or a Promise of one,
 //        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,

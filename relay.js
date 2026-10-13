@@ -721,6 +721,8 @@ function createRelay(opts = {}) {
       const id = x.id.toLowerCase();
       live.set(id, x.openElsewhere === true);
       if (typeof x.team === 'string') teams.set(x.team, [...(teams.get(x.team) || []), id]);
+      // a mid-level lead: in the team it leads too (fleet-view.js sessionJson leads)
+      if (typeof x.leads === 'string' && x.leads !== x.team) teams.set(x.leads, [...(teams.get(x.leads) || []), id]);
     }
     // the list features' order and names as the page keeps them, which the phone may send back unchanged
     const names = s.repoNames;

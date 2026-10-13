@@ -295,7 +295,8 @@ function ago(t) {
 // fv status: a few lines per member (★ the lead): state and what it does, where its work is, its last reply's first line
 function statusLines(j) {
   const out = [];
-  if (j.team) out.push(`team ${j.team.id} "${j.team.name}"${j.team.lead ? '' : ' (no lead: peers)'}`);
+  // a mid-level lead's from: both its teams (the one it leads first)
+  for (const t of j.teams || (j.team ? [j.team] : [])) out.push(`team ${t.id} "${t.name}"${t.lead ? '' : ' (no lead: peers)'}`);
   for (const m of j.members || []) {
     out.push(`${m.lead ? '★ ' : '  '}${short(m.id)}  ${clip(m.name || '', 40)}  ${m.state || 'gone'}${m.doing && m.doing !== m.state ? ` · ${clip(m.doing, 80)}` : ''}${m.queued ? ' · text waiting for it' : ''}${m.removed ? ' · removed from the map' : ''}`);
     const where = [m.repo, m.branch ? `branch ${m.branch}` : '', m.pr ? `PR #${m.pr.number}${m.pr.state ? ` (${m.pr.state})` : ''}` : '',
