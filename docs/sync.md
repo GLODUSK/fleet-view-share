@@ -53,7 +53,8 @@ two big cards: **Sync with Blackbox** or **Work locally**. Choosing sync writes 
 address or key is asked. Sync then goes step by step, each one done before the next opens (**Back** shows the two
 cards again):
 
-1. **Sign in**: **Continue with Google**, sent straight to `syncEmail` (Supabase passes `login_hint` on to Google).
+1. **Sign in**: **Continue with Google** opens Google's account picker with `syncEmail` first (Supabase passes
+   `prompt=select_account` and `login_hint` on to Google).
    Only that account may sign in on these machines (`sync-api.js` `onlyEmail`): another one is turned away at the
    callback, nothing of it is kept, and the screen says which account it was. A sign-in kept from before for another
    account counts as signed out. Without `syncEmail` (a friend's install) Google shows its account picker as before.

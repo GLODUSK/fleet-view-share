@@ -845,9 +845,10 @@ function createSync(opts = {}) {
       code_challenge: pkceChallenge(verifier),
       code_challenge_method: 's256',
     });
-    // Supabase passes these on to Google: straight to the one account allowed here, else the account picker
+    // Supabase passes these on to Google: always its account picker (Henry, 2026-10-13: not Chrome's one-line
+    // "sign in as" prompt), with the one account allowed here put first
+    q.set('prompt', 'select_account');
     if (onlyEmail) q.set('login_hint', onlyEmail);
-    else q.set('prompt', 'select_account');
     return { location: `${c.url}/auth/v1/authorize?${q}`, state };
   }
   // q: the callback's query -> { ok, email, member } or { ok: false, message }

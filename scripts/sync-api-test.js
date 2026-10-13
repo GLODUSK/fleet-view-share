@@ -548,7 +548,7 @@ async function main() {
       return { loc, res: await route(api, 'GET', `/sync/callback?state=${back.searchParams.get('state')}&code=${c}`) };
     };
     let t = await tryAs(only, 'other@example.com');
-    eq([t.loc.searchParams.get('login_hint'), t.loc.searchParams.get('prompt')], ['henry@example.com', null], 'only: Google is sent straight to the one account (login_hint, no picker)');
+    eq([t.loc.searchParams.get('login_hint'), t.loc.searchParams.get('prompt')], ['henry@example.com', 'select_account'], 'only: Google shows its account picker with the one account first (login_hint + picker)');
     ok(t.res.statusCode === 400 && /Only henry@example\.com can sync/.test(t.res.body) && /other@example\.com/.test(t.res.body), `only: another account is turned away (${t.res.statusCode})`);
     let st = await only.status();
     ok(!st.signedIn && st.refused === 'other@example.com' && st.onlyEmail === 'henry@example.com' && onlyStore.peek() == null, `only: nothing kept, and status says who was turned away: ${JSON.stringify(st)}`);
