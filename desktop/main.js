@@ -396,7 +396,7 @@ if (!app.requestSingleInstanceLock()) {
   }
   function saveMain(done) {
     const r = mainRect();
-    if (!r || placing) return done && done();
+    if (!r || placing || fullScreen(win)) return done && done();
     local.webBounds = r;
     local.maximized = win.isMaximized();
     writeLocal();
@@ -527,8 +527,10 @@ if (!app.requestSingleInstanceLock()) {
       title: 'Fleet View',
       backgroundColor: '#00000000',
       ...(P.isMac ? {
-        // the usual title bar; vibrancy behind the page, kept while the window is inactive
-        vibrancy: 'under-window', visualEffectState: 'active',
+        // the usual title bar; vibrancy behind the page, kept while the window is inactive. Full screen is the
+        // simple kind (FULL_SCREEN): the native kind moves the window to a Space of its own with nothing behind
+        // it, so the vibrancy turns solid black there
+        vibrancy: 'under-window', visualEffectState: 'active', simpleFullscreen: true,
       } : {
         icon: ICON,
         backgroundMaterial: 'acrylic', // Windows 11 22H2 and later; older Windows shows the page's own dark tint
@@ -558,6 +560,7 @@ if (!app.requestSingleInstanceLock()) {
       setTimeout(() => { if (!win || win.isDestroyed()) return; if (!win.isMaximized()) place(); placing = false; }, 400);
     };
     brand(win);
+    leaveFullScreenWhenHidden(win);
     win.once('ready-to-show', showIt);
     if (!HIDDEN) keepBlurWhenInactive(win);
     setTimeout(showIt, 3000);
@@ -797,7 +800,7 @@ if (!app.requestSingleInstanceLock()) {
   }
   // its restored (normal) place into local, as the main window's is kept (not while minimized)
   function keepChatsPlace() {
-    if (!chatsAlive() || chats.isMinimized()) return;
+    if (!chatsAlive() || chats.isMinimized() || fullScreen(chats)) return;
     local.chatsBounds = toRect(chats.getNormalBounds());
     local.chatsMaximized = chats.isMaximized();
   }
@@ -837,7 +840,7 @@ if (!app.requestSingleInstanceLock()) {
       resizable: true,
       alwaysOnTop: !!local.chatsOnTop,
       backgroundColor: '#00000000',
-      ...(P.isMac ? { vibrancy: 'under-window', visualEffectState: 'active' } : {
+      ...(P.isMac ? { vibrancy: 'under-window', visualEffectState: 'active', simpleFullscreen: true } : {
         icon: ICON,
         backgroundMaterial: 'acrylic',
         autoHideMenuBar: true,
@@ -850,6 +853,7 @@ if (!app.requestSingleInstanceLock()) {
     const w = chats;
     if (local.chatsOnTop) w.setAlwaysOnTop(true, 'floating');
     if (!sameBounds(w.getBounds(), want)) w.setBounds(want);
+    leaveFullScreenWhenHidden(w);
     // its own taskbar button: an app id of its own (the main window's is FleetView); right-click > Fleet View
     // starts the app as the main window's does
     if (process.platform === 'win32') {
@@ -1131,6 +1135,23 @@ if (!app.requestSingleInstanceLock()) {
     if (!tray || tray.isDestroyed()) return;
     tray.setContextMenu(Menu.buildFromTemplate(trayItems()));
   }
+  // macOS full screen, the simple (pre-Lion) kind: the window covers the screen on the Space it is on, the menu bar
+  // and dock hide, and the desktop stays behind it, so the vibrancy keeps blending with it. The native kind (its
+  // own Space) has nothing behind the window and the see-through page turns black. The windows' simpleFullscreen
+  // option sends the green button the same way.
+  const FULL_SCREEN = {
+    label: 'Toggle Full Screen', accelerator: 'Ctrl+Cmd+F',
+    click: (_item, w) => { if (w && !w.isDestroyed()) w.setSimpleFullScreen(!w.isSimpleFullScreen()); },
+  };
+  // in simple full screen getNormalBounds() reads the whole screen, so a window's place is not saved then
+  const fullScreen = (w) => P.isMac && !!w && !w.isDestroyed() && w.isSimpleFullScreen();
+  // a hidden or closed window leaves full screen, or the menu bar and dock it hid would stay hidden
+  function leaveFullScreenWhenHidden(w) {
+    if (!P.isMac) return;
+    const out = () => { if (fullScreen(w)) w.setSimpleFullScreen(false); };
+    w.on('hide', out);
+    w.on('close', out);
+  }
   // macOS: the application menu. The standard roles give Cmd+C / Cmd+V / Cmd+A in the page, Cmd+W, Cmd+M and
   // Cmd+Q; reload is Cmd+Shift+R as Ctrl+Shift+R on Windows (the page keeps Ctrl+R)
   function macMenu() {
@@ -1144,7 +1165,7 @@ if (!app.requestSingleInstanceLock()) {
       { role: 'editMenu' },
       { label: 'View', submenu: [
         { role: 'reload', accelerator: 'CmdOrCtrl+Shift+R' }, { role: 'toggleDevTools', accelerator: 'Alt+CmdOrCtrl+I' }, { type: 'separator' },
-        { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' },
+        { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, FULL_SCREEN,
       ] },
       { role: 'windowMenu' },
     ]);
