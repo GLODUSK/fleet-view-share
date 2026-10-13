@@ -13,6 +13,13 @@
 // 250 ms) and, for a repo, a kick of its ring's rotation; nothing gets brighter. prefers-reduced-motion turns
 // off drift, orbit, rotation, flow and these nudges (comets still travel).
 //
+// Merge launch (Henry merges dozens of PRs a day; each gets a small payoff, all motion): when a conversation's PR
+// merges (a new 'merged' alert in state.alerts, see ingestMerges), the conversation sends one big comet with a long
+// tail to its repo's hub along their curve. As it lands, the hub's ring makes one extra full turn (WHIRL_MS, easing
+// out) with the usual bump, and a ring of sparks in the repo's colour flies out, curling a little and slowing down,
+// each spark shrinking to nothing at a fixed alpha (I.bursts). A conversation that isn't on the map spins its hub
+// without a comet. prefers-reduced-motion keeps the comet only; replay launches nothing.
+//
 // Transitions (Henry, 2026-10-07: changes of state must feel organic, not snap): a conversation's look morphs
 // into its next one over MORPH_MS (the new look settles in from 90% size over the old one); its size, aura,
 // memory gauge, link and turning ring all glide (exponential easing, see glide). Going idle, the ring of dots
@@ -24,12 +31,19 @@
 // prefers-reduced-motion snaps all of these to their end.
 //
 // Look: conversations and agents are lit orbs; a repo is a hub (a faceted hexagon in its colour, with the repo's
-// initial, inside a turning ring of arcs with ticks) over a faint territory blob, its name on a pill in its
-// colour right next to it. A hub shows presence by size and motion: each live conversation is a small satellite
+// initial, inside a turning ring of arcs with ticks) in its own nebula: a few soft overlapping clouds in the repo's
+// colour (one a lighter tint), shaped by the repo's id, that slowly change shape at fixed brightness, so each repo
+// reads as a coloured region with its conversations inside. Its name sits on a pill in its colour right next to it.
+// On a big window (past about 1600x900) orbs, rings, labels and pills all grow with it, so a 4K map isn't tiny dots.
+// A hub shows presence by size and motion: each live conversation is a small satellite
 // in its colour orbiting the hub, a soft halo widens and the ring's arcs lengthen while it has live
 // conversations, and the ring turns faster (plus an inner counter-turning dash ring grows) while they work.
 // A dormant hub (no live conversation) is smaller, its arcs short, turning slowly; PRs are small rings with a pull-request glyph; edges are gentle curves (always
-// bent to the same side for a pair) with a colour gradient, and names sit on small frosted pills.
+// bent to the same side for a pair, the bend swaying slowly like a rope) with a colour gradient, and names sit on small frosted pills.
+// Behind it all, three layers of faint tiny stars (STAR_LAYERS) at fixed brightness: each follows the camera at
+// its own fraction of the pan and of the zoom, so the sky feels deep, and creeps slowly by itself (not when still).
+// Under the stars a faint sky tint follows the local clock (SKY_KEYS: indigo night, rose dawn, clear day, amber dusk);
+// it changes by the minute, never because something happened.
 //
 // Repo spots (Henry: repos must never jump across the map): every repo keeps the spot it first got. Only the
 // first layout packs the repos in rows to fit the window; a repo that appears later takes the nearest free spot
@@ -79,8 +93,9 @@
 // pickup that runs here is the old conversation's stand-in (handing: true, keyed by the pickup's id once it has one):
 // it keeps the old node and its handing-off look, never the new-session one.
 //
-// Tests (?fixture=1 or ?debug=1): window.__map = { nodes, stats, debug, comet(fromId, toId) }. nodes() lists
-// each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label rectangles.
+// Tests (?fixture=1 or ?debug=1): window.__map = { nodes, stats, debug, comet(fromId, toId), merge(sessionId), sky(hour) }.
+// nodes() lists each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label
+// rectangles; merge('s:<id>') launches that conversation's merge now.
 //
 // Command center (2026-10-08). The map is also where many conversations are steered at once:
 //   Multi-select: Ctrl+click toggles a conversation (or a workspace's hub) into the selection; Ctrl+drag on empty
@@ -137,7 +152,7 @@ const COL = {
 const UI = "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif";
 const DISPLAY = "'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif";
 const MONO = "'Cascadia Mono', Consolas, monospace";
-const ACC_FONT = `700 8.5px ${UI}`;
+const ACC_FONT = () => `700 ${8.5 * (I.sf || 1)}px ${UI}`;
 const HOLE = 'rgba(14,17,27,0.92)';        // inside of a hollow node, over the glass or the solid page
 const PILL_BG = 'rgba(18,21,32,0.72)', PILL_EDGE = 'rgba(255,255,255,0.07)', LABEL_HALO = 'rgba(10,12,19,0.55)';
 // DOM overlays (tooltip, legend, hint) use the shell's CSS variables, with these values as fallbacks
@@ -170,12 +185,26 @@ const COMET_TAIL = 6, COMET_GAP = 0.045; // tail dots and their spacing (fractio
 const COMET_MAX = 60;               // concurrent comets; the oldest are dropped
 const COMET_STAGGER = 80;           // ms between launches when the feed arrives in a burst
 const COMET_MAX_AGE = 10e3;         // feed entries older than this never launch (a re-shown session's history)
+// a merge launch (see "Merge launch" at the top): the big comet's trip, tail dots, their spacing and head radius
+const BIG_MS = 1400, BIG_TAIL = 16, BIG_GAP = 0.024, BIG_HEAD = 3.8;
+const WHIRL_MS = 1200;              // the hub's extra full turn as it lands, easing out
+// its sparks: how many, their flight, how far they get (hub radii; every other one less), start radius, and how
+// far the ring curls round on the way (radians), so it reads as a pinwheel
+const SPARKS = 16, SPARK_MS = 1000, SPARK_REACH = 4.4, SPARK_R = 2.4, SPARK_CURL = 0.55;
+const MERGE_MAX_AGE = 30e3;         // a 'merged' alert older than this is history (the map was hidden)
+const MERGE_STAGGER = 400;          // ms between launches when several merges arrive in one state
 const RING_DOTS = 18, RING_TURN_MS = 12e3;
 const ORBIT_TURN_MS = 40e3;         // running agents: one turn around their conversation
 const DRIFT_PX = 3;                 // node drift amplitude at zoom 1
 const FLOW_PX_S = 16;               // recent-work dash flow speed
 const AURA_MIN = 14, AURA_MAX = 42, AURA_CALLS = 60, AURA_ALPHA = 0.17;
-const TERR_ALPHA = 0.06;            // repo territory blob, fixed
+// repo nebulae: NEB_LOBES soft clouds per repo, each its own fixed alpha (centre lobe NEB_CORE_A, the rest NEB_LOBE_A,
+// one of them NEB_LIGHT of the way to white). Lobes sit NEB_OFF of the region's radius out and are NEB_SIZE of it,
+// so the cloud reaches 1.2-1.4x (NEB_REACH bounds it); each wanders NEB_WANDER of the radius and breathes
+// NEB_BREATHE in scale, once per NEB_PERIOD seconds (min, spread). Shape only: alpha never moves.
+const NEB_LOBES = 5, NEB_CORE_A = 0.08, NEB_LOBE_A = 0.12, NEB_LIGHT = 0.32;
+const NEB_OFF = [0.28, 0.5], NEB_SIZE = [0.5, 0.72], NEB_CORE = 0.8, NEB_REACH = 1.4;
+const NEB_WANDER = 0.09, NEB_BREATHE = 0.08, NEB_PERIOD = [40, 50];
 const BUSY = new Set(['WORKING', 'AGENTS']);
 const DASH_NONE = [], DASH_READ = [2, 3], DASH_WROTE_FLOW = [8, 3], DASH_CLASH = [6, 4], DASH_FRESH = [2, 2];
 const PUSH_RE = /\bgit\s+push\b|\bgh\s+pr\b|\bpush(ed)?\s+the\s+branch\b|\bopen(ed)?\s+(the|a)\s+pr\b/i;
@@ -212,6 +241,28 @@ const CLASH_LINK_ALPHA = 0.4, PATH_MIN_ALPHA = 0.14;
 const GLIDE_MS = 650;               // saved views, n / N and the overlay's panTo glide over this
 const IDLE_FULL_MS = 60 * 60e3;     // the idle lens: fully faded after an hour without activity
 const WT_MAX = 16;                  // worktree satellites drawn per hub
+// the starfield (see "Look"): per layer, how much of the pan it follows, how many stars per STAR_TILE square,
+// their radius and alpha ranges (CSS px; fixed per star, never animated) and its idle drift in px/s.
+// A layer's scale is zoom^(depth * STAR_ZOOM), so zooming feels deep and stars never balloon.
+const STAR_TILE = 512, STAR_ZOOM = 0.4, STAR_DIR = [0.83, 0.56];
+const STAR_LAYERS = [
+  { depth: 0.15, n: 46, r: [0.45, 0.8], a: [0.12, 0.32], drift: 0.8, seed: 11 },
+  { depth: 0.35, n: 20, r: [0.6, 1.0], a: [0.16, 0.4], drift: 1.8, seed: 23 },
+  { depth: 0.6, n: 8, r: [0.8, 1.3], a: [0.22, 0.5], drift: 3.2, seed: 37, sparkle: 2 },
+];
+// sky tint by local hour (see "Look"): [hour, top rgba, bottom (horizon) rgba], blended by minute, wrapping at 24.
+const SKY_KEYS = [
+  [0, [40, 50, 140, 0.10], [30, 40, 120, 0.08]],
+  [4, [40, 50, 140, 0.10], [30, 40, 120, 0.08]],
+  [6, [90, 80, 160, 0.06], [255, 150, 140, 0.09]],
+  [8, [120, 170, 200, 0.03], [255, 200, 160, 0.04]],
+  [10, [120, 200, 210, 0.02], [120, 200, 210, 0.02]],
+  [16, [120, 200, 210, 0.02], [120, 200, 210, 0.02]],
+  [18, [120, 80, 190, 0.07], [255, 150, 90, 0.10]],
+  [20, [90, 60, 170, 0.08], [200, 80, 140, 0.08]],
+  [22, [40, 50, 140, 0.10], [30, 40, 120, 0.08]],
+];
+const STAR_TINT = ['255,255,255', '226,234,255', '226,234,255', '210,196,255', '255,232,190']; // mostly white
 
 let I = null; // the one map instance (layout survives tab switches and container swaps)
 let pendingMulti = null; // a selection set before the map exists (setMapSelection)
@@ -309,6 +360,7 @@ export function renderMap(el, state, ui) {
   rebuild();
   ingestFeed(state);
   ingestTeams(state);
+  ingestMerges(state);
   syncSelection();
   start();
 }
@@ -372,7 +424,8 @@ export function setMapReplay(on) {
   I.replay = on;
   I.seen.clear();
   I.replayT = null;
-  I.comets.length = 0; I.cometQ.length = 0; // the scene jumps: what was travelling stops
+  I.comets.length = 0; I.cometQ.length = 0; I.bursts.length = 0; // the scene jumps: what was travelling stops
+  I.mergeInit = false; // and merges seen on either side of it are history
   if (on) {
     I.spotsBack = new Map([...I.homeXY].map(([id, h]) => [id, { ...h }]));
     I.feedInit = true; // the first replay state's feed (its last 10 s) travels
@@ -565,7 +618,8 @@ function mountOverlay(el) {
 export function mapStats() {
   if (!I) return null;
   const s = I.stats;
-  return { avgMs: s.n ? s.sum / s.n : 0, maxMs: s.max, frames: s.frames, comets: I.comets.length, queued: I.cometQ.length };
+  return { avgMs: s.n ? s.sum / s.n : 0, maxMs: s.max, frames: s.frames, comets: I.comets.length, queued: I.cometQ.length,
+    big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length };
 }
 
 // node positions on screen, for the harness's click tests: [{ id, kind, x, y, cx, cy, sid, pending, root }]
@@ -677,7 +731,8 @@ export function mapDebug() {
   if (!I) return null;
   return { nodes: I.nodes.length, drawn: I.nodes.filter((n) => n.sx !== undefined).length, W: I.W, H: I.H, cam: I.cam, running: I.running, sized: I.sized,
     nanPos: [...I.pos.values()].filter((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y)).length, alpha: I.alpha, ghosts: I.ghosts.length, lastDraw: I.lastDraw,
-    react: I.react ? Object.fromEntries([...I.react].map(([id, r]) => [id, { hits: r.hits, bumps: r.bumps, kick: r.kT, kickNow: r.kC }])) : {},
+    react: I.react ? Object.fromEntries([...I.react].map(([id, r]) => [id, { hits: r.hits, bumps: r.bumps, kick: r.kT, kickNow: r.kC, whirls: r.whirls }])) : {},
+    bursts: I.bursts.map((b) => ({ id: b.id, age: Math.round(performance.now() - b.at) })), mergeN: I.mergeN,
     labels: I.labelRects ? Object.fromEntries(I.labelRects) : {},
     comets: I.comets.concat(I.cometQ).map((c) => c.a + '>' + c.b),
     multi: [...I.multi], lens: I.lens, views: I.views, replay: I.replay, overlay: !!I.overlay, glide: !!I.glide, pan: { ...I.pan }, zoom: I.zoom,
@@ -695,8 +750,13 @@ export function mapComet(from, to) {
   I.dirty = true;
   return true;
 }
+// for tests: a merge launch for a conversation ('s:<id>') now, as if its PR just merged
+export function mapMerge(id) {
+  return !!(I && typeof id === 'string' && id.startsWith('s:') && launchMerge(id.slice(2), performance.now()));
+}
 if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(location.search)) {
-  window.__map = { nodes: () => mapNodes(), stats: () => mapStats(), debug: () => mapDebug(), comet: mapComet,
+  window.__map = { nodes: () => mapNodes(), stats: () => mapStats(), debug: () => mapDebug(), comet: mapComet, merge: mapMerge,
+    sky: (h) => { skyForce = h == null ? null : Number(h); if (I) I.sky = null; }, // force the sky's hour (null: the clock)
     selection: () => mapSelection(), setSelection: (ids) => setMapSelection(ids), lens: (n) => (n ? setMapLens(n) : mapLens()), replay: (on) => setMapReplay(on),
     // what a point on the canvas hits: { node, over, extra } (ids / kinds)
     hit: (x, y) => { if (!I) return null; const o = hitOver(x, y), n = hitTest(x, y), e = hitExtra(x, y); return { node: n ? n.id : null, over: o ? o.kind + ':' + o.id : null, extra: e ? e.kind + ':' + e.id : null }; } };
@@ -763,6 +823,8 @@ function createInstance(state) {
     seen: new Map(),          // feed key -> [t...] already seen
     feedInit: false,
     comets: [], cometQ: [], nextLaunch: 0,
+    bursts: [],               // merge sparks flying out of a hub: { id, at, hue, rot }
+    mergeInit: false, mergeN: -Infinity, // the newest alert n seen (ingestMerges)
     reduce: typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null,
     stats: { sum: 0, n: 0, max: 0, frames: 0, ring: new Float32Array(120), i: 0 },
     // command center
@@ -1201,6 +1263,43 @@ function ingestTeams(state) {
     I.nextLaunch = at;
   }
   if (I.teamAt.size > 200) for (const id of [...I.teamAt.keys()]) if (!(state.teams || []).some((t) => t && t.id === id)) I.teamAt.delete(id);
+}
+
+// A merge launch (see "Merge launch" at the top) for each new 'merged' alert (state.alerts, whose n only grows).
+// The alert, not a ship's 'merged' step going 'ok', is the signal: the server raises it only for a PR it saw open
+// before, while the step also turns 'ok' the first time it looks up an old PR (after a restart, every merged PR at
+// once). Everything in the first state the map sees is history, an alert older than MERGE_MAX_AGE too (the map
+// was hidden); replay launches nothing, and the first live state after it is history again.
+function ingestMerges(state) {
+  if (I.replay) { I.mergeInit = false; return; }
+  const first = !I.mergeInit, nowC = Date.now() - I.skew;
+  I.mergeInit = true;
+  let top = first ? -Infinity : I.mergeN, at = performance.now();
+  for (const a of Array.isArray(state.alerts) ? state.alerts : []) {
+    if (!a || !Number.isFinite(a.n)) continue;
+    if (!first && a.n > I.mergeN && a.kind === 'merged' && a.sid && !(nowC - a.t > MERGE_MAX_AGE) && launchMerge(a.sid, at)) at += MERGE_STAGGER;
+    if (a.n > top) top = a.n;
+  }
+  I.mergeN = top;
+}
+
+// a conversation's merge: its big comet to its repo's hub (queued in time order), or, when it isn't on the map,
+// the hub's landing alone; false when neither is on the map
+function launchMerge(sid, at) {
+  const sn = I.byId.get('s:' + sid);
+  let hub = sn && sn.cl && sn.cl !== '_none' ? I.byId.get(sn.cl) : null;
+  if (!hub) {
+    const st = I.state || {};
+    const s = [...(st.allSessions || []), ...(st.sessions || []), ...(st.finishedSessions || [])].find((x) => x && x.id === sid);
+    hub = s && s.repo && s.repo.root ? I.byId.get(repoId(s.repo.root)) : null;
+  }
+  if (!hub || hub.kind !== 'repo') return false;
+  if (sn) {
+    const q = I.cometQ, i = q.findIndex((c) => c.at > at);
+    q.splice(i < 0 ? q.length : i, 0, { a: sn.id, b: hub.id, at, hue: sn.s.hue || COL.cyan, big: true });
+  } else landed(hub, at);
+  I.dirty = true;
+  return true;
 }
 
 // the saved spots: settings.mapSpots [{ id, x, y, pin }]
@@ -1695,6 +1794,7 @@ function frame() {
     I.sized = true;
     const W0 = I.W, H0 = I.H;
     I.W = Math.round(r.width); I.H = Math.round(r.height); I.dpr = dpr;
+    I.sf = screenFactor(I.W, I.H);
     I.canvas.width = Math.max(1, Math.round(I.W * dpr)); I.canvas.height = Math.max(1, Math.round(I.H * dpr));
     // the solid page colour (Edge, no glass) comes from the shell's --bg when it sets one
     try { I.bgFill = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || COL.bg; } catch { I.bgFill = COL.bg; }
@@ -1723,8 +1823,9 @@ function frame() {
   if (stepGlide(t0)) I.dirty = true;
   if (I.savedCam && I.camInit && I.sim && I.sim.length) restoreCam();
   if (I.camInit && !I.savedCam) keepCam();
-  // continuous motion while anything moves; otherwise only on change (and a slow tick for age fades)
-  const moving = (!I.still && I.nodes.length > 0) || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0;
+  // continuous motion while anything moves (the stars' drift too, even on an empty map); otherwise only on change
+  // (and a slow tick for age fades)
+  const moving = !I.still || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 || I.bursts.length > 0;
   if (I.dirty || moving || t0 - I.lastDraw > 250) {
     draw(); I.lastDraw = t0; I.dirty = false;
     const ms = performance.now() - t0, s = I.stats;
@@ -1738,7 +1839,13 @@ function frame() {
 }
 
 // ---------- drawing ----------
-function font(px, weight = 400, fam = UI) { return `${weight} ${px}px ${fam}`; }
+// screen factor: 1 up to a ~1600x900 window, growing on bigger ones (about 1.45 on a 4K screen) so the map doesn't
+// turn into tiny dots; sizes in px (orbs via ksOf, label fonts and pills via font and I.sf) multiply by it
+function screenFactor(W, H) { return clamp(Math.sqrt(Math.min((W || 0) / 1600, (H || 0) / 900)), 1, 1.6); }
+// the size scale for orbs, rings and lines: the zoom part clamped, then the screen factor
+function ksOf(k) { return clamp(Math.sqrt(k || 1), 0.8, 1.35) * (I.sf || 1); }
+// label fonts grow with the screen factor (not with zoom)
+function font(px, weight = 400, fam = UI) { return `${weight} ${Math.round(px * (I.sf || 1) * 2) / 2}px ${fam}`; }
 function measure(ctx, f, text) {
   const key = f + '|' + text;
   let w = I.measure.get(key);
@@ -1837,9 +1944,11 @@ const buildAura = (c, hue) => {
   g.addColorStop(0, rgba(hue, AURA_ALPHA)); g.addColorStop(0.5, rgba(hue, AURA_ALPHA * 0.42)); g.addColorStop(1, rgba(hue, 0));
   return g;
 };
-const buildTerr = (c, hue) => {
+// a nebula lobe: a soft, roughly gaussian falloff to nothing, so no edge ever shows
+const buildNeb = (c, hue, a) => {
   const g = c.createRadialGradient(0, 0, 0, 0, 0, 1);
-  g.addColorStop(0, rgba(hue, TERR_ALPHA)); g.addColorStop(0.65, rgba(hue, TERR_ALPHA * 0.6)); g.addColorStop(1, rgba(hue, 0));
+  g.addColorStop(0, rgba(hue, a)); g.addColorStop(0.3, rgba(hue, a * 0.8)); g.addColorStop(0.55, rgba(hue, a * 0.45));
+  g.addColorStop(0.8, rgba(hue, a * 0.14)); g.addColorStop(1, rgba(hue, 0));
   return g;
 };
 const buildDiamond = (c, hue) => {
@@ -1874,18 +1983,31 @@ function orb(ctx, x, y, r, hue) {
   screen(ctx);
 }
 
-// Curved edges: a quadratic bend of 12% of the length, always to the same side for a given pair (the
-// side comes from both ends' hashes, so it holds whichever end draws it). Comets ride the same curve.
-const BEND = 0.12, BEND_MAX = 46;
+// Curved edges: a quadratic bend of 22% of the length (capped at BEND_MAX px, scaled with the zoom), always to
+// the same side for a given pair (the side comes from both ends' hashes, so it holds whichever end draws it).
+// The bend sways slowly, like a rope between two drifting nodes: the amount, never the brightness. Every edge
+// drawer, hit test and comet asks bendAmt, so they all agree on the curve in the same frame.
+const BEND = 0.22, BEND_MAX = 96;      // share of the length; cap in px at ks 1
+const SWAY = 0.18, SWAY_S = [9, 7];    // bend sways ±18%, each pair's period 9-16 s
+let bendCap = BEND_MAX;                // BEND_MAX × this frame's ks (set in draw)
 const CP = { x: 0, y: 0 };
 function bendSide(a, b) {
   const s = ((a.h + b.h) * 977) % 1 < 0.5 ? 1 : -1;
   return a.h <= b.h ? s : -s;
 }
+// the signed bend in px for a pair d px apart (0 for straight links); symmetric in a and b apart from the side
+function bendAmt(a, b, d) {
+  if (a.kind === 'agent' || b.kind === 'agent') return 0;
+  let s = Math.min(d * BEND, bendCap);
+  if (!I.still) {
+    const ph = ((a.h + b.h) * 613) % 1, per = SWAY_S[0] + SWAY_S[1] * ((a.h * b.h * 7919) % 1);
+    s *= 1 + SWAY * Math.sin((I.time / 1000 / per + ph) * TAU);
+  }
+  return bendSide(a, b) * s;
+}
 function bend(a, b) {
   const dx = b.sx - a.sx, dy = b.sy - a.sy, d = Math.hypot(dx, dy) || 1;
-  const straight = a.kind === 'agent' || b.kind === 'agent';
-  const s = straight ? 0 : bendSide(a, b) * Math.min(d * BEND, BEND_MAX);
+  const s = bendAmt(a, b, d);
   CP.x = (a.sx + b.sx) / 2 - (dy / d) * s; CP.y = (a.sy + b.sy) / 2 + (dx / d) * s;
   return CP;
 }
@@ -1897,7 +2019,7 @@ function curve(ctx, a, b) {
 function gradCurve(ctx, a, b, ca, cb, width, done) {
   const dx = b.sx - a.sx, dy = b.sy - a.sy, d = Math.hypot(dx, dy);
   if (d < 2) return;
-  const s = bendSide(a, b) * Math.min(d * BEND, BEND_MAX) / d;
+  const s = bendAmt(a, b, d) / d;
   const p = I.dpr;
   ctx.setTransform(p * dx, p * dy, -p * dy, p * dx, p * a.sx, p * a.sy);
   ctx.strokeStyle = cache(done ? 'eD' : 'eL', ca || COL.dim, cb || COL.dim, done ? EDGE_DONE : EDGE_LIVE);
@@ -1906,10 +2028,26 @@ function gradCurve(ctx, a, b, ca, cb, width, done) {
   screen(ctx);
 }
 
-// repo territories: a faint soft blob behind each repo's cluster, eased in world units as it moves
+// a repo's nebula lobes, seeded from its id: lobe 0 near the centre, the rest spread around it
+function nebLobes(id) {
+  const L = [], a0 = hashNum(id + 'na') * TAU, w = (sfx) => TAU / (NEB_PERIOD[0] + NEB_PERIOD[1] * hashNum(id + sfx));
+  const lit = 1 + Math.floor(hashNum(id + 'nl') * (NEB_LOBES - 1));
+  for (let i = 0; i < NEB_LOBES; i++) {
+    const h = (sfx) => hashNum(id + sfx + i);
+    const ang = a0 + ((i - 1) * TAU) / (NEB_LOBES - 1) + (h('nj') - 0.5) * 0.9;
+    const d = i ? NEB_OFF[0] + (NEB_OFF[1] - NEB_OFF[0]) * h('nd') : 0.08 * h('nd');
+    L.push({ x: Math.cos(ang) * d, y: Math.sin(ang) * d, s: i ? NEB_SIZE[0] + (NEB_SIZE[1] - NEB_SIZE[0]) * h('ns') : NEB_CORE,
+      a: i ? NEB_LOBE_A : NEB_CORE_A, lit: i === lit,
+      w1: w('w1' + i), p1: h('p1') * TAU, w2: w('w2' + i), p2: h('p2') * TAU, w3: w('w3' + i), p3: h('p3') * TAU });
+  }
+  return L;
+}
+
+// repo territories: a soft nebula behind each repo's cluster, eased in world units as it moves
 function drawTerritories(ctx, k, ks, ox, oy) {
   const kT = 1 - Math.exp(-(I.dt || 16) / 320);
   const terr = I.terr || (I.terr = new Map());
+  const ts = I.still ? 0 : I.time / 1000;
   for (const n of I.nodes) {
     if (n.kind !== 'repo') continue;
     let x0 = n.p.x, x1 = n.p.x, y0 = n.p.y, y1 = n.p.y;
@@ -1923,17 +2061,94 @@ function drawTerritories(ctx, k, ks, ox, oy) {
     for (const m of n.members) if (m.p) r = Math.max(r, Math.hypot(m.p.x - cx, m.p.y - cy));
     r = Math.max(r, Math.hypot(n.p.x - cx, n.p.y - cy));
     let t = terr.get(n.id);
-    if (!t) terr.set(n.id, (t = { x: cx, y: cy, r }));
+    if (!t) terr.set(n.id, (t = { x: cx, y: cy, r, lobes: nebLobes(n.id) }));
     else { t.x += (cx - t.x) * kT; t.y += (cy - t.y) * kT; t.r += (r - t.r) * kT; }
     // room for the agents' orbit and the names underneath
     const R = t.r * k + Math.max(32 * k, 22 * ks) + 30 * ks;
     n.tx = t.x * k + ox; n.ty = t.y * k + oy; n.tR = R;
-    if (n.tx + R < 0 || n.tx - R > I.W || n.ty + R < 0 || n.ty - R > I.H) continue;
-    unit(ctx, n.tx, n.ty, R);
-    ctx.fillStyle = cache('terr', n.color, '', buildTerr);
-    ctx.beginPath(); ctx.arc(0, 0, 1, 0, TAU); ctx.fill();
+    const RR = R * NEB_REACH;
+    if (n.tx + RR < 0 || n.tx - RR > I.W || n.ty + RR < 0 || n.ty - RR > I.H) continue;
+    const lit = mixHex(n.color || COL.dim, '#ffffff', NEB_LIGHT);
+    for (const L of t.lobes) {
+      const x = n.tx + (L.x + NEB_WANDER * Math.cos(ts * L.w1 + L.p1)) * R;
+      const y = n.ty + (L.y + NEB_WANDER * Math.sin(ts * L.w2 + L.p2)) * R;
+      unit(ctx, x, y, R * L.s * (1 + NEB_BREATHE * Math.sin(ts * L.w3 + L.p3)));
+      ctx.fillStyle = cache('neb', L.lit ? lit : n.color, L.a, buildNeb);
+      ctx.beginPath(); ctx.arc(0, 0, 1, 0, TAU); ctx.fill();
+    }
     screen(ctx);
   }
+}
+
+// the starfield: each layer's tile is painted once (per dpr) into an offscreen canvas and repeated through a
+// pattern placed with setTransform, so a frame costs one fillRect per layer
+function starTile(L, dpr) {
+  const T = STAR_TILE, c = document.createElement('canvas');
+  c.width = c.height = Math.round(T * dpr);
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  let x = L.seed >>> 0;
+  const rnd = () => { x = (x + 0x6d2b79f5) >>> 0; let t = Math.imul(x ^ (x >>> 15), 1 | x); t ^= t + Math.imul(t ^ (t >>> 7), 61 | t); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const lerp = (r, u) => r[0] + (r[1] - r[0]) * u;
+  for (let i = 0; i < L.n; i++) {
+    const px = rnd() * T, py = rnd() * T, r = lerp(L.r, rnd()), a = lerp(L.a, rnd() * rnd());
+    const tint = STAR_TINT[Math.floor(rnd() * STAR_TINT.length)], sp = i < (L.sparkle || 0);
+    // drawn at the wrapped copies too, so a star on a tile's edge isn't cut
+    for (const dx of [-T, 0, T]) for (const dy of [-T, 0, T]) {
+      const X = px + dx, Y = py + dy;
+      if (X < -6 || X > T + 6 || Y < -6 || Y > T + 6) continue;
+      if (sp) {
+        // a tiny 4-point sparkle: two crossed short lines, fixed alpha
+        g.strokeStyle = `rgba(${tint},${a * 0.8})`; g.lineWidth = 0.6;
+        g.beginPath(); g.moveTo(X - 3.2, Y); g.lineTo(X + 3.2, Y); g.moveTo(X, Y - 3.2); g.lineTo(X, Y + 3.2); g.stroke();
+      }
+      if (r >= 0.8) { g.fillStyle = `rgba(${tint},${a * 0.22})`; g.beginPath(); g.arc(X, Y, r * 2.4, 0, TAU); g.fill(); }
+      g.fillStyle = `rgba(${tint},${a})`; g.beginPath(); g.arc(X, Y, r, 0, TAU); g.fill();
+    }
+  }
+  return c;
+}
+function drawStars(ctx) {
+  const dpr = I.dpr || 1;
+  if (!I.stars || I.stars.dpr !== dpr) {
+    I.stars = { dpr, pats: STAR_LAYERS.map((L) => { try { return ctx.createPattern(starTile(L, dpr), 'repeat'); } catch { return null; } }) };
+  }
+  const fit = I.cam.fit || 1, cx = I.cam.cx + I.pan.x, cy = I.cam.cy + I.pan.y, ts = I.still ? 0 : I.time / 1000;
+  screen(ctx);
+  for (let i = 0; i < STAR_LAYERS.length; i++) {
+    const L = STAR_LAYERS[i], pat = I.stars.pats[i];
+    if (!pat || !pat.setTransform) continue;
+    const s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), L.depth * STAR_ZOOM), P = STAR_TILE * s;
+    // the field scales about the screen's middle and slides with a fraction of the pan, plus its drift
+    let ex = I.W / 2 - (cx * fit * L.depth - ts * L.drift * STAR_DIR[0]) * s;
+    let ey = I.H / 2 - (cy * fit * L.depth - ts * L.drift * STAR_DIR[1]) * s;
+    ex -= Math.floor(ex / P) * P; ey -= Math.floor(ey / P) * P;
+    pat.setTransform(new DOMMatrix([s / dpr, 0, 0, s / dpr, ex, ey]));
+    ctx.fillStyle = pat; ctx.fillRect(0, 0, I.W, I.H);
+  }
+}
+
+// the sky tint for hour h (0-24, fractional): top and bottom rgba strings
+function skyAt(h) {
+  h = ((h % 24) + 24) % 24;
+  let i = 0;
+  while (i < SKY_KEYS.length - 1 && SKY_KEYS[i + 1][0] <= h) i++;
+  const a = SKY_KEYS[i], b = SKY_KEYS[(i + 1) % SKY_KEYS.length];
+  const span = ((b[0] - a[0]) + 24) % 24 || 24, t = (h - a[0]) / span;
+  const mix = (p, q) => `rgba(${[0, 1, 2].map((j) => Math.round(p[j] + (q[j] - p[j]) * t)).join(',')},${(p[3] + (q[3] - p[3]) * t).toFixed(3)})`;
+  return [mix(a[1], b[1]), mix(a[2], b[2])];
+}
+let skyForce = (() => { const m = typeof location !== 'undefined' && /[?&]skyHour=([\d.]+)/.exec(location.search); return m ? Number(m[1]) : null; })();
+// one fillRect a frame; the gradient is rebuilt at most once a minute (or on a resize)
+function drawSky(ctx) {
+  const d = new Date(), h = skyForce != null ? skyForce : d.getHours() + d.getMinutes() / 60;
+  const key = h.toFixed(3) + '|' + I.W + 'x' + I.H;
+  if (!I.sky || I.sky.key !== key) {
+    const [top, bot] = skyAt(h), g = ctx.createLinearGradient(0, 0, 0, I.H);
+    g.addColorStop(0, top); g.addColorStop(1, bot);
+    I.sky = { key, grad: g };
+  }
+  ctx.fillStyle = I.sky.grad; ctx.fillRect(0, 0, I.W, I.H);
 }
 
 function draw() {
@@ -1943,7 +2158,10 @@ function draw() {
   // glass (the desktop window): the canvas stays see-through so the window's acrylic shows behind the map
   if (document.documentElement.classList.contains('glass')) ctx.clearRect(0, 0, W, H);
   else { ctx.fillStyle = I.bgFill || COL.bg; ctx.fillRect(0, 0, W, H); }
-  const k = K(), ks = clamp(Math.sqrt(k), 0.8, 1.35);
+  drawSky(ctx);
+  drawStars(ctx);
+  const k = K(), ks = ksOf(k);
+  bendCap = BEND_MAX * ks;
   const nowC = Date.now() - I.skew;
   const selNode = I.sel ? I.byId.get(I.sel) : null;
   const hovNode = I.hover ? I.byId.get(I.hover) : null;
@@ -2178,8 +2396,9 @@ function draw() {
   drawLeadBadges(ctx, ks);
   drawParityGhosts(ctx, k, ks);
   drawGhosts(ctx, ks);
-  // comets into a repo ride over its hub and fade out inside the core
+  // comets into a repo ride over its hub and fade out inside the core; a merge's sparks fly out over it
   drawComets(ctx, ks, true);
+  drawBursts(ctx, ks);
   // selection / hover ring for non-conversation nodes
   for (const id of [I.hover, I.sel]) {
     const n = id && byId.get(id);
@@ -2339,7 +2558,7 @@ function drawParity(ctx, ks) {
     if (!onScreen(a) || !onScreen(b)) continue;
     const dx = b.sx - a.sx, dy = b.sy - a.sy, d = Math.hypot(dx, dy);
     if (d < 4) continue;
-    const s = -bendSide(a, b) * Math.min(d * BEND, BEND_MAX) / d, q = I.dpr;
+    const s = -bendAmt(a, b, d) / d, q = I.dpr;
     ctx.setTransform(q * dx, q * dy, -q * dy, q * dx, q * a.sx, q * a.sy);
     ctx.strokeStyle = cache('par', COL.cyan, COL.mint, PAR_EDGE);
     ctx.lineWidth = (1.6 * ks) / d; ctx.setLineDash([0.01 / d, (4.2 * ks) / d]);
@@ -2397,7 +2616,7 @@ function drawConflict(ctx, n, ks) {
   const k = n.k, c = conflictColor(k), r = n.R;
   if (k.kind === 'migration') {
     const f = font(10, 700, MONO), t = String(k.label || '').startsWith('#') ? k.label : '#' + (k.label || '?');
-    const w = measure(ctx, f, t) + 10, h = 15, x = n.sx - w / 2, y = n.sy - h / 2;
+    const sf = I.sf || 1, w = measure(ctx, f, t) + 10 * sf, h = 15 * sf, x = n.sx - w / 2, y = n.sy - h / 2;
     ctx.fillStyle = HOLE; roundRect(ctx, x, y, w, h, h / 2); ctx.fill();
     ctx.fillStyle = rgba(c, 0.16); ctx.fill();
     ctx.strokeStyle = c; ctx.lineWidth = 1.3; roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, h / 2 - 0.5); ctx.stroke();
@@ -2451,7 +2670,8 @@ function drawWorktrees(ctx, n, r, ks) {
 // Comets: a head dot at constant brightness and a six-dot tail that thins toward the edge colour. They
 // ride the drawn curve, so they follow drifting nodes; the tail slides into the target and is gone. When the
 // head reaches its target, a repo or a conversation there gets a small bump (arrive). Comets that end at a
-// repo are drawn in a second pass (late), over the hub, and fade out as they sink into its core.
+// repo are drawn in a second pass (late), over the hub, and fade out as they sink into its core. A merge's
+// comet (big) is slower, with a larger head and a BIG_TAIL-dot tail; its landing spins the hub (landed).
 function drawComets(ctx, ks, late) {
   const now = performance.now();
   if (!late) {
@@ -2459,37 +2679,38 @@ function drawComets(ctx, ks, late) {
     while (q.length && q[0].at <= now) {
       const c = q.shift();
       if (now - c.at > 1000) continue; // queued while the map was hidden: history now
-      // colours once per comet, not per frame: head, then tail dots fading toward the edge's alpha
+      // once per comet, not per frame: its trip, tail and colours (head, then tail dots fixed per index, thinning
+      // toward the edge's alpha)
+      c.ms = c.big ? BIG_MS : COMET_MS; c.tail = c.big ? BIG_TAIL : COMET_TAIL; c.gap = c.big ? BIG_GAP : COMET_GAP;
       c.cols = [c.hue];
-      for (let j = 1; j <= COMET_TAIL; j++) c.cols.push(rgba(c.hue, 0.7 - (0.55 * (j - 1)) / (COMET_TAIL - 1)));
+      for (let j = 1; j <= c.tail; j++) c.cols.push(rgba(c.hue, c.big ? 0.82 - (0.7 * (j - 1)) / (c.tail - 1) : 0.7 - (0.55 * (j - 1)) / (c.tail - 1)));
       I.comets.push(c);
     }
     if (I.comets.length > COMET_MAX) I.comets.splice(0, I.comets.length - COMET_MAX);
-    const end = 1 + COMET_TAIL * COMET_GAP;
     let keep = 0;
     for (let i = 0; i < I.comets.length; i++) {
       const c = I.comets[i];
-      const u = (now - c.at) / COMET_MS;
+      const u = (now - c.at) / c.ms;
       const a = cometNode(c.a), b = cometNode(c.b);
-      if (u > end || !a || !b || a.sx === undefined || b.sx === undefined) continue;
+      if (u > 1 + c.tail * c.gap || !a || !b || a.sx === undefined || b.sx === undefined) continue;
       I.comets[keep++] = c;
       c.into = b.kind === 'repo';
-      if (u >= 1 && !c.hit) { c.hit = true; arrive(b, now); }
+      if (u >= 1 && !c.hit) { c.hit = true; arrive(b, now); if (c.big) landed(b, now); }
     }
     I.comets.length = keep;
   }
   const W = I.W, H = I.H;
   for (const c of I.comets) {
     if (!!c.into !== late) continue;
-    const u = (now - c.at) / COMET_MS;
+    const u = (now - c.at) / c.ms;
     if (u < 0) continue;
     const a = cometNode(c.a), b = cometNode(c.b);
     // both ends off screen on the same side: nothing of it shows
     if ((a.sx < 0 && b.sx < 0) || (a.sx > W && b.sx > W) || (a.sy < 0 && b.sy < 0) || (a.sy > H && b.sy > H)) continue;
     const cp = bend(a, b), cx = cp.x, cy = cp.y;
     const sink = late ? b.R * 1.25 : 0; // within this distance of the hub's centre a dot fades out
-    for (let j = COMET_TAIL; j >= 0; j--) {
-      const v = u - j * COMET_GAP;
+    for (let j = c.tail; j >= 0; j--) {
+      const v = u - j * c.gap;
       if (v < 0 || (j === 0 && v > 1)) continue;
       const e = ease(v > 1 ? 1 : v), f = 1 - e;
       const x = f * f * a.sx + 2 * f * e * cx + e * e * b.sx, y = f * f * a.sy + 2 * f * e * cy + e * e * b.sy;
@@ -2499,7 +2720,7 @@ function drawComets(ctx, ks, late) {
         ctx.globalAlpha = d < sink ? d / sink : 1;
       }
       ctx.fillStyle = c.cols[j];
-      circle(ctx, x, y, (j === 0 ? 2.6 : 2 - j * 0.15) * ks);
+      circle(ctx, x, y, (c.big ? (j === 0 ? BIG_HEAD : 3 - j * 0.14) : j === 0 ? 2.6 : 2 - j * 0.15) * ks);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
@@ -2509,17 +2730,70 @@ function drawComets(ctx, ks, late) {
 // a comet's end: a node, or a team's pill ('T:<team id>', placed each frame in drawTeams)
 function cometNode(id) { return I.byId.get(id) || I.virt.get(id) || null; }
 
+// A merge's sparks (I.bursts): SPARKS dots in the repo's colour (every other one a lighter tint, smaller and not as
+// far) fly out of the hub, easing out to SPARK_REACH of its radius while the ring curls SPARK_CURL round. Each
+// spark shrinks to nothing on the way, its short streak (round caps, as draw sets) shortening as it slows; alpha
+// never moves.
+function drawBursts(ctx, ks) {
+  if (!I.bursts.length) return;
+  const now = performance.now(), W = I.W, H = I.H;
+  let keep = 0;
+  for (const b of I.bursts) {
+    const u = (now - b.at) / SPARK_MS, n = I.byId.get(b.id);
+    if (u >= 1 || !n || n.sx === undefined) continue;
+    I.bursts[keep++] = b;
+    if (u < 0) continue;
+    const r0 = n.R * 1.3, reach = n.R * SPARK_REACH;
+    if (n.sx + reach < 0 || n.sx - reach > W || n.sy + reach < 0 || n.sy - reach > H) continue;
+    if (!b.cols) b.cols = [b.hue, mixHex(b.hue, '#ffffff', 0.45)];
+    const e = 1 - Math.pow(1 - u, 3), speed = 3 * (1 - u) * (1 - u), size = SPARK_R * ks * (1 - u);
+    for (let i = 0; i < SPARKS; i++) {
+      const odd = i & 1, sr = size * (odd ? 0.7 : 1);
+      if (sr < 0.25) continue;
+      const a = b.rot + (i * TAU) / SPARKS + SPARK_CURL * e, ca = Math.cos(a), sa = Math.sin(a);
+      const span = reach * (odd ? 0.78 : 1) - r0, d = r0 + span * e, tl = Math.min(d - r0, span * 0.14 * speed);
+      ctx.fillStyle = ctx.strokeStyle = b.cols[odd];
+      if (tl > sr) {
+        // the streak points back along the path it came (a little round the curl too)
+        const ab = a - SPARK_CURL * 0.14 * speed;
+        ctx.lineWidth = sr * 1.3;
+        ctx.beginPath(); ctx.moveTo(n.sx + Math.cos(ab) * (d - tl), n.sy + Math.sin(ab) * (d - tl)); ctx.lineTo(n.sx + ca * d, n.sy + sa * d); ctx.stroke();
+      }
+      ctx.beginPath(); ctx.arc(n.sx + ca * d, n.sy + sa * d, sr, 0, TAU); ctx.fill();
+    }
+  }
+  I.bursts.length = keep;
+}
+
 // ---------- reactions: motion only ----------
 // I.react: node id -> { bump: when its last scale bump started, kT: ring rotation asked for by kicks, kC: eased so far }
+function reactOf(id) {
+  const R = I.react || (I.react = new Map());
+  let r = R.get(id);
+  if (!r) R.set(id, (r = { bump: -Infinity, kT: 0, kC: 0, hits: 0, bumps: 0, whirl: -Infinity, whirls: 0 }));
+  return r;
+}
 function arrive(n, now) {
   if (!n || (n.kind !== 'repo' && n.kind !== 'session') || I.still) return;
-  const R = I.react || (I.react = new Map());
-  let r = R.get(n.id);
-  if (!r) R.set(n.id, (r = { bump: -Infinity, kT: 0, kC: 0, hits: 0, bumps: 0 }));
+  const r = reactOf(n.id);
   r.hits++;
   // a burst never stacks into a jitter: one bump per BUMP_GAP; the ring's kicks add up and ease in together
   if (now - r.bump >= BUMP_GAP) { r.bump = now; r.bumps++; }
   if (n.kind === 'repo') r.kT += KICK;
+}
+// a merge lands on a hub (at may be ahead): one extra full turn of its ring, a bump, and a ring of sparks
+function landed(n, at) {
+  if (!n || n.kind !== 'repo' || I.still) return;
+  const r = reactOf(n.id);
+  r.whirl = at; r.whirls++;
+  if (r.bump !== at) { r.bump = at; r.bumps++; }
+  I.bursts.push({ id: n.id, at, hue: n.color || COL.dim, rot: hashNum(n.id + at) * TAU });
+  if (I.bursts.length > 12) I.bursts.shift();
+}
+// the ring's extra turn while a landing's whirl runs (0 before and after: a full turn ends where it began)
+function whirlOf(r, now) {
+  const u = r ? (now - r.whirl) / WHIRL_MS : -1;
+  return u > 0 && u < 1 ? TAU * (1 - Math.pow(1 - u, 3)) : 0;
 }
 // 1 -> 1 + BUMP_UP -> 1 over BUMP_MS: a quick rise, then an ease-out back
 function bumpScale(id, now) {
@@ -2608,7 +2882,7 @@ function drawHub(ctx, n) {
     if (Math.abs(rr.kT - rr.kC) < 1e-3) rr.kC = rr.kT;
     if (rr.kC > TAU * 64) { rr.kC -= TAU * 64; rr.kT -= TAU * 64; }
   }
-  const spin = H.spin + (rr ? rr.kC : 0), pres = H.pres, act = Math.min(1, H.act);
+  const spin = H.spin + (rr ? rr.kC + whirlOf(rr, I.nowP) : 0), pres = H.pres, act = Math.min(1, H.act);
   n.spin = spin; n.da = ctx.globalAlpha;
   // the halo: a soft glow whose SIZE grows with presence and work (its alpha is fixed)
   const hr = r * (1.7 + 1.5 * pres + 0.5 * (Math.min(H.act, 3) / 3));
@@ -2660,7 +2934,7 @@ function drawHub(ctx, n) {
   // the repo's initial on the core when there's room for it, else a small light gem
   const ch = r >= 6.5 ? initial(n.name) : '';
   if (ch) {
-    ctx.font = font(Math.round(r * 1.05), 700, DISPLAY); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `700 ${Math.round(r * 1.05)}px ${DISPLAY}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.lineWidth = 2.2; ctx.strokeStyle = 'rgba(5,7,13,0.5)'; ctx.strokeText(ch, n.sx, n.sy + r * 0.06);
     ctx.fillStyle = 'rgba(255,255,255,0.96)'; ctx.fillText(ch, n.sx, n.sy + r * 0.06);
     ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
@@ -2671,7 +2945,7 @@ function drawHub(ctx, n) {
     screen(ctx);
   }
   // satellites: one per live conversation in its colour, larger while it works, growing in and shrinking out
-  const ks = clamp(Math.sqrt(I.k || 1), 0.8, 1.35);
+  const ks = ksOf(I.k);
   for (const sat of H.sats.values()) {
     const sr = ks * (1.8 + 0.9 * sat.b) * sat.lv;
     if (sr < 0.3) continue;
@@ -2931,7 +3205,7 @@ function drawSession(ctx, n, ks, selected, hovered) {
 // Labels sit on small frosted pills. A line is a list of segments: { t, f, c } text, or { acc, c } an
 // account tag drawn as a tiny coloured circle with its letter.
 const PILL_X = 7, PILL_Y = 2.5, ACC_D = 13, ACC_GAP = 5, HERE_W = 13;
-const segW = (ctx, sg) => (sg.acc !== undefined ? ACC_GAP + ACC_D : sg.here ? ACC_GAP + HERE_W : measure(ctx, sg.f, sg.t));
+const segW = (ctx, sg) => (sg.acc !== undefined ? (ACC_GAP + ACC_D) * (I.sf || 1) : sg.here ? (ACC_GAP + HERE_W) * (I.sf || 1) : measure(ctx, sg.f, sg.t));
 // "here": the conversation runs live in Fleet View's own window. A small terminal glyph after the account.
 function drawHere(ctx, x, y, c) {
   const w = HERE_W, h = 10, x0 = x + 0.5, y0 = Math.round(y - h / 2) - 0.5;
@@ -2977,7 +3251,7 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
       if (showPct || lt) {
         const pf = font(10, 600, MONO), t = lt || pct + '%', c = lt ? lensColor(I.lens, s) : ctxColor(pct);
         jobs.push({ prio: (must ? 2000 : 900) + 1, must, owner: n.id, lines: [[{ t, f: pf, c }]], lh: 11, pill: true, anchors: [(w, h) => [n.sx - w / 2, n.sy + n.RG + 2 * ks]] });
-        below += 17;
+        below += 17 * (I.sf || 1);
       }
       const prio = must ? 2000 : NEEDS_YOU.has(s.state) ? 950 : s.state === 'DONE' ? 300 : 800 + Math.min(50, s.calls20 || 0);
       const off = n.RG + 6 * ks;
@@ -3099,8 +3373,8 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
   ctx.textAlign = 'left';
   for (const j of jobs) {
     const widths = j.lines.map((ln) => ln.reduce((w, sg) => w + segW(ctx, sg), 0));
-    const px = j.pill ? PILL_X : 0, py = j.pill ? PILL_Y : 0;
-    const w = Math.ceil(Math.max(...widths)) + 2 * px, h = j.lines.length * j.lh + 2 * py;
+    const sf = I.sf || 1, lh = j.lh * sf, px = j.pill ? PILL_X * sf : 0, py = j.pill ? PILL_Y * sf : 0;
+    const w = Math.ceil(Math.max(...widths)) + 2 * px, h = j.lines.length * lh + 2 * py;
     // nodes drift every frame, so a label keeps the anchor it had while that one still fits; without
     // this a label near a neighbour would hop between spots as the two sway
     const key = j.key || j.owner + '|' + j.lh;
@@ -3129,7 +3403,7 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
     if (j.owner) (I.labelRects || (I.labelRects = new Map())).set(j.owner + '|' + j.lh, rect);
     if (j.owner && j.owner.startsWith('T:')) { const tm = I.teams.find((x) => 'T:' + x.t.id === j.owner); if (tm) tm.rect = rect; }
     if (j.pill) {
-      const rr = j.lines.length > 1 ? 8 : h / 2;
+      const rr = j.lines.length > 1 ? 8 * sf : h / 2;
       ctx.fillStyle = PILL_BG;
       roundRect(ctx, rect.x, rect.y, rect.w, rect.h, rr); ctx.fill();
       ctx.strokeStyle = PILL_EDGE; ctx.lineWidth = 1;
@@ -3138,19 +3412,22 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
     j.lines.forEach((ln, i) => {
       const lw = widths[i];
       let x = rect.x + (rect.w - lw) / 2;
-      const y = rect.y + py + i * j.lh + j.lh / 2 + 0.5;
+      const y = rect.y + py + i * lh + lh / 2 + 0.5;
       for (const sg of ln) {
         if (sg.acc !== undefined) {
-          const cx = x + ACC_GAP + ACC_D / 2, r = ACC_D / 2;
+          const cx = x + (ACC_GAP + ACC_D / 2) * sf, r = ACC_D / 2 * sf;
           ctx.fillStyle = rgba(sg.c, 0.2); circle(ctx, cx, y - 0.5, r); ctx.fill();
           ctx.strokeStyle = rgba(sg.c, 0.55); ctx.lineWidth = 1; circle(ctx, cx, y - 0.5, r - 0.5); ctx.stroke();
-          ctx.font = ACC_FONT; ctx.fillStyle = sg.c; ctx.textAlign = 'center';
+          ctx.font = ACC_FONT(); ctx.fillStyle = sg.c; ctx.textAlign = 'center';
           ctx.fillText(sg.acc, cx, y);
           ctx.textAlign = 'left';
-          x += ACC_GAP + ACC_D;
+          x += (ACC_GAP + ACC_D) * sf;
           continue;
         }
-        if (sg.here) { drawHere(ctx, x + ACC_GAP, y - 0.5, sg.c); x += ACC_GAP + HERE_W; continue; }
+        if (sg.here) {
+          ctx.save(); ctx.translate(x + ACC_GAP * sf, y - 0.5); ctx.scale(sf, sf); drawHere(ctx, 0, 0, sg.c); ctx.restore();
+          x += (ACC_GAP + HERE_W) * sf; continue;
+        }
         ctx.font = sg.f;
         // a label without a pill (a repo's name) gets a soft dark edge, so it reads over any backdrop
         if (!j.pill) { ctx.strokeStyle = LABEL_HALO; ctx.lineWidth = 3; ctx.strokeText(sg.t, x, y); }
