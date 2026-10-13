@@ -3,7 +3,7 @@
 // Everything below the chat feed is this module's: the activity line (Claude is working: its spinner verb, the
 // time and tokens), the card for a menu Claude shows (a permission prompt, a question, the plan approval), the
 // card for a command's panel (/usage, /status, /config, /mcp…: what the session draws there, with keys that drive
-// it; see parsePanel; sending text closes it first), the text box with its image attachments, the permission-mode picker, the Remote Control switch (see parseRemote) and Send. While Claude works and the box is
+// it; see parsePanel; sending text closes it first), the text box with its image attachments, the permission-mode picker and Send. While Claude works and the box is
 // empty, Send is a red Stop button (so is Esc in an empty box); with text in the box it sends, as always. A sent message goes to the feed at once
 // (the 'fv-chat-sent' event): chat.js shows it until the transcript has it, marked "Sending…" until Claude Code's
 // prompt lets go of it ('fv-chat-taken'), or says it is still in that prompt when the Enter left it there
@@ -30,7 +30,7 @@
 // browser (Edge, or the Mac through Tailscale) knows no path for it, so it is sent to the PC at once (POST /upload,
 // pcfiles.js; its chip shows how far it got) and the path the PC saved it at goes in the message instead; Send waits
 // for a file still on its way. A folder goes in by paste or drop (there is no folder button: attach does it).
-// In the Bots tab (chat.js opts.bubbles) the box is kept simple: no Remote Control switch, and a Dynamic switch
+// In the Bots tab (chat.js opts.bubbles) the box is kept simple: a Dynamic switch
 // before a message shows as "Sending…", never which model it switches to.
 //
 // ↑ in an empty box (or with the caret at its start) brings back your last message, and again the one before;
@@ -620,49 +620,11 @@ onRekey((oldKey, id) => {
     const q = localStorage.getItem(quoteKey(oldKey));
     if (q && !localStorage.getItem(quoteKey(id))) localStorage.setItem(quoteKey(id), q);
     localStorage.removeItem(quoteKey(oldKey));
-    const r = localStorage.getItem(rcKey(oldKey));
-    if (r) localStorage.setItem(rcKey(id), r);
-    localStorage.removeItem(rcKey(oldKey));
     if (localStorage.getItem(shellKey(oldKey))) localStorage.setItem(shellKey(id), '1');
     localStorage.removeItem(shellKey(oldKey));
   } catch {}
   for (const st of boxes) if (st.id === oldKey) st.id = id;
 });
-
-// ---------- Remote Control, per running session ----------
-// Claude Code's /remote-control lets the phone app and claude.ai/code drive the session. It is off whenever a session
-// starts (settings.json has remoteControlAtStartup: false, and a session started here follows it), and on only
-// for the run it was turned on in: a restarted session is off again. Nothing about it goes in the transcript,
-// so the box remembers what it did (fv.rc.<id> = the run it is on in, "<pid>:<startedAt>"), and the screen
-// corrects that when it shows: "· /rc" after the folder in the header, "/remote-control is active · Continue
-// here…" (a new one), "Remote Control disconnected.".
-const rcKey = (id) => `fv.rc.${id}`;
-const runOf = (h) => (h && h.alive ? `${h.pid}:${h.startedAt}` : '');
-function rcStored(id) {
-  const run = runOf(hosts.get(id));
-  if (!run) return false;
-  try { return localStorage.getItem(rcKey(id)) === run; } catch { return false; }
-}
-function rcStore(id, on) {
-  const run = runOf(hosts.get(id));
-  try { if (on && run) localStorage.setItem(rcKey(id), run); else localStorage.removeItem(rcKey(id)); } catch {}
-}
-// -> { header: 'on' | 'connecting' | 'off' | null (the header isn't on screen), active: how many "/remote-control is
-// active" lines show, last: 'active' | 'disconnected' | null, the lower (newer) of the two }. An "is active" line
-// stays in the history after it goes off again, so only a new one (more than the last read saw) means it went on.
-export function parseRemote(lines) {
-  const L = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
-  let header = null, active = 0, last = null;
-  for (const l of L) {
-    if (/^\s*▝▝\s+▝▝\s+\S/.test(l)) header = /\s·\s+\/rc connecting/i.test(l) ? 'connecting' : /\s·\s+\/rc\s*$/.test(l) ? 'on' : 'off';
-    if (/\/remote-control is active/i.test(l)) { active++; last = 'active'; }
-    if (/Remote Control disconnected/i.test(l)) last = 'disconnected';
-  }
-  return { header, active, last };
-}
-// the Remote Control menu (/remote-control while it is on): "Disconnect this session", "Show QR code", "Continue"
-const rcMenuUp = (lines) => lines.some((l) => /^\s*(❯\s*)?Disconnect this session\s*$/.test(String(l ?? '')));
-const rcOnDisconnect = (lines) => lines.some((l) => /^\s*❯\s*Disconnect this session\s*$/.test(String(l ?? '')));
 
 // ---------- what was sent from here, per conversation (↑ finds it before the feed shows it) ----------
 const sentTexts = new Map(); // id -> [text]
@@ -852,7 +814,6 @@ export function mountCompose(slot, s) {
     <button type="button" class="cmp-ib" data-c="attach" title="Attach files or images (or paste, or drop them here)" aria-label="attach files">${ic('attach', 16)}</button>
     <span class="cmp-modew"><button type="button" class="cmp-modeb" data-c="mode" aria-haspopup="menu" aria-expanded="false" title="Permission mode (Shift+Tab in the session)">${ic('mode', 13)}<span class="cmp-model-t">Mode</span>${icon('chevron', 11)}</button><div class="cmp-menu" role="menu" hidden></div></span>
     <span class="cmp-modew cmp-modelw"><button type="button" class="cmp-modeb cmp-modelb" data-c="model" aria-haspopup="menu" aria-expanded="false" title="Model and effort">${icon('model', 13)}<span class="cmp-model-t mono">Model</span><span class="cmp-eff" hidden></span>${icon('chevron', 11)}</button><div class="cmp-menu cmp-menu-model" role="menu" hidden></div></span>
-    <button type="button" class="cmp-modeb cmp-rcb" data-c="remote" aria-pressed="false" data-cur="off" aria-label="Remote Control">${ic('phone', 14)}</button>
     <span class="cmp-hint">Enter to send · Shift+Enter new line · / for commands · ! for bash · ↑ last message</span>
     <span class="grow"></span>
     <button type="button" class="cmp-ib cmp-mic" data-c="mic" title="Talk instead of typing: it listens until you click again" aria-label="dictate" aria-pressed="false">${ic('mic', 16)}</button>
@@ -866,9 +827,7 @@ export function mountCompose(slot, s) {
   const ta = $('.cmp-ta'), notes = $('.cmp-notes'), sendBtn = $('.cmp-send'), fileIn = $('.cmp-file');
   const modeBtn = $('.cmp-modeb'), modeMenu = $('.cmp-menu'), slashEl = $('.cmp-slash');
   const modelBtn = $('.cmp-modelb'), modelMenu = $('.cmp-modelw .cmp-menu');
-  const rcBtn = $('.cmp-rcb');
-  const simple = !!slot.closest('.chat-bubbles'); // the Bots tab: no Remote Control, no model talk
-  rcBtn.hidden = simple;
+  const simple = !!slot.closest('.chat-bubbles'); // the Bots tab: no model talk
   const hsEl = $('.cmp-hs'), hsIn = $('.cmp-hs-in'), hsList = $('.cmp-hs-l'), hsN = $('.cmp-hs-n'), shTag = $('.cmp-shtag'), bgBtn = $('.cmp-bgb');
   const boxEl = $('.cmp-box'), ghost = $('.cmp-ghost'), ghostPad = $('.cmp-ghost-pad'), ghostT = $('.cmp-ghost-t');
   // the chat pane around us: drops anywhere on it land here, and chat.js sends its quotes to it
@@ -881,7 +840,6 @@ export function mountCompose(slot, s) {
     busy: false, menu: null, mode: null, effort: null, rewound: null, // what the screen said last (rewound: a Rewind waiting for its message, see takeRewound)
     panel: null, cmdAt: 0, cmd: '', panelOwned: false, // a command's panel on screen; the last "/command" sent from here, and when
     want: null, // { model?, effort?, from, at }: picked here, shown until the session says so
-    rcSeen: null, rcConnecting: false, rcBusy: false, rcHold: 0, // Remote Control: "is active" lines the last read saw, the header's word, a switch under way, its click trusted until
     slash: { open: false, items: [], sel: 0, q: null, shut: null, seq: 0, kind: 'cmd', at: 0 }, // the "/" and "@" list
     sending: false, step: '', switching: false,
     hist: null, // ↑ / ↓ through past messages: { list, i, draft, draftShell, shown } while browsing
@@ -1693,7 +1651,7 @@ export function mountCompose(slot, s) {
   // activity line and its menu (GET /link/activity, /link/menu, every 1.5 s while Claude works there, else every 5 s,
   // as the phone does), the card's answers, Stop, and the queue's Interrupt and Unsend go there (/link/answer,
   // /link/interrupt, /link/now, /link/unsend), and images too (/link/image, saved there). Rewind and Edit, bash mode,
-  // a "/" command that opens a panel, the mode, the model and Remote Control are its session's: they say Continue
+  // a "/" command that opens a panel, the mode and the model are its session's: they say Continue
   // here, with the button. fleet-view.js and link-send.js serve the routes.
   function remoteOn() { return !hosts.get(st.id)?.alive && !!hostOfChat(st.s); }
   // pinned to the machine that runs it (/state's workspace.pin: { rule, host, why?, manual? }), or null; the chip's
@@ -1766,9 +1724,9 @@ export function mountCompose(slot, s) {
     drawAct(st.busy ? { verb: (a && a.verb) || 'Working', detail: (a && a.detail) || '' } : null);
     drawCard();
     drawPanel();
-    // the mode, the model and Remote Control are that session's: a click says Continue here (they draw again here)
-    st.drawn.mode = st.drawn.model = st.drawn.rc = null;
-    for (const b of [modeBtn, modelBtn, rcBtn]) { b.disabled = false; b.title = `Its session runs on ${hostOfChat(st.s)?.name || 'the other machine'}: Continue here to use this`; }
+    // the mode and the model are that session's: a click says Continue here (they draw again here)
+    st.drawn.mode = st.drawn.model = null;
+    for (const b of [modeBtn, modelBtn]) { b.disabled = false; b.title = `Its session runs on ${hostOfChat(st.s)?.name || 'the other machine'}: Continue here to use this`; }
     drawSend();
     drawNotes();
   }
@@ -2475,71 +2433,6 @@ export function mountCompose(slot, s) {
     drawModel();
   }
 
-  // ----- Remote Control -----
-  // the screen's word, when it gives one, becomes what the box remembers (a switch made in the Session tab too)
-  function readRemote(lines) {
-    if (!lines.length) return;
-    const r = parseRemote(lines);
-    let on = null;
-    if (r.last === 'disconnected') on = false;
-    else if (st.rcSeen != null && r.active > st.rcSeen) on = true;
-    if (r.header) on = r.header !== 'off';
-    st.rcSeen = r.active;
-    st.rcConnecting = r.header === 'connecting';
-    // a click's result shows a moment later: until then the screen's old word doesn't undo it
-    if (on != null && !st.rcBusy && Date.now() > st.rcHold && on !== rcStored(st.id)) rcStore(st.id, on);
-  }
-  function drawRemote() {
-    const t = termApi(), on = rcStored(st.id);
-    const cur = !on ? 'off' : st.rcConnecting ? 'connecting' : 'on';
-    const key = `${cur}|${!!t}|${st.rcBusy}|${st.sending}|${!!(st.menu || st.panel)}`;
-    if (st.drawn.rc === key) return;
-    st.drawn.rc = key;
-    rcBtn.dataset.cur = cur;
-    rcBtn.setAttribute('aria-pressed', String(on));
-    // just the phone icon: off is dim, on lights up mint, connecting gold; the word is in the label and tooltip
-    rcBtn.setAttribute('aria-label', st.rcBusy ? 'Remote Control: switching' : cur === 'off' ? 'Remote Control: off' : cur === 'on' ? 'Remote Control: on' : 'Remote Control: connecting');
-    rcBtn.disabled = !t || st.rcBusy || st.sending || !!st.menu || !!st.panel;
-    rcBtn.title = !t ? noTermMsg('Remote Control')
-      : cur === 'connecting' ? 'Remote Control is connecting. Click to turn it off'
-      : on ? 'Remote Control is on: the Claude phone app and claude.ai/code can see and drive this session. Click to turn it off'
-        : 'Remote Control is off. Click to let the Claude phone app and claude.ai/code see and drive this session (off again when the session restarts)';
-  }
-  async function toggleRemote() {
-    const id = st.id;
-    if (st.rcBusy || st.sending) return;
-    const on = rcStored(id);
-    st.rcBusy = true;
-    drawRemote();
-    const here = () => st.alive && st.id === id && !!hosts.get(id)?.alive;
-    const screen = () => screenText(id, 40);
-    try {
-      if (!on) {
-        if (await send('/remote-control')) rcStore(id, true);
-        return;
-      }
-      // /remote-control while it is on opens its menu (Disconnect this session, Show QR code, Continue)
-      for (let round = 0; round < 2; round++) {
-        if (!(await send('/remote-control'))) return;
-        let up = false;
-        for (let w = 0; w < 20 && here() && !(up = rcMenuUp(screen())); w++) await sleep(200);
-        if (!here()) return;
-        if (!up) continue; // it was off after all, and that turned it on: once more brings up the menu
-        for (let i = 0; i < 4 && here() && !rcOnDisconnect(screen()); i++) { writeKey('\x1b[A'); await sleep(200); }
-        if (!here()) return;
-        if (!rcOnDisconnect(screen())) { writeKey('\x1b'); err('Couldn\'t pick Disconnect in the Remote Control menu'); return; }
-        writeKey('\r');
-        rcStore(id, false);
-        return;
-      }
-      err('Couldn\'t turn Remote Control off: its menu didn\'t come up');
-    } finally {
-      st.rcBusy = false;
-      st.rcHold = Date.now() + 3000;
-      if (st.id === id) { st.drawn.rc = null; drawRemote(); drawNotes(); }
-    }
-  }
-
   // ----- the activity line -----
   function drawAct(spin) {
     act.hidden = !st.busy;
@@ -2604,8 +2497,6 @@ export function mountCompose(slot, s) {
     const effort = alive ? parseEffort(lines) : null;
     if (effort) st.effort = effort;
     else if (!alive) st.effort = null;
-    if (alive) readRemote(lines);
-    else { st.rcSeen = null; st.rcConnecting = false; }
     st.busy = alive && (h.status === 'busy' || !!(spin && spin.strong)) && !menu && !panel;
     st.bgHint = st.busy && lines.some((l) => /ctrl\+b\b/i.test(l) && /\bbackground\b/i.test(l));
     if (st.rewound && menu) { st.rewound.sawMenu = true; st.rewound.emptyAt = 0; }
@@ -2621,7 +2512,6 @@ export function mountCompose(slot, s) {
     drawPanel();
     drawMode();
     drawModel();
-    drawRemote();
     drawSend();
     drawNotes();
     focus?.focus({ preventScroll: true });
@@ -2638,7 +2528,6 @@ export function mountCompose(slot, s) {
     mic.disabled = !t;
     if (!t) stopDictation(false);
     drawModel();
-    drawRemote();
   }
 
   // ----- the mic: voice.js records it and Whisper (on this PC) writes out each stretch of speech after its pause;
@@ -2786,8 +2675,8 @@ export function mountCompose(slot, s) {
     if (b.dataset.dyn) { pickDynamic(b.dataset.dyn); return; }
     if (b.dataset.sl) { pickSlash(+b.dataset.sl, false); return; }
     const c = b.dataset.c;
-    // a chat another machine runs: the mode, model and Remote Control are its session's, there
-    if (remoteOn() && (c === 'mode' || c === 'model' || c === 'remote')) { contNeeded(c === 'mode' ? 'The permission mode' : c === 'model' ? 'Switching the model' : 'Remote Control'); return; }
+    // a chat another machine runs: the mode and model are its session's, there
+    if (remoteOn() && (c === 'mode' || c === 'model')) { contNeeded(c === 'mode' ? 'The permission mode' : 'Switching the model'); return; }
     if (c === 'off-go') { const o = st.offline; st.offline = null; drawNotes(); if (!o) return; if (o.kind === 'bound' || !hasDraft()) continueHere(true); else { st.forceMove = st.id; send(); } return; }
     if (c === 'off-x') { st.offline = null; drawNotes(); return; }
     // the stays-on chip and the offline card of a pinned chat (keeps.js setPin)
@@ -2809,7 +2698,6 @@ export function mountCompose(slot, s) {
     else if (c === 'esc') escMenu();
     else if (c === 'panel-esc') writeKey('\x1b');
     else if (c === 'attach') fileIn.click();
-    else if (c === 'remote') { openModeMenu(false); openModelMenu(false); toggleRemote(); }
     else if (c === 'mode') { openModelMenu(false); openModeMenu(modeMenu.hidden); }
     else if (c === 'model') { openModeMenu(false); openModelMenu(modelMenu.hidden); }
   });
@@ -3001,7 +2889,6 @@ export function mountCompose(slot, s) {
         st.panel = null; st.panelOwned = false; st.cmdAt = 0; st.cmd = '';
         st.menu = null; st.mode = null; st.effort = null; st.want = null; st.busy = false; st.errs = []; st.step = ''; st.elsewhereAt = 0;
         st.freeDraft = null;
-        st.rcSeen = null; st.rcConnecting = false;
         st.rem = newRem(st.rem.gen + 1); st.offline = null; st.cont = null; st.info = null; st.forceMove = null; st.noWork = null;
         st.drawn = {};
         loadDraft();

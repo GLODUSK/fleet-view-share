@@ -286,10 +286,6 @@ html.glass.mac .cmp-box { background: rgba(14, 17, 27, 0.46); } /* the Mac's lig
 .cmp-modeb[data-cur="auto"] { color: var(--mint); border-color: rgba(61, 255, 168, 0.3); }
 /* Remote Control: an icon-only round button. Off is dim and quiet; on is filled mint with a soft glow, so it is
    plain to see that the phone can drive the session; connecting is gold */
-.cmp-rcb { flex: none; justify-content: center; width: 26px; padding: 0; color: var(--dim); background: none; }
-.cmp-rcb[data-cur="on"] { color: var(--mint); border-color: rgba(61, 255, 168, 0.55); background: rgba(61, 255, 168, 0.16); box-shadow: 0 0 10px rgba(61, 255, 168, 0.25); }
-.cmp-rcb[data-cur="on"]:hover:not(:disabled) { color: var(--mint); background: rgba(61, 255, 168, 0.22); }
-.cmp-rcb[data-cur="connecting"] { color: var(--gold); border-color: rgba(255, 194, 74, 0.45); background: rgba(255, 194, 74, 0.1); }
 .cmp-menu {
   position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 30; min-width: 190px; padding: 5px;
   display: flex; flex-direction: column; gap: 1px;
