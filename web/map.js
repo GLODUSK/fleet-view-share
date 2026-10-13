@@ -4094,6 +4094,7 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
       obstacles.push({ id: n.id, sid: n.kind === 'agent' || n.kind === 'pr' ? n.sid : null, x: n.sx - r, y: n.sy - r, w: 2 * r, h: 2 * r });
     }
   }
+  for (const gh of I.parGhosts) { const r = gh.r + 1; obstacles.push({ id: 'g:' + gh.n.sid, sid: null, x: gh.x - r, y: gh.y - r, w: 2 * r, h: 2 * r }); }
   // ownSid: a conversation's own agents and PR don't block its name (second try, when nothing else fits)
   const hit = (r, owner, ignoreObs, ownSid) => {
     if (r.x < 2 || r.y < 2 || r.x + r.w > W - 2 || r.y + r.h > H - 2) return true;
@@ -4206,7 +4207,7 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
     const ln = tm.lead ? String(nameOf(tm.lead) || '') : '', lns = !hov && ln.length > 22 ? ln.slice(0, 21) + '…' : ln;
     const segs = tm.lead ? [{ t: `★ ${lns}`, f: font(10.5, 600), c: p.color }, { t: ' · ', f: font(10.5, 400), c: COL.dim }, { t: tm.t.name || 'team', f: font(10.5, 600), c: p.color }]
       : [{ t: tm.t.name || 'team', f: font(10.5, 600), c: p.color }];
-    jobs.push({ prio: hov ? 1650 : 860, must: hov, soft: true, owner: 'T:' + tm.t.id, lines: [segs], lh: 13, pill: true,
+    jobs.push({ prio: hov ? 1650 : 860, must: hov, owner: 'T:' + tm.t.id, lines: [segs], lh: 13, pill: true,
       // on the link's middle, else beside it, a little farther out each time
       anchors: [[0, 0], [0, -1], [0, 1], [1, 0], [-1, 0], [0, -2], [0, 2], [1.4, -1], [-1.4, 1], [1.4, 1], [-1.4, -1], [0, -3], [0, 3]]
         .map(([ax, ay]) => (w, h) => [p.x - w / 2 + ax * (w / 2 + 8), p.y - h / 2 + ay * (h + 4)]) });
@@ -4219,9 +4220,10 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
   }
   // one-sided changes: "no app change" beside the ghost orb
   for (const gh of I.parGhosts) {
-    const f = font(10, 500), g = gh.r + 4, hov = I.hoverX && I.hoverX.kind === 'ghost' && I.hoverX.id === 'g:' + gh.n.sid;
-    jobs.push({ prio: hov ? 1600 : 520, must: hov, soft: true, owner: 'g:' + gh.n.sid, lines: [[{ t: gh.missing === 'web' ? 'no web change' : 'no app change', f, c: gh.col }]], lh: 12, pill: true,
-      anchors: [(w, h) => [gh.x + g, gh.y - h / 2], (w, h) => [gh.x - g - w, gh.y - h / 2], (w, h) => [gh.x - w / 2, gh.y - g - h], (w, h) => [gh.x - w / 2, gh.y + g]] });
+    const f = font(10, 500), g = gh.r + 4, g2 = g + 10, hov = I.hoverX && I.hoverX.kind === 'ghost' && I.hoverX.id === 'g:' + gh.n.sid;
+    jobs.push({ prio: hov ? 1600 : 520, must: hov, owner: 'g:' + gh.n.sid, lines: [[{ t: gh.missing === 'web' ? 'no web change' : 'no app change', f, c: gh.col }]], lh: 12, pill: true,
+      anchors: [(w, h) => [gh.x + g, gh.y - h / 2], (w, h) => [gh.x - g - w, gh.y - h / 2], (w, h) => [gh.x - w / 2, gh.y - g - h], (w, h) => [gh.x - w / 2, gh.y + g],
+        (w, h) => [gh.x + g2, gh.y - h / 2], (w, h) => [gh.x - g2 - w, gh.y - h / 2], (w, h) => [gh.x - w / 2, gh.y - g2 - h], (w, h) => [gh.x - w / 2, gh.y + g2]] });
   }
   for (const cl of clashLabels) {
     const f = font(10, 600, MONO);
@@ -4261,9 +4263,11 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
       }
       return null;
     };
-    let rect = tryAll(j.must);
+    // labels never sit on an orb if any spot is free: a hovered or selected one goes over orbs only as a last
+    // resort, and an optional pill (a team's, a parity ghost's "no web change") is left out rather than cover one
+    let rect = tryAll(false);
     if (!rect && j.sid) rect = tryAll(false, j.sid);
-    if (!rect && j.soft) rect = tryAll(true); // a team pill: over nodes rather than not at all (other labels still win)
+    if (!rect && j.must) rect = tryAll(true);
     if (!rect && j.must) {
       const [x, y] = j.anchors[0](w, h);
       rect = { x: clamp(x, 2, W - w - 2), y: clamp(y, 2, H - h - 2), w, h };
