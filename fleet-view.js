@@ -37,6 +37,7 @@ const SYNC_MOVE_JS = require(path.join(__dirname, 'sync-move.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
 const CODEGRAPH = require(path.join(__dirname, 'code-index.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
+const SWITCH = require(path.join(__dirname, 'account-switch.js'));
 const FEED_MOD = require(path.join(__dirname, 'feed-mod.js'));
 const TT = require(path.join(__dirname, 'team-tree.js'));
 
@@ -397,6 +398,9 @@ function cleanMapCamera(c) {
 let mapCamera = DEMO ? null : cleanMapCamera(saved.mapCamera);
 // desktop notifications for new alerts (the page asks; on unless turned off)
 let notify = saved.notify !== false;
+// "Switch accounts when one runs low" (the Usage card): conversations move off an account close to its limit, and new
+// ones start elsewhere (account-switch.js, switchTick below); on unless turned off
+let autoSwitch = saved.autoSwitchAccount !== false;
 // accounts turned off (right-click on empty space · Accounts): their conversations, and workspaces only they use,
 // leave /state and the terminal view; the page offers no new sessions on them. Running sessions keep running.
 const cleanOffAccounts = (v) => (Array.isArray(v) ? [...new Set(v.filter((a) => typeof a === 'string' && /^[A-Z]$/.test(a)))].sort() : null);
@@ -838,7 +842,7 @@ function flushSettings() {
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, chatOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
-    mapLens, mapViews, mapCamera, notify, offAccounts, teams, apiTemp, pinOverrides: [...pinOverrides.values()],
+    mapLens, mapViews, mapCamera, notify, autoSwitchAccount: autoSwitch, offAccounts, teams, apiTemp, pinOverrides: [...pinOverrides.values()],
     dynamicChats: [...dynamicChats.values()], botLooks,
     chief: CHIEF ? CHIEF.saveShape() : saved.chief,
     bots: BOTS ? BOTS.saveShape() : saved.bots,
@@ -1695,7 +1699,8 @@ const fmtCost = (c) => '$' + (c >= 100 ? Math.round(c).toLocaleString('en-US') :
 // How much of each account's weekly Claude limit is left, from the endpoint claude's /usage reads, with the
 // token claude keeps in <config>/.credentials.json. Read only: an expired token is skipped until claude
 // refreshes it (a refresh here would rotate the token out from under claude). A value past its reset is dropped.
-// Every 5 minutes; 30 s after a miss (the first read often times out while the logs are still being read).
+// Every 5 minutes (2 while switching accounts watches one at 80% or more); 30 s after a miss (the first read often
+// times out while the logs are still being read).
 // Every account here (accountsHere: B in ~/.claude, the others in ~/.claude-<x>); most machines have only B.
 // An account with no .credentials.json (an API key, or not logged in) is skipped quietly at the 5-minute pace.
 // Each read also goes to usage-watch.js, which compares the climb with what this PC spent to tell when an account is
@@ -1740,7 +1745,9 @@ async function readWeekLeft() {
       if (w && typeof w.utilization === 'number') weekLeft[a] = { ...left(w), five: f && typeof f.utilization === 'number' ? left(f) : null };
       const u = UW.fromEndpoint(j, Date.now());
       if (u) USAGE.read(a, u, { pending: [...sessions.values()].some((x) => x.usagePending), login: loginOf(a) });
-      weekDue[a] = Date.now() + (USAGE.suspicious() ? 2 * 60e3 : 5 * 60e3);
+      // every 2 minutes too while switching accounts is on and an account is at 80% or more, so one can't go past its
+      // limit between reads
+      weekDue[a] = Date.now() + (USAGE.suspicious() || (autoSwitch && SWITCH.nearLimit(onlyListed(USAGE.view()))) ? 2 * 60e3 : 5 * 60e3);
     } catch (e) {
       weekDue[a] = Date.now() + (next || 30e3);
       logOnce('week:' + a + ':' + (e && e.message), `weekly limit read for account ${a} failed: ${e && e.message}`);
@@ -1766,6 +1773,108 @@ const ACCTS = ACCOUNTS.createAccounts({
     relabelAccounts(from, to);
   },
 });
+
+// ---------- switching accounts when one runs low (account-switch.js; the Usage card's switch, autoSwitch) ----------
+// Every 15 s, only while an account is at SWITCH_PCT of a limit or a conversation here hit its limit: the session
+// host's live conversations go through plan(), and each move it picks is made by the host (api.js hostSwitch ->
+// desktop/host.js switchAccount: the same conversation, ended at its pause and resumed under the other account; a
+// rescue is told "continue"). One move at a time; never one another device has (sync owners, away.json); the account
+// it moved to is remembered at once, so cards, the map and the bots show the new letter. Each move raises an alert
+// ("moved from Claude A to Claude B: A at 92% of its 5-hour limit"), a feed line and a server.log line; when nothing
+// has room it says so once, until one has again. New conversations: switchPick (the API, bots, the Chief) and
+// /state's accountSwitch.pick (the page).
+const switchLast = new Map(); // id -> { at, from, to }: its last move (the cooldown)
+const switching = new Set(); // ids with a move in flight
+const switchRefused = new Map(); // id -> the host's last refusal, logged once
+let switchBusy = false, switchStuck = false, switchOldHost = 0, switchCache = null;
+// the accounts a conversation may go to (signed in, not an alias, not turned off on the page) and their usage
+function switchInput() {
+  const here = accountsHere();
+  return { on: autoSwitch && !DEMO, accounts: ACCTS.view().list.filter((x) => here.includes(x.a) && !offAccounts.includes(x.a)), usage: onlyListed(USAGE.view()) };
+}
+// /state's accountSwitch, worked out again at most every 5 s
+function switchView() {
+  if (DEMO) return { on: autoSwitch, pick: {} };
+  if (switchCache && Date.now() - switchCache.at < 5e3 && switchCache.on === autoSwitch) return switchCache.v;
+  const inp = switchInput(), pick = {};
+  if (inp.on) for (const a of accountsHere()) { const p = SWITCH.pickNew(a, inp); if (p) pick[a] = { to: p.account, why: SWITCH.whyText(a, p.why) }; }
+  switchCache = { at: Date.now(), on: autoSwitch, v: { on: autoSwitch, pick } };
+  return switchCache.v;
+}
+// a new conversation the API, a bot or the Chief starts on `a`: { account, text } of the one it starts on instead, or null
+function switchPick(a, name) {
+  const inp = switchInput();
+  const p = inp.on ? SWITCH.pickNew(a, inp) : null;
+  if (!p) return null;
+  const text = SWITCH.whyText(a, p.why);
+  logLine(`account switch: ${name ? `"${plain(name, 60)}"` : 'a new conversation'} starts on ${p.account}, not ${a}: ${text}`);
+  raise({ id: 'accounts', name: 'Fleet View' }, `a new conversation starts on Claude ${p.account}: ${text}`, C.cyan, 'accountSwitch');
+  return { account: p.account, text };
+}
+async function switchTick() {
+  if (DEMO || !autoSwitch || switchBusy || Date.now() < switchOldHost) return;
+  const now = Date.now();
+  for (const [id, m] of switchLast) if (now - m.at > 2 * SWITCH.COOLDOWN_MS) switchLast.delete(id);
+  const inp = switchInput();
+  const hits = [...sessions.values()].some((s) => s.limitHit && now - s.limitHit.at < SWITCH.RESCUE_MS);
+  if (!hits && !Object.values(inp.usage).some((u) => SWITCH.lowOn(u))) { switchStuck = false; return; }
+  switchBusy = true;
+  try {
+    const list = await API.hostList();
+    if (!list) return;
+    const owners = syncOwners();
+    const cand = [];
+    for (const p of list) {
+      if (!p || !p.alive || p.pending || !UUID_RE.test(String(p.id || ''))) continue;
+      const id = String(p.id).toLowerCase(), s = sessions.get(id), lp = liveProcs.get(id);
+      // a limit hit by the claude that runs now (one from before it started was dealt with, or is old)
+      const limit = s && s.limitHit && lp && lp.startedAt && s.limitHit.at >= lp.startedAt - 1000 ? s.limitHit : null;
+      cand.push({ id, account: asListed(liveAccount.get(id) || acctId(p.account)), status: p.status || null, limit,
+        away: !!awayEntry(id) || !!(owners && owners.has(id)), moving: switching.has(id) || !!p.moving });
+    }
+    const { moves, stuck } = SWITCH.plan({ ...inp, now, sessions: cand, last: switchLast });
+    if (stuck.length && !switchStuck) {
+      const c = cand.find((x) => x.id === stuck[0]);
+      const text = `stays on Claude ${c.account}: no other account has room${stuck.length > 1 ? ` (nor do ${stuck.length - 1} more)` : ''}`;
+      raise({ id: c.id, name: nameNow(c.id) || c.id.slice(0, 8) }, text, C.gold, 'accountSwitch');
+      logLine(`account switch: every account is close to its limit; ${stuck.length} conversation(s) stay where they are`);
+    }
+    switchStuck = stuck.length > 0;
+    for (const m of moves) {
+      const name = nameNow(m.id) || m.id.slice(0, 8);
+      switching.add(m.id);
+      let r = null, err = null;
+      try { r = await API.hostSwitch(m.id, m.to, m.rescue); } catch (e) { err = e; }
+      switching.delete(m.id);
+      if (err) {
+        // a session host from before switchAccount: it can once it restarts
+        if (/unknown op/.test(err.message)) { switchOldHost = Date.now() + 10 * 60e3; logOnce('switch:old-host', 'account switch: the session host is too old to switch accounts (it can once it restarts: node desktop/restart-host.js)'); return; }
+        logOnce(`switch:${m.id}:${err.message}`, `account switch: ${name} (${m.id}) not moved to ${m.to}: ${err.message}`);
+        continue;
+      }
+      if (!r || !r.ok) {
+        const why = (r && r.message) || 'no answer';
+        if (switchRefused.get(m.id) !== why) { switchRefused.set(m.id, why); logLine(`account switch: ${name} (${m.id}) not moved from ${m.from} to ${m.to} yet: ${why}`); }
+        if (switchRefused.size > 200) switchRefused.delete(switchRefused.keys().next().value);
+        continue;
+      }
+      switchRefused.delete(m.id);
+      const text = `moved from Claude ${m.from} to Claude ${m.to}: ${SWITCH.whyText(m.from, m.why)}`;
+      switchLast.set(m.id, { at: Date.now(), from: m.from, to: m.to });
+      rememberAccount(m.id, m.to);
+      liveAccount.set(m.id, m.to);
+      liveFolder.set(m.id, m.to);
+      const s = sessions.get(m.id);
+      if (s) s.limitHit = null;
+      raise({ id: m.id, name }, text, C.cyan, 'accountSwitch');
+      const e = { t: Date.now(), sid: m.id, who: 'main', verb: 'account', what: plain(text, 120) };
+      feed.push(e);
+      if (feed.length > 400) feed.splice(0, feed.length - 400);
+      tlEvent(e);
+      logLine(`account switch: ${name} (${m.id}) ${text}${m.rescue ? '; told to continue' : ''}`);
+    }
+  } finally { switchBusy = false; }
+}
 
 let pickupGen = 0; // counts s.pickupFrom being set, so handoffOf's index of successors by log is built again
 const LOG_TAIL = 3 << 20; // a log is first read from its last 3 MB (readNew)
@@ -1860,7 +1969,12 @@ function ingestMain(s, recs) {
       }
       if (tools.some((c) => c.name === 'Skill' && /(?:^|:)handoff$/.test(String(c.input?.skill || '')))) s.hush = 'turn';
       // an API error ends the turn too, but the session is stuck until you retry
-      if (d.isApiErrorMessage) { s.turnOpen = false; s.apiError = true; s.errAt = t; }
+      if (d.isApiErrorMessage) {
+        s.turnOpen = false; s.apiError = true; s.errAt = t;
+        // the plan's limit ("You've hit your session limit · resets …"): switchTick moves it to an account with room
+        const hit = SWITCH.limitHit(d);
+        if (hit) s.limitHit = { limit: hit.limit, at: t };
+      }
       else if (tools.length || sr === 'tool_use') s.turnOpen = true;
       else if (sr) {
         s.turnOpen = false; s.endedOnQuestion = endsOnQuestion(s.lastSaid); s.turnEndT = t;
@@ -1871,6 +1985,7 @@ function ingestMain(s, recs) {
       for (const b of blocks) if (b && b.type === 'tool_result') noteResult(s, t, b);
       s.asking = false;
       s.apiError = false;
+      s.limitHit = null;
       s.endedOnQuestion = false;
       s.lastSaid = '';
       const texts = typeof content === 'string' ? [content] : blocks.filter((c) => c.type === 'text').map((c) => c.text);
@@ -6370,7 +6485,7 @@ function buildState() {
     home: DEMO ? null : os.homedir(),
     // hiddenSync: bumped when another device's hidden list was put in (sync-prefs.js): the page takes hidden whole then
     settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, chatOrder, hostRules, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenSync, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
-      mapLens, mapViews, mapCamera, notify, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() },
+      mapLens, mapViews, mapCamera, notify, autoSwitchAccount: autoSwitch, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() },
       // the Chief: { id: the live Chief's conversation id, else the last one's while its log is there, else null; watch }
       chief: CHIEF ? CHIEF.view() : { id: null, watch: false } },
     // remote access (remote.js): the switch, the address, how turning it on went, browsers waiting for approval
@@ -6388,6 +6503,9 @@ function buildState() {
     launch: DEMO ? null : launchDefaults(),
     // every account folder with who it is signed in as, and the sign-ins going on (accounts.js), for the Accounts list
     accountList: DEMO ? { list: [{ a: 'A', email: 'a@example.com', signedIn: true }, { a: 'B', email: 'b@example.com', signedIn: true }], jobs: {} } : ACCTS.view(),
+    // switching accounts when one runs low (account-switch.js): { on, pick: { <low account>: { to, why } } }: where the
+    // page starts a new conversation asked for on a low account instead
+    accountSwitch: switchView(),
     alert: al ? { t: al.t, sid: al.s.id, name: nameNow(al.s.id, al.s.name), text: al.text, color: toHex(al.color) } : null,
     hiddenDone: onMap.filter((s) => (s.state === 'DONE' || s.state === 'IDLE') && inWindow(s, now)).length,
     sessions: out,
@@ -6460,7 +6578,8 @@ function toolsHere() {
 // forgotten (up to 500 ids on hidden that the Removed conversations list leaves out; replaces the list),
 // hiddenRepos (an array of up to 200 { root, at }, root a string of at most 1024 characters; replaces the list),
 // mapSpots (the map's repo spots, up to 300 { id, x, y, pin }; replaces the list), mapLens (one of MAP_LENSES),
-// mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), mapCamera ({ x, y, k }: the map's view), notify (bool), offAccounts (account letters turned off), parity (rules, see PARITY_BUILTIN)
+// mapViews ({ '1'..'9': { x, y, zoom } }; replaces them), mapCamera ({ x, y, k }: the map's view), notify (bool),
+// autoSwitchAccount (bool: switching accounts when one runs low), offAccounts (account letters turned off), parity (rules, see PARITY_BUILTIN)
 // hiddenReposOps, repoNamesOps, mapSpotsOps, repoOrderOps: single-item changes ({ op: 'add' | 'remove' | 'move', ... },
 // sync-prefs.js applyOps) applied to the list as it is here, which the page sends instead of a whole list (a whole list
 // from a page that missed another device's change would undo it); the whole-list keys stay for an older page
@@ -6541,6 +6660,7 @@ function applySettings(b) {
   if ('mapViews' in b) { const v = cleanMapViews(b.mapViews); if (v) mapViews = v; }
   if ('mapCamera' in b) { const c = cleanMapCamera(b.mapCamera); if (c) mapCamera = c; }
   if (typeof b.notify === 'boolean') notify = b.notify;
+  if (typeof b.autoSwitchAccount === 'boolean' && b.autoSwitchAccount !== autoSwitch) { autoSwitch = b.autoSwitchAccount; logLine(`account switching turned ${autoSwitch ? 'on' : 'off'}`); }
   if ('offAccounts' in b) { const o = cleanOffAccounts(b.offAccounts); if (o) offAccounts = o; }
   if ('parity' in b) { const p = cleanParity(b.parity); if (p) { parityRules = p; saved.parity = p; } }
   if (b.miniBounds === null) miniBounds = null;
@@ -6801,6 +6921,8 @@ function conversationsFor(q) {
 // and one conversation as /state shows it
 const apiCtx = {
   sendJson, readBody, log: (t) => logOnce('api:' + t, t), UNSAFE_PATH, accounts: () => (DEMO ? ['A', 'B'] : accountsHere()),
+  // a new conversation asked for on an account close to its limit: the one it starts on instead (switchPick), or null
+  pickAccount: (a, name) => switchPick(a, name),
   allowedFolders() {
     const st = buildState(), out = [];
     const add = (p) => { if (typeof p === 'string' && p && !inBots(p)) out.push(p); };
@@ -8314,6 +8436,8 @@ function startWeb() {
     setTimeout(() => { try { codeGraphs(); } catch {} }, 20e3);
     // the API's throwaway sessions: off the map once they end
     every(10000, 'api-temp', sweepTemp);
+    // conversations on an account close to its limit move to one with room (switchTick)
+    every(15000, 'account-switch', () => { switchTick().catch((e) => logOnce('account-switch:' + (e && e.message), `account switch failed\n${errorText(e)}`)); });
     // the Chief: follow it through handoffs, tell a new one its id, watch mode (chief.js)
     every(5000, 'chief', () => { CHIEF.tick(); });
     // the bots: the same following and telling, for each (bots.js)

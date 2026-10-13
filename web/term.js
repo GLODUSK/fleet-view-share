@@ -252,13 +252,22 @@ function rekeyLocal(oldKey, id) {
   refreshHosts();
 }
 
+// Switching accounts when one runs low (app.js sets it from /state's accountSwitch): { pick(account) -> { account, why }
+// or null (the account a new conversation starts on instead of one close to its limit), told(pick) once it started there }
+let accountPicker = null;
+export function setAccountPicker(p) { accountPicker = p && typeof p.pick === 'function' ? p : null; }
+
 // start a new conversation (plain `claude`) in a repo folder, or with forkFrom a fork of that conversation in its
-// folder; resolves { ok, message, key }
+// folder, on the account asked for or the one accountPicker picks instead; resolves { ok, message, key }
 export async function createSession({ cwd, account, cols, rows, forkFrom } = {}) {
   const t = termApi();
   if (!t || typeof t.create !== 'function') return { ok: false, message: noTermMsg('Starting a new session') };
+  let pick = null;
+  try { pick = accountPicker ? accountPicker.pick(acctOf(account)) : null; } catch {}
+  const use = pick && pick.account ? acctOf(pick.account) : acctOf(account);
   let r;
-  try { r = await t.create({ cwd, account: acctOf(account), cols, rows, ...(forkFrom ? { forkFrom } : {}) }); } catch (e) { r = { ok: false, message: String(e?.message || e) }; }
+  try { r = await t.create({ cwd, account: use, cols, rows, ...(forkFrom ? { forkFrom } : {}) }); } catch (e) { r = { ok: false, message: String(e?.message || e) }; }
+  if (pick && r && r.ok && typeof r.key === 'string') { try { accountPicker.told(pick); } catch {} }
   // a host from before forks would start a plain new conversation: it says forkFrom back when it forked
   if (forkFrom && r && r.ok && r.forkFrom !== forkFrom.toLowerCase()) {
     if (typeof r.key === 'string') { try { t.kill(r.key); } catch {} }

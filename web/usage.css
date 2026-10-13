@@ -76,6 +76,15 @@ html.glass .uw-pop { background: var(--float-bg); }
 .ua-confirm { margin: 2px 0 8px 24px; padding: 8px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); font-size: 12.5px; color: var(--dim); }
 .ua-confirm b { color: var(--text); font-weight: 600; }
 .ua-cbtns { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+/* "Switch accounts when one runs low": a switch with its one-line explanation */
+.ua .ua-auto { display: flex; align-items: flex-start; gap: 10px; width: 100%; margin-top: 6px; padding: 6px 0 2px; background: none; border-color: transparent; text-align: left; }
+.ua .ua-auto:hover:not(:disabled) { background: none; }
+.ua-tog { flex: none; position: relative; width: 28px; height: 16px; margin-top: 1px; border-radius: 8px; background: rgba(120, 130, 170, 0.35); transition: background 0.15s; }
+.ua-tog::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--dim); transition: transform 0.15s, background 0.15s; }
+.ua-auto.on .ua-tog { background: rgba(63, 216, 255, 0.3); }
+.ua-auto.on .ua-tog::after { transform: translateX(12px); background: var(--cyan); }
+.ua-auto-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; white-space: normal; }
+.ua-auto-t b { font-weight: 600; }
 .ua-note { margin-top: 6px; font-size: 12px; color: var(--mint); overflow-wrap: anywhere; }
 .ua-note.bad { color: var(--rose); }
 .ua-form { margin: 0 16px 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--glass-edge); background: rgba(255, 255, 255, 0.03); display: flex; flex-direction: column; gap: 6px; }

@@ -46,6 +46,7 @@ fs.writeFileSync(FAKE, `'use strict';
 const fs = require('fs'), path = require('path');
 fs.appendFileSync(path.join(process.cwd(), 'starts.txt'), process.pid + ' ' + (process.env.CLAUDE_LAUNCH_KEY || '') + '\\n');
 fs.appendFileSync(path.join(process.cwd(), 'args.txt'), JSON.stringify(process.argv.slice(2)) + '\\n');
+fs.appendFileSync(path.join(process.cwd(), 'config.txt'), (process.env.CLAUDE_CONFIG_DIR || '-') + '\\n');
 let pidFile = null;
 try {
   const id = fs.readFileSync(path.join(process.cwd(), 'want-id.txt'), 'utf8').trim();
@@ -499,6 +500,60 @@ async function main() {
   fs.rmSync(AWAY, { force: true });
   const ro6 = await cl.req('open', { id: AW2.id, cwd: AW2.cwd, account: 'B', cols: 100, rows: 30 });
   check('j. away: with no away.json at all, open works as before', ro6 && ro6.ok, ro6);
+
+  // ===== k. switchAccount: the same conversation goes on under another account, only at a pause =====
+  const configs = (s) => { try { return fs.readFileSync(path.join(s.cwd, 'config.txt'), 'utf8').split('\n').filter(Boolean); } catch { return []; } };
+  const isA = (c) => /[\\/]\.claude-a$/i.test(c || '');
+  const statusIs = (s, st) => waitFor(async () => (await cl.req('list')).find((x) => x.id === s.id && x.status === st), 8000);
+  const K = session('k');
+  await cl.req('open', { id: K.id, cwd: K.cwd, account: 'A', cols: 100, rows: 30, role: BOT1 });
+  await waitFor(() => starts(K).length === 1, 10000);
+  check('k. switch: it starts on A (CLAUDE_CONFIG_DIR ~/.claude-a)', isA(configs(K)[0]), configs(K));
+  pidFile(K, 'busy');
+  await statusIs(K, 'busy');
+  const kBusy = await cl.req('switchAccount', { id: K.id, account: 'B' });
+  check('k. switch: refused while busy, and nothing is ended', kBusy && kBusy.ok === false && /not idle/.test(kBusy.message) && starts(K).length === 1 && !received(K).includes('\x03'), kBusy);
+  pidFile(K, 'idle');
+  await statusIs(K, 'idle');
+  const kSoon = await cl.req('switchAccount', { id: K.id, account: 'B' });
+  check('k. switch: refused until it has been idle a few seconds', kSoon && kSoon.ok === false && /long enough/.test(kSoon.message), kSoon);
+  await sleep(4500); // idle 3 s by the host's scan (every 0.8 s)
+  await cl.req('write', K.id, 'hal');
+  const kTyped = await cl.req('switchAccount', { id: K.id, account: 'B' });
+  check('k. switch: refused while something is typed in its prompt', kTyped && kTyped.ok === false && /typed/.test(kTyped.message) && starts(K).length === 1, kTyped);
+  const kSame = await cl.req('switchAccount', { id: K.id, account: 'A' });
+  check('k. switch: refused to the account it is on', kSame && kSame.ok === false && /on A already/.test(kSame.message), kSame);
+  writeAway({ [K.id]: { device: 'Laptop', why: 'owned' } });
+  const kAway = await cl.req('switchAccount', { id: K.id, account: 'B' });
+  check('k. switch: refused for a conversation on another device', isAwayRefusal(kAway, 'Laptop') && starts(K).length === 1, kAway);
+  fs.rmSync(AWAY, { force: true });
+  // a fresh one, never typed into: it moves
+  const K2 = session('k2');
+  await cl.req('open', { id: K2.id, cwd: K2.cwd, account: 'A', cols: 100, rows: 30, role: BOT2 });
+  await waitFor(() => starts(K2).length === 1, 10000);
+  pidFile(K2, 'idle');
+  await statusIs(K2, 'idle');
+  await sleep(4500); // idle 3 s by the host's scan (every 0.8 s)
+  const kOk = await cl.req('switchAccount', { id: K2.id, account: 'B' });
+  const k2Again = await waitFor(() => starts(K2).length === 2, 10000);
+  const lk2 = (await cl.req('list')).find((x) => x.id === K2.id);
+  const k2Args = argsOf(K2)[1] || [];
+  check('k. switch: an idle one is ended (Ctrl+C) and resumed as the same conversation under B (no CLAUDE_CONFIG_DIR), keeping its role',
+    kOk && kOk.ok && k2Again && received(K2).includes('\x03') && configs(K2)[1] === '-' && k2Args.includes('--resume') && k2Args.includes(K2.id) && !k2Args.some((x) => x.includes('/handoff'))
+    && lk2 && lk2.alive && lk2.account === 'B' && lk2.role === BOT2 && !lk2.moving, { kOk, args: argsOf(K2), configs: configs(K2), lk2 });
+  check('k. switch: logged, and the restore list has it on B', hostLog().includes(`switch to B: ${K2.id} resumed under B`) && await waitFor(() => (savedList().find((x) => x.id === K2.id) || {}).account === 'B', 5000), hostLog().split('\n').filter((l) => l.includes('switch')));
+  // rescue: it hit its limit; under the other account it is told "continue" once it has loaded
+  dropPidFile(K2);
+  pidFile(K2, 'idle');
+  await statusIs(K2, 'idle');
+  await sleep(4500); // idle 3 s by the host's scan (every 0.8 s)
+  const kRescue = await cl.req('switchAccount', { id: K2.id, account: 'A', rescue: true });
+  await waitFor(() => starts(K2).length === 3, 10000);
+  dropPidFile(K2);
+  pidFile(K2, 'idle');
+  const before = received(K2).length;
+  const told = await waitFor(() => noteSent({ cwd: K2.cwd }, 'continue') && received(K2).length > before, 15000);
+  check('k. rescue: moved back to A, then "continue" is typed and sent once it is idle', kRescue && kRescue.ok && isA(configs(K2)[2]) && told, { kRescue, configs: configs(K2), received: received(K2).slice(-80) });
   await cl.req('killAll').catch(() => {});
   cl.close();
 }

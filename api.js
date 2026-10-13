@@ -192,6 +192,12 @@ function hostList() {
 function hostKill(id) {
   return withHost((host) => host.call('kill', id));
 }
+// move a hosted conversation to another account at its pause (the host's switchAccount: the same conversation, resumed
+// there; rescue: told "continue"). For fleet-view.js's account switching (account-switch.js); rejects when the host is
+// not running, or is older than switchAccount ("unknown op")
+function hostSwitch(id, account, rescue) {
+  return withHost((host) => host.call('switchAccount', { id, account, rescue: rescue === true }));
+}
 
 // ---------- helpers ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -747,7 +753,7 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api', does: 'this list, and fleetView: the Fleet View version (1.0.12; "" when unknown)' },
   { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive' },
   { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("chief", "bot:<bot id>" or null)' },
-  { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, role?: "chief", wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends; role "chief": the Chief (one at a time), which may also run fv start, open, hosted, wait and menu without asking' },
+  { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, role?: "chief", wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends; role "chief": the Chief (one at a time), which may also run fv start, open, hosted, wait and menu without asking. An account at 90% of its 5-hour or weekly limit gives way to the one with the most left (accountSwitched in the reply) while "Switch accounts when one runs low" is on' },
   { method: 'POST', path: '/api/chief/start', body: '{ account?: "B", model?: "claude-sonnet-5-5", effort?: "medium" }', does: 'start the Chief in the Fleet View folder, or adopt the one running: { ok, id, key, started }' },
   { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers like the Chief, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, account, model, effort, folder, createdAt, convId, live' },
   { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), account?: "B", model?: "dynamic" (the default: sized for each message Henry sends from the page) or a name like "claude-sonnet-5-5", effort?: "dynamic" (the default) or "medium" }', does: 'Henry only (his phone, through the relay; a session gets 403): make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }' },
@@ -835,7 +841,11 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
       const live = ((await host.call('list')) || []).find((x) => x && x.alive && x.role === role);
       if (live) return [409, { ok: false, id: live.id, message: `${chief ? 'the Chief' : 'that bot'} is running already (${live.id})` }];
     }
-    const o = { cwd: repo, account: b.account };
+    // an account close to its limit: the new conversation starts on the one with the most left instead
+    // (ctx.pickAccount, account-switch.js pickNew; the reply says so in accountSwitched)
+    let pick = null;
+    try { pick = ctx.pickAccount ? ctx.pickAccount(b.account, b.name || null) : null; } catch {}
+    const o = { cwd: repo, account: pick && acctOk(pick.account, ctx) ? pick.account : b.account };
     if (typeof b.chrome === 'boolean') o.chrome = b.chrome;
     if (fork) o.forkFrom = fork;
     if (b.model != null) o.model = b.model;
@@ -858,7 +868,8 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
     // an older host ignores chrome and does not echo it back: say so instead of failing
     const chromeApplied = typeof b.chrome === 'boolean' ? r.chrome === b.chrome : null;
     // what every reply from here on carries
-    const out = { key, id: null, chromeApplied, ...(b.model != null ? { model: b.model } : {}), ...(b.effort != null ? { effort: b.effort } : {}), ...(role ? { role } : {}) };
+    const out = { key, id: null, chromeApplied, ...(b.model != null ? { model: b.model } : {}), ...(b.effort != null ? { effort: b.effort } : {}), ...(role ? { role } : {}),
+      ...(o.account !== b.account ? { account: o.account, accountSwitched: { from: b.account, to: o.account, why: pick.text } } : {}) };
     if (fork) out.forkFrom = fork;
     if (b.temp) out.temp = true;
     if (b.name != null) out.nameSet = false;
@@ -2196,6 +2207,6 @@ function handle(req, res, pathname, ctx) {
 
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
 // relayKey: the phone relay's key (see viaOf), for fleet-view.js to hand the relay
-module.exports = { ensureToken, handle, startChief, startBot, openBot, endHosted, hostList, hostKill, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
+module.exports = { ensureToken, handle, startChief, startBot, openBot, endHosted, hostList, hostKill, hostSwitch, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
   startQueue, queuedIds, switchModel, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
   askParts: { asks, summaryText, laterText, chiefAnswers, answerLines, flushAsk, settleAnswer, askJson } };

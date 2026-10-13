@@ -48,6 +48,7 @@ const CHIEF = require(path.join(__dirname, 'chief.js'));
 const API = require(path.join(__dirname, 'api.js'));
 const P = require(path.join(__dirname, 'platform.js'));
 const TASKS = require(path.join(__dirname, 'bot-tasks.js'));
+const SWITCH = require(path.join(__dirname, 'account-switch.js'));
 
 const BOTS_DIR = path.join(os.homedir(), 'Bots');
 const TEMPLATE_FILE = path.join(__dirname, 'bot', 'BRIEF.md');
@@ -125,21 +126,8 @@ function checkOpts(b, base, accounts) {
 // A Dynamic account's pick for a new conversation: of the accounts here, the one with the most usage left, judged by
 // the fuller of its 5-hour and weekly limits (usage: /state's usage, usage-watch.js view), the weekly one breaking a
 // tie. An account with no read yet comes after every one with a read; with none read, the default account (else the
-// first). Resuming a conversation keeps the account it ran on.
-function roomiest(accounts, usage, def = NEW_BOT.account) {
-  const list = (accounts || []).filter((a) => typeof a === 'string' && a);
-  if (!list.length) return def;
-  const pct = (x) => (x && Number.isFinite(x.pct) ? x.pct : null);
-  const score = (a) => {
-    const u = usage && usage[a];
-    const f = pct(u && u.five), w = pct(u && u.week);
-    return f == null && w == null ? null : { top: Math.max(f ?? 0, w ?? 0), week: w ?? 0 };
-  };
-  const read = list.map((a) => ({ a, s: score(a) })).filter((x) => x.s);
-  if (!read.length) return list.includes(def) ? def : list[0];
-  read.sort((x, y) => x.s.top - y.s.top || x.s.week - y.s.week);
-  return read[0].a;
-}
+// first). Resuming a conversation keeps the account it ran on. The same pick as switching accounts (account-switch.js)
+const roomiest = (accounts, usage, def = NEW_BOT.account) => SWITCH.roomiest(accounts, usage, def);
 // Long context (Henry, 2026-10-12): a bot keeps its whole chat with Henry in context. It never hands off at 200k
 // (~/.claude/hooks/session-length.py leaves sessions in ~/Bots alone), and runs on a model's 1M-context version:
 // opus and sonnet have one ('claude-sonnet-5-5' -> 'claude-sonnet-5-5[1m]'); any other model is left as it is

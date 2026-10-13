@@ -8,7 +8,7 @@
 //
 //   The Usage card: a click on the header's "week left" pill (or its Accounts button). At the top the Accounts list:
 //   each account with who it is signed in as, Switch login, Remove, and Add account (/state accountList, POST
-//   /accounts/*). Then per account: the 5-hour and weekly limits, the last 5 hours as bars (this PC / elsewhere), the
+//   /accounts/*), and the "Switch accounts when one runs low" switch (POST /settings autoSwitchAccount). Then per account: the 5-hour and weekly limits, the last 5 hours as bars (this PC / elsewhere), the
 //   week by app (Claude Code, Chats, Cowork), extra-usage credits and the last episodes. Esc, its × or a click
 //   outside closes it.
 //
@@ -142,6 +142,9 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
   let confirmRm = null; // { a, live: [{ id, name }] | null }
   let note = null; // { text, bad }
   let busy = false;
+  // the "Switch accounts when one runs low" switch (/state accountSwitch.on); a click holds it a few seconds, until
+  // /state says the same
+  let autoSwitch = true, autoSentAt = 0;
   const letterTag = (a) => `<span class="acct" style="background:${acctColor(a)}">${esc(a)}</span>`;
   const emailOf = (a) => (accts.list.find((x) => x.a === a) || {}).email || null;
   const jobOf = (a) => (a && accts.jobs[a]) || null;
@@ -164,8 +167,12 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
       }
       return row;
     }).join('');
+    // switching accounts when one runs low (the server's account-switch.js): only with two accounts or more
+    const sw = accts.list.length < 2 ? ''
+      : `<button type="button" class="ua-auto${autoSwitch ? ' on' : ''}" data-c="auto" role="switch" aria-checked="${autoSwitch}"><span class="ua-tog" aria-hidden="true"></span>`
+        + '<span class="ua-auto-t"><b>Switch accounts when one runs low</b><span class="ua-hint">At 90% of its 5-hour or weekly limit, a conversation moves to the account with the most left at its next pause (the same conversation), and new ones start there.</span></span></button>';
     return `<div class="ua-h"><b>Accounts</b><button type="button" class="ua-add" data-c="add"${form ? ' disabled' : ''}>${icon('plus', 12)}Add account</button></div>`
-      + rows + (note ? `<div class="ua-note${note.bad ? ' bad' : ''}">${esc(note.text)}</div>` : '');
+      + rows + sw + (note ? `<div class="ua-note${note.bad ? ' bad' : ''}">${esc(note.text)}</div>` : '');
   }
   // the form's step: asking (an email, optional), waiting on the browser, or how it ended
   function formStep() {
@@ -221,6 +228,11 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
     else if (c === 'close-form') form = null;
     else if (c === 'keep') confirmRm = null;
     else if (c === 'remove') { confirmRm = { a, live: null }; form = null; }
+    else if (c === 'auto') {
+      autoSwitch = !autoSwitch;
+      autoSentAt = Date.now();
+      Promise.resolve(post('/settings', { autoSwitchAccount: autoSwitch })).catch(() => {});
+    }
     else if (c === 'go') {
       const email = card.querySelector('.ua-email')?.value.trim() || '';
       const r = await act(form.a ? '/accounts/login' : '/accounts/add', { account: form.a, email });
@@ -317,6 +329,8 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
       usage = st && st.usage && typeof st.usage === 'object' ? st.usage : {};
       const al = st && st.accountList;
       if (al && Array.isArray(al.list)) accts = { list: al.list.filter((x) => x && isAcct(x.a)), jobs: al.jobs && typeof al.jobs === 'object' ? al.jobs : {} };
+      const sw = st && st.accountSwitch;
+      if (sw && typeof sw.on === 'boolean' && Date.now() - autoSentAt > 4000) autoSwitch = sw.on;
       for (const id of [...acked]) if (!Object.values(usage).some((u) => u && u.episode && u.episode.id === id && !u.episode.acked)) acked.delete(id);
       drawHeads();
       drawCard();

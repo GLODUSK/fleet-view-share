@@ -169,7 +169,7 @@ import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
-import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote, requestMove } from './term.js';
+import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote, requestMove, setAccountPicker } from './term.js';
 import { pickFolder, canPickFolder, uploads, upload, sizeText, droppedFolders } from './pcfiles.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued, onTeamJoin, setServerQueued, sendWhenUp } from './orders.js';
@@ -2581,6 +2581,13 @@ function acctOut(a) {
   const out = (x) => x && x.left <= 0 && !(x.resets && x.resets < now);
   return out(w) || out(w.five);
 }
+// switching accounts when one runs low (the server's account-switch.js, on unless turned off in the Usage card): a new
+// conversation asked for on an account close to its limit starts on the one /state's accountSwitch.pick names, and a
+// toast says so
+setAccountPicker({
+  pick: (a) => { const p = state?.accountSwitch?.on ? state.accountSwitch.pick?.[a] : null; return p && typeof p.to === 'string' ? { account: p.to, from: a, why: p.why } : null; },
+  told: (p) => toast(`Started on Claude ${p.account}: ${p.why || `Claude ${p.from} is close to its limit`}`, C.dim),
+});
 // "Send elsewhere ▸ Claude A / C ...": one submenu of the accounts that are on (Henry, 2026-10-10), less those out
 // of their 5-hour or weekly limit, which aren't shown at all (Henry, 2026-10-10)
 function sendElsewhereItem(s, hosted) {

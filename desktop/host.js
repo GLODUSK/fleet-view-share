@@ -31,12 +31,13 @@
 // ({ pid, pipe, token, startedAt, version }); anything else, or a wrong token, closes the connection. Then:
 //   { t: 'req', n?, op, a: [args] }  ->  { t: 'res', n, v } or { t: 'res', n, err }   (no n: no reply)
 //   ops: open(o), create(o) (o.chrome, o.forkFrom, o.model, o.effort, o.role: see create below), write(id, data), resize(id, cols, rows), kill(id), list(), snapshot(id),
-//        endAll(graceMs), killAll(), setUi(ui), quitAll({ ui }), restart({ now, by }) (see Restart), log(text)
+//        endAll(graceMs), killAll(), setUi(ui), quitAll({ ui }), restart({ now, by }) (see Restart), log(text),
+//        sendTo(o), switchAccount({ id, account, rescue }) (see Switching accounts)
 //   events: { t: 'ev', e: 'data', id, d } / { e: 'exit', id, code } / { e: 'rekey', from, id } / { e: 'sessions', list }
 // list() gives each session: id, pid, alive, exitCode, startedAt, pending, created, forkFrom, cwd, handoffFrom,
 // pickingUp, account, status, waitingFor (what its pid file says it waits for, while waiting), claudePid,
 // interrupted, restored, autoContinue (a note is due, see below), slashPanel (the "/" command whose panel is
-// open, see Panels), role ('chief', 'bot:<id>' or null, see Roles), cols, rows.
+// open, see Panels), role ('chief', 'bot:<id>' or null, see Roles), cols, rows, moving (a switchAccount is ending it).
 // The pipe is the lock: a second host finds the name taken and exits. The pipe keeps the default ACL (the
 // user, SYSTEM and administrators), and the token keeps out anything that did not read the user's own folder.
 //
@@ -102,6 +103,11 @@
 // restore list (a host that resumes it gives it back), when it is opened again after it ended, sent to another
 // account, and when it hands off (the pickup gets it). A /clear keeps it; a /resume of an older conversation (one
 // begun more than CHIEF_NEW_MS ago) drops it, so an old conversation never takes a role by being resumed there.
+//
+// Switching accounts (the server's "Switch accounts when one runs low", ../account-switch.js): switchAccount({ id,
+// account, rescue }) ends a running conversation at a pause and resumes the same conversation under the other account,
+// under the same key (no exit goes out, the panel stays on it), with its role, folder and size; with rescue it is told
+// "continue" once it has loaded. It refuses (a value, not an error) one that is busy, waiting, typed into, or away.
 //
 // It logs to %LOCALAPPDATA%\fleet-view\host.log, and exits by itself only after 10 minutes with no session and
 // no client. A changed host.js on disk takes effect when the host next starts; until then it logs that once.
@@ -652,6 +658,9 @@ function createPtys(opts = {}) {
       // it handed off (it asked for a restart, then was killed): the pickup takes its place under the same key
       const req = HO.takeRestart(t.launchKey);
       if (req && !t.dismissed && handoff(t, req)) return;
+      // switchAccount ended it: it goes on under the other account, under the same key
+      if (t.moveTo && !t.dismissed && moveOn(t)) return;
+      if (t.moveTo) { t.moveTo.done({ ok: false, message: t.dismissed ? 'it was ended meanwhile' : 'it ended, and could not start again under the other account' }); t.moveTo = null; }
       flush(t);
       send('exit', t.id, t.exitCode);
       // killed from the page, or a new session that never got an id: forget it once it is gone
@@ -671,10 +680,13 @@ function createPtys(opts = {}) {
     try { if (req.cwd && fs.statSync(req.cwd).isDirectory()) cwd = req.cwd; } catch {}
     flush(t);
     const from = req.session || (ID_RE.test(t.id) ? t.id.toLowerCase() : t.handoffFrom);
-    const r = startPickup(t.id, req.file, { cwd, account: t.account, cols: t.cols, rows: t.rows },
+    // one switchAccount was moving: the pickup starts under the account it was moving to
+    const account = t.moveTo ? t.moveTo.account : t.account;
+    const r = startPickup(t.id, req.file, { cwd, account, cols: t.cols, rows: t.rows },
       { chunks: t.chunks.slice(), size: t.size, created: t.created, handoffFrom: from, role: t.role });
     log(`handoff: ${t.id} -> ${r.ok ? `pickup of ${path.basename(req.file)} (pid ${r.pid})` : `could not start the pickup: ${r.message}`}`);
     if (!r.ok) return false;
+    if (t.moveTo) { t.moveTo.done({ ok: true, pid: r.pid, message: 'it handed off; the pickup starts under the other account' }); t.moveTo = null; }
     const n = terms.get(t.id);
     const note = `\r\n\x1b[2m── handed off; a fresh conversation picks it up ──\x1b[0m\r\n`;
     keep(n, note);
@@ -739,6 +751,67 @@ function createPtys(opts = {}) {
       delete r.key;
       return r;
     });
+  }
+
+  // Switching accounts when one runs low (the server decides: ../account-switch.js): the SAME conversation carries on
+  // under o.account, with no /handoff (a bot never hands off, and Henry wants the conversation itself to go on). Only at
+  // a pause: idle for MOVE_IDLE_MS by its pid file, no menu on its screen, nothing typed in its prompt, no key for
+  // MOVE_KEYS_MS, no note or "/" panel due, not moving or ending already, and not on another device (away.json). Its
+  // claude is ended as kill does (Ctrl+C twice, then the tree); when it exits it is resumed (`claude --resume <id>`, as
+  // open does) under o.account, under the same key, keeping its folder, size, role and screen, so the panel showing it
+  // stays on it (no exit goes out). o.rescue: it hit its limit mid-turn, so once the resumed one has loaded it is told
+  // "continue" (the auto-continue note's way: typed only while idle, with no menu and nobody typing). Fixed text only:
+  // nothing from a caller goes into the command line or the note. Resolves { ok, message, pid? }.
+  const MOVE_IDLE_MS = 3000, MOVE_KEYS_MS = 20000;
+  function switchAccount(o) {
+    const { id } = o || {};
+    if (typeof id !== 'string' || !ID_RE.test(id)) return Promise.reject(new Error('bad conversation id'));
+    const account = acctId(o.account);
+    const away = awayOf(id);
+    if (away) { log(`switch to ${account}: ${id} refused: it is on ${away.device}`); return Promise.resolve(awayRefusal(away)); }
+    if (!loadPty()) return Promise.resolve(noPty());
+    const t = terms.get(id) || terms.get(id.toLowerCase());
+    const now = Date.now();
+    const why = !t || !t.alive ? 'it is not running here'
+      : t.isNew ? 'it has no conversation id yet'
+        : t.dismissed ? 'it is ending'
+          : t.moveTo ? 'it is moving already'
+            : t.account === account ? `it is on ${account} already`
+              : t.status !== 'idle' ? `it is not idle (${t.status || 'status unknown'})`
+                : !t.idleSince || now - t.idleSince < MOVE_IDLE_MS ? 'it has not been idle long enough'
+                  : t.line.trim() || t.inPaste ? 'something is typed in its prompt'
+                    : now - (t.inputAt || 0) < MOVE_KEYS_MS ? 'someone typed into it just now'
+                      : t.nudge ? 'a note is due to it'
+                        : t.slash ? 'a "/" panel is open in it'
+                          : menuUp(t) ? 'a menu is up on its screen' : '';
+    if (why) return Promise.resolve({ ok: false, message: why });
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (r) => { if (!settled) { settled = true; resolve(r); } };
+      t.moveTo = { account, from: t.account, rescue: !!o.rescue, done };
+      log(`switch to ${account}: ending ${t.id} on ${t.account}${o.rescue ? ' (it hit its limit)' : ''}`);
+      // its exit (onExit) resumes it; this is the backstop when that never comes
+      // (within api.js's 8 s for a call: 2.5 s grace, 1.5 s for the tree, then this)
+      end(t, 2500, () => setTimeout(() => done({ ok: false, message: 'it did not end' }), 1500));
+    });
+  }
+  // the resume after switchAccount ended it (from its exit): false when it could not start (the exit goes out then)
+  function moveOn(t) {
+    const m = t.moveTo;
+    flush(t);
+    const role = soleRole(t.role, t.id, `switch to ${m.account}:`);
+    const r = spawnPty(t.id, commandFor(t.id, role, t.cwd), { cwd: t.cwd, account: m.account, cols: t.cols, rows: t.rows },
+      { chunks: t.chunks.slice(), size: t.size, created: t.created, forkFrom: t.forkFrom || null, handoffFrom: t.handoffFrom, role,
+        nudge: m.rescue ? { kind: 'continue', cause: `it hit the limit of Claude ${m.from}` } : null });
+    log(`switch to ${m.account}: ${t.id} ${r.ok ? `resumed under ${m.account} (pid ${r.pid})${m.rescue ? ', "continue" due once it has loaded' : ''}` : `could not start again: ${r.message}`}`);
+    t.moveTo = null;
+    if (!r.ok) { m.done({ ok: false, message: r.message }); return false; }
+    const n = terms.get(t.id);
+    const note = `\r\n\x1b[2m── moved from Claude ${m.from} to Claude ${m.account} ──\x1b[0m\r\n`;
+    keep(n, note);
+    send('data', n.id, note);
+    m.done({ ok: true, pid: r.pid, message: `moved to ${m.account}` });
+    return true;
   }
 
   // a new conversation: plain interactive `claude` in o.cwd (the caller has checked it), keyed new-<n>.
@@ -978,6 +1051,7 @@ function createPtys(opts = {}) {
   // The note a resumed session gets once it has loaded (t.nudge = { kind, cause, file?, offset? }, from restore):
   // typed as a bracketed paste, checked again 300 ms later, then Enter.
   function noteFor(n) {
+    if (n.kind === 'continue') return 'continue'; // switchAccount's rescue: the turn the limit cut off goes on
     if (n.kind === 'restart') return `[Fleet View] The session host restarted as you asked. Check that the newest "started:" line in ${P.isWin ? '%LOCALAPPDATA%\\fleet-view\\host.log' : logFile()} shows the new version, then carry on.`;
     if (n.kind === 'tasks') return `[Fleet View] Your background tasks stopped when ${n.cause}; the notes above say which. Check what they finished, start again what still needs to run, then carry on.`;
     return `[Fleet View] You were cut off mid-turn: ${n.cause}. Check what finished, then carry on.`;
@@ -1091,6 +1165,7 @@ function createPtys(opts = {}) {
       waitingFor: t.alive && t.status === 'waiting' ? t.waitingFor : null, autoContinue: !!(t.alive && t.nudge),
       slashPanel: t.alive && t.slash && t.slash.seen && t.status === 'waiting' && t.waitingFor === 'dialog open' ? t.slash.cmd : null,
       interrupted: !!(t.alive && t.interrupted), restored: !!t.restored, role: t.role || null, cols: t.cols, rows: t.rows,
+      moving: !!(t.alive && t.moveTo),
     }));
   }
 
@@ -1129,7 +1204,7 @@ function createPtys(opts = {}) {
     return t.chunks.join('');
   }
 
-  return { open, sendTo, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, markRestartBy, snapshot, aliveCount, dirs };
+  return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, markRestartBy, snapshot, aliveCount, dirs };
 }
 
 // ---------- the host process ----------
@@ -1362,6 +1437,10 @@ function runHost() {
         case 'sendTo': {
           const o = a[0] && typeof a[0] === 'object' ? a[0] : {};
           return ptys.sendTo({ id: o.id, cwd: typeof o.cwd === 'string' ? o.cwd : null, account: acctId(o.account), cols: o.cols, rows: o.rows }).then(reply, fail);
+        }
+        case 'switchAccount': {
+          const o = a[0] && typeof a[0] === 'object' ? a[0] : {};
+          return ptys.switchAccount({ id: o.id, account: acctId(o.account), rescue: o.rescue === true }).then(reply, fail);
         }
         case 'create': {
           const o = a[0] && typeof a[0] === 'object' ? a[0] : {};
