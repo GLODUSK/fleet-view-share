@@ -23,6 +23,9 @@
 //                                page, which the right-click menu shows blurred behind it (backdrop-filter does nothing over the acrylic)
 //   fleetDesktop.onPreviewNav(cb(url)) -> unsubscribe   main view only: a preview frame (a local dev server's page
 //                                in a frame of the page, see main.js previewFrames) went to url by itself
+//   fleetDesktop.onAway(cb) -> unsubscribe   cb({ idle, locked, battery }) now (once known) and whenever one changes:
+//                                idle after 5 minutes with no key or mouse anywhere on the computer, locked while the screen
+//                                is, battery while it runs on battery (main.js, powerMonitor); the map rests and paces by it
 //   fleetDesktop.keepAwake(on)   main view only: true while the chat box's mic listens, so the page keeps full
 //                                speed behind other windows (main.js turns Chromium's background slow-down off)
 //   fleetDesktop.term            main view only (absent in the mini view): live Claude sessions hosted in the window.
@@ -69,6 +72,14 @@ let chatsPopped = null;
 ipcRenderer.on('fv:chats-popped', (_e, popped) => {
   chatsPopped = !!popped;
   for (const cb of chatsListeners) { try { cb(chatsPopped); } catch {} }
+});
+
+const awayListeners = new Set();
+let awayNow = null;
+ipcRenderer.on('fv:away', (_e, a) => {
+  const x = a && typeof a === 'object' ? a : {};
+  awayNow = { idle: !!x.idle, locked: !!x.locked, battery: !!x.battery };
+  for (const cb of awayListeners) { try { cb({ ...awayNow }); } catch {} }
 });
 
 const dataListeners = new Set(), exitListeners = new Set(), rekeyListeners = new Set();
@@ -147,6 +158,12 @@ contextBridge.exposeInMainWorld('fleetDesktop', {
     miniListeners.add(cb);
     if (miniOpen !== null) { try { cb(miniOpen); } catch {} }
     return () => miniListeners.delete(cb);
+  },
+  onAway: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    awayListeners.add(cb);
+    if (awayNow) { try { cb({ ...awayNow }); } catch {} }
+    return () => { awayListeners.delete(cb); };
   },
   popChats: () => ipcRenderer.send('fv:pop-chats'),
   dockChats: () => ipcRenderer.send('fv:dock-chats'),

@@ -46,7 +46,7 @@
 // opening Fleet View again brings it back, and Cmd+Q quits the window app (the host and its sessions keep running).
 // "Quit everything" moves sessions to Terminal windows (iTerm2 with FV_TERMINAL=iterm).
 'use strict';
-const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, powerSaveBlocker, screen, shell, webFrameMain } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, powerMonitor, powerSaveBlocker, screen, shell, webFrameMain } = require('electron');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -568,7 +568,7 @@ if (!app.requestSingleInstanceLock()) {
     const wc = win.webContents;
     guardContents(wc, () => { if (win && !win.isDestroyed()) win.loadURL(START.href); });
     previewFrames(wc);
-    wc.on('did-finish-load', () => { sendMiniOpen(); sendChatsPopped(); });
+    wc.on('did-finish-load', () => { sendMiniOpen(); sendChatsPopped(); sendAway(); });
     editMenu(win);
 
     win.on('move', saveMainSoon);
@@ -861,7 +861,7 @@ if (!app.requestSingleInstanceLock()) {
     const wc = w.webContents;
     guardContents(wc, () => { if (!w.isDestroyed()) w.loadURL(CHATS_URL); });
     editMenu(w);
-    wc.on('did-finish-load', () => sendChatsPopped());
+    wc.on('did-finish-load', () => { sendChatsPopped(); sendAway(); });
     const fromOutside = outsideClose(w);
     let shown = false;
     const showIt = () => {
@@ -941,6 +941,35 @@ if (!app.requestSingleInstanceLock()) {
   function keepChatsOnScreen() {
     if (!chatsAlive() || chats.isMaximized() || chats.isMinimized()) return;
     if (!isVisible(chats.getBounds())) chats.setBounds(inside(chatsDefault()));
+  }
+
+  // ---------- away: the map rests (web/map.js, Pacing) ----------
+  // idle: no key or mouse anywhere on the computer for AWAY_IDLE_S; locked: the screen is; battery: it runs on
+  // battery. Sent to the main window's and the Chats window's page on each change (preload.js onAway).
+  const AWAY_IDLE_S = 300;
+  const away = { idle: false, locked: false, battery: false };
+  let awayTimer = null;
+  function sendAway() {
+    for (const w of [win, chats]) if (w && !w.isDestroyed() && !w.webContents.isDestroyed()) w.webContents.send('fv:away', { ...away });
+  }
+  // asks the system how long nobody touched it: while away once a second (to be back as soon as someone is),
+  // else when it could first reach AWAY_IDLE_S, and at least every 30 s
+  function checkIdle() {
+    clearTimeout(awayTimer);
+    let s = 0;
+    try { s = powerMonitor.getSystemIdleTime(); } catch {}
+    const idle = s >= AWAY_IDLE_S;
+    if (idle !== away.idle) { away.idle = idle; sendAway(); }
+    awayTimer = setTimeout(checkIdle, idle ? 1000 : Math.min(30, Math.max(1, AWAY_IDLE_S - s)) * 1000);
+  }
+  function watchAway() {
+    const set = (k, v) => { if (away[k] !== v) { away[k] = v; sendAway(); } };
+    try { away.battery = !!powerMonitor.isOnBatteryPower(); } catch {}
+    powerMonitor.on('lock-screen', () => set('locked', true));
+    powerMonitor.on('unlock-screen', () => { set('locked', false); checkIdle(); });
+    powerMonitor.on('on-battery', () => set('battery', true));
+    powerMonitor.on('on-ac', () => set('battery', false));
+    checkIdle();
   }
 
   // ---------- messages from the pages (preload.js) ----------
@@ -1285,6 +1314,7 @@ if (!app.requestSingleInstanceLock()) {
       // (not before its first show, which places it first)
       app.on('activate', () => { if (!HIDDEN && !placing && win && !win.isDestroyed() && !win.isVisible()) showMain(null); });
     }
+    watchAway();
     create();
     win.webContents.once('did-finish-load', () => setTimeout(restoreSelection, 1500));
     if (HIDDEN) global.__fvTest = { quitEverything, closeWindow: () => { if (win && !win.isDestroyed()) win.close(); }, terms, popChats, dockChats, chatsWindow: () => chats };

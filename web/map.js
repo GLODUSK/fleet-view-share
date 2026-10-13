@@ -42,8 +42,15 @@
 // bent to the same side for a pair, the bend swaying slowly like a rope) with a colour gradient, and names sit on small frosted pills.
 // Behind it all, three layers of faint tiny stars (STAR_LAYERS) at fixed brightness: each follows the camera at
 // its own fraction of the pan and of the zoom, so the sky feels deep, and creeps slowly by itself (not when still).
+// Some gather in loose clusters; most are white, a few blue-white to amber (STAR_TINT), a few are tiny sparkles.
+// Deeper still (DEEP_*), following even less of the pan: a faint Milky Way band (a soft glow cut by dark dust lanes,
+// with fine star dust where it is dense) and a few big dim gas clouds, painted once, at fixed brightness.
 // Under the stars a faint sky tint follows the local clock (SKY_KEYS: indigo night, rose dawn, clear day, amber dusk);
-// it changes by the minute, never because something happened.
+// it changes by the minute, never because something happened. Over the sky (never the nodes) a soft vignette darkens
+// the edges, and a still dither, fixed to the pixel, keeps the faint gradients from banding. The graphics card draws
+// the sky (tint, deep sky, stars, vignette) in one pass on a WebGL2 canvas off the page (drawSkyGL), only when
+// something in it changed, and the map's canvas lays that picture down first each frame; without WebGL2 the map's
+// canvas draws the tint and stars itself (drawSky, drawStars), without the deep sky and vignette.
 //
 // Repo spots (Henry: repos must never jump across the map): every repo keeps the spot it first got. Only the
 // first layout packs the repos in rows to fit the window; a repo that appears later takes the nearest free spot
@@ -95,9 +102,27 @@
 // pickup that runs here is the old conversation's stand-in (handing: true, keyed by the pickup's id once it has one):
 // it keeps the old node and its handing-off look, never the new-session one.
 //
-// Tests (?fixture=1 or ?debug=1): window.__map = { nodes, stats, debug, comet(fromId, toId), merge(sessionId), sky(hour) }.
+// Tests (?fixture=1 or ?debug=1): window.__map = { nodes, stats, debug, comet(fromId, toId), merge(sessionId), sky(hour), skyGL,
+// rest(on), battery(on) }.
 // nodes() lists each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label
-// rectangles; merge('s:<id>') launches that conversation's merge now.
+// rectangles; merge('s:<id>') launches that conversation's merge now; stats().sky says what draws the sky ('webgl2'
+// or '2d'), stats().fps the draws in the last second, and skyGL() is the sky's WebGL2 context (to lose it). rest(true)
+// rests the map as if nobody were there (null: as the desktop says), battery(true) paces it as on battery.
+// ?skyHour=<0-24> forces the sky's hour; ?sky2d=1 has the canvas draw the sky, as without WebGL2.
+//
+// Pacing (Henry: quality over savings, but the frame rate is the map's big cost). Anything fast or short-lived draws
+// at every screen refresh: comets, sparks, ghosts, morphs, births, bumps, kicks, whirls, relay rings, sizes and levels
+// still gliding, camera glides and fits, the layout settling, drags, and any change marked dirty (hover, selection,
+// wheel, keys, a new state), which also wakes a sleeping loop at once (quickNow, wake). When only the slow ambient
+// motion shows, the map draws every k-th refresh (k from the measured refresh, so frames stay even): PACE_LIVELY_FPS
+// while a working ring turns, dashes flow or a hub ring turns fast, else PACE_FPS (nothing moves over half a pixel a
+// frame), half that on battery; between frames it sleeps (a timer, then a frame callback; paceNext, later). All
+// motion runs on elapsed time, so a slower rate never slows anything down, and the sky is drawn only on drawn frames.
+// Rest: while nobody used the computer for 5 minutes or the screen is locked (the desktop window says, main.js
+// powerMonitor; a browser never rests), the ambient motion holds still where it is and goes on from there after,
+// changes still draw at once, and one frame a second keeps the age fades going. Not when the window merely lost
+// focus; a hidden or minimized window stops the loop altogether. Reduced motion paces as before (every refresh, drawn
+// only on change).
 //
 // Command center (2026-10-08). The map is also where many conversations are steered at once:
 //   Multi-select: Ctrl+click toggles a conversation (or a workspace's hub) into the selection; Ctrl+drag on empty
@@ -243,6 +268,9 @@ const DASH_NEW = [3, 3];             // a new session's ring (steady, never movi
 const DASH_HO = [5, 4];              // a handing-off conversation's ring, turning slowly: it is in transit
 const HANDOFF_GHOST_MS = 950;        // a handed-off node flies into its pickup and is absorbed over this (a pickup already on the map elsewhere)
 const RELAY_MS = 900;                // a picked-up node's violet ring, as it turns from handing off to live
+// pacing (see "Pacing" at the top): frames a second when only slow ambient motion shows, calm and lively (a working
+// ring turns, dashes flow, a hub ring turns fast), halved on battery; at rest one frame a second for age fades
+const PACE_FPS = 20, PACE_LIVELY_FPS = 30, REST_TICK_MS = 1000;
 const STEP_NAMES = ['push', 'PR', 'checks', 'merged', 'live'];
 
 // command center (see "Command center" at the top)
@@ -258,11 +286,12 @@ const WT_MAX = 16;                  // worktree satellites drawn per hub
 // the starfield (see "Look"): per layer, how much of the pan it follows, how many stars per STAR_TILE square,
 // their radius and alpha ranges (CSS px; fixed per star, never animated) and its idle drift in px/s.
 // A layer's scale is zoom^(depth * STAR_ZOOM), so zooming feels deep and stars never balloon.
+// cl: [loose clusters per tile, their share of the stars, spread in px]; sparkle: how many are tiny 4-point sparkles.
 const STAR_TILE = 512, STAR_ZOOM = 0.4, STAR_DIR = [0.83, 0.56];
 const STAR_LAYERS = [
-  { depth: 0.15, n: 46, r: [0.45, 0.8], a: [0.12, 0.32], drift: 0.8, seed: 11 },
-  { depth: 0.35, n: 20, r: [0.6, 1.0], a: [0.16, 0.4], drift: 1.8, seed: 23 },
-  { depth: 0.6, n: 8, r: [0.8, 1.3], a: [0.22, 0.5], drift: 3.2, seed: 37, sparkle: 2 },
+  { depth: 0.15, n: 46, r: [0.45, 0.8], a: [0.12, 0.3], drift: 0.8, seed: 11, cl: [3, 0.45, 34] },
+  { depth: 0.35, n: 20, r: [0.6, 1.0], a: [0.16, 0.38], drift: 1.8, seed: 23, cl: [2, 0.35, 46], sparkle: 1 },
+  { depth: 0.6, n: 8, r: [0.8, 1.3], a: [0.22, 0.46], drift: 3.2, seed: 37, sparkle: 3 },
 ];
 // sky tint by local hour (see "Look"): [hour, top rgba, bottom (horizon) rgba], blended by minute, wrapping at 24.
 const SKY_KEYS = [
@@ -276,7 +305,20 @@ const SKY_KEYS = [
   [20, [90, 60, 170, 0.08], [200, 80, 140, 0.08]],
   [22, [40, 50, 140, 0.10], [30, 40, 120, 0.08]],
 ];
-const STAR_TINT = ['255,255,255', '226,234,255', '226,234,255', '210,196,255', '255,232,190']; // mostly white
+// star colours from blue-white to amber, [rgb, weight]: mostly white
+const STAR_TINT = [['255,255,255', 7], ['236,242,255', 3], ['206,220,255', 1.4], ['218,206,255', 0.6], ['255,244,226', 1.6],
+  ['255,226,184', 0.8], ['255,206,152', 0.35]];
+const STAR_TINT_SUM = STAR_TINT.reduce((s, t) => s + t[1], 0);
+// the deep sky (see "Look"), the sky's deepest layer, under the stars: a texture of DEEP_W x DEEP_H painted once,
+// each texel DEEP_PX CSS px, following DEEP_DEPTH of the pan and drifting DEEP_DRIFT px/s; DEEP_A is its brightest
+// light. Its star dust is a DUST_T device px tile of DUST_N specks, as bright as DUST_A where the band is densest.
+const DEEP_W = 512, DEEP_H = 256, DEEP_PX = 8, DEEP_DEPTH = 0.06, DEEP_DRIFT = 0.3, DEEP_A = 0.07;
+const DUST_T = 512, DUST_N = 2600, DUST_A = 0.3;
+// [rgb (0-1), centre x, y (texels), radius (texels), strength] of the big dim gas clouds, off the band
+const DEEP_CLOUDS = [[[0.62, 0.48, 1], 400, 72, 64, 0.55], [[0.36, 0.7, 0.78], 130, 196, 54, 0.42],
+  [[0.86, 0.48, 0.66], 262, 6, 44, 0.32]];
+// the vignette: how dark the sky's corners get (plain, glass), and the dither, in 8-bit levels
+const VIG_A = [0.3, 0.16], DITHER = 1;
 
 let I = null; // the one map instance (layout survives tab switches and container swaps)
 let pendingMulti = null; // a selection set before the map exists (setMapSelection)
@@ -628,12 +670,15 @@ function mountOverlay(el) {
   }).catch(() => {});
 }
 
-// timing of the last frames, for the harness: { avgMs, maxMs, frames, comets }
+// timing of the last frames, for the harness: { avgMs, maxMs, frames, comets, sky, fps, pace } (sky: 'webgl2' or '2d', what
+// draws it; fps: draws in the last second; pace: the ambient rate paceNext picked, the refresh ms, at rest, on battery)
 export function mapStats() {
   if (!I) return null;
   const s = I.stats;
   return { avgMs: s.n ? s.sum / s.n : 0, maxMs: s.max, frames: s.frames, comets: I.comets.length, queued: I.cometQ.length,
-    big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length };
+    big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length, sky: I.skyGL && I.skyGL.ok ? 'webgl2' : '2d',
+    fps: I.pace.draws.filter((t) => t > performance.now() - 1000).length,
+    pace: { fps: I.pace.fps, refreshMs: Math.round(I.pace.ms * 100) / 100, quick: I.quick, lively: I.lively, rest: resting(), battery: away.battery } };
 }
 
 // node positions on screen, for the harness's click tests: [{ id, kind, x, y, cx, cy, sid, pending, root }]
@@ -771,6 +816,9 @@ export function mapMerge(id) {
 if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(location.search)) {
   window.__map = { nodes: () => mapNodes(), stats: () => mapStats(), debug: () => mapDebug(), comet: mapComet, merge: mapMerge,
     sky: (h) => { skyForce = h == null ? null : Number(h); if (I) I.sky = null; }, // force the sky's hour (null: the clock)
+    skyGL: () => (I && I.skyGL ? I.skyGL.gl : null), // the sky's WebGL2 context, for a context-loss test
+    // rest as if away (true), never (false) or as the desktop says (null); battery(on) as if on battery or not
+    rest: (on) => { restForce = on == null ? null : !!on; wake(); return resting(); }, battery: (on) => { away.battery = !!on; wake(); },
     selection: () => mapSelection(), setSelection: (ids) => setMapSelection(ids), lens: (n) => (n ? setMapLens(n) : mapLens()), replay: (on) => setMapReplay(on),
     // what a point on the canvas hits: { node, over, extra } (ids / kinds)
     hit: (x, y) => { if (!I) return null; const o = hitOver(x, y), n = hitTest(x, y), e = hitExtra(x, y); return { node: n ? n.id : null, over: o ? o.kind + ':' + o.id : null, extra: e ? e.kind + ':' + e.id : null }; } };
@@ -810,6 +858,7 @@ function createInstance(state) {
   const z = Number(state && state.settings && state.settings.zoom);
   return {
     el: null, canvas: null, ctx: null, tip: null, legendEl: null, emptyEl: null,
+    skyCanvas: null, skyGL: null, // the sky's WebGL2 canvas (off the page) and its state (null: the canvas draws the sky)
     W: 0, H: 0, dpr: 1,
     pos: new Map(),           // node id -> { x, y, vx, vy } in world units, kept between polls
     ang: new Map(),           // agent node id -> current orbit angle (eases toward its slot)
@@ -823,7 +872,11 @@ function createInstance(state) {
     sig: '', alpha: 0, settledOnce: false,
     cam: null, pan: { x: 0, y: 0 }, zoom: Number.isFinite(z) && z > 0 ? clamp(z, ZMIN, ZMAX) : 1,
     sel: null, hover: null, kbTip: false, legend: false,
-    raf: 0, running: false, lastDraw: 0, dirty: true,
+    raf: 0, running: false, lastDraw: 0,
+    // anything that marks the map dirty wakes a sleeping loop at once (see "Pacing")
+    _dirty: true, get dirty() { return this._dirty; }, set dirty(v) { this._dirty = v; if (v) wake(); },
+    pace: { ms: 1000 / 60, d: [], ts: 0, chain: false, at: 0, timer: 0, draws: [], fps: PACE_FPS }, // see paceNext
+    quick: false, lively: false, // the last draw had a short-lived change going / lively ambient motion
     ghosts: [],               // conversations that just left the map: { n, at }, faded out over GHOST_MS
     drag: null, saveTimer: 0, ui: {}, state: null, skew: 0, measure: new Map(),
     // motion
@@ -859,6 +912,9 @@ function attach(el) {
   if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
   el.style.overflow = 'hidden';
   if (!I.canvas) {
+    // the sky's canvas (see drawSkyGL): never on the page, the map's canvas lays its picture down
+    I.skyCanvas = document.createElement('canvas');
+    I.skyGL = sky2d ? null : skyGLMake(I.skyCanvas);
     const cv = document.createElement('canvas');
     cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;cursor:default;outline:none';
     I.canvas = cv;
@@ -909,9 +965,11 @@ const active = () => !!(I && I.el && I.el.isConnected && I.el.getClientRects().l
 // keys to the open repo menu, the open-confirm box and the / filter first, and only then to the map.
 function start() {
   if (I.ui && I.ui.keys) I.ui.keys.map = onKey;
-  if (I.running || document.hidden) return;
+  if (I.running) { if (I.cometQ.length) wake(); return; } // a new state's comets launch now, not after a sleep
+  if (document.hidden) return;
   I.running = true;
-  I.dirty = true;
+  I._dirty = true;
+  if (I.skyGL) I.skyGL.drawn = false; // and the sky once, after the map was hidden
   I.lastT = 0;
   I.raf = requestAnimationFrame(frame);
 }
@@ -919,8 +977,71 @@ function start() {
 document.addEventListener('visibilitychange', () => { if (I && !document.hidden && active()) start(); });
 function stop() {
   I.running = false;
-  cancelAnimationFrame(I.raf);
+  cancelAnimationFrame(I.raf); I.raf = 0;
+  clearTimeout(I.pace.timer); I.pace.timer = 0;
   if (I.tip) I.tip.style.display = 'none';
+}
+// a sleeping loop (between paced frames, or at rest) draws on the next screen refresh
+function wake() {
+  if (!I || !I.running || I.raf || !I.pace) return;
+  clearTimeout(I.pace.timer); I.pace.timer = 0; I.pace.at = 0;
+  I.raf = requestAnimationFrame(frame);
+}
+
+// ---------- pacing and rest (see "Pacing" at the top) ----------
+// away: the desktop window says when nobody used the computer for 5 minutes or the screen is locked, and when it
+// runs on battery (main.js, powerMonitor); a browser only knows its battery. restForce: tests (__map.rest)
+const away = { idle: false, locked: false, battery: false };
+let restForce = null;
+const resting = () => (restForce !== null ? restForce : away.idle || away.locked);
+if (typeof window !== 'undefined') {
+  const fd = window.fleetDesktop;
+  if (fd && typeof fd.onAway === 'function') {
+    fd.onAway((a) => {
+      const was = resting();
+      away.idle = !!(a && a.idle); away.locked = !!(a && a.locked); away.battery = !!(a && a.battery);
+      if (I && was !== resting()) wake();
+    });
+  } else if (typeof navigator !== 'undefined' && typeof navigator.getBattery === 'function') {
+    navigator.getBattery().then((b) => {
+      const f = () => { away.battery = !b.charging; };
+      f(); b.addEventListener('chargingchange', f);
+    }).catch(() => {});
+  }
+  // a key or the mouse here ends an idle rest at once (main.js only looks once a second while idle)
+  const back = () => { if (away.idle) { away.idle = false; wake(); } };
+  for (const t of ['pointermove', 'pointerdown', 'keydown', 'wheel']) window.addEventListener(t, back, { capture: true, passive: true });
+}
+// something short-lived is going on (draw at every refresh): a change marked dirty, the layout settling, a comet,
+// a fading ghost, merge sparks, a camera glide, a drag or band, a re-arrange, or what the last draw saw (I.quick:
+// a morph, birth, bump, kick, whirl, relay ring, or a size or level still gliding)
+function quickNow() {
+  return I._dirty || I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 ||
+    I.bursts.length > 0 || !!I.glide || !!I.drag || !!I.band || !!I.keep || !!(I.trail && I.trail.size) || performance.now() < (I.regrid || 0);
+}
+// the screen's refresh interval: the median of the last back-to-back frames
+function paceSample(P, d) {
+  P.d.push(d);
+  if (P.d.length > 15) P.d.shift();
+  if (P.d.length >= 5) { const s = P.d.slice().sort((a, b) => a - b); P.ms = s[s.length >> 1]; }
+}
+// after a frame: the next refresh while something quick goes on (and always under reduced motion, as before),
+// else every k-th refresh for the ambient rate (k from the measured refresh, so frames stay even), or a tick at rest
+function paceNext(ts, hot) {
+  const P = I.pace;
+  if (I.still || hot || quickNow()) { P.at = 0; later(0); return; }
+  const fps = (I.lively ? PACE_LIVELY_FPS : PACE_FPS) / (away.battery ? 2 : 1);
+  P.fps = resting() ? 1000 / REST_TICK_MS : fps;
+  P.at = ts + (resting() ? REST_TICK_MS : P.ms * Math.max(1, Math.round(1000 / (fps * P.ms))));
+  later(P.at);
+}
+// sleep until just before the refresh at `at` (a timer, then a frame callback); one coming sooner skips on
+function later(at) {
+  const P = I.pace, wait = at - performance.now() - P.ms * 0.6;
+  clearTimeout(P.timer); P.timer = 0;
+  if (wait < 1) { P.chain = true; I.raf = requestAnimationFrame(frame); return; }
+  P.chain = false; I.raf = 0;
+  P.timer = setTimeout(() => { P.timer = 0; if (I.running && !I.raf) I.raf = requestAnimationFrame(frame); }, wait);
 }
 
 // ---------- graph ----------
@@ -1821,14 +1942,22 @@ function keepIn(ids) {
 }
 
 // ---------- frame loop ----------
-function frame() {
+function frame(ts) {
+  I.raf = -1; // in a frame: a change marked now needs no wake (paceNext follows)
   if (!active() || document.hidden) { stop(); return; }
-  I.raf = requestAnimationFrame(frame);
-  const t0 = performance.now();
-  const dt = I.lastT ? Math.min(100, t0 - I.lastT) : 16;
-  I.lastT = t0; I.dt = dt;
+  const P = I.pace;
+  if (P.chain && ts - P.ts > 3 && ts - P.ts < 50) paceSample(P, ts - P.ts);
+  P.ts = ts; P.chain = false;
   I.still = !!(I.reduce && I.reduce.matches);
-  if (!I.still) I.time += dt;
+  // an ambient frame that came before its refresh (the sleep ended early): wait for that one
+  if (!I.still && P.at && ts < P.at - P.ms / 2 && !quickNow()) { later(P.at); return; }
+  const t0 = performance.now();
+  // at rest the ambient motion holds still (its clock and turns stop; changes still glide), and goes on from there
+  // after (the frame after a rest tick counts one refresh, so nothing jumps)
+  const rest = !I.still && resting(), tick = rest && !quickNow();
+  const dt = I.lastT ? Math.min(100, t0 - I.lastT) : 16;
+  I.lastT = tick ? 0 : t0; I.dt = dt; I.adt = rest ? 0 : dt;
+  if (!I.still) I.time += I.adt;
   const r = I.el.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   // the strips above the map (the alert line, Recently finished) change height without changing its size much:
@@ -1849,6 +1978,9 @@ function frame() {
     I.W = Math.round(r.width); I.H = Math.round(r.height); I.dpr = dpr;
     I.sf = screenFactor(I.W, I.H);
     I.canvas.width = Math.max(1, Math.round(I.W * dpr)); I.canvas.height = Math.max(1, Math.round(I.H * dpr));
+    // the sky's canvas, pixel for pixel the same; a new size clears it, so the sky is drawn again
+    I.skyCanvas.width = I.canvas.width; I.skyCanvas.height = I.canvas.height;
+    if (I.skyGL) I.skyGL.drawn = false;
     // the solid page colour (Edge, no glass) comes from the shell's --bg when it sets one
     try { I.bgFill = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || COL.bg; } catch { I.bgFill = COL.bg; }
     const before = I.homeSig;
@@ -1877,11 +2009,15 @@ function frame() {
   if (stepGlide(t0)) I.dirty = true;
   if (I.savedCam && I.camInit && I.sim && I.sim.length) restoreCam();
   if (I.camInit && !I.savedCam) keepCam();
-  // continuous motion while anything moves (the stars' drift too, even on an empty map); otherwise only on change
-  // (and a slow tick for age fades)
-  const moving = !I.still || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 || I.bursts.length > 0;
-  if (I.dirty || moving || t0 - I.lastDraw > 250) {
-    draw(); I.lastDraw = t0; I.dirty = false;
+  // continuous motion while anything moves (the stars' drift too, even on an empty map), at the pace paceNext
+  // sets; otherwise only on change (and a slow tick for age fades)
+  const moving = (!I.still && !tick) || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 || I.bursts.length > 0;
+  const hot = I._dirty;
+  if (hot || moving || t0 - I.lastDraw > (tick ? REST_TICK_MS - 50 : 250)) {
+    I.quick = false; I.lively = false; // what this draw finds going on (see quickNow, paceNext)
+    draw(); I.lastDraw = t0; I._dirty = false;
+    P.draws.push(t0);
+    while (P.draws[0] < t0 - 1000) P.draws.shift();
     const ms = performance.now() - t0, s = I.stats;
     s.frames++;
     s.sum += ms - (s.n === s.ring.length ? s.ring[s.i] : 0);
@@ -1890,6 +2026,7 @@ function frame() {
   }
   // the overlay (edge pointers, minimap, ...) follows every frame; its errors never stop the map
   if (I.overlay && typeof I.overlay.frame === 'function') { try { I.overlay.frame(performance.now()); } catch (err) { console.error(err); } }
+  paceNext(ts, hot);
 }
 
 // ---------- drawing ----------
@@ -2190,6 +2327,7 @@ function drawTerritories(ctx, k, ks, ox, oy) {
   for (const [id, p] of P) {
     if (!live.has(id)) p.want = 0;
     p.w += (p.want - p.w) * ease;
+    if (Math.abs(p.want - p.w) > 0.005) I.quick = true;
     if (!live.has(id) && p.w < 0.01) { P.delete(id); continue; }
     const [wr, px, str] = NEB_PUFF[p.kind];
     p.sx = p.x * k + ox; p.sy = p.y * k + oy; p.R = wr * k + px * ks; p.a = p.w * str;
@@ -2281,19 +2419,32 @@ function drawTerritories(ctx, k, ks, ox, oy) {
   }
 }
 
-// the starfield: each layer's tile is painted once (per dpr) into an offscreen canvas and repeated through a
-// pattern placed with setTransform, so a frame costs one fillRect per layer
+// the starfield: each layer's tile is painted once (per dpr) into an offscreen canvas and repeated: as a texture in
+// the sky's shader (drawSkyGL), or through a pattern placed with setTransform when the canvas draws the sky (drawStars)
+function seeded(seed) {
+  let x = seed >>> 0;
+  return () => { x = (x + 0x6d2b79f5) >>> 0; let t = Math.imul(x ^ (x >>> 15), 1 | x); t ^= t + Math.imul(t ^ (t >>> 7), 61 | t); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
 function starTile(L, dpr) {
   const T = STAR_TILE, c = document.createElement('canvas');
   c.width = c.height = Math.round(T * dpr);
   const g = c.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  let x = L.seed >>> 0;
-  const rnd = () => { x = (x + 0x6d2b79f5) >>> 0; let t = Math.imul(x ^ (x >>> 15), 1 | x); t ^= t + Math.imul(t ^ (t >>> 7), 61 | t); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
-  const lerp = (r, u) => r[0] + (r[1] - r[0]) * u;
+  const rnd = seeded(L.seed);
+  const lerp = (r, u) => r[0] + (r[1] - r[0]) * u, wrap = (v) => ((v % T) + T) % T;
+  const tintOf = (u) => { let w = u * STAR_TINT_SUM, j = 0; while (j < STAR_TINT.length - 1 && (w -= STAR_TINT[j][1]) > 0) j++; return STAR_TINT[j][0]; };
+  // loose clusters: centres anywhere on the tile, members spread about them and wrapped, so a cluster on an edge
+  // carries on in the next tile
+  const [nc, share, spread] = L.cl || [0, 0, 0], cs = [];
+  for (let j = 0; j < nc; j++) cs.push([rnd() * T, rnd() * T]);
   for (let i = 0; i < L.n; i++) {
-    const px = rnd() * T, py = rnd() * T, r = lerp(L.r, rnd()), a = lerp(L.a, rnd() * rnd());
-    const tint = STAR_TINT[Math.floor(rnd() * STAR_TINT.length)], sp = i < (L.sparkle || 0);
+    let px = rnd() * T, py = rnd() * T;
+    if (nc && rnd() < share) {
+      const o = cs[Math.floor(rnd() * nc)];
+      px = wrap(o[0] + (rnd() + rnd() + rnd() - 1.5) * spread); py = wrap(o[1] + (rnd() + rnd() + rnd() - 1.5) * spread);
+    }
+    const r = lerp(L.r, rnd()), a = lerp(L.a, rnd() * rnd());
+    const tint = tintOf(rnd()), sp = i < (L.sparkle || 0);
     // drawn at the wrapped copies too, so a star on a tile's edge isn't cut
     for (const dx of [-T, 0, T]) for (const dy of [-T, 0, T]) {
       const X = px + dx, Y = py + dy;
@@ -2309,11 +2460,10 @@ function starTile(L, dpr) {
   }
   return c;
 }
-function drawStars(ctx) {
-  const dpr = I.dpr || 1;
-  if (!I.stars || I.stars.dpr !== dpr) {
-    I.stars = { dpr, pats: STAR_LAYERS.map((L) => { try { return ctx.createPattern(starTile(L, dpr), 'repeat'); } catch { return null; } }) };
-  }
+// where each star layer's tile sits this frame, for drawSkyGL and drawStars: per layer its scale s and the offset
+// (ex, ey) of a tile's corner in CSS px, wrapped into the first tile
+const starPos = new Float64Array(STAR_LAYERS.length * 3);
+function starsAt() {
   const adj = I.starAdj || { x: 0, y: 0 };
   const fit = I.cam.fit || 1, cx = I.cam.cx + I.pan.x - adj.x, cy = I.cam.cy + I.pan.y - adj.y, ts = I.still ? 0 : I.time / 1000;
   // the field's middle is a fixed point in the window (where the map's middle first was), not the map's middle,
@@ -2321,41 +2471,272 @@ function drawStars(ctx) {
   const lf = I.left || 0, tp = I.top || 0;
   if (!I.starO) I.starO = { x: lf + I.W / 2, y: tp + I.H / 2 };
   const mx = I.starO.x - lf, my = I.starO.y - tp;
-  screen(ctx);
   for (let i = 0; i < STAR_LAYERS.length; i++) {
-    const L = STAR_LAYERS[i], pat = I.stars.pats[i];
-    if (!pat || !pat.setTransform) continue;
-    const s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), L.depth * STAR_ZOOM), P = STAR_TILE * s;
+    const L = STAR_LAYERS[i], s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), L.depth * STAR_ZOOM), P = STAR_TILE * s;
     // the field scales about the screen's middle and slides with a fraction of the pan, plus its drift
     let ex = mx - (cx * fit * L.depth - ts * L.drift * STAR_DIR[0]) * s;
     let ey = my - (cy * fit * L.depth - ts * L.drift * STAR_DIR[1]) * s;
     ex -= Math.floor(ex / P) * P; ey -= Math.floor(ey / P) * P;
-    pat.setTransform(new DOMMatrix([s / dpr, 0, 0, s / dpr, ex, ey]));
+    starPos[i * 3] = s; starPos[i * 3 + 1] = ex; starPos[i * 3 + 2] = ey;
+  }
+  // the deep sky the same way, left unwrapped (its band and its dust repeat at different sizes)
+  const s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), DEEP_DEPTH * STAR_ZOOM);
+  deepPos[0] = s;
+  deepPos[1] = mx - (cx * fit * DEEP_DEPTH - ts * DEEP_DRIFT * STAR_DIR[0]) * s;
+  deepPos[2] = my - (cy * fit * DEEP_DEPTH - ts * DEEP_DRIFT * STAR_DIR[1]) * s;
+  return starPos;
+}
+const deepPos = new Float64Array(3);
+// the deep sky's pixels, painted once: the band and the clouds (rgb: their light, scaled to the full range, as
+// DEEP_A dims it in the shader; a: how dense the band's star dust is there) and the star dust tile (one byte a
+// device px). Every noise repeats with the texture, and the band runs along its (2, 1) diagonal, which closes on
+// itself, so the texture tiles without a seam.
+let deepPix = null;
+function deepSky() {
+  if (deepPix) return deepPix;
+  const W = DEEP_W, H = DEEP_H, rnd = seeded(71);
+  const smooth = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+  // value noise on a lattice of cell px that wraps with the texture, summed over octaves
+  const octave = (cell) => { const gw = W / cell, gh = H / cell, v = new Float32Array(gw * gh); for (let i = 0; i < v.length; i++) v[i] = rnd(); return { cell, gw, gh, v }; };
+  const val = (o, x, y) => {
+    const fx = x / o.cell, fy = y / o.cell, ix = Math.floor(fx), iy = Math.floor(fy);
+    const u = smooth(0, 1, fx - ix), w = smooth(0, 1, fy - iy), x1 = (ix + 1) % o.gw, y0 = iy * o.gw, y1 = ((iy + 1) % o.gh) * o.gw;
+    return (o.v[y0 + ix] * (1 - u) + o.v[y0 + x1] * u) * (1 - w) + (o.v[y1 + ix] * (1 - u) + o.v[y1 + x1] * u) * w;
+  };
+  const fbm = (os, x, y) => { let s = 0, n = 0, k = 1; for (const o of os) { s += val(o, x, y) * k; n += k; k *= 0.5; } return s / n; };
+  const glowN = [64, 32, 16, 8].map(octave), laneN = [32, 16, 8, 4].map(octave), cloudN = [64, 32, 16, 8].map(octave);
+  const deep = new Uint8Array(W * H * 4), f = new Float32Array(W * H * 4);
+  let top = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    // across the band (texels), which sways a little along its length
+    const wv = 9 * Math.sin((TAU * x) / W) + 5 * Math.sin((TAU * 2 * x) / W + 1.3);
+    const d = ((((y - 0.5 * x - wv) % H) + H * 1.5) % H - H / 2) * 0.894;
+    const n1 = fbm(glowN, x, y), n2 = fbm(laneN, x, y), n3 = fbm(cloudN, x, y);
+    const band = Math.exp(-((d / 30) ** 2)), core = Math.exp(-((d / 11) ** 2));
+    // dark dust lanes: thin ridges of a noise, near the band's middle
+    const lane = (1 - Math.abs(2 * n2 - 1)) ** 5 * Math.exp(-(((d + 4) / 16) ** 2));
+    const g = (band * (0.4 + 1.1 * smooth(0.3, 0.75, n1)) + 0.6 * core * n1) * (1 - 0.85 * lane);
+    // blue-white at its edges, warmer in its core
+    let r = g * (0.78 + 0.22 * core), gr = g * (0.84 + 0.09 * core), b = g * (1 - 0.18 * core);
+    for (const [col, cx, cy, R, str] of DEEP_CLOUDS) {
+      let dx = Math.abs(x - cx) % W, dy = Math.abs(y - cy) % H;
+      dx = Math.min(dx, W - dx); dy = Math.min(dy, H - dy);
+      const q = (dx * dx + dy * dy) / (R * R), v = str * Math.exp(-1.8 * q) * (0.3 + smooth(0.35, 0.7, n3 + 0.15 * (1 - q)));
+      r += col[0] * v; gr += col[1] * v; b += col[2] * v;
+    }
+    const i = (y * W + x) * 4;
+    f[i] = r; f[i + 1] = gr; f[i + 2] = b;
+    f[i + 3] = clamp(0.06 + band * (1 - 0.9 * lane) * (0.5 + 0.8 * n1), 0, 1);
+    top = Math.max(top, r, gr, b);
+  }
+  for (let i = 0; i < f.length; i++) deep[i] = Math.round((i % 4 === 3 ? f[i] : f[i] / top) * 255);
+  // the star dust: tiny specks, most of them very faint
+  const dust = new Uint8Array(DUST_T * DUST_T);
+  for (let i = 0; i < DUST_N; i++) { const j = Math.floor(rnd() * dust.length); dust[j] = Math.max(dust[j], Math.round(50 + 205 * rnd() * rnd())); }
+  return (deepPix = { deep, dust });
+}
+// the canvas draws the stars (no WebGL2): one fillRect per layer
+function drawStars(ctx) {
+  const dpr = I.dpr || 1;
+  if (!I.stars || I.stars.dpr !== dpr) {
+    I.stars = { dpr, pats: STAR_LAYERS.map((L) => { try { return ctx.createPattern(starTile(L, dpr), 'repeat'); } catch { return null; } }) };
+  }
+  const at = starsAt();
+  screen(ctx);
+  for (let i = 0; i < STAR_LAYERS.length; i++) {
+    const pat = I.stars.pats[i], s = at[i * 3];
+    if (!pat || !pat.setTransform) continue;
+    pat.setTransform(new DOMMatrix([s / dpr, 0, 0, s / dpr, at[i * 3 + 1], at[i * 3 + 2]]));
     ctx.fillStyle = pat; ctx.fillRect(0, 0, I.W, I.H);
   }
 }
 
-// the sky tint for hour h (0-24, fractional): top and bottom rgba strings
+// the sky tint for hour h (0-24, fractional): top and bottom [r, g, b, a]
 function skyAt(h) {
   h = ((h % 24) + 24) % 24;
   let i = 0;
   while (i < SKY_KEYS.length - 1 && SKY_KEYS[i + 1][0] <= h) i++;
   const a = SKY_KEYS[i], b = SKY_KEYS[(i + 1) % SKY_KEYS.length];
   const span = ((b[0] - a[0]) + 24) % 24 || 24, t = (h - a[0]) / span;
-  const mix = (p, q) => `rgba(${[0, 1, 2].map((j) => Math.round(p[j] + (q[j] - p[j]) * t)).join(',')},${(p[3] + (q[3] - p[3]) * t).toFixed(3)})`;
+  const mix = (p, q) => [0, 1, 2].map((j) => Math.round(p[j] + (q[j] - p[j]) * t)).concat(Number((p[3] + (q[3] - p[3]) * t).toFixed(3)));
   return [mix(a[1], b[1]), mix(a[2], b[2])];
 }
 let skyForce = (() => { const m = typeof location !== 'undefined' && /[?&]skyHour=([\d.]+)/.exec(location.search); return m ? Number(m[1]) : null; })();
-// one fillRect a frame; the gradient is rebuilt at most once a minute (or on a resize)
+const sky2d = typeof location !== 'undefined' && /[?&]sky2d=1(&|$)/.test(location.search); // tests: the canvas draws the sky
+const skyHour = () => { if (skyForce != null) return skyForce; const d = new Date(); return d.getHours() + d.getMinutes() / 60; };
+// the canvas draws the tint (no WebGL2): one fillRect a frame; the gradient is rebuilt at most once a minute (or on a resize)
 function drawSky(ctx) {
-  const d = new Date(), h = skyForce != null ? skyForce : d.getHours() + d.getMinutes() / 60;
-  const key = h.toFixed(3) + '|' + I.W + 'x' + I.H;
+  const h = skyHour(), key = h.toFixed(3) + '|' + I.W + 'x' + I.H;
   if (!I.sky || I.sky.key !== key) {
     const [top, bot] = skyAt(h), g = ctx.createLinearGradient(0, 0, 0, I.H);
-    g.addColorStop(0, top); g.addColorStop(1, bot);
+    g.addColorStop(0, `rgba(${top})`); g.addColorStop(1, `rgba(${bot})`);
     I.sky = { key, grad: g };
   }
   ctx.fillStyle = I.sky.grad; ctx.fillRect(0, 0, I.W, I.H);
+}
+
+// ---------- the sky on the graphics card ----------
+// The sky's own WebGL2 canvas (I.skyCanvas) draws the whole sky in one full-screen pass: the page's colour (none in
+// glass), the tint, the deep sky, then the star layers, each tile a repeating texture placed by starsAt, and last the
+// vignette and the dither. A frame only works out the
+// shader's uniforms; when they are the ones last drawn it makes no GL calls and the canvas keeps its picture, which
+// the map's canvas lays down as its first layer (one drawImage, where it used to fill, tint and lay three patterns).
+// The sky's canvas is never on the page: shown, a WebGL canvas that changes keeps about four buffers of its size (a
+// 1600x665 map at dpr 2: +90 MB of GPU memory), off the page about two (+40 MB). No WebGL2 (or only a software one)
+// or the context lost: the map's canvas draws the sky itself (drawSky, drawStars).
+const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
+  preserveDrawingBuffer: false, powerPreference: 'low-power', failIfMajorPerformanceCaveat: true };
+// the shader's uniforms, every one a vec4, in this order in I.skyGL.u: the canvas in device px (x, y), the page's
+// colour (premultiplied; 0 in glass), the tint's top and bottom (straight rgba) and, per star layer, its offset in
+// device px (x, y) and 1 / (scale x tile px) (z); the deep sky's offset in device px and 1 / its size in device px
+// (x, y), its star dust's the same way (1 / the tile's size in z), and the vignette, DEEP_A, DUST_A and the dither.
+// Its textures: the star tiles on units 0 to 2, the deep sky on 3, its star dust on 4.
+const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx'];
+const SKY_TEX = ['uS0', 'uS1', 'uS2', 'uDeep', 'uDust'];
+// one triangle over the whole canvas
+const SKY_VS = `#version 300 es
+void main() { gl_Position = vec4(float((gl_VertexID & 1) << 2) - 1.0, float((gl_VertexID & 2) << 1) - 1.0, 0.0, 1.0); }`;
+// per device pixel, premultiplied: the tint (mixed top to bottom unpremultiplied, as a canvas gradient mixes) over the
+// page's colour, the deep sky's light and its star dust (dense where the band is) over that, then each star layer,
+// sampled where the pixel's centre falls on its tile; then the vignette (black, so in glass it dims the acrylic a
+// little too) and a dither fixed to the pixel (never to time) that breaks the faint gradients' 8-bit bands
+const SKY_FS = `#version 300 es
+precision highp float;
+uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx;
+uniform sampler2D uS0, uS1, uS2, uDeep, uDust;
+out vec4 color;
+vec4 over(vec4 a, vec4 b) { return a + b * (1.0 - a.a); }
+vec4 star(sampler2D s, vec4 l, vec2 p) { return texture(s, (p - l.xy) * l.z); }
+float hash(uvec2 v) {
+  uint h = v.x * 0x8da6b343u ^ v.y * 0xd8163841u;
+  h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12; h *= 0x297a2d39u; h ^= h >> 15;
+  return float(h) / 4294967295.0;
+}
+void main() {
+  vec2 p = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y); // the pixel's centre, device px from the top left
+  vec4 t = mix(uTop, uBot, p.y / uSize.y);
+  vec4 c = over(vec4(t.rgb * t.a, t.a), uBg);
+  vec4 d = texture(uDeep, (p - uD.xy) * uD.zw);
+  vec3 g = d.rgb * uFx.y;
+  c = over(vec4(g, max(g.r, max(g.g, g.b))), c);
+  c = over(vec4(texture(uDust, (p - uDu.xy) * uDu.z).r * d.a * uFx.z), c);
+  c = over(star(uS0, uL0, p), c);
+  c = over(star(uS1, uL1, p), c);
+  c = over(star(uS2, uL2, p), c);
+  vec2 q = p / uSize.xy * 2.0 - 1.0;
+  c = over(vec4(0.0, 0.0, 0.0, uFx.x * smoothstep(0.3, 2.0, dot(q, q))), c);
+  // a triangular dither of about uFx.w levels: on the colour where the sky is opaque, else on its alpha (the colour
+  // kept), so a see-through pixel never gets more colour than alpha
+  uvec2 u = uvec2(gl_FragCoord.xy);
+  float n = (hash(u) + hash(u + uvec2(7919u, 104729u)) - 1.0) * uFx.w / 255.0;
+  if (c.a > 0.998) c.rgb += n; else c *= 1.0 + n / max(c.a, 1.0 / 255.0);
+  color = clamp(c, 0.0, 1.0);
+}`;
+// the sky's GL state on a canvas, or null without WebGL2
+function skyGLMake(cv) {
+  let gl = null;
+  try { gl = cv.getContext('webgl2', SKY_GL_ATTRS); } catch { gl = null; }
+  if (!gl) return null;
+  const n = SKY_U.length * 4;
+  const G = { gl, ok: false, loc: [], u: new Float32Array(n), last: new Float32Array(n), drawn: false, dpr: 0, tw: 0, hour: '', tint: null, bgCss: null, bg: null };
+  // a lost context: the map's canvas draws the sky from the next frame on, until the context is back
+  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; I.dirty = true; });
+  cv.addEventListener('webglcontextrestored', () => { skyGLInit(G); I.dirty = true; });
+  skyGLInit(G);
+  return G;
+}
+// the program and the star textures (their pixels come in drawSkyGL, once per dpr); the program and the textures
+// stay bound, as nothing else draws in this context
+function skyGLInit(G) {
+  const gl = G.gl, p = gl.createProgram();
+  const sh = [[gl.VERTEX_SHADER, SKY_VS], [gl.FRAGMENT_SHADER, SKY_FS]].map(([type, src]) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s); gl.attachShader(p, s);
+    return s;
+  });
+  gl.linkProgram(p);
+  G.ok = !!gl.getProgramParameter(p, gl.LINK_STATUS);
+  if (!G.ok && !gl.isContextLost()) console.warn('map: the sky shader failed, the canvas draws the sky:', sh.map((s) => gl.getShaderInfoLog(s)).join(' ') || gl.getProgramInfoLog(p));
+  for (const s of sh) gl.deleteShader(s);
+  if (!G.ok) return;
+  gl.useProgram(p);
+  G.loc = SKY_U.map((name) => gl.getUniformLocation(p, name));
+  SKY_TEX.forEach((name, i) => {
+    gl.activeTexture(gl.TEXTURE0 + i);
+    gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+    // repeated and smoothed like the canvas's pattern, no mipmaps
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.uniform1i(gl.getUniformLocation(p, name), i);
+  });
+  // a tile's pixels go in premultiplied, as its canvas keeps them
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  G.dpr = 0; G.drawn = false;
+  // the deep sky's textures (they don't depend on dpr), as they are: its alpha is star-dust density, not coverage
+  const D = deepSky();
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.activeTexture(gl.TEXTURE3);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, DEEP_W, DEEP_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, D.deep);
+  gl.activeTexture(gl.TEXTURE4);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, DUST_T, DUST_T, 0, gl.RED, gl.UNSIGNED_BYTE, D.dust);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+}
+// a CSS colour as premultiplied [r, g, b, a] (0-1): painted on one pixel and read back, so any colour the page sets works
+function rgbaOf(css) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 1;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = css; g.fillRect(0, 0, 1, 1);
+  const d = g.getImageData(0, 0, 1, 1).data, a = d[3] / 255;
+  return [(d[0] / 255) * a, (d[1] / 255) * a, (d[2] / 255) * a, a];
+}
+// the sky on its canvas, drawn only when its uniforms changed; false when the map's canvas must draw the sky itself
+function drawSkyGL(glass) {
+  const G = I.skyGL;
+  if (!G || !G.ok || G.gl.isContextLost()) return false;
+  const gl = G.gl, dpr = I.dpr || 1, cv = I.skyCanvas, u = G.u;
+  if (G.dpr !== dpr) {
+    // each star layer's tile at this dpr into its texture; the tile's canvas is let go at once
+    STAR_LAYERS.forEach((L, i) => {
+      const c = starTile(L, dpr);
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+      G.tw = c.width;
+      c.width = c.height = 0;
+    });
+    G.dpr = dpr;
+  }
+  // the page's colour and the tint are worked out again only when they change
+  const bgCss = glass ? '' : I.bgFill || COL.bg;
+  if (G.bgCss !== bgCss) { G.bgCss = bgCss; G.bg = bgCss ? rgbaOf(bgCss) : [0, 0, 0, 0]; }
+  const h = skyHour(), hk = h.toFixed(3);
+  if (G.hour !== hk) { G.hour = hk; G.tint = skyAt(h); }
+  const top = G.tint[0], bot = G.tint[1], at = starsAt();
+  // in SKY_U's order
+  u[0] = cv.width; u[1] = cv.height;
+  for (let j = 0; j < 4; j++) {
+    u[4 + j] = G.bg[j];
+    u[8 + j] = j < 3 ? top[j] / 255 : top[3];
+    u[12 + j] = j < 3 ? bot[j] / 255 : bot[3];
+  }
+  for (let i = 0; i < STAR_LAYERS.length; i++) {
+    // drawStars's pattern puts a tile's pixel (tx, ty) on device px (s tx + ex dpr, s ty + ey dpr): the shader goes back
+    u[16 + i * 4] = at[i * 3 + 1] * dpr; u[17 + i * 4] = at[i * 3 + 2] * dpr; u[18 + i * 4] = 1 / (at[i * 3] * G.tw);
+  }
+  // the deep sky and its dust, each offset wrapped by its own repeat (device px)
+  const ds = deepPos[0], dw = DEEP_W * DEEP_PX * ds * dpr, dh = DEEP_H * DEEP_PX * ds * dpr, dt = DUST_T * ds;
+  const dx = deepPos[1] * dpr, dy = deepPos[2] * dpr, wrap = (v, P) => v - Math.floor(v / P) * P;
+  u[28] = wrap(dx, dw); u[29] = wrap(dy, dh); u[30] = 1 / dw; u[31] = 1 / dh;
+  u[32] = wrap(dx, dt); u[33] = wrap(dy, dt); u[34] = 1 / dt; u[35] = 0;
+  u[36] = VIG_A[glass ? 1 : 0]; u[37] = DEEP_A; u[38] = DUST_A; u[39] = DITHER;
+  let same = G.drawn;
+  for (let j = 0; same && j < u.length; j++) same = u[j] === G.last[j];
+  if (same) return true;
+  G.last.set(u); G.drawn = true;
+  gl.viewport(0, 0, cv.width, cv.height);
+  for (let j = 0; j < SKY_U.length; j++) gl.uniform4fv(G.loc[j], u, j * 4, 4);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  return true;
 }
 
 function draw() {
@@ -2363,10 +2744,17 @@ function draw() {
   if (!W || !H || !I.cam) return;
   screen(ctx);
   // glass (the desktop window): the canvas stays see-through so the window's acrylic shows behind the map
-  if (document.documentElement.classList.contains('glass')) ctx.clearRect(0, 0, W, H);
-  else { ctx.fillStyle = I.bgFill || COL.bg; ctx.fillRect(0, 0, W, H); }
-  drawSky(ctx);
-  drawStars(ctx);
+  const glass = document.documentElement.classList.contains('glass');
+  if (drawSkyGL(glass)) {
+    // the sky's picture first, pixel for pixel (it carries the page's colour when not in glass)
+    ctx.clearRect(0, 0, W, H);
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(I.skyCanvas, 0, 0); screen(ctx);
+  } else {
+    if (glass) ctx.clearRect(0, 0, W, H);
+    else { ctx.fillStyle = I.bgFill || COL.bg; ctx.fillRect(0, 0, W, H); }
+    drawSky(ctx);
+    drawStars(ctx);
+  }
   const k = K(), ks = ksOf(k);
   bendCap = BEND_MAX * ks;
   const nowC = Date.now() - I.skew;
@@ -2405,25 +2793,27 @@ function draw() {
   // agents: on slots around their conversation, eased by angle so a new agent slides in
   // running agents also orbit slowly (their offset only advances while they run, so done ones stay put)
   let orbitMoving = false;
-  const orbStep = I.still ? 0 : (TAU * (I.dt || 16)) / ORBIT_TURN_MS;
+  const orbStep = I.still ? 0 : (TAU * (I.adt ?? 16)) / ORBIT_TURN_MS;
   for (const n of I.nodes) {
     if (n.kind !== 'agent') continue;
     const sn = I.byId.get(n.parent);
     let off = I.orb.get(n.id) || 0;
     if (orbStep && n.a.state === 'run') { off = (off + orbStep) % TAU; I.orb.set(n.id, off); }
-    const target = -Math.PI / 2 + (n.idx / n.count) * Math.PI * 2 + (n.count > 1 ? 0 : Math.PI / 4) + off;
-    let a = I.ang.get(n.id);
-    if (a === undefined) a = target;
-    let d = target - a; d = Math.atan2(Math.sin(d), Math.cos(d));
-    if (Math.abs(d) > 0.002) { a += d * 0.15; orbitMoving = true; } else a = target;
-    I.ang.set(n.id, a);
+    // the slot eases (a short slide); the orbit is added after, so a steady orbit is ambient motion, not a slide
+    const target = -Math.PI / 2 + (n.idx / n.count) * Math.PI * 2 + (n.count > 1 ? 0 : Math.PI / 4);
+    let a0 = I.ang.get(n.id);
+    if (a0 === undefined) a0 = target;
+    let d = target - a0; d = Math.atan2(Math.sin(d), Math.cos(d));
+    if (Math.abs(d) > 0.002) { a0 += d * 0.15; orbitMoving = true; } else a0 = target;
+    I.ang.set(n.id, a0);
+    const a = a0 + off;
     const ro = Math.max(32 * k, sn.RG + 10 * ks) + (n.count > 10 ? 4 * ks : 0);
     n.sx = sn.sx + Math.cos(a) * ro; n.sy = sn.sy + Math.sin(a) * ro; n.R = 3.6 * ks; n.ang = a;
     const lv0 = I.agl.get(n.id);
     n.lv = glide(lv0 === undefined ? (n.a.state === 'run' ? 1 : 0) : lv0, n.a.state === 'run' ? 1 : 0, 600);
     I.agl.set(n.id, n.lv);
   }
-  if (orbitMoving) I.dirty = true;
+  if (orbitMoving) I.quick = true;
   I.k = k;
 
   const byId = I.byId;
@@ -2442,6 +2832,7 @@ function draw() {
     const want = n.s.state === 'DONE' ? 0 : AURA_MIN + ((AURA_MAX - AURA_MIN) * Math.min(n.s.calls20 || 0, AURA_CALLS)) / AURA_CALLS;
     let r0 = I.aura.get(n.id);
     r0 = r0 === undefined ? want : r0 + (want - r0) * auraK;
+    if (Math.abs(want - r0) > 0.05) I.quick = true;
     I.aura.set(n.id, r0);
     if (r0 < 0.6) { n.aura = 0; continue; }
     const R = Math.max(r0 * ks, (n.RG + 3 * ks) * Math.min(1, r0 / AURA_MIN));
@@ -2508,7 +2899,7 @@ function draw() {
     const op = 0.9 - 0.82 * age;
     const dim = focusSid && a.sid !== focusSid ? 0.45 : 1;
     ctx.strokeStyle = rgba(p.hue, Math.max(PATH_MIN_ALPHA, op * 0.6 * dim)); ctx.lineWidth = p.wrote ? 1.1 : 0.9;
-    if (flow && BUSY.has(a.s.state)) { ctx.setLineDash(p.wrote ? DASH_WROTE_FLOW : DASH_READ); ctx.lineDashOffset = -flow; }
+    if (flow && BUSY.has(a.s.state)) { I.lively = true; ctx.setLineDash(p.wrote ? DASH_WROTE_FLOW : DASH_READ); ctx.lineDashOffset = -flow; }
     else { ctx.setLineDash(p.wrote ? DASH_NONE : DASH_READ); ctx.lineDashOffset = 0; }
     curve(ctx, a, b);
     fileAlpha.set(b.id, Math.max(fileAlpha.get(b.id) || 0, op));
@@ -3011,7 +3402,9 @@ function landed(n, at) {
 // the ring's extra turn while a landing's whirl runs (0 before and after: a full turn ends where it began)
 function whirlOf(r, now) {
   const u = r ? (now - r.whirl) / WHIRL_MS : -1;
-  return u > 0 && u < 1 ? TAU * (1 - Math.pow(1 - u, 3)) : 0;
+  if (!(u > 0 && u < 1)) return 0;
+  I.quick = true;
+  return TAU * (1 - Math.pow(1 - u, 3));
 }
 // 1 -> 1 + BUMP_UP -> 1 over BUMP_MS: a quick rise, then an ease-out back
 function bumpScale(id, now) {
@@ -3019,6 +3412,7 @@ function bumpScale(id, now) {
   if (!r) return 1;
   const u = (now - r.bump) / BUMP_MS;
   if (!(u >= 0 && u < 1)) return 1;
+  I.quick = true;
   const shape = u < 0.22 ? Math.sin((u / 0.22) * (Math.PI / 2)) : Math.pow(1 - (u - 0.22) / 0.78, 3);
   return 1 + BUMP_UP * shape;
 }
@@ -3057,13 +3451,15 @@ function hubOf(n, now) {
   H.pres = glide(H.pres, live.length ? 1 : 0, 900);
   H.act = glide(H.act, Math.min(busy, 3), 1200);
   if (!I.still) {
-    const dt = I.dt || 16, a1 = Math.min(1, H.act);
+    const dt = I.adt ?? 16, a1 = Math.min(1, H.act);
     // dormant: a slow turn; working: up to twice as fast with more conversations at work
     H.spin = (H.spin + ((TAU * dt) / HUB_TURN_MS) * (0.3 + 0.7 * a1 + 0.5 * Math.max(0, H.act - 1))) % (TAU * 64);
     H.orb = (H.orb + ((TAU * dt) / SAT_TURN_MS) * (0.4 + 0.6 * a1)) % TAU;
   }
+  if (H.act > 0.05) I.lively = true; // its ring turns fast
   const u = (now - H.born) / BIRTH_MS;
   H.grow = u >= 0 && u < 1 ? backOut(u) : 1;
+  if (H.grow !== 1) I.quick = true;
   // satellites: live conversations on even slots (by id, so they keep their order), eased in and out
   live.sort((x, y) => (x.id < y.id ? -1 : 1));
   const m = Math.min(live.length, SAT_MAX), want = new Set();
@@ -3082,6 +3478,7 @@ function hubOf(n, now) {
     if (want.has(sid)) {
       let d = sat.slot - sat.a; d = Math.atan2(Math.sin(d), Math.cos(d));
       sat.a = I.still || Math.abs(d) < 0.002 ? sat.slot : sat.a + d * (1 - Math.exp(-(I.dt || 16) / 260));
+      if (sat.a !== sat.slot) I.quick = true;
     }
   }
   return H;
@@ -3096,6 +3493,7 @@ function drawHub(ctx, n) {
   const H = I.hub.get(n.id) || { pres: 0, act: 0, spin: 0, orb: 0, sats: new Map() };
   const rr = I.react && I.react.get(n.id);
   if (rr && rr.kC !== rr.kT) {
+    I.quick = true;
     rr.kC += (rr.kT - rr.kC) * (1 - Math.exp(-(I.dt || 16) / KICK_EASE_MS));
     if (Math.abs(rr.kT - rr.kC) < 1e-3) rr.kC = rr.kT;
     if (rr.kC > TAU * 64) { rr.kC -= TAU * 64; rr.kT -= TAU * 64; }
@@ -3272,7 +3670,9 @@ const gaugeOn = (s) => !s.pending && !s.handing && s.state !== 'DONE' && ctxPct(
 function glide(cur, want, tau) {
   if (I.still || cur === undefined) return want;
   const v = cur + (want - cur) * (1 - Math.exp(-(I.dt || 16) / tau));
-  return Math.abs(want - v) < 1e-3 ? want : v;
+  if (Math.abs(want - v) < 1e-3) return want;
+  I.quick = true; // still gliding: full rate until it is there
+  return v;
 }
 // A conversation's look and its eased levels, updated once per frame:
 //   key, prev, at  the look it shows, the one it morphs from and when that started (MORPH_MS)
@@ -3305,9 +3705,12 @@ function lookOf(n, now) {
   L.live = glide(L.live, s.state === 'DONE' ? 0 : 1, 700);
   L.g = glide(L.g, gaugeOn(s) ? 1 : 0, 500);
   L.frac = glide(L.frac, frac, 600);
-  if (!I.still) L.ringA = (L.ringA + ((TAU * (I.dt || 16)) / RING_TURN_MS) * L.busy) % TAU;
+  if (!I.still) L.ringA = (L.ringA + ((TAU * (I.adt ?? 16)) / RING_TURN_MS) * L.busy) % TAU;
   const u = (now - L.born) / BIRTH_MS;
   L.grow = u >= 0 && u < 1 ? backOut(u) : 1;
+  // a birth, a morph or a relay ring under way: full rate
+  if (L.grow !== 1 || (L.prev && now - L.at < MORPH_MS) || (L.relay && now - L.relay < RELAY_MS)) I.quick = true;
+  if (L.busy > 0.02 || key === 'HANDOFF') I.lively = true; // its ring of dots (or handing-off dashes) turns
   return L;
 }
 
