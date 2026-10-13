@@ -2395,10 +2395,12 @@ function openContextMenu(target, x, y) {
     const items = [];
     if (desk) {
       // every account that is on, however little of its weekly or 5-hour limit is left (Henry, 2026-10-10),
-      // less those with none left at all (Henry, 2026-10-10); all of them out: one greyed line saying so
+      // less those with none left at all (Henry, 2026-10-10); all of them out: one greyed line saying so. One line,
+      // "New session ▸ Claude A / B ...", the account picked in its submenu (Henry, 2026-10-13)
       const all = allAccounts(), ok = onAccounts().filter((a) => !acctOut(a));
-      for (const a of ok) items.push({ label: all.length === 1 ? 'New session' : `New session · ${a}`, icon: 'plus', run: () => newSession(folder, a) });
       if (!ok.length) items.push({ label: 'New session', icon: 'plus', disabled: true, note: 'every account is out of its limit' });
+      else if (all.length === 1) items.push({ label: 'New session', icon: 'plus', run: () => newSession(folder, ok[0]) });
+      else items.push({ label: 'New session', icon: 'plus', children: ok.map((a) => ({ label: `Claude ${a}`, tag: a, run: () => newSession(folder, a) })) });
     }
     const rIt = { root: repoRootOf({ root: folder }), name: target.name || repo.name || repoName(folder) };
     // orders for every conversation in it, idle and new ones too (one team), or the same text to each
