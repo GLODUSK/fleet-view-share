@@ -353,22 +353,22 @@ test('botEdits: only what changed, trimmed; the look back to auto is null; colou
   assert.deepEqual(botEdits(null, { name: 'n' }), { name: 'n' });
 });
 
-test('sizeTask: quick questions low on Sonnet, tasks medium, plans and bugs high on Opus, big ones xhigh; go-aheads keep', () => {
+test('sizeTask: quick questions low on Haiku, tasks medium on Sonnet, plans and bugs high on Opus, never Fable, big ones xhigh; go-aheads keep', () => {
   const sz = (t) => { const r = sizeTask(t); return [r.size, r.model || null, r.effort || null]; };
   // go-aheads and acknowledgements: nothing switches
   for (const t of ['ok', 'Yes, do it', 'go ahead please', '2 and 3', 'thanks!', 'sounds good, ship it', 'option 2', '', '   ']) assert.equal(sizeTask(t).size, 'keep', t);
   // quick: questions, greetings, short lookups
-  assert.deepEqual(sz('what time is it in Tokyo?'), ['quick', 'sonnet', 'low']);
-  assert.deepEqual(sz('hey'), ['quick', 'sonnet', 'low']);
+  assert.deepEqual(sz('what time is it in Tokyo?'), ['quick', 'haiku', 'low']);
+  assert.deepEqual(sz('hey'), ['quick', 'haiku', 'low']);
   assert.equal(sizeTask('Good morning!').label, 'Hello');
-  assert.deepEqual(sz('check my calendar for tomorrow'), ['quick', 'sonnet', 'low']);
-  assert.deepEqual(sz('is the deploy green'), ['quick', 'sonnet', 'low']); // a question, though it names a change
-  assert.deepEqual(sz('what should I fix first?'), ['quick', 'sonnet', 'low']);
-  assert.deepEqual(sz('can you fix the login?'), ['normal', 'opus', 'medium']); // asks for a change
-  assert.deepEqual(sz('can you remind me what we decided about the logo?'), ['quick', 'sonnet', 'low']);
-  // normal: a task to do on Opus, a longer question on Sonnet
-  assert.deepEqual(sz('fix the typo in the README heading'), ['normal', 'opus', 'medium']);
-  assert.deepEqual(sz('draft a reply to the email from the landlord saying the date works'), ['normal', 'opus', 'medium']);
+  assert.deepEqual(sz('check my calendar for tomorrow'), ['quick', 'haiku', 'low']);
+  assert.deepEqual(sz('is the deploy green'), ['quick', 'haiku', 'low']); // a question, though it names a change
+  assert.deepEqual(sz('what should I fix first?'), ['quick', 'haiku', 'low']);
+  assert.deepEqual(sz('can you fix the login?'), ['normal', 'sonnet', 'medium']); // asks for a change
+  assert.deepEqual(sz('can you remind me what we decided about the logo?'), ['quick', 'haiku', 'low']);
+  // normal: a task or a longer question on Sonnet
+  assert.deepEqual(sz('fix the typo in the README heading'), ['normal', 'sonnet', 'medium']);
+  assert.deepEqual(sz('draft a reply to the email from the landlord saying the date works'), ['normal', 'sonnet', 'medium']);
   assert.deepEqual(sz('I was wondering about the difference between the two accounts and which one I usually use for the phone app stuff these days'), ['normal', 'sonnet', 'medium']);
   // big: plans, builds, bug hunts, several parts
   assert.deepEqual(sz('plan the new onboarding flow'), ['big', 'opus', 'high']);
@@ -383,6 +383,8 @@ test('sizeTask: quick questions low on Sonnet, tasks medium, plans and bugs high
   // a quoted reply is about the quote, not sized by it
   assert.deepEqual(sz(`> ${'plan the whole architecture '.repeat(20)}\n\nok`), ['keep', null, null]);
   assert.equal(typeof sizeTask(null).label, 'string');
+  // Opus only for hard thinking, never Fable
+  for (const t of ['hi', 'fix the typo', 'plan the whole system', 'debug the race condition', 'word '.repeat(450)]) assert.notEqual(sizeTask(t).model, 'fable', t);
 });
 test('dynamicSwitch: only what is dynamic and differs; the same family stays; nothing for a go-ahead', () => {
   const ids = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5-5[1m]', 'claude-sonnet-5-5', 'claude-sonnet-5-5[1m]'];
@@ -400,6 +402,10 @@ test('dynamicSwitch: only what is dynamic and differs; the same family stays; no
   assert.deepEqual(dynamicSwitch(both, plan, { model: null, effort: 'high' }, ids), { model: 'claude-opus-5-5' }); // model unknown: set
   assert.deepEqual(dynamicSwitch(both, plan, { model: 'claude-sonnet-5-5', effort: 'high' }, []), {}); // no id on offer for it
   assert.deepEqual(dynamicSwitch(null, plan, {}, ids), {});
+  // quick on Haiku, except in a long chat (Haiku has no 1M one) or with no Haiku on offer: Sonnet
+  assert.deepEqual(dynamicSwitch(both, quick, { model: 'claude-opus-5-5', effort: 'low' }, [...ids, 'claude-haiku-5-5']), { model: 'claude-haiku-5-5' });
+  assert.deepEqual(dynamicSwitch(both, quick, { model: 'claude-opus-5-5', effort: 'low' }, [...ids, 'claude-haiku-5-5'], true), { model: 'claude-sonnet-5-5[1m]' });
+  assert.deepEqual(dynamicSwitch(both, quick, { model: 'claude-sonnet-5-5', effort: 'low' }, ids), {});
 });
 test('botFeed: model and effort switch notes are all left out', () => {
   assert.deepEqual(switchNote('/model claude-opus-5-5'), { model: 'claude-opus-5-5' });

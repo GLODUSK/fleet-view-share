@@ -56,7 +56,7 @@
 // Dynamic (a bot whose model or effort is 'dynamic', bots.js; chats.js says which conversations are such a bot's with
 // setDynamicBots; or any other chat whose Dynamic is on in its model menu, /state's dynamic, POST /chat/dynamic, the
 // same on every device; new sessions still start on the default model and effort): before each message (not a "/command" or a bash one), from the box or handed over, the message is
-// sized from its words (chats-model.js sizeTask: a quick question -> Sonnet at low effort, a task -> medium, a plan,
+// sized from its words (chats-model.js sizeTask: a quick question -> Haiku at low effort, a task -> Sonnet at medium, a plan,
 // build or bug hunt -> Opus at high, a big one -> xhigh, a go-ahead keeps what runs). Only when that differs from what
 // the session runs now (current(), dynamicSwitch) does the server switch it first (POST /bots/:id/switch, or
 // /chat/switch for a chat that is no bot's: api.js

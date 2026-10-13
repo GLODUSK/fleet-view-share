@@ -55,8 +55,8 @@
 //   switchNote(text) -> { model } | { effort } | {} | null   a note a model or effort switch left: its command, or
 //       Claude Code's answer to one ({}); null for any other note
 //   sizeTask(text) -> { size, model?, effort?, label }   Dynamic's guess at how big a message is, from its words only:
-//       size 'keep' (a go-ahead: "ok", "yes do it", "2 and 3": nothing switches), 'quick' (sonnet, low), 'normal'
-//       (a question: sonnet, medium; a task: opus, medium), 'big' (a plan, build, bug hunt or several parts: opus,
+//       size 'keep' (a go-ahead: "ok", "yes do it", "2 and 3": nothing switches), 'quick' (haiku, low), 'normal'
+//       (a question or a task: sonnet, medium), 'big' (a plan, build, bug hunt or several parts: opus,
 //       high) or 'huge' (a big plan, a hard bug or a long brief: opus, xhigh); label says which
 //   dynamicSwitch(dyn, size, cur, modelIds, long) -> { model?, effort? }   what to switch before that message: only
 //       what is dynamic (dyn { model, effort } booleans) and differs from cur { model, effort } (a model of the same
@@ -501,9 +501,10 @@ export function botEdits(bot, v) {
 }
 
 // ---------- Dynamic: the model and effort sized for each message ----------
-// A fast local guess from the words alone (no model is asked): quick questions and lookups run on Sonnet at low
-// effort, so they come back fast; a task to do on Opus at medium; a plan, design, build or bug hunt on Opus at high,
-// and a big plan or a hard bug at xhigh. A short go-ahead ("ok", "yes do it", "2 and 3") keeps what the bot runs now:
+// A fast local guess from the words alone (no model is asked). Opus 5.5 only for hard thinking, else Haiku or Sonnet,
+// never Fable (Henry, 2026-10-12): quick questions and lookups run on Haiku at low effort, so they come back fast (on
+// Sonnet in a bot's long chat, which needs a 1M-context model); a task or a longer question on Sonnet at medium; a
+// plan, design, build or bug hunt on Opus at high, and a big plan or a hard bug at xhigh. A short go-ahead ("ok", "yes do it", "2 and 3") keeps what the bot runs now:
 // it carries on the work before it (a plan's "go ahead" is no quick question), and nothing is switched for it.
 const ACK_WORDS = new Set(('ok okay k kk yes yep yeah yup ya sure go ahead on do it proceed continue carry sounds good '
   + 'fine perfect great nice awesome thanks thank you thx ty cool lgtm ship approve approved agreed agree right correct '
@@ -521,10 +522,10 @@ const BIG = /\b(?:whole|entire|full|end[- ]to[- ]end|from scratch|across|every|s
 const LIST_ITEM = /^\s*(?:[-*•]|\d+[.)])\s+\S/;
 const SIZES = {
   keep: { size: 'keep', label: 'Follow-up' },
-  quick: { size: 'quick', model: 'sonnet', effort: 'low', label: 'Quick question' },
-  hello: { size: 'quick', model: 'sonnet', effort: 'low', label: 'Hello' },
+  quick: { size: 'quick', model: 'haiku', effort: 'low', label: 'Quick question' },
+  hello: { size: 'quick', model: 'haiku', effort: 'low', label: 'Hello' },
   question: { size: 'normal', model: 'sonnet', effort: 'medium', label: 'Question' },
-  task: { size: 'normal', model: 'opus', effort: 'medium', label: 'Task' },
+  task: { size: 'normal', model: 'sonnet', effort: 'medium', label: 'Task' },
   plan: { size: 'big', model: 'opus', effort: 'high', label: 'Plan or build' },
   bug: { size: 'big', model: 'opus', effort: 'high', label: 'Bug hunt' },
   parts: { size: 'big', model: 'opus', effort: 'high', label: 'Several parts' },
@@ -562,13 +563,14 @@ export function sizeTask(text) {
 // an effort or null when unknown), ids the model ids on offer (compose.js MODEL_IDS), long true for a bot (the
 // family's 1M-context one is taken, so its long chat still fits; any other chat takes the 200k one, else the first).
 // -> { model?, effort? }: only what differs; a model of the same family (Opus 1M for Opus) is not switched, and
-// nothing is for a follow-up
+// nothing is for a follow-up. Haiku has no 1M-context model, so a long chat (or no Haiku on offer) takes Sonnet
 export function dynamicSwitch(dyn, size, cur, ids = [], long = false) {
   const out = {};
   if (!dyn || !size || size.size === 'keep') return out;
   const fam = (m) => (/^claude-([a-z]+)-/.exec(String(m || '')) || /^([a-z]+)$/.exec(String(m || '')) || [])[1] || null;
-  if (dyn.model && size.model && fam(cur && cur.model) !== size.model) {
-    const id = ids.find((k) => fam(k) === size.model && /\[1m\]$/i.test(k) === !!long) || ids.find((k) => fam(k) === size.model);
+  const want = size.model === 'haiku' && (long || !ids.some((k) => fam(k) === 'haiku')) ? 'sonnet' : size.model;
+  if (dyn.model && want && fam(cur && cur.model) !== want) {
+    const id = ids.find((k) => fam(k) === want && /\[1m\]$/i.test(k) === !!long) || ids.find((k) => fam(k) === want);
     if (id) out.model = id;
   }
   if (dyn.effort && size.effort && (cur && cur.effort) !== size.effort) out.effort = size.effort;
