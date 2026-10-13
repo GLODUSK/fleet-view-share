@@ -1033,19 +1033,13 @@ function addRepoMenuItem(at = null) {
   };
 }
 // ---------- short lists ----------
-// The "recent" lists (these menus and the finished strip) start short: today's, at most SHORT_N (or the
+// The finished strip starts short: today's, at most SHORT_N (or the
 // SHORT_NONE newest when none is from today). The rest waits behind "Show N more". list: newest first.
 const SHORT_N = 5, SHORT_NONE = 3;
 function shortCount(list, timeOf) {
   const today = new Date().setHours(0, 0, 0, 0);
   const n = list.filter((x) => (timeOf(x) || 0) >= today).length;
   return Math.min(list.length, n ? Math.min(SHORT_N, n) : SHORT_NONE);
-}
-// a submenu's items cut to the short list, with "Show N more" opening the rest in place (ctxmenu.js)
-function shortMenu(kids, timeOf) {
-  const n = shortCount(kids, timeOf);
-  if (kids.length - n < 2) return kids; // one more row is no shorter than its "Show 1 more"
-  return [...kids.slice(0, n), { label: `Show ${kids.length - n} more`, icon: 'chevron', more: kids.slice(n) }];
 }
 
 // the removed repos (hiddenRepos) still off the list, newest first, all of them
@@ -1085,9 +1079,9 @@ function forgetRemovedRepos(list) {
   render();
 }
 
-// "Removed workspaces ▸" (empty space's right-click, only while there are some): every removed repo, newest first (the
-// short list, then "Show N more"), each added back with a click like "Add workspace" (POST /repos/add takes it off the
-// server's hidden list too), then "Add back all" and "Clear list"
+// "Removed workspaces ▸" (empty space's right-click, only while there are some): "Add back all" and "Clear list", then
+// every removed repo, newest first, in a box that scrolls (Henry, 2026-10-12: no 45-row menu), each added back with a
+// click like "Add workspace" (POST /repos/add takes it off the server's hidden list too)
 function removedReposMenuItem(at = null) {
   const list = removedRepoList();
   if (!list.length) return null;
@@ -1097,12 +1091,12 @@ function removedReposMenuItem(at = null) {
     run: async () => { const err = await addRepoPath(h.root, at); if (err) toast(err, C.red); },
   }));
   return {
-    label: 'Removed workspaces', icon: 'hide', badge: String(list.length),
+    label: 'Removed workspaces', icon: 'hide', badge: String(list.length), scroll: true,
     children: [
-      ...shortMenu(rows, (k) => k.at),
-      { sep: true },
       ...(list.length > 1 ? [{ label: 'Add back all', icon: 'plus', note: `${list.length} workspaces`, run: () => addBackRepos(list) }] : []),
       { label: 'Clear list', icon: 'close', note: 'forget them: each comes back on its own if it works again', run: () => forgetRemovedRepos(list) },
+      { sep: true },
+      ...rows,
     ],
   };
 }
@@ -1122,9 +1116,9 @@ function removedFor(folder = null) {
     && (!keys || (r.repo && keys.has(normRoot(r.repo.root)))));
 }
 const removedAgo = (ms) => (ms < 60e3 ? 'just now' : ms < 3600e3 ? `${Math.round(ms / 60e3)}m ago` : ms < 48 * 3600e3 ? `${Math.round(ms / 3600e3)}h ago` : `${Math.round(ms / 86400e3)}d ago`);
-// the "Removed conversations" item with its submenu, or null when there are none: all of them (the short list,
-// then "Show N more"), each with its own ▸ (Continue, Show again, Forget), and with two or more "Show all again",
-// "Continue all" and "Forget all" on top
+// the "Removed conversations" item with its submenu, or null when there are none: all of them in a box that scrolls
+// (Henry, 2026-10-12: no 45-row menu), each with its own ▸ (Continue, Show again, Forget), and with two or more
+// "Show all again", "Continue all" and "Forget all" on top
 function removedMenuItem(list, withRepo) {
   if (!list.length) return null;
   const now = Date.now(), n = list.length;
@@ -1135,8 +1129,8 @@ function removedMenuItem(list, withRepo) {
     { sep: true },
   ];
   return {
-    label: 'Removed conversations', icon: 'hide', note: `${n}`,
-    children: [...all, ...shortMenu(list.map((r) => ({
+    label: 'Removed conversations', icon: 'hide', note: `${n}`, scroll: true,
+    children: [...all, ...list.map((r) => ({
       label: r.name, tag: isAcct(r.account) ? r.account : null, icon: 'shell',
       note: `${withRepo ? `${r.repo ? r.repo.name : 'no workspace'} · ` : ''}removed ${removedAgo(now - (r.removedAt || now))}`, at: r.removedAt || now,
       children: [
@@ -1144,7 +1138,7 @@ function removedMenuItem(list, withRepo) {
         { label: 'Show again', icon: 'reply', note: 'back on the page, nothing starts', run: () => showRemovedAgain([r]) },
         { label: 'Forget', icon: 'trash', note: 'off this list for good', run: () => forgetRemoved([r]) },
       ],
-    })), (k) => k.at)],
+    }))],
   };
 }
 // "Show again": off the hidden list (its removed workspace back too, as Continue does) without starting anything.

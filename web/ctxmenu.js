@@ -25,6 +25,8 @@
 //       stay (a submenu item): picking it runs it and keeps the menu open; the parent item's refresh() returns
 //       the parent item anew (label, badge, children) to redraw both menus with (toggles: Accounts ▸ ✓ A); in a
 //       drilled-in level the drilled item's refresh() redraws that level (a checklist: Team ▸ Start team ▸)
+//       scroll (an item with children): its submenu is a short box (about ten rows) with a scroll bar, for a long
+//       list (Removed conversations ▸) that would otherwise run the height of the window
 //   closeCtxMenu()   ctxMenuOpen()
 //
 // Frosted like the repo menu (same .menu surface and tokens). Keys while it is open: ↑↓ (and Home / End)
@@ -319,6 +321,7 @@ function openSub(i, focus) {
   if (!hasKids(it)) return;
   subOf = i;
   subStack = [];
+  subEl.classList.toggle('ctx-scroll', !!it.scroll);
   if (Array.isArray(it.children)) subItems = it.children.filter(Boolean);
   else { subItems = [{ label: 'loading…', icon: 'clock', disabled: true }]; loadKids(it, i); }
   subSel = focus ? subItems.findIndex((_, j) => subPickable(j)) : -1;
@@ -363,6 +366,7 @@ function closeSub() {
   if (!subEl || subOf < 0) return;
   subOf = -1; subItems = []; subSel = -1; level = 'main'; subStack = [];
   subEl.hidden = true;
+  subEl.classList.remove('ctx-scroll');
   subEl.innerHTML = '';
   syncFrost();
   mark();
