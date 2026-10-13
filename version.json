@@ -1,5 +1,4 @@
 {
-  "version": "1.0.213",
-  "commit": "e04de9eceefea95593f6f978cb318059f58e5067",
-  "published": "2026-10-13"
+  "version": "1.0",
+  "about": "The full version is this number plus .n, where n counts the commits on main (first parent) since this file last changed (version.js); edit the number for a bigger step (1.1, 2.0) and n starts again at 0; scripts/publish-share.js writes the full version into the share repo's copy."
 }

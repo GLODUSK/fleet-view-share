@@ -167,6 +167,7 @@ export function parseRewind(lines) {
 }
 // does a /rewind entry ("Reply ALPHA.…", its first line cut to the width) show this message?
 const flat = (v) => String(v || '').replace(/\[Image #\d+\]\s*/g, '').replace(/\s+/g, ' ').trim();
+const bare = (v) => flat(v).replace(/\s/g, ''); // with no spaces at all: the prompt box wraps a long word anywhere
 export function rewindMatches(sel, text) {
   const e = flat(sel).replace(/…$/, '').trim(), t = flat(String(text || '').split('\n')[0]);
   if (!e || e === '(current)') return false;
@@ -1223,93 +1224,129 @@ export function mountCompose(slot, s) {
   }
   // A session not running here is started first (as Send does), and one mid-turn is stopped first (Esc, as the
   // Stop button does), waiting until it is idle: the rewind never fails just because of either.
-  // edit: the text to send in the message's place once Claude Code has restored (Edit in the feed)
+  // edit: the text to send in the message's place once Claude Code has restored (Edit in the feed). An Edit that
+  // doesn't go through puts that text back in this box: it is never dropped.
   async function rewindTo(id, text, nth, edit = null) {
-    if (id !== st.id || working) return;
-    if (remoteOn()) { contNeeded(edit != null ? 'Edit' : 'Rewind'); return; } // /rewind's list is drawn on the machine that runs it
-    if (!termApi()) { err(noTermMsg('Rewinding')); return; }
-    if (st.menu) { err('Answer the question above first'); return; }
-    working = true;
-    st.step = 'Rewinding…'; drawNotes();
+    let handed = false; // the edited text went on (to the restore, or sent); else it goes back to the box
     try {
-      if (!hosts.get(id)?.alive) {
-        if (openElsewhere(st.s)) { err('It is open in another window: end it there, then rewind here'); return; }
-        const r = await ensureLive(st.s, { sizeEl: sizeEl(), ready: drawnNow, onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
-        if (st.id !== id) return;
-        st.step = 'Rewinding…'; drawNotes();
-        if (!r || !r.ok) { err((r && r.message) || 'Could not start the session to rewind it'); return; }
-        for (let i = 0; i < 60 && !screenReady(id); i++) await sleep(150);
-      }
-      const midTurn = () => hosts.get(id)?.status === 'busy' || !!parseSpinner(screenRows(id, 40))?.strong;
-      if (midTurn()) {
-        st.step = 'Stopping Claude, then rewinding…'; drawNotes();
-        if (!writeKey('\x1b')) return;
-        let idle = false;
-        for (let i = 0; i < 60 && !idle; i++) { await sleep(250); idle = !midTurn(); }
-        if (!idle) { err('Claude didn\'t stop: press Esc in the Session tab, then rewind'); return; }
-        await sleep(500); // let the prompt come back before /rewind is typed (two quick Escs open Claude Code's own rewind)
-        st.step = 'Rewinding…'; drawNotes();
-      }
-      if (menuNow(id)) { err('Claude is asking something: answer it first, then rewind'); return; }
-      if (screenReady(id) && !(await closePanel(id))) { err('A panel is open in the session: close it (Esc) first'); return; }
-      const b = boxNow(id);
-      if (!b || b.text) { err('Something is typed in the session\'s prompt: clear it first'); return; }
-      if (growRows(id, REWIND_ROWS)) await sleep(600); // the pty takes the new size and Claude Code redraws
-      await pasteKeys(id, '/rewind');
-      await sleep(ENTER_DELAY_MS);
-      writeKey('\r');
-      let r = null;
-      for (let i = 0; i < 20 && !r; i++) { await sleep(150); r = parseRewind(screenRows(id, PANEL_LINES)); }
-      if (!r) { err('/rewind didn\'t open its list'); return; }
-      let seen = 0, last = r.sig;
-      for (let i = 0; i < 500; i++) {
-        if (!writeKey('\x1b[A')) return;
-        let n = null;
-        for (let j = 0; j < 8; j++) { await sleep(60); n = parseRewind(screenRows(id, PANEL_LINES)); if (!n || n.sig !== last) break; }
-        if (!n) { err('The /rewind list closed'); return; }
-        if (n.sig === last) break; // the top, and it wasn't there
-        last = n.sig;
-        if (rewindMatches(n.sel, text) && seen++ === nth) {
-          writeKey('\r');
-          st.rewound = { id, text, at: Date.now(), edit: edit || null, sawMenu: false, emptyAt: 0 };
-          return;
-        }
-      }
-      writeKey('\x1b');
-      err('That message isn\'t in /rewind\'s list');
-    } finally { working = false; st.step = ''; drawNotes(); }
+      if (id !== st.id) return;
+      if (working) { err('Wait a moment: the last Unsend or Rewind is still going'); return; }
+      if (remoteOn()) { contNeeded(edit != null ? 'Edit' : 'Rewind'); return; } // /rewind's list is drawn on the machine that runs it
+      if (!termApi()) { err(noTermMsg('Rewinding')); return; }
+      if (st.menu) { err('Answer the question above first'); return; }
+      working = true;
+      st.step = 'Rewinding…'; drawNotes();
+      let how = null;
+      try { how = await rewindSteps(id, text, nth, edit); } finally { working = false; st.step = ''; drawNotes(); }
+      if (how === 'picked') handed = true;
+      else if (how === 'gone') { handed = true; await restored(id, text, edit); }
+    } finally { if (edit && !handed) putBack(edit, id); }
   }
-  // after the restore Claude Code puts the message back in its prompt: it moves to this box, to edit and resend
+  // A message Claude hadn't answered yet: the Esc that stops Claude takes it back out of the conversation, into
+  // Claude Code's prompt (2.1.296, an Esc a second or so after sending), and /rewind no longer lists it. What the Esc
+  // put in the prompt is cleared; when it was this message, or the list doesn't have this one any more, the
+  // conversation is already back to before it ('gone'). -> 'picked' (its entry chosen: the restore menu is up),
+  // 'gone', or null (it said why)
+  async function rewindSteps(id, text, nth, edit) {
+    if (!hosts.get(id)?.alive) {
+      if (openElsewhere(st.s)) { err('It is open in another window: end it there, then rewind here'); return null; }
+      const r = await ensureLive(st.s, { sizeEl: sizeEl(), ready: drawnNow, onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
+      if (st.id !== id) return null;
+      st.step = 'Rewinding…'; drawNotes();
+      if (!r || !r.ok) { err((r && r.message) || 'Could not start the session to rewind it'); return null; }
+      for (let i = 0; i < 60 && !screenReady(id); i++) await sleep(150);
+    }
+    const midTurn = () => hosts.get(id)?.status === 'busy' || !!parseSpinner(screenRows(id, 40))?.strong;
+    let took = ''; // what the Esc put back in Claude Code's prompt
+    if (midTurn()) {
+      const typed = boxNow(id)?.text || ''; // typed in the Session tab: stays, and the check below stops the rewind
+      st.step = 'Stopping Claude, then rewinding…'; drawNotes();
+      if (!writeKey('\x1b')) return null;
+      let idle = false;
+      for (let i = 0; i < 60 && !idle; i++) { await sleep(250); idle = !midTurn(); }
+      if (!idle) { err('Claude didn\'t stop: press Esc in the Session tab, then rewind'); return null; }
+      await sleep(500); // let the prompt come back before /rewind is typed (two quick Escs open Claude Code's own rewind)
+      const b1 = typed ? null : boxNow(id);
+      if (b1 && b1.text) {
+        took = b1.text;
+        if (!(await clearBox(id))) { err('Couldn\'t clear the prompt: the stopped message is in it (Session tab)'); return null; }
+      }
+      st.step = 'Rewinding…'; drawNotes();
+    }
+    if (took && bare(took) === bare(text)) return 'gone';
+    if (menuNow(id)) { err('Claude is asking something: answer it first, then rewind'); return null; }
+    if (screenReady(id) && !(await closePanel(id))) { err('A panel is open in the session: close it (Esc) first'); return null; }
+    const b = boxNow(id);
+    if (!b || b.text) { err('Something is typed in the session\'s prompt: clear it first'); return null; }
+    if (growRows(id, REWIND_ROWS)) await sleep(600); // the pty takes the new size and Claude Code redraws
+    await pasteKeys(id, '/rewind');
+    await sleep(ENTER_DELAY_MS);
+    writeKey('\r');
+    let r = null;
+    for (let i = 0; i < 20 && !r; i++) { await sleep(150); r = parseRewind(screenRows(id, PANEL_LINES)); }
+    if (!r) { err('/rewind didn\'t open its list'); return null; }
+    let seen = 0, last = r.sig;
+    for (let i = 0; i < 500; i++) {
+      if (!writeKey('\x1b[A')) return null;
+      let n = null;
+      for (let j = 0; j < 8; j++) { await sleep(60); n = parseRewind(screenRows(id, PANEL_LINES)); if (!n || n.sig !== last) break; }
+      if (!n) { err('The /rewind list closed'); return null; }
+      if (n.sig === last) break; // the top, and it wasn't there
+      last = n.sig;
+      if (rewindMatches(n.sel, text) && seen++ === nth) {
+        writeKey('\r');
+        st.rewound = { id, text, at: Date.now(), edit: edit || null, sawMenu: false, emptyAt: 0 };
+        return 'picked';
+      }
+    }
+    writeKey('\x1b');
+    if (took) { await sleep(300); return 'gone'; } // (the list closes first)
+    err('That message isn\'t in /rewind\'s list');
+    return null;
+  }
+  // after the restore Claude Code puts the message back in its prompt: cleared there, it moves to this box
   async function takeRewound() {
     const r = st.rewound;
     if (!r || r.id !== st.id || working) return;
     const box = boxNow(r.id);
     if (!box) return;
-    if (Date.now() - r.at > 120000) { st.rewound = null; if (r.edit) putBack(r.edit); return; }
+    if (Date.now() - r.at > 120000) { st.rewound = null; if (r.edit) putBack(r.edit, r.id); return; }
     if (!box.text) {
       // an Edit whose restore left the conversation as it was ("Restore code" only, or "Never mind"): the prompt
       // stays empty once the restore menu is gone, and the edited text waits in this box instead of going in
       if (r.edit && r.sawMenu) {
         if (!r.emptyAt) r.emptyAt = Date.now();
-        else if (Date.now() - r.emptyAt > 1500) { st.rewound = null; putBack(r.edit); }
+        else if (Date.now() - r.emptyAt > 1500) { st.rewound = null; putBack(r.edit, r.id); }
       }
       return;
     }
     st.rewound = null;
     working = true;
-    try { if (!(await clearBox(r.id))) return; } finally { working = false; }
-    if (st.id !== r.id) return;
-    if (r.edit) { send(r.edit); return; }
-    if (ta.value.trim()) return;
-    ta.value = r.text;
+    let clear = false;
+    try { clear = await clearBox(r.id); } finally { working = false; }
+    if (!clear) { err('Couldn\'t clear the prompt: the old message is still in it (Session tab)'); if (r.edit) putBack(r.edit, r.id); return; }
+    await restored(r.id, r.text, r.edit);
+  }
+  // the conversation is back to just before the message: the edited text goes in its place (Edit; back to this box
+  // when it can't), or the message goes to this box, to edit and resend (Rewind)
+  async function restored(id, text, edit) {
+    if (edit) {
+      if (st.id !== id || (await send(edit)) !== true) putBack(edit, id);
+      return;
+    }
+    if (st.id !== id || ta.value.trim()) return;
+    ta.value = text;
     saveDraftSoon(); grow(); drawSend();
     ta.focus();
-    ta.setSelectionRange(r.text.length, r.text.length);
+    ta.setSelectionRange(text.length, text.length);
   }
 
-  // an edited message that didn't go in: into the box (after what is typed there already), to send or drop
-  function putBack(text) {
-    ta.value = ta.value.trim() ? `${ta.value.replace(/\s+$/, '')}\n\n${text}` : text;
+  // an edited message that didn't go in: into the box (after what is typed there already), to send or drop; into
+  // its conversation's draft when this box shows another one now
+  function putBack(text, id = st.id) {
+    const join = (v) => (v.trim() ? `${v.replace(/\s+$/, '')}\n\n${text}` : text);
+    if (id !== st.id) { const d = draftOf(id); d.text = join(d.text); storeText(id, d.text); return; }
+    ta.value = join(ta.value);
     saveDraftSoon(); grow(); drawSend();
   }
 
