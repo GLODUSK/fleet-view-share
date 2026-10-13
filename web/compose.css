@@ -29,23 +29,49 @@
 /* ---------- a menu Claude shows: permission, question, plan approval ---------- */
 .cmp-card {
   --cmp-tone: 255, 194, 74; /* gold: a permission; a question (.q) is violet */
-  display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 12px; min-width: 0;
+  position: relative; display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 12px; min-width: 0;
   border-radius: var(--radius);
   background: radial-gradient(120% 90px at 0 0, rgba(var(--cmp-tone), 0.10), transparent 75%), var(--glass-bg-strong);
   border: 1px solid rgba(var(--cmp-tone), 0.26);
   box-shadow: inset 0 1px 0 rgba(var(--cmp-tone), 0.16), 0 12px 34px rgba(0, 0, 0, 0.34);
-  animation: cmp-rise 200ms var(--ease);
 }
+/* it grows open and folds away by itself (compose.js moveCard); opened with its conversation (.still), it fades in */
+.cmp-card.still { animation: cmp-rise 200ms var(--ease); }
 .cmp-card.q { --cmp-tone: 164, 123, 255; }
 html.glass .cmp-card { background: radial-gradient(120% 90px at 0 0, rgba(var(--cmp-tone), 0.10), transparent 75%), rgba(26, 23, 30, 0.82); -webkit-backdrop-filter: blur(24px) saturate(1.3); backdrop-filter: blur(24px) saturate(1.3); }
 .cmp-card:focus { outline: none; }
 .cmp-card:focus-visible { border-color: rgba(var(--cmp-tone), 0.6); }
 @keyframes cmp-rise { from { opacity: 0; transform: translateY(4px); } }
+/* an answer going in (sent), or Fleet View still pressing its keys (busy): a light runs along the top edge */
+.cmp-card::after {
+  content: ''; position: absolute; left: 18px; right: 18px; top: -1px; height: 2px; border-radius: 2px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(var(--cmp-tone), 0.95), transparent) 0 0 / 40% 100% no-repeat;
+  opacity: 0; transition: opacity 200ms var(--ease);
+}
+.cmp-card.sent::after, .cmp-card.busy::after { opacity: 1; animation: cmp-sweep 1.1s linear infinite; }
+@keyframes cmp-sweep { from { background-position: -70% 0; } to { background-position: 170% 0; } }
+/* a new question (compose.js buildCard): its parts come in one after another, the icon with a little spring. Not
+   when the card opens with the conversation (.still): it is just there */
+@keyframes cmp-in { from { opacity: 0; translate: 0 6px; } }
+@keyframes cmp-pop { from { opacity: 0; scale: 0.6; } }
+.cmp-card-h { animation: cmp-in 280ms var(--ease) backwards; }
+.cmp-shield { animation: cmp-pop 460ms cubic-bezier(.34, 1.56, .64, 1) 40ms backwards; }
+.cmp-ctx { animation: cmp-in 280ms var(--ease) 50ms backwards; }
+.cmp-opts > .cmp-opt, .cmp-hl { animation: cmp-in 300ms var(--ease) calc(70ms + var(--i, 0) * 38ms) backwards; }
+.cmp-card-f { animation: cmp-in 300ms var(--ease) calc(70ms + var(--n, 0) * 38ms) backwards; }
+.cmp-card.still :is(.cmp-card-h, .cmp-shield, .cmp-ctx, .cmp-opt, .cmp-hl, .cmp-card-f) { animation: none; }
 .cmp-card-h { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
 .cmp-shield {
   flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 9px;
   color: rgb(var(--cmp-tone)); background: rgba(var(--cmp-tone), 0.13); border: 1px solid rgba(var(--cmp-tone), 0.22);
+  position: relative;
 }
+.cmp-shield::after {
+  content: ''; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none;
+  animation: cmp-wait 2.8s ease-out 1s infinite;
+}
+@keyframes cmp-wait { 0% { box-shadow: 0 0 0 0 rgba(var(--cmp-tone), 0.4); } 55%, 100% { box-shadow: 0 0 0 8px rgba(var(--cmp-tone), 0); } }
+.cmp-card:is(.sent, .busy) .cmp-shield::after { animation: none; }
 .cmp-card-hd { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding-top: 4px; }
 .cmp-card-t { font: 600 14.5px/1.35 var(--font-display, var(--font-ui)); color: var(--text); overflow-wrap: anywhere; }
 /* a question's header (its tab in Claude Code), ticked once answered */
@@ -54,17 +80,22 @@ html.glass .cmp-card { background: radial-gradient(120% 90px at 0 0, rgba(var(--
   display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 7px; border-radius: 999px;
   background: rgba(var(--cmp-tone), 0.14); color: rgb(var(--cmp-tone)); font: 600 10.5px/1 var(--font-ui); letter-spacing: 0.04em; text-transform: uppercase;
 }
+.cmp-tag { transition: background-color 220ms var(--ease), color 220ms var(--ease); }
+.cmp-tag svg { display: none; }
 .cmp-tag.done { background: rgba(255, 255, 255, 0.06); color: var(--dim); }
+.cmp-tag.done svg { display: block; }
 .cmp-ctx {
   margin: 0; padding: 8px 10px; max-height: 11.5em; overflow: auto; border-radius: var(--radius-sm);
   background: rgba(0, 0, 0, 0.26); border: 1px solid var(--line);
   font: 12px/1.45 var(--font-mono); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.cmp-opts { display: flex; flex-direction: column; gap: 4px; }
+.cmp-opts { position: relative; display: flex; flex-direction: column; gap: 4px; }
+.cmp-opts > .cmp-opt { position: relative; }
 .cmp-opt {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; text-align: left; cursor: pointer;
   border-radius: var(--radius-sm); border: 1px solid transparent; background: rgba(255, 255, 255, 0.035); color: var(--text);
-  font: 13px/1.4 var(--font-ui); transition: background-color 160ms var(--ease), border-color 160ms var(--ease);
+  font: 13px/1.4 var(--font-ui);
+  transition: background-color 160ms var(--ease), border-color 160ms var(--ease), opacity 200ms var(--ease), scale 120ms var(--ease);
 }
 .cmp-opt:hover { background: rgba(255, 255, 255, 0.075); border-color: var(--glass-edge); }
 .cmp-opt.ticked { background: rgba(63, 216, 255, 0.06); }
@@ -85,6 +116,23 @@ html.glass .cmp-card { background: radial-gradient(120% 90px at 0 0, rgba(var(--
 .cmp-opt.cmp-chat { background: transparent; border: 1px dashed var(--glass-edge); color: var(--dim); }
 .cmp-opt.cmp-chat:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
 .cmp-opt.cmp-chat.on { color: var(--text); border-style: solid; }
+/* the highlight under the option the ❯ is on (compose.js placeHl): it glides from one to the next, the way the tabs'
+   does; the row itself goes clear over it */
+.cmp-hl {
+  position: absolute; left: 0; right: 0; top: 0; height: 0; border-radius: var(--radius-sm); pointer-events: none; opacity: 0;
+  border: 1px solid rgba(63, 216, 255, 0.42); background: rgba(63, 216, 255, 0.09); box-shadow: 0 0 0 3px rgba(63, 216, 255, 0.06);
+}
+.cmp-hl.placed { opacity: 1; }
+.cmp-hl.glide { transition: transform 240ms var(--ease), height 240ms var(--ease), opacity 160ms var(--ease); }
+.cmp-opts.has-hl > .cmp-opt.on { background: transparent; border-color: transparent; box-shadow: none; }
+.cmp-opts.has-hl > .cmp-opt.on:hover { background: rgba(63, 216, 255, 0.05); }
+/* sent: the picked answer stays lit, with a ring going out of it, while the rest step back */
+.cmp-card.sent :is(.cmp-opt, .cmp-submit, .cmp-esc):not(.chosen) { opacity: 0.35; }
+.cmp-card.sent .chosen:disabled { opacity: 1; }
+.cmp-opts > .cmp-opt.chosen { border-color: rgba(63, 216, 255, 0.6); background: rgba(63, 216, 255, 0.14); }
+.cmp-opt.chosen::after { content: ''; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none; animation: cmp-ping 700ms var(--ease) forwards; }
+.cmp-submit.chosen, .cmp-esc.chosen { animation: cmp-ping 700ms var(--ease); }
+@keyframes cmp-ping { from { box-shadow: 0 0 0 0 rgba(63, 216, 255, 0.5); } to { box-shadow: 0 0 0 9px rgba(63, 216, 255, 0); } }
 .cmp-l small { display: block; margin-top: 2px; color: var(--dim); font: 12px/1.4 var(--font-ui); }
 .cmp-k { color: var(--faint); }
 /* a multiple-choice question's box */
@@ -92,7 +140,11 @@ html.glass .cmp-card { background: radial-gradient(120% 90px at 0 0, rgba(var(--
   flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; margin-top: 2px; border-radius: 4px;
   border: 1.5px solid var(--dim); color: #061018;
 }
-.cmp-cb { transition: background-color 140ms var(--ease), border-color 140ms var(--ease); }
+.cmp-cb { transition: background-color 140ms var(--ease), border-color 140ms var(--ease), box-shadow 200ms var(--ease), scale 280ms cubic-bezier(.34, 1.56, .64, 1); }
+.cmp-cb svg { opacity: 0; scale: 0.5; transition: opacity 120ms var(--ease), scale 280ms cubic-bezier(.34, 1.56, .64, 1); }
+.cmp-cb path { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 220ms var(--ease) 60ms; }
+.cmp-cb.on svg { opacity: 1; scale: 1; }
+.cmp-cb.on path { stroke-dashoffset: 0; }
 .cmp-opt:hover .cmp-cb:not(.on) { border-color: var(--text); }
 .cmp-cb.on { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 10px rgba(63, 216, 255, 0.35); }
 /* "Type something": a text box in the card */
@@ -107,6 +159,7 @@ html.glass .cmp-card { background: radial-gradient(120% 90px at 0 0, rgba(var(--
 .cmp-free-go {
   flex: none; display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; cursor: pointer;
   border: 1px solid var(--glass-edge); background: rgba(255, 255, 255, 0.05); color: var(--dim);
+  transition: background-color 160ms var(--ease), color 160ms var(--ease), opacity 200ms var(--ease), scale 120ms var(--ease);
 }
 .cmp-free-go:hover { background: rgba(63, 216, 255, 0.16); color: var(--cyan); }
 .cmp-free-go:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
@@ -115,20 +168,30 @@ html.glass .cmp-card { background: radial-gradient(120% 90px at 0 0, rgba(var(--
 .cmp-submit {
   height: 26px; padding: 0 14px; border-radius: var(--radius-sm); cursor: pointer;
   border: 1px solid rgba(63, 216, 255, 0.5); background: rgba(63, 216, 255, 0.14); color: var(--cyan); font: 600 12px/1 var(--font-ui);
+  transition: background-color 200ms var(--ease), border-color 200ms var(--ease), color 200ms var(--ease), box-shadow 200ms var(--ease), opacity 200ms var(--ease), scale 120ms var(--ease);
 }
 .cmp-submit:hover { background: rgba(63, 216, 255, 0.24); }
 .cmp-submit.ready { background: var(--cyan); border-color: var(--cyan); color: #061018; box-shadow: 0 4px 14px rgba(63, 216, 255, 0.28); }
 .cmp-submit.ready:hover { filter: brightness(1.08); }
+.cmp-submit.on { box-shadow: 0 0 0 3px rgba(63, 216, 255, 0.2); }
+.cmp-submit.ready.on { box-shadow: 0 0 0 3px rgba(63, 216, 255, 0.25), 0 4px 14px rgba(63, 216, 255, 0.28); }
 .cmp-submit:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .cmp-submit:disabled { opacity: 0.5; cursor: default; }
 .cmp-esc {
   height: 26px; padding: 0 12px; border-radius: var(--radius-sm); cursor: pointer;
   border: 1px solid var(--glass-edge); background: rgba(255, 255, 255, 0.05); color: var(--dim); font: 600 12px/1 var(--font-ui);
+  transition: background-color 160ms var(--ease), color 160ms var(--ease), opacity 200ms var(--ease), scale 120ms var(--ease);
 }
 .cmp-esc:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
 .cmp-esc:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .cmp-card-hint { color: var(--faint); font: 11.5px/1.3 var(--font-ui); }
 .cmp-card-f .cmp-card-hint { margin-left: auto; }
+/* a press gives a little */
+@media (prefers-reduced-motion: no-preference) {
+  .cmp-opt:not(.cmp-free):not(:disabled):active { scale: 0.99; }
+  .cmp-opt:not(:disabled):active .cmp-cb { scale: 0.82; }
+  :is(.cmp-submit, .cmp-esc, .cmp-free-go):not(:disabled):active { scale: 0.95; }
+}
 
 /* ---------- a command's panel: /usage, /status, /config, /mcp… as the session draws it ---------- */
 .cmp-panel {
@@ -448,5 +511,8 @@ html.glass.mac .cmp-box { background: rgba(14, 17, 27, 0.46); } /* the Mac's lig
 
 @media (prefers-reduced-motion: reduce) {
   .cmp-dot, .cmp-verb, .cmp-spin, .cmp-card, .cmp-menu, .cmp-slash, .cmp-hs, .cmp-lightbox { animation: none; }
+  .cmp-card.still, :is(.cmp-card-h, .cmp-shield, .cmp-ctx, .cmp-opt, .cmp-hl, .cmp-card-f, .cmp-submit, .cmp-esc), .cmp-card::after, .cmp-shield::after, .cmp-opt::after { animation: none; }
+  .cmp-hl.glide { transition: opacity 160ms var(--ease); }
+  .cmp-cb svg, .cmp-cb path { transition: none; }
   .cmp-verb { color: var(--text); background: none; }
 }

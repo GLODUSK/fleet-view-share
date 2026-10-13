@@ -1363,6 +1363,9 @@ export function mountCompose(slot, s) {
     if (!writeKey((d > 0 ? '\x1b[B' : '\x1b[A').repeat(Math.abs(d)))) return null;
     return settle(id, m, at);
   }
+  // an answer went in: the card shows it sent for a moment (one click, one answer), the picked one lit: its option's
+  // number, 'free' (the typed answer), 'submit' or 'esc'
+  function answered(sig, pick) { st.answeredSig = sig; st.answeredAt = Date.now(); st.answeredPick = pick; }
   // the question's own answer, typed: onto "Type something" (its digit in a one-answer question, ↑/↓ in a
   // multiple-choice one, where a digit would tick it), what is there already cleared, the text pasted (one line),
   // then Enter in a one-answer question. In a multiple-choice one the text ticks it (Enter there would untick it), so
@@ -1408,22 +1411,14 @@ export function mountCompose(slot, s) {
       st.freeDraft = null;
       if (!multi) {
         if (!writeKey('\r')) return false;
-        st.answeredSig = m.sig; st.answeredAt = Date.now();
+        answered(m.sig, 'free');
         return true;
       }
       const at = await pointTo(id, 'submit');
       if (!at || !at.submit?.on) { err('Your answer is ticked in the question: press Submit to send it'); return true; }
       if (!writeKey('\r')) return true;
-      st.answeredSig = at.sig; st.answeredAt = Date.now();
-      // the last question's Submit opens the review step ("Ready to submit your answers?"): its "Submit answers"
-      for (const end = Date.now() + 1500; Date.now() < end;) {
-        await sleep(60);
-        const r = menuNow(id);
-        if (!r || r.sig === at.sig) continue;
-        const go = r.options.find((o) => /^submit answers$/i.test(o.label));
-        if (go && writeKey(r.options.find((o) => o.on) === go ? '\r' : String(go.n))) { st.answeredSig = r.sig; st.answeredAt = Date.now(); }
-        if (go || !sameQuestion(r, m)) break;
-      }
+      answered(at.sig, 'free');
+      await confirmReview(id, at, m);
       return true;
     } finally {
       st.answering = false;
@@ -1431,19 +1426,37 @@ export function mountCompose(slot, s) {
       drawCard();
     }
   }
-  // a multiple-choice question's Submit: the ❯ to its Submit row, then Enter. A click while a typed answer is still
-  // going in (its button stays live then) waits for it, so a quick Submit is never lost
+  // the last question's Submit opens the review step ("Ready to submit your answers?"): its "Submit answers" too, as
+  // it comes up (at: the menu Submit was pressed on; m: the question)
+  async function confirmReview(id, at, m) {
+    for (const end = Date.now() + 1500; Date.now() < end;) {
+      await sleep(60);
+      const r = menuNow(id);
+      if (!r || r.sig === at.sig) continue;
+      const go = r.options.find((o) => /^submit answers$/i.test(o.label));
+      if (go && writeKey(r.options.find((o) => o.on) === go ? '\r' : String(go.n))) answered(r.sig, go.n);
+      if (go || !sameQuestion(r, m)) break;
+    }
+  }
+  // a multiple-choice question's Submit: the ❯ to its Submit row, Enter, then the review step's "Submit answers":
+  // Submit sends. Words in the card's "Type something" box that aren't in the question yet go in first (answerFree,
+  // which submits them with the rest). A click while a typed answer is still going in (its button stays live then)
+  // waits for it, so a quick Submit is never lost
   async function submitMulti() {
     const id = st.id;
     for (const end = Date.now() + 3000; st.answering && Date.now() < end;) await sleep(50);
     if (st.answering || id !== st.id || !st.menu?.submit) return;
+    const typed = freeText(), f = st.menu.options.find((o) => o.free);
+    if (typed && !(hasText(f) && f.label.trim() === typed)) { await answerFree(typed); return; }
     if (remoteOn() && st.menu.remote) { await answerRemote('submit'); return; }
     st.answering = true;
     drawCard();
     try {
       const m = await pointTo(id, 'submit');
       if (!m || !m.submit?.on) { err('Couldn\'t get to Submit in the question: try again, or press it in the Session tab'); return; }
-      if (writeKey('\r')) { st.answeredSig = m.sig; st.answeredAt = Date.now(); }
+      if (!writeKey('\r')) return;
+      answered(m.sig, 'submit');
+      await confirmReview(id, m, m);
     } finally {
       st.answering = false;
       st.drawn.card = null;
@@ -1792,7 +1805,7 @@ export function mountCompose(slot, s) {
         return false;
       }
       const o = typeof option === 'number' ? m.options.find((x) => x.n === option) : null;
-      if (!(o && o.check != null)) { st.answeredSig = m.sig; st.answeredAt = Date.now(); } // a tick can be undone at once
+      if (!(o && o.check != null)) answered(m.sig, extra.text != null ? 'free' : option); // a tick can be undone at once
       if (extra.text != null) st.freeDraft = null;
       return true;
     } finally {
@@ -1805,7 +1818,7 @@ export function mountCompose(slot, s) {
   // Esc on a question: it cancels it (here, or on the machine that runs it)
   function escMenu() {
     if (remoteOn() && st.menu?.remote) { answerRemote('esc'); return; }
-    if (writeKey('\x1b')) { st.answeredSig = st.menu?.sig || null; st.answeredAt = Date.now(); drawCard(); }
+    if (writeKey('\x1b')) { answered(st.menu?.sig || null, 'esc'); drawCard(); }
   }
   // what only a session on this machine can do: the chip with Continue here
   function contNeeded(what) { st.cont = { id: st.id, what }; drawNotes(); }
@@ -2043,59 +2056,179 @@ export function mountCompose(slot, s) {
   // Each option is a button (its digit, as in the terminal); a multiple-choice question's options are boxes to tick,
   // with a Submit button; "Type something" is a text box of its own (Enter or its arrow sends what it holds as the
   // answer; the chat box below does the same while the question is up). What is typed there survives redraws.
+  // The card is built once per question (its shape: the title, the context, the options) and what changes while it
+  // is up (the ❯, the ticks, sent, busy) is put on in place, so it moves: the highlight glides to the ❯, a box ticks,
+  // the picked answer stays lit as it goes. It grows open when a question comes up in the conversation on screen and
+  // folds away once answered; opening another conversation shows its card at once.
+  const CB_CHECK = ic('check', 11).replace('<path ', '<path pathLength="1" '); // drawn in as it ticks (compose.css)
+  const CARD_PROPS = ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth', 'marginBottom', 'opacity', 'transform'];
+  const calm = () => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } };
+  // the card's box as it is drawn now (mid-animation too), and folded shut (the gap under it too)
+  const cardNow = () => { const cs = getComputedStyle(card), o = { height: `${card.offsetHeight}px` }; for (const p of CARD_PROPS) o[p] = cs[p]; return o; };
+  const cardShut = () => ({
+    height: '0px', paddingTop: '0px', paddingBottom: '0px', borderTopWidth: '0px', borderBottomWidth: '0px',
+    marginBottom: `${-(parseFloat(getComputedStyle(card.parentElement).rowGap) || 0)}px`, opacity: '0', transform: 'translateY(6px) scale(0.985)',
+  });
+  function moveCard(from, to, ms, then) {
+    card.style.overflow = 'hidden';
+    const a = card.animate([from, to], { duration: ms, easing: 'cubic-bezier(.2, .8, .2, 1)' });
+    st.cardAnim = a;
+    a.onfinish = () => { if (st.cardAnim !== a) return; st.cardAnim = null; card.style.overflow = ''; then?.(); };
+  }
+  function stillCard() {
+    clearTimeout(st.cardFold); st.cardFold = 0;
+    const a = st.cardAnim;
+    st.cardAnim = null; st.cardOut = false;
+    if (a) { a.onfinish = null; a.cancel(); }
+    card.style.overflow = '';
+  }
+  // the question is gone (answered, Esc, Claude Code moved on): the card folds away. A moment's grace first: between
+  // two questions, or while Claude Code redraws, the menu can be missing for a read
+  function foldCard(live) {
+    if (!live || calm() || !card.offsetParent) { stillCard(); card.hidden = true; return; }
+    if (st.cardOut || st.cardFold) return;
+    st.cardFold = setTimeout(() => {
+      st.cardFold = 0;
+      if (!st.alive || st.menu || card.hidden) return;
+      st.cardOut = true;
+      moveCard(cardNow(), cardShut(), 200, () => { st.cardOut = false; card.hidden = true; });
+    }, 90);
+  }
   function drawCard() {
     const m = st.menu;
-    card.hidden = !m;
-    if (!m) { st.drawn.card = ''; drawSend(); return; }
+    const live = st.drawn.cardFor === st.id; // false on the first draw for this conversation (opened, switched to)
+    st.drawn.cardFor = st.id;
+    if (!m) { st.drawn.card = ''; if (!card.hidden) foldCard(live); drawSend(); return; }
     const sent = st.answeredSig === m.sig && Date.now() - st.answeredAt < 1500;
     const busy = !!st.answering;
     const key = `${m.sig}|${m.context.join('\n')}|${sent}|${busy}`;
-    if (st.drawn.card === key) return;
+    if (st.drawn.card === key && !st.cardOut && !st.cardFold && !card.hidden) return;
     st.drawn.card = key;
+    if (st.freeDraft && st.freeDraft.title !== m.title) st.freeDraft = null; // another question
+    // a new question (rebuilt, its rows come in again) or the same one: what's typed in "Type something" and the tabs'
+    // ticks are the same question
+    const p = cardParts(m);
+    const shape = JSON.stringify([m.title, p.question, p.tabs && p.tabs.map((t) => t.label), p.context, m.more, !!m.submit,
+      m.options.map((o) => [o.n, o.free ? '' : o.label, o.desc, !!o.free, o.check != null])]);
+    const rebuild = shape !== st.drawn.cardShape || !card.firstChild;
+    clearTimeout(st.cardFold); st.cardFold = 0; // back before it folded
+    // the same question, on screen: in place (its opening, if under way, goes on)
+    if (!rebuild && !card.hidden && !st.cardOut) { paintCard(m, p, sent, busy); drawSend(); return; }
+    const from = !live || calm() ? null : card.hidden ? cardShut() : cardNow();
+    stillCard();
+    card.hidden = false;
+    card.classList.toggle('still', !live);
+    if (rebuild) { buildCard(m, p); st.drawn.cardShape = shape; }
+    paintCard(m, p, sent, busy);
+    if (from && card.offsetParent) {
+      const to = { ...cardNow(), opacity: '1', transform: 'none' };
+      if (Math.abs(parseFloat(from.height) - parseFloat(to.height)) >= 1 || from.opacity !== to.opacity) moveCard(from, to, from.opacity === '0' ? 280 : 240);
+    }
+    drawSend(); // Send sends what the box holds when the chat box is empty
+  }
+  // what the card makes of a menu: multiple choice or not; Claude's question (AskUserQuestion: a "Type something" or
+  // "Chat about this" row) or a permission; a question's tab strip ("←  ☐ Glow  ✔ Submit  →"), which reads as its tags
+  // over the title rather than a line of terminal; the rest of the context
+  function cardParts(m) {
+    const multi = m.options.some((o) => o.check != null);
+    const question = m.options.some((o) => o.free || CHAT_RE.test(o.label));
+    const tabs = question && m.context.length ? questionTabs(m.context[0]) : null;
+    return { multi, question, tabs, context: tabs ? m.context.slice(1) : m.context };
+  }
+  // the card for a question: its rows come in one after another (not when it opens with the conversation: .still)
+  function buildCard(m, p) {
     const old = card.querySelector('.cmp-free-in');
     const had = old && document.activeElement === old ? { a: old.selectionStart, b: old.selectionEnd } : null;
-    if (st.freeDraft && st.freeDraft.title !== m.title) st.freeDraft = null; // another question
-    const dis = sent || busy ? ' disabled' : '';
-    const multi = m.options.some((o) => o.check != null);
-    // Claude's question (AskUserQuestion: a "Type something" or "Chat about this" row), not a permission
-    const question = m.options.some((o) => o.free || CHAT_RE.test(o.label));
-    // its tab strip ("←  ☐ Glow  ✔ Submit  →") reads as the question's tags over the title, not a line of terminal
-    const tabs = question && m.context.length ? questionTabs(m.context[0]) : null;
-    const context = tabs ? m.context.slice(1) : m.context;
+    const { multi, question, tabs, context } = p;
     const ctx = context.length ? `<pre class="cmp-ctx">${esc(context.join('\n'))}${m.more ? '\n…' : ''}</pre>` : '';
-    const tags = tabs && tabs.length ? `<span class="cmp-tags">${tabs.map((t) => `<span class="cmp-tag${t.done ? ' done' : ''}">${t.done ? ic('check', 10) : ''}${esc(t.label)}</span>`).join('')}</span>` : '';
-    const opts = m.options.map((o) => {
-      const box = o.check == null ? '' : `<span class="cmp-cb${o.check ? ' on' : ''}" aria-hidden="true">${o.check ? ic('check', 11) : ''}</span>`;
+    const tags = tabs && tabs.length ? `<span class="cmp-tags">${tabs.map((t) => `<span class="cmp-tag">${ic('check', 10)}${esc(t.label)}</span>`).join('')}</span>` : '';
+    const opts = m.options.map((o, i) => {
+      const box = o.check == null ? '' : `<span class="cmp-cb" aria-hidden="true">${CB_CHECK}</span>`;
       // in a multiple-choice question the box leads and its digit sits at the end, quiet
       const num = multi ? '' : `<span class="cmp-n">${o.n}</span>`;
       if (o.free) {
-        return `<div class="cmp-opt cmp-free${o.on ? ' on' : ''}" data-free="${o.n}">${num}${box}`
-          + `<input type="text" class="cmp-free-in" placeholder="Type something…" spellcheck="true" autocomplete="off" aria-label="your own answer"${busy ? ' disabled' : ''}>`
-          + `<button type="button" class="cmp-free-go" data-c="free" title="${multi ? 'Send this answer (with any ticked above)' : 'Send this answer'}" aria-label="send this answer"${dis}>${ic('send', 13)}</button></div>`;
+        return `<div class="cmp-opt cmp-free" data-free="${o.n}" style="--i:${i}">${num}${box}`
+          + '<input type="text" class="cmp-free-in" placeholder="Type something…" spellcheck="true" autocomplete="off" aria-label="your own answer">'
+          + `<button type="button" class="cmp-free-go" data-c="free" title="${multi ? 'Send this answer (with any ticked above)' : 'Send this answer'}" aria-label="send this answer">${ic('send', 13)}</button></div>`;
       }
       const label = esc(o.label).replace(/\s*\((esc|shift\+tab)\)$/i, ' <span class="cmp-k">($1)</span>');
-      const cls = `cmp-opt${o.on ? ' on' : ''}${o.check ? ' ticked' : ''}${question && CHAT_RE.test(o.label) ? ' cmp-chat' : ''}`;
-      return `<button type="button" class="${cls}" data-n="${o.n}"${dis}${o.on ? ' aria-current="true"' : ''}${o.check != null ? ` role="checkbox" aria-checked="${o.check}"` : ''}>`
+      return `<button type="button" class="cmp-opt${question && CHAT_RE.test(o.label) ? ' cmp-chat' : ''}" data-n="${o.n}" style="--i:${i}"${o.check != null ? ' role="checkbox"' : ''}>`
         + `${num}${box}<span class="cmp-l">${label}${o.desc ? `<small>${esc(o.desc)}</small>` : ''}</span>${multi ? `<span class="cmp-kn">${o.n}</span>` : ''}</button>`;
     }).join('');
     const last = m.options[m.options.length - 1].n;
     const hint = multi ? 'tick any, then Submit' : `or press 1–${Math.min(9, last)} here`;
     card.classList.toggle('q', question);
+    card.style.setProperty('--n', String(m.options.length));
     card.innerHTML = `<div class="cmp-card-h"><span class="cmp-shield">${ic(question ? 'ask' : 'shield', 16)}</span>`
       + `<span class="cmp-card-hd">${tags}<span class="cmp-card-t">${esc(m.title || 'Claude is asking')}</span></span></div>`
-      + ctx + `<div class="cmp-opts">${opts}</div>`
-      + `<div class="cmp-card-f">${m.submit ? `<button type="button" class="cmp-submit" data-c="msubmit"${sent ? ' disabled' : ''}>Submit</button>` : ''}`
-      + `<button type="button" class="cmp-esc" data-c="esc"${sent ? ' disabled' : ''}>Esc</button><span class="cmp-card-hint">${hint}</span></div>`;
-    // the text box: what you typed (kept per question), else what the session's "Type something" holds already
+      + ctx + `<div class="cmp-opts"><span class="cmp-hl" aria-hidden="true"></span>${opts}</div>`
+      + `<div class="cmp-card-f">${m.submit ? '<button type="button" class="cmp-submit" data-c="msubmit">Submit</button>' : ''}`
+      + `<button type="button" class="cmp-esc" data-c="esc">Esc</button><span class="cmp-card-hint">${hint}</span></div>`;
     const fi = card.querySelector('.cmp-free-in');
-    if (fi) {
+    if (fi && had) {
       const f = m.options.find((o) => o.free);
       fi.value = st.freeDraft ? st.freeDraft.text : hasText(f) ? f.label : '';
-      if (had) { fi.focus({ preventScroll: true }); try { fi.setSelectionRange(had.a, had.b); } catch { /* gone */ } }
+      fi.focus({ preventScroll: true });
+      try { fi.setSelectionRange(had.a, had.b); } catch { /* gone */ }
     }
-    readySubmit();
-    drawSend(); // Send sends what the box holds when the chat box is empty
   }
+  // what changes while the question is up, in place: the ❯ (the highlight glides to it), the ticks, sent (the picked
+  // answer stays lit, the rest dim) and busy (Fleet View is still pressing keys)
+  function paintCard(m, p, sent, busy) {
+    const pick = sent ? st.answeredPick : null;
+    card.classList.toggle('sent', sent);
+    card.classList.toggle('busy', busy);
+    card.querySelectorAll('.cmp-tag').forEach((el, i) => el.classList.toggle('done', !!p.tabs?.[i]?.done)); // ticked once answered
+    for (const o of m.options) {
+      const el = card.querySelector(o.free ? `.cmp-free[data-free="${o.n}"]` : `.cmp-opt[data-n="${o.n}"]`);
+      if (!el) continue;
+      el.classList.toggle('on', !!o.on);
+      el.classList.toggle('chosen', pick != null && (o.free ? pick === 'free' : pick === o.n));
+      el.classList.toggle('ticked', !!o.check);
+      el.querySelector('.cmp-cb')?.classList.toggle('on', !!o.check);
+      if (o.free) {
+        // the text box: what you typed (kept per question), else what the session's "Type something" holds already
+        const fi = el.querySelector('.cmp-free-in'), v = st.freeDraft ? st.freeDraft.text : hasText(o) ? o.label : '';
+        fi.disabled = busy;
+        el.querySelector('.cmp-free-go').disabled = sent || busy;
+        if (fi.value !== v) {
+          const had = document.activeElement === fi ? [fi.selectionStart, fi.selectionEnd] : null;
+          fi.value = v;
+          if (had) try { fi.setSelectionRange(...had); } catch { /* gone */ }
+        }
+        continue;
+      }
+      el.disabled = sent || busy;
+      if (o.on) el.setAttribute('aria-current', 'true'); else el.removeAttribute('aria-current');
+      if (o.check != null) el.setAttribute('aria-checked', String(!!o.check));
+    }
+    const sub = card.querySelector('.cmp-submit'), escB = card.querySelector('.cmp-esc');
+    if (sub) { sub.disabled = sent; sub.classList.toggle('on', !!m.submit?.on); sub.classList.toggle('chosen', pick === 'submit'); }
+    escB.disabled = sent;
+    escB.classList.toggle('chosen', pick === 'esc');
+    placeHl();
+    readySubmit();
+  }
+  // the highlight under the option the ❯ is on: placed at once the first time, then it glides (as the tabs' does);
+  // with the ❯ on Submit (no row) it fades
+  function placeHl() {
+    const hl = card.querySelector('.cmp-hl');
+    if (!hl) return;
+    const on = card.querySelector('.cmp-opts > .cmp-opt.on');
+    if (!on) { hl.classList.remove('placed'); return; }
+    if (!on.offsetHeight) return; // not laid out (the tab is hidden): the observer places it once it shows
+    const pos = `${on.offsetTop}|${on.offsetHeight}`;
+    if (hl.dataset.pos === pos && hl.classList.contains('placed')) return;
+    const first = !hl.dataset.pos;
+    hl.dataset.pos = pos;
+    hl.style.transform = `translateY(${on.offsetTop}px)`;
+    hl.style.height = `${on.offsetHeight}px`;
+    hl.classList.add('placed');
+    hl.parentElement.classList.add('has-hl');
+    if (first) requestAnimationFrame(() => hl.classList.add('glide'));
+  }
+  const cardRO = typeof ResizeObserver === 'function' ? new ResizeObserver(() => placeHl()) : null;
+  cardRO?.observe(card);
   // a multiple-choice question's Submit lights up once there's something to send: a tick, or words in its box
   function readySubmit() {
     const b = card.querySelector('.cmp-submit');
@@ -2141,7 +2274,7 @@ export function mountCompose(slot, s) {
       }
     }
     // a tick can be undone at once (several in a row); a pick is one answer
-    if (!tick) { st.answeredSig = m.sig; st.answeredAt = Date.now(); }
+    if (!tick) answered(m.sig, n);
     st.drawn.card = null;
     drawCard();
   }
@@ -2965,6 +3098,8 @@ export function mountCompose(slot, s) {
       boxes.delete(st);
       clearInterval(st.timer);
       clearTimeout(st.saveTimer);
+      stillCard();
+      cardRO?.disconnect();
       st.d.text = ta.value;
       storeText(st.id, ta.value);
       document.removeEventListener('pointerdown', outside, true);
