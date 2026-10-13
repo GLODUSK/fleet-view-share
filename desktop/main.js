@@ -769,8 +769,8 @@ if (!app.requestSingleInstanceLock()) {
   // ---------- Chats window (users see it as the Bots window) ----------
   // The Bots tab popped out (fleetDesktop.popChats): the same page as the main window's (?solo=chats shows only the
   // Bots tab), in a normal window of its own: frameless with the native buttons over the right end of the page's
-  // 36 px header (as the main window's 44 px one), acrylic, resizable, its own taskbar button ("Fleet View Bots",
-  // its own app id so Windows never folds it into the main window's), always on top when chatsOnTop. It does not
+  // 36 px header (as the main window's 44 px one), acrylic, resizable, no taskbar button of its own (Windows: the
+  // taskbar shows Fleet View once, and the window can't be minimized), always on top when chatsOnTop. It does not
   // take turns with the main window the way the mini view does: both stay up. It saves its place (chatsBounds, plus
   // whether it was maximized), is put back on a screen when its old place is on none, and opens again at start-up
   // when it was open when the app quit (chatsOpen). Closing it docks it: chatsOpen false, and the main window comes
@@ -814,7 +814,7 @@ if (!app.requestSingleInstanceLock()) {
   }
   function saveChatsSoon() { clearTimeout(chatsSaveTimer); chatsSaveTimer = setTimeout(saveChats, 800); }
   // Windows: tells a close Henry asked for from one sent from outside. The X (a native caption button: it hit-tests
-  // as HTCLOSE), Alt+F4 and the taskbar's "Close window" send WM_SYSCOMMAND SC_CLOSE, which then sends WM_CLOSE;
+  // as HTCLOSE) and Alt+F4 send WM_SYSCOMMAND SC_CLOSE, which then sends WM_CLOSE;
   // dockChats() ("Bring it back") closes the window without any WM_CLOSE. A WM_CLOSE with no SC_CLOSE just before it comes from another program:
   // Process.CloseMainWindow() when a desktop/ update restarts the window (Windows may hand it this window rather
   // than the main one) or taskkill without /f. Docking then would forget that Bots was popped out, so that close
@@ -846,6 +846,9 @@ if (!app.requestSingleInstanceLock()) {
         autoHideMenuBar: true,
         titleBarStyle: 'hidden',
         titleBarOverlay: { color: '#00000000', symbolColor: '#c9cee6', height: CHATS_BAR_H },
+        // no taskbar button: Fleet View keeps one, the main window's (Alt+Tab still lists this window). With no
+        // button to bring it back, it can't be minimized either.
+        skipTaskbar: true, minimizable: false,
       }),
       show: false,
       webPreferences,
@@ -854,16 +857,6 @@ if (!app.requestSingleInstanceLock()) {
     if (local.chatsOnTop) w.setAlwaysOnTop(true, 'floating');
     if (!sameBounds(w.getBounds(), want)) w.setBounds(want);
     leaveFullScreenWhenHidden(w);
-    // its own taskbar button: an app id of its own (the main window's is FleetView); right-click > Fleet View
-    // starts the app as the main window's does
-    if (process.platform === 'win32') {
-      try {
-        w.setAppDetails({
-          appId: 'FleetView.Chats', appIconPath: ICON, appIconIndex: 0, relaunchDisplayName: 'Fleet View',
-          relaunchCommand: `"${path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')}" //nologo "${FV_VBS}"`,
-        });
-      } catch (e) { hlog(`chats window app details: ${e.message}`); }
-    }
     if (!HIDDEN) keepBlurWhenInactive(w);
     const wc = w.webContents;
     guardContents(wc, () => { if (!w.isDestroyed()) w.loadURL(CHATS_URL); });
