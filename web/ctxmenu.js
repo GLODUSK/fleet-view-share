@@ -26,7 +26,9 @@
 //       the parent item anew (label, badge, children) to redraw both menus with (toggles: Accounts ▸ ✓ A); in a
 //       drilled-in level the drilled item's refresh() redraws that level (a checklist: Team ▸ Start team ▸)
 //       scroll (an item with children): its submenu is a short box (about ten rows) with a scroll bar, for a long
-//       list (Removed conversations ▸) that would otherwise run the height of the window
+//       list (Removed conversations ▸) that would otherwise run the height of the window; with eight or more rows it
+//       has a search box on top (typing filters by label, note and tag; bulk: true rows, the actions for the
+//       whole list, hide while a search is typed)
 //   closeCtxMenu()   ctxMenuOpen()
 //
 // Frosted like the repo menu (same .menu surface and tokens). Keys while it is open: ↑↓ (and Home / End)
@@ -41,6 +43,9 @@ import { icon } from './icons.js';
 let el = null, items = [], sel = -1, open = false, prevFocus = null, confirmFor = null, spec = null, inputFor = null, inputBusy = false;
 // the submenu: its element, the parent item's index, its items and pick; level: where the keys go
 let subEl = null, subOf = -1, subItems = [], subSel = -1, level = 'main';
+// a long scroll list's search box: whether this submenu has one, and what is typed in it (lower case)
+let subScroll = false, subQuery = '';
+const FIND_MIN = 8;
 // a submenu opened inside the submenu (drilled into): the levels above it, each { items, sel }
 let subStack = [];
 // an input item's images ({ key, blob, url }), while its box is open; the server's /chat/image limits
@@ -84,8 +89,8 @@ function ensure() {
   for (const box of [el, subEl]) {
     box.addEventListener('pointerdown', (e) => e.stopPropagation());
     // keep focus on the menu (a press in the text box places the caret as usual)
-    box.addEventListener('mousedown', (e) => { e.stopPropagation(); if (e.button === 0 && !e.target.closest('.ctx-input')) e.preventDefault(); });
-    box.addEventListener('contextmenu', (e) => { if (!e.target.closest('.ctx-input')) e.preventDefault(); e.stopPropagation(); }); // the box keeps the browser's own (paste)
+    box.addEventListener('mousedown', (e) => { e.stopPropagation(); if (e.button === 0 && !e.target.closest('.ctx-input, .ctx-find')) e.preventDefault(); });
+    box.addEventListener('contextmenu', (e) => { if (!e.target.closest('.ctx-input, .ctx-find')) e.preventDefault(); e.stopPropagation(); }); // the box keeps the browser's own (paste)
   }
   el.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -121,6 +126,9 @@ function ensure() {
     if (!withText) e.preventDefault();
     addImages(withText ? files.filter((f) => IMG_TYPES.includes(f.type)) : files);
   });
+  subEl.addEventListener('input', (e) => {
+    if (e.target.classList && e.target.classList.contains('ctx-find')) setFind(e.target.value);
+  });
   subEl.addEventListener('click', (e) => {
     e.stopPropagation();
     const row = e.target.closest('[data-j]');
@@ -137,7 +145,41 @@ function ensure() {
 
 const hasKids = (it) => !!it && ((Array.isArray(it.children) && it.children.length > 0) || typeof it.load === 'function');
 const pickable = (i) => !!items[i] && !items[i].sep && !items[i].disabled;
-const subPickable = (j) => !!subItems[j] && !subItems[j].sep && !subItems[j].disabled;
+const subMatch = (c) => {
+  if (!subQuery) return true;
+  if (!c || c.sep || c.bulk) return false;
+  const text = `${c.label || ''} ${c.note || ''} ${c.tag || ''}`.toLowerCase();
+  return subQuery.split(/\s+/).every((w) => text.includes(w));
+};
+const subPickable = (j) => !!subItems[j] && !subItems[j].sep && !subItems[j].disabled && subMatch(subItems[j]);
+const subFind = () => subScroll && !subStack.length;
+// the submenu's html: the search box (a long scroll list, not drilled into) over the rows
+function subHtml() {
+  const find = subFind()
+    ? `<div class="ctx-find-wrap"><input class="ctx-find" type="text" spellcheck="false" autocomplete="off" placeholder="Search" aria-label="Search this list" value="${esc(subQuery)}"></div>` : '';
+  return find + subItems.map((c, j) => rowHtml(c, j, 'data-j', j === subSel)).join('') + (find ? '<div class="ctx-none" hidden>Nothing matches</div>' : '');
+}
+// hides the rows the typed text leaves out
+function applyFind() {
+  if (!subFind()) return;
+  let shown = 0;
+  for (const r of subEl.querySelectorAll('[data-j]')) {
+    const ok = subMatch(subItems[+r.dataset.j]);
+    r.classList.toggle('ctx-nomatch', !ok);
+    if (ok) shown++;
+  }
+  for (const r of subEl.querySelectorAll('.ctx-sep')) r.classList.toggle('ctx-nomatch', !!subQuery);
+  const none = subEl.querySelector('.ctx-none');
+  if (none) none.hidden = !subQuery || shown > 0;
+}
+function setFind(text) {
+  subQuery = String(text || '').trim().toLowerCase();
+  applyFind();
+  subSel = subItems.findIndex((_, j) => subPickable(j));
+  level = 'sub';
+  markSub();
+  subEl.scrollTop = 0;
+}
 
 function rowHtml(it, i, attr = 'data-i', on = i === sel) {
   if (it.sep) return '<div class="ctx-sep" role="separator"></div>';
@@ -322,11 +364,14 @@ function openSub(i, focus) {
   subOf = i;
   subStack = [];
   subEl.classList.toggle('ctx-scroll', !!it.scroll);
+  subQuery = '';
   if (Array.isArray(it.children)) subItems = it.children.filter(Boolean);
   else { subItems = [{ label: 'loading…', icon: 'clock', disabled: true }]; loadKids(it, i); }
+  subScroll = !!it.scroll && subItems.filter((c) => !c.sep && !c.bulk).length >= FIND_MIN;
   subSel = focus ? subItems.findIndex((_, j) => subPickable(j)) : -1;
   level = focus ? 'sub' : 'main';
-  subEl.innerHTML = subItems.map((c, j) => rowHtml(c, j, 'data-j', j === subSel)).join('');
+  subEl.innerHTML = subHtml();
+  applyFind();
   subEl.scrollTop = 0;
   subEl.hidden = false;
   placeSub();
@@ -366,6 +411,7 @@ function closeSub() {
   if (!subEl || subOf < 0) return;
   subOf = -1; subItems = []; subSel = -1; level = 'main'; subStack = [];
   subEl.hidden = true;
+  subScroll = false; subQuery = '';
   subEl.classList.remove('ctx-scroll');
   subEl.innerHTML = '';
   syncFrost();
@@ -376,7 +422,8 @@ function scrollSubTo(j) {
   if (r) r.scrollIntoView({ block: 'nearest' });
 }
 function drawSub() {
-  subEl.innerHTML = subItems.map((c, k) => rowHtml(c, k, 'data-j', k === subSel)).join('');
+  subEl.innerHTML = subHtml();
+  applyFind();
   subEl.scrollTop = 0;
   placeSub();
   markSub();
@@ -386,7 +433,8 @@ function drawSub() {
 const drillable = (it) => !!it && Array.isArray(it.children) && it.children.length > 0;
 function drillIn(j) {
   const it = subItems[j];
-  subStack.push({ items: subItems, sel: j });
+  subStack.push({ items: subItems, sel: j, q: subQuery });
+  subQuery = '';
   subItems = [{ label: it.label, icon: 'reply', back: true }, { sep: true }, ...it.children.filter(Boolean)];
   subSel = subItems.findIndex((c, k) => k > 0 && subPickable(k));
   level = 'sub';
@@ -397,6 +445,7 @@ function drillOut() {
   if (!up) return false;
   subItems = up.items;
   subSel = up.sel;
+  subQuery = up.q || '';
   level = 'sub';
   drawSub();
   return true;
@@ -412,7 +461,8 @@ function pickSub(j) {
     if (items[subOf] && !subStack.length) items[subOf].children = subItems;
     subSel = j;
     level = 'sub';
-    subEl.innerHTML = subItems.map((c, k) => rowHtml(c, k, 'data-j', k === subSel)).join('');
+    subEl.innerHTML = subHtml();
+    applyFind();
     placeSub();
     markSub();
     scrollSubTo(subSel);
@@ -591,6 +641,16 @@ document.addEventListener('keydown', (e) => {
   if (!open) return;
   const k = e.key;
   e.stopPropagation();
+  // the search box of a long list: typing and the caret keys are its own; Esc clears it first, up, down, Enter and Tab still move and pick
+  const inFind = e.target instanceof Element && e.target.classList.contains('ctx-find');
+  if (inFind) {
+    if (k === 'Escape' && e.target.value) { e.preventDefault(); e.target.value = ''; setFind(''); return; }
+    if (!['Escape', 'ArrowDown', 'ArrowUp', 'Enter', 'Tab'].includes(k)) return;
+  } else if (k.length === 1 && k !== ' ' && !e.ctrlKey && !e.altKey && !e.metaKey && !inputFor && subOf >= 0 && subFind()) {
+    // a letter typed with a long list open goes to its search box
+    const f = subEl.querySelector('.ctx-find');
+    if (f) { try { f.focus({ preventScroll: true }); } catch {} level = 'sub'; return; }
+  }
   if (inputFor) {
     // typing, paste and the caret keys are the text box's own (none reaches the page's shortcuts)
     if (k === 'Escape') { e.preventDefault(); closeCtxMenu(); }

@@ -2416,11 +2416,12 @@ export function mountCompose(slot, s) {
     drawModel();
     return true;
   }
+  // Dynamic stays on the menu (Henry, 2026-10-12): Model's and Effort's can be switched in a row; it closes on a click away
   async function pickDynamic(kind) {
-    openModelMenu(false);
     const dyn = dynNow(st.s);
     if (!dyn || dyn[kind]) return;
     await setDynPart(dyn, kind, DYNAMIC);
+    if (!modelMenu.hidden) modelMenu.querySelector(`[data-dyn="${kind}"]`)?.focus();
   }
   async function pickModel(kind, v) {
     openModelMenu(false);

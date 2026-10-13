@@ -1093,8 +1093,8 @@ function removedReposMenuItem(at = null) {
   return {
     label: 'Removed workspaces', icon: 'hide', badge: String(list.length), scroll: true,
     children: [
-      ...(list.length > 1 ? [{ label: 'Add back all', icon: 'plus', note: `${list.length} workspaces`, run: () => addBackRepos(list) }] : []),
-      { label: 'Clear list', icon: 'close', note: 'forget them: each comes back on its own if it works again', run: () => forgetRemovedRepos(list) },
+      ...(list.length > 1 ? [{ label: 'Add back all', icon: 'plus', note: `${list.length} workspaces`, bulk: true, run: () => addBackRepos(list) }] : []),
+      { label: 'Clear list', icon: 'close', note: 'forget them: each comes back on its own if it works again', bulk: true, run: () => forgetRemovedRepos(list) },
       { sep: true },
       ...rows,
     ],
@@ -1123,9 +1123,9 @@ function removedMenuItem(list, withRepo) {
   if (!list.length) return null;
   const now = Date.now(), n = list.length;
   const all = n < 2 ? [] : [
-    { label: `Show all ${n} again`, icon: 'reply', note: 'nothing starts', run: () => showRemovedAgain(list) },
-    { label: `Continue all ${n}`, icon: 'shell', confirm: { text: `Continue all ${n}? Each one's session starts${termApi() ? ' here' : ' in a terminal tab'}.`, yes: 'Continue all' }, run: () => continueAll(list) },
-    { label: `Forget all ${n}`, icon: 'trash', danger: true, note: 'off this list for good', run: () => forgetRemoved(list) },
+    { label: `Show all ${n} again`, icon: 'reply', note: 'nothing starts', bulk: true, run: () => showRemovedAgain(list) },
+    { label: `Continue all ${n}`, icon: 'shell', bulk: true, confirm: { text: `Continue all ${n}? Each one's session starts${termApi() ? ' here' : ' in a terminal tab'}.`, yes: 'Continue all' }, run: () => continueAll(list) },
+    { label: `Forget all ${n}`, icon: 'trash', danger: true, note: 'off this list for good', bulk: true, run: () => forgetRemoved(list) },
     { sep: true },
   ];
   return {
