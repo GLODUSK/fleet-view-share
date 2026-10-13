@@ -208,10 +208,17 @@ const AURA_MIN = 14, AURA_MAX = 42, AURA_CALLS = 60, AURA_ALPHA = 0.17;
 // drawn white at NEB_RES of the screen's size, tinted the repo's colour (one lit spot per puff NEB_LIGHT of the way
 // to white) and laid on the map at NEB_A. A puff: [world radius, screen px added (x ks), strength]; a finished
 // conversation's is NEB_DONE as strong. Puffs fade in and out over about NEB_FADE_MS. Alpha moves only then.
-const NEB_RES = 1 / 3, NEB_A = 0.32, NEB_LIGHT = 0.32, NEB_LIT_A = 0.5, NEB_DONE = 0.55, NEB_FADE_MS = 700;
+const NEB_RES = 1 / 3, NEB_A = 0.46, NEB_LIGHT = 0.32, NEB_LIT_A = 0.5, NEB_DONE = 0.55, NEB_FADE_MS = 700;
 const NEB_PUFF = { repo: [80, 28, 0.55], session: [58, 20, 0.42], pr: [34, 10, 0.3] };
 const NEB_LOBES = 2, NEB_OFF = [0.3, 0.46], NEB_SIZE = [0.6, 0.76], NEB_LOBE_A = 0.6, NEB_REACH = 1.5;
 const NEB_WANDER = 0.12, NEB_BREATHE = 0.08, NEB_PERIOD = [40, 50];
+// its look: the cloud's edge turns NEB_EDGE_HUE degrees from the repo's colour (orange to rose, blue to teal, violet to
+// indigo), the middle keeps the colour; NEB_GRAIN of a two-layer noise is cut out of it so it reads as wisps and
+// dust, not a smooth blob (layers NEB_NOISE world units a tile, drifting NEB_NOISE_DRIFT units a second, pinned to
+// the map so they move with a pan or zoom), then each puff's middle is put back (NEB_HEART: [radius of the puff's,
+// strength x its own]); it is laid on the map with 'screen', so it adds light and never dulls.
+const NEB_EDGE_HUE = -38, NEB_EDGE_DARK = 0.12, NEB_GRAIN = 0.5, NEB_NOISE = [400, 170], NEB_NOISE_DRIFT = [3.2, -5];
+const NEB_HEART = [0.5, 0.9];
 const BUSY = new Set(['WORKING', 'AGENTS']);
 const DASH_NONE = [], DASH_READ = [2, 3], DASH_WROTE_FLOW = [8, 3], DASH_CLASH = [6, 4], DASH_FRESH = [2, 2];
 const PUSH_RE = /\bgit\s+push\b|\bgh\s+pr\b|\bpush(ed)?\s+the\s+branch\b|\bopen(ed)?\s+(the|a)\s+pr\b/i;
@@ -2093,7 +2100,8 @@ function fieldCanvas() {
   let F = I.field;
   if (!F) {
     const c = document.createElement('canvas'), g = c.getContext('2d');
-    F = I.field = { c, g, grad: buildNeb(g, '#ffffff', 1), lit: new Map() };
+    F = I.field = { c, g, grad: buildNeb(g, '#ffffff', 1), lit: new Map(), core: new Map(), edge: new Map(), noise: null };
+    try { const t = noiseTile(); F.noise = [g.createPattern(t, 'repeat'), g.createPattern(t, 'repeat')]; } catch { F.noise = null; }
   }
   if (F.c.width !== w || F.c.height !== h) { F.c.width = w; F.c.height = h; }
   return F;
@@ -2102,6 +2110,55 @@ function fieldLit(F, hex) {
   let g = F.lit.get(hex);
   if (!g) F.lit.set(hex, (g = buildNeb(F.g, mixHex(hex, '#ffffff', NEB_LIGHT), 1)));
   return g;
+}
+function fieldCore(F, hex) {
+  let g = F.core.get(hex);
+  if (!g) F.core.set(hex, (g = buildNeb(F.g, hex, 1)));
+  return g;
+}
+function fieldEdge(F, hex) {
+  let v = F.edge.get(hex);
+  if (!v) F.edge.set(hex, (v = mixHex(hueTurn(hex, NEB_EDGE_HUE), '#05070d', NEB_EDGE_DARK)));
+  return v;
+}
+// a hex colour with its hue turned deg degrees (saturation and lightness kept)
+function hueTurn(hex, deg) {
+  const [r, g, b] = hexRgb(hex).map((c) => c / 255);
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  if (!d) return hex;
+  const s = d / (1 - Math.abs(2 * l - 1));
+  let h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  h = (((h * 60 + deg) % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = l - c / 2;
+  const [R, G, B] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return '#' + [R, G, B].map((v) => Math.round((v + m) * 255).toString(16).padStart(2, '0')).join('');
+}
+// a tileable fractal noise, white with the noise as alpha (bright, ragged patches over a clear background), made once
+function noiseTile() {
+  const T = 128, c = document.createElement('canvas');
+  c.width = c.height = T;
+  const g = c.getContext('2d'), img = g.createImageData(T, T), v = new Float32Array(T * T);
+  let seed = 0x9e3779b9;
+  const rnd = () => { seed = (seed + 0x6d2b79f5) >>> 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t ^= t + Math.imul(t ^ (t >>> 7), 61 | t); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  let amp = 1, tot = 0;
+  for (const n of [3, 6, 12, 24]) {
+    const lat = Array.from({ length: n * n }, rnd), at = (i, j) => lat[((j + n) % n) * n + ((i + n) % n)];
+    for (let y = 0; y < T; y++) for (let x = 0; x < T; x++) {
+      const fx = (x / T) * n, fy = (y / T) * n, i = Math.floor(fx), j = Math.floor(fy);
+      let u = fx - i, w = fy - j;
+      u = u * u * (3 - 2 * u); w = w * w * (3 - 2 * w);
+      const a = at(i, j) + (at(i + 1, j) - at(i, j)) * u, b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * u;
+      v[y * T + x] += (a + (b - a) * w) * amp;
+    }
+    tot += amp; amp *= 0.5;
+  }
+  for (let i = 0; i < T * T; i++) {
+    const t = clamp((v[i] / tot - 0.38) / 0.34, 0, 1);
+    img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = 255;
+    img.data[i * 4 + 3] = Math.round(t * t * (3 - 2 * t) * 255);
+  }
+  g.putImageData(img, 0, 0);
+  return c;
 }
 
 // repo glow (see NEB_*): puffs are kept by node id (I.puffs) so they fade in and out, and a repo's puffs are
@@ -2166,11 +2223,42 @@ function drawTerritories(ctx, k, ks, ox, oy) {
         g.beginPath(); g.arc(0, 0, 1, 0, TAU); g.fill();
       }
     }
-    // its colour where the field is, then a whiter spot on each puff (the field's alpha stays as it is)
-    g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1;
+    // wisps: the noise layers cut out of the field, pinned to the map
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    if (F.noise) {
+      g.globalCompositeOperation = 'destination-out';
+      for (let i = 0; i < F.noise.length; i++) {
+        const s = (q * k * NEB_NOISE[i]) / 128, dx = ts * NEB_NOISE_DRIFT[i] * k, dy = ts * NEB_NOISE_DRIFT[1 - i] * 0.6 * k;
+        F.noise[i].setTransform(new DOMMatrix([s, 0, 0, s, q * (ox + dx + i * 97 * k), q * (oy + dy + i * 53 * k)]));
+        g.globalAlpha = i ? NEB_GRAIN * 0.6 : NEB_GRAIN;
+        g.fillStyle = F.noise[i]; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+      }
+      // each puff's middle filled back in, so the wisps are at the cloud's edge and the node sits in a clear glow
+      g.globalCompositeOperation = 'lighter';
+      g.fillStyle = F.grad;
+      for (const p of list) {
+        if (p.a < 0.004) continue;
+        const r = p.R * NEB_HEART[0];
+        g.globalAlpha = Math.min(1, p.a * NEB_HEART[1]);
+        g.setTransform(q * r, 0, 0, q * r, q * p.sx, q * p.sy);
+        g.beginPath(); g.arc(0, 0, 1, 0, TAU); g.fill();
+      }
+      g.setTransform(1, 0, 0, 1, 0, 0);
+    }
+    // its colours where the field is: the edge colour, the repo's colour over each puff's middle, then a whiter
+    // spot on each puff (the field's alpha stays as it is)
+    g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-in';
-    g.fillStyle = list[0].color; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+    g.fillStyle = fieldEdge(F, list[0].color); g.fillRect(x0, y0, x1 - x0, y1 - y0);
     g.globalCompositeOperation = 'source-atop';
+    g.fillStyle = fieldCore(F, list[0].color);
+    for (const p of list) {
+      if (p.a < 0.004) continue;
+      const r = p.R * 1.05;
+      g.globalAlpha = Math.min(1, p.w);
+      g.setTransform(q * r, 0, 0, q * r, q * p.sx, q * p.sy);
+      g.beginPath(); g.arc(0, 0, 1, 0, TAU); g.fill();
+    }
     g.fillStyle = fieldLit(F, list[0].color);
     for (const p of list) {
       if (p.a < 0.004) continue;
@@ -2184,9 +2272,9 @@ function drawTerritories(ctx, k, ks, ox, oy) {
     }
     g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
     screen(ctx);
-    ctx.globalAlpha = NEB_A;
+    ctx.globalAlpha = NEB_A; ctx.globalCompositeOperation = 'screen';
     ctx.drawImage(F.c, x0, y0, x1 - x0, y1 - y0, x0 / q, y0 / q, (x1 - x0) / q, (y1 - y0) / q);
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
   }
 }
 
