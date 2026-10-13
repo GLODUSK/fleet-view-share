@@ -83,15 +83,16 @@
 // With ?fixture=1 or ?debug=1, window.__mapNodes() lists the map's nodes with their client positions and
 // window.__fv exposes the shell's state for tests (with ?fixture=1, POSTs are recorded in window.__fvPosts).
 //
-// Right-click (ctxmenu.js): a repo (map anchor, repo chip) offers New session · A / B (desktop window) and
-// Open folder; a conversation offers Remove (ends it if hosted here and takes it off the map; was End session / Hide from map),
+// Right-click (ctxmenu.js): a repo (map anchor, repo chip) offers New session · A / B (desktop window), Give orders ▸,
+// Open folder, Show ▸ (only it / too), Workspace settings ▸ (Rename, Colour, Push to, Keeps on a machine…), its
+// removed conversations and Remove workspace; a conversation offers Remove (ends it if hosted here and takes it off the map; was End session / Hide from map),
 // Send elsewhere ▸ (the other accounts), Rename (renameMenuItem) and Move to workspace (moveMenuItem). A repo also offers "Removed conversations"
 // (a submenu of state.removed, all of them): each one's own ▸ has Continue (see continueConversation), Show again
 // (un-hidden, nothing starts) and Forget (off the list for good: settings.forgotten), and the top of it "Show all
 // again", "Continue all" and "Forget all" (one Undo each but Continue). A repo also offers "Remove repo", and
 // empty space "Add workspace", "Removed workspaces ▸" (every removed repo, to add one back) and "Removed
 // conversations ▸" (every removed conversation, its workspace in the note, those with none too). A repo's "Keeps on a
-// machine…" (just above Remove) opens keeps.js's sheet for its stays-on rule (settings.hostRules). The browser's own menu
+// machine…" (in Workspace settings) opens keeps.js's sheet for its stays-on rule (settings.hostRules). The browser's own menu
 // is kept only in text inputs and the live terminal (and in Edge outside those targets).
 //
 // New sessions (term.js createSession) are listed in state.pending (and state.allSessions) as stand-ins
@@ -2396,24 +2397,27 @@ function openContextMenu(target, x, y) {
       const all = allAccounts(), ok = onAccounts().filter((a) => !acctOut(a));
       for (const a of ok) items.push({ label: all.length === 1 ? 'New session' : `New session · ${a}`, icon: 'plus', run: () => newSession(folder, a) });
       if (!ok.length) items.push({ label: 'New session', icon: 'plus', disabled: true, note: 'every account is out of its limit' });
-      items.push({ sep: true });
     }
-    items.push({ label: onPc('Open folder'), icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
-    // whether it is shown (only it, or with the others shown; not in Bots, which no workspace filters) and its name in
-    // Fleet View
     const rIt = { root: repoRootOf({ root: folder }), name: target.name || repo.name || repoName(folder) };
-    items.push({ sep: true }, ...(local.view === 'chats' ? [] : [...showOnlyItems(rIt), ...showTooItems(rIt)]), repoRenameItem(folder), repoColorItem(folder));
     // orders for every conversation in it, idle and new ones too (one team), or the same text to each
     // (selecting them all is a double-click on the workspace, ui.selectRepo, Henry 2026-10-12)
-    items.push({ sep: true }, ...repoOrderItems(folder, target.name || repo.name || repoName(folder)));
+    items.push(...repoOrderItems(folder, rIt.name));
+    items.push({ label: onPc('Open folder'), icon: 'folder', run: () => ui.reveal({ kind: 'folder', path: folder }) });
+    // grouped to keep the menu short (Henry, 2026-10-12): Show ▸ (whether it is shown: only it, or with the others;
+    // not in Bots, which no workspace filters), then its settings in one submenu, then its removed conversations
+    items.push({ sep: true });
+    const shows = local.view === 'chats' ? [] : [...showOnlyItems(rIt), ...showTooItems(rIt)];
+    if (shows.length === 1) items.push(shows[0]);
+    else if (shows.length) items.push({ label: 'Show', icon: 'repo', note: 'in the views', children: shows });
+    // push sits with the rest; a repo has no "Unpin from the map" (Henry, 2026-10-10); keeps: which machine its files
+    // and some of its chats stay on (keeps.js, fleet-view.js hostRules)
+    items.push({
+      label: 'Workspace settings', icon: 'settings',
+      children: [repoRenameItem(folder), repoColorItem(folder), { sep: true }, ...(pushHook() ? [repoPushItem(folder, repo.push || 'production')] : []), keepsItem(rIt.root, rIt.name)],
+    });
     // its removed conversations (only when it has any), all of them: continue, show again or forget each
     const rm = removedMenuItem(removedFor(folder), false);
-    if (rm) items.push({ sep: true }, rm);
-    // push sits at the bottom, just above Remove; a repo has no "Unpin from the map" (Henry, 2026-10-10)
-    if (pushHook()) items.push({ sep: true }, repoPushItem(folder, repo.push || 'production'));
-    // which machine its files and some of its chats stay on (keeps.js, fleet-view.js hostRules), just above Remove
-    if (!pushHook()) items.push({ sep: true });
-    items.push(keepsItem(rIt.root, rIt.name));
+    if (rm) items.push(rm);
     // the repo and its conversations leave every view (the workspace list too); Undo on the toast
     items.push({ sep: true }, { label: 'Remove workspace', icon: 'close', danger: true, run: () => removeRepo({ root: folder, name: target.name || repo.name }) });
     openCtxMenu({ x, y, title: target.name || repo.name || repoName(folder), dot: color, sub: folder, items });
