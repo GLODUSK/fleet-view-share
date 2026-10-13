@@ -1266,7 +1266,9 @@ export function mountCompose(slot, s) {
       for (let i = 0; i < 60 && !idle; i++) { await sleep(250); idle = !midTurn(); }
       if (!idle) { err('Claude didn\'t stop: press Esc in the Session tab, then rewind'); return null; }
       await sleep(500); // let the prompt come back before /rewind is typed (two quick Escs open Claude Code's own rewind)
-      const b1 = typed ? null : boxNow(id);
+      // the stopped message can come back into the prompt a moment later still: up to 1.2 s more for it
+      let b1 = typed ? null : boxNow(id);
+      for (let i = 0; i < 8 && !typed && !(b1 && b1.text); i++) { await sleep(150); b1 = boxNow(id); }
       if (b1 && b1.text) {
         took = b1.text;
         if (!(await clearBox(id))) { err('Couldn\'t clear the prompt: the stopped message is in it (Session tab)'); return null; }
@@ -1276,7 +1278,14 @@ export function mountCompose(slot, s) {
     if (took && bare(took) === bare(text)) return 'gone';
     if (menuNow(id)) { err('Claude is asking something: answer it first, then rewind'); return null; }
     if (screenReady(id) && !(await closePanel(id))) { err('A panel is open in the session: close it (Esc) first'); return null; }
-    const b = boxNow(id);
+    let b = boxNow(id);
+    // this very message in the prompt: the stopped one, come back later still, or one an earlier Stop or Rewind left
+    // there. Cleared; when /rewind's list doesn't have it, the conversation is already back to before it
+    if (b && b.text && bare(b.text) === bare(text)) {
+      if (!(await clearBox(id))) { err('Couldn\'t clear the prompt: the old message is in it (Session tab)'); return null; }
+      took = b.text;
+      b = boxNow(id);
+    }
     if (!b || b.text) { err('Something is typed in the session\'s prompt: clear it first'); return null; }
     if (growRows(id, REWIND_ROWS)) await sleep(600); // the pty takes the new size and Claude Code redraws
     await pasteKeys(id, '/rewind');
@@ -1680,7 +1689,13 @@ export function mountCompose(slot, s) {
       if (st.id === id && st.step) { st.step = ''; drawNotes(); }
       if (pick && blocked()) { err('Claude is asking something: answer it first, then send'); return; }
       id = keyNow(id);
-      const before = screenReady(id) ? boxNow(id) : null; // (before bash mode's "!")
+      let before = screenReady(id) ? boxNow(id) : null; // (before bash mode's "!")
+      // a message sent from here left in Claude Code's prompt (a Stop or Rewind's Esc put it back there): cleared
+      // first, so the new one doesn't go in glued onto it
+      if (before && before.text && st.id === id && (sentTexts.get(id) || []).some((m) => bare(m) === bare(before.text))) {
+        if (!(await clearBox(id))) { err('Couldn\'t clear the prompt: an earlier message is in it (Session tab)'); return; }
+        before = boxNow(id);
+      }
       if (shell) {
         // bash mode: "!" as a key of its own into an empty prompt (a "!" after text, or a pasted one, is just text)
         if (before && before.text) { err('Something is typed in the session\'s prompt: clear it in the Session tab first'); return; }
