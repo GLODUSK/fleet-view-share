@@ -205,6 +205,7 @@ const AURA_MIN = 14, AURA_MAX = 42, AURA_CALLS = 60, AURA_ALPHA = 0.17;
 const NEB_LOBES = 5, NEB_CORE_A = 0.08, NEB_LOBE_A = 0.12, NEB_LIGHT = 0.32;
 const NEB_OFF = [0.28, 0.5], NEB_SIZE = [0.5, 0.72], NEB_CORE = 0.8, NEB_REACH = 1.4;
 const NEB_WANDER = 0.09, NEB_BREATHE = 0.08, NEB_PERIOD = [40, 50];
+const NEB_LINK = 260;               // world units: a repo's nodes closer than this share one cloud (REST.repo is 115)
 const BUSY = new Set(['WORKING', 'AGENTS']);
 const DASH_NONE = [], DASH_READ = [2, 3], DASH_WROTE_FLOW = [8, 3], DASH_CLASH = [6, 4], DASH_FRESH = [2, 2];
 const PUSH_RE = /\bgit\s+push\b|\bgh\s+pr\b|\bpush(ed)?\s+the\s+branch\b|\bopen(ed)?\s+(the|a)\s+pr\b/i;
@@ -1147,7 +1148,7 @@ function rebuild() {
   for (const id of [...I.agl.keys()]) if (!byId.has(id)) I.agl.delete(id);
   for (const id of [...I.hub.keys()]) if (!byId.has(id)) I.hub.delete(id);
   for (const id of [...I.look.keys()]) if (!byId.has(id) && !I.ghosts.some((g) => g.n.id === id)) I.look.delete(id);
-  if (I.terr) for (const id of [...I.terr.keys()]) if (!byId.has(id)) I.terr.delete(id);
+  if (I.terr) for (const [key, t] of [...I.terr]) if (!byId.has(t.repo)) I.terr.delete(key);
 
   I.nodes = nodes; I.byId = byId; I.springs = springs; I.paths = paths; I.clashes = clashes; I.sim = sim;
   I.conflicts = conflicts; I.teams = teams; I.parity = parity; I.trails = trails;
@@ -1409,8 +1410,7 @@ function syncSpots(set) {
       if (m) { n.p.x += m.dx; n.p.y += m.dy; n.p.vx = n.p.vy = 0; }
     }
     for (const [id, m] of moved) {
-      const t = I.terr && I.terr.get(id);
-      if (t) { t.x += m.dx; t.y += m.dy; }
+      moveTerr(id, m.dx, m.dy);
       if (I.trail) I.trail.delete(id);
     }
   }
@@ -2051,41 +2051,66 @@ function nebLobes(id) {
   return L;
 }
 
-// repo territories: a soft nebula behind each repo's cluster, eased in world units as it moves
+// a repo's hub and its members, split into groups that sit near each other (single link, NEB_LINK world units):
+// each group gets its own cloud, so a conversation far from its repo has a small cloud of its own, never one big
+// cloud over the empty space between them. A group is keyed by the hub when it holds it, else by its first member
+function nebGroups(n) {
+  const pts = [n];
+  for (const m of n.members) if (m.p) pts.push(m);
+  const up = pts.map((_, i) => i);
+  const root = (i) => { while (up[i] !== i) i = up[i] = up[up[i]]; return i; };
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) {
+      if (Math.hypot(pts[i].p.x - pts[j].p.x, pts[i].p.y - pts[j].p.y) < NEB_LINK) up[root(j)] = root(i);
+    }
+  }
+  const by = new Map();
+  pts.forEach((p, i) => { const r = root(i); if (!by.has(r)) by.set(r, []); by.get(r).push(p); });
+  return [...by.values()].map((g) => ({ key: g[0].id, pts: g }));
+}
+
+// shift every cloud of a repo
+function moveTerr(id, dx, dy) {
+  if (!I.terr) return;
+  for (const t of I.terr.values()) if (t.repo === id) { t.x += dx; t.y += dy; }
+}
+
+// repo territories: a soft nebula behind each group of a repo's cluster, eased in world units as it moves
 function drawTerritories(ctx, k, ks, ox, oy) {
   const kT = 1 - Math.exp(-(I.dt || 16) / 320);
   const terr = I.terr || (I.terr = new Map());
   const ts = I.still ? 0 : I.time / 1000;
+  const seen = new Set();
   for (const n of I.nodes) {
     if (n.kind !== 'repo') continue;
-    let x0 = n.p.x, x1 = n.p.x, y0 = n.p.y, y1 = n.p.y;
-    for (const m of n.members) {
-      if (!m.p) continue;
-      if (m.p.x < x0) x0 = m.p.x; else if (m.p.x > x1) x1 = m.p.x;
-      if (m.p.y < y0) y0 = m.p.y; else if (m.p.y > y1) y1 = m.p.y;
-    }
-    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-    let r = 0;
-    for (const m of n.members) if (m.p) r = Math.max(r, Math.hypot(m.p.x - cx, m.p.y - cy));
-    r = Math.max(r, Math.hypot(n.p.x - cx, n.p.y - cy));
-    let t = terr.get(n.id);
-    if (!t) terr.set(n.id, (t = { x: cx, y: cy, r, lobes: nebLobes(n.id) }));
-    else { t.x += (cx - t.x) * kT; t.y += (cy - t.y) * kT; t.r += (r - t.r) * kT; }
-    // room for the agents' orbit and the names underneath
-    const R = t.r * k + Math.max(32 * k, 22 * ks) + 30 * ks;
-    n.tx = t.x * k + ox; n.ty = t.y * k + oy; n.tR = R;
-    const RR = R * NEB_REACH;
-    if (n.tx + RR < 0 || n.tx - RR > I.W || n.ty + RR < 0 || n.ty - RR > I.H) continue;
     const lit = mixHex(n.color || COL.dim, '#ffffff', NEB_LIGHT);
-    for (const L of t.lobes) {
-      const x = n.tx + (L.x + NEB_WANDER * Math.cos(ts * L.w1 + L.p1)) * R;
-      const y = n.ty + (L.y + NEB_WANDER * Math.sin(ts * L.w2 + L.p2)) * R;
-      unit(ctx, x, y, R * L.s * (1 + NEB_BREATHE * Math.sin(ts * L.w3 + L.p3)));
-      ctx.fillStyle = cache('neb', L.lit ? lit : n.color, L.a, buildNeb);
-      ctx.beginPath(); ctx.arc(0, 0, 1, 0, TAU); ctx.fill();
+    for (const g of nebGroups(n)) {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const m of g.pts) { x0 = Math.min(x0, m.p.x); x1 = Math.max(x1, m.p.x); y0 = Math.min(y0, m.p.y); y1 = Math.max(y1, m.p.y); }
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+      let r = 0;
+      for (const m of g.pts) r = Math.max(r, Math.hypot(m.p.x - cx, m.p.y - cy));
+      const key = `${n.id}|${g.key}`;
+      seen.add(key);
+      let t = terr.get(key);
+      if (!t) terr.set(key, (t = { x: cx, y: cy, r, repo: n.id, lobes: nebLobes(key) }));
+      else { t.x += (cx - t.x) * kT; t.y += (cy - t.y) * kT; t.r += (r - t.r) * kT; }
+      // room for the agents' orbit and the names underneath
+      const R = t.r * k + Math.max(32 * k, 22 * ks) + 30 * ks;
+      const tx = t.x * k + ox, ty = t.y * k + oy;
+      const RR = R * NEB_REACH;
+      if (tx + RR < 0 || tx - RR > I.W || ty + RR < 0 || ty - RR > I.H) continue;
+      for (const L of t.lobes) {
+        const x = tx + (L.x + NEB_WANDER * Math.cos(ts * L.w1 + L.p1)) * R;
+        const y = ty + (L.y + NEB_WANDER * Math.sin(ts * L.w2 + L.p2)) * R;
+        unit(ctx, x, y, R * L.s * (1 + NEB_BREATHE * Math.sin(ts * L.w3 + L.p3)));
+        ctx.fillStyle = cache('neb', L.lit ? lit : n.color, L.a, buildNeb);
+        ctx.beginPath(); ctx.arc(0, 0, 1, 0, TAU); ctx.fill();
+      }
+      screen(ctx);
     }
-    screen(ctx);
   }
+  for (const key of terr.keys()) if (!seen.has(key)) terr.delete(key);
 }
 
 // the starfield: each layer's tile is painted once (per dpr) into an offscreen canvas and repeated through a
@@ -3624,8 +3649,7 @@ function wireMouse(cv) {
             startTrail(h); // before it moves: the shape to come back to is the one it has now
             h.p.x += wx; h.p.y += wy; h.p.vx = h.p.vy = 0;
             // its territory glow moves with it (its easing is for changes of shape, not for the drag)
-            const t = I.terr && I.terr.get(h.id);
-            if (t) { t.x += wx; t.y += wy; }
+            moveTerr(h.id, wx, wy);
             I.homeXY.set(h.id, { x: h.p.x, y: h.p.y, pin: true });
           }
           I.alpha = Math.max(I.alpha, 0.05);
