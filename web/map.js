@@ -59,7 +59,9 @@
 // marks it while dragging) moves it there (ui.moveSession, the same as the menu's "Move to workspace"). A repo's or
 // conversation's right-click menu offers "Unpin" (mapPinned / mapUnpin). `g` re-arranges the repos that aren't pinned, `G` unpins every
 // repo and conversation too. The camera fits the map when it first shows (and on `0` or `g`), then holds
-// still. A resize (the panel opening) keeps the view where it is, held by its top-left corner.
+// still. A resize (the panel opening) keeps the view where it is, held by its top-left corner; whatever that pushes
+// off the map (a panel docked on the left or right) brings the view along in one glide once the panel is in place
+// (keepIn), so nothing sits under it.
 //
 // Repo anchors: every repo in the shell's list (state.repoAnchors: [{ root, name, color }], the repo menu's list,
 // less removed repos) has its hub and territory even with no conversation on the map, steady like any hub, so
@@ -196,16 +198,20 @@ const MERGE_STAGGER = 400;          // ms between launches when several merges a
 const RING_DOTS = 18, RING_TURN_MS = 12e3;
 const ORBIT_TURN_MS = 40e3;         // running agents: one turn around their conversation
 const DRIFT_PX = 3;                 // node drift amplitude at zoom 1
+const KEEP_SETTLE_MS = 160, KEEP_PAD = 56; // keepIn: once the map's box holds still this long; px kept from its edge
 const FLOW_PX_S = 16;               // recent-work dash flow speed
 const AURA_MIN = 14, AURA_MAX = 42, AURA_CALLS = 60, AURA_ALPHA = 0.17;
-// repo nebulae: NEB_LOBES soft clouds per repo, each its own fixed alpha (centre lobe NEB_CORE_A, the rest NEB_LOBE_A,
-// one of them NEB_LIGHT of the way to white). Lobes sit NEB_OFF of the region's radius out and are NEB_SIZE of it,
-// so the cloud reaches 1.2-1.4x (NEB_REACH bounds it); each wanders NEB_WANDER of the radius and breathes
-// NEB_BREATHE in scale, once per NEB_PERIOD seconds (min, spread). Shape only: alpha never moves.
-const NEB_LOBES = 5, NEB_CORE_A = 0.08, NEB_LOBE_A = 0.12, NEB_LIGHT = 0.32;
-const NEB_OFF = [0.28, 0.5], NEB_SIZE = [0.5, 0.72], NEB_CORE = 0.8, NEB_REACH = 1.4;
-const NEB_WANDER = 0.09, NEB_BREATHE = 0.08, NEB_PERIOD = [40, 50];
-const NEB_LINK = 260;               // world units: a repo's nodes closer than this share one cloud (REST.repo is 115)
+// repo glow: one soft field per repo, into which each of its nodes (the hub, its conversations, their PRs) puts a
+// puff: a core and NEB_LOBES lobes that wander NEB_WANDER of the puff's radius and breathe NEB_BREATHE in scale, once
+// per NEB_PERIOD seconds (min, spread). Puffs add up (clamped), so near nodes melt into one cloud that grows with the
+// group, a node far off keeps a small cloud of its own, and the empty space between them stays dark. The field is
+// drawn white at NEB_RES of the screen's size, tinted the repo's colour (one lit spot per puff NEB_LIGHT of the way
+// to white) and laid on the map at NEB_A. A puff: [world radius, screen px added (x ks), strength]; a finished
+// conversation's is NEB_DONE as strong. Puffs fade in and out over about NEB_FADE_MS. Alpha moves only then.
+const NEB_RES = 1 / 3, NEB_A = 0.32, NEB_LIGHT = 0.32, NEB_LIT_A = 0.5, NEB_DONE = 0.55, NEB_FADE_MS = 700;
+const NEB_PUFF = { repo: [80, 28, 0.55], session: [58, 20, 0.42], pr: [34, 10, 0.3] };
+const NEB_LOBES = 2, NEB_OFF = [0.3, 0.46], NEB_SIZE = [0.6, 0.76], NEB_LOBE_A = 0.6, NEB_REACH = 1.5;
+const NEB_WANDER = 0.12, NEB_BREATHE = 0.08, NEB_PERIOD = [40, 50];
 const BUSY = new Set(['WORKING', 'AGENTS']);
 const DASH_NONE = [], DASH_READ = [2, 3], DASH_WROTE_FLOW = [8, 3], DASH_CLASH = [6, 4], DASH_FRESH = [2, 2];
 const PUSH_RE = /\bgit\s+push\b|\bgh\s+pr\b|\bpush(ed)?\s+the\s+branch\b|\bopen(ed)?\s+(the|a)\s+pr\b/i;
@@ -1148,7 +1154,6 @@ function rebuild() {
   for (const id of [...I.agl.keys()]) if (!byId.has(id)) I.agl.delete(id);
   for (const id of [...I.hub.keys()]) if (!byId.has(id)) I.hub.delete(id);
   for (const id of [...I.look.keys()]) if (!byId.has(id) && !I.ghosts.some((g) => g.n.id === id)) I.look.delete(id);
-  if (I.terr) for (const [key, t] of [...I.terr]) if (!byId.has(t.repo)) I.terr.delete(key);
 
   I.nodes = nodes; I.byId = byId; I.springs = springs; I.paths = paths; I.clashes = clashes; I.sim = sim;
   I.conflicts = conflicts; I.teams = teams; I.parity = parity; I.trails = trails;
@@ -1409,8 +1414,7 @@ function syncSpots(set) {
       const m = n.p && moved.get(n.kind === 'repo' ? n.id : n.cl);
       if (m) { n.p.x += m.dx; n.p.y += m.dy; n.p.vx = n.p.vy = 0; }
     }
-    for (const [id, m] of moved) {
-      moveTerr(id, m.dx, m.dy);
+    for (const [id] of moved) {
       if (I.trail) I.trail.delete(id);
     }
   }
@@ -1781,6 +1785,31 @@ function holdPan(dx, dy) {
   a.x += dx; a.y += dy;
 }
 
+// the repos and conversations on screen now (at their last drawn place)
+function onScreenIds() {
+  const ids = new Set();
+  for (const n of I.sim || []) if (n.sx >= 0 && n.sx <= I.W && n.sy >= 0 && n.sy <= I.H) ids.add(n.id);
+  return ids;
+}
+// after the map moved or shrank (a panel opening on its left or right): any of ids that was on screen and is now
+// off it brings the view along in one glide, so nothing ends up under the panel. The view moves as little as it
+// can (KEEP_PAD from the edge) and zooms out only when they no longer fit. Nothing pushed off: it holds still.
+function keepIn(ids) {
+  const ns = (I.sim || []).filter((n) => ids.has(n.id) && n.p);
+  if (!ns.length || !I.cam) return;
+  if (!ns.some((n) => n.sx < 0 || n.sx > I.W || n.sy < 0 || n.sy > I.H)) return;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const n of ns) { x0 = Math.min(x0, n.p.x); x1 = Math.max(x1, n.p.x); y0 = Math.min(y0, n.p.y); y1 = Math.max(y1, n.p.y); }
+  const m = KEEP_PAD * (I.sf || 1), k = K();
+  const f = Math.min(1, (I.W - 2 * m) / Math.max(1, (x1 - x0) * k), (I.H - 2 * m) / Math.max(1, (y1 - y0) * k));
+  const zoom = clamp(I.zoom * Math.max(0.05, f), ZMIN, ZMAX), k2 = I.cam.fit * zoom;
+  let [cx, cy] = toWorld(I.W / 2, I.H / 2);
+  const hw = (I.W / 2 - m) / k2, hh = (I.H / 2 - m) / k2;
+  if (x1 - x0 > 2 * hw) cx = (x0 + x1) / 2; else if (x0 < cx - hw) cx = x0 + hw; else if (x1 > cx + hw) cx = x1 - hw;
+  if (y1 - y0 > 2 * hh) cy = (y0 + y1) / 2; else if (y0 < cy - hh) cy = y0 + hh; else if (y1 > cy + hh) cy = y1 - hh;
+  glideTo(cx, cy, zoom);
+}
+
 // ---------- frame loop ----------
 function frame() {
   if (!active() || document.hidden) { stop(); return; }
@@ -1797,6 +1826,12 @@ function frame() {
   const top0 = I.top, left0 = I.left;
   I.top = r.top; I.left = r.left;
   const shifted = I.cam && top0 != null && (Math.abs(r.top - top0) >= 0.5 || Math.abs(r.left - left0) >= 0.5);
+  const resized = I.sized && (Math.round(r.width) !== I.W || Math.round(r.height) !== I.H);
+  // a panel opening beside the map: note what is on screen before it moves, to bring back what it pushes off (keepIn)
+  if ((shifted || resized) && I.camInit) {
+    if (!I.keep) I.keep = { ids: onScreenIds() };
+    I.keep.at = t0;
+  }
   if (shifted) { holdPan((r.left - left0) / K(), (r.top - top0) / K()); I.dirty = true; }
   if (!I.sized || Math.round(r.width) !== I.W || Math.round(r.height) !== I.H || dpr !== I.dpr) {
     I.sized = true;
@@ -1818,6 +1853,7 @@ function frame() {
     }
     I.dirty = true;
   }
+  if (I.keep && t0 - I.keep.at > KEEP_SETTLE_MS) { const ids = I.keep.ids; I.keep = null; if (!I.drag) keepIn(ids); }
   if (t0 < I.regrid) I.alpha = Math.max(I.alpha, 0.3); // a re-arrange: the forces keep going until the groups have their shape back
   if (I.alpha > 0.01) { simStep(); simStep(); I.dirty = true; }
   else if (separate(0.15) > 0.05) I.dirty = true; // settled: still never let anything sit too close
@@ -2036,81 +2072,122 @@ function gradCurve(ctx, a, b, ca, cb, width, done) {
   screen(ctx);
 }
 
-// a repo's nebula lobes, seeded from its id: lobe 0 near the centre, the rest spread around it
-function nebLobes(id) {
+// a puff's lobes, seeded from its node's id: the core in the middle (lobe 0), then NEB_LOBES around it; lit is
+// where its whiter spot sits (on one of the lobes)
+function puffLobes(id) {
   const L = [], a0 = hashNum(id + 'na') * TAU, w = (sfx) => TAU / (NEB_PERIOD[0] + NEB_PERIOD[1] * hashNum(id + sfx));
-  const lit = 1 + Math.floor(hashNum(id + 'nl') * (NEB_LOBES - 1));
-  for (let i = 0; i < NEB_LOBES; i++) {
+  for (let i = 0; i <= NEB_LOBES; i++) {
     const h = (sfx) => hashNum(id + sfx + i);
-    const ang = a0 + ((i - 1) * TAU) / (NEB_LOBES - 1) + (h('nj') - 0.5) * 0.9;
-    const d = i ? NEB_OFF[0] + (NEB_OFF[1] - NEB_OFF[0]) * h('nd') : 0.08 * h('nd');
-    L.push({ x: Math.cos(ang) * d, y: Math.sin(ang) * d, s: i ? NEB_SIZE[0] + (NEB_SIZE[1] - NEB_SIZE[0]) * h('ns') : NEB_CORE,
-      a: i ? NEB_LOBE_A : NEB_CORE_A, lit: i === lit,
+    const ang = a0 + ((i - 1) * TAU) / NEB_LOBES + (h('nj') - 0.5) * 1.2;
+    const d = i ? NEB_OFF[0] + (NEB_OFF[1] - NEB_OFF[0]) * h('nd') : 0.06 * h('nd');
+    L.push({ x: Math.cos(ang) * d, y: Math.sin(ang) * d, s: i ? NEB_SIZE[0] + (NEB_SIZE[1] - NEB_SIZE[0]) * h('ns') : 1,
+      a: i ? NEB_LOBE_A : 1,
       w1: w('w1' + i), p1: h('p1') * TAU, w2: w('w2' + i), p2: h('p2') * TAU, w3: w('w3' + i), p3: h('p3') * TAU });
   }
-  return L;
+  return { lobes: L, lit: 1 + Math.floor(hashNum(id + 'nl') * NEB_LOBES) };
 }
 
-// a repo's hub and its members, split into groups that sit near each other (single link, NEB_LINK world units):
-// each group gets its own cloud, so a conversation far from its repo has a small cloud of its own, never one big
-// cloud over the empty space between them. A group is keyed by the hub when it holds it, else by its first member
-function nebGroups(n) {
-  const pts = [n];
-  for (const m of n.members) if (m.p) pts.push(m);
-  const up = pts.map((_, i) => i);
-  const root = (i) => { while (up[i] !== i) i = up[i] = up[up[i]]; return i; };
-  for (let i = 0; i < pts.length; i++) {
-    for (let j = i + 1; j < pts.length; j++) {
-      if (Math.hypot(pts[i].p.x - pts[j].p.x, pts[i].p.y - pts[j].p.y) < NEB_LINK) up[root(j)] = root(i);
-    }
+// the white field's falloff (one gradient, on the field's own canvas) and each colour's lit spot
+function fieldCanvas() {
+  const w = Math.max(1, Math.ceil(I.W * NEB_RES)), h = Math.max(1, Math.ceil(I.H * NEB_RES));
+  let F = I.field;
+  if (!F) {
+    const c = document.createElement('canvas'), g = c.getContext('2d');
+    F = I.field = { c, g, grad: buildNeb(g, '#ffffff', 1), lit: new Map() };
   }
-  const by = new Map();
-  pts.forEach((p, i) => { const r = root(i); if (!by.has(r)) by.set(r, []); by.get(r).push(p); });
-  return [...by.values()].map((g) => ({ key: g[0].id, pts: g }));
+  if (F.c.width !== w || F.c.height !== h) { F.c.width = w; F.c.height = h; }
+  return F;
+}
+function fieldLit(F, hex) {
+  let g = F.lit.get(hex);
+  if (!g) F.lit.set(hex, (g = buildNeb(F.g, mixHex(hex, '#ffffff', NEB_LIGHT), 1)));
+  return g;
 }
 
-// shift every cloud of a repo
-function moveTerr(id, dx, dy) {
-  if (!I.terr) return;
-  for (const t of I.terr.values()) if (t.repo === id) { t.x += dx; t.y += dy; }
-}
-
-// repo territories: a soft nebula behind each group of a repo's cluster, eased in world units as it moves
+// repo glow (see NEB_*): puffs are kept by node id (I.puffs) so they fade in and out, and a repo's puffs are
+// summed into the field canvas, tinted, and laid on the map in one drawImage per repo
 function drawTerritories(ctx, k, ks, ox, oy) {
-  const kT = 1 - Math.exp(-(I.dt || 16) / 320);
-  const terr = I.terr || (I.terr = new Map());
+  const P = I.puffs || (I.puffs = new Map());
+  const first = !P.size; // the map's first frame: what is there already shows at once
+  const ease = I.still ? 1 : 1 - Math.exp(-(I.dt || 16) / (NEB_FADE_MS / 3));
   const ts = I.still ? 0 : I.time / 1000;
-  const seen = new Set();
+  const live = new Set();
+  const put = (m, repo, kind) => {
+    let p = P.get(m.id);
+    if (!p) P.set(m.id, (p = { w: 0, ...puffLobes(m.id) }));
+    p.repo = repo.id; p.color = repo.color || COL.dim; p.kind = kind; p.x = m.p.x; p.y = m.p.y;
+    p.want = kind === 'session' && m.s && m.s.state === 'DONE' ? NEB_DONE : 1;
+    if (first) p.w = p.want;
+    live.add(m.id);
+  };
   for (const n of I.nodes) {
-    if (n.kind !== 'repo') continue;
-    const lit = mixHex(n.color || COL.dim, '#ffffff', NEB_LIGHT);
-    for (const g of nebGroups(n)) {
-      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-      for (const m of g.pts) { x0 = Math.min(x0, m.p.x); x1 = Math.max(x1, m.p.x); y0 = Math.min(y0, m.p.y); y1 = Math.max(y1, m.p.y); }
-      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-      let r = 0;
-      for (const m of g.pts) r = Math.max(r, Math.hypot(m.p.x - cx, m.p.y - cy));
-      const key = `${n.id}|${g.key}`;
-      seen.add(key);
-      let t = terr.get(key);
-      if (!t) terr.set(key, (t = { x: cx, y: cy, r, repo: n.id, lobes: nebLobes(key) }));
-      else { t.x += (cx - t.x) * kT; t.y += (cy - t.y) * kT; t.r += (r - t.r) * kT; }
-      // room for the agents' orbit and the names underneath
-      const R = t.r * k + Math.max(32 * k, 22 * ks) + 30 * ks;
-      const tx = t.x * k + ox, ty = t.y * k + oy;
-      const RR = R * NEB_REACH;
-      if (tx + RR < 0 || tx - RR > I.W || ty + RR < 0 || ty - RR > I.H) continue;
-      for (const L of t.lobes) {
-        const x = tx + (L.x + NEB_WANDER * Math.cos(ts * L.w1 + L.p1)) * R;
-        const y = ty + (L.y + NEB_WANDER * Math.sin(ts * L.w2 + L.p2)) * R;
-        unit(ctx, x, y, R * L.s * (1 + NEB_BREATHE * Math.sin(ts * L.w3 + L.p3)));
-        ctx.fillStyle = cache('neb', L.lit ? lit : n.color, L.a, buildNeb);
-        ctx.beginPath(); ctx.arc(0, 0, 1, 0, TAU); ctx.fill();
-      }
-      screen(ctx);
-    }
+    if (n.kind !== 'repo' || !n.p) continue;
+    put(n, n, 'repo');
+    for (const m of n.members) if (m.p) put(m, n, m.kind === 'pr' ? 'pr' : 'session');
   }
-  for (const key of terr.keys()) if (!seen.has(key)) terr.delete(key);
+  // by repo, each puff's screen place and radius; one that left fades where it was
+  const byRepo = new Map();
+  for (const [id, p] of P) {
+    if (!live.has(id)) p.want = 0;
+    p.w += (p.want - p.w) * ease;
+    if (!live.has(id) && p.w < 0.01) { P.delete(id); continue; }
+    const [wr, px, str] = NEB_PUFF[p.kind];
+    p.sx = p.x * k + ox; p.sy = p.y * k + oy; p.R = wr * k + px * ks; p.a = p.w * str;
+    let g = byRepo.get(p.repo);
+    if (!g) byRepo.set(p.repo, (g = []));
+    g.push(p);
+  }
+  if (!byRepo.size) return;
+  const F = fieldCanvas(), g = F.g, q = NEB_RES;
+  for (const list of byRepo.values()) {
+    // the repo's box on screen: everything it can touch, cut to the screen
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of list) {
+      const e = p.R * NEB_REACH;
+      x0 = Math.min(x0, p.sx - e); y0 = Math.min(y0, p.sy - e); x1 = Math.max(x1, p.sx + e); y1 = Math.max(y1, p.sy + e);
+    }
+    x0 = Math.max(0, Math.floor(x0 * q)); y0 = Math.max(0, Math.floor(y0 * q));
+    x1 = Math.min(F.c.width, Math.ceil(x1 * q)); y1 = Math.min(F.c.height, Math.ceil(y1 * q));
+    if (x1 - x0 < 1 || y1 - y0 < 1) continue;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1;
+    g.clearRect(x0, y0, x1 - x0, y1 - y0);
+    // the field: every lobe of every puff, added up
+    g.globalCompositeOperation = 'lighter';
+    g.fillStyle = F.grad;
+    for (const p of list) {
+      if (p.a < 0.004) continue;
+      for (const L of p.lobes) {
+        const x = p.sx + (L.x + NEB_WANDER * Math.cos(ts * L.w1 + L.p1)) * p.R;
+        const y = p.sy + (L.y + NEB_WANDER * Math.sin(ts * L.w2 + L.p2)) * p.R;
+        const r = p.R * L.s * (1 + NEB_BREATHE * Math.sin(ts * L.w3 + L.p3));
+        g.globalAlpha = Math.min(1, p.a * L.a);
+        g.setTransform(q * r, 0, 0, q * r, q * x, q * y);
+        g.beginPath(); g.arc(0, 0, 1, 0, TAU); g.fill();
+      }
+    }
+    // its colour where the field is, then a whiter spot on each puff (the field's alpha stays as it is)
+    g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-in';
+    g.fillStyle = list[0].color; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+    g.globalCompositeOperation = 'source-atop';
+    g.fillStyle = fieldLit(F, list[0].color);
+    for (const p of list) {
+      if (p.a < 0.004) continue;
+      const L = p.lobes[p.lit];
+      const x = p.sx + (L.x + NEB_WANDER * Math.cos(ts * L.w1 + L.p1)) * p.R;
+      const y = p.sy + (L.y + NEB_WANDER * Math.sin(ts * L.w2 + L.p2)) * p.R;
+      const r = p.R * 0.62 * (1 + NEB_BREATHE * Math.sin(ts * L.w3 + L.p3));
+      g.globalAlpha = NEB_LIT_A * Math.min(1, p.w);
+      g.setTransform(q * r, 0, 0, q * r, q * x, q * y);
+      g.beginPath(); g.arc(0, 0, 1, 0, TAU); g.fill();
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
+    screen(ctx);
+    ctx.globalAlpha = NEB_A;
+    ctx.drawImage(F.c, x0, y0, x1 - x0, y1 - y0, x0 / q, y0 / q, (x1 - x0) / q, (y1 - y0) / q);
+    ctx.globalAlpha = 1;
+  }
 }
 
 // the starfield: each layer's tile is painted once (per dpr) into an offscreen canvas and repeated through a
@@ -3648,8 +3725,6 @@ function wireMouse(cv) {
             if (!h || !h.p) continue;
             startTrail(h); // before it moves: the shape to come back to is the one it has now
             h.p.x += wx; h.p.y += wy; h.p.vx = h.p.vy = 0;
-            // its territory glow moves with it (its easing is for changes of shape, not for the drag)
-            moveTerr(h.id, wx, wy);
             I.homeXY.set(h.id, { x: h.p.x, y: h.p.y, pin: true });
           }
           I.alpha = Math.max(I.alpha, 0.05);
@@ -4256,7 +4331,7 @@ function buildLegend() {
       `<path d="${arcs}" fill="none" stroke="${rgba(c, 0.66)}" stroke-width="1.3" stroke-linecap="round"/>` +
       `<polygon points="${hex(4.6)}" fill="url(#${id})" stroke="rgba(255,255,255,0.24)" stroke-width="0.8"/><polygon points="${hex(1.6)}" fill="${mix(c, WHITE, 0.5)}"/>`;
   };
-  item(hub(COL.ember), 'repo: a hub in its colour, its ring turns slowly and nudges when work arrives (territory: the faint blob)');
+  item(hub(COL.ember), 'repo: a hub in its colour, its ring turns slowly and nudges when work arrives (its glow: a faint cloud around it and its conversations)');
   const vtri = (cx, c) => `<circle cx="${cx}" cy="10" r="5.6" fill="${HOLE}" stroke="${rgba(c, 0.55)}" stroke-width="1"/><path d="M${cx} 6.6l3.6 5.6h-7.2z" fill="${c}"/>`;
   item(`<circle cx="15" cy="10" r="7.6" fill="none" stroke="${rgba(COL.gold, 0.16)}" stroke-width="2"/><path d="M15 2.4A7.6 7.6 0 0 1 22.6 10" fill="none" stroke="${COL.gold}" stroke-width="2" stroke-linecap="round"/>` + vtri(15, COL.gold), 'repo deploying to production (Vercel): gold arc turning round the hub');
   item(vtri(9, COL.mint) + vtri(22, COL.red), 'repo on production: clean, nothing building · last deploy failed');
