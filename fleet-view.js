@@ -1846,7 +1846,7 @@ function ingestMain(s, recs) {
         else s.lastReply = said.slice(0, 20000);
         s.replyId = msg.id || null;
         s.replyAt = t;
-        if (!hushed(s.hush, said)) s.shownReply = s.lastReply;
+        if (!hushed(s.hush, said)) { s.shownReply = s.lastReply; s.shownAt = t; }
       }
       if (tools.some((c) => c.name === 'Skill' && /(?:^|:)handoff$/.test(String(c.input?.skill || '')))) s.hush = 'turn';
       // an API error ends the turn too, but the session is stuck until you retry
@@ -4793,6 +4793,9 @@ function sessionJson(s, now, owners = syncOwners()) {
     // instead (chats-model.js botPreview)
     ...((s.turnOpen ? s.doneReply || '' : s.shownReply || '') !== s.lastReply
       ? { doneReply: clipReply(s.turnOpen ? s.doneReply : s.shownReply, 600) } : {}),
+    // when that chat last showed a reply (null before any): its unread dot goes by it, never by last, which moves
+    // with whatever is written after it (a quiet task run, tool steps, the title lines; chats-model.js newOf)
+    shownAt: Math.round(s.shownAt || 0) || null,
     calls: [...s.calls].sort((a, b) => b.t - a.t).slice(0, 30).map((c) => ({ t: Math.round(c.t), who: c.who, verb: c.verb, what: c.what, file: c.file || null })),
     links: {
       pr: s.lastPr && OWNER_REPO.test(s.repo || '') ? `https://github.com/${s.repo}/pull/${s.lastPr}` : null,

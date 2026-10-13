@@ -29,7 +29,8 @@
 //       ChainStore: { keyFor(id) -> string, link(fromId, toId), save() }. A conversation that picked up another's
 //       handoff (s.pickedUpFrom.id) gets the same chain key. Only the chiefId fallback uses it: the tags keep a bot's
 //       conversations together by themselves
-//   unread(contact, seen) -> boolean  seen: { [contact.key]: ms the user last opened it }
+//   unread(contact, seen) -> boolean  seen: { [contact.key]: ms the user last opened it }; something new since
+//       (contact.newAt when it has one, else at)
 //   asksYou(contact, seen) -> boolean   its row shows needs-you (gold, "!"): it waits on you and you haven't opened it
 //       since (Henry, 2026-10-12: opening the chat clears it; a newer question brings it back)
 //   rawToContactsState(st) -> { ...st, sessions, allSessions, finishedSessions, pending, teams }   raw GET /state to
@@ -107,6 +108,8 @@
 //                     conversation listed: its brief's first line, else "Not started yet"
 //     at,             ms of its latest activity (for sorting and the time on the row); a bot with no conversation
 //                     listed: when it was made
+//     newAt,          bot and Chief rows with a conversation: ms its chat last showed something new, for the unread
+//                     dot (newOf: its last reply shown, or the question it waits on; at with an older server)
 //     needsYou, busy, pinned (the Chief; sortContacts with an order sets each row's), teamId (team rows), members (team rows: [{ id, name, lead }])
 //     turnStart, lastAction, running, waitingOn   bot and Chief rows: its conversation's, as /state has them (null
 //                     when unknown), so mascot.js mascotState can tell thinking from working and doingOf can say what
@@ -246,6 +249,14 @@ const nowOf = (s) => ({
   turnStart: (s && Number.isFinite(s.turnStart) && s.turnStart) || null, lastAction: (s && s.lastAction) || null,
   running: (s && Array.isArray(s.running) && s.running.length && s.running) || null, waitingOn: (s && s.waitingOn) || null,
 });
+// when a bot's or the Chief's chat last showed something new (Contact.newAt): the last reply its chat shows
+// (s.shownAt: a "[react:👍]" too, not a quiet task run, a hushed reply, its tool steps or a title Claude Code writes
+// after the turn), or the question it waits on now. Its log's time (at) moves with all of those, so a dot cleared by
+// opening the chat came back with nothing new in it. An older server sends no shownAt: its latest activity then
+function newOf(members, s, at) {
+  if (!members.some((x) => has(x, 'shownAt'))) return at;
+  return Math.max(0, ...members.map((x) => Number(x.shownAt) || 0), NEEDS.has(s.state) ? activeAt(s) : 0);
+}
 // a bot's own shape and colour (bots.js checks them; a colour here is #rrggbb only)
 const lookOf = (b) => ({
   shape: (b && typeof b.shape === 'string' && b.shape) || null,
@@ -308,6 +319,7 @@ export function buildContacts(input, opts = {}) {
       preview: botPreview(s, members.filter((m) => m !== s).reverse()), at: Math.max(...members.map(lastOf)), needsYou: NEEDS.has(s.state), busy: BUSY.has(s.state), pinned: isChief,
       ...nowOf(s),
     };
+    row.newAt = newOf(members, s, row.at);
     // another machine's bot (state.bots elsewhere: bots.js): its chat as any synced one's, nothing to start here
     if (!isChief) Object.assign(row, { botId: tag, live: b && !b.elsewhere ? !!b.live : null, ...(b && b.elsewhere ? { elsewhere: true } : {}), ...lookOf(b) });
     out.push(row);
@@ -479,7 +491,10 @@ export function doingOf(c, face) {
   return head;
 }
 
-export const unread = (c, seen) => !!(c.at && (!seen || !seen[c.key] || seen[c.key] < c.at));
+export const unread = (c, seen) => {
+  const at = c.newAt != null ? c.newAt : c.at;
+  return !!(at && (!seen || !seen[c.key] || seen[c.key] < at));
+};
 export const asksYou = (c, seen) => !!c.needsYou && unread(c, seen);
 
 // ---------- a bot's chat as the Bots tab shows it (botFeed) ----------

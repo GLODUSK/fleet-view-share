@@ -238,6 +238,34 @@ test('unread', () => {
   assert.equal(unread({ key: 'k', at: 5 }, { k: 5 }), false);
   assert.equal(unread({ key: 'k', at: 6 }, { k: 5 }), true);
   assert.equal(unread({ key: 'k', at: 0 }, {}), false);
+  // newAt, when a row has it, says what is new: at alone moving on is not
+  assert.equal(unread({ key: 'k', at: 9, newAt: 5 }, { k: 6 }), false);
+  assert.equal(unread({ key: 'k', at: 9, newAt: 7 }, { k: 6 }), true);
+  assert.equal(asksYou({ key: 'k', at: 9, newAt: 5, needsYou: true }, { k: 6 }), false);
+});
+
+test('a bot\'s unread dot goes by the last reply its chat shows (shownAt), not its log\'s time', () => {
+  const bots = [BOT(B1, { convId: 'u', live: true })];
+  const row = (o) => build(st({ allSessions: [S('u', { bot: B1, state: 'IDLE', ...o })], bots }))[0];
+  // it reacted ("[react:👍]") at T + 10; Henry opened the chat at T + 20, then the log kept growing (the steps after the
+  // reaction, a quiet task run, the title lines Claude Code writes after a turn): nothing new, no dot
+  const opened = { [`bot:${B1}`]: T + 20 };
+  const quiet = row({ last: T + 300, active: T + 290, shownAt: T + 10 });
+  assert.equal(quiet.at, T + 300, 'the row\'s time is still its latest activity');
+  assert.equal(quiet.newAt, T + 10);
+  assert.equal(unread(quiet, opened), false);
+  // a reply it shows after Henry opened it brings the dot back
+  assert.equal(unread(row({ last: T + 300, shownAt: T + 250 }), opened), true);
+  // a question it waits on (no reply text: AskUserQuestion) counts from when it asked
+  const asks = row({ state: 'ASKING', last: T + 300, active: T + 280, shownAt: T + 10 });
+  assert.equal(asksYou({ ...asks, needsYou: true }, opened), true);
+  // across its conversations: the newest shown reply of any; none yet: no dot
+  const two = build(st({ allSessions: [S('v', { bot: B1, last: T + 5, shownAt: T + 30 }), S('u', { bot: B1, state: 'IDLE', last: T + 300, shownAt: null })], bots }))[0];
+  assert.equal(two.newAt, T + 30);
+  assert.equal(row({ last: T + 300, shownAt: null }).newAt, 0);
+  // an older server (no shownAt): its latest activity, as before
+  assert.equal(row({ last: T + 300 }).newAt, T + 300);
+  assert.equal(unread(row({ last: T + 300 }), opened), true);
 });
 
 test('chain store: persists, saves only on change, caps at 2000, survives a throwing storage', () => {
