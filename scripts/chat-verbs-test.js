@@ -456,6 +456,12 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
       assert.deepEqual(parseMenu(rows), rest);
     }
     assert.equal(parseMenu(['● Steps:', '  ❯ No, exit', '    Yes, I trust this folder', '', '  that is all']), null);
+    // the question card shows AskUserQuestion's tab strip as tags: each header, ticked once answered, no Submit
+    const { questionTabs } = await import('../web/compose.js');
+    assert.deepEqual(questionTabs('←  ☐ Glow  ✔ Submit  →'), [{ label: 'Glow', done: false }]);
+    assert.deepEqual(questionTabs('☐ Theme'), [{ label: 'Theme', done: false }]);
+    assert.deepEqual(questionTabs('←  ☒ Two words  ☐ Size  ✔ Submit  →'), [{ label: 'Two words', done: true }, { label: 'Size', done: false }]);
+    assert.equal(questionTabs('Claude wants to edit app.js'), null);
 
     reset(); live({ status: 'waiting', waitingFor: 'trust', cols: 120, rows: 30 });
     fake.screen = TRUST_RAW;

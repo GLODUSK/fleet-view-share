@@ -28,33 +28,48 @@
 
 /* ---------- a menu Claude shows: permission, question, plan approval ---------- */
 .cmp-card {
-  display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 12px; min-width: 0;
-  border-radius: var(--radius); background: var(--glass-bg-strong);
-  border: 1px solid rgba(255, 194, 74, 0.34);
-  box-shadow: inset 0 1px 0 var(--glass-highlight), 0 10px 30px rgba(0, 0, 0, 0.32);
+  --cmp-tone: 255, 194, 74; /* gold: a permission; a question (.q) is violet */
+  display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 12px; min-width: 0;
+  border-radius: var(--radius);
+  background: radial-gradient(120% 90px at 0 0, rgba(var(--cmp-tone), 0.10), transparent 75%), var(--glass-bg-strong);
+  border: 1px solid rgba(var(--cmp-tone), 0.26);
+  box-shadow: inset 0 1px 0 rgba(var(--cmp-tone), 0.16), 0 12px 34px rgba(0, 0, 0, 0.34);
   animation: cmp-rise 200ms var(--ease);
 }
-html.glass .cmp-card { background: rgba(26, 23, 30, 0.82); -webkit-backdrop-filter: blur(24px) saturate(1.3); backdrop-filter: blur(24px) saturate(1.3); }
+.cmp-card.q { --cmp-tone: 164, 123, 255; }
+html.glass .cmp-card { background: radial-gradient(120% 90px at 0 0, rgba(var(--cmp-tone), 0.10), transparent 75%), rgba(26, 23, 30, 0.82); -webkit-backdrop-filter: blur(24px) saturate(1.3); backdrop-filter: blur(24px) saturate(1.3); }
 .cmp-card:focus { outline: none; }
-.cmp-card:focus-visible { border-color: rgba(255, 194, 74, 0.6); }
+.cmp-card:focus-visible { border-color: rgba(var(--cmp-tone), 0.6); }
 @keyframes cmp-rise { from { opacity: 0; transform: translateY(4px); } }
-.cmp-card-h { display: flex; align-items: flex-start; gap: 9px; min-width: 0; }
-.cmp-shield { flex: none; display: inline-flex; color: var(--gold); margin-top: 1px; }
-.cmp-card-t { font: 600 14px/1.4 var(--font-display, var(--font-ui)); color: var(--text); overflow-wrap: anywhere; }
+.cmp-card-h { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.cmp-shield {
+  flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 9px;
+  color: rgb(var(--cmp-tone)); background: rgba(var(--cmp-tone), 0.13); border: 1px solid rgba(var(--cmp-tone), 0.22);
+}
+.cmp-card-hd { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding-top: 4px; }
+.cmp-card-t { font: 600 14.5px/1.35 var(--font-display, var(--font-ui)); color: var(--text); overflow-wrap: anywhere; }
+/* a question's header (its tab in Claude Code), ticked once answered */
+.cmp-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: -1px; }
+.cmp-tag {
+  display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 7px; border-radius: 999px;
+  background: rgba(var(--cmp-tone), 0.14); color: rgb(var(--cmp-tone)); font: 600 10.5px/1 var(--font-ui); letter-spacing: 0.04em; text-transform: uppercase;
+}
+.cmp-tag.done { background: rgba(255, 255, 255, 0.06); color: var(--dim); }
 .cmp-ctx {
   margin: 0; padding: 8px 10px; max-height: 11.5em; overflow: auto; border-radius: var(--radius-sm);
   background: rgba(0, 0, 0, 0.26); border: 1px solid var(--line);
   font: 12px/1.45 var(--font-mono); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.cmp-opts { display: flex; flex-direction: column; gap: 5px; }
+.cmp-opts { display: flex; flex-direction: column; gap: 4px; }
 .cmp-opt {
-  display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 7px 10px; text-align: left; cursor: pointer;
-  border-radius: var(--radius-sm); border: 1px solid var(--glass-edge); background: rgba(255, 255, 255, 0.04); color: var(--text);
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; text-align: left; cursor: pointer;
+  border-radius: var(--radius-sm); border: 1px solid transparent; background: rgba(255, 255, 255, 0.035); color: var(--text);
   font: 13px/1.4 var(--font-ui); transition: background-color 160ms var(--ease), border-color 160ms var(--ease);
 }
-.cmp-opt:hover { background: rgba(255, 255, 255, 0.09); }
-.cmp-opt.on { border-color: rgba(63, 216, 255, 0.45); background: rgba(63, 216, 255, 0.09); }
-.cmp-opt.on:hover { background: rgba(63, 216, 255, 0.15); }
+.cmp-opt:hover { background: rgba(255, 255, 255, 0.075); border-color: var(--glass-edge); }
+.cmp-opt.ticked { background: rgba(63, 216, 255, 0.06); }
+.cmp-opt.on { border-color: rgba(63, 216, 255, 0.42); background: rgba(63, 216, 255, 0.09); box-shadow: 0 0 0 3px rgba(63, 216, 255, 0.06); }
+.cmp-opt.on:hover { background: rgba(63, 216, 255, 0.14); }
 .cmp-opt:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .cmp-opt:disabled, .cmp-esc:disabled { opacity: 0.5; cursor: default; }
 .cmp-n {
@@ -62,7 +77,14 @@ html.glass .cmp-card { background: rgba(26, 23, 30, 0.82); -webkit-backdrop-filt
   background: rgba(255, 255, 255, 0.07); border: 1px solid var(--glass-edge); font: 600 11.5px/1 var(--font-mono); color: var(--dim);
 }
 .cmp-opt.on .cmp-n { color: var(--cyan); border-color: rgba(63, 216, 255, 0.4); }
-.cmp-l { min-width: 0; overflow-wrap: anywhere; padding-top: 1px; }
+.cmp-l { flex: 1; min-width: 0; overflow-wrap: anywhere; padding-top: 1px; }
+/* a multiple-choice row's digit, at its end */
+.cmp-kn { flex: none; align-self: center; font: 600 11px/1 var(--font-mono); color: var(--faint); opacity: 0; transition: opacity 160ms var(--ease); }
+.cmp-opt:hover .cmp-kn, .cmp-opt.on .cmp-kn { opacity: 1; }
+/* "Chat about this": a way out, not an answer */
+.cmp-opt.cmp-chat { background: transparent; border: 1px dashed var(--glass-edge); color: var(--dim); }
+.cmp-opt.cmp-chat:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+.cmp-opt.cmp-chat.on { color: var(--text); border-style: solid; }
 .cmp-l small { display: block; margin-top: 2px; color: var(--dim); font: 12px/1.4 var(--font-ui); }
 .cmp-k { color: var(--faint); }
 /* a multiple-choice question's box */
@@ -70,9 +92,11 @@ html.glass .cmp-card { background: rgba(26, 23, 30, 0.82); -webkit-backdrop-filt
   flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; margin-top: 2px; border-radius: 4px;
   border: 1.5px solid var(--dim); color: #061018;
 }
-.cmp-cb.on { background: var(--cyan); border-color: var(--cyan); }
+.cmp-cb { transition: background-color 140ms var(--ease), border-color 140ms var(--ease); }
+.cmp-opt:hover .cmp-cb:not(.on) { border-color: var(--text); }
+.cmp-cb.on { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 10px rgba(63, 216, 255, 0.35); }
 /* "Type something": a text box in the card */
-.cmp-free { align-items: center; padding-top: 4px; padding-bottom: 4px; cursor: text; }
+.cmp-free { align-items: center; padding-top: 4px; padding-bottom: 4px; cursor: text; border-color: var(--glass-edge); background: rgba(0, 0, 0, 0.16); }
 .cmp-free:focus-within { border-color: rgba(63, 216, 255, 0.55); background: rgba(63, 216, 255, 0.07); }
 .cmp-free .cmp-cb { margin-top: 0; }
 .cmp-free-in {
@@ -87,12 +111,14 @@ html.glass .cmp-card { background: rgba(26, 23, 30, 0.82); -webkit-backdrop-filt
 .cmp-free-go:hover { background: rgba(63, 216, 255, 0.16); color: var(--cyan); }
 .cmp-free-go:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .cmp-free-go:disabled { opacity: 0.5; cursor: default; }
-.cmp-card-f { display: flex; align-items: center; gap: 10px; }
+.cmp-card-f { display: flex; align-items: center; gap: 8px; padding-top: 2px; }
 .cmp-submit {
   height: 26px; padding: 0 14px; border-radius: var(--radius-sm); cursor: pointer;
   border: 1px solid rgba(63, 216, 255, 0.5); background: rgba(63, 216, 255, 0.14); color: var(--cyan); font: 600 12px/1 var(--font-ui);
 }
 .cmp-submit:hover { background: rgba(63, 216, 255, 0.24); }
+.cmp-submit.ready { background: var(--cyan); border-color: var(--cyan); color: #061018; box-shadow: 0 4px 14px rgba(63, 216, 255, 0.28); }
+.cmp-submit.ready:hover { filter: brightness(1.08); }
 .cmp-submit:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .cmp-submit:disabled { opacity: 0.5; cursor: default; }
 .cmp-esc {
@@ -102,6 +128,7 @@ html.glass .cmp-card { background: rgba(26, 23, 30, 0.82); -webkit-backdrop-filt
 .cmp-esc:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
 .cmp-esc:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .cmp-card-hint { color: var(--faint); font: 11.5px/1.3 var(--font-ui); }
+.cmp-card-f .cmp-card-hint { margin-left: auto; }
 
 /* ---------- a command's panel: /usage, /status, /config, /mcp… as the session draws it ---------- */
 .cmp-panel {

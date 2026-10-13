@@ -201,6 +201,15 @@ const OPT_RE = /^(\s*)([❯›])?\s*(\d{1,2})[.)]\s+(.*\S)\s*$/;
 const CHECK_RE = /^\[([ ✔✓xX×])\]\s+/;
 const SUBMIT_RE = /^\s*(❯)?\s*Submit\s*$/;
 const FREE_RE = /^(?:type something\.?|other)$/i;
+const CHAT_RE = /^chat about this$/i;
+// AskUserQuestion's tab strip, the line over its question ("←  ☐ Glow  ☒ Theme  ✔ Submit  →"): each question's
+// header, ☒ once answered; -> [{ label, done }] without the Submit step, or null when the line is something else
+export function questionTabs(line) {
+  const l = String(line || '').replace(/^\s*←\s*/, '').replace(/\s*→\s*$/, '');
+  if (!/^[☐☒✔✓]\s+\S/.test(l)) return null;
+  const tabs = [...l.matchAll(/([☐☒✔✓])\s+(.+?)(?=\s+[☐☒✔✓]\s|$)/g)].map((x) => ({ label: x[2].trim(), done: x[1] !== '☐' }));
+  return tabs.filter((t) => !/^submit$/i.test(t.label));
+}
 const PREVIEW_RE = /\s{3,}[┌└│╭╰┃].*$/;
 const isPreview = (l) => /^\s*[┌└│╭╰┃]/.test(l) || /^\s*Notes: press n\b/.test(l);
 // The prompt box: a "❯" row right under a rule, closed by another rule below it. A past message on the screen
@@ -2048,21 +2057,32 @@ export function mountCompose(slot, s) {
     if (st.freeDraft && st.freeDraft.title !== m.title) st.freeDraft = null; // another question
     const dis = sent || busy ? ' disabled' : '';
     const multi = m.options.some((o) => o.check != null);
-    const ctx = m.context.length ? `<pre class="cmp-ctx">${esc(m.context.join('\n'))}${m.more ? '\n…' : ''}</pre>` : '';
+    // Claude's question (AskUserQuestion: a "Type something" or "Chat about this" row), not a permission
+    const question = m.options.some((o) => o.free || CHAT_RE.test(o.label));
+    // its tab strip ("←  ☐ Glow  ✔ Submit  →") reads as the question's tags over the title, not a line of terminal
+    const tabs = question && m.context.length ? questionTabs(m.context[0]) : null;
+    const context = tabs ? m.context.slice(1) : m.context;
+    const ctx = context.length ? `<pre class="cmp-ctx">${esc(context.join('\n'))}${m.more ? '\n…' : ''}</pre>` : '';
+    const tags = tabs && tabs.length ? `<span class="cmp-tags">${tabs.map((t) => `<span class="cmp-tag${t.done ? ' done' : ''}">${t.done ? ic('check', 10) : ''}${esc(t.label)}</span>`).join('')}</span>` : '';
     const opts = m.options.map((o) => {
       const box = o.check == null ? '' : `<span class="cmp-cb${o.check ? ' on' : ''}" aria-hidden="true">${o.check ? ic('check', 11) : ''}</span>`;
+      // in a multiple-choice question the box leads and its digit sits at the end, quiet
+      const num = multi ? '' : `<span class="cmp-n">${o.n}</span>`;
       if (o.free) {
-        return `<div class="cmp-opt cmp-free${o.on ? ' on' : ''}" data-free="${o.n}"><span class="cmp-n">${o.n}</span>${box}`
+        return `<div class="cmp-opt cmp-free${o.on ? ' on' : ''}" data-free="${o.n}">${num}${box}`
           + `<input type="text" class="cmp-free-in" placeholder="Type something…" spellcheck="true" autocomplete="off" aria-label="your own answer"${busy ? ' disabled' : ''}>`
           + `<button type="button" class="cmp-free-go" data-c="free" title="${multi ? 'Send this answer (with any ticked above)' : 'Send this answer'}" aria-label="send this answer"${dis}>${ic('send', 13)}</button></div>`;
       }
       const label = esc(o.label).replace(/\s*\((esc|shift\+tab)\)$/i, ' <span class="cmp-k">($1)</span>');
-      return `<button type="button" class="cmp-opt${o.on ? ' on' : ''}" data-n="${o.n}"${dis}${o.on ? ' aria-current="true"' : ''}${o.check != null ? ` role="checkbox" aria-checked="${o.check}"` : ''}>`
-        + `<span class="cmp-n">${o.n}</span>${box}<span class="cmp-l">${label}${o.desc ? `<small>${esc(o.desc)}</small>` : ''}</span></button>`;
+      const cls = `cmp-opt${o.on ? ' on' : ''}${o.check ? ' ticked' : ''}${question && CHAT_RE.test(o.label) ? ' cmp-chat' : ''}`;
+      return `<button type="button" class="${cls}" data-n="${o.n}"${dis}${o.on ? ' aria-current="true"' : ''}${o.check != null ? ` role="checkbox" aria-checked="${o.check}"` : ''}>`
+        + `${num}${box}<span class="cmp-l">${label}${o.desc ? `<small>${esc(o.desc)}</small>` : ''}</span>${multi ? `<span class="cmp-kn">${o.n}</span>` : ''}</button>`;
     }).join('');
     const last = m.options[m.options.length - 1].n;
     const hint = multi ? 'tick any, then Submit' : `or press 1–${Math.min(9, last)} here`;
-    card.innerHTML = `<div class="cmp-card-h"><span class="cmp-shield">${ic('shield', 16)}</span><span class="cmp-card-t">${esc(m.title || 'Claude is asking')}</span></div>`
+    card.classList.toggle('q', question);
+    card.innerHTML = `<div class="cmp-card-h"><span class="cmp-shield">${ic(question ? 'ask' : 'shield', 16)}</span>`
+      + `<span class="cmp-card-hd">${tags}<span class="cmp-card-t">${esc(m.title || 'Claude is asking')}</span></span></div>`
       + ctx + `<div class="cmp-opts">${opts}</div>`
       + `<div class="cmp-card-f">${m.submit ? `<button type="button" class="cmp-submit" data-c="msubmit"${sent ? ' disabled' : ''}>Submit</button>` : ''}`
       + `<button type="button" class="cmp-esc" data-c="esc"${sent ? ' disabled' : ''}>Esc</button><span class="cmp-card-hint">${hint}</span></div>`;
@@ -2073,7 +2093,13 @@ export function mountCompose(slot, s) {
       fi.value = st.freeDraft ? st.freeDraft.text : hasText(f) ? f.label : '';
       if (had) { fi.focus({ preventScroll: true }); try { fi.setSelectionRange(had.a, had.b); } catch { /* gone */ } }
     }
+    readySubmit();
     drawSend(); // Send sends what the box holds when the chat box is empty
+  }
+  // a multiple-choice question's Submit lights up once there's something to send: a tick, or words in its box
+  function readySubmit() {
+    const b = card.querySelector('.cmp-submit');
+    if (b && st.menu) b.classList.toggle('ready', st.menu.options.some((o) => o.check) || !!freeText());
   }
   function focusFree() {
     const fi = card.querySelector('.cmp-free-in');
@@ -2739,7 +2765,7 @@ export function mountCompose(slot, s) {
   });
   panelEl.addEventListener('keydown', panelKeydown);
   card.addEventListener('input', (e) => {
-    if (e.target.closest?.('.cmp-free-in') && st.menu) { st.freeDraft = { title: st.menu.title, text: e.target.value }; drawSend(); }
+    if (e.target.closest?.('.cmp-free-in') && st.menu) { st.freeDraft = { title: st.menu.title, text: e.target.value }; readySubmit(); drawSend(); }
   });
   // a click on the "Type something" row, beside its box: into the box
   card.addEventListener('click', (e) => { if (e.target.closest('[data-free]') && !e.target.closest('input, button')) focusFree(); });
