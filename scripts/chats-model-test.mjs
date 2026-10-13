@@ -7,7 +7,7 @@
 // taskWhen, taskLine, tasksHead). Plain asserts, no dependencies:
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, rawToContactsState, previewOf, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, rawToContactsState, previewOf, botPreview, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
   sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
@@ -39,7 +39,7 @@ test('map conversations are left out; a bot is one row keyed bot:<id> across its
   assert.deepEqual(r.ids, ['a', 'b', 'c']);
   assert.equal(r.at, T + 3);
   assert.equal(r.busy, true);
-  assert.equal(r.preview, 'edit x.ts');
+  assert.equal(r.preview, '', 'working: never the tool it runs (botPreview)');
   assert.equal(build(st({ allSessions: [m], sessions: [m] })).length, 0);
 });
 
@@ -153,10 +153,10 @@ test('teamThread: oldest first, names resolved through handoffs, unknown ids sho
   assert.equal(th[2].fromName, 'unknown-');
 });
 
-test('previews: question, activity, first real reply line, goal; one line of at most 140 characters', () => {
+test('previews: question, first real reply line, goal, never the activity; one line of at most 140 characters', () => {
   const p = (o) => build(st({ allSessions: [S('p', { bot: B1, ...o })] }))[0].preview;
   assert.equal(p({ state: 'ASKING', waitingOn: 'Merge it?' }), 'Merge it?');
-  assert.equal(p({ state: 'WORKING', lastAction: { who: 'build:x', verb: 'edit', what: 'a.ts' } }), 'build:x: edit a.ts');
+  assert.equal(p({ state: 'WORKING', lastAction: { who: 'build:x', verb: 'edit', what: 'a.ts' }, lastReply: 'Merged.' }), 'Merged.');
   assert.equal(p({ lastReply: '# Title\n\n```js\n```\n| a | b |\n|---|---|\n**Shipped** the thing\nmore' }), 'Shipped the thing');
   assert.equal(p({ goal: 'Do the work' }), 'Do the work');
   const long = p({ lastReply: 'word '.repeat(100) });
@@ -250,6 +250,24 @@ test('previewOf: the question, then the action, then the last reply or the goal'
   assert.equal(previewOf({ state: 'DONE', goal: '  fix   the menu ' }), 'fix the menu');
   assert.equal(previewOf({ state: 'IDLE', lastReply: 'x'.repeat(200) }).length, 140);
   assert.equal(previewOf({ state: 'IDLE' }), '');
+});
+
+test('botPreview: the question, else the last finished reply the chat shows; never a step mid-turn', () => {
+  assert.equal(botPreview({ state: 'QUESTION', waitingOn: 'Which branch?', lastReply: 'x' }), 'Which branch?');
+  // working: what it did last time, not the tool or the text it says along the way
+  assert.equal(botPreview({ state: 'WORKING', lastAction: { verb: 'edit', what: 'dialer.py' }, lastReply: 'Compiles. Now the screenshots.', doneReply: 'Shipped the dialer.' }), 'Shipped the dialer.');
+  assert.equal(botPreview({ state: 'WORKING', lastAction: { verb: 'edit', what: 'a.py' }, lastReply: 'Looking.', doneReply: null, goal: 'fix it' }), 'fix it', 'no finished reply yet: the goal');
+  // a reply the chat leaves out (doneReply sent when lastReply is one): the shown one
+  assert.equal(botPreview({ state: 'DONE', lastReply: 'Read it again. My name is now Panchito.', doneReply: 'Inbox is clear.' }), 'Inbox is clear.');
+  // none in this conversation: its older ones, newest first; a Fleet View note as the goal is never shown
+  const fresh = { state: 'DONE', lastReply: 'Read it again.', doneReply: null, goal: '[Fleet View] Your instructions changed: read CLAUDE.md again' };
+  assert.equal(botPreview(fresh, [{ lastReply: 'Newer one.' }, { lastReply: 'Older one.' }]), 'Newer one.');
+  assert.equal(botPreview(fresh), '');
+  assert.equal(botPreview({ state: 'IDLE', lastReply: '[react:👍] Done, sent to Juanito.' }), 'Done, sent to Juanito.');
+  // the row uses it
+  const st = { allSessions: [], sessions: [{ id: 'b1', bot: 'k1', state: 'WORKING', last: 5, lastAction: { verb: 'edit', what: 'dialer.py' }, lastReply: 'Now I check it.', doneReply: 'Dialer is live.' }],
+    finishedSessions: [], pending: [], teams: [], bots: [{ id: 'k1', name: 'Juanito', convId: 'b1', live: true }] };
+  assert.equal(buildContacts(st).find((c) => c.key === 'bot:k1').preview, 'Dialer is live.');
 });
 
 test('botFeed: Fleet View setup notes become small notes, the bare "ok" to one is left out', () => {

@@ -29,7 +29,11 @@
 //   rawToContactsState(st) -> { ...st, sessions, allSessions, finishedSessions, pending, teams }   raw GET /state to
 //       the lists above (buildContacts calls it by itself when state has no allSessions); the tags and state.bots stay
 //   previewOf(session) -> string   a conversation's one-line preview: the question it asks, what it is doing now, or
-//       its last reply (Contact.preview uses it)
+//       its last reply (the map's rows)
+//   botPreview(session, older = []) -> string   a bot's or the Chief's row (Contact.preview): the question it asks,
+//       else the last finished reply its chat shows (s.doneReply when /state sends it, else s.lastReply), else that of
+//       its older conversations (newest first), else its goal unless that is a "[Fleet View]" note; never a step
+//       mid-turn or a reply botFeed leaves out
 //   replyLine(text) -> string   the first line of a reply that says something: no heading, code fence, table or
 //       rule, list and quote marks and * _ ` stripped; '' for none. A bot's reaction at its start (reactionOf) is
 //       left out, and a reply that is only a reaction reads as its emoji
@@ -93,7 +97,7 @@
 //                     is another machine's (elsewhere: true, a row only while its chats are listed)
 //     name,           a Fleet View rename of one of its conversations (the newest), else the bot's name, else 'Chief'
 //     account, repo ({ name, root, color } | null), state, label, statusColor,
-//     preview,        one line: what it is doing now, the question it asks, or its last reply; a bot with no
+//     preview,        one line: the question it asks, or its last finished reply (botPreview); a bot with no
 //                     conversation listed: its brief's first line, else "Not started yet"
 //     at,             ms of its latest activity (for sorting and the time on the row); a bot with no conversation
 //                     listed: when it was made
@@ -176,6 +180,22 @@ export function previewOf(s) {
     if (a) return oneLine(a);
   }
   return oneLine(replyLine(s.lastReply) || s.goal || '');
+}
+
+// a bot's or the Chief's row, as a chat app's: the question it asks, else the last reply its chat shows, finished;
+// never what it is doing along the way (a tool, a step mid-turn) or a reply the chat leaves out (Henry, 2026-10-12).
+// doneReply is there only when it differs from lastReply (fleet-view.js); its earlier conversations (older, newest
+// first) are looked in when this one has none, then its goal unless that is one of Fleet View's own notes
+export function botPreview(s, older = []) {
+  if (NEEDS.has(s.state)) {
+    const q = s.waitingOn || replyLine(s.lastReply);
+    if (q) return oneLine(q);
+  }
+  for (const x of [s, ...older]) {
+    const r = replyLine(has(x, 'doneReply') ? x.doneReply : x.lastReply);
+    if (r) return oneLine(r);
+  }
+  return setupNote(s.goal) == null ? oneLine(s.goal || '') : '';
 }
 
 // settings.hidden -> (conversation) -> whether it is left out: on the list, unless it worked again after it was
@@ -279,7 +299,7 @@ export function buildContacts(input, opts = {}) {
       key: isChief ? 'chief' : `bot:${tag}`, kind: isChief ? 'chief' : 'bot', id: s.id, ids: members.map((m) => m.id),
       name: ren ? ren.name : isChief ? 'Chief' : (b && b.name) || s.name || short(s.id),
       account: s.account, repo: s.repo || null, state: s.state, label: s.label, statusColor: s.stateColor,
-      preview: previewOf(s), at: Math.max(...members.map(lastOf)), needsYou: NEEDS.has(s.state), busy: BUSY.has(s.state), pinned: isChief,
+      preview: botPreview(s, members.filter((m) => m !== s).reverse()), at: Math.max(...members.map(lastOf)), needsYou: NEEDS.has(s.state), busy: BUSY.has(s.state), pinned: isChief,
       ...nowOf(s),
     };
     // another machine's bot (state.bots elsewhere: bots.js): its chat as any synced one's, nothing to start here

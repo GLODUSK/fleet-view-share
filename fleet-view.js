@@ -1761,7 +1761,7 @@ function ingestMain(s, recs) {
       const a = d.attachment;
       if (a && a.type === 'queued_command' && (!a.commandMode || a.commandMode === 'prompt') && typeof a.prompt === 'string' && a.prompt.trim() && !a.prompt.startsWith('<')) {
         const t = Date.parse(d.timestamp) || Date.now();
-        s.prompt = a.prompt; s.promptAt = t; s.turnOpen = true;
+        s.prompt = a.prompt; s.promptAt = t; s.turnOpen = true; s.hush = hushOf(a.prompt, [a.prompt]);
         if (t > (s.actT || 0)) s.actT = t;
       }
       continue;
@@ -1820,11 +1820,17 @@ function ingestMain(s, recs) {
         else s.lastReply = said.slice(0, 20000);
         s.replyId = msg.id || null;
         s.replyAt = t;
+        if (!hushed(s.hush, said)) s.shownReply = s.lastReply;
       }
+      if (tools.some((c) => c.name === 'Skill' && /(?:^|:)handoff$/.test(String(c.input?.skill || '')))) s.hush = 'turn';
       // an API error ends the turn too, but the session is stuck until you retry
       if (d.isApiErrorMessage) { s.turnOpen = false; s.apiError = true; s.errAt = t; }
       else if (tools.length || sr === 'tool_use') s.turnOpen = true;
-      else if (sr) { s.turnOpen = false; s.endedOnQuestion = endsOnQuestion(s.lastSaid); s.turnEndT = t; }
+      else if (sr) {
+        s.turnOpen = false; s.endedOnQuestion = endsOnQuestion(s.lastSaid); s.turnEndT = t;
+        // the reply the last finished turn ended on: the Bots tab's row shows it, never a step mid-turn (doneReply)
+        s.doneReply = s.shownReply || '';
+      }
     } else if (!d.isMeta) {
       for (const b of blocks) if (b && b.type === 'tool_result') noteResult(s, t, b);
       s.asking = false;
@@ -1832,7 +1838,7 @@ function ingestMain(s, recs) {
       s.endedOnQuestion = false;
       s.lastSaid = '';
       const texts = typeof content === 'string' ? [content] : blocks.filter((c) => c.type === 'text').map((c) => c.text);
-      if (texts.some((x) => /^\[Request interrupted by user/.test(x))) { s.turnOpen = false; s.turnEndT = t; continue; }
+      if (texts.some((x) => /^\[Request interrupted by user/.test(x))) { s.turnOpen = false; s.turnEndT = t; s.doneReply = s.shownReply || ''; continue; }
       // a conversation that started from a handoff (`claude "/pickup <file>"`, among its first few messages):
       // the file, for "picked up from"
       if (!s.pickupArg && (s.userMsgs = (s.userMsgs || 0) + 1) <= 3) {
@@ -1844,6 +1850,8 @@ function ingestMain(s, recs) {
       s.turnOpen = true;
       const typed = texts.find((x) => x && !x.startsWith('<'));
       if (typed) { s.prompt = typed; s.promptAt = t; }
+      const h = hushOf(typed, texts);
+      if (h !== undefined) s.hush = h;
     }
   }
 }
@@ -2341,6 +2349,30 @@ function raise(s, text, color, kind, extra = {}) {
 
 // what a bot answers a task run with when there is nothing to report (web/chats-model.js QUIET, the same words)
 const QUIET_REPLY = /^\s*(?:\[quiet\]|nothing new(?: to report)?|no(?:thing| new \w+)(?: new)?(?: to report)?(?: this (?:hour|time|run))?)[.!]?\s*$/i;
+// Which of a turn's replies a bot's chat leaves out (web/chats-model.js botFeed, the same rules), so the Bots tab's
+// row shows only a reply its chat shows (s.shownReply, doneReply). A prompt -> s.hush: 'turn' every reply (Fleet
+// View's "instructions changed" note, a /handoff), 'ack' a bare "ok" (any other "[Fleet View]" note; the start
+// prompt), 'pickup' the "Picked up" reply (a /pickup), null none (Henry's own message, "you were cut off");
+// undefined: no prompt in it (a tool result, another command), s.hush stays
+const HUSH_ACK = /^\s*(?:ok(?:ay)?|ready|got it)[.!]?\s*$/i;
+function hushOf(typed, texts) {
+  for (const x of texts || []) {
+    const m = /<command-name>\/?(pickup|handoff)<\/command-name>/.exec(x || '');
+    if (m) return m[1] === 'pickup' ? 'pickup' : 'turn';
+  }
+  if (!typed) return undefined;
+  const t = String(typed).trim();
+  if (/^\/pickup(?:\s|$)/.test(t)) return 'pickup';
+  if (/^\/handoff(?:\s|$)/.test(t)) return 'turn';
+  const n = /^\[Fleet View\][ \t]*([\s\S]*)$/.exec(t);
+  if (!n) return null;
+  if (/^You were cut off mid-turn\b/.test(n[1])) return null;
+  if (/^Your instructions changed\b/.test(n[1])) return 'turn';
+  if (/^You are (?:the Chief\b|.{1,80}?, one of Henry's bots\b)/.test(n[1]) && /Greet Henry/.test(n[1])) return null;
+  return 'ack';
+}
+const hushed = (hush, said) => hush === 'turn' || (hush === 'ack' && HUSH_ACK.test(said))
+  || (hush === 'pickup' && /^\s*Picked up\b/i.test(said));
 const STUCK_AGENT_MS = 20 * 60e3, OVER_LIMIT_EVERY_MS = 30 * 60e3;
 function checkAlerts(s, prev) {
   const busy = (x) => x === 'WORKING' || x === 'AGENTS';
@@ -4727,6 +4759,11 @@ function sessionJson(s, now, owners = syncOwners()) {
     // the detail panel: the latest reply in full (or, while it asks, the question and its choices), its own
     // recent tool calls, and where its PR, branch, deploy and folder are
     lastReply: clipReply(s.state === 'ASKING' && !s.liveWait && s.askFull ? s.askFull : s.lastReply),
+    // when it differs from lastReply (mid-turn, or the last reply is one its bot chat leaves out: hushOf): the reply
+    // its last finished turn ended on that a bot's chat shows (null before any), which the Bots tab's row shows
+    // instead (chats-model.js botPreview)
+    ...((s.turnOpen ? s.doneReply || '' : s.shownReply || '') !== s.lastReply
+      ? { doneReply: clipReply(s.turnOpen ? s.doneReply : s.shownReply, 600) } : {}),
     calls: [...s.calls].sort((a, b) => b.t - a.t).slice(0, 30).map((c) => ({ t: Math.round(c.t), who: c.who, verb: c.verb, what: c.what, file: c.file || null })),
     links: {
       pr: s.lastPr && OWNER_REPO.test(s.repo || '') ? `https://github.com/${s.repo}/pull/${s.lastPr}` : null,
