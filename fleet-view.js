@@ -1811,8 +1811,11 @@ function ingestMain(s, recs) {
       const sr = d.message?.stop_reason;
       const said = blocks.filter((c) => c.type === 'text').map((c) => c.text).join('\n').trim();
       if (said) s.lastSaid = said;
+      // a bot's "[quiet]" answer to a task run that turned up nothing (bot-tasks.js runText) is no reply: the
+      // preview keeps the one before it and the turn's end raises no "finished" alert (s.quietTurn)
+      if (said) s.quietTurn = QUIET_REPLY.test(said);
       // the latest reply in full, kept across tool calls; the text blocks of one message are joined
-      if (said) {
+      if (said && !s.quietTurn) {
         if (msg.id && msg.id === s.replyId) { if (!s.lastReply.endsWith(said)) s.lastReply = (s.lastReply + '\n\n' + said).slice(-20000); }
         else s.lastReply = said.slice(0, 20000);
         s.replyId = msg.id || null;
@@ -2336,6 +2339,8 @@ function raise(s, text, color, kind, extra = {}) {
   if (shipKind) tlShip({ t: a.t, kind: shipKind, pr: extra.pr || null, repo: extra.repo || null, sid: s.id, name: a.s.name });
 }
 
+// what a bot answers a task run with when there is nothing to report (web/chats-model.js QUIET, the same words)
+const QUIET_REPLY = /^\s*(?:\[quiet\]|nothing new(?: to report)?|no(?:thing| new \w+)(?: new)?(?: to report)?(?: this (?:hour|time|run))?)[.!]?\s*$/i;
 const STUCK_AGENT_MS = 20 * 60e3, OVER_LIMIT_EVERY_MS = 30 * 60e3;
 function checkAlerts(s, prev) {
   const busy = (x) => x === 'WORKING' || x === 'AGENTS';
@@ -2350,7 +2355,7 @@ function checkAlerts(s, prev) {
     else if (s.state === 'QUESTION') raise(s, 'asked you a question', C.gold, 'question');
     else if (s.state === 'ERROR') raise(s, 'hit an API error, retry it', C.red, 'error', { fail: true });
     else if (s.state === 'STALLED') raise(s, s.stoppedIdle ? 'stopped mid-turn; its session is idle (tell it to continue)' : 'quiet for 5 minutes mid-turn (permission prompt?)', C.gold, 'stalled');
-    else if (s.state === 'DONE') raise(s, 'finished', C.mint, 'done');
+    else if (s.state === 'DONE' && !s.quietTurn) raise(s, 'finished', C.mint, 'done');
   }
   if (s.wf) { s.seenRun = s.wf.runId; s.seenDone = !!s.wf.done; s.seenFails = s.wf.fails; }
   const key = s.lastPr && `${s.repo}#${s.lastPr}`;

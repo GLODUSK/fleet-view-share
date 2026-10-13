@@ -44,7 +44,8 @@
 //       reaction ("[react:👍]", reactionOf) puts reaction: '👍' on your last message before it (chat.js draws it on
 //       the bubble's corner) and shows the rest, or nothing when that is all
 //       A scheduled task's note shows as one line, "Scheduled task: <title>" ("Ran now: …" when Henry ran it), and
-//       when the bot answers it with "[quiet]" (or "Nothing new.") that run's steps and answer are left out too
+//       when the bot answers it with "[quiet]" (or "Nothing new.") the note, that run's steps and answer are all left
+//       out (Henry, 2026-10-12: a row of "Scheduled task: …" notes is noise)
 //   taskNote(text) -> { now, title } | null   a task's note (bot-tasks.js runText) and its title, tidied
 //   quietNote(text) -> 'ack' | 'one' | 'skip' | null   a setup note's text (setupNote) that botFeed leaves out, and
 //       what it leaves out after it: 'ack' the bare "ok", 'one' the one reply, 'skip' nothing; null: it shows
@@ -419,7 +420,7 @@ export function taskNote(text) {
   return { now: m[1] !== 'Scheduled task', title };
 }
 // what a bot answers a task with when there is nothing to report (bot-tasks.js runText asks for "[quiet]"): the
-// whole run is left out of the chat, the task's note alone says it ran
+// whole run is left out of the chat, its note too (fleet-view.js QUIET_REPLY: no preview, no bot note for it)
 const QUIET = /^\s*(?:\[quiet\]|nothing new(?: to report)?|no(?:thing| new \w+)(?: new)?(?: to report)?(?: this (?:hour|time|run))?)[.!]?\s*$/i;
 export function botFeed(items) {
   const out = [];
@@ -428,7 +429,7 @@ export function botFeed(items) {
   // everything until the next message
   let skip = null;
   let mine = -1; // where your last message is in out: a reaction goes on it
-  let task = -1; // just after a task's note in out: a quiet answer to it takes its run out
+  let task = -1; // where a task's note is in out: a quiet answer to it takes the note and its run out
   // _j is chat.js's cached JSON of the item as it came: a changed copy must not reuse it
   const copy = (it, more) => { const { _j, ...rest } = it; return { ...rest, ...more }; };
   for (const it of items || []) {
@@ -450,7 +451,7 @@ export function botFeed(items) {
         if (q) { skip = q === 'skip' ? null : q; continue; }
         const tn = taskNote(note);
         out.push(copy(it, { kind: 'setup', text: tn ? `${tn.now ? 'Ran now' : 'Scheduled task'}: ${tn.title}` : note }));
-        if (tn) task = out.length;
+        if (tn) task = out.length - 1;
         skip = 'ack';
         continue;
       }
@@ -461,7 +462,7 @@ export function botFeed(items) {
       const was = skip;
       skip = null;
       if (was === 'one' || (was === 'ack' && ACK.test(String(it.text || ''))) || (was === 'pickup' && PICKED.test(String(it.text || '')))) continue;
-      if (task >= 0 && QUIET.test(String(it.text || ''))) { out.length = task; continue; }
+      if (task >= 0 && QUIET.test(String(it.text || ''))) { out.length = task; task = -1; continue; }
       const r = reactionOf(it.text);
       if (r) {
         if (mine >= 0 && !out[mine].reaction) out[mine] = copy(out[mine], { reaction: r.emoji });
