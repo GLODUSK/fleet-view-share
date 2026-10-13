@@ -1773,6 +1773,14 @@ function zoomAt(sx, sy, factor) {
   saveZoomSoon();
 }
 
+// a pan that only makes up for the map moving or resizing on screen (a menu or panel opening): the starfield
+// takes it back out (starAdj), so the stars hold still in the window as well
+function holdPan(dx, dy) {
+  I.pan.x += dx; I.pan.y += dy;
+  const a = I.starAdj || (I.starAdj = { x: 0, y: 0 });
+  a.x += dx; a.y += dy;
+}
+
 // ---------- frame loop ----------
 function frame() {
   if (!active() || document.hidden) { stop(); return; }
@@ -1789,7 +1797,7 @@ function frame() {
   const top0 = I.top, left0 = I.left;
   I.top = r.top; I.left = r.left;
   const shifted = I.cam && top0 != null && (Math.abs(r.top - top0) >= 0.5 || Math.abs(r.left - left0) >= 0.5);
-  if (shifted) { I.pan.x += (r.left - left0) / K(); I.pan.y += (r.top - top0) / K(); I.dirty = true; }
+  if (shifted) { holdPan((r.left - left0) / K(), (r.top - top0) / K()); I.dirty = true; }
   if (!I.sized || Math.round(r.width) !== I.W || Math.round(r.height) !== I.H || dpr !== I.dpr) {
     I.sized = true;
     const W0 = I.W, H0 = I.H;
@@ -1806,7 +1814,7 @@ function frame() {
       // a resized map (the panel opening, the window) doesn't move the view: what's on screen stays put,
       // held by its top-left corner (the panel takes room from the right), and by where that corner is on
       // screen (above)
-      I.pan.x += (I.W - W0) / (2 * K()); I.pan.y += (I.H - H0) / (2 * K());
+      holdPan((I.W - W0) / (2 * K()), (I.H - H0) / (2 * K()));
     }
     I.dirty = true;
   }
@@ -2113,15 +2121,21 @@ function drawStars(ctx) {
   if (!I.stars || I.stars.dpr !== dpr) {
     I.stars = { dpr, pats: STAR_LAYERS.map((L) => { try { return ctx.createPattern(starTile(L, dpr), 'repeat'); } catch { return null; } }) };
   }
-  const fit = I.cam.fit || 1, cx = I.cam.cx + I.pan.x, cy = I.cam.cy + I.pan.y, ts = I.still ? 0 : I.time / 1000;
+  const adj = I.starAdj || { x: 0, y: 0 };
+  const fit = I.cam.fit || 1, cx = I.cam.cx + I.pan.x - adj.x, cy = I.cam.cy + I.pan.y - adj.y, ts = I.still ? 0 : I.time / 1000;
+  // the field's middle is a fixed point in the window (where the map's middle first was), not the map's middle,
+  // which moves when a menu or panel takes room from the map
+  const lf = I.left || 0, tp = I.top || 0;
+  if (!I.starO) I.starO = { x: lf + I.W / 2, y: tp + I.H / 2 };
+  const mx = I.starO.x - lf, my = I.starO.y - tp;
   screen(ctx);
   for (let i = 0; i < STAR_LAYERS.length; i++) {
     const L = STAR_LAYERS[i], pat = I.stars.pats[i];
     if (!pat || !pat.setTransform) continue;
     const s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), L.depth * STAR_ZOOM), P = STAR_TILE * s;
     // the field scales about the screen's middle and slides with a fraction of the pan, plus its drift
-    let ex = I.W / 2 - (cx * fit * L.depth - ts * L.drift * STAR_DIR[0]) * s;
-    let ey = I.H / 2 - (cy * fit * L.depth - ts * L.drift * STAR_DIR[1]) * s;
+    let ex = mx - (cx * fit * L.depth - ts * L.drift * STAR_DIR[0]) * s;
+    let ey = my - (cy * fit * L.depth - ts * L.drift * STAR_DIR[1]) * s;
     ex -= Math.floor(ex / P) * P; ey -= Math.floor(ey / P) * P;
     pat.setTransform(new DOMMatrix([s / dpr, 0, 0, s / dpr, ex, ey]));
     ctx.fillStyle = pat; ctx.fillRect(0, 0, I.W, I.H);
