@@ -41,6 +41,7 @@ const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
 const SWITCH = require(path.join(__dirname, 'account-switch.js'));
 const FEED_MOD = require(path.join(__dirname, 'feed-mod.js'));
 const TT = require(path.join(__dirname, 'team-tree.js'));
+const SKY = require(path.join(__dirname, 'sky-events.js')).createSkyEvents({ dir: require(path.join(__dirname, 'platform.js')).dataDir() });
 
 // ---------- options ----------
 const argv = process.argv.slice(2);
@@ -8006,6 +8007,11 @@ function handleRequest(req, res) {
   if (pathname === '/sync/fresh') return syncFresh(req, res);
   if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   // GET /relay/status, POST /relay/pair | revoke (relay.js): this PC only, never a remote device; its POSTs need this page's Origin
+  // the map's sky events: their log and the kinds switched off (sky-events.js)
+  if (pathname === '/sky-events') {
+    if (req.method === 'GET') { const [code, out] = SKY.route('GET'); return sendJson(res, code, out); }
+    if (req.method === 'POST') return readBody(req, res, (body) => { const [code, out] = SKY.route('POST', body); sendJson(res, code, out); });
+  }
   if (pathname === '/relay' || pathname.startsWith('/relay/')) return RELAY.handle(req, res, pageCtx);
   // the link between Henry's machines (link.js): this machine's page; and what a linked machine asks, through the relay
   if (pathname === '/link' || pathname.startsWith('/link/')) return linkRoute(req, res, pathname);

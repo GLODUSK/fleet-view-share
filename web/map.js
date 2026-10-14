@@ -114,6 +114,19 @@
 // Every star layer stretches, the near ones more (WARP_LAYER), the deep sky only a little (WARP_DEEP). It sits under the lens
 // and the twinkle and the tile wrap as they are (it only moves the lookup point), and its point follows the middle star
 // layer's pan and zoom. The canvas fallback shows none.
+// Far events (FAR_*; Henry 2026-10-14: everything in his list of space events beyond our galaxy, "more like BG happening",
+// logged so he can ask what one was): a second, quieter director with its own clock (FAR_GAP, about once a minute, one
+// at a time, beside the space events above) shows every kind in web/sky-far.js's catalog once, in a shuffled order,
+// before any repeats: supernovae, kilonovae, gamma-ray bursts, black hole mergers, tidal disruptions, jets, galaxy
+// mergers, cluster collisions, fast radio bursts, lensed images, the cosmic history, the far future (73 kinds). Each
+// is a few small parts the shader draws from one function (FAR_GLSL farPart: a point and its halo, a shell, jets, a
+// galaxy, a trail, an inspiralling pair, a debris swirl, a mottled wash, filaments, lensed arcs, ripples, a swarm of
+// dots, a dark disc), each with its own light over time (a flash, pulses, a fade...). All of it is far and faint: a
+// flash is a few px with a soft halo, a galaxy a smudge, and only the cosmic washes are big, at a few percent alpha. It
+// goes where the orbs and hubs are not (farPlace: FAR_CLEAR px clear of every one on screen, the best of FAR_TRIES
+// places), under the stars, at the far star layer's depth. Every start (and every space event's) is logged on the
+// server (POST /sky-events: the time, its label, one line on what it is, where on the window), and the kinds Henry
+// switched off (GET /sky-events: off) never show. None at rest, hidden or under reduced motion; the canvas shows none.
 // The faint back layer is a tile repeated; the two front ones, sparse and bright enough that a repeat would show,
 // never repeat when the graphics card draws them: it places their stars itself, at most one per cell of a grid,
 // each cell's star (or none) from a hash of the cell (STAR_FIELD_GLSL). The canvas repeats a tile for all three.
@@ -184,7 +197,7 @@
 // (not held back by SHOWER_GAP) (stats().meteor: how many streaks show or are about to; meteorIn: ms to the next shooting
 // star, null when none is due; showers: how many showers started). rocket(hubId) sends a deploy's rocket up now under
 // that hub (null: anywhere) (event(name) starts that space event now, ignoring EVENT_GAP; no name lists the registered ones, null stops
-// the one running, skipSeconds: begins that far into an event that has a clock; stats().event: { running, last, nextIn } as name / name / ms, null when none; stats().nebula: the cloud's middle and size in CSS px, its alpha and palette, null when none; stats().asteroids: the field's light direction and the rocks in view, far to near, { x, y, r, blur, a } in CSS px, null when none; stats().lens: the lens's middle and Einstein radius in CSS px, its size share a and its galaxies' light, null when none; ship(escort, skipSeconds) starts the capital ship now, escort: true or false to force the escort (null: a pick); stats().ship: its middle and half-length in CSS px, its alpha, its heading as a unit vector and whether an escort follows, null when none; warp(skipSeconds) starts the warp drift now; stats().warp: its stretch share, point and direction, null when none) (stats().rockets: { flying, launched, shown: [{ x, y, head, trail, puff }] }, the head in CSS px). moon(date) sets the clock the moon and the sky tint go by (null: the real one);
+// the one running, skipSeconds: begins that far into an event that has a clock; stats().event: { running, last, nextIn } as name / name / ms, null when none; stats().nebula: the cloud's middle and size in CSS px, its alpha and palette, null when none; stats().asteroids: the field's light direction and the rocks in view, far to near, { x, y, r, blur, a } in CSS px, null when none; stats().lens: the lens's middle and Einstein radius in CSS px, its size share a and its galaxies' light, null when none; ship(escort, skipSeconds) starts the capital ship now, escort: true or false to force the escort (null: a pick); stats().ship: its middle and half-length in CSS px, its alpha, its heading as a unit vector and whether an escort follows, null when none; warp(skipSeconds) starts the warp drift now; stats().warp: its stretch share, point and direction, null when none; far(name, skipSeconds) starts that far event now (web/sky-far.js; no name: the kinds, null stops it); stats().far: { running, label, nextIn, at, off, shown: its parts { form, x, y, r, a } in CSS px }) (stats().rockets: { flying, launched, shown: [{ x, y, head, trail, puff }] }, the head in CSS px). moon(date) sets the clock the moon and the sky tint go by (null: the real one);
 // stats().moon is its phase (0 new, 0.5 full), lit share, waxing, alpha and place (CSS px), shown when visible.
 // nodes() lists each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label
 // rectangles; merge('s:<id>') launches that conversation's merge now; stats().heads is where each comet's head is (CSS px); stats().sky says what draws the sky ('webgl2'
@@ -257,6 +270,8 @@
 
 // colours and fonts follow the shell's design tokens (app.css); the canvas can't read CSS variables
 // per frame, so the values are repeated here
+import { FAR_KINDS } from './sky-far.js';
+
 const COL = {
   bg: '#0a0c13', text: '#eef0fa', dim: '#8a92b2', faint: '#4c5372',
   ember: '#ff6a2b', gold: '#ffc24a', rose: '#ff4d8d', violet: '#a47bff', cyan: '#3fd8ff',
@@ -486,6 +501,13 @@ const SAT_BLINK = [1500, 2000], SAT_FLASH = 160, SAT_RED = [1, 0.32, 0.26], SAT_
 // the map is active and awake again (never at once); EVENT_DEPTH: the star layers' depths (far, middle, near) an event
 // picks its parallax from through eventCam(depth), the fraction of the pan and zoom it follows
 const EVENT_GAP = [150e3, 330e3];
+// the far events (see "Look", FAR_*; web/sky-far.js is the catalog): the next comes FAR_GAP ms (a pick) after the last
+// ended; FAR_N parts drawn at most (the shader has a slot for each); a new one's middle keeps FAR_CLEAR CSS px plus its
+// own reach from every orb and hub on screen and FAR_EDGE from the window's edge, the best of FAR_TRIES places;
+// FAR_SCALE: its sizes times this, by the window's shorter side (FAR_SCALE_AT px is 1), within FAR_SCALE_K;
+// SKY_OFF_MS: how often the kinds switched off are read again
+const FAR_GAP = [35e3, 80e3], FAR_N = 10, FAR_CLEAR = 60, FAR_EDGE = 20, FAR_TRIES = 48, FAR_SCALE_AT = 900, FAR_SCALE_K = [0.8, 1.3];
+const SKY_OFF_MS = 120e3;
 const EVENT_DEPTH = { far: STAR_LAYERS[0].depth, mid: STAR_LAYERS[Math.floor(STAR_LAYERS.length / 2)].depth, near: SAT_DEPTH };
 // the nebula drift (see "Look"): it crosses the window in NEBULA_MS ms (a pick), its long half-axis NEBULA_R of the
 // window's longer side, its short one NEBULA_ASPECT times that (a pick), along STAR_DIR turned by up to NEBULA_TURN radians
@@ -984,6 +1006,9 @@ export function mapStats() {
     lens: (() => { const l = lensNow(); return l ? { x: Math.round(l.x), y: Math.round(l.y), r: Math.round(l.r * 10) / 10, a: Math.round(l.a * 1e3) / 1e3, src: l.srcs.map((o) => Math.round(o.amp * 1e3) / 1e3) } : null; })(),
     ship: (() => { const q = shipNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3, dir: [Math.round(q.cs * 1e3) / 1e3, Math.round(q.sn * 1e3) / 1e3], escort: !!q.eo } : null; })(),
     warp: (() => { const q = warpNow(); return q ? { a: Math.round(q.a * 1e3) / 1e3, x: Math.round(q.x), y: Math.round(q.y), dir: [Math.round(q.dx * 1e3) / 1e3, Math.round(q.dy * 1e3) / 1e3] } : null; })(),
+    far: { running: I.far ? I.far.name : null, label: I.far ? FAR_KINDS.get(I.far.name).label : null, ms: I.far ? I.far.ms : null, nextIn: I.farAt ? Math.round(I.farAt - performance.now()) : null,
+      at: I.far ? [Math.round(I.far.x), Math.round(I.far.y)] : null, off: [...I.skyOff],
+      shown: farNow().map((q) => ({ form: q.form, x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3 })) },
     nebula: (() => { const n = nebulaNow(); return n ? { x: Math.round(n.x), y: Math.round(n.y), r: Math.round(n.r), a: Math.round(n.a * 1e3) / 1e3, pal: n.pal } : null; })(),
     moon: (({ phase, frac, waxing, a, x, y }) => ({ phase: Math.round(phase * 1e4) / 1e4, frac: Math.round(frac * 1e4) / 1e4, waxing, a: Math.round(a * 1e3) / 1e3,
       visible: a > 0, x: Math.round(x), y: Math.round(y) }))(moonNow()), skyDraws: I.skyGL ? I.skyGL.draws || 0 : 0,
@@ -1147,6 +1172,9 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     // a space event now by name (ignoring EVENT_GAP); no name: the registered ones; null: stop the one running
     event: (n, skip) => { if (n === undefined) return [...EVENTS.keys()]; if (!I) return false; if (n === null) { eventEnd(); return true; }
       const ok = eventStart(performance.now(), n); if (ok && skip > 0 && I.event.ev && I.event.ev.at != null) I.event.ev.at -= skip * 1000; return ok; },
+    // a far event now by name (web/sky-far.js), skip seconds into it; no name: the kinds; null: stop the one running
+    far: (n, skip) => { if (n === undefined) return [...FAR_KINDS.keys()]; if (!I) return false; if (n === null) { farEnd(); return true; }
+      const ok = farStart(performance.now(), n); if (ok && skip > 0) I.far.at -= skip * 1000; return ok; },
     // the capital ship now, with the escort (true), without (false) or as a pick (null), skip seconds into its crossing
     ship: (escort, skip) => { if (!I) return false; shipForce = escort == null ? null : !!escort; const ok = eventStart(performance.now(), 'ship'); shipForce = null; if (ok && skip > 0) I.event.ev.at -= skip * 1000; return ok; },
     // the warp drift now, skip seconds into it
@@ -1237,6 +1265,9 @@ function createInstance(state) {
     meteors: [], meteorAt: 0, showerAt: -Infinity, showers: 0,
     // the space event running ({ name, at, ev }: eventStep; ev is its own state), the last one's name, when the next is due (0: not yet planned)
     event: null, eventLast: null, eventAt: 0,
+    // the far event running ({ name, at, ms, cam, x, y, parts, quick }: farStart), when the next is due (0: not yet
+    // planned), the kinds still to show before any repeats (farPick), the kinds switched off (/sky-events) and when to read them again
+    far: null, farAt: 0, farBag: [], skyOff: new Set(), skyOffAt: 0,
     sats: new Map(), satRun: [], // the satellites (key -> satMake's), the running agents' keys (rebuild)
     // the deploys' rockets flying (rocketLaunch), how many went up, and the deploys seen (id -> state; ingestDeploys)
     rockets: [], rocketsN: 0, dpSeen: new Map(), dpInit: false,
@@ -1331,6 +1362,7 @@ function stop() {
   clearTimeout(I.pace.timer); I.pace.timer = 0;
   I.meteors.length = 0; I.meteorAt = 0; // the next shooting star is planned when the map shows again
   I.event = null; I.eventAt = 0; // likewise the next space event
+  I.far = null; I.farAt = 0; // and the next far event
   I.rockets.length = 0;
   if (I.tip) I.tip.style.display = 'none';
 }
@@ -1369,7 +1401,7 @@ if (typeof window !== 'undefined') {
 // a shooting star, a fading ghost, merge sparks, a camera glide, a drag or band, a re-arrange, or what the last draw
 // saw (I.quick: a morph, birth, bump, kick, whirl, relay ring, or a size or level still gliding)
 function quickNow() {
-  return I._dirty || I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || I.ghosts.length > 0 ||
+  return I._dirty || I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || !!(I.far && I.far.quick) || I.ghosts.length > 0 ||
     I.bursts.length > 0 || !!I.glide || !!I.drag || !!I.band || !!I.keep || !!(I.trail && I.trail.size) || performance.now() < (I.regrid || 0);
 }
 // the screen's refresh interval: the median of the last back-to-back frames
@@ -2388,11 +2420,12 @@ function frame(ts) {
   if (I.camInit && !I.savedCam) keepCam();
   meteorStep(t0, rest);
   eventStep(t0, rest);
+  farStep(t0, rest);
   satStep(rest);
   rocketStep(t0, rest);
   // continuous motion while anything moves (the stars' drift too, even on an empty map), at the pace paceNext
   // sets; otherwise only on change (and a slow tick for age fades)
-  const moving = (!I.still && !tick) || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event ||
+  const moving = (!I.still && !tick) || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || !!I.far ||
     I.ghosts.length > 0 || I.bursts.length > 0;
   const hot = I._dirty;
   if (hot || moving || t0 - I.lastDraw > (tick ? REST_TICK_MS - 50 : 250)) {
@@ -3067,12 +3100,17 @@ function eventStart(t, name) {
   if (!d || I.still) return false;
   if (I.event) eventEnd();
   I.event = { name, at: t, ev: d.start(t) }; I.eventLast = name; I.dirty = true;
+  skyLog(name, EVENT_LABELS[name] || name, null, d.ms || I.event.ev.ms);
   return true;
 }
-// the next kind by weight, never the one shown last (unless it is the only one)
+// what the log calls each space event
+const EVENT_LABELS = { nebula: 'Nebula drift', asteroids: 'Asteroid field', lens: 'Gravity lens (a black hole)', ship: 'Capital ship', warp: 'Warp drift' };
+// the next kind by weight, never the one shown last (unless it is the only one), never one switched off (null: none left)
 function eventPick() {
-  const ks = [...EVENTS.keys()].filter((k) => k !== I.eventLast);
-  const pool = ks.length ? ks : [...EVENTS.keys()];
+  const on = [...EVENTS.keys()].filter((k) => !I.skyOff.has(k));
+  const ks = on.filter((k) => k !== I.eventLast);
+  const pool = ks.length ? ks : on;
+  if (!pool.length) return null;
   let w = Math.random() * pool.reduce((a, k) => a + EVENTS.get(k).weight, 0);
   for (const k of pool) if ((w -= EVENTS.get(k).weight) < 0) return k;
   return pool[pool.length - 1];
@@ -3090,7 +3128,7 @@ function eventStep(t, rest) {
     return;
   }
   if (!I.eventAt) I.eventAt = t + pickIn(EVENT_GAP);
-  else if (t >= I.eventAt && EVENTS.size) eventStart(t, eventPick());
+  else if (t >= I.eventAt && EVENTS.size) { const k = eventPick(); if (k) eventStart(t, k); else I.eventAt = t + pickIn(EVENT_GAP); }
 }
 // ---------- the nebula drift (see "Look", NEBULA_*) ----------
 // start: the cloud's palette, size and straight path across the window at the far layer's depth, laid in CSS px of the
@@ -3255,6 +3293,140 @@ function warpNow() {
   if (a <= 0) return null;
   const [x, y] = eventAt(ev.cam, ev.x, ev.y);
   return { a: a * a * (3 - 2 * a), x, y, dx: ev.dx, dy: ev.dy };
+}
+// ---------- the far events (see "Look", FAR_*; the catalog is web/sky-far.js) ----------
+// the log (POST /sky-events, sky-events.js on the server): one line per event that starts, so "what was that at 3:42?"
+// has an answer; where: the window's third it is in. Never throws (the fixture page has no server)
+function skyLog(kind, label, what, ms, x, y) {
+  const W = I.W || 1, H = I.H || 1;
+  const where = x == null ? 'across the sky' : `${y < H / 3 ? 'upper' : y > (2 * H) / 3 ? 'lower' : 'middle'} ${x < W / 3 ? 'left' : x > (2 * W) / 3 ? 'right' : 'centre'}`;
+  const body = { shown: { kind, label, what: what || null, ms: Math.round(ms || 0), where, x: x == null ? null : Math.round(x), y: y == null ? null : Math.round(y), w: Math.round(W), h: Math.round(H) } };
+  try { fetch('/sky-events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {}); } catch { /* no server */ }
+}
+// the kinds switched off (GET /sky-events: { off: [names] }), read when the map starts and every SKY_OFF_MS
+function skyOffRead(t) {
+  I.skyOffAt = t + SKY_OFF_MS;
+  try {
+    fetch('/sky-events').then((r) => (r.ok ? r.json() : null)).then((j) => {
+      if (I && j && Array.isArray(j.off)) I.skyOff = new Set(j.off.filter((k) => typeof k === 'string'));
+      if (I && I.far && I.skyOff.has(I.far.name)) farEnd();
+    }).catch(() => {});
+  } catch { /* no server */ }
+}
+// the next kind: the first in the bag of kinds not shown yet (refilled, shuffled, once it is empty), skipping the off ones
+function farPick() {
+  for (let pass = 0; pass < 2; pass++) {
+    while (I.farBag.length) { const k = I.farBag.pop(); if (FAR_KINDS.has(k) && !I.skyOff.has(k)) return k; }
+    const ks = [...FAR_KINDS.keys()];
+    for (let i = ks.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [ks[i], ks[j]] = [ks[j], ks[i]]; }
+    I.farBag = ks;
+  }
+  return null;
+}
+// a place for an event reaching `reach` CSS px from its middle: of FAR_TRIES picks in the window (FAR_EDGE in from its
+// edges where it fits) where the map itself shows (its middle and four points round it are the canvas, not the header,
+// the finished strip, the footer, a panel or a button over it), the one furthest past FAR_CLEAR from every orb and hub
+// drawn (each node's own radius too); null when no pick shows
+function farPlace(reach) {
+  const W = I.W || 1, H = I.H || 1, m = Math.min(reach + FAR_EDGE, W / 3), mh = Math.min(reach + FAR_EDGE, H / 3), k = K();
+  const nodes = I.nodes.filter((n) => n.sx !== undefined).map((n) => [n.sx, n.sy, (n.R || 8) * k]);
+  const rc = I.canvas ? I.canvas.getBoundingClientRect() : null, e = Math.min(reach, 40) * 0.7;
+  const shows = (x, y) => !rc || [[0, 0], [e, 0], [-e, 0], [0, e], [0, -e]].every(([dx, dy]) => document.elementFromPoint(rc.left + x + dx, rc.top + y + dy) === I.canvas);
+  let best = null, bs = -Infinity;
+  for (let i = 0; i < FAR_TRIES; i++) {
+    const x = m + Math.random() * Math.max(1, W - 2 * m), y = mh + Math.random() * Math.max(1, H - 2 * mh);
+    if (!shows(x, y)) continue;
+    let s = Infinity;
+    for (const [nx, ny, nr] of nodes) s = Math.min(s, Math.hypot(x - nx, y - ny) - nr - reach);
+    if (s > bs) { bs = s; best = [x, y]; }
+    if (s > FAR_CLEAR * 3) break;
+  }
+  return best;
+}
+// how far a part reaches from the event's middle (CSS px), by its shape's edge (the shader's cut-offs)
+const FAR_REACH = { 1: 2.5, 2: 1.4, 3: 1.2, 4: 1.5, 5: 1.2, 6: 1.3, 7: 1.2, 8: 1.1, 9: 1.1, 10: 1.3, 11: 1, 12: 1.1, 13: 1.3 };
+// start `name` at t: its recipe laid out at the window's scale, placed (farPlace) and logged; false when it is not in
+// the catalog or the map is under reduced motion
+function farStart(t, name) {
+  const d = FAR_KINDS.get(name);
+  if (!d || I.still) return false;
+  if (I.far) farEnd();
+  const R = { r: Math.random, in: (a, b) => a + Math.random() * (b - a), pick: (l) => l[Math.floor(Math.random() * l.length)], sg: () => (Math.random() < 0.5 ? -1 : 1) };
+  const rec = d.make(R), sc = clamp(Math.min(I.W || FAR_SCALE_AT, I.H || FAR_SCALE_AT) / FAR_SCALE_AT, FAR_SCALE_K[0], FAR_SCALE_K[1]);
+  const parts = rec.parts.slice(0, FAR_N).map((q) => {
+    const p = { x: 0, y: 0, to: null, a: 0.5, t0: 0, t1: 1, env: 'smooth', rgb: [1, 1, 1], ang: 0, spin: 0, p: 0, u0: 0, u1: 1, grow: false, seed: Math.random(), ...q };
+    p.r1 = p.r1 == null ? p.r0 : p.r1;
+    p.x *= sc; p.y *= sc; p.r0 *= sc; p.r1 *= sc;
+    if (p.to) p.to = [p.to[0] * sc, p.to[1] * sc];
+    return p;
+  });
+  // its reach: the furthest any part's edge gets, the big faint washes counted at no more than a fifth of the window
+  let reach = 0;
+  for (const p of parts) {
+    const ex = Math.max(Math.hypot(p.x, p.y), p.to ? Math.hypot(p.to[0], p.to[1]) : 0), rr = Math.max(p.r0, p.r1) * (FAR_REACH[p.f] || 1.5);
+    reach = Math.max(reach, Math.min(ex + rr, Math.min(I.W || 1, I.H || 1) / 5));
+  }
+  const at = farPlace(reach);
+  if (!at) return false;
+  const cam = eventCam(EVENT_DEPTH.far);
+  I.far = { name, at: t, ms: rec.ms, quick: !!rec.quick, cam, x: at[0], y: at[1], parts }; I.dirty = true;
+  skyLog(name, d.label, d.what, rec.ms, at[0], at[1]);
+  return true;
+}
+function farEnd() {
+  if (!I.far) return;
+  I.far = null; I.dirty = true;
+  I.farAt = performance.now() + pickIn(FAR_GAP);
+}
+// each frame, as eventStep: none at rest or under reduced motion; the running one ends after its ms; the next comes FAR_GAP after
+function farStep(t, rest) {
+  if (t >= I.skyOffAt) skyOffRead(t);
+  if (I.still || rest) {
+    if (I.far) farEnd();
+    I.farAt = 0;
+    return;
+  }
+  if (I.far) {
+    if (t - I.far.at >= I.far.ms) farEnd();
+    return;
+  }
+  if (!I.farAt) I.farAt = t + pickIn(FAR_GAP);
+  else if (t >= I.farAt) { const k = farPick(); if (!k || !farStart(t, k)) I.farAt = t + pickIn(FAR_GAP); }
+}
+// a part's light over its life (f 0-1 through its own t0..t1; age: ms since the event began), 0-1
+function farEnv(q, f, age) {
+  const sm = (v) => { v = clamp(v, 0, 1); return v * v * (3 - 2 * v); };
+  const edge = sm(Math.min(f / (q.fin != null ? q.fin : 0.15), (1 - f) / (q.fout != null ? q.fout : 0.2)));
+  const fl = (rise, tau) => (f < rise ? sm(f / rise) : Math.exp(-(f - rise) / tau)) * sm((1 - f) / 0.12);
+  switch (q.env) {
+    case 'flash': return fl(q.rise != null ? q.rise : 0.08, q.tau != null ? q.tau : 0.25);
+    case 'flicker': return fl(q.rise != null ? q.rise : 0.1, q.tau != null ? q.tau : 0.3) * (0.7 + 0.3 * Math.sin(age / 170 + q.seed * 40) * Math.sin(age / 430 + q.seed * 9));
+    case 'pulse': { const fo = q.floor != null ? q.floor : 0.1, ph = (age / (q.per || 2000) + q.seed) % 1; return edge * (fo + (1 - fo) * Math.exp(-(((ph - 0.5) / 0.07) ** 2))); }
+    case 'rise': return sm(f / 0.85) * sm((1 - f) / 0.1);
+    case 'fade': return sm(f / 0.08) * (1 - f) ** 1.5;
+    case 'dip': return edge * (1 - 0.75 * Math.exp(-(((f - 0.5) / 0.07) ** 2)));
+    default: return edge;
+  }
+}
+// the far event's parts showing now, at most FAR_N, in CSS px of the map: middle (x, y), size r, alpha a, shape (form),
+// progress u, seed (+1: a trail that grows), turn ang, rgb and the shape's number p
+function farNow() {
+  const e = I && I.far;
+  if (!e) return [];
+  const age = Math.max(0, performance.now() - e.at), g = age / e.ms, out = [];
+  const k = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), EVENT_DEPTH.far * STAR_ZOOM) / e.cam.sc;
+  for (const q of e.parts) {
+    const f = (g - q.t0) / Math.max(q.t1 - q.t0, 1e-3);
+    if (f < 0 || f > 1) continue;
+    const a = q.a * farEnv(q, f, age);
+    if (!(a > 0.002)) continue;
+    const ox = q.to ? q.x + (q.to[0] - q.x) * f : q.x, oy = q.to ? q.y + (q.to[1] - q.y) * f : q.y;
+    const [x, y] = eventAt(e.cam, e.x + ox, e.y + oy), ef = 1 - (1 - f) * (1 - f);
+    out.push({ x, y, r: (q.r0 + (q.r1 - q.r0) * ef) * k, a, form: q.f, u: q.u0 + (q.u1 - q.u0) * f, seed: q.seed + (q.grow ? 1 : 0),
+      ang: q.ang + (q.spin * age) / 1000, rgb: q.rgb, p: q.p });
+    if (out.length >= FAR_N) break;
+  }
+  return out;
 }
 // the streaks showing now (a shower's later ones not yet), at most METEOR_N, in CSS px of the map: each one's head
 // (hx, hy), tail end (tx, ty), rgb and alpha (> 0); the tail grows to its length as the head moves off, and the alpha
@@ -3672,7 +3844,7 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo'];
 const SKY_M = SKY_U.length * 4;
 const SKY_NB = SKY_M + METEOR_N * 8 + SAT_N * 8 + ROCKET_N * 12; // the nebula drift's five vec4s, after the rockets
-const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_SH = SKY_LN + 20, SKY_WP = SKY_SH + 12, SKY_END = SKY_WP + 8; // the asteroid field's vec4s, after the nebula; the lens's five, then the ship's three, then the warp's two, after them
+const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_SH = SKY_LN + 20, SKY_WP = SKY_SH + 12, SKY_FR = SKY_WP + 8, SKY_END = SKY_FR + FAR_N * 12; // the asteroid field's vec4s, after the nebula; the lens's five, then the ship's three, then the warp's two, then the far event's three per part (FAR_GLSL), after them
 const STAR_TILES = STAR_LAYERS.filter((L) => !L.cell);
 const SKY_TEX = [...STAR_TILES.map((L, t) => 'uS' + t), 'uDeep', 'uDust', 'uNoise', 'uField', 'uMoon'];
 const TEX_DEEP = SKY_TEX.indexOf('uDeep'), TEX_DUST = TEX_DEEP + 1, TEX_NOISE = TEX_DEEP + 2, TEX_FIELD = TEX_DEEP + 3;
@@ -3808,6 +3980,99 @@ const WARP_GLSL = `vec2 warpP(vec2 p, float k) {
   if (s <= 0.0) return p;
   vec2 d = p - uWp[0].xy, dir = normalize(mix(uWp[0].zw, d / max(length(d), 1.0), uWp[1].y));
   return p - dir * (dot(d, dir) * s / (1.0 + s));
+}`;
+// a far event's part (see "Look", FAR_*; web/sky-far.js FORM), premultiplied, at device px p. uFr, three per part: A its
+// middle (device px; x, y), size r (device px) and alpha (w), B its shape (x), progress u (y), seed (z; +1: a trail that
+// grows) and turn (w), C its rgb and the shape's number (w). Everything is worked in the part's own frame (q: turned,
+// in radii), and a pixel past the shape's reach returns at once (FAR_REACH in the JS keeps the same edges)
+const FAR_GLSL = `vec4 farPart(vec2 p, vec4 A, vec4 B, vec4 C) {
+  float r = max(A.z, 0.5), dp = uSize.z, u = B.y, sd = fract(B.z), pr = C.w;
+  int fm = int(B.x + 0.5);
+  vec2 d = p - A.xy;
+  float cs = cos(B.w), sn = sin(B.w);
+  vec2 q = vec2(cs * d.x + sn * d.y, -sn * d.x + cs * d.y) / r;
+  float L = length(q), px = dp / r, m = 0.0;
+  vec3 col = C.rgb;
+  if (fm == 1) { // a point: a hot core, a soft halo, spikes (pr)
+    if (L > 2.5) return vec4(0.0);
+    float core = exp(-L * L * 9.0);
+    m = core + 0.2 * exp(-L * L * 1.6) + pr * 0.35 * (exp(-abs(q.y) / (0.8 * px)) * exp(-abs(q.x) * 1.6) + exp(-abs(q.x) / (0.8 * px)) * exp(-abs(q.y) * 1.6));
+    col = mix(col, vec3(1.0), 0.45 * core);
+  } else if (fm == 2) { // a shell: lumpy round its edge, a faint fill
+    if (L > 1.4) return vec4(0.0);
+    float w = max(pr, 1.3 * px), th = atan(q.y, q.x);
+    float lump = 0.62 + 0.24 * sin(3.0 * th + sd * 20.0) + 0.14 * sin(7.0 * th + sd * 53.0);
+    m = lump * exp(-pow((L - 1.0) / w, 2.0)) + 0.06 * smoothstep(1.0, 0.5, L);
+  } else if (fm == 3) { // jets: two beams along the turn, widening a little, knots running out with u
+    if (L > 1.2) return vec4(0.0);
+    float al = abs(q.x), w = pr * (0.5 + al) + 0.7 * px;
+    float knots = 0.55 + 0.45 * sin(al * 14.0 - u * 18.0 + sd * 30.0);
+    m = exp(-pow(q.y / w, 2.0)) * smoothstep(1.1, 0.45, al) * knots * (0.35 + 0.65 * (1.0 - al)) + 0.8 * exp(-L * L * 80.0);
+  } else if (fm == 4) { // a galaxy: pr > 0 a spiral seen at that aspect, < 0 an elliptical
+    if (L > 1.5) return vec4(0.0);
+    float asp = max(abs(pr), 0.12);
+    vec2 g = vec2(q.x, q.y / asp);
+    float R = length(g), bulge = exp(-R * R * 14.0);
+    if (pr < 0.0) m = 0.8 * exp(-pow(R * 2.4, 1.2)) + 0.4 * bulge;
+    else {
+      float arm = 0.5 + 0.5 * cos(2.0 * (atan(g.y, g.x) - 2.6 * log(R + 0.05) - sd * 6.0));
+      m = 0.85 * bulge + 0.75 * exp(-R * 2.6) * (0.25 + 0.75 * arm * arm) * smoothstep(1.15, 0.55, R);
+    }
+  } else if (fm == 5) { // a trail one radius long from the middle, bent by pr; stars along it; a growing one to u
+    if (L > 1.25) return vec4(0.0);
+    float s, e, k = pr;
+    if (abs(k) < 0.02) { s = q.x; e = abs(q.y); }
+    else { vec2 v = q - vec2(0.0, 1.0 / k); s = atan(k * v.x, -k * v.y) / k; e = abs(length(v) - 1.0 / abs(k)); }
+    if (s < 0.0 || s > 1.0) return vec4(0.0);
+    float w = max(0.035, 1.0 * px), spk = 0.45 + 0.55 * step(0.55, hash(uvec2(uint(s * 70.0), uint(sd * 9973.0))));
+    m = exp(-pow(e / w, 2.0)) * spk * pow(1.0 - s, 0.6);
+    if (B.z >= 1.0) { float h = max(u, 1e-3); m = s > h ? 0.0 : exp(-pow(e / w, 2.0)) * spk * (0.3 + 0.7 * s / h); }
+  } else if (fm == 6) { // a pair spiralling in: closer and faster as u goes to 1; pr the second's light
+    if (L > 1.3) return vec4(0.0);
+    float v = max(1.0 - u, 0.0), sep = pow(v, 0.25), ph = sd * 6.2832 + 70.0 * (1.0 - pow(v, 0.625));
+    vec2 o = 0.5 * sep * vec2(cos(ph), sin(ph)), a1 = (q - o) / (1.5 * px), a2 = (q + o) / (1.5 * px);
+    m = exp(-dot(a1, a1)) + pr * exp(-dot(a2, a2));
+  } else if (fm == 7) { // a debris swirl: one arm winding in to a dark middle, turning with u
+    if (L > 1.2) return vec4(0.0);
+    float arm = 0.5 + 0.5 * cos(atan(q.y, q.x) + 2.4 * log(max(L, 1e-3)) - u * 6.0 - sd * 6.2832);
+    m = pow(arm, 5.0) * smoothstep(1.1, 0.35, L) * smoothstep(0.05, 0.2, L) + 0.5 * exp(-pow((L - 0.13) / 0.05, 2.0));
+  } else if (fm == 8) { // a mottled wash over the disc, pr cells per radius
+    if (L > 1.1) return vec4(0.0);
+    vec2 nq = q * max(pr, 0.5) + sd * 97.0;
+    float n = 0.55 * nbN(nq) + 0.3 * nbN(nq * 2.03 + 13.0) + 0.15 * nbN(nq * 4.1 + 29.0);
+    m = smoothstep(1.1, 0.15, L) * (0.25 + 0.75 * smoothstep(0.35, 0.8, n));
+  } else if (fm == 9) { // filaments: the edges between cells (pr per radius)
+    if (L > 1.1) return vec4(0.0);
+    vec2 g = q * pr + sd * 53.0, gi = floor(g);
+    float f1 = 9.0, f2 = 9.0;
+    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+      vec2 cc = gi + vec2(float(x), float(y));
+      uvec2 h = uvec2(ivec2(cc) + 4096);
+      float dd = length(g - cc - vec2(hash(h), hash(h + uvec2(17u, 31u))));
+      if (dd < f1) { f2 = f1; f1 = dd; } else if (dd < f2) f2 = dd;
+    }
+    m = (1.0 - smoothstep(0.0, 0.1, f2 - f1)) * smoothstep(1.1, 0.3, L);
+  } else if (fm == 10) { // an Einstein ring cut into pr arcs (1: whole, 4: a cross of short ones)
+    if (L > 1.3) return vec4(0.0);
+    float n = max(pr, 1.0), seg = 6.2832 / n, dth = mod(atan(q.y, q.x) + seg * 0.5, seg) - seg * 0.5;
+    float wid = n >= 4.0 ? 0.08 : n > 1.0 ? 0.3 : 9.0;
+    m = exp(-pow((L - 1.0) / max(0.06, 1.3 * px), 2.0)) * exp(-pow(dth / (seg * wid), 2.0));
+  } else if (fm == 11) { // ripples running out to the front u, pr apart
+    if (L > 1.0 || L > u + 0.03) return vec4(0.0);
+    m = pow(0.5 + 0.5 * cos((L - u) / max(pr, 0.03) * 6.2832), 6.0) * smoothstep(1.0, 0.15, L) * smoothstep(u + 0.03, u - 0.05, L);
+  } else if (fm == 12) { // a swarm of faint points (pr: how many cells hold one), a faint shared glow
+    if (L > 1.1) return vec4(0.0);
+    vec2 g = q * 7.0 + sd * 41.0, gi = floor(g);
+    uvec2 h = uvec2(ivec2(gi) + 4096);
+    vec2 o = gi + 0.25 + 0.5 * vec2(hash(h), hash(h + uvec2(17u, 31u))), dd = (g - o) * r / (7.0 * 1.1 * dp);
+    m = step(hash(h + uvec2(5u, 9u)), pr) * (0.4 + 0.6 * hash(h + uvec2(3u, 77u))) * exp(-dot(dd, dd)) * smoothstep(1.1, 0.5, L)
+      + 0.1 * pr * exp(-L * L * 3.0);
+  } else if (fm == 13) { // a dark disc, a soft edge
+    if (L > 1.3) return vec4(0.0);
+    return vec4(0.0, 0.0, 0.0, smoothstep(1.2, 0.6, L) * A.w);
+  }
+  float a = clamp(m * A.w, 0.0, 1.0);
+  return vec4(col * a, a);
 }`;
 // per star layer its line in SKY_FS: its tile's texel, or its stars made per cell
 const STAR_GLSL = STAR_LAYERS.map((L, i) => (L.cell
@@ -4090,8 +4355,9 @@ precision highp float;
 #define SAT_N ${SAT_N}
 #define ROCKET_N ${ROCKET_N}
 #define ASTEROID_N ${ASTEROID_N}
+#define FAR_N ${FAR_N}
 uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uGlow, uN0, uN1;
-uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[5], uSh[3], uWp[2];
+uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[5], uSh[3], uWp[2], uFr[FAR_N * 3];
 uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
 uniform int uGN;
 uniform sampler2D ${SKY_TEX.join(', ')};
@@ -4109,6 +4375,7 @@ ${ASTEROID_GLSL}
 ${LENS_GLSL}
 ${SHIP_GLSL}
 ${WARP_GLSL}
+${FAR_GLSL}
 void main() {
   vec2 p = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y); // the pixel's centre, device px from the top left
   vec4 t = mix(uTop, uBot, p.y / uSize.y);
@@ -4121,6 +4388,12 @@ void main() {
   c = over(vec4(texture(uDust, (pw - uDu.xy) * uDu.z).r * d.a * uFx.z), c);
   // the nebula drift, over the deep sky and under the stars, which show through it
   if (uNb[0].w > 0.0) c = over(nebula(pl), c);
+  // the far event's parts (supernovae, mergers, bursts...), far away, under the stars; the first empty slot ends them
+  for (int i = 0; i < FAR_N; i++) {
+    vec4 fa = uFr[i * 3];
+    if (fa.w <= 0.0) break;
+    c = over(farPart(pl, fa, uFr[i * 3 + 1], uFr[i * 3 + 2]), c);
+  }
   // the lens's far galaxies, bent into arcs, over those and under the stars
   c = over(lensLight(pl - uLn[0].xy), c);
   ${STAR_GLSL}
@@ -4282,6 +4555,7 @@ function skyGLInit(G) {
   G.lnloc = gl.getUniformLocation(p, 'uLn');
   G.shloc = gl.getUniformLocation(p, 'uSh');
   G.wploc = gl.getUniformLocation(p, 'uWp');
+  G.frloc = gl.getUniformLocation(p, 'uFr');
   G.gloc = ['uGlow', 'uN0', 'uN1', 'uGB', 'uGE', 'uGC', 'uGL', 'uGN'].map((name) => gl.getUniformLocation(p, name));
   SKY_TEX.forEach((name, i) => {
     gl.activeTexture(gl.TEXTURE0 + i);
@@ -4578,6 +4852,13 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     u[o] = wp.x * dpr; u[o + 1] = wp.y * dpr; u[o + 2] = wp.dx; u[o + 3] = wp.dy;
     u[o + 4] = wp.a * WARP_STRETCH; u[o + 5] = WARP_RADIAL; u[o + 6] = WARP_DEEP;
   }
+  // the far event's parts, after the warp (all 0 when none)
+  farNow().forEach((q, i) => {
+    const o = SKY_FR + i * 12;
+    u[o] = q.x * dpr; u[o + 1] = q.y * dpr; u[o + 2] = q.r * dpr; u[o + 3] = q.a;
+    u[o + 4] = q.form; u[o + 5] = q.u; u[o + 6] = q.seed; u[o + 7] = q.ang;
+    u[o + 8] = q.rgb[0]; u[o + 9] = q.rgb[1]; u[o + 10] = q.rgb[2]; u[o + 11] = q.p;
+  });
   I.glowGL = glowPrep(G, glows, k, ox, oy, dpr);
   // the field again when its quads changed; the sky's pass when anything it shows did
   let fresh = !G.gn || (G.fieldOk && G.ni === G.lastNi);
@@ -4599,6 +4880,7 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   gl.uniform4fv(G.lnloc, u, SKY_LN, 20);
   gl.uniform4fv(G.shloc, u, SKY_SH, 12);
   gl.uniform4fv(G.wploc, u, SKY_WP, 8);
+  gl.uniform4fv(G.frloc, u, SKY_FR, FAR_N * 12);
   if (G.glow) {
     const L = G.gloc, gu = G.gu, M = GLOW_MAX * 4;
     for (let j = 0; j < 3; j++) gl.uniform4fv(L[j], gu, j * 4, 4);
