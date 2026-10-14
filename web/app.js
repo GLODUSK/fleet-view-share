@@ -167,7 +167,7 @@ import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects, followProjectsPick } from './projects.js';
 import { renderChats, botFace, seenNow, setPickedColors, selectChat } from './chats.js';
-import { BOT_JOBS, jobLabel, ownBots, onMap, watchesOf, botColor, botName, watchName } from './map-bots.js';
+import { BOT_JOBS, jobLabel, ownBots, onMap, watchesOf, botMascot, botName, watchName } from './map-bots.js';
 import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
@@ -3755,7 +3755,8 @@ function applyBotEdits(st) {
   for (const b of st?.bots || []) { const e = b && botEdits.get(b.id); if (e) Object.assign(b, e); }
 }
 const botById = (id) => ownBots(state).find((b) => b.id === id) || null;
-const botLook = (b) => botColor(b, view || state);
+// its mascot in a menu, as its Bots row draws it (the face, shape and colour there)
+const botArt = (b, size = 20) => botMascot(b, view || state, size);
 // a change to a bot: drawn at once, then POSTed; done: the toast once it's saved
 function editBot(b, change, url, body, done) {
   botEdits.set(b.id, { ...(botEdits.get(b.id) || {}), ...change });
@@ -3831,7 +3832,7 @@ function addBotMenuItem(x, y) {
   if (!off.length) return quiet('Every bot is on the map');
   return {
     label: 'Add bot', icon: 'bots',
-    children: off.map((b) => ({ label: botName(b), swatch: botLook(b), note: b.live ? null : 'not running', run: () => {
+    children: off.map((b) => ({ label: botName(b), art: botArt(b), note: b.live ? null : 'not running', run: () => {
       const at = mapMod?.mapWorldAt?.(x, y);
       if (!at) { toast('the map is not showing', C.red); return; }
       placeBot(b.id, at, `${botName(b)} is on the map: right-click it to give it a job`);
@@ -3867,7 +3868,7 @@ function botMenu(b, x, y) {
       run: () => placeBot(b.id, null, `${name} is off the map${n ? ' and watches nothing' : ''}`),
     });
   }
-  openCtxMenu({ x, y, title: name, dot: botLook(b), sub: `${b.live ? 'running' : 'not running'}${ws.length ? ` · watching ${ws.length}` : ''}`, items });
+  openCtxMenu({ x, y, title: name, art: botArt(b, 24), sub: `${b.live ? 'running' : 'not running'}${ws.length ? ` · watching ${ws.length}` : ''}`, items });
 }
 // a conversation's "Have a bot watch it ▸": each own bot ▸ the jobs (and Stop watching when it watches it already)
 function botWatchItem(s) {
@@ -3877,8 +3878,8 @@ function botWatchItem(s) {
     label: 'Have a bot watch it', icon: 'bots',
     children: bots.map((b) => {
       const ws = watchesOf(b), w = ws.find((x) => x.id === s.id), full = !w && ws.length >= BOT_WATCH_MAX;
-      if (full) return { label: botName(b), swatch: botLook(b), disabled: true, note: `watches ${BOT_WATCH_MAX} already` };
-      return { label: botName(b), swatch: botLook(b), note: w ? jobLabel(w.job) : b.live ? null : 'not running',
+      if (full) return { label: botName(b), art: botArt(b), disabled: true, note: `watches ${BOT_WATCH_MAX} already` };
+      return { label: botName(b), art: botArt(b), note: w ? jobLabel(w.job) : b.live ? null : 'not running',
         children: [...jobItems(b, s.id, w ? w.job : null), ...(w ? [{ sep: true }, stopWatchItem(b, s.id)] : [])] };
     }),
   };

@@ -1287,6 +1287,23 @@ export function botFace(state, sid, face, size = 34) {
     face: mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: face, color, size, shape: c.shape || undefined }) };
 }
 
+// a bot's look by its id, exactly as its row here draws it (the Map's mascot and the menus' "Add bot ▸" and "Have a
+// bot watch it ▸", map-bots.js): -> { color, shape, face, svg(size, face?) } or null when it has no row. The rows are
+// built once per state (the map asks every frame); a look just picked here counts at once (lookOf)
+const rowsOf = new WeakMap();
+export function botLook(state, botId) {
+  if (!state || typeof state !== 'object' || !botId) return null;
+  let rows = rowsOf.get(state);
+  if (!rows) {
+    try { rows = buildContacts(withMade(state), { chiefId: state.settings?.chief?.id || null, chains: chains || undefined }); } catch { rows = []; }
+    rowsOf.set(state, rows);
+  }
+  const row = rows.find((x) => x.kind === 'bot' && x.botId === botId);
+  if (!row) return null;
+  const c = lookOf(row), color = colorOf(c), face = faceOf(c), shape = c.shape || undefined;
+  return { color, shape: shape || null, face, svg: (size, f = face) => mascotSVG(c.key, { state: f, color, size, shape }) };
+}
+
 export function renderChats(el, view, ui) {
   if (!el._built) build(el, ui);
   const state = withMade(view);

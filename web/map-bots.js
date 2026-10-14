@@ -5,9 +5,9 @@
 // api is the overlay's (map.js overlayApi): camera(), nodes(), state() (bots and sessions come from it) and ui() (the
 // shell's: contextMenu, placeBot, watchBot, openBotChat; app.js).
 // Every own bot with a spot (state.bots[].map: { x, y } in world units; another machine's, elsewhere, never) is its
-// mascot (mascot.js, with the Bots tab's seed, shape and colour, so it is the same character there and here), about
-// 34 px and growing and shrinking with the zoom (24 to 52), centred on its spot, its name on a small frosted pill
-// under it (with how many it watches); not running, it is dimmer. A thin dashed line in its colour (fixed alpha) runs
+// mascot exactly as its row in the Bots tab draws it (chats.js botLook: the same seed, shape, colour and face, so it is
+// the same character there and here), about 34 px and growing and shrinking with the zoom (24 to 52), centred on its
+// spot, its name on a small frosted pill under it (with how many it watches); not running, only its name is quieter. A thin dashed line in its colour (fixed alpha) runs
 // to each conversation it watches (watches[]) whose orb is on the map, and its hover lists them ("Watching: Fix login ·
 // Answer its questions"). An older server has no map or watches: no bots on the map then.
 // Drag one (pointer capture, so the map under it never pans): it follows the pointer and stays where it is let go
@@ -22,6 +22,7 @@
 
 import { mascotSVG, mascotState } from './mascot.js';
 import { C, acctColor, isAcct } from './cards.js';
+import { botLook } from './chats.js';
 
 const UI = "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif";
 const CSS_UI = `var(--font-ui, ${UI})`;
@@ -41,7 +42,6 @@ const STYLE = `
 .fvb-bot.drag{cursor:grabbing}
 .fvb-face{width:100%;height:100%;filter:drop-shadow(0 3px 7px rgba(0,0,0,0.45))}
 .fvb-face svg{width:100%;height:100%;display:block}
-.fvb-bot.off .fvb-face{opacity:0.5}
 .fvb-name{position:absolute;left:50%;top:100%;margin-top:3px;transform:translateX(-50%);display:flex;gap:5px;align-items:center;
   max-width:170px;padding:2px 7px;border-radius:999px;font:600 11px/1.25 ${CSS_UI};white-space:nowrap;
   background:rgba(18,21,32,0.72);border:1px solid rgba(255,255,255,0.07);color:${C.text}}
@@ -60,15 +60,23 @@ export const onMap = (b) => !!(b && b.map && Number.isFinite(b.map.x) && Number.
 export const watchesOf = (b) => (b && Array.isArray(b.watches) ? b.watches.filter((w) => w && typeof w.id === 'string') : []);
 // a bot's conversation now (its convId), from the state the map drew
 const botSession = (b, st) => (b && b.convId ? sessionsOf(st).find((s) => s.id === b.convId) || null : null);
-// its colour, as the Bots tab picks it (chats.js colorOf): its own, else its conversation's workspace, else its
-// account's, else cyan
+// its colour, as its Bots row wears it (chats.js botLook); without a row, as that picks it: its own, else its
+// conversation's workspace, else its account's, else cyan
 export function botColor(b, st) {
+  const look = b ? botLook(st, b.id) : null;
+  if (look) return look.color;
   if (b && typeof b.color === 'string' && HEX6.test(b.color)) return b.color;
   const s = botSession(b, st);
   const r = s && s.repo && s.repo.color;
   if (HEX.test(String(r || ''))) return r;
   const a = (s && s.account) || (b && b.account);
   return isAcct(a) ? acctColor(a) : C.cyan;
+}
+// its mascot as its Bots row draws it (the menus' "Add bot ▸", "Have a bot watch it ▸"), size px
+export function botMascot(b, st, size = 20) {
+  const look = b ? botLook(st, b.id) : null;
+  if (look) return look.svg(size);
+  return mascotSVG(`bot:${(b && b.id) || ''}`, { state: 'idle', color: botColor(b, st), size, shape: (b && b.shape) || undefined });
 }
 export const botName = (b) => (b && typeof b.name === 'string' && b.name) || String((b && b.id) || '').slice(0, 8);
 // a watched conversation's name: the server's, else the listed conversation's, else its id's start
@@ -226,16 +234,18 @@ export function mountMapBots(layer, api) {
       seen.add(b.id);
       const m = botEl(b.id);
       m.at = at;
-      const s = botSession(b, st);
       const live = !!b.live;
-      const color = botColor(b, st);
       const ws = watchesOf(b);
-      // the face: its conversation's state while it runs, half-shut when it doesn't
-      const face = live && s ? mascotState(s) : 'idle';
-      const faceSig = [face, color, b.shape || ''].join('|');
+      // the face, colour and shape its Bots row has (chats.js botLook); without a row, worked out the same way
+      const look = botLook(st, b.id);
+      const color = look ? look.color : botColor(b, st);
+      const s = look ? null : botSession(b, st);
+      const face = look ? look.face : live && s ? mascotState(s) : 'idle';
+      const shape = look ? look.shape : b.shape || null;
+      const faceSig = [face, color, shape || ''].join('|');
       if (faceSig !== m.faceSig) {
         m.faceSig = faceSig;
-        m.face.innerHTML = mascotSVG(`bot:${b.id}`, { state: face, color, size: 40, shape: b.shape || undefined });
+        m.face.innerHTML = look ? look.svg(40) : mascotSVG(`bot:${b.id}`, { state: face, color, size: 40, shape: shape || undefined });
       }
       if (m.off !== !live) { m.off = !live; m.el.classList.toggle('off', !live); }
       const name = botName(b);
