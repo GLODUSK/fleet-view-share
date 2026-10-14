@@ -23,6 +23,8 @@
 //     only a rebuild adds that. When the installed version changes, a tiny index built in codegraph-probe tells the
 //     extraction version it stamps, and every index stamped lower is rebuilt. Updating CodeGraph itself, and what
 //     to do when a new one needs this file changed: docs\codegraph-update.md.
+//   - every 5 min, Claude Code's own `codegraph serve --mcp` processes whose session is gone are ended and logged
+//     (strays(), below).
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -328,8 +330,122 @@ function kill(p) {
   else P.killTree(p.pid);
 }
 
+// ---------- stray MCP servers ----------
+// Claude Code starts `codegraph serve --mcp` for every session: on Windows claude.exe -> cmd.exe (codegraph.cmd)
+// -> node npm-shim.js -> the bundled node running codegraph.js, each `serve --mcp`; on macOS node running the npm
+// `codegraph` (the shim) -> the bundled codegraph.js. That last one is a thin proxy: it pipes the session to one
+// shared daemon per checkout, `codegraph.js serve --mcp --path <checkout>`, which the first proxy starts detached
+// and which ends by itself 30 s (the accounts' CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS) after its last proxy goes.
+// A proxy watches only the shim and cmd.exe above it, never claude.exe itself, so a chain whose session ended
+// without closing its pipes can stay up for good, holding its daemon up with it. Every SWEEP_MS strays() picks:
+//   - a proxy chain whose top has lost its parent: on Windows the parent pid runs no more, or now names a process
+//     that started after the child (a pid reused); on macOS the child went to launchd (ppid 1). The whole chain
+//     goes, each process on its own (never a tree kill: a daemon is a child of the proxy that started it).
+//   - a daemon only when no session can be using it: its parent is gone too (always so once the proxy that started
+//     it ended, while other sessions still use it), it is over DAEMON_MIN_AGE_MS old, every live proxy belongs to a
+//     Claude session whose cwd is known (~/.claude*/sessions/<pid>.json; another program's proxy: nothing is
+//     ended), and no live session's cwd is the daemon's checkout, inside it, or above it.
+// Fleet View's own builds run `init`/`index`, never `serve`, so they never match. Each one ended is logged.
+// scripts\codegraph-contract.js checks that a new CodeGraph's processes still read so (serverKind()).
+const SWEEP_MS = 5 * 60e3, DAEMON_MIN_AGE_MS = 10 * 60e3;
+// serverKind(command): null, { kind: 'proxy' } or { kind: 'daemon', path }, from a command line
+function serverKind(command) {
+  const c = String(command || '');
+  const m = /(?:^|[\s"'\\/])(?:codegraph(?:\.js|\.cmd)?|npm-shim\.js)["']?\s+serve\s+--mcp(?=["']?(?:\s|$))["']?(.*)$/i.exec(c);
+  if (!m) return null;
+  const p = /^\s+--path\s+(.+)$/.exec(m[1]);
+  if (!p) return { kind: 'proxy' };
+  const v = p[1].trim();
+  return { kind: 'daemon', path: /^"[^"]*"$/.test(v) || /^'[^']*'$/.test(v) ? v.slice(1, -1) : v };
+}
+// strays(list, o): the servers to end, [{ pid, kind, path, mb, why }]. list: [{ pid, ppid, started, mb, command }]
+// (P.processTable). o: { win (Windows rules; default this platform), sessions (Map of a live session's claude pid
+// -> its cwd; null: not known, no daemon is ended), now, minAge (DAEMON_MIN_AGE_MS), self (never ended: this pid) }
+function strays(list, o = {}) {
+  const win = o.win === undefined ? P.isWin : !!o.win, now = o.now || Date.now();
+  const minAge = o.minAge === undefined ? DAEMON_MIN_AGE_MS : o.minAge, sessions = o.sessions || null;
+  const fold = (s) => String(s).replace(/[\\/]+/g, '/').replace(/\/$/, '').toLowerCase();
+  const byPid = new Map((list || []).map((p) => [p.pid, p]));
+  const kinds = new Map();
+  for (const p of list || []) { const k = serverKind(p.command); if (k) kinds.set(p.pid, k); }
+  const parentGone = (p) => {
+    if (!win) return p.ppid <= 1 || !byPid.has(p.ppid);
+    const parent = byPid.get(p.ppid);
+    return !parent || (parent.started != null && p.started != null && parent.started > p.started);
+  };
+  // orphaned(p): a proxy chain member whose chain lost its parent. Memoized; a loop (never seen) counts as alive
+  const memo = new Map();
+  const orphaned = (p) => {
+    if (memo.has(p.pid)) return memo.get(p.pid);
+    memo.set(p.pid, false);
+    let r = parentGone(p);
+    if (!r) { const parent = byPid.get(p.ppid), pk = kinds.get(p.ppid); r = !!(pk && pk.kind === 'proxy' && orphaned(parent)); }
+    memo.set(p.pid, r);
+    return r;
+  };
+  const out = [];
+  const proxies = [...kinds].filter(([, k]) => k.kind === 'proxy').map(([pid]) => byPid.get(pid));
+  for (const p of proxies) if (p.pid !== o.self && orphaned(p)) out.push({ pid: p.pid, kind: 'proxy', path: null, mb: p.mb, why: parentGone(p) ? 'its parent is gone' : 'its chain lost its parent' });
+  // daemons: only with every live proxy's session known
+  if (!sessions) return out;
+  const live = proxies.filter((p) => !orphaned(p));
+  const tops = live.filter((p) => { const k = kinds.get(p.ppid); return !(k && k.kind === 'proxy'); });
+  if (tops.some((p) => !sessions.has(p.ppid))) return out;
+  const cwds = [...sessions].filter(([pid]) => byPid.has(pid)).map(([, cwd]) => cwd && fold(cwd));
+  if (cwds.some((c) => !c)) return out;
+  for (const [pid, k] of kinds) {
+    if (k.kind !== 'daemon' || pid === o.self) continue;
+    const d = byPid.get(pid), parent = byPid.get(d.ppid), pk = kinds.get(d.ppid);
+    if (!parentGone(d) && !(pk && pk.kind === 'proxy' && orphaned(parent))) continue; // its proxy still runs
+    if (d.started == null || now - d.started < minAge) continue;
+    const at = fold(k.path);
+    if (!at || cwds.some((c) => c === at || c.startsWith(`${at}/`) || at.startsWith(`${c}/`))) continue;
+    out.push({ pid, kind: 'daemon', path: k.path, mb: d.mb, why: 'no live session works in its checkout' });
+  }
+  return out;
+}
+// the live Claude sessions: claude pid -> cwd, from every account's sessions folder (null when none can be read)
+function sessionCwds() {
+  let SC;
+  try { SC = require('./sync-common'); } catch { return null; }
+  const map = new Map();
+  try {
+    for (const dir of SC.sessionDirs(os.homedir())) {
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch {}
+      for (const f of names) {
+        if (!/^\d+\.json$/.test(f)) continue;
+        const j = SC.readState(path.join(dir, f), null);
+        map.set(Number(f.slice(0, -5)), j && typeof j.cwd === 'string' ? j.cwd : null);
+      }
+    }
+  } catch { return null; }
+  return map;
+}
+let sweeping = false;
+function sweepStrays() {
+  if (sweeping || found === false) return;
+  sweeping = true;
+  P.processTable((list) => {
+    sweeping = false;
+    if (!list) return;
+    for (const s of strays(list, { sessions: sessionCwds(), self: process.pid })) {
+      if (P.isWin) execFile('taskkill', ['/f', '/pid', String(s.pid)], { windowsHide: true }, () => {});
+      else try { process.kill(s.pid, 'SIGTERM'); } catch {}
+      log(`ended a stray CodeGraph MCP ${s.kind}: pid ${s.pid}, ${s.path ? `--path ${s.path}` : 'no --path'}, ${s.mb == null ? '?' : s.mb} MB (${s.why})`);
+    }
+  }, 'codegraph');
+}
+// started by fleet-view.js (not in its demo): a first look 2 min after start, then every SWEEP_MS
+let sweepTimer = null;
+function startSweeping() {
+  if (sweepTimer) return;
+  sweepTimer = setInterval(sweepStrays, SWEEP_MS);
+  setTimeout(sweepStrays, 2 * 60e3).unref?.();
+}
+
 module.exports = {
-  want, check, runs, lockPid, nodes, BUILD_ENV,
+  want, check, runs, lockPid, nodes, BUILD_ENV, serverKind, strays, sweepStrays, startSweeping,
   status: () => {
     const o = [...orphans.values()].map((x) => x.top);
     return { found, engine, building: building || o[0] || null, queued: [...o.slice(building ? 0 : 1), ...queue.map((q) => q.top)] };

@@ -8425,6 +8425,8 @@ function startWeb() {
     // the nightly clean-up: does nothing unless Henry turned it on in the card
     HK.startNightly();
     setTimeout(() => { try { codeGraphs(); } catch {} }, 20e3);
+    // CodeGraph MCP servers left running after their session ended (code-index.js strays())
+    if (!DEMO) CODEGRAPH.startSweeping();
     // the API's throwaway sessions: off the map once they end
     every(10000, 'api-temp', sweepTemp);
     // conversations on an account close to its limit move to one with room (switchTick)

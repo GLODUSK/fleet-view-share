@@ -83,6 +83,37 @@ function commandLines(cb, image) {
     cb(String(out).split(/\r?\n/).flatMap((l) => { const m = /^(\d+)\t(.*)$/.exec(l); return m ? [{ pid: Number(m[1]), command: m[2] }] : []; }));
   });
 }
+// processTable(cb, match): [{ pid, ppid, started, mb, command }] of every process, or null when it can't tell. started:
+// when it started (ms since 1970, null when unknown), mb: its memory in MB. Only a command line holding the text
+// match (any case) is filled in, the others read ''. Windows: Win32_Process in a hidden PowerShell, every process
+// (a parent can be any program); macOS and Linux: ps, its elapsed time giving started
+function processTable(cb, match) {
+  const m = String(match || '').toLowerCase();
+  if (!isWin) {
+    execFile('ps', ['-A', '-o', 'pid=,ppid=,rss=,etime=,command='], { encoding: 'utf8', timeout: 20000, maxBuffer: 16 << 20 }, (err, out) => {
+      if (err) return cb(null);
+      const now = Date.now(), list = [];
+      for (const line of String(out).split('\n')) {
+        const r = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)\s?(.*)$/.exec(line);
+        if (!r) continue;
+        const secs = ((Number(r[4] || 0) * 24 + Number(r[5] || 0)) * 60 + Number(r[6])) * 60 + Number(r[7]);
+        const command = r[8] || '';
+        list.push({ pid: Number(r[1]), ppid: Number(r[2]), started: now - secs * 1000, mb: Math.round(Number(r[3]) / 1024), command: command.toLowerCase().includes(m) ? command : '' });
+      }
+      cb(list);
+    });
+    return;
+  }
+  const like = m.replace(/[^\w.-]/g, '');
+  const ps = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; $e = [datetime]'1970-01-01'; Get-CimInstance Win32_Process | ForEach-Object { $t = if ($_.CreationDate) { [long]($_.CreationDate.ToUniversalTime() - $e).TotalMilliseconds } else { '' }; $c = if ($_.CommandLine -like '*${like}*') { $_.CommandLine } else { '' }; [string]$_.ProcessId + [char]9 + [string]$_.ParentProcessId + [char]9 + [string]$t + [char]9 + [string]$_.WorkingSetSize + [char]9 + $c }`;
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 16 << 20 }, (err, out) => {
+    if (err) return cb(null);
+    cb(String(out).split(/\r?\n/).flatMap((l) => {
+      const r = /^(\d+)\t(\d+)\t(\d*)\t(\d*)\t(.*)$/.exec(l);
+      return r ? [{ pid: Number(r[1]), ppid: Number(r[2]), started: r[3] ? Number(r[3]) : null, mb: r[4] ? Math.round(Number(r[4]) / 1048576) : null, command: r[5] }] : [];
+    }));
+  });
+}
 // every process below pid (children, their children, ...), from one ps table
 function descendants(pid, list) {
   const kids = new Map();
@@ -328,7 +359,7 @@ function electronBinary(desktopDir) {
 }
 
 module.exports = {
-  isWin, isMac, dataDir, hostSocketPath, foldCase, detachGroup, processes, processesSync, commandLines, descendants, killTree,
+  isWin, isMac, dataDir, hostSocketPath, foldCase, detachGroup, processes, processesSync, commandLines, processTable, descendants, killTree,
   loginShellPath, applyLoginPath, which, shellQuote, openTerminal, resumeCommand, keychainCredentials, electronBinary,
   brandedElectron, BRANDED_EXE, electronStamp,
 };

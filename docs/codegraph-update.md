@@ -32,6 +32,7 @@ Run it by hand: `powershell -NoProfile -ExecutionPolicy Bypass -File Z:\Github\f
 | `index --quiet <dir>` rebuilds it, still complete | Fleet View's rebuilds |
 | Nothing is written outside `.codegraph` | No surprise CLAUDE.md, AGENTS.md or `.mcp.json` edits in our repos |
 | `serve --mcp`, started like the accounts' `.claude.json` start it, lists `codegraph_explore`, and a call returns the project's code | The MCP server in all three accounts; CLAUDE.md and the agent prompts name `codegraph_explore` |
+| While that server runs, each CodeGraph `serve --mcp` process below it reads, by its command line, as a proxy (`serve --mcp`: cmd.exe, the npm shim, the bundled `codegraph.js`) or as the shared daemon (`serve --mcp --path <the folder>`), and `code-index.js` `strays()` picks none of them | Fleet View's sweep that ends MCP servers left running after their session ended |
 | The npm package has no install scripts | An `npm i -g` must not touch agent configs |
 | Telemetry is off (it turns it off first, then checks it stuck) | A CodeGraph's first run can write a fresh "enabled" default over the saved choice |
 | A build started as `code-index.js` starts it (`CODEGRAPH_PPID_POLL_MS=0`, stderr to a file) outlives the process that started it; meanwhile `code-index.js` finds it running (a node process running `codegraph init` with the folder last), `.codegraph\codegraph.lock` holds its pid, and `index_state` reads not complete | Builds that survive Fleet View's restart after every update; picking them up, and rebuilding at once an index whose build is gone |

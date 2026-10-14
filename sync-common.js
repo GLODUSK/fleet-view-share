@@ -715,6 +715,6 @@ const isLive = (id, o = {}) => typeof id === 'string' && !!id && liveIds(o).has(
 module.exports = {
   slugOf, projectsDirs, normalizeOrigin, HOME_ORIGIN, rowOrigin, homeSkipped, repoOf, forgetRepos, checkFileKey, fileKeyB64, fileKeyFromB64, objectPath,
   workspaceKind, classifyFolder, checkoutAt, gitUnreadAt, inTemp, perforceAt, p4ClientRoots, p4RootsNow, BOUND_WHY, nativeAbs, boundOrigin, boundDeviceOf, boundRel, boundRelOk, boundNative, boundBase, boundPlaceholder, isBoundPlaceholder,
-  conversationFiles, lastMeta, homeCwd, ensureDevice, touchDevice, devicePath, isLive, pidAlive, readState, writeState,
+  conversationFiles, lastMeta, homeCwd, ensureDevice, touchDevice, devicePath, isLive, pidAlive, readState, writeState, sessionDirs,
   SIDE_DIRS, TOUCH_MS,
 };

@@ -19,6 +19,10 @@
 //      node process running codegraph init with the folder last), codegraph.lock holds that build's pid
 //      (lockPid()), and check() reads the index as not complete. About 20 s: a build long enough to outlast the
 //      5 s CodeGraph waits between looks at its parent.
+//   9. while the server of step 5 runs, its processes read as code-index.js expects to find stray servers by: below
+//      the process started, each CodeGraph process is `serve --mcp` (a proxy chain member: cmd.exe, the npm shim, the
+//      bundled codegraph.js) or `serve --mcp --path <the folder>` (the shared daemon), and strays() ends none of
+//      them. A release that changes these command lines fails here, before the sweep misses or misreads them.
 // Exit code 0 when all pass, 1 when any fails. The updater (scripts/codegraph-update.ps1) runs it after every
 // CodeGraph update and goes back to the last good version on a failure; docs/codegraph-update.md says what then.
 'use strict';
@@ -31,6 +35,7 @@ const argv = process.argv.slice(2);
 const binArg = argv.indexOf('--bin') >= 0 ? argv[argv.indexOf('--bin') + 1] : null;
 const BIN = binArg ? path.resolve(binArg) : (process.platform === 'win32' ? 'codegraph.cmd' : 'codegraph');
 const CI = require(path.join(__dirname, '..', 'code-index.js'));
+const P = require(path.join(__dirname, '..', 'platform.js'));
 
 let failures = 0;
 const ok = (m) => console.log(`ok:   ${m}`);
@@ -113,9 +118,33 @@ function mcp(dir) {
         ? await ask('tools/call', { name: 'codegraph_explore', arguments: { query: 'contractProbe', projectPath: dir } })
         : null;
       const text = call && call.result && Array.isArray(call.result.content) ? call.result.content.map((c) => c.text || '').join('\n') : '';
-      return { tools, text };
+      return { tools, text, shape: await shapes(p.pid, dir) };
     })().then((r) => { kill(p); resolve(r); }, (e) => { kill(p); resolve({ error: `${e.message}${err ? `\n    ${err.trim().slice(-600)}` : ''}` }); });
   });
+}
+
+// 9: the processes of a running `serve --mcp`, as code-index.js reads them to end strays (serverKind(), strays()):
+// every CodeGraph `serve --mcp` process below the one started (not its helpers, such as the daemon's `node -e`
+// liveness watchdog) reads as a proxy or a daemon, at least one is a proxy, one daemon
+// names the folder with --path, and strays() picks none of them (their session, this script, still runs).
+// Resolves null when all hold, else what failed
+function shapes(rootPid, dir) {
+  return new Promise((resolve) => P.processTable((list) => {
+    if (!list) return resolve('cannot list processes (platform.js processTable)');
+    const byPid = new Map(list.map((x) => [x.pid, x]));
+    const tree = [rootPid, ...P.descendants(rootPid, list)].map((pid) => byPid.get(pid)).filter((x) => x && /codegraph|npm-shim/i.test(x.command) && /\sserve\s+--mcp\b/i.test(x.command));
+    const kind = (x) => CI.serverKind(x.command);
+    const fold = (s) => P.foldCase(path.resolve(s));
+    const dirs = new Set([fold(dir), fold((() => { try { return fs.realpathSync.native(dir); } catch { return dir; } })())]);
+    const unread = tree.find((x) => !kind(x));
+    if (unread) return resolve(`serverKind() reads no server in: ${unread.command}`);
+    if (!tree.some((x) => kind(x).kind === 'proxy')) return resolve(`no proxy (serve --mcp without --path) below pid ${rootPid}: ${tree.map((x) => x.command).join(' | ') || 'no CodeGraph process'}`);
+    const daemons = tree.filter((x) => kind(x).kind === 'daemon');
+    if (!daemons.some((x) => dirs.has(fold(kind(x).path)))) return resolve(`no daemon (serve --mcp --path <the folder>) below pid ${rootPid}: ${daemons.map((x) => x.command).join(' | ') || 'none'}`);
+    const picked = CI.strays(list, { sessions: null }).filter((s) => tree.some((x) => x.pid === s.pid));
+    if (picked.length) return resolve(`strays() would end the running server: pid ${picked.map((s) => s.pid).join(', ')} (${picked[0].why})`);
+    resolve(null);
+  }, 'codegraph'));
 }
 
 async function rmrf(dir) {
@@ -205,6 +234,11 @@ async function survives() {
     else if (!m.tools.includes('codegraph_explore')) fail(`serve --mcp: no codegraph_explore tool (has ${m.tools.join(', ') || 'none'}); CLAUDE.md and the agent prompts name it`);
     else if (!/contractHelper/.test(m.text)) fail(`serve --mcp: codegraph_explore did not return the project's code: "${m.text.slice(0, 300)}"`);
     else ok(`serve --mcp: ${m.tools.length} tools, codegraph_explore returns the code`);
+    // 9
+    if (!m.error) {
+      if (m.shape) fail(`serve --mcp processes: ${m.shape}`);
+      else ok('serve --mcp processes: code-index.js reads its proxy and daemon (serverKind()) and strays() leaves them');
+    }
 
     // 4 (after init, index and serve)
     const wrote = changed(before, snapshot(dir));
