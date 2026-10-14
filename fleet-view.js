@@ -2036,6 +2036,9 @@ function ingestMain(s, recs) {
 // A TaskStop ends its task with no notice, so its own result does. A dev server, bundler or emulator never ends
 // by itself: it is kept (it shows in the tooltip) but does not keep the session WORKING.
 const BG_MAX_MS = 6 * 3600e3;
+// a subagent mid-step (a tool running, the model thinking) counts as working this long without writing; pollOne
+// forgets an agent after 10 quiet minutes anyway
+const AGENT_STEP_MS = 10 * 60e3;
 const BG_TOOLS = /^(?:Bash|PowerShell|Agent|Task|Workflow|TaskStop)$/;
 const BG_SERVER = /\b(?:next\s+(?:dev|start)|expo\s+start|vite(?:\s+(?:dev|preview))?(?:\s|$)|(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:dev|start|serve|preview)\b|http-server|http.server|serve\s+-|webpack\s+serve|nodemon|emulator\s+-avd|storybook\s+dev)/i;
 function noteBackground(s, d) {
@@ -2109,12 +2112,17 @@ function bgLiveList(s, lp, now) {
 
 function ingestAgent(s, a, recs) {
   for (const { d } of recs) {
+    // mid-step: a tool running or the model thinking writes nothing for minutes (a render, a long think); only a
+    // reply of plain text ends its turn
+    if (d.type === 'user' && !d.isMeta) a.open = true;
     if (d.type === 'user' && s.eas && Array.isArray(d.message?.content)) {
       for (const b of d.message.content) if (b && b.type === 'tool_result') noteResult(s, Date.parse(d.timestamp) || Date.now(), b);
     }
     if (d.type !== 'assistant') continue;
+    const content = Array.isArray(d.message?.content) ? d.message.content : [];
+    if (content.length) a.open = content.some((c) => c && (c.type === 'tool_use' || c.type === 'thinking' || c.type === 'redacted_thinking'));
     const t = Date.parse(d.timestamp) || Date.now();
-    for (const c of d.message?.content || []) {
+    for (const c of content) {
       if (c.type !== 'tool_use') continue;
       const [verb, what] = describeTool(c.name, c.input);
       pushEvent(s, t, a.label, verb, what, toolFile(c));
@@ -2746,7 +2754,9 @@ function pollOne(s, now, budget) {
   scanUsage(s, [s.file, ...files], budget);
   for (const [f, a] of s.agents) if (now - a.mtime > 10 * 60e3) s.agents.delete(f);
   loadWorkflow(s, s.dir);
-  s.liveAgents = [...s.agents.values()].filter((a) => now - a.mtime < 90e3).length;
+  // written in the last 90 s, or mid-step while its claude still runs (a quiet render or think is still work)
+  const lpAlive = liveProcs.has(s.id);
+  s.liveAgents = [...s.agents.values()].filter((a) => now - a.mtime < 90e3 || (a.open && lpAlive && now - a.mtime < AGENT_STEP_MS)).length;
   s.last = Math.max(s.mtime, ...[...s.agents.values()].map((a) => a.mtime));
   inheritName(s);
   s.name = clean(baseName(s) || s.id.slice(0, 8), 40);
