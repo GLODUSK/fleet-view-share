@@ -165,6 +165,49 @@ const CHROME_RAW_YES = CHROME_RAW.replace('\x1b[2G\x1b[38;2;177;185;249m❯\x1b[
   ok('screen.js: the Claude in Chrome offer reads as kind chrome (unnumbered or numbered); trust, question and permission keep theirs');
 }
 
+// ---------- menus: an MCP server's elicitation, its options on one line ----------
+// Claude Code 2.1.296 on a Supabase execute_sql with destructive SQL (issue #431); the first lines' indent is a guess
+// (pad), so 0-2 spaces are read alike. on: the ❯ before "Decline" instead, as after ↓
+const MCP_ROWS = (on = 0, pad = '  ') => ['● Running the cleanup.', '', '─'.repeat(94),
+  `${pad}MCP server “claude.ai Supabase” requests your input`,
+  `${pad}This SQL includes destructive operations (DROP, DELETE, TRUNCATE or UPDATE without WHER…`,
+  `${pad}It may permanently remove data, tables, schemas or other objects.`,
+  `${pad}Run it on project abcdefghijklmnopqrst?`,
+  on ? '  Accept  ❯ Decline' : '❯ Accept    Decline', '', '  Esc to cancel · ↑/↓ to navigate'];
+{
+  for (const pad of ['', ' ', '  ']) {
+    const m = SCREEN.menuDetails(MCP_ROWS(0, pad));
+    assert.ok(m, `the one-line elicitation reads as a menu (pad ${pad.length})`);
+    assert.equal(m.kind, 'permission');
+    assert.equal(m.unnumbered, true);
+    assert.equal(m.title, 'Run it on project abcdefghijklmnopqrst?');
+    assert.deepEqual(m.context, ['MCP server “claude.ai Supabase” requests your input',
+      'This SQL includes destructive operations (DROP, DELETE, TRUNCATE or UPDATE without WHER…',
+      'It may permanently remove data, tables, schemas or other objects.']);
+    assert.deepEqual(m.options.map(({ n, label, on }) => ({ n, label, on })), [{ n: 1, label: 'Accept', on: true }, { n: 2, label: 'Decline', on: false }]);
+    assert.ok(m.options.every((o) => !o.desc && !o.free));
+  }
+  const d = SCREEN.menuDetails(MCP_ROWS(1));
+  assert.deepEqual(d.options.map((o) => o.on), [false, true]);
+  assert.notEqual(d.sig, SCREEN.menuDetails(MCP_ROWS(0)).sig, 'the sig changes when the pointer moves');
+  // "←/→ to navigate" as its keys line reads the same; three labels too
+  assert.ok(SCREEN.menuDetails([RULE, ' Pick one?', '❯ Accept    Decline', '', ' ←/→ to navigate']));
+  assert.equal(SCREEN.menuDetails([RULE, ' Pick one?', '❯ Accept   Decline   Cancel', '', ' Esc to cancel']).options.length, 3);
+  // a reply line with no keys line under it: not a menu
+  assert.equal(SCREEN.menuDetails(['● The dialog said:', '', '❯ Accept    Decline', '', '  and I picked Accept.', '', RULE, '❯ ', RULE, '  ? for shortcuts']), null);
+  // typed into the prompt box: not a menu (a rule right above it), with or without a keys-like footer
+  assert.equal(SCREEN.menuDetails(['● done.', RULE, '❯ Accept    Decline', RULE, '  ? for shortcuts']), null);
+  assert.equal(SCREEN.menuDetails(['● done.', RULE, '❯ Accept    Decline', '', '  Esc to cancel · ↑/↓ to navigate']), null);
+  // one label, two pointers, a long sentence, a numbered line, a panel's list (its ▔ edge above): not one either
+  assert.equal(SCREEN.menuDetails([RULE, ' Pick one?', '❯ Accept', '', ' Esc to cancel']), null);
+  assert.equal(SCREEN.menuDetails([RULE, ' Pick one?', '❯ Accept  ❯ Decline', '', ' Esc to cancel']), null);
+  assert.equal(SCREEN.menuDetails([RULE, ' Pick one?', '❯ this is a whole sentence someone wrote in a reply here  ok', '', ' Esc to cancel']), null);
+  assert.equal(SCREEN.menuDetails(['▔'.repeat(40), ' Servers', '', '❯ claude.ai Supabase    connected', '', ' Esc to cancel']), null);
+  // a question drawn this way is never kind question (fail closed); without the MCP line it is other
+  assert.equal(SCREEN.menuDetails([RULE, ' Ready to submit your answers?', '❯ Submit    Cancel', '', ' Esc to cancel']).kind, 'other');
+  ok('screen.js: an MCP server\'s one-line elicitation (kind permission, title, context, pointer, sig); not a reply, the prompt box or a panel');
+}
+
 // ---------- the fake session host ----------
 const fake = { list: [], screen: '', writes: [], onWrite: null };
 const screenOf = (rows) => rows.join('\r\n');
@@ -516,6 +559,48 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     assert.equal(c4, 200, o4.message);
     assert.equal(o4.changed, false);
     ok('answer: the unnumbered trust question picked with ↓ and Enter (no digit), only with allowPermission; parseMenu agrees');
+  }
+
+  // ---------- answer: an MCP server's one-line elicitation ----------
+  {
+    const { parseMenu } = await import('../web/compose.js');
+    for (const rows of [MCP_ROWS(0), MCP_ROWS(1), MCP_ROWS(0, '')]) {
+      const { kind, ...rest } = SCREEN.menuDetails(rows);
+      assert.equal(kind, 'permission');
+      assert.deepEqual(parseMenu(rows), rest);
+    }
+    assert.equal(parseMenu(['● The dialog said:', '', '❯ Accept    Decline', '', '  and I picked Accept.']), null);
+    assert.equal(parseMenu(['● done.', RULE, '❯ Accept    Decline', RULE, '  ? for shortcuts']), null);
+
+    const UP = screenOf(MCP_ROWS(0)), DOWN = screenOf(MCP_ROWS(1));
+    reset(); live({ status: 'waiting', waitingFor: 'input needed', cols: 120, rows: 30 });
+    fake.screen = UP;
+    const [c0, o0] = await call('GET', `${S}/menu`);
+    assert.equal(c0, 200, o0.message);
+    assert.equal(o0.menu.kind, 'permission');
+    assert.equal(o0.menu.unnumbered, true);
+    assert.equal(o0.menu.title, 'Run it on project abcdefghijklmnopqrst?');
+    // an MCP server asking to run something needs allowPermission
+    const [c1, o1] = await call('POST', `${S}/answer`, { option: 2 });
+    assert.equal(c1, 403, o1.message);
+    assert.deepEqual(fake.writes, []);
+    // Decline: ↓ then Enter, never a digit
+    fake.onWrite = (w) => {
+      if (w === '\x1b[B') fake.screen = DOWN;
+      else if (w === '\r' && fake.screen === DOWN) { fake.screen = screenOf(['', ...box()]); live({ status: 'idle', cols: 120, rows: 30 }); }
+    };
+    const [c2, o2] = await call('POST', `${S}/answer`, { option: 2, sig: o0.menu.sig, allowPermission: true });
+    assert.equal(c2, 200, o2.message);
+    assert.deepEqual(fake.writes, ['\x1b[B', '\r']);
+    assert.deepEqual(o2.answered, { n: 2, label: 'Decline' });
+    assert.equal(o2.changed, true);
+    // Accept with the ❯ on it already: Enter alone
+    reset(); fake.screen = UP;
+    fake.onWrite = (w) => { if (w === '\r') { fake.screen = screenOf(['', ...box()]); live({ status: 'idle', cols: 120, rows: 30 }); } };
+    const [c3, o3] = await call('POST', `${S}/answer`, { option: 1, allowPermission: true });
+    assert.equal(c3, 200, o3.message);
+    assert.deepEqual(fake.writes, ['\r']);
+    ok('answer: an MCP server\'s one-line elicitation, Decline as ↓ and Enter (no digit), only with allowPermission; parseMenu agrees');
   }
 
   // ---------- start and open: the Claude in Chrome offer answered Yes, nothing else ----------

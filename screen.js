@@ -280,6 +280,37 @@ function plainRun(L, raw, start) {
   for (let i = got[0].i - 1; i >= start && !isRule(L[i]); i--) if (/^\s*▔{12,}\s*$/.test(L[i])) return null;
   return got.map((o, x) => ({ ...o, n: x + 1 }));
 }
+// A choice drawn on one line: an MCP server's elicitation dialog (2.1.296: "❯ Accept    Decline" over "Esc to cancel ·
+// ↑/↓ to navigate"). Read strictly, so a reply or the prompt box never reads as one: two to six labels 2+ spaces apart,
+// one ❯ at the line's start or (the pointer moved) right before a later label, its keys line within 3 lines under it,
+// and a line of its own above it that is no rule (the prompt box's ❯ sits right under one). -> its labels numbered 1..k
+// in screen order, the one after the ❯ on, or null
+const INLINE_KEYS = /\bEsc to cancel\b|[↑←]\/[↓→] to (?:navigate|select)\b/i;
+function inlineRun(L, raw, start) {
+  let h = L.length - 1;
+  while (h >= start && !INLINE_KEYS.test(L[h])) h--;
+  if (h < start) return null;
+  let e = h - 1;
+  while (e >= Math.max(start, h - 3) && !L[e].trim()) e--;
+  if (e < Math.max(start, h - 3)) return null;
+  const l = L[e];
+  if (OPT_RE.test(l) || (l.match(/❯/g) || []).length !== 1 || !/^(?:\s{0,2}❯ |\s{1,4}[^\s❯›])/.test(l)) return null;
+  const parts = l.trim().split(/\s{2,}/);
+  if (parts.length < 2 || parts.length > 6) return null;
+  const got = [];
+  for (const p of parts) {
+    const q = /^(❯ )?([^\s❯›].{0,39})$/.exec(p);
+    if (!q) return null;
+    got.push({ i: e, on: !!q[1], label: q[2], col: l.indexOf(p) + (q[1] ? 2 : 0), boxed: /^\s*[│┃]/.test(raw[e]) });
+  }
+  if (got.filter((o) => o.on).length !== 1) return null;
+  let k = e - 1;
+  while (k >= start && !L[k].trim()) k--;
+  if (k < start || isRule(L[k]) || isBoxEdge(L[k])) return null;
+  // a list in a command's panel (its ▔ edge above, no rule between): the panel reader's, not a menu
+  for (let i = e - 1; i >= start && !isRule(L[i]); i--) if (/^\s*▔{12,}\s*$/.test(L[i])) return null;
+  return got.map((o, x) => ({ ...o, n: x + 1 }));
+}
 
 // What kind of menu it is, so a caller can tell a question it may answer from a tool call it must not approve:
 //   'question'   AskUserQuestion: its tab bar (☐ / ☒ / ✔ Submit), its "Type something." / "Chat about this"
@@ -290,7 +321,8 @@ function plainRun(L, raw, start) {
 //                browser" option, with its title or its "No, keep browser tools off" option (api.js answers it Yes)
 //   'plan'       the plan approval ("Would you like to proceed?" with auto-accept edits / keep planning)
 //   'permission' a tool's permission prompt ("Do you want to proceed?", "Do you want to make this edit to x?",
-//                "Do you want to create x?", or a "Yes, and don't ask again" / "Yes, allow" option)
+//                "Do you want to create x?", or a "Yes, and don't ask again" / "Yes, allow" option), and an MCP
+//                server's elicitation ("MCP server “x” requests your input": its Accept may run what it asks)
 //   'other'      anything else (a picker, a notice)
 // above: the few lines around the dialog's top rule or box edge, where the tab bar sits
 function kindOf(title, context, options, above) {
@@ -304,7 +336,8 @@ function kindOf(title, context, options, above) {
   if (/would you like to proceed\?/i.test(title)
     && (labels.some((l) => /auto-accept|keep planning|manually approve|bypass permissions|clear context/i.test(l)) || /\bplan\b/i.test(all))) return 'plan';
   if (/^Do you want to (?:proceed|make this edit|create|allow|run|write|delete|overwrite|fetch|use)\b/i.test(title)
-    || labels.some((l) => /^Yes, (?:and don't ask again|allow)\b/i.test(l))) return 'permission';
+    || labels.some((l) => /^Yes, (?:and don't ask again|allow)\b/i.test(l))
+    || /^\s*MCP server\b.*\brequests your input\b/im.test(all)) return 'permission';
   if (/^Ready to submit your answers\?/i.test(title) || labels.some((l) => /^(?:Type something\.?|Chat about this)$/i.test(l))
     || above.some((l) => /^\s*(?:←\s*)?[☐☒✔]/.test(l) && /[☐☒]\s*\S/.test(l) && /✔\s*Submit\s*(?:→\s*)?$/.test(l))
     // one question's header alone ("☐ Layout"), as one with option previews shows it (no "Type something" there)
@@ -313,9 +346,9 @@ function kindOf(title, context, options, above) {
 }
 
 // A select menu at the bottom of the screen: Claude Code's permission prompts, AskUserQuestion, the plan
-// approval, the folder trust question. Only when at least two options numbered one after another sit in the last
-// ~30 non-empty lines and one of them carries the ❯ pointer (or, with none numbered, an unnumbered menu as plainRun
-// reads it: its options are numbered 1..k here and it is marked unnumbered); the prompt box (❯ under a rule, where a typed
+// approval, the folder trust question, an MCP server's elicitation. Only when at least two options numbered one after
+// another sit in the last ~30 non-empty lines and one of them carries the ❯ pointer (or, with none numbered, an
+// unnumbered menu as plainRun or inlineRun reads it: its options are numbered 1..k here and it is marked unnumbered); the prompt box (❯ under a rule, where a typed
 // "1. … 2. …" list would look the same) and a menu with the prompt drawn under it are not menus. Read it over the
 // rows as drawn (render(..., join = false)): joined soft-wrapped rows hide a narrow panel's menu.
 // -> { kind, title, context: [lines], more, options: [{ n, label, desc, on, check?, free? }], submit, sig, unnumbered? }
@@ -344,6 +377,8 @@ function menuDetails(lines) {
   // none numbered: one drawn without numbers (2.1.296's trust question), picked with ↑/↓ and Enter, never a digit
   let unnumbered = false;
   if (!run && (run = plainRun(L, raw, start))) unnumbered = true;
+  // or all on one line (an MCP server's elicitation), the same way: ↑/↓ walks it, as its keys line says
+  if (!run && (run = inlineRun(L, raw, start))) unnumbered = true;
   if (!run) return null;
   const first = run[0], last = run[run.length - 1];
   let k = first.i - 1;

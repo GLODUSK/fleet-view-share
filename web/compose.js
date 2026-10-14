@@ -278,6 +278,37 @@ function plainRun(L, raw, start) {
   for (let i = got[0].i - 1; i >= start && !isRule(L[i]); i--) if (/^\s*▔{12,}\s*$/.test(L[i])) return null;
   return got.map((o, x) => ({ ...o, n: x + 1 }));
 }
+// A choice drawn on one line: an MCP server's elicitation dialog (2.1.296: "❯ Accept    Decline" over "Esc to cancel ·
+// ↑/↓ to navigate"). Read strictly, so a reply or the prompt box never reads as one: two to six labels 2+ spaces apart,
+// one ❯ at the line's start or (the pointer moved) right before a later label, its keys line within 3 lines under it,
+// and a line of its own above it that is no rule (the prompt box's ❯ sits right under one). -> its labels numbered 1..k
+// in screen order, the one after the ❯ on, or null
+const INLINE_KEYS = /\bEsc to cancel\b|[↑←]\/[↓→] to (?:navigate|select)\b/i;
+function inlineRun(L, raw, start) {
+  let h = L.length - 1;
+  while (h >= start && !INLINE_KEYS.test(L[h])) h--;
+  if (h < start) return null;
+  let e = h - 1;
+  while (e >= Math.max(start, h - 3) && !L[e].trim()) e--;
+  if (e < Math.max(start, h - 3)) return null;
+  const l = L[e];
+  if (OPT_RE.test(l) || (l.match(/❯/g) || []).length !== 1 || !/^(?:\s{0,2}❯ |\s{1,4}[^\s❯›])/.test(l)) return null;
+  const parts = l.trim().split(/\s{2,}/);
+  if (parts.length < 2 || parts.length > 6) return null;
+  const got = [];
+  for (const p of parts) {
+    const q = /^(❯ )?([^\s❯›].{0,39})$/.exec(p);
+    if (!q) return null;
+    got.push({ i: e, on: !!q[1], label: q[2], col: l.indexOf(p) + (q[1] ? 2 : 0), boxed: /^\s*[│┃]/.test(raw[e]) });
+  }
+  if (got.filter((o) => o.on).length !== 1) return null;
+  let k = e - 1;
+  while (k >= start && !L[k].trim()) k--;
+  if (k < start || isRule(L[k]) || isBoxEdge(L[k])) return null;
+  // a list in a command's panel (its ▔ edge above, no rule between): the panel reader's, not a menu
+  for (let i = e - 1; i >= start && !isRule(L[i]); i--) if (/^\s*▔{12,}\s*$/.test(L[i])) return null;
+  return got.map((o, x) => ({ ...o, n: x + 1 }));
+}
 
 // The spinner line while Claude works, e.g. "✻ Brewing… (12s · ↓ 1.2k tokens · esc to interrupt)", whose
 // parentheses may run onto the next line when the screen is narrow. -> { verb, detail, strong } or null.
@@ -322,9 +353,9 @@ export function parseMode(lines) {
 
 // A select menu at the bottom of the screen: Claude Code's permission prompts ("Do you want to proceed?",
 // "Do you want to make this edit to x?"), AskUserQuestion, the plan approval ("Would you like to proceed?"),
-// the folder trust question. Only when at least two options numbered one after another sit in the last ~30
-// non-empty lines and one of them carries the ❯ pointer (or, with none numbered, an unnumbered menu as plainRun
-// reads it); the prompt box (❯ under a rule, where a typed "1. … 2. …" list would look the same) and a menu with
+// the folder trust question, an MCP server's elicitation. Only when at least two options numbered one after another
+// sit in the last ~30 non-empty lines and one of them carries the ❯ pointer (or, with none numbered, an unnumbered
+// menu as plainRun or inlineRun reads it); the prompt box (❯ under a rule, where a typed "1. … 2. …" list would look the same) and a menu with
 // the prompt drawn under it are not menus.
 // -> { title, context: [lines], more, options: [{ n, label, desc, on, check?, free? }], submit, sig, unnumbered? } or null.
 // check: a multiple-choice option's box (true ticked); free: the option that takes typed text; submit: { on } for
@@ -354,6 +385,8 @@ export function parseMenu(lines) {
   // none numbered: one drawn without numbers (2.1.296's trust question), picked with ↑/↓ and Enter, never a digit
   let unnumbered = false;
   if (!run && (run = plainRun(L, raw, start))) unnumbered = true;
+  // or all on one line (an MCP server's elicitation), the same way: ↑/↓ walks it, as its keys line says
+  if (!run && (run = inlineRun(L, raw, start))) unnumbered = true;
   if (!run) return null;
   const first = run[0], last = run[run.length - 1];
   let k = first.i - 1;

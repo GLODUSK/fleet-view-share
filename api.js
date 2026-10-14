@@ -1446,7 +1446,7 @@ async function readMenu(key) {
 // then Enter (in a multiple-choice question no Enter: that would untick it). Any other option is its digit (Claude
 // Code picks it at once; in a multiple-choice question it ticks or unticks it), or ↑/↓ to it and Enter past 9,
 // while the pointer is on "Type something" (a digit would be typed into it), or in a menu drawn without numbers
-// (m.unnumbered: 2.1.296's trust question, where a digit does nothing). "submit": a multiple-choice question's
+// (m.unnumbered: 2.1.296's trust question, or an MCP server's one-line "❯ Accept    Decline", where a digit does nothing). "submit": a multiple-choice question's
 // Submit row. Then up to ANSWER_MS for the menu to
 // change; with wait, once no menu is left, the turn is waited on like a message's. The folder trust question answered
 // Yes: a Claude in Chrome offer that comes up after it is answered too (chromeOffer: 'accepted').
