@@ -35,6 +35,15 @@
 @keyframes mascot-ponder { 0%, 100% { transform: translate(-0.6px, 0); } 50% { transform: translate(0.6px, -0.3px); } }
 @keyframes mascot-drift { 0%, 100% { transform: translate(0, 0); } 50% { transform: translate(0.5px, -0.3px); } }
 @keyframes mascot-dot { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-1.2px); } }
+/* the Bots tab (chats.js), where the faces live: a little more breathing and more frequent looks around, so a glance
+   sees them alive (Henry, 2026-10-13: "their faces should be moving once im in the bots section"). A hidden tab draws
+   nothing, so this costs nothing elsewhere. :where keeps these at the rules' own weight, so the hop below still wins */
+:where(.view-chats) .mascot .m-body { animation-name: mascot-breathe-more; }
+:where(.view-chats) .mascot.m-working .m-body { animation-name: mascot-bob-more; }
+:where(.view-chats) .mascot .m-eyes { animation-duration: 7s; }
+:where(.view-chats) .mascot.m-working .m-eyes { animation-duration: 3.6s; }
+@keyframes mascot-breathe-more { 0%, 100% { transform: translateY(0) scale(1, 1); } 50% { transform: translateY(-0.4px) scale(0.976, 1.05); } }
+@keyframes mascot-bob-more { 0%, 100% { transform: translateY(0) scale(1, 1); } 50% { transform: translateY(-2.4px) scale(0.99, 1.02); } }
 /* the acknowledge hop: a squash, up, a small landing squash, still */
 .m-ack .mascot .m-body, .mascot.m-ack .m-body { animation: mascot-hop 0.62s cubic-bezier(.3, .7, .4, 1) 1; }
 @keyframes mascot-hop {
@@ -44,6 +53,7 @@
   72% { transform: translateY(0) scale(1.05, 0.95); }
   100% { transform: translateY(0) scale(1, 1); }
 }
+/* (important: the state rules above, .m-working's say, weigh more than a plain .mascot .m-body) */
 @media (prefers-reduced-motion: reduce) {
-  .mascot .m-body, .mascot .m-eyes, .mascot .m-dot, .m-ack .mascot .m-body, .mascot.m-ack .m-body { animation: none; }
+  .mascot .m-body, .mascot .m-eyes, .mascot .m-dot { animation: none !important; }
 }

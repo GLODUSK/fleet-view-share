@@ -59,8 +59,11 @@
 //       { ...it, kind: 'setup', text: without that header }, drawn as a small grey note, not your bubble; the ones
 //       that are only plumbing (quietNote: the start prompt, an id note, "your instructions changed", "you were cut
 //       off") are left out, and so is the bot's answer to one (the bare "ok"; the one short line to "instructions
-//       changed", with the steps before it). Left out too: every model or effort switch note ("/model x", "Set model
-//       to …", "/effort y", …: switchNote), "Conversation compacted", a background task's "finished" note (bg), and
+//       changed", with the steps before it). Left out too (noiseNote; Henry, 2026-10-13: "i also dont want to see any
+//       'changing to sonnet' or anything like that"): every model or effort switch note ("/model x", "Set model
+//       to …", "/effort y", …: switchNote), any other of Claude Code's own commands typed in ("/fast", "/config",
+//       "/context", …) and the output note right after one, "Conversation compacted", "[Request interrupted by
+//       user]", a background task's "finished" note (bg), and
 //       a handoff from one conversation to the next: from the /handoff skill (or command) to the end of that turn,
 //       the "/pickup <file>" note and the "Picked up: …" reply (with the steps before it). A reply that starts with a
 //       reaction ("[react:👍]", reactionOf) puts reaction: '👍' on your last message before it (chat.js draws it on
@@ -76,6 +79,11 @@
 //   setupNote(text) -> string|null   that text without "[Fleet View] ", or null for any other message
 //   switchNote(text) -> { model } | { effort } | {} | null   a note a model or effort switch left: its command, or
 //       Claude Code's answer to one ({}); null for any other note
+//   noiseNote(text) -> 'command' | 'said' | 'noise' | null   a note botFeed leaves out of a bot's chat: 'command' one
+//       of Claude Code's own commands ("/model x", "/effort y", "/fast", "/config", "/context", "/clear", ...; the note
+//       right after it is its output, left out too), 'said' what a switch printed ("Set model to …", "Set effort level
+//       to …"), 'noise' a compaction or an interrupt; null: it shows (a skill's or a custom command, /pickup, an API
+//       error, anything else)
 //   sizeTask(text) -> { size, model?, effort?, label }   Dynamic's guess at how big a message is, from its words only:
 //       size 'keep' (a go-ahead: "ok", "yes do it", "2 and 3": nothing switches), 'quick' (haiku, low), 'normal'
 //       (a question or a task: sonnet, medium), 'big' (a plan, build, bug hunt or several parts: opus,
@@ -628,9 +636,26 @@ const isHandoff = (it) => (it.kind === 'tool' && it.name === 'Skill' && /(?:^|:)
   || (it.kind === 'note' && /^\/handoff(?:\s|$)/.test(String(it.text || '')));
 const PICKUP = /^\/pickup(?:\s|$)/;
 const PICKED = /^\s*Picked up\b/i;
-// notes that are noise in a chat with a bot: a compaction (Claude Code goes on in the same conversation) and a
-// /clear or /compact typed
-const NOISE = /^(?:Conversation compacted\b|\/(?:clear|compact)(?:\s|$))/;
+// notes that are noise in a chat with a bot: a compaction (Claude Code goes on in the same conversation), Stop's
+// "[Request interrupted by user]" and Claude Code's own commands typed in (conversation.js commandOf: "/model x"),
+// whose output is the note right after (conversation.js: a command's stdout). A skill's or a custom command
+// ("/app-catchup") is Henry asking for work: it shows
+const NOISE = /^(?:Conversation compacted\b|\[Request interrupted by user\b)/;
+const OWN_CMD = new RegExp(`^/(?:${['model', 'effort', 'fast', 'config', 'settings', 'status', 'cost', 'usage', 'extra-usage', 'stats',
+  'context', 'color', 'rename', 'clear', 'compact', 'resume', 'rewind', 'mcp', 'memory', 'permissions', 'allowed-tools', 'hooks',
+  'agents', 'doctor', 'help', 'login', 'logout', 'statusline', 'theme', 'vim', 'terminal-setup', 'output-style', 'add-dir',
+  'export', 'copy', 'release-notes', 'ide', 'privacy-settings', 'upgrade', 'plugins?', 'skills', 'sandbox', 'keybindings',
+  'bashes', 'tasks', 'todos', 'remote-control', 'mobile', 'exit', 'quit'].join('|')})(?:\\s|$)`, 'i');
+// what one of those prints when its own note is gone (a log read from its middle)
+const OWN_SAID = /^(?:Compacted\b|Fast mode (?:on|off)\b|Kept effort level\b)/i;
+export function noiseNote(text) {
+  const t = String(text == null ? '' : text).trim();
+  const sw = switchNote(t);
+  if (sw) return Object.keys(sw).length ? 'command' : 'said';
+  if (OWN_CMD.test(t)) return 'command';
+  if (OWN_SAID.test(t)) return 'said';
+  return NOISE.test(t) ? 'noise' : null;
+}
 // a scheduled task coming due (bot-tasks.js runText): its head line, the title and Fleet View's "(schedule, task id)"
 const TASK = /^(Scheduled task|Henry ran this task now): (.*?) \([^()]*\btask [^()]*\)\s*$/;
 // taskNote(text) -> { now, title } | null   the title without a schedule the bot wrote into it ("Watch X (:50)")
@@ -651,16 +676,22 @@ export function botFeed(items) {
   let skip = null;
   let mine = -1; // where your last message is in out: a reaction goes on it
   let task = -1; // where a task's note is in out: a quiet answer to it takes the note and its run out
+  let said = false; // the item before was one of Claude Code's own commands: a note now is what it printed
   // _j is chat.js's cached JSON of the item as it came: a changed copy must not reuse it
   const copy = (it, more) => { const { _j, ...rest } = it; return { ...rest, ...more }; };
   for (const it of items || []) {
     if (!it) continue;
+    const afterCmd = said;
+    said = false;
     if (it.kind !== 'user' && skip === 'handoff') continue;
     if (isHandoff(it)) { skip = 'handoff'; continue; }
     if (it.kind === 'note') {
-      // model and effort switches (Dynamic's, or the model menu's) are left out: the chat stays clean
-      if (switchNote(it.text) || it.bg || NOISE.test(String(it.text || ''))) continue;
-      if (PICKUP.test(String(it.text || ''))) { skip = 'pickup'; continue; }
+      const t = String(it.text || '');
+      if (PICKUP.test(t)) { skip = 'pickup'; continue; }
+      // model and effort switches (Dynamic's, or the model menu's), the other commands and what they print are left
+      // out: the chat stays clean (an API error, or another command, after one still shows)
+      const nz = noiseNote(t);
+      if (nz || it.bg || (afterCmd && !it.apiRetry && !/^(?:API error\b|\/)/.test(t))) { said = nz === 'command'; continue; }
     }
     if ((it.kind === 'thinking' || it.kind === 'tool') && (skip === 'one' || skip === 'pickup')) continue;
     if (it.kind === 'user') {

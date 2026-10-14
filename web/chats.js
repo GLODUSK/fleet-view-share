@@ -59,6 +59,8 @@
 // on its conversation's right-click: setPickedColors), its face follows what it does (thinking about a fresh message,
 // working, needs you, ...), it hops when you send it a message (the chat box's 'fv-chat-sent', or the box of one not
 // running), and hovering its avatar in the list or the chat's header says what it is doing now (chats-model.js doingOf).
+// They move whenever this tab shows (mascot.css; a hidden tab draws nothing, so they cost nothing elsewhere), and while
+// a bot works on its reply a small copy of its face bobs at the bottom right of its chat with typing dots (drawTyping).
 //
 // Tasks and routines: above a bot's chat (running or not) a Tasks strip lists its tasks.json (state.bots[].tasks:
 // bots.js, bot-tasks.js), which the bot keeps itself as you give it work: one-offs and recurring ones with their
@@ -68,7 +70,8 @@
 // too (asks first). Fleet View delivers each one that comes due to its bot by itself (bots.js schedule). Folded or
 // open is kept in this window's storage (fv.chats.tasks); the list follows /state, so it updates as the file changes.
 //
-// Built once and patched on each render; the list's HTML is rewritten only when what it shows changed. The pick
+// Built once and patched on each render; the list is patched in place only where what it shows changed (morphHTML),
+// so its faces keep moving. The pick
 // (a contact key) is kept in this window's storage (fv.chats.sel; the pop-out window keeps its own), and when each
 // contact was last opened in fv.chats.seen (the unread dots; shared by both windows). Picking a contact clears the
 // shell's pick (ui.selectedId): an overseer is no conversation of the other views'. Keys: ↑↓ (or j/k) move, Enter
@@ -337,6 +340,43 @@ function listHtml(state, nodes, now, noBots) {
     if (!x.depth) lastTop = x.c;
     return sep + rowHtml(state, x.c, now, x);
   }).join('') + intro;
+}
+// The list drawn again in place: only what changed is touched, so a face whose drawing is the same keeps its motion.
+// Rewriting the list's HTML whenever any row changed (a working bot's step, a preview, the time) started every face's
+// animation over from its first frame, about once a second while a bot worked, which held them all still (Henry,
+// 2026-10-13: "their faces should be moving once im in the bots section"). Rows are matched by data-key, anything
+// else by its place and tag; a face drawn differently (another state) is put in anew.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function morphHTML(el, html) {
+  if (el._html === html) return;
+  el._html = html;
+  const t = document.createElement('template');
+  t.innerHTML = html;
+  morphKids(el, t.content);
+}
+function morphKids(to, from) {
+  const keyed = new Map();
+  for (const n of to.children) if (n.hasAttribute('data-key')) keyed.set(n.getAttribute('data-key'), n);
+  let cur = to.firstChild;
+  for (const w of [...from.childNodes]) {
+    const k = w.nodeType === 1 ? w.getAttribute('data-key') : null;
+    let o = k != null ? keyed.get(k) : cur && cur.nodeType === w.nodeType && !(cur.nodeType === 1 && cur.hasAttribute('data-key')) ? cur : null;
+    if (k != null) keyed.delete(k);
+    if (o && o.nodeName !== w.nodeName) o = null;
+    if (!o) { to.insertBefore(w, cur); continue; }
+    if (o === cur) cur = cur.nextSibling;
+    else to.insertBefore(o, cur); // moved (its face starts over, as a new row's does)
+    morphNode(o, w);
+  }
+  while (cur) { const nx = cur.nextSibling; cur.remove(); cur = nx; }
+}
+function morphNode(o, w) {
+  if (o.nodeType !== 1) { if (o.nodeValue !== w.nodeValue) o.nodeValue = w.nodeValue; return; }
+  if (o.isEqualNode(w)) return;
+  if (o.namespaceURI === SVG_NS) { o.replaceWith(w); return; }
+  for (const a of [...o.attributes]) if (!w.hasAttribute(a.name)) o.removeAttribute(a.name);
+  for (const a of w.attributes) if (o.getAttribute(a.name) !== a.value) o.setAttribute(a.name, a.value);
+  morphKids(o, w);
 }
 
 // ---------- the order: drag, Pin / Unpin ----------
@@ -1193,6 +1233,39 @@ function back(ui) {
 }
 
 // ---------- the chat side ----------
+// A bot (or the Chief) working on its reply: a small copy of its face at the bottom right of its chat, above the box,
+// bobbing beside three typing dots, Grok-style (Henry, 2026-10-13: "when they are typing back i should them bottom
+// right in a smaller version like in grokbot"); gone once it is idle, done or asks you something. Its face from the
+// conversation /state already gives (mascotState: working or thinking), nothing polled. The feed leaves room for it
+// under the last message (.ch-typing-on), and one at its end stays there.
+function drawTyping(el, c, s) {
+  const main = el._chat.querySelector('.chat-main');
+  if (!main) return;
+  const f = s && c && c.kind !== 'team' ? mascotState(s) : 'idle';
+  const on = f === 'working' || f === 'thinking';
+  let t = el._typing;
+  if (!t && !on) return;
+  if (!t) {
+    t = el._typing = document.createElement('div');
+    t.className = 'ch-typing';
+    t.setAttribute('role', 'status');
+    t.innerHTML = '<span class="ch-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="ch-typing-av"></span>';
+    t._av = t.querySelector('.ch-typing-av');
+  }
+  if (t.parentNode !== main) main.appendChild(t); // (a pane built again: put back)
+  if (on) {
+    setHTML(t._av, mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: 'working', color: colorOf(c), size: 28, shape: c.shape || undefined }));
+    const say = `${c.name || 'It'} is working on a reply`;
+    if (t.getAttribute('aria-label') !== say) { t.setAttribute('aria-label', say); t.title = say; }
+  }
+  t.hidden = !on;
+  if (el._chat.classList.contains('ch-typing-on') !== on) {
+    const feed = el._chat.querySelector('.chat-feed');
+    const atEnd = !!feed && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 8;
+    el._chat.classList.toggle('ch-typing-on', on);
+    if (on && atEnd) feed.scrollTop = feed.scrollHeight;
+  }
+}
 function drawHead(el, state, c, s) {
   const narrow = el.classList.contains('ch-narrow');
   el._head.querySelector('.ch-back').hidden = !narrow;
@@ -1625,7 +1698,7 @@ export function renderChats(el, view, ui) {
   catch (e) { console.error('chats: tree', e); nodes = contacts.map((c) => ({ c, depth: 0, parent: null, path: [] })); }
   if (!(drag && drag.on)) {
     el._shown = nodes.map((x) => x.c);
-    setHTML(el._list, listHtml(state, nodes, now, noBots));
+    morphHTML(el._list, listHtml(state, nodes, now, noBots));
   }
 
   const c = contacts.find((x) => x.key === selKey) || null;
@@ -1673,4 +1746,5 @@ export function renderChats(el, view, ui) {
   drawHead(el, state, c, s);
   if (team) { drawTeam(el, state, c); return; }
   renderChatPane(el._chat, s, { visible: !narrow || open, bubbles: true, history: historyOf(state, c) });
+  drawTyping(el, c, s);
 }

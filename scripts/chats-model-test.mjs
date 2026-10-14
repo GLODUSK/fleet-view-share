@@ -3,12 +3,12 @@
 // fallbacks, hidden ones, teams of overseers only, sorting (and the Bots list's own order: chatOrder), unread, a storage that throws and raw GET /state (the
 // phone app), a row's moment and look (turnStart, lastAction, running, shape, color), doingOf (the avatar's hover), botChoices and
 // botEdits (the New bot and Edit bot forms), mascot.js (thinking, the shapes, the same markup for the same call) and Dynamic
-// (sizeTask, dynamicSwitch, the switch notes left out) and a bot's Tasks strip (taskSchedule,
+// (sizeTask, dynamicSwitch, the switch notes left out), the transcript noise a bot's chat leaves out (noiseNote) and a bot's Tasks strip (taskSchedule,
 // taskWhen, taskLine, tasksHead). Plain asserts, no dependencies:
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
 import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, rawToContactsState, previewOf, botPreview, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
-  sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
+  sizeTask, dynamicSwitch, switchNote, noiseNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
   sameChatOrder, contactTree, teamFlags } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
@@ -638,6 +638,42 @@ test('botFeed: model and effort switch notes are all left out', () => {
   // a setup note after a switch is still one
   const s2 = botFeed([{ key: 1, kind: 'note', text: '/effort low' }, { key: 2, kind: 'user', text: '[Fleet View] x' }]);
   assert.deepEqual(s2.map((it) => [it.key, it.kind]), [[2, 'setup']]);
+});
+
+test('noiseNote: the transcript noise of real bot chats, and what still shows', () => {
+  // as conversation.js makes them from real bot transcripts (~/.claude/projects/*Bots*, 2026-10-13)
+  for (const t of ['/model claude-sonnet-5-5[1m]', '/model claude-opus-5-5', '/effort low', '/effort xhigh', '/model', '/effort', '/fast', '/fast on',
+    '/config', '/context', '/usage', '/cost', '/status', '/color violet', '/rename Pan', '/clear', '/compact keep the plan', '/resume', '/mcp', '/Model sonnet']) {
+    assert.equal(noiseNote(t), 'command', t);
+  }
+  for (const t of ['Set model to `Sonnet 5.5` and saved as your default for new sessions',
+    'Set model to `Opus 5.5 (1M context)` and saved as your default for new sessions\n     .claude\\settings.json pins `Sonnet 5.5` — that applies here',
+    'Set effort level to low (saved as your default for new sessions): Quick, straightforward implementation with minimal overhead',
+    'Kept model as Opus 5.5', 'Effort level set to high', 'Compacted. ctrl+o to see the summary', 'Fast mode ON']) {
+    assert.equal(noiseNote(t), 'said', t);
+  }
+  for (const t of ['Conversation compacted\n\nsummary', '[Request interrupted by user]', '[Request interrupted by user for tool use]']) assert.equal(noiseNote(t), 'noise', t);
+  // a skill's or a custom command is Henry asking for work; a pickup is botFeed's own; an API error says why it stopped
+  for (const t of ['/app-catchup', '/handoff', '/pickup x.md', '/models-report', '/effortless', 'API error: Overloaded (retry 2 of 10)', 'Background command "x" completed', null, '']) {
+    assert.equal(noiseNote(t), null, String(t));
+  }
+  // a command's output is the note right after it, whatever it says; the next message still shows
+  const items = [
+    { key: 1, kind: 'user', text: 'how full is your context?' },
+    { key: 2, kind: 'note', text: '/context' },
+    { key: 3, kind: 'note', text: 'Context Usage\n claude-opus-5-5 · 61k/1m tokens (6%)' },
+    { key: 4, kind: 'note', text: '/fast' },
+    { key: 5, kind: 'note', text: '[Request interrupted by user]' },
+    { key: 6, kind: 'assistant', text: 'About 6% used.' },
+    { key: 7, kind: 'note', text: '/config' },
+    { key: 8, kind: 'note', text: 'API error: Overloaded', apiRetry: true },
+    { key: 9, kind: 'note', text: '/usage' },
+    { key: 10, kind: 'note', text: '/app-catchup' },
+    { key: 11, kind: 'note', text: 'Some note' },
+  ];
+  assert.deepEqual(botFeed(items).map((it) => it.key), [1, 6, 8, 10, 11]);
+  // only the note right after: a reply in between ends it
+  assert.deepEqual(botFeed([{ key: 1, kind: 'note', text: '/fast' }, { key: 2, kind: 'assistant', text: 'ok' }, { key: 3, kind: 'note', text: 'Some note' }]).map((it) => it.key), [2, 3]);
 });
 
 test('botFeed: no plumbing: quiet setup notes, handoffs, pickups, compactions and background notes are left out', () => {
