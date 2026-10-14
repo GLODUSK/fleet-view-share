@@ -5786,7 +5786,7 @@ function cross(ctx, x, y, r) { ctx.beginPath(); ctx.moveTo(x - r, y - r); ctx.li
 // A conversation's look key: what drawLook draws for it. WORKING and AGENTS look the same.
 // In a lens other than 'state' a live conversation is an orb in the lens's colour ('L:<lens>').
 const lookKey = (s) => (s.handing ? 'HANDOFF' : s.pending ? 'NEW' : I && I.lens !== 'state' && s.state !== 'DONE' ? 'L:' + I.lens
-  : BUSY.has(s.state) ? 'BUSY' : s.state === 'QUESTION' ? 'ASKING' : s.state);
+  : BUSY.has(s.state) ? 'BUSY' : s.state);
 // the cost lens: the orb's size follows its cost ($0 .. $50, log scale)
 const costRadius = (s) => 6 + 9 * costT(s.cost);
 const gaugeOn = (s) => !s.pending && !s.handing && s.state !== 'DONE' && ctxPct(s) !== null;
@@ -5868,6 +5868,18 @@ function drawLook(ctx, key, s, x, y, R, ks) {
       ctx.strokeStyle = COL.gold; ctx.lineWidth = 2 * ks;
       circle(ctx, x, y, R - ks); ctx.stroke();
       orb(ctx, x, y, Math.max(1.5, R - 4.6 * ks), COL.gold);
+      break;
+    case 'QUESTION':
+      // its reply ends on a question (nothing is blocked): a solid gold orb with a steady rim and a "?" on it
+      orb(ctx, x, y, R, COL.gold);
+      ctx.strokeStyle = rgba(COL.gold, 0.4); ctx.lineWidth = 1.2 * ks;
+      circle(ctx, x, y, R + 1.8 * ks); ctx.stroke();
+      if (R >= 4) {
+        ctx.font = `700 ${Math.round(R * 1.15)}px ${DISPLAY}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.lineWidth = Math.max(1, R * 0.16); ctx.strokeStyle = 'rgba(5,7,13,0.45)'; ctx.strokeText('?', x, y + R * 0.06);
+        ctx.fillStyle = 'rgba(255,255,255,0.96)'; ctx.fillText('?', x, y + R * 0.06);
+        ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      }
       break;
     case 'STALLED':
       ctx.fillStyle = HOLE; circle(ctx, x, y, R); ctx.fill();
@@ -6943,7 +6955,9 @@ function buildLegend() {
   sec('Conversations');
   item(orbSvg(15, 10, 6, COL.cyan), 'working (an orb in its colour)');
   item(orbSvg(15, 10, 5, COL.violet) + orbSvg(5, 10, 2, COL.violet) + orbSvg(25, 10, 2, COL.violet) + orbSvg(15, 2.2, 1.8, COL.violet, 0.45), 'agents running (orbs around it)');
-  item(`<circle cx="15" cy="10" r="6.5" fill="${rgba(COL.gold, 0.14)}" stroke="${COL.gold}" stroke-width="1.8"/>` + orbSvg(15, 10, 2.6, COL.gold), 'needs you / asked you');
+  item(`<circle cx="15" cy="10" r="6.5" fill="${rgba(COL.gold, 0.14)}" stroke="${COL.gold}" stroke-width="1.8"/>` + orbSvg(15, 10, 2.6, COL.gold), 'needs you (blocked on a question or permission)');
+  item(`<circle cx="15" cy="10" r="7.6" fill="none" stroke="${rgba(COL.gold, 0.4)}" stroke-width="1"/>` + orbSvg(15, 10, 6, COL.gold) +
+    `<text x="15" y="13.4" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">?</text>`, 'asked you (its reply ends on a question)');
   item(`<circle cx="15" cy="10" r="6.5" fill="none" stroke="${rgba(COL.gold, 0.6)}" stroke-width="2" stroke-linecap="round" stroke-dasharray="0.1 3.6"/>`, 'stalled? (quiet 5 min mid-turn)');
   item(`<circle cx="15" cy="10" r="6.5" fill="${rgba(COL.red, 0.14)}" stroke="${COL.red}" stroke-width="1.8"/><path d="M12.6 7.6l4.8 4.8M17.4 7.6l-4.8 4.8" stroke="${COL.red}" stroke-width="1.6" stroke-linecap="round"/>`, 'API error');
   item(orbSvg(15, 10, 4.4, mixHex(COL.cyan, COL.faint, 0.5)), 'finished, in "Recently finished" (smaller and muted, on its repo; removing it there removes it here)');

@@ -17,6 +17,8 @@ const CONV = require(path.join(__dirname, 'conversation.js'));
 const CMDS = require(path.join(__dirname, 'commands.js'));
 const FILES = require(path.join(__dirname, 'files.js'));
 const CHANGES = require(path.join(__dirname, 'changes.js'));
+// does a finished reply wait on you (a question or an open task list at its end) or is it done
+const { endsOnQuestion } = require(path.join(__dirname, 'ends-on-question.js'));
 const PREVIEW = require(path.join(__dirname, 'preview.js'));
 const UPDATER = require(path.join(__dirname, 'updater.js'));
 const HOUSEKEEPING = require(path.join(__dirname, 'housekeeping.js'));
@@ -2102,27 +2104,6 @@ function bgLiveList(s, lp, now) {
     else if (b.t >= (lp.startedAt || 0) - 5e3) out.push(b);
   }
   return out;
-}
-
-// a reply that closes on a question is waiting on you; anything else is a finished turn.
-// The question may sit in the last few lines ("Should I merge?" then "Let me know."),
-// carry a short tail ("Merge now? (yes/no)"), or be one sentence of several ("Do you want the 24-hour
-// change? Or I can ..."). Code and links are left out first, so "foo?.bar" and "?page=2" are not questions.
-const ASKS_RE = /(?:^|[.!:]\s+)(?:want me to|should i|shall i|do you want|would you like|which (?:one|do you)|let me know (?:if|whether|which))\b/i;
-// A reply that ends on a task list with unticked boxes ("- [ ] **Short name** …", the options the chat turns into
-// checkboxes) is waiting on you too: nothing runs until you tick and launch. Only the list at the very end counts:
-// after its last open box there may be nothing but blank lines or the indented lines of its items.
-function endsOnOpenList(text) {
-  const lines = String(text || '').split('\n');
-  let last = -1;
-  lines.forEach((l, i) => { if (/^\s*[-*+]\s+\[ \]\s/.test(l)) last = i; });
-  return last >= 0 && lines.slice(last + 1).every((l) => !l.trim() || /^\s/.test(l));
-}
-function endsOnQuestion(text) {
-  if (endsOnOpenList(text)) return true;
-  const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-3)
-    .map((l) => l.replace(/`[^`]*`/g, '').replace(/\bhttps?:\/\/\S+/g, '').replace(/[*_`\]"'\s]+$/, ''));
-  return lines.some((l) => /\?[^?]{0,14}$/.test(l) || /\?(?=[\s)*_"'\]]|$)/.test(l)) || ASKS_RE.test(lines[lines.length - 1] || '');
 }
 
 function ingestAgent(s, a, recs) {
