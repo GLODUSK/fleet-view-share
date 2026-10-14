@@ -93,13 +93,15 @@
 // on one side. A couple of far galaxies (LENS_SRC), too faint to see by themselves, slide behind it as it passes and are
 // pulled into arcs that wander round the ring, closing to a full one as one lines up. Brightness is constant: it comes in
 // off the window and leaves off it, and a galaxy's arcs only fade by where it lies. The canvas fallback shows none.
-// The distant capital ship (event 'ship', SHIP_*): a huge, dim silhouette takes three to five minutes to cross the sky between
-// the far and the middle star layer's depth, level but for a slight tilt, either way, seen mostly as a dark shape against the
+// The distant capital ship (event 'ship', SHIP_*): a huge, dim silhouette takes three to five minutes to cross the sky at
+// the far star layer's depth, level but for a slight tilt, either way, seen mostly as a dark shape against the
 // stars (it hides them). Its hull is a signed distance field in the shader (SHIP_HULL, SHIP_BOXES, SHIP_NOTCH): a long
 // layered wedge, a stepped upper deck, a keel with a hangar mouth, a bridge tower and a forward block with a mast, small
 // turrets, an engine block with two nozzles, and a few notches cut into its edges, so it is not one triangle. A thin cool rim
 // light runs along every edge that faces the light (one star, high and a little behind: warmer towards the bow), with a
-// soft sheen fading into the hull below it and a trace of bounce on the underside. A handful of tiny, warm windows (a hash
+// soft sheen fading into the hull below it and a trace of bounce on the underside. It is a long way off, seen through haze:
+// the hull takes on the sky's cool haze (more of it low on the hull, and on the escort, further still), its edges are a
+// little soft, a faint veil of haze glows just outside them and its lights are muted. A handful of tiny, warm windows (a hash
 // picks which cells of a few rows are lit, SHIP_WINDOW_P) and, at the stern, two dim engine glows with a short faint plume
 // are the only lights. Sometimes (SHIP_ESCORT_P) a small escort, the same ship at a fraction of the size, follows a little behind and
 // to one side. Brightness is constant, no light blinks or pulses: it comes in off the window and leaves off it. The canvas
@@ -538,25 +540,29 @@ const LENS_SRC = [
   { rgb: [1, 0.78, 0.58], sig: 0.09, asp: 0.65, amp: 0.4, miss: [0.12, 0.3], at: [0.15, 0.35], w: 0.4 },
 ];
 const LENS_SRC_A = 0.55, LENS_SWEEP = 2.6;
-// the distant capital ship (see "Look"): it crosses the window in SHIP_MS ms (a pick) at SHIP_DEPTH (halfway between the far and the middle
-// star layer's), bow first, level but for up to SHIP_TILT radians off (either way, and it may go either way round), off the window's
+// the distant capital ship (see "Look"): it crosses the window in SHIP_MS ms (a pick) at SHIP_DEPTH (the far star layer's), bow
+// first, level but for up to SHIP_TILT radians off (either way, and it may go either way round), off the window's
 // middle by up to SHIP_OFF of its height. SHIP_R: its half-length (CSS px, a pick; its whole length is twice that). It starts and ends
 // off the window and fades in and out over SHIP_FADE ms at the ends of its life (unseen). SHIP_ESCORT_P: the chance of an escort, which
 // follows SHIP_ESCORT_BACK half-lengths behind the ship's middle (a pick) and SHIP_ESCORT_SIDE to one side of its path (a pick, either
 // side), at SHIP_ESCORT_SCALE of its size (a pick). SHIP_BODY: the hull's colour (rgb 0-1, nearly black), SHIP_LIFT: the faint
-// lightening of its top, SHIP_BODY_A: how much of what is behind it the hull hides. SHIP_LIGHT: the star's direction on the screen (x, y
+// lightening of its top, SHIP_BODY_A: how much of what is behind it the hull hides. SHIP_HAZE: the haze between it and us (rgb 0-1,
+// a little darker than the sky), SHIP_HAZE_A: how much of the hull's colour it takes (more low on the hull and on the escort, at most
+// SHIP_HAZE_MAX; the rim, windows and engines dim by 0.6 of that), SHIP_HAZE_GLOW: the alpha of its faint veil just outside the hull,
+// SHIP_SOFT: the edges' extra softness (device px). SHIP_LIGHT: the star's direction on the screen (x, y
 // down); SHIP_RIM, SHIP_RIM_WARM: the rim light's tint (cool, warmer towards the bow), SHIP_RIM_A: its alpha. SHIP_WINDOW: the windows'
 // colour, SHIP_WINDOW_A their alpha, SHIP_WINDOW_P the share of the cells of a row that is lit (the tower's row has three times that;
 // the escort a third); SHIP_ENGINE, SHIP_ENGINE_A: the engine glow's colour and alpha. The hull, in units of its half-length with
 // x along the ship (-1 the stern, 1 the bow) and y across it (negative up): SHIP_HULL the polygons, SHIP_BOXES [middle x, y, half
 // width, half height] added to them, SHIP_NOTCH the same cut out of the whole, SHIP_ROWS the windows' rows' y, SHIP_ENGINES the
 // nozzles' glows [x, y]
-const SHIP_DEPTH = (EVENT_DEPTH.far + EVENT_DEPTH.mid) / 2;
-const SHIP_MS = [210e3, 300e3], SHIP_R = [118, 150], SHIP_TILT = 0.2, SHIP_OFF = 0.3, SHIP_FADE = 6000;
+const SHIP_DEPTH = EVENT_DEPTH.far;
+const SHIP_MS = [210e3, 300e3], SHIP_R = [86, 110], SHIP_TILT = 0.2, SHIP_OFF = 0.3, SHIP_FADE = 6000;
 const SHIP_ESCORT_P = 0.6, SHIP_ESCORT_BACK = [1.7, 2.2], SHIP_ESCORT_SIDE = [0.12, 0.4], SHIP_ESCORT_SCALE = [0.2, 0.26];
-const SHIP_BODY = [0.016, 0.02, 0.03], SHIP_LIFT = [0.03, 0.042, 0.066], SHIP_BODY_A = 0.95, SHIP_LIGHT = [-0.42, -0.91];
-const SHIP_RIM = [0.6, 0.72, 1], SHIP_RIM_WARM = [1, 0.84, 0.64], SHIP_RIM_A = 0.5;
-const SHIP_WINDOW = [1, 0.78, 0.46], SHIP_WINDOW_A = 0.7, SHIP_WINDOW_P = 0.14, SHIP_ENGINE = [0.6, 0.78, 1], SHIP_ENGINE_A = 0.6;
+const SHIP_BODY = [0.016, 0.02, 0.03], SHIP_LIFT = [0.03, 0.042, 0.066], SHIP_BODY_A = 0.93, SHIP_LIGHT = [-0.42, -0.91];
+const SHIP_HAZE = [0.08, 0.106, 0.13], SHIP_HAZE_A = 0.5, SHIP_HAZE_MAX = 0.78, SHIP_HAZE_GLOW = 0.07, SHIP_SOFT = 1.1;
+const SHIP_RIM = [0.6, 0.72, 1], SHIP_RIM_WARM = [1, 0.84, 0.64], SHIP_RIM_A = 0.3;
+const SHIP_WINDOW = [1, 0.78, 0.46], SHIP_WINDOW_A = 0.45, SHIP_WINDOW_P = 0.14, SHIP_ENGINE = [0.6, 0.78, 1], SHIP_ENGINE_A = 0.42;
 const SHIP_HULL = [
   [[-0.9, -0.085], [-0.4, -0.1], [0.3, -0.075], [0.97, -0.014], [1, 0], [0.92, 0.014], [0.3, 0.07], [-0.45, 0.105], [-0.9, 0.1]], // the main wedge
   [[-0.78, -0.09], [-0.7, -0.135], [-0.1, -0.145], [0.2, -0.115], [0.5, -0.06], [0.2, -0.05]], // the stepped upper deck
@@ -3956,7 +3962,9 @@ vec4 lensHole(vec2 p) {
 // into the ship's frame) gets a thin glow as bright as it faces, fading over about a px in and a little less out, varied along the
 // ship by a slow noise, and a fainter, wider sheen into the hull below it, with a trace of bounce on the sides facing away. The
 // windows: a few rows of cells, each lit or not by a hash of its cell and the ship's seed, drawn only where the cell is well inside
-// the hull, a tiny soft point with a faint wider glow. The engines: a small glow at each nozzle with a short plume behind
+// the hull, a tiny soft point with a faint wider glow. The engines: a small glow at each nozzle with a short plume behind. The haze:
+// the hull's colour mixed towards SHIP_HAZE (hz: more low on the hull, more on the escort, wp < 1), the rim and lights dimmed by
+// 0.6 of that (lit), the edges softened by SHIP_SOFT and a faint veil of haze just outside them
 const SHIP_GLSL = (() => {
   const f2 = (v) => `vec2(${glf(v[0])}, ${glf(v[1])})`, f4 = (v) => `vec4(${v.map(glf).join(', ')})`;
   const polys = SHIP_HULL.map((pts, k) => `float shP${k}(vec2 p) {
@@ -3992,14 +4000,18 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A) {
   vec2 d = p - c, e1 = fr.xy, e2 = vec2(-fr.y, fr.x);
   vec2 u = vec2(dot(d, e1), fr.z * dot(d, e2)) / R;
   if (u.x < -1.55 || u.x > 1.15 || abs(u.y) > 0.42) return vec4(0.0);
-  float dp = uSize.z, w = (0.7 + 0.3 * dp) / R;
+  float dp = uSize.z, w = (0.7 + (0.3 + ${glf(SHIP_SOFT)}) * dp) / R;
   float sd = shSD(u), dd = sd * R;
   float cov = 1.0 - smoothstep(-w, w, sd);
   float plate = nbF(vec2(u.x * 36.0, u.y * 120.0) + fr.w * 71.0, 2);
   vec3 body = ${col(SHIP_BODY)} * (0.8 + 0.5 * plate) + ${col(SHIP_LIFT)} * smoothstep(0.12, -0.14, u.y);
-  float ba = cov * ${glf(SHIP_BODY_A)} * A;
+  float hz = min(${glf(SHIP_HAZE_MAX)}, ${glf(SHIP_HAZE_A)} * (1.0 + 0.35 * smoothstep(-0.05, 0.15, u.y)) * (wp < 1.0 ? 1.4 : 1.0));
+  body = mix(body, ${col(SHIP_HAZE)}, hz);
+  float ba = cov * ${glf(SHIP_BODY_A)} * A, lit = A * (1.0 - 0.6 * hz);
   vec4 o = vec4(body * ba, ba);
   if (abs(dd) < 16.0 * dp) {
+    float hg = dd > 0.0 ? ${glf(SHIP_HAZE_GLOW)} * exp(-dd / (5.0 * dp)) * A : 0.0;
+    o = over(o, vec4(${col(SHIP_HAZE)} * 2.2 * hg, hg));
     float e = 1.6 / R;
     vec2 g = vec2(shSD(u + vec2(e, 0.0)) - shSD(u - vec2(e, 0.0)), shSD(u + vec2(0.0, e)) - shSD(u - vec2(0.0, e)));
     vec2 n = g / max(length(g), 1e-5);
@@ -4008,9 +4020,9 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A) {
     float vr = clamp(0.55 + 0.9 * nbF(u * 4.0 + fr.w * 30.0, 2), 0.4, 1.3);
     vec3 rc = mix(${col(SHIP_RIM)}, ${col(SHIP_RIM_WARM)}, 0.6 * smoothstep(0.1, 1.0, u.x));
     float edge = exp(min(dd, 0.0) / (1.1 * dp)) * exp(-pow(max(dd, 0.0) / (1.2 * dp), 2.0));
-    float m = (${glf(SHIP_RIM_A)} * pow(fc, 1.3) * vr * edge + (dd < 0.0 ? 0.1 * fc * vr * exp(dd / (6.0 * dp)) : 0.0)) * A;
+    float m = (${glf(SHIP_RIM_A)} * pow(fc, 1.3) * vr * edge + (dd < 0.0 ? 0.1 * fc * vr * exp(dd / (6.0 * dp)) : 0.0)) * lit;
     o = over(vec4(rc * m, m), o);
-    float mb = 0.07 * fb * (dd < 0.0 ? exp(dd / (1.4 * dp)) : 0.0) * A;
+    float mb = 0.07 * fb * (dd < 0.0 ? exp(dd / (1.4 * dp)) : 0.0) * lit;
     o = over(vec4(vec3(0.45, 0.42, 0.66) * mb, mb), o);
   }
   // the windows
@@ -4023,7 +4035,7 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A) {
     if (shSD(wc) > -0.018) continue;
     vec2 q = (u - wc) * R;
     float rw = 0.62 * dp, q2 = dot(q, q);
-    float m = ${glf(SHIP_WINDOW_A)} * (exp(-q2 / (rw * rw)) + 0.12 * exp(-q2 / (6.0 * rw * rw))) * A;
+    float m = ${glf(SHIP_WINDOW_A)} * (exp(-q2 / (rw * rw)) + 0.12 * exp(-q2 / (6.0 * rw * rw))) * lit;
     o = over(vec4(${col(SHIP_WINDOW)} * m, m), o);
   }
   // the engines
@@ -4031,7 +4043,7 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A) {
     vec2 q = (u - SH_ENG[k]) * R;
     float q2 = dot(q, q), rc = max(1.1 * dp, 0.011 * R), rh = 0.035 * R;
     float pl = q.x < 0.0 ? exp(q.x / (0.1 * R)) * exp(-pow(q.y / (0.012 * R + 0.5 * dp), 2.0)) : 0.0;
-    float m = ${glf(SHIP_ENGINE_A)} * (exp(-q2 / (rc * rc)) + 0.28 * exp(-q2 / (rh * rh)) + 0.34 * pl) * A;
+    float m = ${glf(SHIP_ENGINE_A)} * (exp(-q2 / (rc * rc)) + 0.28 * exp(-q2 / (rh * rh)) + 0.34 * pl) * lit;
     o = over(vec4(${col(SHIP_ENGINE)} * m, m), o);
   }
   return o;
