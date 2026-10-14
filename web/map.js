@@ -374,13 +374,14 @@ const WT_MAX = 16;                  // worktree satellites drawn per hub
 // the starfield (see "Look"): per layer, how much of the pan it follows, how many stars per STAR_TILE square,
 // their radius and alpha ranges (CSS px; fixed per star, only a few bright ones twinkle, TWINKLE_*) and its idle
 // drift in px/s.
-// A layer's scale is zoom^(depth * STAR_ZOOM), so zooming feels deep and stars never balloon.
+// A layer's scale is zoom^(depth * STAR_ZOOM); STAR_ZOOM is 0 (Henry 2026-10-14: the sky is far away, so zooming leaves the
+// stars, the deep sky's galaxies and the space events exactly where they are; zoomAt keeps them from sliding too).
 // cl: [loose clusters per tile, their share of the stars, spread in px]; sparkle: how many are tiny 4-point sparkles.
 // cell: the sky's shader makes this layer itself (STAR_FIELD_GLSL) instead of repeating its tile: at most one star
 // per square of cell px, at the tile's density and mix; its stars repeat only every STAR_WRAP px, and its clusters
 // become a gentle unevenness (cl's share of the stars gathers in some squares of STAR_SUPER px). STAR_EDGE: how far
 // (px) a made star keeps from its cell's edges, so its glow and sparkle are never cut. The canvas repeats all three tiles.
-const STAR_TILE = 512, STAR_ZOOM = 0.4, STAR_DIR = [0.83, 0.56], STAR_WRAP = 32768, STAR_SUPER = 256, STAR_EDGE = 5;
+const STAR_TILE = 512, STAR_ZOOM = 0, STAR_DIR = [0.83, 0.56], STAR_WRAP = 32768, STAR_SUPER = 256, STAR_EDGE = 5;
 const STAR_LAYERS = [
   { depth: 0.15, n: 46, r: [0.45, 0.8], a: [0.12, 0.3], drift: 0.8, seed: 11, cl: [3, 0.45, 34] },
   { depth: 0.35, n: 20, r: [0.6, 1.0], a: [0.16, 0.38], drift: 1.8, seed: 23, cl: [2, 0.35, 46], sparkle: 1, cell: 32, twinkle: 0.15 },
@@ -2260,7 +2261,7 @@ function zoomAt(sx, sy, factor) {
   const [wx, wy] = toWorld(sx, sy);
   I.zoom = clamp(I.zoom * factor, ZMIN, ZMAX);
   const [nx, ny] = toWorld(sx, sy);
-  I.pan.x += wx - nx; I.pan.y += wy - ny;
+  holdPan(wx - nx, wy - ny); // the pan that keeps the point under the pointer; the sky takes it back out
   I.dirty = true;
   saveZoomSoon();
 }
