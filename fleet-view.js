@@ -7111,10 +7111,9 @@ const HK = HOUSEKEEPING.createHousekeeping({
 const SYNC_PRIVATE = DEMO ? null : SYNC_SETUP_JS.readPrivate(__dirname);
 const SYNC = SYNC_API.createSync({ port: PORT, demo: DEMO, dataDir: LOG_DIR, log: (t) => logOnce(t, t),
   onlyEmail: SYNC_PRIVATE ? SYNC_PRIVATE.syncEmail : null });
-// relay.js: the phone relay (docs/phone.md). Off (no socket, no key read) until a phone is paired: through Supabase
-// while sync is set up and signed in, or on this PC's Wi-Fi (relay-lan.js: port 4779 on the private addresses only,
-// no sync needed); it answers the phone through this server's own routes over loopback, and marks what Henry sent
-// from it with api.js's in-memory relay key (viaOf)
+// relay.js: the phone relay (docs/phone.md). Off (no socket, no key read) until a phone is paired: through Supabase,
+// while sync is set up and signed in; it answers the phone through this server's own routes over loopback, and marks
+// what Henry sent from it with api.js's in-memory relay key (viaOf)
 // Another of Henry's machines linked through link.js (docs/link.md) is a device of kind 'computer' there; one revoked
 // with relay.js revoke (the CLI) is unlinked on both machines (onComputerGone)
 const RELAY = RELAY_JS.createRelay({ port: PORT, sync: SYNC, dataDir: LOG_DIR, logDir: LOG_DIR, apiToken: API.TOKEN_FILE,

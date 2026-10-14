@@ -3,18 +3,14 @@
 The phone app (`phone/`, Expo) shows Cards, Wall and Projects (Projects as a Claude-app-style chat list with the
 Chats tab's bots and team group chats). It never calls the server's routes itself: the PC's **relay**
 (`relay.js`, inside the Fleet View server) opens each encrypted envelope, checks it, and answers the phone by calling
-the server's own routes over loopback. The envelopes travel one of two ways, picked on the phone's start screen (and
-in the PC's Pair an iPhone dialog) when it pairs:
+the server's own routes over loopback. The envelopes travel through **Sync with Blackbox** (mode `relay`): both
+sides join a private **Supabase Realtime Broadcast** channel. Works from anywhere. Nothing is stored in the database:
+Supabase only carries encrypted envelopes. There is no open port and no Tailscale.
 
-- **Sync with Blackbox** (mode `relay`, recommended): both sides join a private **Supabase Realtime Broadcast**
-  channel. Works from anywhere. Nothing is stored in the database: Supabase only carries encrypted envelopes. There is
-  no open port and no Tailscale.
-- **Work locally** (mode `local`): the phone, on the same Wi-Fi as the PC, opens a WebSocket straight to the PC's
-  Wi-Fi listener (`relay-lan.js`, port 4779 on the PC's private addresses only). No Supabase, no sign-in, no sync set
-  up on the PC at all. See "Work locally" below.
-
-The envelopes, the keys, the handshake and every check below are the same for both; only the carrier and the topic in
-the AAD differ.
+(A second way, **Work locally** (mode `local`: a WebSocket straight to the PC on the same Wi-Fi, `relay-lan.js` on
+port 4779), was taken out on 2026-10-14. The PC refuses a pairing asking for it, drops a device paired that way at
+start, key and all, and the phone refuses a Wi-Fi code and drops a Wi-Fi pairing an older app kept: that phone pairs
+again through Blackbox.)
 
 This file is the contract between `relay.js` and the app. `docs/phone-vectors.json` holds fixed inputs and the exact
 outputs of the crypto below. It is made by `node scripts/phone-vectors.js` with node's own crypto, and both sides
@@ -25,9 +21,6 @@ device's own key with an X25519 exchange, and from then on the QR code opens not
 v2 relay: that phone pairs again. Nothing was paired for real under v1.
 
 ## The three locks
-
-(For a local pairing the first lock is the network instead: only a device on the same network reaches the listener,
-and it gets nothing without the device key. See "Work locally".)
 
 1. **Supabase sign-in.** The PC is signed in through sync S1 (`sync-api.js`), and the phone signs in with the same
    Google account. The channel is private. Migration `0376_fleet_sync_relay.sql` (detailforge-web) lets a signed-in
@@ -52,7 +45,7 @@ Supabase sees who is connected, when, and how big each message is, but never wha
 |---|---|
 | `uid` | the Supabase user id (a lowercase UUID) of the PC's S1 sign-in |
 | `dev` | the device id: 16 characters, base64url of 12 random bytes, made by the PC at pairing |
-| `topic` | `fleet:<uid>:<dev>`. On the wire realtime-js sends `realtime:fleet:<uid>:<dev>`, and `realtime.topic()` in the policies returns it without `realtime:`. A local pairing's is `fleet:local:<dev>` (`local` where the uid would be): it is only in the AAD, nothing is joined |
+| `topic` | `fleet:<uid>:<dev>`. On the wire realtime-js sends `realtime:fleet:<uid>:<dev>`, and `realtime.topic()` in the policies returns it without `realtime:` |
 | `K` | the pairing key: 32 random bytes in the QR code, for the handshake only |
 | `K'` | the device's own key, made by the handshake; every message after it goes under `K'` |
 | b64u | base64url with no padding (RFC 4648 section 5). Envelope fields use it |
@@ -61,25 +54,15 @@ Supabase sees who is connected, when, and how big each message is, but never wha
 ## Pairing
 
 1. On the PC, the page's "Pair an iPhone" card calls `POST /relay/pair { name?, mode? }` (`mode` `"relay"`, the
-   default, or `"local"`), or run `node relay.js pair [--name N] [--local]`. The relay makes `dev` and `K` and keeps
-   the device as `pending` for 10 minutes. It answers with the pairing link and its QR code as SVG. `K` is shown only
-   then, and is never logged. `relay` needs sync set up and signed in (409 otherwise); `local` needs neither, only a
-   private address on this PC (409 "no address on a home network" otherwise), and the Wi-Fi listener running (503 when
-   it could not listen, say the port is taken).
+   default and the only one; `"local"` gets 400 "update the app"), or run `node relay.js pair [--name N]`. The relay
+   makes `dev` and `K` and keeps the device as `pending` for 10 minutes. It answers with the pairing link and its QR
+   code as SVG. `K` is shown only then, and is never logged. It needs sync set up and signed in (409 otherwise).
 2. The link is `fleetview://pair?d=<b64u of the UTF-8 JSON>`:
 
    ```json
    { "v": 2, "url": "https://<project>.supabase.co", "key": "<publishable key>", "uid": "<uid>",
      "email": "<the PC's Google email>", "pcName": "<the PC's name>", "dev": "<dev>", "k": "<b64u of K>",
      "exp": 1760141400000 }
-   ```
-
-   and for a local pairing (no Supabase url, key, uid or email: the PC's private addresses the listener got, in
-   order, and its port):
-
-   ```json
-   { "v": 2, "mode": "local", "hosts": ["192.168.1.20"], "port": 4779, "pcName": "<the PC's name>", "dev": "<dev>",
-     "k": "<b64u of K>", "exp": 1760141400000 }
    ```
 
    `url` and `key` come from S1's `readConfig(dataDir).config` (`{ url, key }`). The publishable key is public, but
@@ -91,10 +74,7 @@ Supabase sees who is connected, when, and how big each message is, but never wha
    redirect `fleetview://auth-callback`). If the signed-in user's id is not `uid`, it says "Sign in with <email>,
    the account the PC uses" and signs out. Otherwise it saves `{ url, key, uid, email, pcName, dev, k }` in
    SecureStore (`k` is `K`), joins the channel, and starts the handshake.
-   A local link is refused unless every host is a private IPv4 address (10/8, 172.16/12, 192.168/16, written
-   plainly; 1 to 8 of them) and `port` is a port. There is no sign-in: the phone saves `{ mode: "local", hosts,
-   port, pcName, dev, k }`, opens the socket, and starts the handshake. A code of the other kind than the way picked
-   on the start screen is refused with words that name the right one.
+   A Wi-Fi code from an older PC (`"mode": "local"`) is refused, saying that way is gone.
 4. **The handshake.** While its stored key is `K`, the phone sends nothing but a `hello`, sealed under `K` like any
    envelope, with one more field: `epk`, the b64u of a fresh X25519 public key (its secret stays in memory for this
    one hello). The relay, for a hello under `K` before its time is up:
@@ -136,27 +116,26 @@ Supabase sees who is connected, when, and how big each message is, but never wha
    answered but whose first envelope under a `K'` never came before `K`'s time ran out (10 minutes after the last
    handshake), and the relay leaves its channel. A phone whose first hello under its new `K'` goes unanswered says
    "Pairing didn't complete. Make a new code on the PC."
-8. **Revoke:** `POST /relay/revoke { id }` or `node relay.js revoke <id>`, for either mode. The relay sends `notice`
-   `revoked`, leaves the channel (a local device: closes its sockets after the notice, and the listener 404s it from
-   then on) and deletes the key; a request of that device still being checked is dropped before it reaches
+8. **Revoke:** `POST /relay/revoke { id }` or `node relay.js revoke <id>`, The relay sends `notice`
+   `revoked`, leaves the channel and deletes the key; a request of that device still being checked is dropped before it reaches
    the server. On that notice the phone wipes its pairing and its cached data. "Unpair" on the phone only forgets
    the pairing on the phone; the PC lists the device until it is revoked.
 
 ## Pairing by sign-in
 
 The usual way since 2026-10-13: no QR code. The phone signs in with Google once, lists the computers signed in to
-Blackbox sync with the same account, and pairs the one Henry taps, either way (Sync with Blackbox or Work locally).
+Blackbox sync with the same account, and pairs the one Henry taps.
 The QR code stays behind "Use a pairing code instead".
 
 - **The lobby.** Every machine whose sync is signed in joins `fleet:<uid>:lobby` (relay-lobby.js). 0376's policies
   already confine `fleet:<uid>:*` to that account while it is a sync member, so no migration was needed. A machine
   whose sync is not signed in is not listed.
 - **Presence.** Key `pc-<id>`; `id` is 16 b64u, made once and kept in `<dataDir>/relay/lobby.json`. Payload
-  `{ role: 'pc', v: 1, id, name, device, platform, version, hosts, at }`, sent again every 5 minutes. `hosts` are the
-  private IPv4 addresses a Wi-Fi pairing would name. The phone joins with key `phone-<random>`.
-- **Ask** (phone, broadcast event `e`): `{ t: 'pair-ask', v: 1, to: <id>, rid, epk, mode: 'relay' | 'local', name,
-  phone, at }`. `rid` is 16-32 b64u, new for each pairing; `epk` is a fresh X25519 public key; `phone` is the
-  install id (AsyncStorage `fv.phoneId`). The phone sends the same ask every 3 s, and gives up after 25 s.
+  `{ role: 'pc', v: 1, id, name, device, platform, version, at }`, sent again every 5 minutes (an older PC's also has
+  `hosts`, its Wi-Fi addresses, which the phone ignores). The phone joins with key `phone-<random>`.
+- **Ask** (phone, broadcast event `e`): `{ t: 'pair-ask', v: 1, to: <id>, rid, epk, mode: 'relay', name,
+  phone, at }` (an older app's `mode: 'local'` is answered `pair-no`, "update the app"). `rid` is 16-32 b64u, new
+  for each pairing; `epk` is a fresh X25519 public key; `phone` is the install id (AsyncStorage `fv.phoneId`). The phone sends the same ask every 3 s, and gives up after 25 s.
 - **Answer** (machine): it makes a pairing with relay.js `pair(name, mode, { phone, via: 'sign-in' })`, the same
   pending device, `K` and handshake as a QR code's, after dropping that phone's older devices. It sends
   `{ t: 'pair-link', v: 1, rid, from: <id>, epk, n, c }`, where `c` is the link text sealed with AES-256-GCM (tag
@@ -165,14 +144,12 @@ The QR code stays behind "Use a pairing code instead".
   in the clear. A refusal is `{ t: 'pair-no', v: 1, rid, from, message }`.
 - **Limits.** The same `rid` gets the same answer for 10 minutes; at most 12 asks a minute; an ask whose `at` is more
   than 5 minutes off is ignored.
-- **The phone** opens the box (phone/src/crypto/lobby.ts), checks the link as a scanned one, and refuses a Blackbox
-  link for another account or a link of the other way. The pairing keeps the machine's lobby id (`lobby`).
+- **The phone** opens the box (phone/src/crypto/lobby.ts), checks the link as a scanned one, and refuses a link for
+  another account, or a Wi-Fi link from an older PC. The pairing keeps the machine's lobby id (`lobby`).
 - **Trust is the account.** Anyone who can sign in as Henry's sync account can pair a phone, and the machine pairs
   without a click on its screen (Henry's call).
-- **Afterwards.** Work locally needs the sign-in only to pair; traffic then goes straight over the Wi-Fi. The Google
-  sign-in survives Unpair. When a machine stops taking a pairing that has a lobby id and is in the lobby, the phone
-  pairs it again by itself; a revocation is never undone. A Wi-Fi pairing follows the `hosts` its machine's presence
-  names (the key stays as stored).
+- **Afterwards.** The Google sign-in survives Unpair. When a machine stops taking a pairing that has a lobby id and is
+  in the lobby, the phone pairs it again by itself; a revocation is never undone.
 
 ## The channel
 
@@ -184,83 +161,6 @@ The QR code stays behind "Use a pairing code instead".
   is present and "PC offline since <time>" when it is not. The phone tracks `{ role: "phone", v: 1, at }`, and the
   PC only uses it for the device's `lastSeen`.
 - Every message is one broadcast, event `"e"`, whose payload is the envelope.
-
-## Work locally (the Wi-Fi carrier)
-
-A local pairing reaches the PC with no Supabase at all. The phone's transport is the same `RelayTransport` (the same
-envelopes, crypto, hello and handshake, ids, retries, parts and notices); only its **carrier** differs
-(`phone/src/transport/carrier.ts`: `SupabaseCarrier` for Blackbox, `LanCarrier` for the Wi-Fi). On the PC, envelopes
-from the listener go through exactly the same `onEnvelope` as Supabase ones: the device key, nonces, skew, the
-allowlist and its narrower rules, the fence, every limit, the hello rate limits and the marker. The topic in their AAD
-is `fleet:local:<dev>` on both sides, so an envelope made for one carrier never opens on the other.
-
-**The phone (`LanCarrier`).** It opens `ws://<host>:<port>/fleet/<dev>`, one envelope per JSON text message each
-way. It tries the link's hosts in turn (the one that worked last first); an attempt not open within 5 s is given up;
-after a whole round failed it waits 1 s, doubling to 30 s, and says "Can't reach the PC on this Wi-Fi" (with what to
-check: the same network, Fleet View running, iOS's Local Network permission). The link is up (`connected`) and the PC
-is there (`pcOnline`) while the socket is open; a socket that closes reports the PC offline (the banner) and is opened
-again a second later. On open the transport says hello at once (the handshake while the key is still `K`), which also
-proves the socket on the PC. The app coming back to the front tries at once. A message down over 4 M characters, or
-not JSON, is ignored. iOS: `NSLocalNetworkUsageDescription` (iOS asks once) and `NSAppTransportSecurity`
-`NSAllowsLocalNetworking` (plain `ws://` to a private address) in `phone/app.json`.
-
-**The PC (`relay-lan.js`, the listener).**
-
-- On only while relay.js wants it: a local-mode device paired or pairing (with its key). Off otherwise, and off
-  whatever sync says; it never makes the Supabase socket open, and Supabase never makes it listen.
-- Its own port, **4779** (`createRelay({ lanPort })`), bound to each of the PC's **private IPv4 addresses**
-  (10/8, 172.16/12, 192.168/16), one server each: never `0.0.0.0`, never a public, loopback, link-local or CGNAT
-  (Tailscale's 100.64/10) address. A virtual adapter's private address (WSL, Hyper-V, Docker, VirtualBox) is left out
-  whenever a real adapter has one (else it is all there is, as on a PC whose LAN is a Hyper-V external switch); the
-  link's `hosts` go 192.168/16, then 10/8, then 172.16/12. The addresses are read again every 30 s (a new Wi-Fi address picked up, a gone one let go). A PC
-  whose address changes later (a new DHCP lease) needs a new pairing: the phone only knows the hosts its code named. The page's server stays on 127.0.0.1:4777 only; nothing on the listener reaches it except the relay's own
-  `forward()` after an envelope passed every check.
-- It serves **one thing**: the WebSocket upgrade `GET /fleet/<dev>` (exactly that path, no query), version 13, for a
-  `dev` that is a known local device; the `Host` header must be the address and port it was reached on (no DNS
-  rebinding), and an `Origin`, when there is one, must be `http://<that host>` (what the phone's WebSocket sends; a
-  page in a browser on the network sends its own and is refused). Everything else, plain requests included, gets a
-  bare `404` (no body, no `Date`, no server name) and the socket is closed; a malformed request is closed without a
-  word. Nothing goes down a socket until an envelope came up on it that opened under the device's key and is fresh
-  (its `at` within the skew window: an old envelope replayed opens but proves nothing) (a "proven" socket), and only
-  proven sockets get answers or notices.
-- **Answers go back down the socket the request came on** (a repeat's kept answer too); when that socket is gone, the
-  device's newest proven one. Notices (`revoked`, `pc-closing`) go to every proven socket of the device.
-- **Limits** (`relay-lan.js` `LIMITS`): 16 sockets in all and 8 from one address (past either: the socket is
-  dropped with no answer); 4 per device (the oldest one not proven yet makes room; a proven one never does, so a
-  stranger can't push the phone off); 64 TCP connections per listening address and 8 from one address before any upgrade; 5 s
-  (checked every second) and 4 KB for the request headers; one message at most the relay's `C_MAX` plus 1 KB, checked from the frame header before the body is read
-  (1009), and at most 1024 frames to one message (1009); 64 messages and 256 frames of any kind (pings and
-  continuations too) a second per socket (1008); once the close handshake started, every frame but the close is
-  ignored; a socket must prove itself within 15 s (1008); one not proven yet is
-  closed at the first envelope that does not open (or names another device, or is a replay), a proven one after 8;
-  a ping every 25 s, two missed and it goes; a proven socket that sent no envelope for 10 minutes is closed (the phone
-  opens another); 128 MB waiting to go out to a phone that stopped reading drops its socket (64 KB for one not proven yet). The frames are
-  `ws-frames.js` (RFC 6455, shared with `live.js`): client frames must be masked, no extensions, control frames whole
-  and at most 125 bytes.
-- **Windows Firewall.** The first time the listener binds, Windows may ask whether Node.js (node.exe) may use the
-  network. It must be allowed on **Private** networks, or the phone can't connect. The PC's Pair an iPhone dialog
-  says so.
-
-**Threat notes.** Anyone on the same network can reach the listener, and `ws://` is plain: what protects the phone and
-the PC is the envelope, as on Supabase.
-
-- *A stranger without the device key* gets a 404 for every path, a 404 for an unknown `dev`, and for a known `dev` a
-  socket that stays silent and is closed at its first bad envelope or after 15 s. No route, no PC name, no version,
-  no answer: there is nothing to amplify. The device id is 96 random bits (a passive listener on the Wi-Fi can see it
-  in the path, which only lets it open that silent socket).
-- *A passive listener on the Wi-Fi* sees the device id, when the phone talks and how much, never what: the envelopes
-  are AES-256-GCM under the device's own `K'`, which the QR code never held.
-- *An active one* (ARP spoofing, a rogue access point) can drop, delay or replay envelopes. A replay is dropped by the
-  nonce (10 minutes, per device, both carriers) and `at` checks (5 minutes, and nothing from before the relay
-  started); a forged or changed one does not open; a POST sent again after a restart gets 409, never runs twice. It can
-  keep the phone from reaching the PC (a denial of service), as it could any local traffic.
-- *The pairing code* shown on the PC is, until the phone pairs, the same secret as for Blackbox: anyone on the network
-  who scans it in its 10 minutes could pair in Henry's place (for Blackbox they would also need his Google account).
-  After the phone's first envelope under its own key, the code opens nothing.
-- *A web page* in a browser on the network (or on the phone) can't use the listener: its `Origin` is refused, a
-  rebound host name fails the `Host` check, and it has no key.
-- *Every relay check holds*: the allowlist, the fence, the start limits, the marker (which only the relay sets) and
-  the in-flight caps apply to local envelopes exactly as to Supabase ones; the listener adds its own caps in front.
 
 ## The envelope
 
@@ -623,22 +523,22 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   `/state` names its host, and so does one taken over with Continue on; at most 10 minutes.
 - **Per machine:** a machine that revokes the phone, or no longer takes its pairing, drops that one pairing, with a
   note naming it; the last one gone is the same as Unpair. The same machine paired again (the same sync device id)
-  drops the older pairing. Settings lists the machines (online or last seen, the way, the Fleet View version); a tap
+  drops the older pairing. Settings lists the machines (online or last seen, the Fleet View version); a tap
   unpairs that one only.
 
 ## The relay on the PC
 
 - `relay.js` runs inside the Fleet View server. Its Supabase side is off unless sync S1 is set up and signed in and
-  a relay-mode phone is paired (or pairing); its Wi-Fi listener (`relay-lan.js`) is off unless a local-mode phone is,
-  whatever sync says. With neither it opens no socket and reads no key. It speaks the
+  a phone is paired (or pairing). Before that it opens no socket and reads no key. It speaks the
   Phoenix protocol itself (Node's global `WebSocket`, `vsn=1.0.0`): join with the access token, a heartbeat every
   25 seconds, the new token on refresh, presence `track`, and a backoff reconnect (1 s doubling to 60 s).
 - **Host-agnostic.** It takes the server's port, the data folder, the API token and the S1 instance from whoever
   starts it, and assumes nothing else about the PC. That way it can move to a cloud host later (Henry wants the
   session host on Supabase Compute once that leaves its waitlist).
-- **Devices:** `<dataDir>/relay/devices.json` lists `{ id, name, mode: "relay" | "local", state: "pending" |
-  "paired", createdAt, exp?, pairedAt?, lastSeen?, app?, device? }` (a file from before local mode has no `mode`:
-  relay). A local device's `lastSeen` is its last envelope that opened. The keys are kept apart, in `protectedStore(<dataDir>/relay,
+- **Devices:** `<dataDir>/relay/devices.json` lists `{ id, name, mode: "relay", state: "pending" |
+  "paired", createdAt, exp?, pairedAt?, lastSeen?, app?, device? }` (a file from before modes has no `mode`: relay;
+  a device with `mode: "local"`, paired on the Wi-Fi before that way was taken out, is dropped at start with its key).
+  The keys are kept apart, in `protectedStore(<dataDir>/relay,
   'relay-keys')`, as one JSON object: per device `{ k }` (its own `K'`) once the pairing finished, or
   `{ k, qr: { until, next, n? } }` while it pairs (`k` is `K`, which opens hellos until `until`, `next` the `K'` the
   handshakes made, and `n` how many handshakes it made, when any). `GET /relay/status` says `finished` for a paired
@@ -648,31 +548,24 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   it paired (`addComputer`), and unlinking removes it (`removeComputer`, the notice `revoked`). It is served like a
   phone, tracks the presence key `peer`, and may also call the `/peer/...` routes. The iPhone card does not list it.
 - **Routes (on the PC only, never through the relay):** `GET /relay/status` (`{ enabled, signedIn, email,
-  connected, lan: { on, port, listening, addresses, sockets }, devices }`, never a key; each device has its `mode`,
-  and a local one's `channel` is `joined` while a proven socket of its is open), `POST /relay/pair { name?, mode? }`
+  connected, devices }`, never a key), `POST /relay/pair { name?, mode? }`
   (`{ id, mode, link, svg, exp }`) and `POST /relay/revoke { id }`.
-- **CLI:** `node relay.js status | devices | pair [--name N] [--local] | revoke <id>`. It talks to the running
+- **CLI:** `node relay.js status | devices | pair [--name N] | revoke <id>`. It talks to the running
   server. `pair` also writes `<dataDir>/relay/pair.html` with the QR code, to open in Fleet View's viewer.
-- **The page:** the header's iPhone button shows on this PC whether or not sync is set up. Its card offers **On this
-  Wi-Fi** always and **Through Blackbox** only while sync is set up and signed in, says that the phone has to be on
-  the same Wi-Fi and that Windows may ask once to let Fleet View (node.exe) on the network (allow it on Private
-  networks), and lists the phones with their way.
+- **The page:** the header's iPhone button shows on this PC whether or not sync is set up. Its card pairs through
+  Blackbox while sync is set up and signed in (else it points to the Sync card), and lists the phones.
 - **Log:** `<logDir>/relay.log`: time, device, method, path, status, ms, bytes. Never a body, a key or a token.
 
 ## The app
 
 - `phone/` in this repo: Expo SDK 57, TypeScript, expo-router. The name is "Fleet View", the bundle
   `com.glodusk.fleetview`, the scheme `fleetview`. It ships to TestFlight only, and is left out of the share repo.
-- **The start screen.** Before it is paired the app asks once, with two big cards as the PC's own start screen does:
-  **Sync with Blackbox** (recommended: works away from home; QR code, then Google sign-in) or **Work locally** (same
-  Wi-Fi as the PC; no sign-in, nothing through Supabase). The pick opens the pair screen for that way (Back returns to
-  the cards) and is kept (AsyncStorage `fv.way`) until it pairs; a pairing link opened before a pick picks the link's
-  way. Settings shows the way, and switching is unpair plus the start screen again, after a confirm. A local pairing
-  is always "signed in" (no Supabase session to follow). `expo.version` went to 0.2.0 with local mode, because its iOS
-  keys (`NSLocalNetworkUsageDescription`, `NSAllowsLocalNetworking`) need a new native build: `runtimeVersion` follows
-  the app version, so no update meant for 0.2.0 reaches a 0.1.0 build.
-- One `Transport` interface with three implementations: `RelayTransport` (release; over `SupabaseCarrier` or
-  `LanCarrier`, see "Work locally"), `DirectTransport` (`__DEV__`
+- **Pairing.** The app opens on the pair screen until it is paired: the computers in the lobby, or a pairing code.
+  An older app's start screen pick (AsyncStorage `fv.way`) is cleared at launch. `app.json` still has the iOS keys
+  the Wi-Fi way needed (`NSLocalNetworkUsageDescription`, `NSAllowsLocalNetworking`, from app version 0.2.0); they
+  are native, so they go with the next store build.
+- One `Transport` interface with three implementations: `RelayTransport` (release; over `SupabaseCarrier`),
+  `DirectTransport` (`__DEV__`
   only: `http://localhost:4777` through `adb reverse tcp:4777 tcp:4777`, with the `Origin` header for page POSTs and
   the API token pasted into a dev field), and `MockTransport` (the fixtures in `web/fixtures/`).
 - Crypto: `@noble/ciphers` (AES-GCM), `@noble/hashes` (HKDF-SHA256), `@noble/curves` (X25519, pinned at 2.4.0)

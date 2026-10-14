@@ -4,13 +4,13 @@
 //
 // A phone reaches this PC through Blackbox (mode 'relay'): the sync's Supabase project, from anywhere, while sync is
 // set up and signed in (the phone signs in with the same Google account). Signed out or not set up: a line pointing to
-// the Sync card instead, and no code. The Wi-Fi way (mode 'local') is no longer offered (Henry, 2026-10-14); a phone
-// paired that way before is still listed, as Wi-Fi.
+// the Sync card instead, and no code. The Wi-Fi way (mode 'local') is gone (Henry, 2026-10-14): relay.js drops a phone
+// paired that way before.
 //
 // It shows:
 //   GET /relay/status    read once when the card opens, after every action, and every 3 seconds while a pairing code
-//                        is on screen (never while the card is closed): the sync sign-in, the Wi-Fi addresses, and the
-//                        paired phones (name, Wi-Fi or Blackbox, the phone and app, last seen, connected or not)
+//                        is on screen (never while the card is closed): the sync sign-in and the paired phones (name,
+//                        the phone and app, last seen, connected or not)
 // Laid out as the Sync card (sync.css): what pairing needs in a soft panel, the name field and Pair as one row, the QR in a framed panel with the countdown as
 // a pill under it, "Paired" as a success state, and the phones as rows (a phone icon, the name with a dot for its
 // connection, the details on a second line, Remove at the right).
@@ -34,7 +34,6 @@ const ago = (t) => {
 };
 const left = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const CHANNEL = { joined: 'connected', joining: 'connecting…', closed: 'not connected', refused: 'refused' };
-const MODE = { local: { short: 'Wi-Fi' }, relay: { short: 'Blackbox' } }; // how a listed phone was paired
 
 export function mountPhone({ post, isRemote = () => false, fixture = false, openSync = null } = {}) {
   let card = null, timer = null, tick = null, gen = 0;
@@ -123,12 +122,11 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
     const rows = status.devices.filter((d) => d.kind !== 'computer' && (d.state === 'paired' || (d.state === 'pending' && !(code && d.id === code.id) && d.exp > t)));
     if (!rows.length) return '<div class="sy-line sy-dim">No phone is paired yet.</div>';
     return rows.map((d) => {
-      const way = MODE[d.mode === 'local' ? 'local' : 'relay'];
-      const what = [way.short, d.device, d.app ? `app ${d.app}` : ''].filter(Boolean).join(' · ');
+      const what = ['Blackbox', d.device, d.app ? `app ${d.app}` : ''].filter(Boolean).join(' · ');
       const ch = CHANNEL[d.channel] || d.channel || '';
       const sub = d.state === 'pending'
         ? `waiting for the phone, ${left(d.exp - t)} left${d.handshakes ? ' (scanned, finishing)' : ''}`
-        : [d.lastSeen ? `seen ${ago(d.lastSeen)}` : 'not seen yet', ch ? `${d.mode === 'local' ? 'Wi-Fi' : 'channel'} ${ch}${d.problem ? `: ${d.problem}` : ''}` : '', d.finished === false ? 'finishing pairing' : ''].filter(Boolean).join(' · ');
+        : [d.lastSeen ? `seen ${ago(d.lastSeen)}` : 'not seen yet', ch ? `channel ${ch}${d.problem ? `: ${d.problem}` : ''}` : '', d.finished === false ? 'finishing pairing' : ''].filter(Boolean).join(' · ');
       // the dot: connected mint, connecting or waiting gold, refused rose, else dim
       const dot = d.state === 'pending' ? 'warn' : d.channel === 'joined' ? 'on' : d.channel === 'joining' ? 'warn' : d.channel === 'refused' ? 'bad' : 'off';
       const dotTip = d.state === 'pending' ? 'waiting for the phone' : ch || 'not seen yet';

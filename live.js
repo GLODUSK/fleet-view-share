@@ -10,8 +10,8 @@
 // tick), so turning remote access off or taking a device's approval back closes its socket; recheck() asks every
 // socket at once.
 //
-// The WebSocket itself (RFC 6455, no npm package; the frame reader and writer are ws-frames.js's, shared with
-// relay-lan.js): version 13 only, no extensions or subprotocols; client frames must be masked, server frames are not;
+// The WebSocket itself (RFC 6455, no npm package; the frame reader and writer are ws-frames.js's): version 13 only,
+// no extensions or subprotocols; client frames must be masked, server frames are not;
 // text and binary messages (both read as UTF-8 JSON; the page sends text), continuation frames, ping/pong, the close
 // handshake, 16- and 64-bit lengths, at most 4 MB a message. The server
 // pings every 25 s and drops a browser that missed two. A browser that stops reading (8 MB waiting to go out to

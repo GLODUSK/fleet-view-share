@@ -4,7 +4,7 @@
 // presence. The phone signs in with the same Google account, joins the same lobby, lists the machines from their
 // presence, and asks the one Henry taps for a pairing; the machine makes one with relay.js pair() (the same pending
 // device, K and handshake as a QR code's) and hands the link back sealed to the phone's one-time X25519 key, so what
-// Supabase carries never holds K. From then on it is the ordinary relay (or Wi-Fi) pairing: the first hello turns K
+// Supabase carries never holds K. From then on it is the ordinary relay pairing: the first hello turns K
 // into the device's own K'.
 //
 // The trust is the account: anyone who can sign in as Henry's sync account can pair a phone here, exactly as anyone
@@ -12,20 +12,19 @@
 // that: "my Google sign-in should be all I need").
 //
 //   presence  key pc-<id> (id: 16 b64u, <dataDir>/relay/lobby.json, this machine's for good), payload
-//             { role: 'pc', v: 1, id, name, device, platform, version, hosts, at }: device is the sync device id (or
-//             null), hosts the private IPv4 addresses a Wi-Fi pairing would name (the phone keeps a Wi-Fi pairing's
-//             addresses up to date from them)
-//   ask       phone -> { t: 'pair-ask', v: 1, to: <id>, rid, epk, mode: 'relay' | 'local', name, phone, at }
+//             { role: 'pc', v: 1, id, name, device, platform, version, at }: device is the sync device id (or null)
+//   ask       phone -> { t: 'pair-ask', v: 1, to: <id>, rid, epk, mode: 'relay', name, phone, at }
 //             rid: 16-32 b64u, new for each pairing (the phone sends the same ask again until it has an answer: the
 //             machine answers the same rid with the same answer, for 10 minutes); epk: b64u of a fresh X25519 public
-//             key; phone: the phone's install id (8-40 b64u): its older pairings with this machine are dropped
+//             key; phone: the phone's install id (8-40 b64u): its older pairings with this machine are dropped.
+//             mode 'local' (pairing on this machine's Wi-Fi, from an older app) is gone: pair-no, update the app
 //   answer    machine -> { t: 'pair-link', v: 1, rid, from: <id>, epk, n, c } or { t: 'pair-no', v: 1, rid, from,
 //             message }. c = AES-256-GCM(key, n, the link's text) with its 16-byte tag after it, b64u;
 //             key = HKDF-SHA256(ikm = X25519(the machine's one-time secret, the ask's epk), salt = the UTF-8 rid,
 //             info = 'fleet-view lobby v1', 32); AAD = the UTF-8 of 'fleet-view lobby v1|<topic>|<rid>|<id>'
 //             (topic: fleet:<uid>:lobby)
 //
-//   createLobby({ relay, sync, dataDir, readConfig, pcName, version, device, lanHosts, log, now, timers,
+//   createLobby({ relay, sync, dataDir, readConfig, pcName, version, device, log, now, timers,
 //                 WebSocketImpl, realtime }) -> { start(), stop(), status() }
 'use strict';
 const fs = require('fs');
@@ -40,7 +39,7 @@ const LOBBY_INFO = 'fleet-view lobby v1';
 const ANSWER_KEEP_MS = 10 * 60e3; // a rid's answer, sent again for a repeated ask
 const SKEW_MS = 5 * 60e3; // an ask's `at` this far from our clock is ignored
 const ASKS_PER_MIN = 12; // asks taken up per minute (each makes a pending device and writes the key store)
-const RETRACK_MS = 5 * 60e3; // the presence again (a new Wi-Fi address shows up on the phone)
+const RETRACK_MS = 5 * 60e3; // the presence again (a new version or sync device id shows up on the phone)
 const ID_RE = /^[A-Za-z0-9_-]{16}$/, RID_RE = /^[A-Za-z0-9_-]{16,32}$/, PHONE_RE = /^[A-Za-z0-9_-]{8,40}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const clip = (s, n = 200) => String(s == null ? '' : s).replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, n);
@@ -82,7 +81,6 @@ function createLobby(o = {}) {
   const readConfig = typeof o.readConfig === 'function' ? o.readConfig : SYNC_API.readConfig;
   const pcName = () => clip(o.pcName || os.hostname(), 80);
   const version = () => { try { return String((typeof o.version === 'function' ? o.version() : o.version) || ''); } catch { return ''; } };
-  const lanHosts = () => { try { return (typeof o.lanHosts === 'function' ? o.lanHosts() : require(path.join(__dirname, 'relay-lan.js')).privateIPv4s()).slice(0, 8); } catch { return []; } };
   const device = () => {
     try {
       if (typeof o.device === 'function') { const d = o.device(); return typeof d === 'string' && UUID_RE.test(d) ? d.toLowerCase() : null; }
@@ -109,7 +107,7 @@ function createLobby(o = {}) {
   const said = new Map();
   const note = (text) => { const t = now(), seen = said.get(text); if (seen && t - seen < 60e3) return; if (said.size > 100) said.clear(); said.set(text, t); log(`lobby: ${text}`); };
 
-  const presence = () => ({ role: 'pc', v: 1, id: idOf(), name: pcName(), device: device(), platform: process.platform, version: version(), hosts: lanHosts() });
+  const presence = () => ({ role: 'pc', v: 1, id: idOf(), name: pcName(), device: device(), platform: process.platform, version: version() });
 
   function realtime() {
     if (!rt) {
@@ -169,7 +167,8 @@ function createLobby(o = {}) {
     const answer = (msg) => { answers.set(m.rid, { at: now(), msg }); send(msg); };
     const epk = fromB64u(m.epk);
     if (!epk || epk.length !== 32) return answer(no('The phone sent no usable key: update the app.'));
-    if (m.mode !== 'relay' && m.mode !== 'local') return answer(no('Update the app: it asked for a way this machine does not know.'));
+    if (m.mode === 'local') return answer(no('Pairing on this Wi-Fi is no longer offered: update the Fleet View app and pair with Sync with Blackbox.'));
+    if (m.mode !== 'relay') return answer(no('Update the app: it asked for a way this machine does not know.'));
     if (asks.length >= ASKS_PER_MIN) return send(no('Too many pairings at once: try again in a minute.'));
     asks.push(now());
     answers.set(m.rid, { at: now(), busy: true });
@@ -182,7 +181,7 @@ function createLobby(o = {}) {
     }
     const box = sealLink(out.link, m.epk, topic, m.rid, id);
     if (!box) return answer(no('The phone sent no usable key: update the app.'));
-    note(`paired ${out.id} (${clip(m.name, 60) || 'iPhone'}${m.mode === 'local' ? ', on this Wi-Fi' : ''}) by sign-in`);
+    note(`paired ${out.id} (${clip(m.name, 60) || 'iPhone'}) by sign-in`);
     answer({ t: 'pair-link', v: 1, rid: m.rid, from: id, ...box });
   }
 

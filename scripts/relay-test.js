@@ -38,18 +38,10 @@
 // revoke (notice, leave, key deleted, a request still being checked never going on), stop('pc-closing') (notice,
 // socket closed), backoff on refused joins and on a socket that keeps dropping (1 s doubling to 60 s, never a spin).
 // /relay/* (PC only, Origin on POSTs, no key in the status) and the CLI over loopback (pair.html with the QR code,
-// never the link). relay.log holds no body, key, token, marker key or link. Local mode (Work locally, relay-lan.js) on
-// a real socket on a spare port: the addresses it would bind (private IPv4 only, the Wi-Fi's first), pairing with sync
-// not set up (409 with no private address, 400 for a bad mode, relay mode still 409; the local link's exact JSON, no
-// Supabase socket, devices.json's mode), a bare 404 for a plain request, another path, an unknown device, a query,
-// another Host, a page's Origin, a bad version or key; on the device's socket nothing before an envelope opens, an
-// unmasked frame 1002, an oversized frame 1009 from its header, a bad envelope or one for the Supabase topic 1008, a
-// silent socket closed when its time runs out; then the v2 handshake under K and a hello under K' over the socket,
-// GET /state through, the allowlist, the fence and the marker as through Supabase, a replay dropped, answers down the
-// socket the request came on, the per-device cap (a proven socket never pushed out), sync signed in with only a local
-// device (no Supabase socket) and a relay pairing next to it (the socket opens, and closes when it is revoked),
-// stop('pc-closing') down the socket, a restart with sync off, revoke (notice, socket closed, key gone, listener off).
-// Last, publish-share.js's guard passes relay.js, relay-lan.js, ws-frames.js, this test, the QR library and the
+// never the link). relay.log holds no body, key, token, marker key or link. The Wi-Fi way (mode 'local') is gone: a
+// pairing asking for it gets 400 (LOCAL_GONE), a bad mode 400, and a phone paired that way before (devices.json's
+// mode 'local') is dropped at start with its key, the other devices kept.
+// Last, publish-share.js's guard passes relay.js, ws-frames.js, this test, the QR library and the
 // protocol docs (in a throwaway git repo).
 // The home folder and the app data folders are fakes inside the temp folder (USERPROFILE, HOME, APPDATA,
 // LOCALAPPDATA, PROGRAMDATA, XDG_* for this process), so the fence's cases never touch the real ones.
@@ -63,7 +55,6 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const net = require('net');
 const http = require('http');
 const zlib = require('zlib');
 const crypto = require('crypto');
@@ -397,98 +388,9 @@ function relayOpts(o) {
     relayKey: 'relayKey' in o ? o.relayKey : () => RELAY_KEY,
     log: (t) => (o.logs || []).push(t), now: () => clock.t, WebSocketImpl: FakeWS, timers: o.timers, keyStore: o.keyStore,
     readConfig: () => { o.configReads = (o.configReads || 0) + 1; return { config: { url: SB_URL, key: SB_KEY } }; },
-    port: o.port, startLimits: o.startLimits, lanHosts: o.lanHosts, lanPort: o.lanPort, lanLimits: o.lanLimits,
+    port: o.port, startLimits: o.startLimits,
   };
 }
-// ---------- a WebSocket client on a real socket (the phone in local mode), written here so the test can also send
-// what a real client never would: unmasked frames, an oversized header, garbage ----------
-// a client frame (masked unless o.unmasked; o.len: the length the header claims, whatever the payload)
-function clientFrame(op, payload, o = {}) {
-  const len = o.len !== undefined ? o.len : payload.length;
-  let head;
-  if (len < 126) { head = Buffer.alloc(2); head[1] = len; }
-  else if (len < 65536) { head = Buffer.alloc(4); head[1] = 126; head.writeUInt16BE(len, 2); }
-  else { head = Buffer.alloc(10); head[1] = 127; head.writeUInt32BE(Math.floor(len / 2 ** 32), 2); head.writeUInt32BE(len >>> 0, 6); }
-  head[0] = 0x80 | op;
-  if (o.unmasked) return Buffer.concat([head, payload]);
-  head[1] |= 0x80;
-  const mask = crypto.randomBytes(4), data = Buffer.from(payload);
-  for (let i = 0; i < data.length; i++) data[i] ^= mask[i & 3];
-  return Buffer.concat([head, mask, data]);
-}
-// -> Promise of { status (the HTTP status, or 0: the socket closed with no answer), head (the answer's text), msgs
-// (JSON text frames), closeCode, ended, send(obj), raw(buf), close() }
-function wsConnect(port, p, headers = {}) {
-  return new Promise((resolve) => {
-    const s = net.connect(port, '127.0.0.1');
-    const c = { status: 0, head: '', msgs: [], closeCode: null, ended: false, pings: 0, sock: s };
-    let buf = Buffer.alloc(0), done = false;
-    const finish = () => { if (!done) { done = true; resolve(c); } };
-    c.send = (o) => { try { s.write(clientFrame(0x1, Buffer.from(JSON.stringify(o)))); } catch {} };
-    c.raw = (b) => { try { s.write(b); } catch {} };
-    c.close = () => { try { s.destroy(); } catch {} };
-    s.on('error', () => {});
-    s.on('close', () => { c.ended = true; finish(); });
-    s.on('connect', () => {
-      const h = { Host: `127.0.0.1:${port}`, Upgrade: 'websocket', Connection: 'Upgrade', 'Sec-WebSocket-Key': crypto.randomBytes(16).toString('base64'), 'Sec-WebSocket-Version': '13', ...headers };
-      s.write(`GET ${p} HTTP/1.1\r\n${Object.entries(h).filter(([, v]) => v !== null).map(([k, v]) => `${k}: ${v}`).join('\r\n')}\r\n\r\n`);
-    });
-    s.on('data', (d) => {
-      buf = Buffer.concat([buf, d]);
-      if (!c.status) {
-        const i = buf.indexOf('\r\n\r\n');
-        if (i < 0) return;
-        c.head = buf.subarray(0, i).toString('latin1');
-        c.status = Number((/^HTTP\/1\.1 (\d{3})/.exec(c.head) || [])[1]) || -1;
-        buf = buf.subarray(i + 4);
-        finish();
-      }
-      // the server's frames (never masked)
-      for (;;) {
-        if (buf.length < 2) break;
-        let len = buf[1] & 0x7f, off = 2;
-        if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); off = 4; } else if (len === 127) { if (buf.length < 10) break; len = buf.readUInt32BE(6); off = 10; }
-        if (buf.length < off + len) break;
-        const op = buf[0] & 0x0f, data = buf.subarray(off, off + len);
-        buf = buf.subarray(off + len);
-        if (op === 0x1) { try { c.msgs.push(JSON.parse(data.toString('utf8'))); } catch {} } else if (op === 0x8) c.closeCode = data.length >= 2 ? data.readUInt16BE(0) : 1005;
-        else if (op === 0x9) { c.pings++; c.raw(clientFrame(0xA, Buffer.from(data))); }
-      }
-    });
-  });
-}
-// the phone in local mode, on such a socket: the topic is fleet:local:<dev>
-function makeLanPhone(link) {
-  const j = JSON.parse(Buffer.from(new URL(link).searchParams.get('d'), 'base64url').toString('utf8'));
-  const K = Buffer.from(j.k, 'base64url'), topic = `fleet:local:${j.dev}`;
-  const ph = {
-    j, K, dev: j.dev, topic, key: K, n: 0,
-    env: (msg, k = ph.key, t = topic) => R.seal(R.dirKey(k, 'up'), t, j.dev, 'up', msg),
-    // every message that came down c and opens under k (parts are not used here)
-    read: (c, k = ph.key) => c.msgs.map((e) => R.open(R.dirKey(k, 'down'), topic, j.dev, 'down', e)).filter((x) => x !== null).map((x) => JSON.parse(x)),
-    answer: (c, id, k = ph.key, ms = 5000) => waitUntil(() => ph.read(c, k).find((m) => m.t === 'res' && m.id === id), ms),
-    connect: (port, headers) => wsConnect(port, `/fleet/${j.dev}`, headers),
-    async handshake(c, id) {
-      const mine = R.xPair();
-      c.send(ph.env({ t: 'hello', id, at: clock.t, app: '1.0.0', device: 'Wi-Fi iPhone', epk: mine.pub.toString('base64url') }, K));
-      const r = await ph.answer(c, id, K);
-      return { r, k: r && r.s === 200 && r.b.epk ? R.pairedKey(K, mine.priv, Buffer.from(r.b.epk, 'base64url')) : null };
-    },
-    async ask(c, m, p, more = {}) {
-      const id = more.id || `l${++ph.n}`;
-      c.send(ph.env({ t: 'req', id, at: clock.t, m, p, ...more, id }));
-      return ph.answer(c, id);
-    },
-  };
-  return ph;
-}
-const freePort = () => new Promise((rs) => { const s = http.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => rs(p)); }); });
-const httpGet = (port, p, headers = {}) => new Promise((resolve) => {
-  const rq = http.request({ host: '127.0.0.1', port, path: p, headers }, (rs) => { const parts = []; rs.on('data', (b) => parts.push(b)); rs.on('end', () => resolve({ status: rs.statusCode, headers: rs.headers, text: Buffer.concat(parts).toString('utf8') })); });
-  rq.on('error', (e) => resolve({ status: 0, error: e.code }));
-  rq.end();
-});
-
 // the fence's environment: the fake home and app data folders, for this process only
 function fakeEnv() {
   for (const k of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME']) delete process.env[k];
@@ -1891,197 +1793,37 @@ async function main() {
   await relayC.stop();
   srvC.close();
 
-  // ---------- local mode: pairing with no sync, the Wi-Fi listener (relay-lan.js) on a real socket ----------
-  // the addresses it would bind in use: the private IPv4 ones only, a real adapter's first, 192.168 before 10 before 172
-  const LANM = require(path.join(ROOT, 'relay-lan.js'));
-  const nic = (address, family = 'IPv4', internal = false) => ({ address, family, internal });
-  eq(LANM.privateIPv4s({ 'vEthernet (WSL)': [nic('172.20.0.1')], 'Wi-Fi': [nic('fe80::1', 'IPv6'), nic('172.16.5.5'), nic('192.168.1.20')], Ethernet: [nic('10.0.0.5', 4)],
-    'Loopback Pseudo-Interface 1': [nic('127.0.0.1', 'IPv4', true)], Tailscale: [nic('100.64.1.2')], Public: [nic('8.8.8.8')], Odd: [nic('172.32.0.1'), nic('169.254.3.4')] }),
-  ['192.168.1.20', '10.0.0.5', '172.16.5.5'], 'the listener\'s addresses: private IPv4 only (no loopback, CGNAT, public, link-local), the Wi-Fi\'s first, no virtual adapter while a real one has one');
-  eq(LANM.privateIPv4s({ 'vEthernet (External)': [nic('192.168.1.30')], 'vEthernet (WSL)': [nic('172.20.0.1')], Tailscale: [nic('100.64.1.2')] }),
-    ['192.168.1.30', '172.20.0.1'], 'with only virtual adapters (a Hyper-V external switch), theirs are all there is');
-  ok(['10.1.2.3', '172.31.0.1', '192.168.0.1'].every(LANM.isPrivate) && !['172.15.0.1', '192.169.0.1', '0.0.0.0', '256.1.1.1', '127.0.0.1'].some(LANM.isPrivate), 'isPrivate: RFC 1918 only');
-
-  // a friend's install: sync not set up at all. The listener binds only what lanHosts gives (127.0.0.1 here; in use,
-  // this PC's private addresses)
-  const lanPort = await freePort();
-  let lanAddrs = ['127.0.0.1'];
-  const L = { dataDir: path.join(T, 'lan'), sync: fakeSync(), keyStore: memStore(), timers: makeTimers(), port, logs: [], lanPort, lanHosts: () => lanAddrs, lanLimits: { perDevice: 2, proveMs: 1500 } };
-  L.sync.on = false;
+  // ---------- the Wi-Fi way (mode 'local') is gone ----------
+  const L = { dataDir: path.join(T, 'lan'), sync: fakeSync(), keyStore: memStore(), timers: makeTimers(), port, logs: [] };
   let relayL = R.createRelay(relayOpts(L));
-  nSock = sockets.length;
   relayL.start();
   await settle();
-  let stL = await relayL.status();
-  ok(stL.lan && stL.lan.port === lanPort && stL.lan.listening.length === 0 && L.keyStore.reads === 0, `local: nothing paired, nothing listening and no key read (${JSON.stringify(stL.lan)})`);
-  let lanAns = await httpGet(lanPort, '/');
-  ok(lanAns.status === 0, `local: nothing answers on the Wi-Fi port before a local pairing (${lanAns.status} ${lanAns.error})`);
+  [code, out] = await relayL.pair('x', 'local');
+  ok(code === 400 && out.message === R.LOCAL_GONE, `a pairing on this Wi-Fi: 400, update the app (${code} ${out.message})`);
   [code, out] = await relayL.pair('x', 'bogus');
   ok(code === 400, `pair with a bad mode: 400 (${code})`);
-  lanAddrs = [];
-  [code, out] = await relayL.pair('x', 'local');
-  ok(code === 409 && /home network/.test(out.message), `local pairing with no private address: 409 (${code} ${out.message})`);
-  lanAddrs = ['127.0.0.1'];
-  [code, out] = await relayL.pair('x');
-  ok(code === 409 && /set it up/.test(out.message), `relay pairing (the default mode) still needs sync: 409 (${code})`);
-  [code, out] = await relayL.pair('Wi-Fi iPhone', 'local');
-  ok(code === 200 && out.ok && out.mode === 'local' && out.svg.startsWith('<svg'), `local pairing with sync off: 200 (${code} ${out.message || ''})`);
-  const lp = makeLanPhone(out.link);
-  eq({ ...lp.j, dev: '-', k: '-' }, { v: 2, mode: 'local', hosts: ['127.0.0.1'], port: lanPort, pcName: 'TEST-PC', dev: '-', k: '-', exp: out.exp }, 'the local link\'s JSON: no Supabase url, key, uid or email');
-  ok(!/supabase|henry@example/.test(Buffer.from(new URL(out.link).searchParams.get('d'), 'base64url').toString('utf8')), 'the local link names no Supabase project and no account');
-  eq(R.pairLink({ mode: 'local', hosts: ['192.168.1.20'], port: 4779, pcName: 'P', dev: 'd', k: 'k', exp: 1 }), `fleetview://pair?d=${Buffer.from(JSON.stringify({ v: 2, mode: 'local', hosts: ['192.168.1.20'], port: 4779, pcName: 'P', dev: 'd', k: 'k', exp: 1 })).toString('base64url')}`, 'pairLink: the local link\'s keys in the contract\'s order');
-  ok(sockets.length === nSock, 'local pairing opened no Supabase socket');
-  devs = JSON.parse(fs.readFileSync(path.join(L.dataDir, 'relay', 'devices.json'), 'utf8')).devices;
-  eq(devs.map((d) => [d.id, d.mode, d.state]), [[lp.dev, 'local', 'pending']], 'devices.json remembers the mode');
-  stL = await relayL.status();
-  eq([stL.lan.listening, stL.devices[0].mode, stL.devices[0].channel], [['127.0.0.1'], 'local', 'closed'], 'status: listening on the private addresses, the device local and not connected');
-
-  // what anyone on the network gets: a bare 404 for everything but the upgrade of a known local device
-  lanAns = await httpGet(lanPort, '/');
-  ok(lanAns.status === 404 && lanAns.text === '' && !lanAns.headers.date && !lanAns.headers.server, `GET /: a bare 404 (${lanAns.status} ${JSON.stringify(lanAns.headers)})`);
-  lanAns = await httpGet(lanPort, '/state');
-  ok(lanAns.status === 404 && lanAns.text === '', 'GET /state on the Wi-Fi port: 404 (the server\'s routes are not there)');
-  lanAns = await httpGet(lanPort, `/fleet/${lp.dev}`);
-  ok(lanAns.status === 404, 'the device\'s path without the upgrade: 404');
-  for (const [what, p, h] of [['another path', '/live', {}], ['an unknown device', '/fleet/AAAAAAAAAAAAAAAA', {}], ['a query', `/fleet/${lp.dev}?x=1`, {}],
-    ['another Host (DNS rebinding)', `/fleet/${lp.dev}`, { Host: `evil.example:${lanPort}` }], ['a page\'s Origin', `/fleet/${lp.dev}`, { Origin: 'http://evil.example' }],
-    ['version 8', `/fleet/${lp.dev}`, { 'Sec-WebSocket-Version': '8' }], ['a bad key', `/fleet/${lp.dev}`, { 'Sec-WebSocket-Key': 'nope' }]]) {
-    const c = await wsConnect(lanPort, p, h);
-    ok(c.status === 404 && !/fleet|TEST-PC|1\.0\.99/i.test(c.head.replace(/^HTTP[^\r]*/, '')), `upgrade with ${what}: 404 and nothing else (${c.status})`);
-    c.close();
-  }
-  let lc = await lp.connect(lanPort, { Origin: `http://127.0.0.1:${lanPort}` });
-  ok(lc.status === 101, `the known device's upgrade, with the Origin a phone sends: 101 (${lc.status})`);
-  await sleep(50);
-  ok(lc.msgs.length === 0, 'nothing comes down before an envelope opened');
-  // an unmasked frame, garbage, an oversized frame (refused from its header), another device's envelope: closed
-  lc.raw(clientFrame(0x1, Buffer.from('{}'), { unmasked: true }));
-  await waitUntil(() => lc.closeCode !== null, 2000);
-  ok(lc.closeCode === 1002 && lc.msgs.length === 0, `an unmasked frame: closed 1002 (${lc.closeCode})`);
-  lc.close();
-  lc = await lp.connect(lanPort);
-  lc.raw(clientFrame(0x1, Buffer.alloc(0), { len: R.C_MAX + 4096 }));
-  await waitUntil(() => lc.closeCode !== null, 2000);
-  ok(lc.closeCode === 1009, `a frame longer than an envelope may be: closed 1009 from its header alone (${lc.closeCode})`);
-  lc.close();
-  lc = await lp.connect(lanPort);
-  lc.send({ v: 1, d: lp.dev, dir: 'up', n: 'AAAAAAAAAAAAAAAA', z: 0, c: 'AAAAAAAAAAAAAAAAAAAAAAAA' });
-  await waitUntil(() => lc.closeCode !== null, 2000);
-  ok(lc.closeCode === 1008 && lc.msgs.length === 0, `an envelope that does not open, on a socket that never proved itself: closed 1008, unanswered (${lc.closeCode})`);
-  lc.close();
-  lc = await lp.connect(lanPort);
-  // the relay topic's AAD (fleet:<uid>:<dev>) does not open on the Wi-Fi: the topics are apart
-  lc.send(lp.env({ t: 'hello', id: 'x1', at: clock.t, app: '1', device: 'x', epk: R.xPair().pub.toString('base64url') }, lp.K, `fleet:${UID}:${lp.dev}`));
-  await waitUntil(() => lc.closeCode !== null, 2000);
-  ok(lc.closeCode === 1008 && lc.msgs.length === 0, `an envelope sealed for the Supabase topic: closed, unanswered (${lc.closeCode})`);
-  lc.close();
-  lc = await lp.connect(lanPort);
-  await waitUntil(() => lc.ended, 4000);
-  ok(lc.ended && lc.closeCode === 1008 && !lc.msgs.length, `a socket that sends nothing is closed when its time to prove itself runs out (${lc.closeCode})`);
-
-  // the whole thing over the socket: the v2 handshake under K, then K', then requests through the same checks
-  lc = await lp.connect(lanPort);
-  const lhs = await lp.handshake(lc, 'lh1');
-  ok(lhs.r && lhs.r.s === 200 && lhs.r.b.paired === true && lhs.k, `local: the handshake's hello under K over the socket: 200 with the PC's epk (${lhs.r && lhs.r.s})`);
-  lp.key = lhs.k;
-  lc.send(lp.env({ t: 'hello', id: 'lh2', at: clock.t, app: '1.0.0', device: 'Wi-Fi iPhone' }));
-  r = await lp.answer(lc, 'lh2');
-  eq(r && { s: r.s, b: r.b }, { s: 200, b: { paired: true, pcName: 'TEST-PC', version: '1.0.99', device: null, platform: process.platform } }, 'local: a hello under K\' finishes the pairing');
-  eq(JSON.parse(L.keyStore.peek()), { [lp.dev]: { k: lhs.k.toString('base64url') } }, 'local: the key store holds K\' alone');
-  stL = await relayL.status();
-  ok(stL.devices[0].state === 'paired' && stL.devices[0].finished === true && stL.devices[0].channel === 'joined', `status: paired, finished, connected (${JSON.stringify(stL.devices[0])})`);
-  await tick(L.timers, 1001, null);
-  const nStateL = seenFor('/state').length;
-  r = await lp.ask(lc, 'GET', '/state');
-  ok(r && r.s === 200 && r.b.repos[0].root === KNOWN && seenFor('/state').length === nStateL + 1, `local: GET /state over the Wi-Fi reaches the server and comes back (${r && r.s})`);
-  last = seenFor('/state').pop();
-  ok(last && !last.headers.origin && !last.headers.authorization, 'and goes to the server like a Supabase one (no Origin, no token on a page GET)');
-  r = await lp.ask(lc, 'GET', '/relay/status');
-  ok(r && r.s === 403, `local: the allowlist holds (/relay/status: ${r && r.s})`);
-  r = await lp.ask(lc, 'GET', '/file', { q: { path: path.join(HOME, '.ssh', 'id_ed25519') } });
-  ok(r && r.s === 403, `local: the fence holds (~/.ssh: ${r && r.s})`);
-  r = await lp.ask(lc, 'POST', `/api/sessions/${SID}/message`, { b: { text: 'from the Wi-Fi', via: 'phone' } });
-  last = seenFor(`/api/sessions/${SID}/message`).pop();
-  ok(r && r.s === 200 && last.body.via === 'phone' && last.headers['x-fleet-view-relay'] === RELAY_KEY && last.headers.authorization === `Bearer ${API_TOKEN}`, `local: a marked route is marked by the relay, as through Supabase (${r && r.s})`);
-  // a replay of an envelope that went: dropped, unanswered
-  const replayEnv = lp.env({ t: 'req', id: 'lrep', at: clock.t, m: 'POST', p: '/rename', b: { id: SID, name: 'w' } });
-  lc.send(replayEnv);
-  r = await lp.answer(lc, 'lrep');
-  const nRen = renames;
-  lc.send(replayEnv);
-  await sleep(80);
-  ok(r && r.s === 200 && renames === nRen && lp.read(lc).filter((m) => m.id === 'lrep').length === 1, 'local: a replayed envelope is dropped, never run or answered twice');
-  // an old envelope (a capture replayed after a restart, or past the nonce window) opens but is not fresh: it proves
-  // nothing, so the socket it came on is closed like a stranger's and can't hold one of the device's places
-  const lcOld = await lp.connect(lanPort);
-  lcOld.send(lp.env({ t: 'hello', id: 'lold', at: clock.t - 60 * 60e3, app: '1.0.0', device: 'Wi-Fi iPhone' }));
-  await waitUntil(() => lcOld.closeCode !== null, 2000);
-  ok(lcOld.closeCode === 1008 && !lcOld.msgs.length, `local: a stale envelope proves nothing: its socket closed 1008, unanswered (${lcOld.closeCode})`);
-  lcOld.close();
-  // a second socket: its answers go down it, not the first
-  const lc2 = await lp.connect(lanPort);
-  lc2.send(lp.env({ t: 'hello', id: 'lh3', at: clock.t, app: '1.0.0', device: 'Wi-Fi iPhone' }));
-  ok(await lp.answer(lc2, 'lh3'), 'a second socket proves itself with a hello');
-  const before1 = lc.msgs.length;
-  r = await lp.ask(lc2, 'GET', '/api/status');
-  await sleep(50);
-  ok(r && r.s === 200 && lc.msgs.length === before1, 'its answer goes down the socket the request came on, and no other');
-  // a device's sockets are capped (2 in this test): a new one pushes out one not proven yet, never a proven one
-  const lc3 = await lp.connect(lanPort);
-  ok(lc3.status === 0 || lc3.status === -1 || (await waitUntil(() => lc3.ended, 1000)), `with both places proven, a third socket gets nothing (${lc3.status})`);
-  lc2.close();
-  for (let i = 0; i < 100 && (await relayL.status()).lan.sockets !== 1; i++) await sleep(10);
-  const lc4 = await lp.connect(lanPort);
-  const lc5 = await lp.connect(lanPort);
-  ok(lc4.status === 101 && lc5.status === 101 && (await waitUntil(() => lc4.ended, 1000)) && !lc.ended, 'a new socket pushed out the one not proven yet, and the proven one stayed');
-  lc5.close();
-
-  // the Supabase socket opens only for a relay-mode device, with sync signed in
-  L.sync.on = true;
-  L.sync.emit('signed-in');
-  await settle();
-  await tick(L.timers, 10, null);
-  ok(sockets.length === nSock, 'sync signed in but only a local device paired: still no Supabase socket');
-  ok(!lc.ended && (await relayL.status()).lan.listening.length === 1, 'and the Wi-Fi socket and listener are untouched by the sign-in');
-  [code, out] = await relayL.pair('Relay phone');
-  ok(code === 200 && out.mode === 'relay' && sockets.length === nSock + 1, `a relay-mode pairing next to it opens the Supabase socket (${code})`);
-  ok(JSON.parse(Buffer.from(new URL(out.link).searchParams.get('d'), 'base64url').toString('utf8')).url === SB_URL, 'and its link is the Supabase one');
-  [code] = await relayL.revoke(out.id);
-  await tick(L.timers, 10, null);
-  ok(code === 200 && lastSocket().closed, 'revoking it closes the Supabase socket again (no relay-mode device left)');
-  L.sync.on = false;
-  L.sync.emit('signed-out');
-  await settle();
-
-  // a restart: the listener comes back for the paired local device with sync off; stop says pc-closing first
-  await relayL.stop('pc-closing');
-  await waitUntil(() => lc.ended, 3000);
-  ok(lp.read(lc).some((m) => m.t === 'notice' && m.kind === 'pc-closing') && lc.closeCode === 1001, `stop('pc-closing'): the notice down the Wi-Fi socket, then it closes (${lc.closeCode})`);
-  lanAns = await httpGet(lanPort, '/');
-  ok(lanAns.status === 0, 'a stopped relay stops listening');
+  await relayL.stop();
+  // a phone paired on the Wi-Fi before (devices.json's mode 'local'): dropped at start, its key too; the others kept
+  const wifiDev = 'WIFIWIFIWIFIWIF1', keptDev = 'KEPTKEPTKEPTKEP1', k32 = crypto.randomBytes(32).toString('base64url');
+  fs.mkdirSync(path.join(L.dataDir, 'relay'), { recursive: true });
+  fs.writeFileSync(path.join(L.dataDir, 'relay', 'devices.json'), JSON.stringify({ v: 1, devices: [
+    { id: wifiDev, name: 'Wi-Fi iPhone', mode: 'local', state: 'paired', createdAt: 1, pairedAt: 1 },
+    { id: keptDev, name: 'Sync iPhone', mode: 'relay', state: 'paired', createdAt: 1, pairedAt: 1 }] }));
+  await L.keyStore.write(JSON.stringify({ [wifiDev]: { k: k32 }, [keptDev]: { k: k32 } }));
   relayL = R.createRelay(relayOpts(L));
   relayL.start();
   await settle(20);
-  for (let i = 0; i < 200 && (await relayL.status()).lan.listening.length !== 1; i++) await sleep(10);
-  lc = await lp.connect(lanPort);
-  await tick(L.timers, 1001, null);
-  r = await lp.ask(lc, 'GET', '/api/status');
-  ok(r && r.s === 200, `after a restart, with sync still off, the paired local phone gets through (${r && r.s})`);
-  // revoke: the notice, the socket closed, the device unknown to the listener, and the listener off
-  [code] = await relayL.revoke(lp.dev);
-  await waitUntil(() => lc.ended, 3000);
-  ok(code === 200 && lp.read(lc).some((m) => m.t === 'notice' && m.kind === 'revoked') && lc.closeCode === 1000, `revoke a local device: notice revoked, then its socket closed (${lc.closeCode})`);
-  ok(!JSON.parse(L.keyStore.peek() || '{}')[lp.dev], 'its key is deleted');
-  lanAns = await httpGet(lanPort, '/');
-  ok(lanAns.status === 0 && (await relayL.status()).lan.listening.length === 0, 'with no local device left, the listener is off');
-  const logL = fs.readFileSync(path.join(L.dataDir, 'relay.log'), 'utf8');
-  ok(![lp.j.k, lhs.k.toString('base64url'), 'fleetview://', 'from the Wi-Fi'].some((x) => logL.includes(x)), 'relay.log holds no key, link or body for the local device either');
+  devs = JSON.parse(fs.readFileSync(path.join(L.dataDir, 'relay', 'devices.json'), 'utf8')).devices;
+  eq(devs.map((d) => [d.id, d.mode]), [[keptDev, 'relay']], 'a Wi-Fi phone from before is dropped from devices.json, the sync one kept');
+  eq(Object.keys(JSON.parse(L.keyStore.peek() || '{}')), [keptDev], 'and its key is deleted, the sync one\'s kept');
+  eq((await relayL.status()).devices.map((d) => d.id), [keptDev], 'status lists only the sync phone');
+  ok(L.logs.some((t) => /Wi-Fi dropped/.test(t)), 'the drop is said in the log');
   await relayL.stop();
 
   // ---------- publish-share.js's guard, in a throwaway repo ----------
   const G = path.join(T, 'share-guard');
   const copy = (rel) => { fs.mkdirSync(path.dirname(path.join(G, rel)), { recursive: true }); fs.copyFileSync(path.join(ROOT, rel), path.join(G, rel)); };
-  const mine = ['relay.js', 'relay-lan.js', 'ws-frames.js', 'scripts/relay-test.js', 'web/vendor/qrcode/qrcode.js', 'web/vendor/qrcode/LICENSE', 'docs/phone.md', 'docs/phone-vectors.json', 'scripts/phone-vectors.js'];
+  const mine = ['relay.js', 'ws-frames.js', 'scripts/relay-test.js', 'web/vendor/qrcode/qrcode.js', 'web/vendor/qrcode/LICENSE', 'docs/phone.md', 'docs/phone-vectors.json', 'scripts/phone-vectors.js'];
   for (const f of ['scripts/publish-share.js', 'version.js', 'platform.js', ...mine]) copy(f);
   const gEnv = { ...ENV0, GIT_AUTHOR_NAME: 'relay test', GIT_AUTHOR_EMAIL: 'relay@test', GIT_COMMITTER_NAME: 'relay test', GIT_COMMITTER_EMAIL: 'relay@test', GIT_CONFIG_NOSYSTEM: '1' };
   const git = (...args) => { const x = cp.spawnSync('git', ['-C', G, ...args], { encoding: 'utf8', env: gEnv, windowsHide: true }); if (x.status !== 0) throw new Error(`git ${args.join(' ')}: ${x.stderr}`); return x.stdout.trim(); };

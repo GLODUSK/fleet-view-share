@@ -1,16 +1,12 @@
 // relay.js: the phone relay, the PC side of docs/phone.md (the contract; docs/phone-vectors.json holds its crypto).
-// Fleet View for iPhone never calls this server's routes itself. Each paired phone has a mode, chosen when it pairs:
-//   relay  (Sync with Blackbox) both join one private Supabase Realtime Broadcast channel per phone; works anywhere.
-//          Nothing goes in the database: Supabase only carries envelopes it can't read.
-//   local  (Work locally) the phone opens a WebSocket to this PC on the same Wi-Fi (relay-lan.js: its own port, 4779,
-//          bound only to this PC's private addresses); no Supabase, no sign-in, no sync needed.
-// Both carry the very same envelopes, and everything below (the keys, the handshake, nonces, skew, the allowlist, the
-// fence, every limit, the marker) is one code path, onEnvelope, for both: the relay answers each encrypted request by
-// calling this server's own routes over loopback, and the answer goes back the way the request came (the channel, or
-// the socket it came on). A local device's AAD topic is fleet:local:<dev> (LOCAL_UID), a relay one's fleet:<uid>:<dev>.
+// Fleet View for iPhone never calls this server's routes itself. The phone and this PC (Sync with Blackbox) both join
+// one private Supabase Realtime Broadcast channel per phone; works anywhere. Nothing goes in the database: Supabase only
+// carries envelopes it can't read. Everything below (the keys, the handshake, nonces, skew, the allowlist, the fence,
+// every limit, the marker) goes through onEnvelope: the relay answers each encrypted request by calling this server's
+// own routes over loopback, and the answer goes back on the channel. A device's AAD topic is fleet:<uid>:<dev>.
 //
-// Supabase is off unless sync S1 (sync-api.js) is set up and signed in AND a relay-mode phone is paired (or being
-// paired); the Wi-Fi listener is off unless a local-mode phone is. Before either it opens no socket and reads no key.
+// Supabase is off unless sync S1 (sync-api.js) is set up and signed in AND a phone is paired (or being paired).
+// Before that it opens no socket and reads no key.
 // Host-agnostic: the port, the data and log folders, the S1 instance, the API token, the version and the PC's name all
 // come in through createRelay's opts, so it can move with the session host to a cloud box later. S1's config (url,
 // publishable key) is read again on every (re)connect, never kept.
@@ -77,9 +73,8 @@
 //             10 minutes (a team one per member; a message to a conversation that opens one /state says is not
 //             running 1, a team message one per member not running); 64 MB of answers being read at once. Over one: 429 with
 //             b.retryAfter (ms), not kept
-//   revoke    notice 'revoked', leave (a local device: its sockets closed after the notice), delete the key; a request
-//             of its still being checked never goes on. stop('pc-closing') sends notice 'pc-closing' on every channel
-//             and Wi-Fi socket
+//   revoke    notice 'revoked', leave, delete the key; a request of its still being checked never goes on.
+//             stop('pc-closing') sends notice 'pc-closing' on every channel
 //
 // The allowlist (docs/phone.md's, mirrored in ALLOW) and where the relay is narrower than the route itself, because a
 // loopback request looks like this PC's own page to the server: a root the phone names must be one Fleet View already
@@ -119,10 +114,11 @@
 //   forkFrom, and the page's /teams routes take conversation ids.
 //   Paths: the method and the whole path must match; ids match their patterns; '..', '//', '%', '?', '#', '\' refused.
 //
-// Devices: <dataDir>/relay/devices.json [{ id, name, mode: 'relay' | 'local', state: 'pending' | 'paired', createdAt,
+// Devices: <dataDir>/relay/devices.json [{ id, name, mode: 'relay', state: 'pending' | 'paired', createdAt,
 // exp?, pairedAt?, lastSeen?, app?, device?, kind?, peer? }] (app and device: what the phone's hello said; a file from
-// before modes has no mode: relay), no keys; the keys in sync-api.js's protectedStore(<dataDir>/relay, 'relay-keys') as
-// one JSON object { <dev>: { k, qr? } } (see loadKeys), for both modes.
+// before modes has no mode: relay; one with mode 'local', a phone paired on this PC's Wi-Fi before that way was taken
+// out, is dropped at start with its key), no keys; the keys in sync-api.js's protectedStore(<dataDir>/relay,
+// 'relay-keys') as one JSON object { <dev>: { k, qr? } } (see loadKeys).
 // Computers (docs/link.md): another of Henry's machines, linked through link.js, is a device of kind 'computer' with
 // peer: its sync device id. It never pairs with a QR code: link.js's pairing makes its key and adds it here paired
 // (addComputer), and removeComputer (link.js unlink) revokes it like any device. It is served exactly like a phone
@@ -138,18 +134,17 @@
 // pairedAt, lastSeen, channel }] }
 //   opts: { port, dataDir, logDir, sync (createSync()'s instance), apiToken (a function giving it, or the token
 //   file's path), relayKey (a function giving api.js's relayKey(), for the marker), version (string or function),
-//   pcName, log(text), lanPort (the Wi-Fi listener's, 4779), onComputerGone(peer) (a computer revoked with revoke(),
+//   pcName, log(text), onComputerGone(peer) (a computer revoked with revoke(),
 //   not through link.js: fleet-view.js has the link unlink it on both machines) } and, for tests: now, WebSocketImpl, timers
 //   ({ setTimeout, clearTimeout }), keyStore (a store as sync-api.js's), readConfig(dataDir), routeMs, waitRouteMs,
-//   startLimits ({ atOnce, max }, read at each request), resDeviceMax, lanHosts() (the listener's addresses: 127.0.0.1
-//   in a test; never anything but this PC's private ones in use), lanLimits (relay-lan.js LIMITS)
+//   startLimits ({ atOnce, max }, read at each request), resDeviceMax
 // Routes (fleet-view.js sends /relay/* here; this PC only, never through the relay; POSTs need this page's Origin):
-//   GET  /relay/status  { enabled, signedIn, email, connected, lan: { on, port, listening, addresses, sockets },
-//                       devices } (never a key; a device still pairing says how many handshakes its code made)
-//   POST /relay/pair    { name?, mode?: 'relay' (the default) | 'local' } -> { ok, id, mode, link, svg, exp }: the link
-//                       (and its QR code) is shown once. 'local' needs no sync and no sign-in, only a private address
-//   POST /relay/revoke  { id }, either mode
-// CLI (talks to the running server): node relay.js status | devices | pair [--name N] [--local] | revoke <id>
+//   GET  /relay/status  { enabled, signedIn, email, connected, devices } (never a key; a device still pairing says how
+//                       many handshakes its code made)
+//   POST /relay/pair    { name?, mode?: 'relay' (the only one; 'local', the Wi-Fi way that is gone, gets 400) } ->
+//                       { ok, id, mode, link, svg, exp }: the link (and its QR code) is shown once
+//   POST /relay/revoke  { id }
+// CLI (talks to the running server): node relay.js status | devices | pair [--name N] | revoke <id>
 //   [--port 4777]. pair writes <dataDir>/relay/pair.html with the QR code (never prints the link); it is deleted once
 //   no pairing waits.
 'use strict';
@@ -161,7 +156,6 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 const P = require(path.join(__dirname, 'platform.js'));
 const SYNC_API = require(path.join(__dirname, 'sync-api.js'));
-const LAN = require(path.join(__dirname, 'relay-lan.js'));
 
 const LABEL = 'fleet-view relay v1'; // the envelope's (HKDF salt and AAD), the same in protocol v2
 const PAIRED_INFO = 'fleet-view relay v2 paired'; // K' = HKDF-SHA256(ikm K || X25519 secret, no salt, this, 32)
@@ -224,9 +218,8 @@ function fromB64u(s) {
 const dirKey = (k, dir) => Buffer.from(crypto.hkdfSync('sha256', k, Buffer.from(LABEL, 'utf8'), Buffer.from(dir, 'utf8'), 32));
 const aadText = (topic, d, dir, z) => `${LABEL}|${topic}|${d}|${dir}|${z}`;
 const topicOf = (uid, dev) => `fleet:${uid}:${dev}`;
-// a local-mode device's topic (only in the AAD: nothing is joined) has 'local' where a relay one has the uid
-const LOCAL_UID = 'local';
-const MODES = ['relay', 'local'];
+// what a pairing asked for on this PC's Wi-Fi (mode 'local', which is gone) is told
+const LOCAL_GONE = 'pairing on this Wi-Fi is no longer offered: update the Fleet View app and pair through sync (Sync with Blackbox)';
 // one message (or its JSON text) -> an envelope, with key the direction's key (dirKey). o.z: 0 or 1 (default: 1 when
 // the JSON is over ZIP_MIN bytes); o.nonce: 12 bytes (only the test vectors fix it)
 function seal(key, topic, d, dir, msg, o = {}) {
@@ -302,12 +295,9 @@ function slices(text, max = PART_MAX) {
   }
   return out;
 }
-// the pairing link: fleetview://pair?d=<b64u of the UTF-8 JSON>, its keys in the contract's order. A local-mode one
-// (o.mode 'local') has no Supabase url, key, uid or email: this PC's private addresses and its Wi-Fi port instead
+// the pairing link: fleetview://pair?d=<b64u of the UTF-8 JSON>, its keys in the contract's order
 function pairLink(o) {
-  const j = o.mode === 'local'
-    ? { v: LINK_V, mode: 'local', hosts: o.hosts, port: o.port, pcName: o.pcName, dev: o.dev, k: o.k, exp: o.exp }
-    : { v: LINK_V, url: o.url, key: o.key, uid: o.uid, email: o.email, pcName: o.pcName, dev: o.dev, k: o.k, exp: o.exp };
+  const j = { v: LINK_V, url: o.url, key: o.key, uid: o.uid, email: o.email, pcName: o.pcName, dev: o.dev, k: o.k, exp: o.exp };
   return `fleetview://pair?d=${b64u(Buffer.from(JSON.stringify(j), 'utf8'))}`;
 }
 // the link's QR code as SVG (web/vendor/qrcode: qrcode-generator 1.4.4, MIT), drawn here from its module matrix: one
@@ -569,9 +559,6 @@ function createRelay(opts = {}) {
   const helloBody = () => ({ paired: true, pcName: pcName(), version: version(), device: deviceId(), platform: process.platform });
   if (!sync || typeof sync.enabled !== 'function') throw new Error('createRelay needs the sync instance (opts.sync)');
   let keyStore = opts.keyStore || null; // made on first use: on Windows it is DPAPI through PowerShell
-  const lanPort = Number(opts.lanPort) || LAN.LAN_PORT;
-  // the addresses the Wi-Fi listener binds: this PC's private IPv4 ones (opts.lanHosts only in tests: 127.0.0.1)
-  const lanHosts = () => { try { return typeof opts.lanHosts === 'function' ? opts.lanHosts() : LAN.privateIPv4s(); } catch { return []; } };
 
   // ---------- the log ----------
   const onceSeen = new Map();
@@ -592,7 +579,7 @@ function createRelay(opts = {}) {
   }
 
   // ---------- devices ----------
-  // id -> { id, name, mode ('relay': Supabase; 'local': the Wi-Fi listener), state, createdAt, exp, pairedAt, lastSeen,
+  // id -> { id, name, mode (always 'relay': Supabase), state, createdAt, exp, pairedAt, lastSeen,
   //         app, device, gone,
   //         k (its key: the QR's K while qr, else its own K'), keys: { up, down } of k | null, qr, until (K opens hellos
   //         until then), cands: [{ k, up, down }] (the K' its handshakes made), hsN, hsAt (how many handshakes the
@@ -603,15 +590,14 @@ function createRelay(opts = {}) {
   const devices = new Map();
   let devicesDirty = false;
   const usable = (dv) => dv.state === 'paired' || (dv.state === 'pending' && dv.exp > now());
-  const isLocal = (dv) => dv.mode === 'local';
-  // the topic in a device's AAD: fleet:<uid>:<dev> through Supabase, fleet:local:<dev> on the Wi-Fi
-  const topicFor = (dv) => topicOf(isLocal(dv) ? LOCAL_UID : uid, dv.id);
+  // the topic in a device's AAD: fleet:<uid>:<dev>
+  const topicFor = (dv) => topicOf(uid, dv.id);
   const isComputer = (dv) => dv.kind === 'computer';
   function makeDevice(o) {
     const computer = o.kind === 'computer' && typeof o.peer === 'string' && UUID_RE.test(o.peer);
     return {
       kind: computer ? 'computer' : 'phone', peer: computer ? o.peer.toLowerCase() : undefined,
-      id: o.id, name: clip(o.name, 60) || (computer ? 'another computer' : 'iPhone'), mode: o.mode === 'local' && !computer ? 'local' : 'relay', state: o.state, createdAt: Number(o.createdAt) || now(),
+      id: o.id, name: clip(o.name, 60) || (computer ? 'another computer' : 'iPhone'), mode: 'relay', state: o.state, createdAt: Number(o.createdAt) || now(),
       exp: o.state === 'pending' ? Number(o.exp) || 0 : undefined, pairedAt: Number(o.pairedAt) || undefined, lastSeen: Number(o.lastSeen) || undefined,
       app: o.app ? clip(o.app, 40) : undefined, device: o.device ? clip(o.device, 60) : undefined, gone: false,
       // the phone's install id when it paired by sign-in (relay-lobby.js): its next pairing here replaces this one
@@ -629,15 +615,20 @@ function createRelay(opts = {}) {
     if (isComputer(dv)) { o.kind = 'computer'; o.peer = dv.peer; }
     return o;
   };
+  // -> the ids of phones paired on this PC's Wi-Fi (mode 'local', which is gone): left out here, and start() deletes
+  // their keys and writes devices.json without them; such a phone pairs again through sync
   function loadDevices() {
     let j = null;
-    try { j = JSON.parse(fs.readFileSync(devicesFile, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') note(`devices.json could not be read: ${e.message}`); return; }
+    const gone = [];
+    try { j = JSON.parse(fs.readFileSync(devicesFile, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') note(`devices.json could not be read: ${e.message}`); return gone; }
     for (const o of arr(j && j.devices).slice(0, DEVICES_MAX)) {
       if (!o || !DEV_RE.test(String(o.id)) || (o.state !== 'pending' && o.state !== 'paired')) continue;
+      if (o.mode === 'local') { gone.push(o.id); continue; }
       // a computer is only ever paired, and always names its peer
       if (o.kind === 'computer' && (o.state !== 'paired' || !(typeof o.peer === 'string' && UUID_RE.test(o.peer)))) continue;
       devices.set(o.id, makeDevice(o));
     }
+    return gone;
   }
   function saveDevices() {
     devicesDirty = false;
@@ -688,7 +679,6 @@ function createRelay(opts = {}) {
   async function forgetDevice(dv, why) {
     dv.gone = true;
     leave(dv);
-    if (isLocal(dv)) lan.closeDevice(dv.id);
     devices.delete(dv.id);
     saveDevices();
     if (![...devices.values()].some((x) => x.state === 'pending')) removePairPage();
@@ -1090,13 +1080,13 @@ function createRelay(opts = {}) {
     if (msg.at - msg.t0 > EXPIRED_MS) return fail(409, 'This was first sent too long ago for the PC to tell whether it went in. Check before sending again.', { expired: true });
     return null;
   }
-  function onRequest(dv, msg, rt) {
+  function onRequest(dv, msg) {
     const had = dv.kept.get(msg.id);
-    if (had) { if (had.res) sendRes(dv, msg.id, had.res, undefined, rt); return; } // a repeat: the kept answer, or nothing while it runs
+    if (had) { if (had.res) sendRes(dv, msg.id, had.res); return; } // a repeat: the kept answer, or nothing while it runs
     const m = clip(msg.m, 8) || '?', p = logPath(msg.p);
     const refuse = (res, kept) => {
       logLine(dv.id, m, p, res.s, 0, 0);
-      const sent = sendRes(dv, msg.id, res, undefined, rt);
+      const sent = sendRes(dv, msg.id, res);
       if (kept) { pruneKept(dv); const entry = { at: now(), res: null, size: 0, get: false }; dv.kept.set(msg.id, entry); keep(dv, msg.id, entry, sent.res, sent.size); }
     };
     if (msg.t0 !== undefined && !(typeof msg.t0 === 'number' && Number.isFinite(msg.t0) && msg.t0 <= msg.at)) return refuse(fail(400, 't0 must be the time of the first attempt, at or before at'));
@@ -1124,7 +1114,7 @@ function createRelay(opts = {}) {
         if (!r || dv.gone || devices.get(dv.id) !== dv) return;
         const { bytes, ...res } = r;
         logLine(dv.id, m, p, res.s, now() - t0, bytes || 0);
-        const sent = sendRes(dv, msg.id, res, undefined, rt);
+        const sent = sendRes(dv, msg.id, res);
         keep(dv, msg.id, entry, sent.res, sent.size);
       });
     };
@@ -1175,12 +1165,9 @@ function createRelay(opts = {}) {
       else resolve(null);
     });
   }
-  // one envelope up, from either carrier: rt is the Wi-Fi socket it came on (its answers go back down that one), or
-  // none for Supabase. Everything after this is the same for both
-  async function onEnvelope(dv, env, rt) {
-    // on the Wi-Fi, a socket gets nothing until an envelope of its opened (relay-lan.js proven), and one that has not
-    // opened any is closed at the first that does not
-    const no = () => { if (rt) lan.bad(rt); return drop(dv); };
+  // one envelope up, from the device's channel
+  async function onEnvelope(dv, env) {
+    const no = () => drop(dv);
     if (!dv.keys || !usable(dv)) return no();
     // a copy of an envelope seen in the last 10 minutes goes before any work
     if (!env || typeof env !== 'object' || typeof env.n !== 'string' || dv.nonces.has(env.n)) return no();
@@ -1192,26 +1179,23 @@ function createRelay(opts = {}) {
     const msg = await unpackSome(dv, o.r);
     if (dv.gone || devices.get(dv.id) !== dv) return;
     if (!msgOk(msg) || !fresh(msg)) return no();
-    // a Wi-Fi socket is proven only by an envelope that opened AND is fresh: an old one replayed (after a restart, or
-    // past the nonce window) opens, but its at is out of the skew window, so it can't hold one of the device's sockets
-    if (rt) { lan.proven(rt); dv.lastSeen = now(); devicesDirty = true; }
     // the pairing finished while this one was opened: K says no more than "already paired"
     const via = o.via === 'qr' && !dv.qr ? 'old' : o.via;
     const answers = msg.t === 'hello' || msg.t === 'req';
     if (wait) {
       if (!answers) return drop(dv);
       logLine(dv.id, msg.t === 'hello' ? 'HELLO' : clip(msg.m, 8) || '?', msg.t === 'hello' ? '-' : logPath(msg.p), 429, 0, 0);
-      return void sendRes(dv, msg.id, fail(429, 'too many messages from the phone: try again shortly', { retryAfter: wait }), o.down, rt);
+      return void sendRes(dv, msg.id, fail(429, 'too many messages from the phone: try again shortly', { retryAfter: wait }), o.down);
     }
-    if (via === 'old') return answers ? void sendRes(dv, msg.id, fail(403, 'already paired: this pairing code was used. Make a new one on the PC.', { paired: false }), o.down, rt) : drop(dv);
+    if (via === 'old') return answers ? void sendRes(dv, msg.id, fail(403, 'already paired: this pairing code was used. Make a new one on the PC.', { paired: false }), o.down) : drop(dv);
     if (via === 'qr') {
-      if (msg.t === 'hello') return handshake(dv, msg, o.down, rt);
-      return msg.t === 'req' ? void sendRes(dv, msg.id, fail(403, 'not paired yet: send hello first'), o.down, rt) : drop(dv);
+      if (msg.t === 'hello') return handshake(dv, msg, o.down);
+      return msg.t === 'req' ? void sendRes(dv, msg.id, fail(403, 'not paired yet: send hello first'), o.down) : drop(dv);
     }
-    if (msg.t === 'part') return onPart(dv, msg, rt);
-    return onMessage(dv, msg, rt);
+    if (msg.t === 'part') return onPart(dv, msg);
+    return onMessage(dv, msg);
   }
-  function onPart(dv, msg, rt) {
+  function onPart(dv, msg) {
     const { id, part, parts, chunk } = msg;
     const t = now();
     for (const [k, a] of dv.parts) if (t - a.at > ASSEMBLY_MS) { dv.parts.delete(k); drop(dv); } // ran out of time
@@ -1234,16 +1218,16 @@ function createRelay(opts = {}) {
     let whole = null;
     try { whole = JSON.parse(a.chunks.join('')); } catch {}
     if (!msgOk(whole) || whole.t === 'part' || whole.id !== id || !fresh(whole)) return drop(dv);
-    return onMessage(dv, whole, rt);
+    return onMessage(dv, whole);
   }
   // a message under the device's own key
-  function onMessage(dv, msg, rt) {
+  function onMessage(dv, msg) {
     if (msg.t === 'hello') {
       saw(dv, msg, false);
       logLine(dv.id, 'HELLO', '-', 200, 0, 0);
-      return void sendRes(dv, msg.id, { s: 200, b: helloBody() }, undefined, rt);
+      return void sendRes(dv, msg.id, { s: 200, b: helloBody() });
     }
-    if (msg.t === 'req') return onRequest(dv, msg, rt);
+    if (msg.t === 'req') return onRequest(dv, msg);
     return drop(dv);
   }
   // a hello's lastSeen, app and device; changed (a pairing) or a new app version is saved now, lastSeen alone with
@@ -1259,8 +1243,8 @@ function createRelay(opts = {}) {
   // carries the PC's half, so a lost answer or a restart never strands the phone: it may say hello under K again (a
   // new K' each time, K opening hellos until PENDING_MS after the last), and whichever K' its first envelope comes
   // under is its key (finish). down: K's key down
-  async function handshake(dv, msg, down, rt) {
-    const no = (s, message, extra) => { logLine(dv.id, 'HELLO', '-', s, 0, 0); sendRes(dv, msg.id, fail(s, message, extra), down, rt); };
+  async function handshake(dv, msg, down) {
+    const no = (s, message, extra) => { logLine(dv.id, 'HELLO', '-', s, 0, 0); sendRes(dv, msg.id, fail(s, message, extra), down); };
     const epk = typeof msg.epk === 'string' ? fromB64u(msg.epk) : null;
     if (!epk || epk.length !== 32) return no(400, 'this app pairs the old way (its hello has no epk): update it');
     // each one makes a key pair and writes the key store: HS_MAX with one code, one per HS_GAP_MS
@@ -1295,7 +1279,7 @@ function createRelay(opts = {}) {
     }
     saw(dv, msg, changed);
     logLine(dv.id, 'HELLO', '-', 200, 0, 0);
-    sendRes(dv, msg.id, { s: 200, b: { ...helloBody(), epk: b64u(mine.pub) } }, down, rt);
+    sendRes(dv, msg.id, { s: 200, b: { ...helloBody(), epk: b64u(mine.pub) } }, down);
   }
   // the first envelope under one of the K' (c) a handshake made: it is the device's key now, the QR's K and the other
   // K' open nothing (K still answers "already paired" until its time is up, from memory only)
@@ -1309,34 +1293,25 @@ function createRelay(opts = {}) {
 
   // ---------- messages down ----------
   // the answer to id (a repeat's too), with a fresh `at`; one whose JSON text would need more than PARTS_MAX parts goes
-  // as a 413 instead. down: the key it goes under (the device's own, unless it answers the QR's K); rt: the Wi-Fi
-  // socket the request came on (none through Supabase).
+  // as a 413 instead. down: the key it goes under (the device's own, unless it answers the QR's K).
   // -> { res: what went, size: its JSON text's length }
-  function sendRes(dv, id, res, down, rt) {
+  function sendRes(dv, id, res, down) {
     let text = JSON.stringify({ t: 'res', id, at: now(), ...res });
     if (text.length > PARTS_MAX * (PART_MAX - 1)) {
       res = fail(413, 'the answer is too large for the phone');
       text = JSON.stringify({ t: 'res', id, at: now(), ...res });
     }
-    sendDown(dv, id, text, down, rt);
+    sendDown(dv, id, text, down);
     return { res, size: text.length };
   }
   // one message's JSON text down: one envelope, or its parts when it is longer than PART_MAX. Through Supabase on the
-  // device's channel; on the Wi-Fi down the socket rt (when it is gone, the device's newest proven one; with no rt, a
-  // notice, every proven one: relay-lan.js targets)
-  function sendDown(dv, id, text, down, rt) {
+  // device's channel
+  function sendDown(dv, id, text, down) {
     if (!dv.keys) return false;
     const topic = topicFor(dv), key = down || dv.keys.down;
-    let one;
-    if (isLocal(dv)) {
-      const socks = lan.targets(dv.id, rt);
-      if (!socks.length) return false;
-      one = (t) => { const env = seal(key, topic, dv.id, 'down', t); return socks.map((c) => lan.send(c, env)).some(Boolean); };
-    } else {
-      const ch = dv.ch;
-      if (ch.state !== 'joined' || !wsOpen) return false;
-      one = (t) => wire({ topic: ch.topic, event: 'broadcast', payload: { type: 'broadcast', event: 'e', payload: seal(key, topic, dv.id, 'down', t) }, ref: mkRef(), join_ref: ch.joinRef });
-    }
+    const ch = dv.ch;
+    if (ch.state !== 'joined' || !wsOpen) return false;
+    const one = (t) => wire({ topic: ch.topic, event: 'broadcast', payload: { type: 'broadcast', event: 'e', payload: seal(key, topic, dv.id, 'down', t) }, ref: mkRef(), join_ref: ch.joinRef });
     if (text.length <= PART_MAX) return one(text);
     const list = slices(text);
     if (list.length > PARTS_MAX) return false;
@@ -1354,19 +1329,6 @@ function createRelay(opts = {}) {
   let ws = null, wsOpen = false, refN = 0, hbTimer = null, hbRef = null, reconnectTimer = null, sweepTimer = null;
   let sockBackoff = BACKOFF_MIN, uid = null, token = null, want = false, started = false, stopped = false, startedAt = Infinity;
   let unsubscribe = null, evalChain = Promise.resolve();
-  // ---------- the Wi-Fi listener (relay-lan.js), for local-mode devices: on while one is paired or pairing ----------
-  // A socket is let in only for a local device that has its keys and is usable; what comes up on it goes through
-  // onEnvelope like a Supabase envelope, with the socket as rt
-  let lanOn = false;
-  const lan = LAN.createLan({
-    port: lanPort, hosts: lanHosts, msgMax: C_MAX + 1024, log: (t) => note(t), limits: opts.lanLimits,
-    known: (id) => { const dv = devices.get(id); return !!(dv && isLocal(dv) && !dv.gone && dv.keys && usable(dv)); },
-    onEnvelope: (id, env, rt) => {
-      const dv = devices.get(id);
-      if (!dv || !isLocal(dv) || dv.gone) return lan.closeDevice(id);
-      onEnvelope(dv, env, rt).catch((e) => note(`a message failed: ${e && e.message}`));
-    },
-  });
   const mkRef = () => String(++refN);
   function wire(o) {
     if (!ws || !wsOpen) return false;
@@ -1443,11 +1405,10 @@ function createRelay(opts = {}) {
       beat();
     }, HEARTBEAT_MS);
   }
-  // join dv's channel, unless it is joined or joining, or a refused one waits out its backoff (rejoinLater); a local
-  // device has no channel
+  // join dv's channel, unless it is joined or joining, or a refused one waits out its backoff (rejoinLater)
   async function join(dv) {
     const ch = dv.ch;
-    if (isLocal(dv) || !wsOpen || !uid || !dv.keys || !usable(dv) || ch.state === 'joining' || ch.state === 'joined' || (ch.state === 'errored' && ch.timer)) return;
+    if (!wsOpen || !uid || !dv.keys || !usable(dv) || ch.state === 'joining' || ch.state === 'joined' || (ch.state === 'errored' && ch.timer)) return;
     cancel(ch.timer); ch.timer = null;
     ch.state = 'joining';
     ch.joinRef = null;
@@ -1576,9 +1537,8 @@ function createRelay(opts = {}) {
       for (const dv of devices.values()) dv.ch.backoff = BACKOFF_MIN;
     }
     uid = id;
-    // the keys are read once a device needs them: a relay one while S1 is signed in (the uid is in its topic), a local
-    // one whatever sync says
-    const need = [...devices.values()].filter((dv) => isLocal(dv) || uid);
+    // the keys are read once a device needs them: while S1 is signed in (the uid is in its topic)
+    const need = uid ? [...devices.values()] : [];
     if (need.length) {
       try {
         await loadKeys();
@@ -1590,18 +1550,12 @@ function createRelay(opts = {}) {
         if (devicesDirty) saveDevices();
       } catch (e) { note(`the device keys could not be read: ${e.message}`); }
     }
-    // Supabase only for relay-mode devices, and only while S1 is signed in
-    want = !!uid && [...devices.values()].some((dv) => !isLocal(dv) && dv.keys && usable(dv));
+    // Supabase only while a device is paired or pairing, and only while S1 is signed in
+    want = !!uid && [...devices.values()].some((dv) => dv.keys && usable(dv));
     if (want) {
       if (!ws) connect();
       else if (wsOpen) for (const dv of devices.values()) join(dv);
     } else if (ws || reconnectTimer) disconnect('nothing to relay');
-    // the Wi-Fi listener only while a local-mode device is paired or pairing (its addresses read again each time)
-    const lanWant = [...devices.values()].some((dv) => isLocal(dv) && dv.keys && usable(dv));
-    if (lanWant || lanOn) {
-      lanOn = lanWant;
-      try { await lan.sync(lanWant); } catch (e) { note(`the Wi-Fi listener failed: ${e && e.message}`); }
-    }
     sweepLater();
   }
   function sweepLater() {
@@ -1622,10 +1576,7 @@ function createRelay(opts = {}) {
     }
     if (devicesDirty) saveDevices();
     if (![...devices.values()].some((dv) => dv.state === 'pending')) removePairPage();
-    const left = (local) => [...devices.values()].some((dv) => isLocal(dv) === local && dv.keys && usable(dv));
-    if ((want && !left(false)) || (lanOn && !left(true))) await evaluate();
-    // the Wi-Fi listener follows this PC's addresses (a new Wi-Fi, an address gone), in line with evaluate
-    else if (lanOn) await (evalChain = evalChain.then(() => (lanOn && !stopped ? lan.sync(true) : null)).catch(() => null));
+    if (want && ![...devices.values()].some((dv) => dv.keys && usable(dv))) await evaluate();
   }
   function removePairPage() { try { fs.rmSync(pairPage, { force: true }); } catch {} }
 
@@ -1634,7 +1585,13 @@ function createRelay(opts = {}) {
     started = true;
     startedAt = now();
     if (typeof opts.relayKey !== 'function') markKey(); // says so in the log now, once
-    loadDevices();
+    const wifi = loadDevices();
+    if (wifi.length) {
+      saveDevices();
+      note(`${wifi.length} phone(s) paired on this PC's Wi-Fi dropped: that way is gone, pair again through sync`);
+      loadKeys().then(() => { if (wifi.filter((id) => keys.delete(id)).length) return saveKeys(); })
+        .catch((e) => note(`the keys of the Wi-Fi phones could not be deleted: ${e && e.message}`));
+    }
     unsubscribe = sync.onChange((ev) => {
       if (ev && ev.type === 'refreshed') refreshToken();
       else evaluate(true);
@@ -1650,30 +1607,24 @@ function createRelay(opts = {}) {
     cancel(sweepTimer); sweepTimer = null;
     if (reason === 'pc-closing') for (const dv of devices.values()) if (dv.state === 'paired') notice(dv, 'pc-closing');
     disconnect(reason === 'pc-closing' ? 'pc closing' : 'relay stopped');
-    // the Wi-Fi sockets close after what was written to them (the notice), and the listener stops
-    lanOn = false;
-    const lanDone = lan.stop().catch(() => {});
     if (devicesDirty) saveDevices();
-    return Promise.all([keyWrites.catch(() => {}), lanDone]).then(() => {});
+    return keyWrites.catch(() => {}).then(() => {});
   }
 
   // ---------- pairing, revoking, status ----------
-  // mode 'relay' (through Supabase: sync set up and signed in) or 'local' (this PC's Wi-Fi: no sync, no sign-in).
+  // mode 'relay' only (through Supabase: sync set up and signed in): pairing on this PC's Wi-Fi ('local') is gone.
   // o.phone: the asking phone's install id (pairing by sign-in, relay-lobby.js): that phone's earlier pairings here
   // are dropped first, so pairing again never piles devices up
   async function pair(name, mode = 'relay', o = {}) {
     if (!started || stopped) return [503, { ok: false, message: 'the relay is not running' }];
-    if (!MODES.includes(mode)) return [400, { ok: false, message: 'mode must be local or relay' }];
-    let id = null, email = null, c = null;
-    if (mode === 'relay') {
-      if (!sync.enabled()) return [409, { ok: false, message: 'sync is not set up on this PC, and the phone reaches it through sync: set it up first (node sync-api.js setup)' }];
-      try { id = await sync.uid(); email = id ? await sync.email() : null; } catch {}
-      if (!id) return [409, { ok: false, message: 'sign in to sync on this PC first (node sync-api.js signin)' }];
-      c = (readConfig(dataDir) || {}).config;
-      if (!c) return [409, { ok: false, message: 'the sync settings could not be read' }];
-    } else if (!lanHosts().length) {
-      return [409, { ok: false, message: 'this PC has no address on a home network right now (Wi-Fi or a cable: 192.168.x.x, 10.x.x.x or 172.16-31.x.x): connect it to the network the phone uses first' }];
-    }
+    if (mode === 'local') return [400, { ok: false, message: LOCAL_GONE }];
+    if (mode !== 'relay') return [400, { ok: false, message: 'mode must be relay' }];
+    let id = null, email = null;
+    if (!sync.enabled()) return [409, { ok: false, message: 'sync is not set up on this PC, and the phone reaches it through sync: set it up first (node sync-api.js setup)' }];
+    try { id = await sync.uid(); email = id ? await sync.email() : null; } catch {}
+    if (!id) return [409, { ok: false, message: 'sign in to sync on this PC first (node sync-api.js signin)' }];
+    const c = (readConfig(dataDir) || {}).config;
+    if (!c) return [409, { ok: false, message: 'the sync settings could not be read' }];
     if (name != null && typeof name !== 'string') return [400, { ok: false, message: 'name must be text' }];
     await sweep();
     const phone = o && typeof o.phone === 'string' && PHONE_RE.test(o.phone) ? o.phone : undefined;
@@ -1689,25 +1640,13 @@ function createRelay(opts = {}) {
       keys.set(dev, { k: K, qr: { until: exp, next: [] } });
       await saveKeys();
     } catch (e) { if (keys) keys.delete(dev); return [500, { ok: false, message: `the device key could not be kept safe on this PC: ${clip(e.message)}` }]; }
-    const dv = makeDevice({ id: dev, name: clip(name, 60) || 'iPhone', mode, state: 'pending', createdAt: t, exp, phone });
+    const dv = makeDevice({ id: dev, name: clip(name, 60) || 'iPhone', state: 'pending', createdAt: t, exp, phone });
     withKey(dv, keys.get(dev));
     devices.set(dev, dv);
     saveDevices();
-    note(`pairing ${dev} (${dv.name}${mode === 'local' ? ', on this Wi-Fi' : ''}): it waits 10 minutes for the phone`);
+    note(`pairing ${dev} (${dv.name}): it waits 10 minutes for the phone`);
     await evaluate();
-    let link;
-    if (mode === 'local') {
-      // the link names the addresses the listener really got, so it must have got one
-      const ls = lan.status();
-      if (!ls.listening.length) {
-        await forgetDevice(dv, 'could not be paired: the Wi-Fi listener is not running');
-        await evaluate();
-        return [503, { ok: false, message: `Fleet View could not listen for the phone on port ${lanPort}${ls.error ? ` (${clip(ls.error, 120)})` : ''}: another program may be using it` }];
-      }
-      // in lanHosts' order (the Wi-Fi's before a virtual adapter's), 8 at most (the phone takes no more)
-      const hosts = [...lanHosts().filter((a) => ls.listening.includes(a)), ...ls.listening].filter((a, i, all) => all.indexOf(a) === i).slice(0, 8);
-      link = pairLink({ mode: 'local', hosts, port: lanPort, pcName: pcName(), dev, k: b64u(K), exp });
-    } else link = pairLink({ url: c.url, key: c.key, uid: id, email: email || '', pcName: pcName(), dev, k: b64u(K), exp });
+    const link = pairLink({ url: c.url, key: c.key, uid: id, email: email || '', pcName: pcName(), dev, k: b64u(K), exp });
     return [200, { ok: true, id: dev, mode, link, svg: qrSvg(link), exp }];
   }
   async function revoke(id) {
@@ -1764,15 +1703,12 @@ function createRelay(opts = {}) {
       if (enabled) { signedIn = !!(await sync.uid()); email = signedIn ? await sync.email() : null; }
     } catch {}
     const t = now();
-    // a local device's channel: 'joined' while a socket of its is up and proven (relay-lan.js), else 'closed'
-    const channelOf = (dv) => (isLocal(dv) ? (lan.connected(dv.id) ? 'joined' : 'closed') : dv.ch.state === 'errored' ? 'refused' : dv.ch.state);
+    const channelOf = (dv) => (dv.ch.state === 'errored' ? 'refused' : dv.ch.state);
     return {
       enabled, signedIn, email, connected: wsOpen,
-      // the Wi-Fi listener: its port, the addresses it listens on (none while no local device needs it), its sockets
-      lan: { on: lanOn, ...lan.status(), addresses: lanHosts() },
       devices: [...devices.values()].filter((dv) => dv.state === 'paired' || dv.exp > t).map((dv) => ({
         ...deviceView(dv), ...(dv.state === 'paired' ? { finished: !dv.qr } : {}), ...(dv.qr ? { handshakes: dv.hsN } : {}), channel: channelOf(dv),
-        ...(!isLocal(dv) && dv.ch.refused ? { problem: dv.ch.refused } : {}), dropped: dv.dropped,
+        ...(dv.ch.refused ? { problem: dv.ch.refused } : {}), dropped: dv.dropped,
       })),
     };
   }
@@ -1817,11 +1753,9 @@ function pairHtml(o) {
     + `<style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;max-width:32em;margin:2em auto;padding:0 16px;background:#fff;color:#222}`
     + `@media (prefers-color-scheme:dark){body{background:#1c1c1c;color:#ddd}}h1{font-size:1.3em}.qr{background:#fff;padding:8px;border-radius:8px;max-width:340px}.qr svg{display:block;width:100%;height:auto}</style></head><body>`
     + `<h1>Pair an iPhone with ${esc(o.pcName)}</h1><div class="qr">${o.svg}</div>`
-    + `<p>Scan this with the Fleet View app before ${esc(until)}; after that, make a new one (node relay.js pair${o.local ? ' --local' : ''}).</p>`
-    + (o.local ? '<p>The phone must be on the same Wi-Fi as this PC. Windows may ask once whether Fleet View (node.exe) may use the network: allow it on Private networks.</p>' : '')
+    + `<p>Scan this with the Fleet View app before ${esc(until)}; after that, make a new one (node relay.js pair).</p>`
     + `<p>It pairs one phone. The phone and this PC then make a key of their own that this code does not hold, and the code opens nothing after that. `
-    + (o.local ? 'Until then, anyone on this network who scans it could pair in your place, so keep it to yourself, '
-      : `Until then, anyone who scans it and can also sign in as ${esc(o.email || 'your Google account')} could pair in your place, so keep it to yourself, `)
+    + `Until then, anyone who scans it and can also sign in as ${esc(o.email || 'your Google account')} could pair in your place, so keep it to yourself, `
     + `and close this page once your phone is paired.</p></body></html>`;
 }
 // cli(argv, { dataDir, port, out, err }) -> exit code
@@ -1846,7 +1780,7 @@ async function cli(argv, io = {}) {
     rq.end(data || undefined);
   });
   const when = (t) => (t ? new Date(t).toLocaleString() : '-');
-  const row = (d) => `${d.id}  ${d.name}  ${d.mode === 'local' ? 'Wi-Fi' : 'sync'}  ${d.state}${d.state === 'pending' ? ` until ${when(d.exp)}` : `, paired ${when(d.pairedAt)}, last seen ${when(d.lastSeen)}`}${d.channel ? `  [channel ${d.channel}${d.problem ? `: ${d.problem}` : ''}]` : ''}`;
+  const row = (d) => `${d.id}  ${d.name}  ${d.state}${d.state === 'pending' ? ` until ${when(d.exp)}` : `, paired ${when(d.pairedAt)}, last seen ${when(d.lastSeen)}`}${d.channel ? `  [channel ${d.channel}${d.problem ? `: ${d.problem}` : ''}]` : ''}`;
   try {
     if (cmd === 'status' || cmd === 'devices') {
       const r = await call('GET', '/relay/status');
@@ -1856,9 +1790,6 @@ async function cli(argv, io = {}) {
         out(!s.enabled ? 'Through sync: off, sync is not set up on this PC (node sync-api.js setup).'
           : !s.signedIn ? 'Through sync: off, sync is not signed in (node sync-api.js signin).'
             : `Signed in to sync as ${s.email || '?'}; ${s.connected ? 'connected to Supabase' : 'not connected (it connects while a phone is paired through sync)'}.`);
-        const ln = s.lan || {};
-        out(ln.listening && ln.listening.length ? `On this Wi-Fi: listening at ${ln.listening.map((a) => `${a}:${ln.port}`).join(', ')}.`
-          : `On this Wi-Fi: not listening (it listens on port ${ln.port || 4779} while a phone is paired with --local).`);
         out(`${(s.devices || []).length} device(s).`);
       }
       for (const d of s.devices || []) out(row(d));
@@ -1866,14 +1797,14 @@ async function cli(argv, io = {}) {
       return 0;
     }
     if (cmd === 'pair') {
-      const name = flag('--name'), local = rest.includes('--local');
-      const r = await call('POST', '/relay/pair', { ...(name ? { name } : {}), ...(local ? { mode: 'local' } : {}) });
+      const name = flag('--name');
+      const r = await call('POST', '/relay/pair', name ? { name } : {});
       if (r.status !== 200 || !r.json.link) { err(`Could not pair: ${r.json.message || `HTTP ${r.status}`}`); return 1; }
       // the PC's name and the account as the link says them (never printed: the link is the secret)
       let j = {};
       try { j = JSON.parse(Buffer.from(new URL(r.json.link).searchParams.get('d') || '', 'base64url').toString('utf8')) || {}; } catch {}
       const file = path.join(dataDir, 'relay', 'pair.html');
-      writeAtomic(file, pairHtml({ svg: r.json.svg, exp: r.json.exp, pcName: j.pcName || os.hostname(), email: j.email, local: j.mode === 'local' }));
+      writeAtomic(file, pairHtml({ svg: r.json.svg, exp: r.json.exp, pcName: j.pcName || os.hostname(), email: j.email }));
       out(`Pairing ${r.json.id}: scan the QR code in ${file} with the Fleet View app before ${when(r.json.exp)} (open it in Fleet View's viewer).`);
       out('The page is a secret while it works, and is deleted once the phone pairs or the time runs out.');
       return 0;
@@ -1891,8 +1822,7 @@ async function cli(argv, io = {}) {
     'usage:',
     '  node relay.js status           (sync, the connection, the devices)',
     '  node relay.js devices',
-    '  node relay.js pair [--name N] [--local]  (writes <data folder>/relay/pair.html with the QR code;',
-    '                                 --local: the phone reaches this PC on the same Wi-Fi, no sync needed)',
+    '  node relay.js pair [--name N]  (writes <data folder>/relay/pair.html with the QR code)',
     '  node relay.js revoke <id>',
     '  (each takes --port <n> when Fleet View runs on another port than 4777)',
   ].join('\n'));
@@ -1902,7 +1832,7 @@ async function cli(argv, io = {}) {
 module.exports = {
   createRelay, cli, seal, open, decrypt, dirKey, aadText, topicOf, slices, pairLink, qrSvg, routeAllowed, peerRouteAllowed, PEER_ALLOW, pathOk,
   routeTimeout, startWeight, resumeKind, resumeWeight, xPair, xPublic, pairedKey, secretName, stepsOk, ALLOW, SIGNIN_LETTERS, SETTINGS_KEYS, MARKED, LABEL, PAIRED_INFO, LINK_V,
-  PART_MAX, PARTS_MAX, C_MAX, LOCAL_UID,
+  PART_MAX, PARTS_MAX, C_MAX, LOCAL_GONE,
   TIMES: { ROUTE_MS, WAIT_ROUTE_MS, WAIT_CAP_S, START_ROUTE_MS, RESUME_ROUTE_MS, ACTIVITY_MS, NOW_MS, MODEL_MS },
   LIMITS: { IN_FLIGHT_MAX, PER_S, PER_MIN, STARTS_AT_ONCE, STARTS_MAX, STARTS_MS, RES_DEVICE_MAX, UNPACKS_MAX, UNPACK_WAIT_MAX, INFLATE_UP_MAX, HS_GAP_MS, HS_MAX },
 };

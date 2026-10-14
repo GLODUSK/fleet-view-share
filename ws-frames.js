@@ -1,6 +1,6 @@
-// ws-frames.js: the server side of RFC 6455 framing, no npm package, shared by live.js (the page's /live socket) and
-// relay-lan.js (the phone's socket on this PC's Wi-Fi). Only what a server needs: the handshake's accept value, a frame
-// to send (never masked), and a reader for what a client sends (always masked). The callers keep their own policy
+// ws-frames.js: the server side of RFC 6455 framing, no npm package, used by live.js (the page's /live socket).
+// Only what a server needs: the handshake's accept value, a frame to send (never masked), and a reader for what a
+// client sends (always masked). The caller keeps its own policy
 // (who may connect, what a message means, how big one may be); this file only cuts bytes into frames.
 //
 // The reader works on the caller's connection object c, which holds its state in these fields:

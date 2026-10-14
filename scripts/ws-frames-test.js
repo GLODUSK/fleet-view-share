@@ -41,7 +41,7 @@ function clientFrame(op, payload, o = {}) {
   return Buffer.concat([head, mask, data]);
 }
 
-// a connection object as live.js and relay-lan.js keep one, its handlers recording what the reader asked for
+// a connection object as live.js keeps one, its handlers recording what the reader asked for
 function fakeConn(max = 1000) {
   const c = { ...WF.state(), got: [], closes: [], pongs: [], goneN: 0 };
   c.h = {

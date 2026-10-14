@@ -9,35 +9,10 @@ body:not(.phone-on) .count.phone { display: none; } /* not this PC (phone.js): t
 
 .ph-pop { width: min(420px, calc(100vw - 32px)); }
 
-/* the two ways (On this Wi-Fi, Through Blackbox): selectable cards as the start screen's, an icon tile, the words and a
-   radio mark; the picked one lit in cyan */
-.ph-modes { display: flex; flex-direction: column; gap: 8px; }
-.sy-pop button.ph-mode[data-c] {
-  display: grid; grid-template-columns: 36px minmax(0, 1fr) 18px; align-items: center; gap: 12px; width: 100%; text-align: left;
-  padding: 11px 12px; border-radius: 12px; white-space: normal; font: 500 12.5px/1.35 var(--font-ui); color: var(--text); cursor: pointer;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.012)); border: 1px solid var(--glass-edge);
-}
-.sy-pop button.ph-mode[data-c]:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.18); background: linear-gradient(180deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.02)); }
-.sy-pop button.ph-mode.on[data-c], .sy-pop button.ph-mode.on[data-c]:hover:not(:disabled) {
-  border-color: rgba(63, 216, 255, 0.55); background: linear-gradient(160deg, rgba(63, 216, 255, 0.11), rgba(164, 123, 255, 0.05) 60%, transparent);
-  box-shadow: 0 0 0 3px rgba(63, 216, 255, 0.07);
-}
-.sy-pop button.ph-mode[data-c]:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
-.ph-mic { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; color: var(--dim); background: rgba(255, 255, 255, 0.05); border: 1px solid var(--glass-edge); }
-.ph-mode.on .ph-mic { color: #fff; background: linear-gradient(135deg, var(--cyan), var(--violet)); border-color: transparent; }
-.ph-mt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.ph-mt b { font: 600 14px/1.25 var(--font-display); }
-.ph-mt .sy-dim { font-weight: 400; }
-.ph-radio { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid rgba(255, 255, 255, 0.25); justify-self: end; }
-.ph-mode.on .ph-radio { border-color: var(--cyan); background: radial-gradient(circle, var(--cyan) 0 3.5px, transparent 4.5px); }
-
-/* what the picked way needs: a soft panel */
+/* what pairing needs (sync signed in on this PC) */
 .ph-needs { display: flex; flex-direction: column; gap: 6px; }
 .ph-needs:empty { display: none; }
 .ph-needs b { color: var(--text); font-weight: 600; }
-.ph-needs:has(.ph-say-wifi) { padding: 10px 12px; border-radius: 10px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--line); }
-.ph-say-wifi { display: flex; align-items: center; gap: 8px; font-weight: 550; }
-.ph-say-wifi svg { flex: none; color: var(--cyan); }
 
 /* the name and Pair: one row */
 .ph-form { display: flex; gap: 8px; align-items: stretch; }

@@ -1,10 +1,10 @@
 // Pairing by sign-in: a test of relay-lobby.js with a real relay.js, run with the system node:
 //   node scripts/relay-lobby-test.js
 // The lobby joins fleet:<uid>:lobby only while sync is set up and signed in (and leaves it on sign-out), lists this
-// machine there by its presence (name, sync device id, platform, Wi-Fi addresses), answers a phone's ask with a real
+// machine there by its presence (name, sync device id, platform), answers a phone's ask with a real
 // pairing link from relay.js sealed to the phone's one-time key (the phone opens it; nothing else can), answers the same
 // rid again with the same answer and pairs once, ignores asks for another machine, stale ones and junk, refuses a bad
-// key, and passes a relay refusal on in words. The same phone pairing again drops its older pairing on the relay.
+// key and an ask for the Wi-Fi way (gone: update the app), and passes a relay refusal on in words. The same phone pairing again drops its older pairing on the relay.
 // Also: realtime.js's track() sends the presence again. Exit 0 = all pass. Everything in a temp folder. No network.
 'use strict';
 const fs = require('fs');
@@ -86,13 +86,13 @@ async function main() {
   const sync = fakeSync();
   const keyStore = memStore();
   const relay = R.createRelay({ dataDir, logDir: dataDir, sync: sync.api, apiToken: () => 'x'.repeat(40), relayKey: () => 'k'.repeat(32), version: '1.0.99', pcName: 'TEST-PC',
-    WebSocketImpl: NeverWS, keyStore, readConfig: () => ({ config: { url: SB_URL, key: SB_KEY } }), lanHosts: () => ['127.0.0.1'], lanPort: 47990 + Math.floor(Math.random() * 9) });
+    WebSocketImpl: NeverWS, keyStore, readConfig: () => ({ config: { url: SB_URL, key: SB_KEY } }) });
   relay.start();
   const pairs = [];
   const spy = { pair: (...a) => { pairs.push(a); return relay.pair(...a); } };
   const fr = fakeRealtime();
   const logs = [];
-  const lobby = LB.createLobby({ relay: spy, sync: sync.api, dataDir, pcName: 'TEST-PC', version: '1.0.99', device: () => DEVICE, lanHosts: () => ['192.168.1.20'], log: (t) => logs.push(t), realtime: fr.factory });
+  const lobby = LB.createLobby({ relay: spy, sync: sync.api, dataDir, pcName: 'TEST-PC', version: '1.0.99', device: () => DEVICE, log: (t) => logs.push(t), realtime: fr.factory });
 
   // ---------- sync off: nothing joined ----------
   sync.on = false;
@@ -113,7 +113,8 @@ async function main() {
   eq(JSON.parse(fs.readFileSync(path.join(dataDir, 'relay', 'lobby.json'), 'utf8')).id, id, 'the lobby id is kept on disk');
   eq(fr.made.presenceKey, `pc-${id}`, 'presence key pc-<id>');
   const pres = fr.made.presence();
-  eq({ role: pres.role, id: pres.id, name: pres.name, device: pres.device, hosts: pres.hosts, platform: pres.platform }, { role: 'pc', id, name: 'TEST-PC', device: DEVICE, hosts: ['192.168.1.20'], platform: process.platform }, 'the presence lists this machine');
+  eq({ role: pres.role, id: pres.id, name: pres.name, device: pres.device, platform: pres.platform }, { role: 'pc', id, name: 'TEST-PC', device: DEVICE, platform: process.platform }, 'the presence lists this machine');
+  ok(!('hosts' in pres), 'the presence names no Wi-Fi addresses');
   sync.emit('refreshed');
   await settle();
   eq(fr.chans.length, 1, 'a token refresh does not join again');
@@ -153,13 +154,13 @@ async function main() {
 
   // ---------- the same phone again: its older pairing goes ----------
   const rid2 = crypto.randomBytes(12).toString('base64url');
-  ch.h.onBroadcast({ ...ask, rid: rid2, mode: 'local', at: Date.now() });
+  ch.h.onBroadcast({ ...ask, rid: rid2, at: Date.now() });
   await settle(); await settle();
   const ans2 = fr.sent[2];
   const text2 = ans2 && ans2.t === 'pair-link' ? openBox(ph.priv, ans2, topic, rid2, id) : null;
-  ok(!!text2, `a Wi-Fi pairing by sign-in (${ans2 && ans2.message})`);
+  ok(!!text2, `the same phone pairs again by sign-in (${ans2 && ans2.message})`);
   const j2 = text2 ? linkJson(text2) : {};
-  eq([j2.mode, j2.hosts], ['local', ['127.0.0.1']], 'a local link with the listener\'s addresses');
+  eq([j2.uid, j2.url], [UID, SB_URL], 'a relay link again');
   const st2 = await relay.status();
   ok(!st2.devices.some((d) => d.id === j.dev), 'the same phone pairing again dropped its older pairing');
   ok(st2.devices.some((d) => d.id === j2.dev), 'and kept the new one');
@@ -173,8 +174,13 @@ async function main() {
   ch.h.onBroadcast({ ...ask, rid: rid4, mode: 'carrier-pigeon', at: Date.now() });
   await settle();
   ok(fr.sent[4] && fr.sent[4].t === 'pair-no', 'an unknown way is refused');
+  const nPairs = pairs.length;
+  ch.h.onBroadcast({ ...ask, rid: crypto.randomBytes(12).toString('base64url'), mode: 'local', at: Date.now() });
+  await settle();
+  ok(fr.sent[5] && fr.sent[5].t === 'pair-no' && /no longer offered/.test(fr.sent[5].message) && /update/i.test(fr.sent[5].message) && pairs.length === nPairs,
+    `the Wi-Fi way (gone) is refused, update the app, and nothing is paired (${fr.sent[5] && fr.sent[5].message})`);
   const refusing = fakeRealtime();
-  const lobby2 = LB.createLobby({ relay: { pair: async () => [409, { ok: false, message: 'sign in to sync on this PC first' }] }, sync: sync.api, dataDir: path.join(T, 'd2'), device: () => null, lanHosts: () => [], realtime: refusing.factory });
+  const lobby2 = LB.createLobby({ relay: { pair: async () => [409, { ok: false, message: 'sign in to sync on this PC first' }] }, sync: sync.api, dataDir: path.join(T, 'd2'), device: () => null, realtime: refusing.factory });
   lobby2.start();
   await settle();
   const id2 = lobby2.status().id;
