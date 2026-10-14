@@ -43,6 +43,11 @@
 // Behind it all, three layers of faint tiny stars (STAR_LAYERS) at fixed brightness: each follows the camera at
 // its own fraction of the pan and of the zoom, so the sky feels deep, and creeps slowly by itself (not when still).
 // Some gather in loose clusters; most are white, a few blue-white to amber (STAR_TINT), a few are tiny sparkles.
+// Now and then (every 20-60 s, METEOR_*) a shooting star: a faint thin streak, tinted like the stars, falls across
+// the sky for half a second, fixed to the screen; none while the map rests, is hidden or under reduced motion.
+// The faint back layer is a tile repeated; the two front ones, sparse and bright enough that a repeat would show,
+// never repeat when the graphics card draws them: it places their stars itself, at most one per cell of a grid,
+// each cell's star (or none) from a hash of the cell (STAR_FIELD_GLSL). The canvas repeats a tile for all three.
 // Deeper still (DEEP_*), following even less of the pan: a faint Milky Way band (a soft glow cut by dark dust lanes,
 // with fine star dust where it is dense) and a few big dim gas clouds, painted once, at fixed brightness.
 // Under the stars a faint sky tint follows the local clock (SKY_KEYS: indigo night, rose dawn, clear day, amber dusk);
@@ -105,7 +110,8 @@
 // it keeps the old node and its handing-off look, never the new-session one.
 //
 // Tests (?fixture=1 or ?debug=1): window.__map = { nodes, stats, debug, comet(fromId, toId), merge(sessionId), sky(hour), skyGL,
-// rest(on), battery(on) }.
+// rest(on), battery(on), meteor() }. meteor() sends a shooting star now (stats().meteor: one shows; meteorIn: ms to
+// the next, null when none is due).
 // nodes() lists each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label
 // rectangles; merge('s:<id>') launches that conversation's merge now; stats().sky says what draws the sky ('webgl2'
 // or '2d'), stats().glow what drew the repo nebulae last, stats().fps the draws in the last second, and skyGL() is the sky's WebGL2 context (to lose it). rest(true)
@@ -114,7 +120,7 @@
 // draw only the repo nebulae (to compare the two).
 //
 // Pacing (Henry: quality over savings, but the frame rate is the map's big cost). Anything fast or short-lived draws
-// at every screen refresh: comets, sparks, ghosts, morphs, births, bumps, kicks, whirls, relay rings, sizes and levels
+// at every screen refresh: comets, sparks, shooting stars, ghosts, morphs, births, bumps, kicks, whirls, relay rings, sizes and levels
 // still gliding, camera glides and fits, the layout settling, drags, and any change marked dirty (hover, selection,
 // wheel, keys, a new state), which also wakes a sleeping loop at once (quickNow, wake). When only the slow ambient
 // motion shows, the map draws every k-th refresh (k from the measured refresh, so frames stay even): PACE_LIVELY_FPS
@@ -291,11 +297,15 @@ const WT_MAX = 16;                  // worktree satellites drawn per hub
 // their radius and alpha ranges (CSS px; fixed per star, never animated) and its idle drift in px/s.
 // A layer's scale is zoom^(depth * STAR_ZOOM), so zooming feels deep and stars never balloon.
 // cl: [loose clusters per tile, their share of the stars, spread in px]; sparkle: how many are tiny 4-point sparkles.
-const STAR_TILE = 512, STAR_ZOOM = 0.4, STAR_DIR = [0.83, 0.56];
+// cell: the sky's shader makes this layer itself (STAR_FIELD_GLSL) instead of repeating its tile: at most one star
+// per square of cell px, at the tile's density and mix; its stars repeat only every STAR_WRAP px, and its clusters
+// become a gentle unevenness (cl's share of the stars gathers in some squares of STAR_SUPER px). STAR_EDGE: how far
+// (px) a made star keeps from its cell's edges, so its glow and sparkle are never cut. The canvas repeats all three tiles.
+const STAR_TILE = 512, STAR_ZOOM = 0.4, STAR_DIR = [0.83, 0.56], STAR_WRAP = 32768, STAR_SUPER = 256, STAR_EDGE = 5;
 const STAR_LAYERS = [
   { depth: 0.15, n: 46, r: [0.45, 0.8], a: [0.12, 0.3], drift: 0.8, seed: 11, cl: [3, 0.45, 34] },
-  { depth: 0.35, n: 20, r: [0.6, 1.0], a: [0.16, 0.38], drift: 1.8, seed: 23, cl: [2, 0.35, 46], sparkle: 1 },
-  { depth: 0.6, n: 8, r: [0.8, 1.3], a: [0.22, 0.46], drift: 3.2, seed: 37, sparkle: 3 },
+  { depth: 0.35, n: 20, r: [0.6, 1.0], a: [0.16, 0.38], drift: 1.8, seed: 23, cl: [2, 0.35, 46], sparkle: 1, cell: 32 },
+  { depth: 0.6, n: 8, r: [0.8, 1.3], a: [0.22, 0.46], drift: 3.2, seed: 37, sparkle: 3, cell: 64 },
 ];
 // sky tint by local hour (see "Look"): [hour, top rgba, bottom (horizon) rgba], blended by minute, wrapping at 24.
 const SKY_KEYS = [
@@ -313,6 +323,12 @@ const SKY_KEYS = [
 const STAR_TINT = [['255,255,255', 7], ['236,242,255', 3], ['206,220,255', 1.4], ['218,206,255', 0.6], ['255,244,226', 1.6],
   ['255,226,184', 0.8], ['255,206,152', 0.35]];
 const STAR_TINT_SUM = STAR_TINT.reduce((s, t) => s + t[1], 0);
+// shooting stars (see "Look"): the next one comes METEOR_GAP ms (a random pick in the range) after the last, or after
+// the map is active and awake again; each lasts METEOR_MS, its head moving METEOR_SPEED CSS px/s, its tail fading
+// over METEOR_TAIL px (a random pick), at most METEOR_A (as bright as the brightest stars). Its angle is STAR_DIR's,
+// turned by up to METEOR_TURN radians, falling to the right or (mirrored) to the left; METEOR_W: its core's width (px)
+const METEOR_GAP = [20e3, 60e3], METEOR_MS = 520, METEOR_SPEED = 620, METEOR_TAIL = [80, 140], METEOR_A = 0.5;
+const METEOR_TURN = 0.35, METEOR_W = 0.6;
 // the deep sky (see "Look"), the sky's deepest layer, under the stars: a texture of DEEP_W x DEEP_H painted once,
 // each texel DEEP_PX CSS px, following DEEP_DEPTH of the pan and drifting DEEP_DRIFT px/s; DEEP_A is its brightest
 // light. Its star dust is a DUST_T device px tile of DUST_N specks, as bright as DUST_A where the band is densest.
@@ -681,6 +697,7 @@ export function mapStats() {
   const s = I.stats;
   return { avgMs: s.n ? s.sum / s.n : 0, maxMs: s.max, frames: s.frames, comets: I.comets.length, queued: I.cometQ.length,
     big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length, sky: I.skyGL && I.skyGL.ok ? 'webgl2' : '2d',
+    meteor: !!I.meteor, meteorIn: I.meteorAt ? Math.round(I.meteorAt - performance.now()) : null,
     glow: I.glowGL ? 'webgl2' : '2d',
     fps: I.pace.draws.filter((t) => t > performance.now() - 1000).length,
     pace: { fps: I.pace.fps, refreshMs: Math.round(I.pace.ms * 100) / 100, quick: I.quick, lively: I.lively, rest: resting(), battery: away.battery } };
@@ -824,6 +841,7 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     skyGL: () => (I && I.skyGL ? I.skyGL.gl : null), // the sky's WebGL2 context, for a context-loss test
     // rest as if away (true), never (false) or as the desktop says (null); battery(on) as if on battery or not
     rest: (on) => { restForce = on == null ? null : !!on; wake(); return resting(); }, battery: (on) => { away.battery = !!on; wake(); },
+    meteor: () => { if (!I) return false; I.meteor = meteorMake(performance.now()); I.dirty = true; return true; }, // a shooting star now
     selection: () => mapSelection(), setSelection: (ids) => setMapSelection(ids), lens: (n) => (n ? setMapLens(n) : mapLens()), replay: (on) => setMapReplay(on),
     // what a point on the canvas hits: { node, over, extra } (ids / kinds)
     hit: (x, y) => { if (!I) return null; const o = hitOver(x, y), n = hitTest(x, y), e = hitExtra(x, y); return { node: n ? n.id : null, over: o ? o.kind + ':' + o.id : null, extra: e ? e.kind + ':' + e.id : null }; } };
@@ -896,6 +914,7 @@ function createInstance(state) {
     seen: new Map(),          // feed key -> [t...] already seen
     feedInit: false,
     comets: [], cometQ: [], nextLaunch: 0,
+    meteor: null, meteorAt: 0, // the shooting star showing (meteorMake) and when the next is due (0: not yet planned)
     bursts: [],               // merge sparks flying out of a hub: { id, at, hue, rot }
     mergeInit: false, mergeN: -Infinity, // the newest alert n seen (ingestMerges)
     reduce: typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null,
@@ -985,6 +1004,7 @@ function stop() {
   I.running = false;
   cancelAnimationFrame(I.raf); I.raf = 0;
   clearTimeout(I.pace.timer); I.pace.timer = 0;
+  I.meteor = null; I.meteorAt = 0; // the next shooting star is planned when the map shows again
   if (I.tip) I.tip.style.display = 'none';
 }
 // a sleeping loop (between paced frames, or at rest) draws on the next screen refresh
@@ -1019,10 +1039,10 @@ if (typeof window !== 'undefined') {
   for (const t of ['pointermove', 'pointerdown', 'keydown', 'wheel']) window.addEventListener(t, back, { capture: true, passive: true });
 }
 // something short-lived is going on (draw at every refresh): a change marked dirty, the layout settling, a comet,
-// a fading ghost, merge sparks, a camera glide, a drag or band, a re-arrange, or what the last draw saw (I.quick:
-// a morph, birth, bump, kick, whirl, relay ring, or a size or level still gliding)
+// a shooting star, a fading ghost, merge sparks, a camera glide, a drag or band, a re-arrange, or what the last draw
+// saw (I.quick: a morph, birth, bump, kick, whirl, relay ring, or a size or level still gliding)
 function quickNow() {
-  return I._dirty || I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 ||
+  return I._dirty || I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || !!I.meteor || I.ghosts.length > 0 ||
     I.bursts.length > 0 || !!I.glide || !!I.drag || !!I.band || !!I.keep || !!(I.trail && I.trail.size) || performance.now() < (I.regrid || 0);
 }
 // the screen's refresh interval: the median of the last back-to-back frames
@@ -2015,9 +2035,10 @@ function frame(ts) {
   if (stepGlide(t0)) I.dirty = true;
   if (I.savedCam && I.camInit && I.sim && I.sim.length) restoreCam();
   if (I.camInit && !I.savedCam) keepCam();
+  meteorStep(t0, rest);
   // continuous motion while anything moves (the stars' drift too, even on an empty map), at the pace paceNext
   // sets; otherwise only on change (and a slow tick for age fades)
-  const moving = (!I.still && !tick) || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 || I.bursts.length > 0;
+  const moving = (!I.still && !tick) || I.comets.length > 0 || I.cometQ.length > 0 || !!I.meteor || I.ghosts.length > 0 || I.bursts.length > 0;
   const hot = I._dirty;
   if (hot || moving || t0 - I.lastDraw > (tick ? REST_TICK_MS - 50 : 250)) {
     I.quick = false; I.lively = false; // what this draw finds going on (see quickNow, paceNext)
@@ -2441,7 +2462,8 @@ function drawTerritories(ctx, k, ox, oy, byRepo) {
 }
 
 // the starfield: each layer's tile is painted once (per dpr) into an offscreen canvas and repeated: as a texture in
-// the sky's shader (drawSkyGL), or through a pattern placed with setTransform when the canvas draws the sky (drawStars)
+// the sky's shader (drawSkyGL; only the layers without a cell, it makes the others itself, STAR_FIELD_GLSL), or
+// through a pattern placed with setTransform when the canvas draws the sky (drawStars, all three)
 function seeded(seed) {
   let x = seed >>> 0;
   return () => { x = (x + 0x6d2b79f5) >>> 0; let t = Math.imul(x ^ (x >>> 15), 1 | x); t ^= t + Math.imul(t ^ (t >>> 7), 61 | t); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
@@ -2482,8 +2504,10 @@ function starTile(L, dpr) {
   return c;
 }
 // where each star layer's tile sits this frame, for drawSkyGL and drawStars: per layer its scale s and the offset
-// (ex, ey) of a tile's corner in CSS px, wrapped into the first tile
-const starPos = new Float64Array(STAR_LAYERS.length * 3);
+// (ex, ey) of a tile's corner in CSS px, wrapped into the first tile; and in starWide, per layer, the point of its
+// star space (a tile's px, unscaled) at the map's top left, wrapped into [0, STAR_WRAP), so the shader's star space
+// is never negative and stays small enough for its floats (the shader's hash repeats with it, so no seam)
+const starPos = new Float64Array(STAR_LAYERS.length * 3), starWide = new Float64Array(STAR_LAYERS.length * 2);
 function starsAt() {
   const adj = I.starAdj || { x: 0, y: 0 };
   const fit = I.cam.fit || 1, cx = I.cam.cx + I.pan.x - adj.x, cy = I.cam.cy + I.pan.y - adj.y, ts = I.still ? 0 : I.time / 1000;
@@ -2497,6 +2521,8 @@ function starsAt() {
     // the field scales about the screen's middle and slides with a fraction of the pan, plus its drift
     let ex = mx - (cx * fit * L.depth - ts * L.drift * STAR_DIR[0]) * s;
     let ey = my - (cy * fit * L.depth - ts * L.drift * STAR_DIR[1]) * s;
+    const wx = -ex / s, wy = -ey / s;
+    starWide[i * 2] = wx - Math.floor(wx / STAR_WRAP) * STAR_WRAP; starWide[i * 2 + 1] = wy - Math.floor(wy / STAR_WRAP) * STAR_WRAP;
     ex -= Math.floor(ex / P) * P; ey -= Math.floor(ey / P) * P;
     starPos[i * 3] = s; starPos[i * 3 + 1] = ex; starPos[i * 3 + 2] = ey;
   }
@@ -2572,6 +2598,58 @@ function drawStars(ctx) {
   }
 }
 
+// ---------- shooting stars (see "Look", METEOR_*) ----------
+const pickIn = (r) => r[0] + Math.random() * (r[1] - r[0]);
+// a shooting star starting at t (ms): somewhere in the map's upper half, its direction, tail and tint (picked by
+// STAR_TINT's weights, so mostly white)
+function meteorMake(t) {
+  const W = I.W || 1, H = I.H || 1, ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (Math.random() * 2 - 1) * METEOR_TURN;
+  let w = Math.random() * STAR_TINT_SUM, j = 0;
+  while (j < STAR_TINT.length - 1 && (w -= STAR_TINT[j][1]) > 0) j++;
+  return { at: t, x: W * pickIn([0.1, 0.9]), y: H * pickIn([0.04, 0.5]), dx: Math.cos(ang) * (Math.random() < 0.4 ? -1 : 1),
+    dy: Math.sin(ang), tail: pickIn(METEOR_TAIL), rgb: STAR_TINT[j][0].split(',').map(Number) };
+}
+// each frame: none while resting or under reduced motion (and none planned), the one showing ends after METEOR_MS
+// (one more draw clears it), and the next comes METEOR_GAP after the last or after the map woke (never at once)
+function meteorStep(t, rest) {
+  if (I.still || rest) {
+    if (I.meteor) { I.meteor = null; I.dirty = true; }
+    I.meteorAt = 0;
+    return;
+  }
+  if (I.meteor && t - I.meteor.at >= METEOR_MS) { I.meteor = null; I.dirty = true; }
+  if (!I.meteorAt) I.meteorAt = t + pickIn(METEOR_GAP);
+  else if (!I.meteor && t >= I.meteorAt) { I.meteor = meteorMake(t); I.meteorAt = t + pickIn(METEOR_GAP); }
+}
+// the shooting star now, in CSS px of the map: its head (hx, hy), tail end (tx, ty), rgb and alpha, or null; the
+// tail grows to its length as the head moves off, and the alpha fades in over its first fifth, out over its last half
+function meteorNow() {
+  const m = I.meteor;
+  if (!m) return null;
+  const s = performance.now() - m.at, e = clamp(s / METEOR_MS, 0, 1), d = (METEOR_SPEED * Math.max(0, s)) / 1000;
+  const a = METEOR_A * Math.min(1, e / 0.2) * Math.min(1, (1 - e) / 0.5), l = Math.min(m.tail, d);
+  return { hx: m.x + m.dx * d, hy: m.y + m.dy * d, tx: m.x + m.dx * (d - l), ty: m.y + m.dy * (d - l), rgb: m.rgb, a };
+}
+// the canvas draws the shooting star (no WebGL2): a soft faint halo and a thin core, each a gradient from nothing at
+// the tail to the head, and a small bright head
+function drawMeteor(ctx) {
+  const m = meteorNow();
+  if (!m || m.a <= 0) return;
+  const rgb = m.rgb.join(','), g = (k) => {
+    const gr = ctx.createLinearGradient(m.tx, m.ty, m.hx, m.hy);
+    gr.addColorStop(0, `rgba(${rgb},0)`); gr.addColorStop(0.6, `rgba(${rgb},${m.a * k * 0.36})`); gr.addColorStop(1, `rgba(${rgb},${m.a * k})`);
+    return gr;
+  };
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(m.tx, m.ty); ctx.lineTo(m.hx, m.hy);
+  ctx.strokeStyle = g(0.3); ctx.lineWidth = 2.4; ctx.stroke();
+  ctx.strokeStyle = g(1); ctx.lineWidth = 0.9; ctx.stroke();
+  ctx.fillStyle = `rgba(${rgb},${m.a * 0.5})`;
+  ctx.beginPath(); ctx.arc(m.hx, m.hy, 1.1, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
 // the sky tint for hour h (0-24, fractional): top and bottom [r, g, b, a]
 function skyAt(h) {
   h = ((h % 24) + 24) % 24;
@@ -2598,8 +2676,9 @@ function drawSky(ctx) {
 
 // ---------- the sky on the graphics card ----------
 // The sky's own WebGL2 canvas (I.skyCanvas) draws the whole sky in one full-screen pass: the page's colour (none in
-// glass), the tint, the deep sky, then the star layers, each tile a repeating texture placed by starsAt, the
-// vignette, the repo glows (from their field, a small texture filled just before) and last the dither. A frame only
+// glass), the tint, the deep sky, then the star layers (the back one a repeating texture placed by starsAt, the
+// front ones made per cell by the shader itself, STAR_FIELD_GLSL), the vignette, the repo glows (from their field,
+// a small texture filled just before) and last the dither. A frame only
 // works out the shader's uniforms and the glows' quads; when they are the ones last drawn it makes no GL calls and the canvas keeps its picture, which
 // the map's canvas lays down as its first layer (one drawImage, where it used to fill, tint and lay three patterns).
 // The sky's canvas is never on the page: shown, a WebGL canvas that changes keeps about four buffers of its size (a
@@ -2608,13 +2687,17 @@ function drawSky(ctx) {
 const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
   preserveDrawingBuffer: false, powerPreference: 'low-power', failIfMajorPerformanceCaveat: true };
 // the shader's uniforms, every one a vec4, in this order in I.skyGL.u: the canvas in device px (x, y), the page's
-// colour (premultiplied; 0 in glass), the tint's top and bottom (straight rgba) and, per star layer, its offset in
-// device px (x, y) and 1 / (scale x tile px) (z); the deep sky's offset in device px and 1 / its size in device px
-// (x, y), its star dust's the same way (1 / the tile's size in z), and the vignette, DEEP_A, DUST_A and the dither.
-// Its textures: the star tiles on units 0 to 2, the deep sky on 3, its star dust on 4, the glows' noise on 5 and their
-// fields on 6.
-const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx'];
-const SKY_TEX = ['uS0', 'uS1', 'uS2', 'uDeep', 'uDust', 'uNoise', 'uField'];
+// colour (premultiplied; 0 in glass), the tint's top and bottom (straight rgba) and, per star layer: with a tile, its
+// offset in device px (x, y) and 1 / (scale x tile px) (z); made per cell, its star space at the top left (starWide;
+// x, y), star px per device px (z) and device px per star px (w); then the deep sky's offset in device px and 1 / its
+// size in device px (x, y), its star dust's the same way (1 / the tile's size in z), and the vignette, DEEP_A,
+// DUST_A and the dither, and the shooting star's head and tail end (device px; x, y and z, w) and its rgb and alpha (0:
+// none); uSize's z is the dpr, for the streak's width. Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
+// without a cell), the deep sky, its star dust, the glows' noise and their field. uTint (STAR_TINT) is set once.
+const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uM', 'uMc'];
+const STAR_TILES = STAR_LAYERS.filter((L) => !L.cell);
+const SKY_TEX = [...STAR_TILES.map((L, t) => 'uS' + t), 'uDeep', 'uDust', 'uNoise', 'uField'];
+const TEX_DEEP = SKY_TEX.indexOf('uDeep'), TEX_DUST = TEX_DEEP + 1, TEX_NOISE = TEX_DEEP + 2, TEX_FIELD = TEX_DEEP + 3;
 // The repo glows (see NEB_*) are drawn by the same context, over the vignette and under the dither, so the 2D
 // canvas gets sky and glows in its one drawImage, at the glows' place in its stack (nothing it draws comes between).
 // Each frame with glows, every puff's lobes, heart, middle and lit spot go in as instanced quads (GLOW_VS, GLOW_FS),
@@ -2662,19 +2745,84 @@ void main() {
   float f = neb(length(vL));
   o = vec4(f * vW.xy, -log(1.0 - min(f * vW.zw, 0.999)));
 }`;
+// the front star layers made by the sky's shader (see "Look"), so they never repeat: a layer's star space (a tile's
+// px, placed by starWide) is cut into cells of L.cell px, and each cell's hash (pcg, of the cell wrapped by STAR_WRAP
+// and the layer's seed) says whether it holds a star (as likely as the tile's density makes it, likelier where
+// starDense says so), where (STAR_EDGE from the cell's edges), its radius, its alpha (skewed faint, as u1 u2), its tint
+// (uTint, STAR_TINT: rgb and the weights summed up to it over their total) and whether it sparkles. It is drawn as
+// starTile paints one (the sparkle's two crossed lines, a glow when r >= 0.8, the core, each over the last), smoothed
+// over a device px, premultiplied like a tile's texel. Nothing in it moves with time: a frame draws the same stars.
+const glf = (v) => (Number.isInteger(v) ? v + '.0' : String(v)); // a number as a GLSL float
+const STAR_FIELD_GLSL = `#define STAR_WRAP ${STAR_WRAP}u
+uniform vec4 uTint[${STAR_TINT.length}];
+uint pcg(uint v) {
+  uint s = v * 747796405u + 2891336453u, w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+float u01(uint h) { return float(h >> 8u) / 16777216.0; }
+// a cell's hash, the cell wrapped by n cells (c is never below -n)
+uint cellHash(ivec2 c, uint n, uint seed) { uvec2 w = uvec2(c + int(n)) % n; return pcg(w.x + pcg(w.y + pcg(seed))); }
+// how much likelier a star is about star px q: a smooth noise over squares of STAR_SUPER px, mostly near 0, here and
+// there up to 7 (1 on average)
+float starDense(vec2 q, uint seed) {
+  vec2 f = q / ${glf(STAR_SUPER)} - 0.5, i = floor(f), t = f - i;
+  t = t * t * (3.0 - 2.0 * t);
+  ivec2 c = ivec2(i);
+  uint n = STAR_WRAP / ${STAR_SUPER}u, s = seed ^ 0x9e3779b9u;
+  float a = pow(u01(cellHash(c, n, s)), 6.0), b = pow(u01(cellHash(c + ivec2(1, 0), n, s)), 6.0);
+  float d = pow(u01(cellHash(c + ivec2(0, 1), n, s)), 6.0), e = pow(u01(cellHash(c + ivec2(1, 1), n, s)), 6.0);
+  return 7.0 * mix(mix(a, b, t.x), mix(d, e, t.x), t.y);
+}
+// a disc of radius r, d from its middle (device px): its cover, smoothed over a px, its light kept (the ramp adds
+// 1/12 px² to its area; one under half a px spreads to half a px, dimmer)
+float starDisc(float d, float r) { float e = max(r, 0.5); return clamp(e + 0.5 - d, 0.0, 1.0) * r * r / (e * e + 0.0833); }
+// a line along x through the middle, len either way and w wide (device px), flat ends: its cover, a thin one's light kept
+float starLine(vec2 d, float len, float w) {
+  float e = max(w, 1.0);
+  return w / e * clamp(0.5 * e + 0.5 - abs(d.y), 0.0, 1.0) * clamp(len + 0.5 - abs(d.x), 0.0, 1.0);
+}
+// a layer's star (premultiplied) at device px p: l its uniform (see SKY_U), k its cell (px), dens its stars per cell,
+// spark the share that sparkles, share cl's share, ra its radius and alpha ranges
+vec4 starField(vec2 p, vec4 l, float k, float dens, float spark, float share, vec4 ra, uint seed) {
+  vec2 q = p * l.z + l.xy, ci = floor(q / k);
+  uint h = cellHash(ivec2(ci), STAR_WRAP / uint(k), seed);
+  float u = u01(h);
+  if (u >= dens * (1.0 + 6.0 * share)) return vec4(0.0);
+  if (share > 0.0 && u >= dens * (1.0 - share + share * starDense((ci + 0.5) * k, seed))) return vec4(0.0);
+  h = pcg(h); float x = u01(h);
+  h = pcg(h); float y = u01(h);
+  vec2 d = (q - ci * k - ${glf(STAR_EDGE)} - vec2(x, y) * (k - ${glf(2 * STAR_EDGE)})) * l.w;
+  h = pcg(h); float r = mix(ra.x, ra.y, u01(h));
+  h = pcg(h); float a = u01(h);
+  h = pcg(h); a = mix(ra.z, ra.w, a * u01(h));
+  h = pcg(h); float tw = u01(h);
+  h = pcg(h); bool sp = u01(h) < spark;
+  vec3 col = uTint[${STAR_TINT.length - 1}].rgb;
+  for (int i = ${STAR_TINT.length - 2}; i >= 0; i--) if (tw <= uTint[i].w) col = uTint[i].rgb;
+  float s = l.w, dd = length(d), v = a * starDisc(dd, r * s);
+  if (r >= 0.8) v = 1.0 - (1.0 - v) * (1.0 - a * 0.22 * starDisc(dd, 2.4 * r * s));
+  if (sp) v = 1.0 - (1.0 - v) * (1.0 - a * 0.8 * max(starLine(d, 3.2 * s, 0.6 * s), starLine(d.yx, 3.2 * s, 0.6 * s)));
+  return vec4(col * v, v);
+}`;
+// per star layer its line in SKY_FS: its tile's texel, or its stars made per cell
+const STAR_GLSL = STAR_LAYERS.map((L, i) => (L.cell
+  ? `c = over(starField(p, uL${i}, ${glf(L.cell)}, ${glf(L.n * (L.cell / STAR_TILE) ** 2)}, ${glf((L.sparkle || 0) / L.n)}, ` +
+    `${glf(L.cl ? L.cl[1] : 0)}, vec4(${L.r.concat(L.a).map(glf).join(', ')}), ${L.seed}u), c);`
+  : `c = over(star(uS${STAR_TILES.indexOf(L)}, uL${i}, p), c);`)).join('\n  ');
 // per device pixel, premultiplied: the tint (mixed top to bottom unpremultiplied, as a canvas gradient mixes) over the
 // page's colour, the deep sky's light and its star dust (dense where the band is) over that, then each star layer,
-// sampled where the pixel's centre falls on its tile; then the vignette (black, so in glass it dims the acrylic a
-// little too), the repo glows ('screen': 1 - (1 - sky)(1 - glow), on colour and alpha alike, as the canvas does) and
+// back to front (STAR_GLSL), sampled where the pixel's centre falls on its tile or made there; then the vignette
+// (black, so in glass it dims the acrylic a little too), the repo glows ('screen': 1 - (1 - sky)(1 - glow), on colour and alpha alike, as the canvas does) and
 // a dither fixed to the pixel (never to time) that breaks the faint gradients' 8-bit bands
 const SKY_FS = `#version 300 es
 precision highp float;
 #define GLOW_MAX ${GLOW_MAX}
-uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uGlow, uN0, uN1;
+uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uM, uMc, uGlow, uN0, uN1;
 uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
 uniform int uGN;
-uniform sampler2D uS0, uS1, uS2, uDeep, uDust, uNoise, uField;
+uniform sampler2D ${SKY_TEX.join(', ')};
 out vec4 color;
+${STAR_FIELD_GLSL}
 vec4 over(vec4 a, vec4 b) { return a + b * (1.0 - a.a); }
 vec4 star(sampler2D s, vec4 l, vec2 p) { return texture(s, (p - l.xy) * l.z); }
 float hash(uvec2 v) {
@@ -2690,9 +2838,16 @@ void main() {
   vec3 g = d.rgb * uFx.y;
   c = over(vec4(g, max(g.r, max(g.g, g.b))), c);
   c = over(vec4(texture(uDust, (p - uDu.xy) * uDu.z).r * d.a * uFx.z), c);
-  c = over(star(uS0, uL0, p), c);
-  c = over(star(uS1, uL1, p), c);
-  c = over(star(uS2, uL2, p), c);
+  ${STAR_GLSL}
+  // the shooting star: a soft line about a CSS px wide from its tail end to its head, fading in towards the head
+  // (squared), plus a small glow on the head
+  if (uMc.a > 0.0) {
+    vec2 ab = uM.xy - uM.zw;
+    float h = clamp(dot(p - uM.zw, ab) / max(dot(ab, ab), 1e-4), 0.0, 1.0), w = ${glf(METEOR_W)} * uSize.z;
+    vec2 e = p - uM.zw - ab * h, o = (p - uM.xy) / (2.0 * w);
+    float m = uMc.a * min(1.0, h * h * exp(-dot(e, e) / (w * w)) + 0.5 * exp(-dot(o, o)));
+    c = over(vec4(uMc.rgb * m, m), c);
+  }
   vec2 q = p / uSize.xy * 2.0 - 1.0;
   c = over(vec4(0.0, 0.0, 0.0, uFx.x * smoothstep(0.3, 2.0, dot(q, q))), c);
   // the glows: per repo whose box holds the pixel, its field's texel; the noise is the same for every repo
@@ -2767,27 +2922,32 @@ function skyGLInit(G) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.uniform1i(gl.getUniformLocation(p, name), i);
   });
+  // the star tints for the layers the shader makes: rgb and the weights summed up to each, over their total
+  const tint = new Float32Array(STAR_TINT.length * 4);
+  let tsum = 0;
+  STAR_TINT.forEach(([rgb, w], i) => { tsum += w; tint.set(rgb.split(',').map((v) => v / 255).concat(tsum / STAR_TINT_SUM), i * 4); });
+  gl.uniform4fv(gl.getUniformLocation(p, 'uTint'), tint);
   // a tile's pixels go in premultiplied, as its canvas keeps them
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
   G.dpr = 0; G.drawn = false;
   // the deep sky's textures (they don't depend on dpr), as they are: its alpha is star-dust density, not coverage
   const D = deepSky();
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-  gl.activeTexture(gl.TEXTURE3);
+  gl.activeTexture(gl.TEXTURE0 + TEX_DEEP);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, DEEP_W, DEEP_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, D.deep);
-  gl.activeTexture(gl.TEXTURE4);
+  gl.activeTexture(gl.TEXTURE0 + TEX_DUST);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, DUST_T, DUST_T, 0, gl.RED, gl.UNSIGNED_BYTE, D.dust);
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
   // the glows: the noise tile with mipmaps (sampled at the field's scale, as the canvas samples it), the field
   // (its size set in glowPrep, cut to its texels at its edges), and the quads' program
   G.glow = false; G.fieldOk = false; G.fw = G.fh = 0; G.bufN = 0; G.lastNi = -1; G.lastGn = -1;
   try {
-    gl.activeTexture(gl.TEXTURE5);
+    gl.activeTexture(gl.TEXTURE0 + TEX_NOISE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, noiseTile());
     gl.generateMipmap(gl.TEXTURE_2D);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   } catch { return; }
-  gl.activeTexture(gl.TEXTURE6);
+  gl.activeTexture(gl.TEXTURE0 + TEX_FIELD);
   G.ft = gl.getParameter(gl.TEXTURE_BINDING_2D);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 1, 1, 0, gl.RGBA, gl.HALF_FLOAT, null);
@@ -2855,7 +3015,7 @@ function glowPrep(G, byRepo, k, ox, oy, dpr) {
   if (G.fw !== w || G.fh < need) {
     // a bigger field: room for a quarter more, so a slowly growing one isn't made again every frame
     G.fw = w; G.fh = Math.min(GLOW_ROWS * h, Math.ceil((need * 1.25) / 16) * 16);
-    gl.activeTexture(gl.TEXTURE6);
+    gl.activeTexture(gl.TEXTURE0 + TEX_FIELD);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, G.fw, G.fh, 0, gl.RGBA, gl.HALF_FLOAT, null);
     G.fieldOk = false;
   }
@@ -2930,8 +3090,8 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   if (!G || !G.ok || G.gl.isContextLost()) return false;
   const gl = G.gl, dpr = I.dpr || 1, cv = I.skyCanvas, u = G.u;
   if (G.dpr !== dpr) {
-    // each star layer's tile at this dpr into its texture; the tile's canvas is let go at once
-    STAR_LAYERS.forEach((L, i) => {
+    // each tiled star layer's tile at this dpr into its texture; the tile's canvas is let go at once
+    STAR_TILES.forEach((L, i) => {
       const c = starTile(L, dpr);
       gl.activeTexture(gl.TEXTURE0 + i);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
@@ -2947,15 +3107,18 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   if (G.hour !== hk) { G.hour = hk; G.tint = skyAt(h); }
   const top = G.tint[0], bot = G.tint[1], at = starsAt();
   // in SKY_U's order
-  u[0] = cv.width; u[1] = cv.height;
+  u[0] = cv.width; u[1] = cv.height; u[2] = dpr;
   for (let j = 0; j < 4; j++) {
     u[4 + j] = G.bg[j];
     u[8 + j] = j < 3 ? top[j] / 255 : top[3];
     u[12 + j] = j < 3 ? bot[j] / 255 : bot[3];
   }
-  for (let i = 0; i < STAR_LAYERS.length; i++) {
+  for (let i = 0, o = 16; i < STAR_LAYERS.length; i++, o += 4) {
+    const s = at[i * 3];
+    // a layer the shader makes: star px = device px / (s dpr) + its star space at the top left
+    if (STAR_LAYERS[i].cell) { u[o] = starWide[i * 2]; u[o + 1] = starWide[i * 2 + 1]; u[o + 2] = 1 / (s * dpr); u[o + 3] = s * dpr; continue; }
     // drawStars's pattern puts a tile's pixel (tx, ty) on device px (s tx + ex dpr, s ty + ey dpr): the shader goes back
-    u[16 + i * 4] = at[i * 3 + 1] * dpr; u[17 + i * 4] = at[i * 3 + 2] * dpr; u[18 + i * 4] = 1 / (at[i * 3] * G.tw);
+    u[o] = at[i * 3 + 1] * dpr; u[o + 1] = at[i * 3 + 2] * dpr; u[o + 2] = 1 / (s * G.tw);
   }
   // the deep sky and its dust, each offset wrapped by its own repeat (device px)
   const ds = deepPos[0], dw = DEEP_W * DEEP_PX * ds * dpr, dh = DEEP_H * DEEP_PX * ds * dpr, dt = DUST_T * ds;
@@ -2963,6 +3126,11 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   u[28] = wrap(dx, dw); u[29] = wrap(dy, dh); u[30] = 1 / dw; u[31] = 1 / dh;
   u[32] = wrap(dx, dt); u[33] = wrap(dy, dt); u[34] = 1 / dt; u[35] = 0;
   u[36] = VIG_A[glass ? 1 : 0]; u[37] = DEEP_A; u[38] = DUST_A; u[39] = DITHER;
+  // the shooting star (all 0 when none: the frame after it ends draws the sky without it)
+  const m = meteorNow(), ma = m ? Math.max(0, m.a) : 0;
+  u[40] = ma ? m.hx * dpr : 0; u[41] = ma ? m.hy * dpr : 0; u[42] = ma ? m.tx * dpr : 0; u[43] = ma ? m.ty * dpr : 0;
+  for (let j = 0; j < 3; j++) u[44 + j] = ma ? m.rgb[j] / 255 : 0;
+  u[47] = ma;
   I.glowGL = glowPrep(G, glows, k, ox, oy, dpr);
   // the field again when its quads changed; the sky's pass when anything it shows did
   let fresh = !G.gn || (G.fieldOk && G.ni === G.lastNi);
@@ -3007,6 +3175,7 @@ function draw() {
     else { ctx.fillStyle = I.bgFill || COL.bg; ctx.fillRect(0, 0, W, H); }
     drawSky(ctx);
     drawStars(ctx);
+    drawMeteor(ctx);
   }
   if (!I.glowGL) drawTerritories(ctx, k, ox, oy, glows);
   const nowC = Date.now() - I.skew;
