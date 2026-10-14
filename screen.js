@@ -15,6 +15,10 @@
 //                                                   dropped), like term.js screenText; marks: inverse runs read
 //                                                   "\x01text\x02" and dim ones "\x03text\x04", like term.js
 //                                                   screenMarked(id, n, { dim: true }) (only those two: no colours)
+//   createScreen(cols, rows, { maxLines }) -> { write, resize, lines, serialize, size }   the same terminal, fed a
+//                                                   piece at a time; serialize() draws its screen again, colours and
+//                                                   all. The session host plays into one what falls off the output
+//                                                   it keeps, so a snapshot starts with the screen as it stood there
 //   menuDetails(lines) -> { kind, title, context, more, options: [{ n, label, desc, on }], sig, unnumbered? } | null
 //                                                   (unnumbered: options drawn without numbers, numbered 1..k here;
 //                                                   pick one with ↑/↓ and Enter, a digit does nothing)
@@ -36,42 +40,88 @@ function widthOf(cp) {
   return 1;
 }
 
-const DIM = 1, INV = 2; // render's cell attributes
+const DIM = 1, INV = 2; // a style's marks (render's): SGR 2 and 7
+// the DECSET modes serialize() draws again: 1 cursor keys, 7 auto-wrap, 25 the cursor shown, 1000-1006 and 1015 mouse
+// reports, 1004 focus reports, 2004 bracketed paste
+const MODES = new Set([1, 7, 25, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 2004]);
 const clampInt = (v, lo, hi, def) => (Number.isInteger(v) && v >= lo && v <= hi ? v : def);
 
-function render(raw, cols, rows, lastN = 40, join = true, marks = false) {
-  const W = clampInt(cols, 2, 1000, 120), Hh = clampInt(rows, 2, 500, 32);
-  const s = String(raw || '');
-  const blank = () => ({ c: [], a: [], w: false }); // a: each cell's DIM | INV
+// The terminal itself, fed a piece of output at a time: createScreen(cols, rows, { maxLines }) ->
+//   write(s)              plays s in (a sequence cut off at its end waits for the next write)
+//   resize(cols, rows)    the pty's new size (rows at the top of a shorter screen go to the scrollback)
+//   lines(lastN, join, marks) -> [line]   as render() gives them
+//   serialize() -> string  output that draws this screen again in a fresh terminal of the same size: the
+//                          scrollback, the screen with its colours, the scroll region, the cursor and the pen, and
+//                          then the cut-off sequence write() still holds
+// A mode set once (DECSET: cursor keys, bracketed paste, focus and mouse reports, the cursor shown) is kept too.
+// Each cell keeps its style (an index into styles: its SGR, as "\x1b[0;…m", and its marks), so serialize() draws the
+// colours too.
+function createScreen(cols, rows, o = {}) {
+  let W = clampInt(cols, 2, 1000, 120), Hh = clampInt(rows, 2, 500, 32);
+  const MAXL = clampInt(o.maxLines, 100, 100000, 5000); // lines kept, scrollback and screen
+  const blank = () => ({ c: [], a: [], w: false }); // a: each cell's style
   let main = { lines: Array.from({ length: Hh }, blank) }, alt = null;
   let L = main.lines; // the active buffer: scrollback, then the Hh rows of the screen at its end
-  let attr = 0; // the pen's DIM | INV (SGR 2 and 7)
+  const styles = [{ sgr: '\x1b[0m', f: 0 }], styleOf = new Map([['', 0]]);
+  // the pen: what SGR has set (colours as their own parameters, '' for the default)
+  let pen = { b: 0, d: 0, i: 0, u: '', k: 0, v: 0, h: 0, s: 0, fg: '', bg: '' };
+  let attr = 0; // the pen's style
   let x = 0, y = 0, wrapNext = false, top = 0, bot = Hh - 1, saved = { x: 0, y: 0 }, savedMain = null;
+  let rest = ''; // a sequence the last write() ended in the middle of
+  const modes = new Map(); // DECSET number -> 'h' | 'l', for the ones in MODES
   const row = (r) => L[L.length - Hh + r];
   const setRow = (r, v) => { L[L.length - Hh + r] = v; };
   const clampCur = () => { x = Math.max(0, Math.min(W - 1, x)); y = Math.max(0, Math.min(Hh - 1, y)); wrapNext = false; };
+  const styleFor = (key, f) => {
+    let k = styleOf.get(key);
+    if (k == null) { k = styles.length; styles.push({ sgr: `\x1b[0;${key}m`, f }); styleOf.set(key, k); }
+    return k;
+  };
+  // what an erase leaves (as xterm does it): blanks in the pen's background colour, nothing else
+  const eraseAttr = () => (pen.bg ? styleFor(pen.bg, 0) : 0);
+  // a new row: empty, or with a background colour set, a whole row of blanks in it
+  const fresh = (w = false) => { const e = eraseAttr(); return e ? { c: Array(W).fill(' '), a: Array(W).fill(e), w } : { c: [], a: [], w }; };
+  const penStyle = () => {
+    const p = [];
+    if (pen.b) p.push(1);
+    if (pen.d) p.push(2);
+    if (pen.i) p.push(3);
+    if (pen.u) p.push(pen.u);
+    if (pen.k) p.push(5);
+    if (pen.v) p.push(7);
+    if (pen.h) p.push(8);
+    if (pen.s) p.push(9);
+    if (pen.fg) p.push(pen.fg);
+    if (pen.bg) p.push(pen.bg);
+    return styleFor(p.join(';'), (pen.d ? DIM : 0) | (pen.v ? INV : 0));
+  };
   // the rows top..bot move up n (new blank rows at bot); the whole screen scrolling keeps the top rows as scrollback
   const scrollUp = (n) => {
     for (let k = 0; k < n; k++) {
-      if (top === 0 && bot === Hh - 1 && L === main.lines) { L.push(blank()); continue; }
+      if (top === 0 && bot === Hh - 1 && L === main.lines) { L.push(fresh()); continue; }
       L.splice(L.length - Hh + top, 1);
-      L.splice(L.length - Hh + bot + 1, 0, blank());
+      L.splice(L.length - Hh + bot + 1, 0, fresh());
     }
-    if (L.length > 5000) L.splice(0, L.length - 5000);
+    if (L.length > MAXL) L.splice(0, L.length - MAXL);
   };
   const scrollDown = (n) => {
     for (let k = 0; k < n; k++) {
       L.splice(L.length - Hh + bot, 1);
-      L.splice(L.length - Hh + top, 0, blank());
+      L.splice(L.length - Hh + top, 0, fresh());
     }
   };
   const lineFeed = () => { if (y === bot) scrollUp(1); else if (y < Hh - 1) y++; };
-  const erase = (r, from, to) => { const l = row(r); for (let i = from; i < to && i < l.c.length; i++) { l.c[i] = ' '; l.a[i] = 0; } };
+  const erase = (r, from, to) => {
+    const l = row(r), e = eraseAttr(), end = e ? Math.min(to, W) : Math.min(to, l.c.length);
+    if (from >= end) return;
+    while (l.c.length < from) { l.c.push(' '); l.a.push(0); }
+    for (let i = from; i < end; i++) { l.c[i] = ' '; l.a[i] = e; }
+  };
   const put = (ch, w) => {
     if (w === 0) { const l = row(y); const i = Math.max(0, x - 1); if (l.c[i] != null) l.c[i] += ch; return; }
     if (wrapNext || (w === 2 && x === W - 1)) { x = 0; lineFeed(); row(y).w = true; wrapNext = false; }
     const l = row(y);
-    while (l.c.length < x) l.c.push(' ');
+    while (l.c.length < x) { l.c.push(' '); l.a.push(0); }
     l.c[x] = ch;
     l.a[x] = attr;
     if (w === 2) { l.c[x + 1] = ''; l.a[x + 1] = attr; }
@@ -89,133 +139,231 @@ function render(raw, cols, rows, lastN = 40, join = true, marks = false) {
     }
     wrapNext = false;
   };
+  // SGR: every attribute, a colour's own parameters kept whole (38;5;n, 38;2;r;g;b, or one 38:2::r:g:b)
+  const sgr = (params) => {
+    const seg = params.split(';');
+    for (let k = 0; k < seg.length; k++) {
+      const q = seg[k] === '' ? 0 : parseInt(seg[k], 10);
+      if (q === 38 || q === 48 || q === 58) {
+        let v = seg[k];
+        if (!/:/.test(seg[k])) {
+          const m = parseInt(seg[k + 1], 10), n = m === 5 ? 2 : m === 2 ? 4 : 0;
+          v = seg.slice(k, k + 1 + n).join(';');
+          k += n;
+        }
+        if (q === 38) pen.fg = v; else if (q === 48) pen.bg = v; // 58 (the underline's colour) is not kept
+        continue;
+      }
+      if (!Number.isFinite(q) || q === 0) pen = { b: 0, d: 0, i: 0, u: '', k: 0, v: 0, h: 0, s: 0, fg: '', bg: '' };
+      else if (q === 1) pen.b = 1;
+      else if (q === 2) pen.d = 1;
+      else if (q === 3) pen.i = 1;
+      else if (q === 4) pen.u = seg[k] === '4:0' ? '' : seg[k];
+      else if (q === 21) pen.u = '21';
+      else if (q === 5 || q === 6) pen.k = 1;
+      else if (q === 7) pen.v = 1;
+      else if (q === 8) pen.h = 1;
+      else if (q === 9) pen.s = 1;
+      else if (q === 22) { pen.b = 0; pen.d = 0; }
+      else if (q === 23) pen.i = 0;
+      else if (q === 24) pen.u = '';
+      else if (q === 25) pen.k = 0;
+      else if (q === 27) pen.v = 0;
+      else if (q === 28) pen.h = 0;
+      else if (q === 29) pen.s = 0;
+      else if ((q >= 30 && q <= 37) || (q >= 90 && q <= 97)) pen.fg = String(q);
+      else if (q === 39) pen.fg = '';
+      else if ((q >= 40 && q <= 47) || (q >= 100 && q <= 107)) pen.bg = String(q);
+      else if (q === 49) pen.bg = '';
+    }
+    attr = penStyle();
+  };
 
-  for (let i = 0; i < s.length;) {
-    const code = s.charCodeAt(i);
-    if (code === 0x1b) {
-      const nx = s[i + 1];
-      if (nx === '[') {
-        // CSI: parameters, intermediates, one final byte
-        let j = i + 2;
-        while (j < s.length && s.charCodeAt(j) >= 0x30 && s.charCodeAt(j) <= 0x3f) j++;
-        const params = s.slice(i + 2, j);
-        while (j < s.length && s.charCodeAt(j) >= 0x20 && s.charCodeAt(j) <= 0x2f) j++;
-        if (j >= s.length) break;
-        const fin = s[j];
-        i = j + 1;
-        const priv = /^[?<=>]/.test(params);
-        const ps = (priv ? params.slice(1) : params).split(';').map((p) => (p === '' ? NaN : parseInt(p, 10)));
-        const p1 = Number.isFinite(ps[0]) ? ps[0] : 0, n = Math.max(1, p1);
-        if (priv) {
-          if ((fin === 'h' || fin === 'l') && ps.some((p) => p === 1049 || p === 1047 || p === 47)) altScreen(fin === 'h');
+  function write(raw) {
+    const s = rest + String(raw || '');
+    rest = '';
+    let i = 0;
+    const wait = () => { rest = s.length - i > 65536 ? '' : s.slice(i); }; // (a sequence that never ends is dropped)
+    while (i < s.length) {
+      const code = s.charCodeAt(i);
+      if (code === 0x1b) {
+        if (i + 1 >= s.length) { wait(); break; }
+        const nx = s[i + 1];
+        if (nx === '[') {
+          // CSI: parameters, intermediates, one final byte
+          let j = i + 2;
+          while (j < s.length && s.charCodeAt(j) >= 0x30 && s.charCodeAt(j) <= 0x3f) j++;
+          const params = s.slice(i + 2, j);
+          while (j < s.length && s.charCodeAt(j) >= 0x20 && s.charCodeAt(j) <= 0x2f) j++;
+          if (j >= s.length) { wait(); break; }
+          const fin = s[j];
+          i = j + 1;
+          const priv = /^[?<=>]/.test(params);
+          const ps = (priv ? params.slice(1) : params).split(';').map((p) => (p === '' ? NaN : parseInt(p, 10)));
+          const p1 = Number.isFinite(ps[0]) ? ps[0] : 0, n = Math.max(1, p1);
+          if (priv) {
+            if ((fin === 'h' || fin === 'l') && params[0] === '?') for (const p of ps) if (MODES.has(p)) modes.set(p, fin);
+            if ((fin === 'h' || fin === 'l') && ps.some((p) => p === 1049 || p === 1047 || p === 47)) altScreen(fin === 'h');
+            continue;
+          }
+          switch (fin) {
+            case 'A': y = Math.max(y >= top ? top : 0, y - n); clampCur(); break;
+            case 'B': case 'e': y = Math.min(y <= bot ? bot : Hh - 1, y + n); clampCur(); break;
+            case 'C': case 'a': x += n; clampCur(); break;
+            case 'D': x -= n; clampCur(); break;
+            case 'E': y = Math.min(bot, y + n); x = 0; clampCur(); break;
+            case 'F': y = Math.max(top, y - n); x = 0; clampCur(); break;
+            case 'G': case '`': x = n - 1; clampCur(); break;
+            case 'd': y = n - 1; clampCur(); break;
+            case 'H': case 'f': y = n - 1; x = (Number.isFinite(ps[1]) ? Math.max(1, ps[1]) : 1) - 1; clampCur(); break;
+            case 'J':
+              if (p1 === 0) { erase(y, x, W); for (let r = y + 1; r < Hh; r++) setRow(r, fresh()); }
+              else if (p1 === 1) { erase(y, 0, x + 1); for (let r = 0; r < y; r++) setRow(r, fresh()); }
+              else if (p1 === 2) { for (let r = 0; r < Hh; r++) setRow(r, fresh()); }
+              else if (p1 === 3) { if (L.length > Hh) L.splice(0, L.length - Hh); }
+              wrapNext = false;
+              break;
+            case 'K':
+              if (p1 === 0) erase(y, x, W); else if (p1 === 1) erase(y, 0, x + 1); else if (p1 === 2) setRow(y, fresh(row(y).w));
+              wrapNext = false;
+              break;
+            case 'X': erase(y, x, x + n); wrapNext = false; break;
+            case 'P': { const l = row(y), e = eraseAttr(); l.c.splice(x, n); l.a.splice(x, n); if (e) while (l.c.length < W) { l.c.push(' '); l.a.push(e); } wrapNext = false; break; }
+            case '@': { const l = row(y); if (l.c.length > x) { l.c.splice(x, 0, ...Array(n).fill(' ')); l.c.length = Math.min(l.c.length, W); l.a.splice(x, 0, ...Array(n).fill(eraseAttr())); l.a.length = Math.min(l.a.length, W); } wrapNext = false; break; }
+            case 'L': if (y >= top && y <= bot) { const t0 = top; top = y; scrollDown(Math.min(n, bot - y + 1)); top = t0; } x = 0; wrapNext = false; break;
+            case 'M': if (y >= top && y <= bot) { const t0 = top; top = y; for (let k = 0; k < Math.min(n, bot - y + 1); k++) { L.splice(L.length - Hh + top, 1); L.splice(L.length - Hh + bot + 1, 0, fresh()); } top = t0; } x = 0; wrapNext = false; break;
+            case 'S': scrollUp(n); break;
+            case 'T': scrollDown(n); break;
+            case 'r': {
+              const a = (Number.isFinite(ps[0]) ? Math.max(1, ps[0]) : 1) - 1, b = (Number.isFinite(ps[1]) ? Math.max(1, ps[1]) : Hh) - 1;
+              if (a < b && b < Hh) { top = a; bot = b; } else { top = 0; bot = Hh - 1; }
+              x = 0; y = 0; wrapNext = false;
+              break;
+            }
+            case 's': saved = { x, y }; break;
+            case 'u': ({ x, y } = saved); clampCur(); break;
+            case 'm': sgr(params); break;
+            default: break; // the rest draw nothing
+          }
           continue;
         }
-        switch (fin) {
-          case 'A': y = Math.max(y >= top ? top : 0, y - n); clampCur(); break;
-          case 'B': case 'e': y = Math.min(y <= bot ? bot : Hh - 1, y + n); clampCur(); break;
-          case 'C': case 'a': x += n; clampCur(); break;
-          case 'D': x -= n; clampCur(); break;
-          case 'E': y = Math.min(bot, y + n); x = 0; clampCur(); break;
-          case 'F': y = Math.max(top, y - n); x = 0; clampCur(); break;
-          case 'G': case '`': x = n - 1; clampCur(); break;
-          case 'd': y = n - 1; clampCur(); break;
-          case 'H': case 'f': y = n - 1; x = (Number.isFinite(ps[1]) ? Math.max(1, ps[1]) : 1) - 1; clampCur(); break;
-          case 'J':
-            if (p1 === 0) { erase(y, x, W); for (let r = y + 1; r < Hh; r++) setRow(r, blank()); }
-            else if (p1 === 1) { erase(y, 0, x + 1); for (let r = 0; r < y; r++) setRow(r, blank()); }
-            else if (p1 === 2) { for (let r = 0; r < Hh; r++) setRow(r, blank()); }
-            else if (p1 === 3) { if (L.length > Hh) L.splice(0, L.length - Hh); }
-            wrapNext = false;
-            break;
-          case 'K':
-            if (p1 === 0) erase(y, x, W); else if (p1 === 1) erase(y, 0, x + 1); else if (p1 === 2) setRow(y, { c: [], w: row(y).w });
-            wrapNext = false;
-            break;
-          case 'X': erase(y, x, x + n); wrapNext = false; break;
-          case 'P': { const l = row(y); l.c.splice(x, n); l.a.splice(x, n); wrapNext = false; break; }
-          case '@': { const l = row(y); if (l.c.length > x) { l.c.splice(x, 0, ...Array(n).fill(' ')); l.c.length = Math.min(l.c.length, W); l.a.splice(x, 0, ...Array(n).fill(0)); l.a.length = Math.min(l.a.length, W); } wrapNext = false; break; }
-          case 'L': if (y >= top && y <= bot) { const t0 = top; top = y; scrollDown(Math.min(n, bot - y + 1)); top = t0; } x = 0; wrapNext = false; break;
-          case 'M': if (y >= top && y <= bot) { const t0 = top; top = y; for (let k = 0; k < Math.min(n, bot - y + 1); k++) { L.splice(L.length - Hh + top, 1); L.splice(L.length - Hh + bot + 1, 0, blank()); } top = t0; } x = 0; wrapNext = false; break;
-          case 'S': scrollUp(n); break;
-          case 'T': scrollDown(n); break;
-          case 'r': {
-            const a = (Number.isFinite(ps[0]) ? Math.max(1, ps[0]) : 1) - 1, b = (Number.isFinite(ps[1]) ? Math.max(1, ps[1]) : Hh) - 1;
-            if (a < b && b < Hh) { top = a; bot = b; } else { top = 0; bot = Hh - 1; }
-            x = 0; y = 0; wrapNext = false;
-            break;
-          }
-          case 's': saved = { x, y }; break;
-          case 'u': ({ x, y } = saved); clampCur(); break;
-          case 'm': // only dim and inverse are kept (render's marks); a colour's own numbers (38;5;n, 38;2;r;g;b) skipped
-            for (let k = 0; k < ps.length; k++) {
-              const q = Number.isFinite(ps[k]) ? ps[k] : 0;
-              if (q === 38 || q === 48 || q === 58) { if (!/:/.test(params.split(';')[k] || '')) k += ps[k + 1] === 5 ? 2 : ps[k + 1] === 2 ? 4 : 0; }
-              else if (q === 0) attr = 0;
-              else if (q === 2) attr |= DIM;
-              else if (q === 22) attr &= ~DIM;
-              else if (q === 7) attr |= INV;
-              else if (q === 27) attr &= ~INV;
-            }
-            break;
-          default: break; // the rest draw nothing
+        if (nx === ']') { // OSC: up to BEL or ST
+          const a = s.indexOf('\x07', i + 2), b = s.indexOf('\x1b\\', i + 2);
+          const end = a < 0 ? b : b < 0 ? a : Math.min(a, b);
+          if (end < 0) { wait(); break; }
+          i = end + (end === b ? 2 : 1);
+          continue;
         }
+        if (nx === 'P' || nx === 'X' || nx === '^' || nx === '_') { const e = s.indexOf('\x1b\\', i + 2); if (e < 0) { wait(); break; } i = e + 2; continue; }
+        if (nx === '(' || nx === ')' || nx === '*' || nx === '+' || nx === '#' || nx === '%') { if (i + 2 >= s.length) { wait(); break; } i += 3; continue; }
+        if (nx === '7') saved = { x, y };
+        else if (nx === '8') { ({ x, y } = saved); clampCur(); }
+        else if (nx === 'D') lineFeed();
+        else if (nx === 'E') { x = 0; lineFeed(); }
+        else if (nx === 'M') { if (y === top) scrollDown(1); else if (y > 0) y--; }
+        else if (nx === 'c') { altScreen(false); for (let r = 0; r < Hh; r++) setRow(r, blank()); x = 0; y = 0; top = 0; bot = Hh - 1; }
+        i += 2;
         continue;
       }
-      if (nx === ']') { // OSC: up to BEL or ST
-        const a = s.indexOf('\x07', i + 2), b = s.indexOf('\x1b\\', i + 2);
-        const end = a < 0 ? b : b < 0 ? a : Math.min(a, b);
-        if (end < 0) break;
-        i = end + (end === b ? 2 : 1);
+      if (code < 0x20 || code === 0x7f) {
+        if (code === 0x0d) { x = 0; wrapNext = false; }
+        else if (code === 0x0a || code === 0x0b || code === 0x0c) { lineFeed(); wrapNext = false; }
+        else if (code === 0x08) { x = Math.max(0, x - 1); wrapNext = false; }
+        else if (code === 0x09) { x = Math.min(W - 1, (Math.floor(x / 8) + 1) * 8); }
+        i++;
         continue;
       }
-      if (nx === 'P' || nx === 'X' || nx === '^' || nx === '_') { const e = s.indexOf('\x1b\\', i + 2); if (e < 0) break; i = e + 2; continue; }
-      if (nx === '(' || nx === ')' || nx === '*' || nx === '+' || nx === '#' || nx === '%') { i += 3; continue; }
-      if (nx === '7') saved = { x, y };
-      else if (nx === '8') { ({ x, y } = saved); clampCur(); }
-      else if (nx === 'D') lineFeed();
-      else if (nx === 'E') { x = 0; lineFeed(); }
-      else if (nx === 'M') { if (y === top) scrollDown(1); else if (y > 0) y--; }
-      else if (nx === 'c') { altScreen(false); for (let r = 0; r < Hh; r++) setRow(r, blank()); x = 0; y = 0; top = 0; bot = Hh - 1; }
-      i += 2;
-      continue;
+      if (code >= 0x80 && code <= 0x9f) { i++; continue; } // C1 controls
+      if (code >= 0xd800 && code <= 0xdbff && i + 1 >= s.length) { wait(); break; } // half of a pair: the rest comes next
+      const cp = s.codePointAt(i);
+      const ch = String.fromCodePoint(cp);
+      i += ch.length;
+      put(ch, widthOf(cp));
     }
-    if (code < 0x20 || code === 0x7f) {
-      if (code === 0x0d) { x = 0; wrapNext = false; }
-      else if (code === 0x0a || code === 0x0b || code === 0x0c) { lineFeed(); wrapNext = false; }
-      else if (code === 0x08) { x = Math.max(0, x - 1); wrapNext = false; }
-      else if (code === 0x09) { x = Math.min(W - 1, (Math.floor(x / 8) + 1) * 8); }
-      i++;
-      continue;
-    }
-    if (code >= 0x80 && code <= 0x9f) { i++; continue; } // C1 controls
-    const cp = s.codePointAt(i);
-    const ch = String.fromCodePoint(cp);
-    i += ch.length;
-    put(ch, widthOf(cp));
+    return api;
   }
 
-  const out = [];
-  for (const l of L) {
-    let text = '';
-    if (!marks) text = l.c.map((c) => (c == null ? ' ' : c)).join('');
-    else {
-      let on = 0;
-      for (let k = 0; k < l.c.length; k++) {
-        const v = l.c[k] == null ? 0 : l.a[k] || 0;
-        if ((on & DIM) && !(v & DIM)) text += '\x04';
-        if ((on & INV) !== (v & INV)) text += v & INV ? '\x01' : '\x02';
-        if ((v & DIM) && !(on & DIM)) text += '\x03';
-        on = v;
-        text += l.c[k] == null ? ' ' : l.c[k];
-      }
-      if (on & DIM) text += '\x04';
-      if (on & INV) text += '\x02';
+  function resize(c, r) {
+    const nc = clampInt(c, 2, 1000, W), nr = clampInt(r, 2, 500, Hh);
+    for (const b of [main, alt]) {
+      if (!b) continue;
+      if (nr > Hh) for (let k = Hh; k < nr; k++) b.lines.push(blank());
+      else if (nr < Hh && b === alt) b.lines.splice(0, Hh - nr); // the alternate screen keeps no scrollback
     }
-    text = text.replace(/\s+$/, '');
-    if (join && l.w && out.length) out[out.length - 1] += text; else out.push(text);
+    if (nr < Hh) { y = Math.max(0, y - (Hh - nr)); if (savedMain) savedMain.y = Math.max(0, savedMain.y - (Hh - nr)); }
+    W = nc; Hh = nr; top = 0; bot = Hh - 1;
+    if (savedMain) { savedMain.top = 0; savedMain.bot = Hh - 1; }
+    clampCur();
+    return api;
   }
-  while (out.length && !out[out.length - 1].replace(/[\x01-\x04]/g, '').trim()) out.pop();
-  return out.slice(-lastN);
+
+  function lines(lastN = 40, join = true, marks = false) {
+    const out = [];
+    for (const l of L) {
+      let text = '';
+      if (!marks) text = l.c.map((c) => (c == null ? ' ' : c)).join('');
+      else {
+        let on = 0;
+        for (let k = 0; k < l.c.length; k++) {
+          const v = l.c[k] == null ? 0 : styles[l.a[k] || 0].f;
+          if ((on & DIM) && !(v & DIM)) text += '\x04';
+          if ((on & INV) !== (v & INV)) text += v & INV ? '\x01' : '\x02';
+          if ((v & DIM) && !(on & DIM)) text += '\x03';
+          on = v;
+          text += l.c[k] == null ? ' ' : l.c[k];
+        }
+        if (on & DIM) text += '\x04';
+        if (on & INV) text += '\x02';
+      }
+      text = text.replace(/\s+$/, '');
+      if (join && l.w && out.length) out[out.length - 1] += text; else out.push(text);
+    }
+    while (out.length && !out[out.length - 1].replace(/[\x01-\x04]/g, '').trim()) out.pop();
+    return out.slice(-lastN);
+  }
+
+  // one row as output: each style change, then its characters (trailing default blanks left out; full: padded to
+  // the width, so the row after it, wrapped, follows on its own)
+  const rowOut = (l, full) => {
+    let end = l.c.length;
+    if (!full) while (end > 0 && (l.c[end - 1] == null || l.c[end - 1] === ' ') && !(l.a[end - 1] || 0)) end--;
+    let s = '', cur = 0;
+    for (let k = 0; k < end; k++) {
+      const ch = l.c[k];
+      if (ch === '') continue; // the second half of a wide character
+      const a = ch == null ? 0 : l.a[k] || 0;
+      if (a !== cur) { s += styles[a].sgr; cur = a; }
+      s += ch == null ? ' ' : ch;
+    }
+    if (cur) s += '\x1b[0m';
+    if (full && end < W) s += ' '.repeat(W - end);
+    return s;
+  };
+  function serialize() {
+    let s = '\x1b[0m';
+    const M = main.lines;
+    for (const [n, v] of modes) s += `\x1b[?${n}${v}`;
+    // a wrapped row follows the one before it (padded to the width) with no new line, unless it is empty
+    for (let k = 0; k < M.length; k++) {
+      const r = rowOut(M[k], k + 1 < M.length && M[k + 1].w);
+      if (k) s += M[k].w && r ? '' : '\r\n';
+      s += r;
+    }
+    if (alt) {
+      s += '\x1b[?1049h\x1b[H\x1b[2J';
+      for (let r = 0; r < Hh; r++) s += `\x1b[${r + 1};1H${rowOut(alt.lines[r], false)}`;
+    }
+    if (top !== 0 || bot !== Hh - 1) s += `\x1b[${top + 1};${bot + 1}r`;
+    s += `\x1b[${y + 1};${x + 1}H${styles[attr].sgr}`;
+    return s + rest;
+  }
+
+  const api = { write, resize, lines, serialize, size: () => ({ cols: W, rows: Hh }) };
+  return api;
+}
+
+function render(raw, cols, rows, lastN = 40, join = true, marks = false) {
+  return createScreen(cols, rows).write(raw).lines(lastN, join, marks);
 }
 
 // ---------- the menu (a port of web/compose.js parseMenu; keep the two in step) ----------
@@ -525,4 +673,4 @@ function effortShown(lines) {
   return null;
 }
 
-module.exports = { render, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, spinner, effortShown };
+module.exports = { render, createScreen, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, spinner, effortShown };

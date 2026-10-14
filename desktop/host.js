@@ -8,7 +8,10 @@
 // Each session is a pseudo-terminal (ConPTY, through node-pty) running the interactive `claude --resume <id>`,
 // exactly what a terminal window runs; never `claude -p`. Each keeps its last ~512 KB of output, so a panel
 // that attaches later (another conversation was picked, the page reloaded, the window reopened) replays it
-// with snapshot() and then follows the live output.
+// with snapshot() and then follows the live output. What falls off the front of those 512 KB is played into a
+// screen (screen.js createScreen), and snapshot() starts with that screen drawn again: ConPTY sends only the cells
+// that change, so Claude Code's prompt box, drawn once, would otherwise be gone from a replay after a long turn
+// (and with it the Chat tab's Unsend, Rewind and Fork: "Couldn't read the session's prompt").
 //
 // New sessions (create): a plain interactive `claude` in a repo folder, or a fork of a conversation (`claude
 // --resume <id> --fork-session`: a new conversation with its history), keyed "new-<n>" until Claude Code
@@ -144,6 +147,7 @@ const NEW_RE = /^new-\d{1,9}$/; // a new session's key until Claude Code reports
 const KEY_RE = /^(?:[0-9a-f-]{36}|new-\d{1,9})$/i;
 const SCAN_MS = 800;
 const BUFFER_MAX = 512 * 1024; // characters of output kept per pty for snapshot()
+const KEYFRAME_LINES = 1000; // lines (scrollback and screen) the screen of what fell off that output keeps
 const FLUSH_MS = 6; // output goes out in small batches, not one message per ConPTY read
 const PROTO = 1;
 // what a terminal sends by itself, not a key: focus in/out, and its replies to Claude Code's queries (cursor
@@ -623,6 +627,7 @@ function createPtys(opts = {}) {
     return Number.isInteger(s) && s >= 0 ? s * 1000 : PANEL_CLOSE_MS;
   }
   // key -> { id, pty, pid, alive, exitCode, startedAt, chunks, size, pending, timer, dismissed, cwd, account, cols, rows,
+  //          dims / dim / base / baseOut (each chunk's pty size, the size now, and the screen of what fell off: see drop),
   //          isNew (still keyed new-<n>), created (started by create()), claudePid, status, known (pids there before),
   //          interrupted (restored after a shutdown that caught it mid-turn), restored, launchKey (its
   //          CLAUDE_LAUNCH_KEY), pickup (the handoff file it picks up, while it waits for its id), handoffFrom
@@ -654,12 +659,43 @@ function createPtys(opts = {}) {
     send('data', t.id, data);
   }
 
+  const screens = () => screenLib || (screenLib = require(path.join(__dirname, '..', 'screen.js')));
+  // What falls off the front of the kept output goes into t.base, a screen (screen.js createScreen) at the pty's size
+  // when that output came (t.dims, one per chunk): the screen as it stood where the kept output begins. null until
+  // something falls off; false once it failed (a snapshot is the kept output alone then, as before it).
+  function drop(t, data, dim) {
+    if (t.base === false || !data) return;
+    t.baseOut = null;
+    try {
+      if (!t.base) t.base = screens().createScreen(dim.cols, dim.rows, { maxLines: KEYFRAME_LINES });
+      else { const s = t.base.size(); if (s.cols !== dim.cols || s.rows !== dim.rows) t.base.resize(dim.cols, dim.rows); }
+      t.base.write(data);
+    } catch (e) {
+      t.base = false;
+      log(`snapshot: could not keep the screen of ${t.id} (${e.message}); its replays start from the kept output`);
+    }
+  }
   function keep(t, data) {
     t.chunks.push(data);
+    t.dims.push(t.dim);
     t.size += data.length;
-    while (t.size > BUFFER_MAX && t.chunks.length > 1) t.size -= t.chunks.shift().length;
-    if (t.size > BUFFER_MAX) { t.chunks[0] = t.chunks[0].slice(t.size - BUFFER_MAX); t.size = BUFFER_MAX; }
+    while (t.size > BUFFER_MAX && t.chunks.length > 1) { const c = t.chunks.shift(); t.size -= c.length; drop(t, c, t.dims.shift()); }
+    if (t.size > BUFFER_MAX) {
+      const cut = t.size - BUFFER_MAX;
+      drop(t, t.chunks[0].slice(0, cut), t.dims[0]);
+      t.chunks[0] = t.chunks[0].slice(cut);
+      t.size = BUFFER_MAX;
+    }
   }
+  // everything kept, as a terminal replays it: the screen where the kept output begins drawn again, then that output
+  function kept(t) {
+    if (t.base && t.baseOut == null) {
+      try { t.baseOut = t.base.serialize(); } catch (e) { t.base = false; t.baseOut = null; log(`snapshot: could not draw the screen of ${t.id} again (${e.message})`); }
+    }
+    return (t.base ? t.baseOut : '') + t.chunks.join('');
+  }
+  // what a pty that carries on in its place (a handoff's pickup, a switch of account) starts its output with
+  const carried = (t) => ({ chunks: t.chunks.slice(), dims: t.dims.slice(), size: t.size, base: t.base, baseOut: t.baseOut });
 
   const aliveCount = () => [...terms.values()].filter((t) => t.alive).length;
   const noPty = () => ({ ok: false, message: `No pty module: ${ptyError ? ptyError.message : 'not installed'}` });
@@ -690,6 +726,7 @@ function createPtys(opts = {}) {
     }
     const t = {
       id: key, pty: p, pid: p.pid, alive: true, exitCode: null, startedAt: Date.now(), chunks: [], size: 0, pending: '', timer: null, dismissed: false,
+      dims: [], dim: { cols, rows }, base: null, baseOut: null,
       cwd, account: acctId(o.account), cols, rows, isNew: false, created: false, claudePid: null, status: null, known: null,
       interrupted: false, restored: false, launchKey, pickup: null, handoffFrom: null, waitingFor: null, seenIdle: false, idleSince: 0,
       outAt: 0, inputAt: 0, line: '', inPaste: false, slash: null, nudge: null, restartBy: false, role: null, ...extra,
@@ -736,7 +773,7 @@ function createPtys(opts = {}) {
     // one switchAccount was moving: the pickup starts under the account it was moving to
     const account = t.moveTo ? t.moveTo.account : t.account;
     const r = startPickup(t.id, req.file, { cwd, account, cols: t.cols, rows: t.rows },
-      { chunks: t.chunks.slice(), size: t.size, created: t.created, handoffFrom: from, role: t.role });
+      { ...carried(t), created: t.created, handoffFrom: from, role: t.role });
     log(`handoff: ${t.id} -> ${r.ok ? `pickup of ${path.basename(req.file)} (pid ${r.pid})` : `could not start the pickup: ${r.message}`}`);
     if (!r.ok) return false;
     if (t.moveTo) { t.moveTo.done({ ok: true, pid: r.pid, message: 'it handed off; the pickup starts under the other account' }); t.moveTo = null; }
@@ -867,7 +904,7 @@ function createPtys(opts = {}) {
     flush(t);
     const role = t.role;
     const r = spawnPty(t.id, commandFor(t.id, t.cwd), { cwd: t.cwd, account: m.account, cols: t.cols, rows: t.rows },
-      { chunks: t.chunks.slice(), size: t.size, created: t.created, forkFrom: t.forkFrom || null, handoffFrom: t.handoffFrom, role,
+      { ...carried(t), created: t.created, forkFrom: t.forkFrom || null, handoffFrom: t.handoffFrom, role,
         nudge: m.rescue ? { kind: 'continue', cause: `it hit the limit of Claude ${m.from}` } : null });
     log(`switch to ${m.account}: ${t.id} ${r.ok ? `resumed under ${m.account} (pid ${r.pid})${m.rescue ? ', "continue" due once it has loaded' : ''}` : `could not start again: ${r.message}`}`);
     t.moveTo = null;
@@ -1103,8 +1140,7 @@ function createPtys(opts = {}) {
   // is a select menu up on its screen (a permission prompt, a question)? Then an Enter would pick an option
   function menuUp(t) {
     try {
-      if (!screenLib) screenLib = require(path.join(__dirname, '..', 'screen.js'));
-      return !!screenLib.menuShown(t.chunks.join(''), t.cols, t.rows);
+      return !!screens().menuShown(kept(t), t.cols, t.rows);
     } catch (e) { log(`auto-continue: could not read the screen of ${t.id}: ${e.message}`); return true; }
   }
 
@@ -1157,7 +1193,7 @@ function createPtys(opts = {}) {
     if (!t || !t.alive) return;
     const c = intIn(cols, 2, 1000, 0), r = intIn(rows, 2, 500, 0);
     if (!c || !r) return;
-    try { t.pty.resize(c, r); t.cols = c; t.rows = r; } catch {}
+    try { t.pty.resize(c, r); t.cols = c; t.rows = r; t.dim = { cols: c, rows: r }; } catch {}
   }
 
   // Ask claude to quit the way a person would (Ctrl+C twice: claude reads it as a key in raw mode), so it
@@ -1261,13 +1297,13 @@ function createPtys(opts = {}) {
     return t ? t.id : null;
   }
 
-  // everything kept so far. Pending output is sent first, so a client gets every chunk once: the ones it
+  // everything kept so far (see kept). Pending output is sent first, so a client gets every chunk once: the ones it
   // received before the snapshot are in it, the ones after are new (see preload.js).
   function snapshot(id) {
     const t = terms.get(id);
     if (!t) return '';
     flush(t);
-    return t.chunks.join('');
+    return kept(t);
   }
 
   return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, workingBut, markRestartBy, snapshot, aliveCount, dirs,

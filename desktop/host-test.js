@@ -1,7 +1,8 @@
 // Fleet View desktop: a test of the session host's auto-continue, panel auto-close, restart, the roles: a bot's (the
 // usual fv commands; kept through a re-key, a /clear, a restore and a handoff; dropped when it resumes an older
 // conversation; the old 'chief' role is no role, also in a restore list that still has it), and conversations
-// on another device (sync/away.json: open, sendTo and a restore refuse them) (host.js), run
+// on another device (sync/away.json: open, sendTo and a restore refuse them), and a snapshot after a long turn
+// (the prompt box drawn once still in it) (host.js), run
 // with the system node:   node desktop/host-test.js
 // It starts a test host (its own pipe \\.\pipe\fleet-view-host-test-<random>, on macOS and Linux the socket
 // <temp>/fleet-view-host-test-<random>.sock; every file under one temp folder,
@@ -57,6 +58,19 @@ try {
 } catch {}
 process.on('exit', () => { if (pidFile) { try { fs.unlinkSync(pidFile); } catch {} } });
 process.stdout.write('fake claude ready\\r\\n');
+// with flood.txt (a number n): Claude Code's prompt box drawn once at the bottom, then the rows above it drawn over n
+// times, as a long turn's spinner and output do. ConPTY sends only the cells that change: the box goes out once
+try {
+  const n = +fs.readFileSync(path.join(process.cwd(), 'flood.txt'), 'utf8'), R = '\\u2500'.repeat(60);
+  process.stdout.write('\\x1b[26;1H' + R + '\\x1b[27;1H\\u276f \\x1b[2mPress up to edit queued messages\\x1b[22m\\x1b[28;1H' + R + '\\x1b[29;1H  bypass permissions on');
+  let k = 0;
+  const tick = setInterval(() => {
+    let s = '';
+    for (let r = 1; r <= 24; r++) s += '\\x1b[' + r + ';1Htick ' + String(k).padStart(6, '0') + ' row ' + r + ' ' + 'abcdefghij'.repeat(6);
+    process.stdout.write(s + '\\x1b[27;3H');
+    if (++k >= n) { clearInterval(tick); fs.writeFileSync(path.join(process.cwd(), 'flooded.txt'), String(k)); }
+  }, 4);
+} catch {}
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.on('data', (d) => { fs.appendFileSync(path.join(process.cwd(), 'received.txt'), d); if (d.includes(3)) process.exit(0); });
 process.stdin.resume();
@@ -545,6 +559,19 @@ async function main() {
   const before = received(K2).length;
   const told = await waitFor(() => noteSent({ cwd: K2.cwd }, 'continue') && received(K2).length > before, 15000);
   check('k. rescue: moved back to A, then "continue" is typed and sent once it is idle', kRescue && kRescue.ok && isA(configs(K2)[2]) && told, { kRescue, configs: configs(K2), received: received(K2).slice(-80) });
+
+  // ===== s. snapshot: the prompt box, drawn once, is still in a replay after more than 512 KB of output =====
+  const SCREEN = require(path.join(__dirname, '..', 'screen.js'));
+  const FL = session('flood');
+  fs.writeFileSync(path.join(FL.cwd, 'flood.txt'), '600');
+  await cl.req('open', { id: FL.id, cwd: FL.cwd, account: 'B', cols: 100, rows: 30 });
+  const flooded = await waitFor(() => fs.existsSync(path.join(FL.cwd, 'flooded.txt')), 60000, 500);
+  await sleep(1000); // ConPTY's last frames
+  const snap = String(await cl.req('snapshot', FL.id) || '');
+  const boxOf = (raw) => SCREEN.promptBox(SCREEN.render(raw, 100, 30, 60, false, true));
+  const whole = boxOf(snap), rawOnly = boxOf(snap.slice(-512 * 1024));
+  check('s. snapshot: the prompt box drawn once is in the replay after >512 KB of output (the last 512 KB alone lack it)',
+    !!flooded && !!whole && whole.text === '' && !rawOnly, { flooded, whole, rawOnly, length: snap.length });
   await cl.req('killAll').catch(() => {});
   cl.close();
 }
