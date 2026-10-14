@@ -17,10 +17,11 @@
 // does nothing; a double-click opens its chat in the Bots tab (ui.openBotChat). Right-click: the shell's bot menu
 // (ui.contextMenu({ kind: 'bot', id })). Its new spot holds until the state says so (or 5 s), so it never jumps back.
 // House rules (map-overlay.js): nothing pulses, blinks or lights up on events, colours and alphas are fixed; the
-// mascot's own slow breathing (mascot.css, transform only) is all that moves. The DOM is written only when something
-// changed: a bot's place, size, look, name or watches, the lines when an end moved.
+// mascot's own slow breathing (mascot.css, transform only) is all that moves, and the short "got it" hop its Bots
+// row does when Henry messages it (chats.js ackBot sends fv-bot-ack; mascot.js mascotAck). The DOM is written only
+// when something changed: a bot's place, size, look, name or watches, the lines when an end moved.
 
-import { mascotSVG, mascotState } from './mascot.js';
+import { mascotSVG, mascotState, mascotAck } from './mascot.js';
 import { C, acctColor, isAcct } from './cards.js';
 import { botLook } from './chats.js';
 
@@ -282,9 +283,18 @@ export function mountMapBots(layer, api) {
     for (const [id, m] of B.els) if (!seen.has(id)) { m.el.remove(); B.els.delete(id); if (B.drag && B.drag.id === id) B.drag = null; }
   }
 
+  // Henry messaged a bot (chats.js ackBot): its mascot here hops as its row does, if it is on the map
+  const onAck = (e) => {
+    const key = e && e.detail && e.detail.key;
+    const m = typeof key === 'string' && key.startsWith('bot:') ? B.els.get(key.slice(4)) : null;
+    if (m) mascotAck(m.face);
+  };
+  window.addEventListener('fv-bot-ack', onAck);
+
   function destroy() {
     if (B.dead) return;
     B.dead = true;
+    window.removeEventListener('fv-bot-ack', onAck);
     for (const m of B.els.values()) m.el.remove();
     B.els.clear();
     lines.remove();

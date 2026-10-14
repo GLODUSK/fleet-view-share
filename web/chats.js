@@ -239,9 +239,11 @@ const doingTip = (c) => {
   if (u && (u.starting || u.wait)) return 'Starting...';
   return doingOf(c, faceOf(c));
 };
-// the "got it" hop, on its avatar in the header and in the list
+// the "got it" hop, on its avatar in the header and in the list; a bot's mascot on the Map hops too (map-bots.js
+// listens for fv-bot-ack), so it answers wherever it is drawn
 function ackBot(el, key) {
   if (!el) return;
+  if (typeof window !== 'undefined' && typeof key === 'string' && key.startsWith('bot:')) window.dispatchEvent(new CustomEvent('fv-bot-ack', { detail: { key } }));
   if (el._cur && el._cur.key === key) mascotAck(el._headAv);
   const row = [...el._list.querySelectorAll('.ch-row')].find((r) => r.dataset.key === key);
   if (row) mascotAck(row.querySelector('.ch-av'));
