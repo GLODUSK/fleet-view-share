@@ -25,19 +25,31 @@
 
 // the shapes (the shader's farPart, map.js FAR_GLSL), with what p means for each
 export const FORM = {
-  point: 1, // a star-like point and its halo; p: diffraction spikes (0-1)
-  ring: 2, // an expanding shell, lumpy round its edge; p: its width (share of its radius)
-  jets: 3, // two opposed beams with knots running out; p: their width
-  galaxy: 4, // p > 0: a spiral seen at that aspect; p < 0: an elliptical at aspect -p
-  arc: 5, // a thin trail (stars along it) one radius long, bent by p (1 / radii)
-  binary: 6, // two points spiralling in (u: 0 far apart, 1 merged); p: the second's light
-  swirl: 7, // a one-armed spiral of debris winding into a dark middle (u turns it)
-  wash: 8, // a soft, mottled glow over a disc; p: mottle cells per radius
-  web: 9, // filaments (the edges of cells); p: cells per radius
-  arcs: 10, // an Einstein ring cut into p arcs (1: whole, 4: a cross)
-  ripple: 11, // rings running out from the middle (u: the front); p: wavelength (radii)
-  dots: 12, // a swarm of faint points; p: their density (0-1)
-  dark: 13, // a dark disc with a soft edge (a shadow, a hollow)
+  point: 1, // a star-like point: a white-hot core, its glare and a colour fringe; p: diffraction spikes (0-1)
+  ring: 2, // an expanding shell of thin, broken filaments (a supernova remnant); p: its width (share of its radius)
+  jets: 3, // two opposed turbulent beams from a bright base, knots running out, a lobe at each end; p: their width
+  galaxy: 4, // p > 0: a spiral (dust lanes, star clumps) seen at that aspect; p < 0: an elliptical at aspect -p
+  arc: 5, // a stream of stars one radius long, bent by p (1 / radii), its stars resolved along it
+  binary: 6, // two points spiralling in, a shared glow growing between them (u: 0 far apart, 1 merged); p: the second's light
+  swirl: 7, // a torn one-armed spiral of debris winding into a hot ring round a dark middle (u turns it)
+  wash: 8, // a cloud of gas: layered, streaked, frayed at its edge; p: its cells per radius
+  web: 9, // fine filaments (the edges of cells) with clumps where they meet; p: cells per radius
+  arcs: 10, // an Einstein ring cut into p arcs (1: whole, 4: a cross), clumpy like a lensed galaxy
+  ripple: 11, // faint rings running out from the middle (u: the front); p: wavelength (radii)
+  dots: 12, // a swarm of twinkling points, a few bright, some smudged; p: their density (0-1)
+  dark: 13, // a dark cloud with a torn, soft edge (a shadow, a hollow)
+  // signature shapes: one kind's whole story in one part, u its life (0 to 1 over the event, so t0 0, t1 1, and the
+  // light curve is the shape's own: env 'smooth' with short fades)
+  supernova: 14, // a red star, a flash, then a remnant of filaments and Rayleigh-Taylor fingers, cooling, a pulsar's nebula in it
+  kilonova: 15, // two neutron stars spiral in, flash, a short burst's jets, a wave ring, then blue and red ejecta
+  collision: 16, // two spirals swing past each other, fling out tidal tails, light up with star birth and merge
+  tde: 17, // a star falls in, is stretched into a stream, the bound end winds into a disc that flares
+  grb: 18, // a hard flash, needle jets from a cocoon, an afterglow fading and reddening, then the supernova under it
+  quasar: 19, // a core with JWST's spikes in its galaxy, ionised cones, lobes; p > 0 it switches on, < 0 off (|p|: the lobes)
+  magnetar: 20, // a giant flare: field loops and beams turning, the pulsing tail, ejecta; u counts turns, p of them in all
+  bhmerger: 21, // two black holes bending the light behind them spiral in and merge, ringing; p: the second's mass share
+  cartwheel: 22, // a spiral hit at u = p by an intruder; a ring of star birth runs out, spokes behind it
+  jellyfish: 23, // a galaxy moving along its x, its gas stripped into tentacles of star birth trailing behind
 };
 const F = FORM;
 
@@ -57,16 +69,16 @@ const binary = (R, o) => ({ f: F.binary, env: 'smooth', fin: 0.1, fout: 0.02, r0
 const ripple = (R, o) => ({ f: F.ripple, env: 'smooth', r0: 46, a: 0.12, rgb: ICE, p: 0.14, u0: 0, u1: 1, ...o });
 const dots = (R, o) => ({ f: F.dots, env: 'smooth', r0: 26, a: 0.42, rgb: ICE, p: 0.35, ...o });
 const wash = (R, o) => ({ f: F.wash, env: 'smooth', r0: 40, a: 0.07, rgb: GOLD, p: 2.5, ...o });
+// a signature shape over the whole life (u 0 to 1), its own light curve inside a short fade in and out
+const sig = (f, o) => ({ f, env: 'smooth', fin: 0.02, fout: 0.1, u0: 0, u1: 1, ...o });
 
 // name -> { label, what, group, make(R) }; the order is the one in Henry's list
 const K = [];
 const kind = (name, label, what, group, make) => K.push([name, { label, what, group, make }]);
 
 // ---- 1. star explosions and star deaths ----
-kind('supernova', 'Core-collapse supernova', 'a massive star\'s core collapsed and blew the star apart, in a far galaxy', 'stars', (R) => {
-  const [x, y] = inHost(R);
-  return { ms: 26e3, parts: [host(R), flash(R, { x, y, tau: 0.3, p: 0.3 }), shell(R, { x, y, t0: 0.18 })] };
-});
+kind('supernova', 'Core-collapse supernova', 'a massive star\'s core collapsed and blew the star apart, leaving a remnant of glowing filaments', 'stars', (R) => (
+  { ms: 26e3, parts: [sig(F.supernova, { r0: 13, a: 0.5, rgb: [1, 0.55, 0.36], ang: R.in(0, 6.28), fin: 0.01 })] }));
 kind('type-ia', 'Type Ia supernova', 'a white dwarf passed 1.4 suns and blew itself apart (the standard candle)', 'stars', (R) => {
   const [x, y] = inHost(R);
   return { ms: 24e3, parts: [host(R, { ell: true }), flash(R, { x, y, rgb: ICE, rise: 0.2, tau: 0.35, p: 0.2 })] };
@@ -102,13 +114,13 @@ kind('red-nova', 'Luminous red nova', 'two stars spiralled together and merged i
 
 // ---- 2. compact object collisions ----
 kind('kilonova', 'Kilonova', 'two neutron stars collided: a gamma flash, then a red glow of fresh gold and platinum', 'collisions', (R) => (
-  { ms: 26e3, quick: true, parts: [host(R, { ell: true, x: R.in(-10, 10), y: R.in(-6, 6), a: 0.24 }), binary(R, { t1: 0.36 }),
-    ripple(R, { t0: 0.3, t1: 0.62 }), blink({ t0: 0.35, t1: 0.42, r0: 6 }), flash(R, { t0: 0.37, r0: 5, a: 0.6, rgb: RED, rise: 0.08, tau: 0.4 })] }));
+  { ms: 26e3, quick: true, parts: [host(R, { ell: true, r: 9, x: R.in(-8, 8), y: R.in(-5, 5), a: 0.2 }),
+    sig(F.kilonova, { r0: 15, a: 0.6, rgb: ICE, ang: R.in(0, 6.28), fin: 0.04 })] }));
 kind('ns-bh', 'Neutron star + black hole merger', 'a black hole swallowed a neutron star (gravitational waves, sometimes a faint flash)', 'collisions', (R) => (
   { ms: 16e3, parts: [binary(R, { t1: 0.55, p: 0.35, rgb: VIOLET, a: 0.45 }), ripple(R, { t0: 0.45, t1: 0.9 }),
     ...(R.r() < 0.5 ? [flash(R, { t0: 0.54, r0: 4, a: 0.45, rgb: RED, tau: 0.3 })] : [])] }));
 kind('bh-merger', 'Black hole merger', 'two black holes spiralled together; spacetime rang with gravitational waves', 'collisions', (R) => (
-  { ms: 15e3, parts: [binary(R, { t1: 0.55, p: 1, rgb: VIOLET, a: 0.4 }), ripple(R, { t0: 0.5, t1: 1, r0: 52, a: 0.14 })] }));
+  { ms: 24e3, quick: true, parts: [sig(F.bhmerger, { r0: 22, a: 0.6, rgb: VIOLET, p: R.in(0.5, 1), ang: R.in(0, 6.28), fin: 0.06 })] }));
 kind('mass-gap', 'Mass-gap black hole merger', 'a merger that made a black hole of a size once thought impossible (like GW190521)', 'collisions', (R) => (
   { ms: 16e3, parts: [binary(R, { t1: 0.5, p: 0.85, rgb: GOLD, a: 0.45, r0: 15 }), ripple(R, { t0: 0.45, t1: 1, r0: 64, a: 0.15, rgb: GOLD, p: 0.18 })] }));
 kind('merger-grb', 'Long burst from a merger', 'a long gamma-ray burst from a neutron-star merger, with a kilonova after (GRB 211211A)', 'collisions', (R) => {
@@ -119,15 +131,14 @@ kind('merger-grb', 'Long burst from a merger', 'a long gamma-ray burst from a ne
 
 // ---- 3. gamma-ray bursts and high-energy flashes ----
 kind('long-grb', 'Long gamma-ray burst', 'a dying massive star fired a jet straight at us; then the afterglow', 'flashes', (R) => (
-  { ms: 16e3, quick: true, parts: [host(R, { r: 9, a: 0.18 }), blink({ t1: 0.16, r0: 8, p: 0.7 }),
-    { f: F.jets, r0: 18, a: 0.35, rgb: ICE, ang: R.in(0, 6.28), p: 0.05, env: 'fade', t1: 0.22, u0: 0, u1: 1 }, flash(R, { t0: 0.08, r0: 5, a: 0.5, rgb: GOLD, rise: 0.05, tau: 0.3 })] }));
+  { ms: 16e3, quick: true, parts: [host(R, { r: 9, a: 0.16, x: R.in(-4, 4), y: R.in(-3, 3) }),
+    sig(F.grb, { r0: 18, a: 0.6, rgb: ICE, ang: R.in(0, 6.28), fin: 0.002 })] }));
 kind('short-grb', 'Short gamma-ray burst', 'a flash under two seconds, usually two neutron stars merging', 'flashes', (R) => (
   { ms: 8e3, quick: true, parts: [blink({ t1: 0.08, r0: 6 }), flash(R, { t0: 0.04, r0: 4, a: 0.35, rgb: GOLD, tau: 0.3 })] }));
 kind('orphan-afterglow', 'Orphan afterglow', 'the fading glow of a gamma-ray burst whose jet pointed away from us', 'flashes', (R) => (
   { ms: 20e3, parts: [flash(R, { r0: 5, a: 0.45, rgb: GOLD, rise: 0.3, tau: 0.45 })] }));
 kind('magnetar-flare', 'Magnetar giant flare', 'a starquake on a magnetar: a tenth of a second, then a ringing pulse', 'flashes', (R) => (
-  { ms: 14e3, quick: true, parts: [host(R, { a: 0.22 }), blink({ x: R.in(-6, 6), y: R.in(-3, 3), t1: 0.05, r0: 6, rgb: [0.9, 0.86, 1] }),
-    { f: F.point, r0: 3, a: 0.4, rgb: VIOLET, env: 'pulse', per: 1500, floor: 0, t0: 0.06, t1: 0.75 }] }));
+  { ms: 14e3, quick: true, parts: [sig(F.magnetar, { r0: 15, a: 0.75, rgb: VIOLET, p: 4, u1: 4, ang: R.in(0, 6.28), fin: 0.002 })] }));
 kind('lfbot', 'Fast blue optical transient', 'a hot blue flash that rises in days and fades fast (like AT2018cow, "the Cow")', 'flashes', (R) => (
   { ms: 11e3, parts: [host(R, { r: 9, a: 0.18 }), flash(R, { x: R.in(-3, 3), r0: 5, a: 0.75, rgb: BLUE, rise: 0.05, tau: 0.15 })] }));
 kind('ulx', 'Ultraluminous X-ray source', 'a neutron star or black hole eating gas faster than should be possible', 'flashes', (R) => {
@@ -137,16 +148,13 @@ kind('ulx', 'Ultraluminous X-ray source', 'a neutron star or black hole eating g
 
 // ---- 4. supermassive black hole events ----
 kind('tde', 'Tidal disruption event', 'a star strayed too close to a giant black hole and was torn into a spiral', 'black holes', (R) => {
-  const s = R.sg();
-  return { ms: 30e3, parts: [host(R, { r: 20, a: 0.2 }), { f: F.point, x: 16 * s, y: -6, to: [0, 0], r0: 3, a: 0.55, rgb: GOLD, env: 'smooth', t1: 0.32, fout: 0.05 },
-    { f: F.swirl, r0: 4, r1: 11, a: 0.5, rgb: ORANGE, ang: R.in(0, 6.28), spin: 0.25 * s, env: 'smooth', t0: 0.28, u0: 0, u1: 1.5 },
-    flash(R, { t0: 0.34, r0: 6, a: 0.6, rgb: BLUE, rise: 0.12, tau: 0.45 })] };
+  return { ms: 30e3, parts: [host(R, { r: 22, a: 0.14 }), sig(F.tde, { r0: 16, a: 0.55, rgb: ORANGE, ang: R.in(0, 6.28), fin: 0.04 })] };
 });
 kind('qpe', 'Quasi-periodic eruptions', 'X-ray bursts every few hours from a galaxy\'s core (something crashing through the disk each orbit)', 'black holes', (R) => (
   { ms: 24e3, parts: [host(R, { r: 18 }), { f: F.point, r0: 3, a: 0.25, rgb: GOLD }, { f: F.point, r0: 5, a: 0.7, rgb: TEAL, env: 'pulse', per: 3200, floor: 0 }] }));
 kind('changing-look', 'Changing-look quasar', 'a quasar\'s bright core switched on (or off) within months', 'black holes', (R) => {
   const on = R.r() < 0.6;
-  return { ms: 26e3, parts: [host(R, { r: 18, a: 0.28 }), { f: F.point, r0: 6, a: 0.75, rgb: BLUE, env: on ? 'rise' : 'fade', p: 0.15 }] };
+  return { ms: 26e3, parts: [sig(F.quasar, { r0: 20, a: 0.5, rgb: ICE, p: (on ? 1 : -1) * R.in(0.25, 0.7), ang: R.in(0, 6.28), fin: 0.06 })] };
 });
 kind('blazar', 'Blazar flare', 'a black hole\'s jet pointed straight at us suddenly flared', 'black holes', (R) => (
   { ms: 15e3, parts: [host(R, { ell: true, r: 12, a: 0.22 }), { f: F.point, r0: 6, a: 0.8, rgb: VIOLET, env: 'flicker', rise: 0.1, tau: 0.3, p: 0.25 }] }));
@@ -165,10 +173,7 @@ kind('gw-background', 'Gravitational-wave background', 'the hum of countless gia
 
 // ---- 5. galaxy events ----
 kind('major-merger', 'Galaxy merger', 'two galaxies collide over hundreds of millions of years, flinging out tidal tails', 'galaxies', (R) => {
-  const ang = R.in(0, 6.28), c = Math.cos(ang), s = Math.sin(ang), d = 18;
-  return { ms: 60e3, parts: [host(R, { x: -c * d, y: -s * d, to: [-c * 5, -s * 5], r: 14 }), host(R, { x: c * d, y: s * d, to: [c * 5, s * 5], r: 13 }),
-    { f: F.arc, x: -c * 5, y: -s * 5, r0: 26, a: 0.28, rgb: ICE, ang: ang + 2.6, p: 1.4, t0: 0.45 }, { f: F.arc, x: c * 5, y: s * 5, r0: 26, a: 0.28, rgb: ICE, ang: ang - 0.5, p: 1.4, t0: 0.45 },
-    wash(R, { r0: 14, a: 0.12, rgb: ROSE, p: 3, t0: 0.55 })] };
+  return { ms: 60e3, parts: [sig(F.collision, { r0: 36, a: 0.45, rgb: ICE, ang: R.in(0, 6.28), fin: 0.06, fout: 0.08 })] };
 });
 kind('cannibalism', 'Galactic cannibalism', 'a big galaxy swallows a dwarf galaxy, pulling it into a stream of stars', 'galaxies', (R) => {
   const s = R.sg();
@@ -182,8 +187,8 @@ kind('starburst', 'Starburst', 'a galaxy forming stars hundreds of times faster 
 });
 kind('ring-galaxy', 'Ring galaxy forming', 'a small galaxy punched through a larger one, sending out a ring of star birth (like the Cartwheel)', 'galaxies', (R) => {
   const s = R.sg();
-  return { ms: 44e3, parts: [host(R, { r: 15, ell: true }), host(R, { r: 4, a: 0.3, x: -24 * s, y: -8, to: [26 * s, 8] }),
-    { f: F.ring, r0: 3, r1: 17, a: 0.3, rgb: BLUE, p: 0.14, t0: 0.4, env: 'smooth', ang: R.in(0, 6.28) }] };
+  // the intruder crosses the middle at 14 / 44 of its life (0.8), so u 0.255
+  return { ms: 44e3, parts: [sig(F.cartwheel, { r0: 18, a: 0.45, rgb: BLUE, p: 0.255, fin: 0.06 }), host(R, { r: 4, a: 0.3, x: -14 * s, y: -5, to: [30 * s, 10], t1: 0.8 })] };
 });
 kind('tidal-tails', 'Tidal tails', 'two galaxies passing close fling long streams of stars out (like the Mice)', 'galaxies', (R) => {
   const ang = R.in(0, 6.28);
@@ -192,8 +197,7 @@ kind('tidal-tails', 'Tidal tails', 'two galaxies passing close fling long stream
 });
 kind('jellyfish', 'Jellyfish galaxy', 'a galaxy plowing through a cluster\'s hot gas loses it in trailing tentacles', 'galaxies', (R) => {
   const ang = R.in(0, 6.28), c = Math.cos(ang), s = Math.sin(ang);
-  return { ms: 40e3, parts: [host(R, { r: 13, x: 6 * c, y: 6 * s, to: [-6 * c, -6 * s] }),
-    ...[-0.25, 0, 0.25].map((o) => ({ f: F.arc, x: 6 * c, y: 6 * s, to: [-6 * c, -6 * s], r0: R.in(22, 30), a: 0.26, rgb: TEAL, ang: ang + o, p: R.in(-0.4, 0.4), t0: 0.1 }))] };
+  return { ms: 40e3, parts: [sig(F.jellyfish, { r0: 30, a: 0.5, rgb: TEAL, ang, x: -5 * c, y: -5 * s, to: [5 * c, 5 * s], fin: 0.06 })] };
 });
 kind('harassment', 'Galaxy harassment', 'many fast fly-bys inside a cluster slowly wear a galaxy down', 'galaxies', (R) => (
   { ms: 40e3, parts: [host(R, { r: 13 }), ...[0, 1, 2].map((i) => { const a = R.in(0, 6.28), c = Math.cos(a), s = Math.sin(a);

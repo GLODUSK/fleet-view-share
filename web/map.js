@@ -120,9 +120,13 @@
 // at a time, beside the space events above) shows every kind in web/sky-far.js's catalog once, in a shuffled order,
 // before any repeats: supernovae, kilonovae, gamma-ray bursts, black hole mergers, tidal disruptions, jets, galaxy
 // mergers, cluster collisions, fast radio bursts, lensed images, the cosmic history, the far future (73 kinds). Each
-// is a few small parts the shader draws from one function (FAR_GLSL farPart: a point and its halo, a shell, jets, a
-// galaxy, a trail, an inspiralling pair, a debris swirl, a mottled wash, filaments, lensed arcs, ripples, a swarm of
-// dots, a dark disc), each with its own light over time (a flash, pulses, a fade...). All of it is far and faint: a
+// is a few small parts the shader draws from one function (FAR_GLSL farPart: a point with its glare and spikes, a
+// remnant's filaments, jets, a galaxy with dust lanes and star clumps, a stream of stars, an inspiralling pair, a debris
+// swirl, a cloud of gas, the cosmic web, lensed arcs, ripples, a swarm of dots, a dark cloud), each drawn after the real
+// thing in a deep photo; the ten most striking (supernova, kilonova, galaxy collision, tidal disruption, gamma-ray burst,
+// quasar, magnetar flare, black hole merger, ring galaxy, jellyfish galaxy) each have a signature shape of their own that
+// tells their whole story over their life, from noise seeded per part so no two look alike, and each with its own light over time (a
+// flash, pulses, a fade...). All of it is far and faint: a
 // flash is a few px with a soft halo, a galaxy a smudge, and only the cosmic washes are big, at a few percent alpha. It
 // goes where the orbs and hubs are not (farPlace: FAR_CLEAR px clear of every one on screen, the best of FAR_TRIES
 // places), under the stars, at the far star layer's depth. Every start (and every space event's) is logged on the
@@ -3468,7 +3472,8 @@ function farPlace(reach) {
   return best;
 }
 // how far a part reaches from the event's middle (CSS px), by its shape's edge (the shader's cut-offs)
-const FAR_REACH = { 1: 2.5, 2: 1.4, 3: 1.2, 4: 1.5, 5: 1.2, 6: 1.3, 7: 1.2, 8: 1.1, 9: 1.1, 10: 1.3, 11: 1, 12: 1.1, 13: 1.3 };
+const FAR_REACH = { 1: 2.5, 2: 1.4, 3: 1.2, 4: 1.5, 5: 1.2, 6: 1.3, 7: 1.2, 8: 1.1, 9: 1.1, 10: 1.3, 11: 1, 12: 1.1, 13: 1.3,
+  14: 1.25, 15: 1.1, 16: 1.25, 17: 1.2, 18: 1.15, 19: 1.3, 20: 1.2, 21: 1.15, 22: 1.25, 23: 1.3 };
 // start `name` at t: its recipe laid out at the window's scale, placed (farPlace) and logged; false when it is not in
 // the catalog or the map is under reduced motion
 function farStart(t, name) {
@@ -4123,96 +4128,549 @@ const WARP_GLSL = `vec2 warpP(vec2 p, float k) {
 // a far event's part (see "Look", FAR_*; web/sky-far.js FORM), premultiplied, at device px p. uFr, three per part: A its
 // middle (device px; x, y), size r (device px) and alpha (w), B its shape (x), progress u (y), seed (z; +1: a trail that
 // grows) and turn (w), C its rgb and the shape's number (w). Everything is worked in the part's own frame (q: turned,
-// in radii), and a pixel past the shape's reach returns at once (FAR_REACH in the JS keeps the same edges)
-const FAR_GLSL = `vec4 farPart(vec2 p, vec4 A, vec4 B, vec4 C) {
+// in radii), and a pixel past the shape's reach returns at once (FAR_REACH in the JS keeps the same edges). Each shape is
+// drawn after the real thing in a deep photo: value noise (nbN, nbF, from the nebula) warped and seeded by the part's seed
+// (so), so no two look the same, gives filaments, clumps, dust and torn edges; light is summed as m (how much) and lt (its
+// colour times m), so one part can be white-hot in its core and its own colour in its wings
+const FAR_GLSL = `void farAdd(inout float m, inout vec3 lt, float w, vec3 c) { m += w; lt += w * c; }
+// a ridged nbF: 1 along the noise's middle level, falling off both sides (thin crests where it crosses)
+float farRidge(vec2 x, int n) { return 1.0 - abs(2.0 * nbF(x, n) - 1.0); }
+// the distances to the three nearest points of a jittered grid (the web's filaments lie where the nearest two tie, its
+// knots where three do)
+vec3 farCells(vec2 g) {
+  vec2 gi = floor(g);
+  vec3 f = vec3(9.0);
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+    vec2 cc = gi + vec2(float(x), float(y));
+    uvec2 h = uvec2(ivec2(cc) + 4096);
+    float dd = length(g - cc - vec2(hash(h), hash(h + uvec2(17u, 31u))));
+    if (dd < f.x) f = vec3(dd, f.xy); else if (dd < f.y) f = vec3(f.x, dd, f.y); else if (dd < f.z) f.z = dd;
+  }
+  return f;
+}
+// for the signature shapes (14 on): v turned by -a, as q is
+vec2 farTurn(vec2 v, float a) { float c = cos(a), s = sin(a); return vec2(c * v.x + s * v.y, -s * v.x + c * v.y); }
+// a field of small points near q, n cells per radius, a share dens of them holding one: its light (a dot about a CSS px
+// across, larger with its pick b, which it hands back)
+float farPts(vec2 q, float n, float dens, float px, vec2 so, out float b) {
+  vec2 g = q * n + so, gi = floor(g);
+  uvec2 h = uvec2(ivec2(gi) + 4096);
+  b = hash(h + uvec2(3u, 77u));
+  if (hash(h + uvec2(5u, 9u)) >= dens) return 0.0;
+  vec2 dd = (g - gi - 0.25 - 0.5 * vec2(hash(h), hash(h + uvec2(17u, 31u)))) / (n * px * (0.8 + 0.8 * b));
+  return exp(-dot(dd, dd));
+}
+// a spiral disc, g in its own plane (its edge at 1), tw its arms' turn, br its light: a warm bulge round a white nucleus,
+// two noisy arms of blue clumps, dust on their inner side, pink star birth (sf: how much)
+void farDisc(inout float m, inout vec3 lt, vec2 g, float tw, float br, float sf, vec2 so) {
+  float R = length(g);
+  if (R > 1.3 || br <= 0.0) return;
+  float bulge = exp(-R * R * 14.0), nuc = exp(-R * R * 160.0);
+  float ph = atan(g.y, g.x) - 2.6 * log(R + 0.05) - tw + 1.4 * (nbF(g * 2.6 + so, 3) - 0.5);
+  float arm = pow(0.5 + 0.5 * cos(2.0 * ph), 3.0), disc = exp(-R * 2.6) * smoothstep(1.15, 0.5, R);
+  float lane = pow(0.5 + 0.5 * cos(2.0 * ph + 1.1), 8.0) * smoothstep(0.08, 0.3, R) * smoothstep(1.1, 0.4, R);
+  vec3 warm = vec3(1.0, 0.86, 0.62), blue = vec3(0.66, 0.78, 1.0);
+  farAdd(m, lt, br * (0.85 * bulge + 0.4 * nuc), mix(warm, vec3(1.0), 0.6 * nuc));
+  farAdd(m, lt, br * 0.75 * disc * (0.2 + 0.8 * arm) * (1.0 - 0.6 * lane), mix(warm, blue, smoothstep(0.1, 0.5, R)));
+  float cl = br * disc * arm * (1.0 - 0.6 * lane) * smoothstep(0.15, 0.4, R);
+  farAdd(m, lt, cl * 2.0 * pow(nbN(g * 16.0 + so + 7.0), 5.0), vec3(0.8, 0.88, 1.0));
+  farAdd(m, lt, cl * sf * 1.6 * pow(nbN(g * 11.0 + so + 19.0), 6.0), vec3(1.0, 0.55, 0.68));
+}
+// diffraction spikes on a point at s (in radii, the screen's frame: spikes keep the telescope's way up): jw as JWST draws
+// them (six long, two short across), else as Hubble's four; w their width (radii), k how fast they fall off
+float farSpikes(vec2 s, float w, float k, bool jw) {
+  float L = length(s), bead = 0.75 + 0.25 * cos(L * 34.0), o = 0.0;
+  if (jw) {
+    for (int i = 0; i < 3; i++) {
+      float an = 1.5708 + float(i) * 1.0472;
+      vec2 t = vec2(cos(an), sin(an));
+      o += exp(-abs(dot(s, vec2(-t.y, t.x))) / w) * exp(-abs(dot(s, t)) * k);
+    }
+    o += 0.45 * exp(-abs(s.y) / w) * exp(-abs(s.x) * k * 2.5);
+  } else {
+    vec2 a = abs(s);
+    o = exp(-a.y / w) * exp(-a.x * k) + exp(-a.x / w) * exp(-a.y * k);
+  }
+  return o * bead;
+}
+vec4 farPart(vec2 p, vec4 A, vec4 B, vec4 C) {
   float r = max(A.z, 0.5), dp = uSize.z, u = B.y, sd = fract(B.z), pr = C.w;
   int fm = int(B.x + 0.5);
   vec2 d = p - A.xy;
   float cs = cos(B.w), sn = sin(B.w);
   vec2 q = vec2(cs * d.x + sn * d.y, -sn * d.x + cs * d.y) / r;
   float L = length(q), px = dp / r, m = 0.0;
-  vec3 col = C.rgb;
-  if (fm == 1) { // a point: a hot core, a soft halo, spikes (pr)
+  vec3 col = C.rgb, lt = vec3(0.0), wht = vec3(1.0);
+  vec2 so = vec2(sd * 157.3, fract(sd * 7.37) * 89.1); // the seed's own corner of the noise
+  if (fm == 1) { // a point: a small white-hot core, steep wings of its own colour, a halo whose rim the lens tints (a little
+    // blue inside, warm outside) with a faint ring in it, a wide glare, and spikes (pr) beaded along their length, a faint
+    // second pair between them
     if (L > 2.5) return vec4(0.0);
-    float core = exp(-L * L * 9.0);
-    m = core + 0.2 * exp(-L * L * 1.6) + pr * 0.35 * (exp(-abs(q.y) / (0.8 * px)) * exp(-abs(q.x) * 1.6) + exp(-abs(q.x) / (0.8 * px)) * exp(-abs(q.y) * 1.6));
-    col = mix(col, vec3(1.0), 0.45 * core);
-  } else if (fm == 2) { // a shell: lumpy round its edge, a faint fill
+    float core = exp(-L * L * 30.0), wing = exp(-L * 6.0);
+    vec3 fr = mix(vec3(0.82, 0.9, 1.0), vec3(1.0, 0.82, 0.68), smoothstep(0.2, 0.8, L));
+    farAdd(m, lt, core, wht);
+    farAdd(m, lt, 0.55 * wing, mix(col, wht, 0.4 * wing));
+    farAdd(m, lt, 0.16 * exp(-L * L * 1.6) + 0.05 * exp(-pow((L - 0.62) / 0.1, 2.0)), col * fr);
+    farAdd(m, lt, 0.12 * 0.04 / (0.04 + L * L) * smoothstep(2.5, 1.2, L), col);
+    if (pr > 0.0) {
+      vec2 aq = abs(q);
+      float w = 0.55 * px, bead = 0.75 + 0.25 * cos(L * 34.0);
+      float sp = 0.5 * bead * (exp(-aq.y / w) * exp(-aq.x * 1.1) + exp(-aq.x / w) * exp(-aq.y * 1.1))
+        + 0.14 * (exp(-abs(q.x - q.y) * 0.7071 / w) + exp(-abs(q.x + q.y) * 0.7071 / w)) * exp(-L * 3.0);
+      farAdd(m, lt, pr * sp * smoothstep(2.5, 1.6, L), mix(wht, col * fr, smoothstep(0.0, 0.6, L)));
+    }
+  } else if (fm == 2) { // a supernova remnant: a few thin filaments braided round its rim (each pushed in and out by its own
+    // noise, so they cross and part) in a soft glow, broken in places, brighter in knots along them, a faint sharp shock just
+    // outside (as ragged), a fibrous fill
     if (L > 1.4) return vec4(0.0);
-    float w = max(pr, 1.3 * px), th = atan(q.y, q.x);
-    float lump = 0.62 + 0.24 * sin(3.0 * th + sd * 20.0) + 0.14 * sin(7.0 * th + sd * 53.0);
-    m = lump * exp(-pow((L - 1.0) / w, 2.0)) + 0.06 * smoothstep(1.0, 0.5, L);
-  } else if (fm == 3) { // jets: two beams along the turn, widening a little, knots running out with u
+    float w = max(pr, 1.3 * px), fw = max(0.12 * w, 1.1 * px);
+    vec2 nq = q * 2.2 + so;
+    float whole = 0.2 + 0.8 * smoothstep(0.28, 0.62, nbF(nq * 0.8 + 3.1, 3)), fil = 0.0;
+    for (int k = 0; k < 3; k++) {
+      float fk = float(k), rk = 1.0 - w * (0.1 + 0.3 * fk) + w * 1.1 * (nbF(nq * (1.0 + 0.6 * fk) + fk * 17.0, 3) - 0.5);
+      fil += (1.0 - 0.3 * fk) * exp(-pow((L - rk) / (fw * (1.0 + 0.4 * fk)), 2.0));
+    }
+    float knot = 1.8 * smoothstep(0.5, 0.8, nbF(q * 9.0 + so + 41.0, 3));
+    farAdd(m, lt, whole * 0.6 * fil * (1.0 + knot), mix(col, wht, 0.15 * knot));
+    farAdd(m, lt, 0.25 * whole * exp(-pow((L - 1.0 + 0.2 * w) / max(w, 4.0 * px), 2.0)), col);
+    float rs = 1.0 + 0.3 * w + 0.5 * w * (nbF(nq * 0.6 + 23.0, 2) - 0.5);
+    farAdd(m, lt, 0.22 * whole * exp(-pow((L - rs) / max(0.35 * fw, px), 2.0)), mix(col, vec3(0.8, 0.9, 1.0), 0.6));
+    farAdd(m, lt, 0.06 * smoothstep(1.0, 0.4, L) * (0.3 + farRidge(q * 3.5 + so, 3)), col * vec3(0.85, 0.92, 1.0));
+  } else if (fm == 3) { // jets: a bright base, a narrow turbulent beam each way wandering a little (the one towards us, picked
+    // by the seed, brighter), knots running out with u, a faint sheath round it, a lobe where it ends
     if (L > 1.2) return vec4(0.0);
-    float al = abs(q.x), w = pr * (0.5 + al) + 0.7 * px;
-    float knots = 0.55 + 0.45 * sin(al * 14.0 - u * 18.0 + sd * 30.0);
-    m = exp(-pow(q.y / w, 2.0)) * smoothstep(1.1, 0.45, al) * knots * (0.35 + 0.65 * (1.0 - al)) + 0.8 * exp(-L * L * 80.0);
-  } else if (fm == 4) { // a galaxy: pr > 0 a spiral seen at that aspect, < 0 an elliptical
+    float al = abs(q.x), sg = q.x < 0.0 ? -1.0 : 1.0, near = sg * (sd - 0.5) > 0.0 ? 1.0 : 0.5;
+    float wb = pr * (0.45 + 1.1 * al) + 0.7 * px;
+    float y0 = pr * 2.5 * al * (nbF(vec2(al * 3.0, sg * 5.0) + so, 2) - 0.5), yy = (q.y - y0) / wb;
+    float turb = nbF(vec2((al - u * 0.4) * 12.0, yy * 0.6) + so + sg * 31.0, 3);
+    float knot = pow(0.5 + 0.5 * sin(al * 14.0 - u * 18.0 + sd * 30.0 + 2.5 * nbN(vec2(al * 3.0, sg) + so)), 3.0);
+    float run = smoothstep(1.1, 0.4, al) * (0.3 + 0.7 * (1.0 - al)) * near;
+    farAdd(m, lt, exp(-yy * yy) * run * (0.35 + 0.5 * turb + 0.7 * knot), mix(col, wht, 0.35 * knot));
+    farAdd(m, lt, 0.1 * exp(-yy * yy * 0.12) * smoothstep(1.0, 0.2, al) * near * (0.4 + turb), col);
+    vec2 lq = vec2(al - 0.93, q.y - y0) / 0.12;
+    farAdd(m, lt, 0.28 * exp(-dot(lq, lq)) * smoothstep(1.2, 1.05, al) * near * (0.4 + nbF(q * 9.0 + so, 3)), col);
+    farAdd(m, lt, 0.8 * exp(-L * L * 80.0) + 0.2 * exp(-L * L * 12.0), mix(col, wht, 0.6));
+  } else if (fm == 4) { // a galaxy: pr > 0 a spiral seen at that aspect, < 0 an elliptical. A spiral: a warm bulge round a
+    // white nucleus, two arms (their phase warped by noise, so never quite symmetric) of blue star clumps and pink star
+    // birth, dark dust lanes on their inner side, and seen nearly edge-on a dust lane across the middle. An elliptical:
+    // smooth, slightly irregular, a sharp core, (some) faint shells each off the other side from the last, a few globular
+    // clusters round it
     if (L > 1.5) return vec4(0.0);
     float asp = max(abs(pr), 0.12);
     vec2 g = vec2(q.x, q.y / asp);
-    float R = length(g), bulge = exp(-R * R * 14.0);
-    if (pr < 0.0) m = 0.8 * exp(-pow(R * 2.4, 1.2)) + 0.4 * bulge;
-    else {
-      float arm = 0.5 + 0.5 * cos(2.0 * (atan(g.y, g.x) - 2.6 * log(R + 0.05) - sd * 6.0));
-      m = 0.85 * bulge + 0.75 * exp(-R * 2.6) * (0.25 + 0.75 * arm * arm) * smoothstep(1.15, 0.55, R);
+    float R = length(g), bulge = exp(-R * R * 14.0), nuc = exp(-R * R * 160.0);
+    vec3 warm = mix(col, vec3(1.0, 0.86, 0.62), 0.5);
+    if (pr < 0.0) {
+      float R2 = R * (1.0 + 0.08 * (nbN(g * 2.0 + so) - 0.5));
+      farAdd(m, lt, 0.8 * exp(-pow(R2 * 2.4, 1.2)) + 0.4 * bulge, mix(col, warm, 0.3 + 0.5 * bulge));
+      farAdd(m, lt, 0.35 * nuc, mix(warm, wht, 0.5));
+      float sh = R * 3.5 + sd * 1.4, side = mod(floor(sh), 2.0) * 2.0 - 1.0;
+      if (sd > 0.5) farAdd(m, lt, 0.06 * pow(sin(3.1416 * fract(sh)), 12.0) * smoothstep(1.2, 0.5, R) * smoothstep(0.15, 0.35, R)
+        * pow(max(side * cos(atan(g.y, g.x) - sd * 6.2832), 0.0), 2.0), col);
+      vec2 gc = q * 9.0 + so, ci = floor(gc);
+      uvec2 h = uvec2(ivec2(ci) + 4096);
+      vec2 dd = (gc - ci - 0.25 - 0.5 * vec2(hash(h), hash(h + uvec2(3u, 7u)))) / (9.0 * px * 0.8);
+      farAdd(m, lt, 0.3 * step(hash(h + uvec2(11u, 5u)), 0.25 * exp(-L * 1.5)) * exp(-dot(dd, dd)) * smoothstep(1.4, 0.9, L), warm);
+    } else {
+      float wv = nbF(g * 2.6 + so, 3) - 0.5, ph = atan(g.y, g.x) - 2.6 * log(R + 0.05) - sd * 6.0 + 1.4 * wv;
+      float arm = 0.5 + 0.5 * cos(2.0 * ph), armS = arm * arm * arm, disc = exp(-R * 2.6) * smoothstep(1.15, 0.55, R);
+      float lane = pow(0.5 + 0.5 * cos(2.0 * ph + 1.1), 8.0) * smoothstep(0.08, 0.3, R) * smoothstep(1.1, 0.4, R) * (0.4 + nbF(g * 7.0 + so, 2));
+      float edge = (1.0 - smoothstep(0.25, 0.6, asp)) * exp(-pow((q.y - 0.012) / (0.03 + 0.06 * asp), 2.0)) * smoothstep(1.0, 0.1, abs(q.x));
+      float dust = (1.0 - 0.6 * lane) * (1.0 - 0.7 * edge);
+      vec3 blue = mix(col, vec3(0.66, 0.78, 1.0), 0.45);
+      farAdd(m, lt, (0.85 * bulge + 0.4 * nuc) * (1.0 - 0.7 * edge), mix(warm, wht, 0.6 * nuc));
+      farAdd(m, lt, 0.75 * disc * (0.2 + 0.8 * armS) * dust, mix(warm, blue, smoothstep(0.1, 0.5, R)));
+      float clump = pow(nbN(g * 16.0 + so + 7.0), 5.0), hii = pow(nbN(g * 11.0 + so + 19.0), 7.0);
+      farAdd(m, lt, disc * armS * dust * smoothstep(0.15, 0.4, R) * 2.2 * clump, mix(blue, wht, 0.4));
+      farAdd(m, lt, disc * armS * dust * smoothstep(0.15, 0.4, R) * 1.6 * hii, vec3(1.0, 0.55, 0.68));
     }
-  } else if (fm == 5) { // a trail one radius long from the middle, bent by pr; stars along it; a growing one to u
+  } else if (fm == 5) { // a stream of stars one radius long from the middle, bent by pr: a faint clumpy band wandering a
+    // little, widening away from its source, with its own stars resolved along it; a growing one (a trail) to u, widening
+    // behind its head
     if (L > 1.25) return vec4(0.0);
     float s, e, k = pr;
-    if (abs(k) < 0.02) { s = q.x; e = abs(q.y); }
-    else { vec2 v = q - vec2(0.0, 1.0 / k); s = atan(k * v.x, -k * v.y) / k; e = abs(length(v) - 1.0 / abs(k)); }
-    if (s < 0.0 || s > 1.0) return vec4(0.0);
-    float w = max(0.035, 1.0 * px), spk = 0.45 + 0.55 * step(0.55, hash(uvec2(uint(s * 70.0), uint(sd * 9973.0))));
-    m = exp(-pow(e / w, 2.0)) * spk * pow(1.0 - s, 0.6);
-    if (B.z >= 1.0) { float h = max(u, 1e-3); m = s > h ? 0.0 : exp(-pow(e / w, 2.0)) * spk * (0.3 + 0.7 * s / h); }
-  } else if (fm == 6) { // a pair spiralling in: closer and faster as u goes to 1; pr the second's light
+    if (abs(k) < 0.02) { s = q.x; e = q.y; }
+    else { vec2 v = q - vec2(0.0, 1.0 / k); s = atan(k * v.x, -k * v.y) / k; e = length(v) - 1.0 / abs(k); }
+    bool gr = B.z >= 1.0;
+    float hd = max(u, 1e-3);
+    if (s < 0.0 || s > 1.0 || (gr && s > hd)) return vec4(0.0);
+    float age = gr ? hd - s : s, lum = gr ? 0.3 + 0.7 * s / hd : pow(1.0 - s, 0.6);
+    float wd = 0.02 + (gr ? 0.025 : 0.07) * age + 0.5 * px;
+    float ew = e + wd * 0.8 * (nbF(vec2(s * 5.0, 0.0) + so, 2) - 0.5);
+    farAdd(m, lt, 0.4 * exp(-pow(ew / wd, 2.0)) * lum * (0.35 + 0.9 * nbF(vec2(s * 14.0, ew / wd * 0.7) + so + 5.0, 3)), col);
+    float n = clamp(0.25 / px, 20.0, 120.0);
+    vec2 gs = vec2(s, ew) * n, gi = floor(gs);
+    uvec2 h = uvec2(ivec2(gi) + 4096) + uvec2(uint(sd * 9973.0), 0u);
+    float b = hash(h + uvec2(3u, 77u)), sz = 0.7 + 0.8 * b;
+    vec2 dd = (gs - gi - 0.25 - 0.5 * vec2(hash(h), hash(h + uvec2(17u, 31u)))) / (n * px * sz);
+    farAdd(m, lt, step(hash(h + uvec2(5u, 9u)), 0.55 * exp(-pow(ew / (wd * 1.3), 2.0)) * lum) * (0.35 + 0.75 * b * b) * exp(-dot(dd, dd)),
+      mix(col, b > 0.8 ? vec3(1.0, 0.86, 0.66) : wht, 0.5 * b));
+  } else if (fm == 6) { // a pair spiralling in: closer and faster as u goes to 1; pr the second's light. Each a point with a
+    // halo, a bridge of gas pulled between them and a shared glow that grow as they close, two faint streamers flung out
     if (L > 1.3) return vec4(0.0);
     float v = max(1.0 - u, 0.0), sep = pow(v, 0.25), ph = sd * 6.2832 + 70.0 * (1.0 - pow(v, 0.625));
     float pw = max(0.07, 1.5 * px);
     vec2 o = 0.5 * sep * vec2(cos(ph), sin(ph)), a1 = (q - o) / pw, a2 = (q + o) / pw;
-    m = exp(-dot(a1, a1)) + pr * exp(-dot(a2, a2));
-  } else if (fm == 7) { // a debris swirl: one arm winding in to a dark middle, turning with u
+    farAdd(m, lt, exp(-dot(a1, a1)) + 0.16 * exp(-dot(a1, a1) * 0.1), mix(col, wht, 0.5 * exp(-dot(a1, a1))));
+    farAdd(m, lt, pr * (exp(-dot(a2, a2)) + 0.16 * exp(-dot(a2, a2) * 0.1)), col);
+    float pea = length(q - o) * length(q + o) / pow(0.55 * sep + pw, 2.0);
+    farAdd(m, lt, 0.28 * (0.25 + 0.75 * u) * (0.5 + 0.5 * pr) * exp(-pea * pea), col);
+    farAdd(m, lt, 0.1 * u * exp(-L * L / pow(0.25 * sep + 0.12, 2.0)), col);
+    float th = atan(q.y, q.x);
+    farAdd(m, lt, 0.1 * (0.3 + 0.7 * u) * pow(0.5 + 0.5 * cos(2.0 * (th - ph) + 9.0 * L), 6.0) * exp(-L * 3.0) * smoothstep(0.1, 0.3, L)
+      * smoothstep(1.25, 0.9, L) * (0.5 + nbF(q * 6.0 + so, 2)), col);
+  } else if (fm == 7) { // a tidal disruption's debris: a torn arm of streaks (and a fainter one opposite) winding in to a hot
+    // ring with one side brighter (its Doppler beaming) round a dark middle, turning with u
     if (L > 1.2) return vec4(0.0);
-    float arm = 0.5 + 0.5 * cos(atan(q.y, q.x) + 2.4 * log(max(L, 1e-3)) - u * 6.0 - sd * 6.2832);
-    m = pow(arm, 5.0) * smoothstep(1.1, 0.35, L) * smoothstep(0.05, 0.2, L) + 0.5 * exp(-pow((L - 0.13) / 0.05, 2.0));
-  } else if (fm == 8) { // a mottled wash over the disc, pr cells per radius
+    float th = atan(q.y, q.x), ph = th + 2.4 * log(max(L, 1e-3)) - u * 6.0 - sd * 6.2832, wv = 0.9 * (nbF(q * 3.0 + so, 3) - 0.5);
+    float arm = pow(0.5 + 0.5 * cos(ph + wv), 5.0) + 0.35 * pow(0.5 + 0.5 * cos(ph + 3.1 + wv), 9.0);
+    float streak = 0.5 + 0.5 * cos(13.0 * ph + 4.0 * nbN(q * 5.0 + so));
+    farAdd(m, lt, arm * (0.4 + 0.6 * streak) * (0.5 + 0.8 * nbF(q * 7.0 + so, 3)) * smoothstep(1.1, 0.35, L) * smoothstep(0.08, 0.22, L),
+      mix(col, vec3(1.0, 0.9, 0.8), 0.5 * smoothstep(0.45, 0.15, L)));
+    farAdd(m, lt, 0.6 * exp(-pow((L - 0.13) / 0.03, 2.0)) * (0.55 + 0.45 * sin(th + sd * 6.2832)), mix(col, vec3(0.85, 0.92, 1.0), 0.7));
+  } else if (fm == 8) { // a glow of gas, pr cells per radius: a noise warped by itself (pulled into streams) gives its density,
+    // a ridged one along the same warp bright crests, a thin band round one level of another dark lanes; its edge is that
+    // density added to its circle, so it frays; its colour pulled a little towards its own hues turned round, and white on
+    // the crests
     if (L > 1.1) return vec4(0.0);
-    vec2 nq = q * max(pr, 0.5) + sd * 97.0;
-    float n = 0.55 * nbN(nq) + 0.3 * nbN(nq * 2.03 + 13.0) + 0.15 * nbN(nq * 4.1 + 29.0);
-    m = smoothstep(1.1, 0.15, L) * (0.25 + 0.75 * smoothstep(0.35, 0.8, n));
-  } else if (fm == 9) { // filaments: the edges between cells (pr per radius)
+    vec2 x = q * max(pr, 0.5) * 0.7 + so;
+    vec2 w1 = vec2(nbF(x, 3), nbF(x + vec2(5.2, 1.3), 3));
+    float dn = nbF(x + 2.2 * w1 + vec2(1.7, 9.2), 4), crest = pow(farRidge(x * 1.7 + 1.6 * w1 + 3.3, 3), 8.0);
+    float lane = smoothstep(0.1, 0.02, abs(nbF(x * 1.3 + 2.0 * w1 + 7.7, 3) - 0.5)) * smoothstep(0.45, 0.7, nbN(x * 0.6 + 4.4));
+    float body = smoothstep(0.32, 0.75, dn), edge = smoothstep(1.1, 0.25, L + 0.55 * (0.5 - dn)) * smoothstep(1.1, 0.95, L);
+    vec3 c = mix(col, col.bgr, 0.35 * smoothstep(0.3, 0.7, w1.x));
+    farAdd(m, lt, edge * (0.2 + 0.7 * body) * (1.0 - 0.5 * lane), c);
+    farAdd(m, lt, edge * 0.5 * crest * (0.3 + body) * (1.0 - 0.5 * lane), mix(c, wht, 0.3));
+  } else if (fm == 9) { // the cosmic web, pr cells per radius: curving filaments (the edges between cells, bent by noise),
+    // their light varying along them in a faint haze, a finer web between, bright clumps where they meet
     if (L > 1.1) return vec4(0.0);
-    vec2 g = q * pr + sd * 53.0, gi = floor(g);
-    float f1 = 9.0, f2 = 9.0;
-    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
-      vec2 cc = gi + vec2(float(x), float(y));
-      uvec2 h = uvec2(ivec2(cc) + 4096);
-      float dd = length(g - cc - vec2(hash(h), hash(h + uvec2(17u, 31u))));
-      if (dd < f1) { f2 = f1; f1 = dd; } else if (dd < f2) f2 = dd;
-    }
-    m = (1.0 - smoothstep(0.0, 0.1, f2 - f1)) * smoothstep(1.1, 0.3, L);
-  } else if (fm == 10) { // an Einstein ring cut into pr arcs (1: whole, 4: a cross of short ones)
+    vec2 g = q * pr + so;
+    g += 0.35 * (vec2(nbF(g * 0.8 + 3.0, 2), nbF(g * 0.8 + 11.0, 2)) - 0.5);
+    vec3 f = farCells(g);
+    vec2 f2 = farCells(g * 2.3 + 17.0).xy;
+    float e1 = f.y - f.x, wf = max(0.03, 1.2 * px * pr), fade = smoothstep(1.1, 0.3, L);
+    farAdd(m, lt, fade * (exp(-pow(e1 / wf, 2.0)) * (0.4 + 0.9 * nbF(g * 2.0 + 5.0, 3)) + 0.15 * exp(-e1 / 0.12)), col);
+    farAdd(m, lt, fade * 0.35 * exp(-pow((f2.y - f2.x) / (wf * 2.3), 2.0)) * nbF(g * 1.5 + 9.0, 2), col * 0.9);
+    float nd = f.z - f.x;
+    farAdd(m, lt, fade * (0.6 * exp(-pow(nd / 0.1, 2.0)) + 0.15 * exp(-pow(nd / 0.3, 2.0))), mix(col, vec3(1.0, 0.9, 0.8), 0.5));
+  } else if (fm == 10) { // an Einstein ring cut into pr arcs (1: whole, 4: a cross of short ones): each arc thickest in its
+    // middle, a lensed galaxy's knots smeared along it, a fainter twin just outside, and a bright image at its middle (the
+    // quasar's in a cross)
     if (L > 1.3) return vec4(0.0);
     float n = max(pr, 1.0), seg = 6.2832 / n, dth = mod(atan(q.y, q.x) + seg * 0.5, seg) - seg * 0.5;
-    float wid = n >= 4.0 ? 0.08 : n > 1.0 ? 0.3 : 9.0;
-    m = exp(-pow((L - 1.0) / max(0.06, 1.3 * px), 2.0)) * exp(-pow(dth / (seg * wid), 2.0));
-  } else if (fm == 11) { // ripples running out to the front u, pr apart
+    float wid = n >= 4.0 ? 0.08 : n > 1.0 ? 0.3 : 9.0, along = exp(-pow(dth / (seg * wid), 2.0));
+    vec2 dir = q / max(L, 1e-4);
+    float th = max(0.05, 1.3 * px) * (0.55 + 0.75 * along) * (n > 1.0 ? 1.0 : 0.6 + 0.8 * nbN(dir * 2.5 + so));
+    float rr = 1.0 + 0.04 * (nbN(dir * 3.0 + so + 9.0) - 0.5);
+    float knots = 0.45 + 1.1 * pow(nbF(dir * 7.0 + so, 3), 2.5);
+    farAdd(m, lt, along * exp(-pow((L - rr) / th, 2.0)) * knots, mix(col, wht, 0.35 * clamp(knots - 0.8, 0.0, 1.0)));
+    farAdd(m, lt, along * 0.35 * nbN(dir * 5.0 + so + 3.0) * exp(-pow((L - rr - th * 1.6) / (th * 0.6), 2.0)), col);
+    if (n > 1.0) farAdd(m, lt, (n >= 4.0 ? 1.0 : 0.35) * exp(-pow(dth * L / 0.05, 2.0) - pow((L - rr) / 0.05, 2.0)), mix(col, wht, 0.5));
+  } else if (fm == 11) { // ripples running out to the front u, pr apart (further apart the further out: the older waves were
+    // slower), stronger along one axis (the waves' quadrupole), shimmering
     if (L > 1.0 || L > u + 0.03) return vec4(0.0);
-    m = pow(0.5 + 0.5 * cos((L - u) / max(pr, 0.03) * 6.2832), 6.0) * smoothstep(1.0, 0.15, L) * smoothstep(u + 0.03, u - 0.05, L);
-  } else if (fm == 12) { // a swarm of faint points (pr: how many cells hold one), a faint shared glow
+    float lam = max(pr, 0.03) * (0.7 + 0.6 * L / max(u, 0.05));
+    m = pow(0.5 + 0.5 * cos((L - u) / lam * 6.2832), 10.0) * smoothstep(1.0, 0.15, L) * smoothstep(u + 0.03, u - 0.05, L) * smoothstep(0.03, 0.2, L)
+      * (0.65 + 0.35 * cos(2.0 * (atan(q.y, q.x) - sd * 6.2832))) * (0.7 + 0.6 * nbN(q * 7.0 + so));
+    lt = col * m;
+  } else if (fm == 12) { // a swarm of points (pr: how many cells hold one), crowded to the middle: a few bright, many faint,
+    // some smudged into far galaxies, each its own tint, twinkling; a faint mottled glow they share
     if (L > 1.1) return vec4(0.0);
-    vec2 g = q * 7.0 + sd * 41.0, gi = floor(g);
-    uvec2 h = uvec2(ivec2(gi) + 4096);
-    vec2 o = gi + 0.25 + 0.5 * vec2(hash(h), hash(h + uvec2(17u, 31u))), dd = (g - o) * r / (7.0 * 1.1 * dp);
-    m = step(hash(h + uvec2(5u, 9u)), pr) * (0.4 + 0.6 * hash(h + uvec2(3u, 77u))) * exp(-dot(dd, dd)) * smoothstep(1.1, 0.5, L)
-      + 0.1 * pr * exp(-L * L * 3.0);
-  } else if (fm == 13) { // a dark disc, a soft edge
+    float t = uSize.w;
+    for (int k = 0; k < 2; k++) {
+      float nk = k == 0 ? 7.0 : clamp(0.2 / px, 7.0, 16.0);
+      vec2 g = q * nk + so + float(k) * 31.0, gi = floor(g);
+      uvec2 h = uvec2(ivec2(gi) + 4096 + k * 977);
+      if (hash(h + uvec2(5u, 9u)) >= pr * (k == 0 ? 1.0 : 0.6) * (0.55 + 0.9 * exp(-L * L * 2.5))) continue;
+      float b = hash(h + uvec2(3u, 77u)), lum = k == 0 ? 0.2 + 1.0 * b * b * b : 0.12 + 0.3 * b;
+      float sz = min(k == 0 ? 0.7 + 1.4 * b * b : 0.7, 0.12 / (nk * px));
+      vec2 dd = (g - gi - 0.25 - 0.5 * vec2(hash(h), hash(h + uvec2(17u, 31u)))) / (nk * px);
+      if (k == 0 && hash(h + uvec2(11u, 5u)) < 0.3) {
+        float an = hash(h + uvec2(23u, 2u)) * 6.2832;
+        dd = vec2(cos(an) * dd.x + sin(an) * dd.y, (-sin(an) * dd.x + cos(an) * dd.y) / (0.35 + 0.4 * hash(h + uvec2(29u, 13u))));
+        sz = min(sz * 1.4, 0.12 / (nk * px)); lum *= 0.7;
+      }
+      float hz = floor(mix(0.3, 1.0, hash(h + uvec2(41u, 3u))) * 3600.0) / 3600.0;
+      float tw = t < 0.0 ? 1.0 : 1.0 + 0.35 * sin(6.2832 * fract(hz * t + hash(h + uvec2(43u, 8u))));
+      float hk = hash(h + uvec2(47u, 19u));
+      farAdd(m, lt, lum * tw * exp(-dot(dd, dd) / (sz * sz)), mix(mix(col, vec3(1.0, 0.84, 0.66), step(0.7, hk) * 0.6), wht, 0.3 * b));
+    }
+    farAdd(m, lt, 0.1 * pr * exp(-L * L * 3.0) * (0.5 + 0.9 * nbF(q * 3.0 + so, 2)), col);
+  } else if (fm == 13) { // a dark cloud: an absorbing patch, denser in clumps, its edge torn by noise
     if (L > 1.3) return vec4(0.0);
-    return vec4(0.0, 0.0, 0.0, smoothstep(1.2, 0.6, L) * A.w);
+    float dn = smoothstep(1.2, 0.45, L + 0.5 * (nbF(q * 2.2 + so, 4) - 0.5)) * (0.7 + 0.45 * nbF(q * 5.0 + so + 7.0, 3));
+    return vec4(0.0, 0.0, 0.0, clamp(dn * smoothstep(1.3, 1.15, L), 0.0, 1.0) * A.w);
+  } else if (fm == 14) { // a core-collapse supernova over its life u: a red supergiant; a white-blue flash with spikes (u
+    // 0.04); then the blast wave (a thin, broken, blue-white shell) racing out and slowing, behind it a cage of filaments
+    // with Rayleigh-Taylor fingers reaching in, knotted, cooling from blue-white to its colour, some knots oxygen teal; a
+    // pulsar and its blue-white wind nebula in the middle later
+    if (L > 1.25) return vec4(0.0);
+    vec2 dir = q / max(L, 1e-4), sq = d / r;
+    float s = clamp((u - 0.04) / 0.96, 0.0, 1.0), Rs = 0.04 + 0.96 * (1.0 - pow(1.0 - s, 2.4)), cool = smoothstep(0.06, 0.55, u);
+    float st = 1.0 - smoothstep(0.03, 0.045, u), fl = smoothstep(0.03, 0.045, u) * exp(-max(u - 0.045, 0.0) / 0.07);
+    farAdd(m, lt, st * (0.7 * exp(-L * L / 0.0006) + 0.1 * exp(-L * 30.0)), vec3(1.0, 0.6, 0.4));
+    farAdd(m, lt, fl * (1.4 * exp(-L * L / 0.0012) + 0.35 * exp(-L * 12.0) + 0.6 * farSpikes(sq, 0.6 * px, 3.0, false)),
+      mix(vec3(0.8, 0.88, 1.0), wht, exp(-L * 20.0)));
+    if (s > 0.0) {
+      float Rl = Rs * (1.0 + 0.12 * (nbF(dir * 1.3 + so + 50.0, 2) - 0.5)), lr = L / Rl; // lopsided
+      float x = (Rl - L) / (Rl * (0.1 + 0.5 * nbF(dir * 3.0 + so + 3.0, 2))); // 0 at the shell, 1 at a finger's tip
+      float ridge = pow(farRidge(dir * 7.0 + so + vec2(lr * 2.2, lr * 1.1), 3), 6.0) * smoothstep(0.3, 0.65, nbF(dir * 2.2 + so + 61.0, 2));
+      float web = pow(farRidge(q / Rl * 4.0 + so + 17.0, 3), 10.0) * smoothstep(0.55, 0.85, lr) * smoothstep(1.02, 0.9, lr);
+      float fil = ridge * smoothstep(-0.04, 0.02, x) * smoothstep(1.05, 0.8, x) * (0.5 + smoothstep(0.55, 0.95, x)) + 0.7 * web;
+      float rim = exp(-pow((L - Rl * 0.96) / (0.045 * Rl + px), 2.0)) * (0.2 + 1.3 * pow(nbF(dir * 7.0 + so + vec2(0.0, L * 3.0), 3), 2.5));
+      float br = (1.0 - 0.55 * smoothstep(0.5, 1.0, u)) * smoothstep(0.0, 0.03, s), kb;
+      float kn = farPts(q, 40.0, 0.5, px, so + 9.0, kb) * (fil + rim);
+      vec3 fc = mix(vec3(0.86, 0.92, 1.0), col, cool);
+      float teal = smoothstep(0.55, 0.75, nbN(dir * 4.0 + so + 21.0)) * cool;
+      farAdd(m, lt, br * (0.55 * fil + 0.45 * rim), mix(fc, vec3(0.46, 0.95, 0.8), 0.6 * teal));
+      farAdd(m, lt, br * 0.9 * kn, mix(fc, wht, 0.5));
+      float rb = Rl * (1.06 + 0.03 * (nbF(dir * 5.0 + so + 13.0, 2) - 0.5));
+      farAdd(m, lt, br * 0.28 * exp(-pow((L - rb) / max(0.008, 1.1 * px), 2.0)) * (0.3 + 0.9 * nbF(dir * 6.0 + so + 31.0, 3)), vec3(0.72, 0.84, 1.0));
+      farAdd(m, lt, br * 0.06 * smoothstep(1.0, 0.3, L / Rs) * (0.4 + farRidge(q / Rs * 3.0 + so, 3)), fc);
+      vec2 pq = q / (0.3 * Rs);
+      farAdd(m, lt, smoothstep(0.3, 0.6, u) * (0.22 * exp(-dot(pq, pq)) * (0.5 + 0.8 * farRidge(pq * 1.5 + so + 7.0, 3)) + 0.6 * exp(-L * L / 0.0003)),
+        vec3(0.7, 0.8, 1.0));
+    }
+  } else if (fm == 15) { // a kilonova over its life u: two neutron stars spiral in (closer, faster) under a faint two-armed
+    // spiral of gravitational waves; they merge at u 0.32 in a hard white flash, a brief pair of narrow jets (the short
+    // gamma-ray burst) along the part's x and a ring of waves running out; then the ejecta: a fast blue glow along the
+    // poles that fades within days, and a slower, clumpy red one round the waist (fresh gold and platinum) that lasts
+    if (L > 1.1) return vec4(0.0);
+    float um = 0.32, x = clamp(u / um, 0.0, 1.0), v = 1.0 - x, th = atan(q.y, q.x);
+    float sep = 0.3 * pow(v, 0.25), ph = sd * 6.2832 + 60.0 * (1.0 - pow(v, 0.625));
+    if (u < um) {
+      float pw = max(0.025, 1.3 * px);
+      vec2 o = 0.5 * sep * vec2(cos(ph), sin(ph)), a1 = (q - o) / pw, a2 = (q + o) / pw;
+      farAdd(m, lt, exp(-dot(a1, a1)) + exp(-dot(a2, a2)), wht);
+      farAdd(m, lt, 0.25 * (exp(-dot(a1, a1) * 0.08) + exp(-dot(a2, a2) * 0.08)), col);
+      farAdd(m, lt, 0.12 * x * x * exp(-L * L / pow(0.3 * sep + 0.04, 2.0)), col);
+      float gw = pow(0.5 + 0.5 * cos(2.0 * (th - ph) + L * (20.0 + 30.0 * x)), 6.0);
+      farAdd(m, lt, 0.08 * x * x * gw * smoothstep(0.05, 0.15, L) * smoothstep(1.0, 0.3, L), vec3(0.75, 0.7, 1.0));
+    } else {
+      float t = u - um, fl = exp(-t / 0.012);
+      farAdd(m, lt, fl * (1.6 * exp(-L * L / 0.0015) + 0.4 * exp(-L * 10.0) + 0.5 * farSpikes(d / r, 0.6 * px, 2.5, false)), wht);
+      float jl = smoothstep(0.0, 0.004, t) * exp(-t / 0.03), jx = abs(q.x), hd = min(t * 25.0, 1.0);
+      farAdd(m, lt, jl * 0.8 * exp(-pow(q.y / (0.01 + 0.04 * jx + px), 2.0)) * smoothstep(hd + 0.02, hd - 0.1, jx), mix(col, wht, 0.6));
+      float fr = t * 3.5;
+      farAdd(m, lt, 0.16 * exp(-t / 0.15) * pow(0.5 + 0.5 * cos((L - fr) * 40.0), 4.0) * smoothstep(fr + 0.02, fr - 0.08, L) * smoothstep(fr - 0.4, fr - 0.1, L)
+        * (0.6 + 0.4 * cos(2.0 * (th - ph))), vec3(0.75, 0.7, 1.0));
+      float rb = 0.05 + 0.55 * pow(min(t / 0.5, 1.0), 0.6);
+      vec2 bq = vec2(q.x / rb, q.y / (rb * 0.55));
+      farAdd(m, lt, smoothstep(0.0, 0.02, t) * exp(-t / 0.1) * 0.7 * exp(-dot(bq, bq) * 1.5) * (0.6 + 0.6 * nbF(bq * 2.5 + so, 3)), vec3(0.55, 0.7, 1.0));
+      float rr = 0.04 + 0.35 * pow(min(t / 0.68, 1.0), 0.6);
+      vec2 rq = vec2(q.x / (rr * 0.75), q.y / rr);
+      farAdd(m, lt, smoothstep(0.01, 0.08, t) * exp(-max(t - 0.08, 0.0) / 0.35) * 0.75 * exp(-dot(rq, rq) * 1.4) * (0.5 + 0.8 * nbF(rq * 2.0 + so + 5.0, 4)),
+        mix(vec3(1.0, 0.5, 0.25), vec3(0.9, 0.22, 0.14), smoothstep(0.1, 0.5, t)));
+      farAdd(m, lt, 0.5 * exp(-L * L / 0.0006) * smoothstep(0.0, 0.05, t), vec3(1.0, 0.85, 0.75));
+    }
+  } else if (fm == 16) { // two spiral galaxies colliding over its life u: they fall together, swing past each other (u
+    // 0.28), fling out two long curved tidal tails and a bridge, fall back and merge by u 0.82 into one glow with shells;
+    // star birth (blue clusters, pink knots) lights up where they overlap and along the tails
+    if (L > 1.25) return vec4(0.0);
+    float dd0 = 0.72 - 0.52 * smoothstep(0.0, 0.28, u) + 0.22 * smoothstep(0.28, 0.45, u) - 0.42 * smoothstep(0.5, 0.82, u);
+    float phi = 0.5 * u + 1.9 * smoothstep(0.12, 0.42, u) + 1.4 * smoothstep(0.52, 0.85, u);
+    vec2 e = vec2(cos(phi), sin(phi)), c1 = 0.45 * dd0 * e, c2 = -0.55 * dd0 * e;
+    float mg = smoothstep(0.7, 0.92, u), burst = smoothstep(0.3, 0.5, u) * (1.0 - 0.5 * smoothstep(0.85, 1.0, u));
+    float tg = smoothstep(0.24, 0.6, u) * (1.0 - 0.5 * smoothstep(0.85, 1.0, u)), Lt = 0.1 + 0.8 * smoothstep(0.26, 0.75, u), tails = 0.0;
+    for (int k = 0; k < 2; k++) {
+      float fk = float(k), tl = 0.4 + 0.5 * fract(sd * (3.1 + fk * 2.3));
+      vec2 c = k == 0 ? c1 : c2, g = farTurn(q - c, sd * 9.0 + fk * 2.1);
+      farDisc(m, lt, vec2(g.x, g.y / tl) / (k == 0 ? 0.26 : 0.22), sd * 5.0 + fk * 3.0 + u * 2.0, 0.85 * (1.0 - mg), burst, so + fk * 37.0);
+      // its tail: from its far side at the swing past (phi 1.18), curving back behind the orbit
+      vec2 w = q - c;
+      float rr = length(w), sa = (rr - 0.1) / Lt;
+      float dth = mod(atan(w.y, w.x) - (1.18 + fk * 3.1416 + 0.5 - 2.4 * max(rr - 0.1, 0.0)) + 3.1416, 6.2832) - 3.1416;
+      float wd = 0.025 + 0.06 * clamp(sa, 0.0, 1.0) + px, e1 = dth * rr / wd;
+      float tail = exp(-e1 * e1) * pow(max(1.0 - sa, 0.0), 0.5) * smoothstep(0.0, 0.1, sa) * (0.35 + 0.9 * nbF(vec2(rr * 9.0, e1 * 0.5) + so + fk * 13.0, 3));
+      tails += tail;
+    }
+    farAdd(m, lt, tg * 0.5 * tails, mix(col, wht, 0.2));
+    vec2 cd = c2 - c1;
+    float hb = clamp(dot(q - c1, cd) / max(dot(cd, cd), 1e-4), 0.0, 1.0), db = length(q - c1 - hb * cd);
+    farAdd(m, lt, 0.2 * smoothstep(0.2, 0.32, u) * (1.0 - smoothstep(0.5, 0.72, u)) * exp(-pow(db / 0.035, 2.0)) * smoothstep(0.1, 0.3, hb) * smoothstep(0.9, 0.7, hb)
+      * (0.4 + nbF(q * 9.0 + so, 3)), col);
+    vec2 mid = 0.5 * (c1 + c2) - q;
+    float kb, kn = farPts(q, 34.0, burst * (0.4 * exp(-dot(mid, mid) / 0.03) + 0.25 * min(tails * tg, 1.0)), px, so + 3.0, kb);
+    farAdd(m, lt, kn * (0.6 + 0.9 * kb), kb > 0.55 ? vec3(1.0, 0.55, 0.68) : vec3(0.75, 0.85, 1.0));
+    // the merged remnant
+    farAdd(m, lt, mg * (0.9 * exp(-L * L / 0.006) + 0.35 * exp(-L * 6.0)), vec3(1.0, 0.86, 0.66));
+    farAdd(m, lt, mg * 0.07 * pow(sin(3.1416 * fract(L * 5.0 + sd)), 12.0) * smoothstep(0.7, 0.2, L) * smoothstep(0.08, 0.2, L) * (0.5 + 0.5 * cos(atan(q.y, q.x) - sd * 6.2832 + floor(L * 5.0 + sd) * 3.1416)), col);
+  } else if (fm == 17) { // a tidal disruption over its life u: a star falls in on a parabola (its pericentre 0.1 radii off
+    // the black hole, at u 0.25), stretched more the nearer it gets; past it, torn into a thin stream along its orbit,
+    // the head flung out, the bound end falling back and winding in to a hot disc that flares (white-blue at u 0.42, then
+    // dimming as t^-5/3) with one side brighter as it turns; a faint outflow rings out
+    if (L > 1.2) return vec4(0.0);
+    if (sd > 0.5) q.y = -q.y;
+    float rp = 0.1, th = atan(q.y, q.x);
+    float tt = -8.85 * (1.0 - u / 0.25), ths = 2.0 * atan(2.0 * sinh(asinh(1.5 * tt) / 3.0));
+    vec2 sp = 2.0 * rp / (1.0 + cos(ths)) * vec2(cos(ths), sin(ths)), tv = vec2(-sin(ths * 0.5), cos(ths * 0.5));
+    // the star, stretching as it nears, gone into the stream after
+    float el = 1.0 + 7.0 * smoothstep(0.16, 0.26, u), pw = max(0.02, 1.3 * px);
+    vec2 dq = q - sp, sa = vec2(dot(dq, tv) / (pw * el), dot(dq, vec2(-tv.y, tv.x)) / pw);
+    float star = (1.0 - smoothstep(0.24, 0.3, u)) * exp(-dot(sa, sa)) * (1.0 + 0.6 * smoothstep(0.15, 0.24, u));
+    farAdd(m, lt, star + 0.2 * (1.0 - smoothstep(0.24, 0.3, u)) * exp(-dot(dq, dq) / 0.004), vec3(1.0, 0.86, 0.6));
+    // the stream: along the parabola between where its tail and its head are
+    float ta = -0.6 + 1.6 * smoothstep(0.24, 0.8, u), tb = ths + 0.25 * smoothstep(0.2, 0.3, u);
+    float rc = 2.0 * rp / max(1.0 + cos(th), 1e-3), perp = abs(L - rc) * cos(th * 0.5), wd = 0.006 + 0.03 * rc + px;
+    float inr = smoothstep(ta - 0.05, ta + 0.15, th) * smoothstep(tb + 0.02, tb - 0.1, th);
+    float strm = smoothstep(0.2, 0.28, u) * (1.0 - smoothstep(0.6, 0.85, u)) * inr * smoothstep(1.15, 0.8, L) * exp(-pow(perp / wd, 2.0)) * (0.5 + 0.8 * nbF(vec2(th * 9.0, perp / wd) + so, 3));
+    farAdd(m, lt, 0.75 * strm, mix(vec3(1.0, 0.75, 0.5), col, 0.5));
+    // the bound debris falling back, winding in
+    float fb = smoothstep(0.3, 0.4, u) * (1.0 - smoothstep(0.6, 0.85, u));
+    float arm = pow(0.5 + 0.5 * cos(th - 3.0 * log(max(L, 1e-3)) - u * 40.0 + 1.5 * nbN(q * 6.0 + so)), 6.0);
+    farAdd(m, lt, 0.35 * fb * arm * smoothstep(0.06, 0.12, L) * smoothstep(0.4, 0.15, L), col);
+    // the disc, the flare, the outflow
+    float flare = smoothstep(0.37, 0.42, u) * pow(1.0 + max(u - 0.42, 0.0) / 0.04, -1.667), dsc = smoothstep(0.36, 0.45, u);
+    float ring = exp(-pow((L - 0.1) / 0.045, 2.0)) * (0.55 + 0.45 * sin(th + u * 30.0)) * (0.6 + 0.4 * cos(9.0 * th + 6.0 * log(max(L, 1e-3)) - u * 90.0));
+    farAdd(m, lt, dsc * (0.25 + 0.75 * flare) * 0.8 * ring, mix(col, vec3(0.85, 0.92, 1.0), 0.6 * flare + 0.3));
+    farAdd(m, lt, flare * (1.3 * exp(-L * L / 0.0025) + 0.35 * exp(-L * 9.0)), vec3(0.8, 0.88, 1.0));
+    float Ro = 0.12 + 1.3 * max(u - 0.45, 0.0);
+    farAdd(m, lt, 0.1 * smoothstep(0.45, 0.5, u) * (1.0 - smoothstep(0.7, 1.0, u)) * exp(-pow((L - Ro) / 0.05, 2.0)) * (0.4 + nbF(q * 5.0 + so + 9.0, 3)), vec3(0.7, 0.8, 1.0));
+  } else if (fm == 18) { // a long gamma-ray burst over its life u: a hard, flickering white flash with long spikes (u 0.01),
+    // two needle-thin jets along the part's x with knots racing out from a hot cocoon (the dying star they punched
+    // through), then the afterglow: a point fading as a power law and reddening, a faint shock ring slowing as it spreads,
+    // and the supernova under it brightening at u ~0.6 and fading
+    if (L > 1.15) return vec4(0.0);
+    float pf = smoothstep(0.0, 0.006, u) * exp(-max(u - 0.006, 0.0) / 0.025) * (0.6 + 0.4 * nbN(vec2(u * 400.0, sd * 50.0)));
+    farAdd(m, lt, pf * (1.8 * exp(-L * L / 0.0015) + 0.5 * exp(-L * 7.0) + 0.9 * farSpikes(d / r, 0.55 * px, 1.8, false)), mix(vec3(0.85, 0.85, 1.0), wht, exp(-L * 12.0)));
+    float jt = smoothstep(0.004, 0.012, u) * exp(-max(u - 0.012, 0.0) / 0.07), jx = abs(q.x), hd = min(1.0, 0.05 + u * 9.0);
+    float kn = pow(0.5 + 0.5 * sin(jx * 40.0 - u * 300.0 + sd * 20.0), 4.0);
+    farAdd(m, lt, jt * exp(-pow(q.y / (0.006 + 0.02 * jx + 0.6 * px), 2.0)) * smoothstep(hd + 0.02, hd - 0.15, jx) * (0.35 + 0.9 * kn) * (q.x > 0.0 ? 1.0 : 0.6),
+      mix(vec3(0.7, 0.8, 1.0), wht, 0.5 * kn));
+    float cg = min(u / 0.2, 1.0);
+    vec2 cq = vec2(q.x / (0.03 + 0.25 * cg), q.y / (0.02 + 0.08 * cg));
+    farAdd(m, lt, smoothstep(0.004, 0.03, u) * exp(-u / 0.15) * 0.35 * exp(-dot(cq, cq)) * (0.5 + nbF(cq * 2.0 + so, 3)), vec3(1.0, 0.62, 0.42));
+    float ag = smoothstep(0.005, 0.015, u) * pow(1.0 + max(u - 0.015, 0.0) / 0.02, -1.1);
+    vec3 agc = mix(mix(vec3(0.75, 0.82, 1.0), vec3(1.0, 0.8, 0.5), smoothstep(0.02, 0.15, u)), vec3(1.0, 0.45, 0.3), smoothstep(0.15, 0.5, u));
+    farAdd(m, lt, ag * (1.0 * exp(-L * L / 0.0008) + 0.25 * exp(-L * 14.0)), mix(agc, wht, 0.4 * exp(-L * L / 0.0008)));
+    float Rk = 0.05 + 0.8 * sqrt(max(u - 0.01, 0.0));
+    farAdd(m, lt, 0.06 * smoothstep(0.01, 0.05, u) * (1.0 - smoothstep(0.4, 0.8, u)) * exp(-pow((L - Rk) / (0.02 + 0.03 * Rk), 2.0)) * (0.4 + nbF(q * 6.0 / max(Rk, 0.1) + so, 3)), col);
+    float sn = smoothstep(0.35, 0.6, u) * (1.0 - smoothstep(0.62, 0.95, u));
+    farAdd(m, lt, sn * (0.7 * exp(-L * L / 0.0012) + 0.15 * exp(-L * 12.0)), vec3(1.0, 0.85, 0.6));
+  } else if (fm == 19) { // a quasar in its galaxy over its life u, switching on (pr > 0) or off (pr < 0): a blinding core
+    // with JWST's spikes, the host's disc round it, cones of ionised gas (teal) along the part's x and radio lobes (violet,
+    // |pr|) fed by thin jets at their ends; light from the change spreads at light speed, so the cones and the host light
+    // up (or go dark) from the middle out, an echo ring running through the disc
+    if (L > 1.3) return vec4(0.0);
+    bool up = pr > 0.0;
+    float on0 = up ? smoothstep(0.12, 0.4, u) : 1.0 - smoothstep(0.35, 0.62, u), ue = u - L * 0.45;
+    float on = up ? smoothstep(0.12, 0.4, ue) : 1.0 - smoothstep(0.35, 0.62, ue), lb = abs(pr);
+    float echo = exp(-pow((ue - (up ? 0.26 : 0.48)) / 0.03, 2.0));
+    vec2 g = farTurn(q, sd * 7.0);
+    g = vec2(g.x, g.y / (0.45 + 0.4 * sd)) / 0.75;
+    float m0 = m;
+    farDisc(m, lt, g, sd * 6.0, 0.5 + 0.3 * on, 0.4, so);
+    float dl = m - m0, gl = exp(-length(g) * 1.5) * smoothstep(1.2, 0.6, length(g));
+    farAdd(m, lt, 0.6 * echo * gl * (0.4 + nbF(g * 5.0 + so + 3.0, 3)), vec3(0.75, 0.85, 1.0));
+    float ax = abs(q.x), cone = smoothstep(0.45, 0.2, abs(q.y) / max(ax, 1e-3)) * smoothstep(0.04, 0.15, ax) * smoothstep(0.7, 0.3, ax);
+    farAdd(m, lt, 0.22 * on * cone * (0.12 + 1.3 * pow(farRidge(q * 6.0 + so, 3), 4.0)), vec3(0.45, 0.95, 0.8));
+    farAdd(m, lt, 0.12 * lb * exp(-pow(q.y / (0.005 + 0.012 * ax + px), 2.0)) * smoothstep(0.95, 0.8, ax) * smoothstep(0.02, 0.08, ax), mix(col, wht, 0.4));
+    vec2 lq = vec2((ax - 0.98) / 0.13, q.y / 0.17);
+    farAdd(m, lt, lb * (0.3 * exp(-dot(lq, lq)) * (0.4 + nbF(lq * 2.0 + so + 9.0, 3)) + 0.5 * exp(-dot(lq - vec2(0.7, 0.0), lq - vec2(0.7, 0.0)) * 12.0)), vec3(0.74, 0.58, 1.0));
+    farAdd(m, lt, on0 * (2.0 * exp(-L * L / 0.0008) + 0.5 * exp(-L * 14.0) + 0.12 * 0.03 / (0.03 + L * L) + 0.6 * farSpikes(d / r, 0.55 * px, 1.6, true)),
+      mix(vec3(0.8, 0.88, 1.0), wht, exp(-L * 25.0)));
+  } else if (fm == 20) { // a magnetar's giant flare over its life (u counts its turns, pr of them in all): a tiny neutron
+    // star, its field's closed loops glowing round it and two beams along its tilted magnetic pole, turning with it (they
+    // foreshorten as it turns, and the core blips when a beam sweeps past us); the flare a blinding flash at the start,
+    // then the ringing tail of pulses dying away, and a lopsided cloud of ejecta spreading
+    if (L > 1.2) return vec4(0.0);
+    float lf = u / max(pr, 1.0), ph = (u + sd) * 6.2832, inc = 0.5;
+    vec3 Om = vec3(0.0, cos(inc), sin(inc)), mg = 0.62 * Om + 0.78 * (cos(ph) * vec3(1.0, 0.0, 0.0) + sin(ph) * vec3(0.0, sin(inc), -cos(inc)));
+    float mp = length(mg.xy);
+    vec2 ax = mg.xy / max(mp, 1e-3);
+    float al = dot(q, ax), pp = dot(q, vec2(-ax.y, ax.x));
+    float tail = exp(-lf / 0.3), fl = smoothstep(0.0, 0.004, lf) * exp(-max(lf - 0.004, 0.0) / 0.012), pulse = exp(-(1.0 - abs(mg.z)) / 0.02) * tail;
+    farAdd(m, lt, (0.6 + 0.9 * pulse + 3.0 * fl) * exp(-L * L / 0.0005) + (0.08 + 0.3 * pulse + 0.6 * fl) * exp(-L * 12.0) + 0.7 * fl * farSpikes(d / r, 0.55 * px, 2.0, false),
+      mix(col, wht, 0.6));
+    farAdd(m, lt, (0.12 + 0.5 * pulse) * (0.3 + 0.7 * tail) * exp(-pow(pp / (0.01 + 0.12 * abs(al)), 2.0)) * smoothstep(0.75 * mp + 0.05, 0.1 * mp, abs(al)) * smoothstep(0.0, 0.03, abs(al)),
+      mix(col, wht, 0.4));
+    vec2 fq = vec2(al / max(mp, 0.3), pp);
+    float R2 = length(fq), Lk = R2 * R2 * R2 / max(pp * pp, 1e-6);
+    float loops = pow(0.5 + 0.5 * cos(log(Lk) * 14.0 + 2.0 * fl * nbN(fq * 12.0 + so)), 10.0) * smoothstep(0.02, 0.05, R2) * exp(-R2 * 5.0) * smoothstep(0.7, 0.35, Lk);
+    farAdd(m, lt, 0.6 * (0.35 + 0.65 * tail + 1.5 * fl) * loops, col);
+    float Re = 0.08 + 0.85 * sqrt(lf);
+    vec2 eq = (q - Re * 0.3 * vec2(cos(sd * 20.0), sin(sd * 20.0))) / Re;
+    eq.x /= 1.3;
+    float LE = length(eq);
+    farAdd(m, lt, 0.25 * smoothstep(0.0, 0.03, lf) * (1.0 - 0.7 * lf) * (0.3 * exp(-pow((LE - 0.8) / 0.3, 2.0)) + 0.25 * smoothstep(1.0, 0.2, LE)) * 1.6 * pow(nbF(eq * 3.0 + so, 4), 2.0),
+      mix(col, vec3(1.0, 0.56, 0.72), 0.4));
+  } else if (fm == 21) { // two black holes merging over its life u (pr: the second's mass, a share of the first's): the
+    // stars and a faint galaxy behind bent round each into arcs and Einstein rings, its shadow dark with a thin photon ring;
+    // they spiral in, closer and faster, under a two-armed spiral of gravitational waves (the colour), merge at u 0.6 into
+    // one bigger shadow that rings (oblate, settling round) as a strong wave runs out
+    if (L > 1.15) return vec4(0.0);
+    float um = 0.6, x = clamp(u / um, 0.0, 1.0), v = 1.0 - x, th = atan(q.y, q.x), t = u - um;
+    float sep = 0.42 * pow(v, 0.25), ph = sd * 6.2832 + 55.0 * (1.0 - pow(v, 0.625)), m2 = clamp(pr, 0.2, 1.0);
+    float E1 = 0.12, E2 = 0.12 * sqrt(m2), Ef = sqrt(E1 * E1 + E2 * E2);
+    vec2 e = vec2(cos(ph), sin(ph)), c1 = sep * m2 / (1.0 + m2) * e, c2 = -sep / (1.0 + m2) * e, d1 = q - c1, d2 = q - c2, b;
+    float shd;
+    if (t < 0.0) {
+      b = q - E1 * E1 * d1 / max(dot(d1, d1), 1e-5) - E2 * E2 * d2 / max(dot(d2, d2), 1e-5);
+      float l1 = length(d1), l2 = length(d2), s1 = 0.4 * E1, s2 = 0.4 * E2;
+      shd = max(smoothstep(s1 + px, s1 - px, l1), smoothstep(s2 + px, s2 - px, l2));
+      farAdd(m, lt, 0.5 * (exp(-pow((l1 - 1.1 * s1) / max(0.005, px), 2.0)) + exp(-pow((l2 - 1.1 * s2) / max(0.005, px), 2.0))), vec3(1.0, 0.9, 0.8));
+    } else {
+      b = q - Ef * Ef * q / max(L * L, 1e-5);
+      float sf = 0.4 * Ef * (1.0 + 0.3 * exp(-t / 0.03) * cos(2.0 * (th - ph) - t * 400.0));
+      shd = smoothstep(sf + px, sf - px, L);
+      farAdd(m, lt, 0.5 * exp(-pow((L - 1.1 * sf) / max(0.005, px), 2.0)), vec3(1.0, 0.9, 0.8));
+    }
+    b = clamp(b, vec2(-40.0), vec2(40.0));
+    float fade = smoothstep(1.1, 0.3, L), sb, sl = farPts(b, 14.0, 0.22, px, so, sb);
+    farAdd(m, lt, fade * sl * (0.3 + 0.9 * sb * sb), mix(wht, vec3(1.0, 0.84, 0.66), step(0.8, sb)));
+    vec2 gq = (b - 0.05 * vec2(cos(sd * 40.0), sin(sd * 40.0))) / vec2(0.16, 0.1);
+    farAdd(m, lt, fade * 0.45 * exp(-dot(gq, gq)) * (0.6 + 0.6 * nbF(gq + so, 3)), vec3(0.66, 0.78, 1.0));
+    farAdd(m, lt, 0.07 * x * x * x * pow(0.5 + 0.5 * cos(2.0 * (th - ph) + L * (18.0 + 30.0 * x)), 6.0) * smoothstep(0.1, 0.2, L) * smoothstep(1.05, 0.4, L) * step(t, 0.0), col);
+    float fr = max(t, 0.0) * 3.0;
+    farAdd(m, lt, 0.2 * step(0.0, t) * exp(-t / 0.12) * pow(0.5 + 0.5 * cos((L - fr) * 45.0), 4.0) * smoothstep(fr + 0.02, fr - 0.08, L) * smoothstep(fr - 0.4, fr - 0.1, L), col);
+    float a = clamp(m * A.w, 0.0, 1.0), sh = clamp(shd, 0.0, 1.0) * min(1.0, A.w * 1.6);
+    return vec4(lt * (a / max(m, 1e-5)) * (1.0 - sh), a * (1.0 - sh) + sh);
+  } else if (fm == 22) { // a ring galaxy forming over its life u (pr: when the intruder punches through): a spiral disc
+    // until then; after, its arms fade as a ring of star birth (blue clusters, pink knots) runs out through the disc,
+    // spokes reaching back to an inner ring round the yellow core
+    if (L > 1.25) return vec4(0.0);
+    float s = clamp((u - pr) / (1.0 - pr), 0.0, 1.0), hit = smoothstep(pr, pr + 0.04, u);
+    vec2 g = farTurn(q, sd * 11.0);
+    g.y /= 0.55 + 0.35 * sd;
+    float R = length(g), th = atan(g.y, g.x);
+    vec2 dir = g / max(R, 1e-4);
+    farDisc(m, lt, g / 0.85, sd * 6.0 + u * 1.5, 0.75 * (1.0 - 0.7 * hit), 0.3, so);
+    if (hit > 0.0) {
+      float Rr = 0.1 + 0.9 * s + 0.04 * (nbF(dir * 3.0 + so, 2) - 0.5), Ri = 0.06 + 0.22 * s;
+      float ring = exp(-pow((R - Rr) / (0.035 + 0.04 * s), 2.0)) * (0.35 + 1.2 * pow(nbF(dir * 9.0 + so + 3.0, 3), 2.0));
+      float iring = exp(-pow((R - Ri) / 0.025, 2.0));
+      float spk = pow(0.5 + 0.5 * cos(th * 9.0 + 3.0 * nbN(dir * 2.0 + so) + R * 4.0), 10.0) * smoothstep(Ri, Ri + 0.05, R) * smoothstep(Rr - 0.02, Rr - 0.1, R)
+        * (0.2 + 1.2 * smoothstep(0.3, 0.7, nbN(dir * 4.0 + so + 40.0)));
+      farAdd(m, lt, hit * (0.75 * ring + 0.35 * iring + 0.14 * spk * (0.4 + nbF(g * 6.0 + so, 2))), mix(col, wht, 0.25));
+      float kb, kn = farPts(g, 36.0, 0.7 * min(ring, 1.0) + 0.25 * spk, px, so + 5.0, kb);
+      farAdd(m, lt, hit * kn * (0.45 + 0.6 * kb), kb > 0.6 ? vec3(1.0, 0.55, 0.68) : vec3(0.8, 0.88, 1.0));
+      farAdd(m, lt, hit * 0.7 * exp(-R * R * 60.0), vec3(1.0, 0.82, 0.55));
+    }
+  } else if (fm == 23) { // a jellyfish galaxy over its life u, moving along the part's x through a cluster's hot gas: its
+    // disc (its own tilt) pressed bright along its leading edge, its gas stripped back into tentacles trailing behind,
+    // growing with u, wavering, blue-teal (the colour) with young blue clusters and pink knots of star birth along them
+    if (L > 1.3) return vec4(0.0);
+    vec2 g = farTurn(q, sd * 13.0);
+    g = vec2(g.x, g.y / (0.35 + 0.4 * sd)) / 0.3;
+    farDisc(m, lt, g, sd * 4.0 + u * 1.2, 0.85, 0.5, so);
+    float Rg = length(g), lead = smoothstep(0.2, 0.9, q.x / max(L, 1e-4));
+    farAdd(m, lt, 0.4 * lead * exp(-pow((Rg - 0.85) / 0.15, 2.0)) * (0.4 + nbF(g * 6.0 + so + 2.0, 3)), vec3(0.75, 0.85, 1.0));
+    float grow = smoothstep(0.02, 0.6, u), T = 0.0;
+    for (int k = 0; k < 6; k++) {
+      float fk = float(k), hk = fract(sd * 7.13 + fk * 0.618), y0 = (fk / 5.0 - 0.5) * 0.42 + 0.09 * (hk - 0.5);
+      float x0 = -0.06 - 0.1 * hk, Lk = (0.55 + 0.45 * hk) * 0.95 * grow, s = (x0 - q.x) / max(Lk, 1e-3);
+      if (s < -0.1 || s > 1.0) continue;
+      float yc = y0 * (1.0 + 0.9 * max(s, 0.0)) + 0.12 * s * (nbF(vec2(q.x * 2.5, fk * 3.1) + so, 2) - 0.5);
+      float wd = 0.012 + 0.03 * max(s, 0.0) + px, e1 = (q.y - yc) / wd;
+      T += exp(-e1 * e1) * pow(1.0 - max(s, 0.0), 0.6) * smoothstep(-0.1, 0.05, s) * (0.4 + 0.9 * nbF(vec2(q.x * 12.0, e1) + so + fk * 7.0, 3));
+    }
+    farAdd(m, lt, 0.4 * T, col);
+    farAdd(m, lt, 0.04 * grow * smoothstep(0.0, -0.3, q.x) * exp(-pow(q.y / (0.18 + 0.25 * max(-q.x, 0.0)), 2.0)) * smoothstep(1.2, 0.5, L), col);
+    float kb, kn = farPts(q, 40.0, 0.4 * min(T, 1.0) * grow, px, so + 3.0, kb);
+    farAdd(m, lt, kn * (0.6 + 0.9 * kb), kb > 0.6 ? vec3(1.0, 0.55, 0.68) : vec3(0.7, 0.85, 1.0));
   }
   float a = clamp(m * A.w, 0.0, 1.0);
-  return vec4(col * a, a);
+  return vec4(lt * (a / max(m, 1e-5)), a);
 }`;
 // per star layer its line in SKY_FS: its tile's texel, or its stars made per cell
 const STAR_GLSL = STAR_LAYERS.map((L, i) => (L.cell
