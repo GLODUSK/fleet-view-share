@@ -150,7 +150,7 @@
 //   gets the order and directs the others, who report to it; POST /teams { lead }), then Model, Effort, Fast mode.
 //   A multi-selection's menu has "Give orders ▸" (Work together, Under a lead ▸, Send to each, Model, Effort, Fast
 //   mode), "Add to team ▸", the single conversation's actions for each of them ("Fork each", "Move to workspace ▸",
-//   "Send elsewhere ▸", "Push to ▸", "Cancel N waiting orders", "Unpin from the map"; one toast each, one Undo for a
+//   "Send elsewhere ▸", "Push to ▸", "Cancel N waiting orders"; one toast each, one Undo for a
 //   move or push, new sessions left out), "Interrupt all", "Open all here", "Clear selection" and "Remove N conversations"; a
 //   team's has "Message the team", "Lead ▸" (who leads, or No lead: POST /teams/lead), "Rename team" (POST
 //   /teams/rename: notes and orders from then on carry the new name; nobody is told), "Add <picked>", "Remove
@@ -208,13 +208,12 @@ function fillStaticIcons() {
   tabPos = ''; fitHeader(true); // the tabs just got wider
 }
 
-let renderMap = null, mapRekey = null, mapPins = null, mapMod = null;
+let renderMap = null, mapRekey = null, mapMod = null;
 let mapMissing = false;
 import('./map.js').then((m) => {
   mapMod = m;
   renderMap = m.renderMap;
   mapRekey = m.rekeyNode || null;
-  mapPins = m.mapPinned && m.mapUnpin ? { pinned: m.mapPinned, unpin: m.mapUnpin } : null;
   if (DEBUG) window.__mapNodes = () => m.mapNodes();
   render();
 }).catch((e) => { mapMissing = true; console.warn('map.js did not load', e); render(); });
@@ -2472,9 +2471,8 @@ function openContextMenu(target, x, y) {
   const bw = botWatchItem(s);
   if (bw) items.push(bw);
   if (waitingOrderItem(s)) items.push(waitingOrderItem(s));
-  // push and unpin sit at the bottom, just above Remove (Henry, 2026-10-10)
-  const tail = [!s.pending && !s.demo && pushHook() ? sessionPushItem(s) : null, unpinItem(target)].filter(Boolean);
-  if (tail.length) items.push({ sep: true }, ...tail);
+  // push sits at the bottom, just above Remove (Henry, 2026-10-10); no "Unpin from the map" here (Henry, 2026-10-13)
+  if (!s.pending && !s.demo && pushHook()) items.push({ sep: true }, sessionPushItem(s));
   // Remove: ends the session if it runs here, and takes the conversation off the map, cards and strip (Henry: "to me end
   // is delete"). Its log stays on disk; it comes back by itself if it works again (open in another window, say).
   const st = hosted ? hostStatus(s.id) : null;
@@ -2524,11 +2522,6 @@ function setPushTarget(who, target, done) {
     toast(done, C.mint);
     poll();
   });
-}
-// on the map, a repo or conversation dragged into place can be let go again
-function unpinItem(target) {
-  if (local.view !== 'map' || !mapPins || !mapPins.pinned(target)) return null;
-  return { label: 'Unpin from the map', icon: 'reply', run: () => mapPins.unpin(target) };
 }
 // "Move to workspace": a submenu of the other listed repos; a moved one also offers going back to the repo its own
 // tool calls point at. The server keeps the move (POST /sessions/move), and a pickup of this conversation's
@@ -3090,7 +3083,7 @@ async function runSet(list, cmd, kind = null) {
 // the "N conversations" menu (a multi-selection). "Give orders ▸" as on a workspace: Work together (one team of
 // peers), Under a lead ▸ (one of them, or a new conversation in the first one's workspace, leads), Send to each,
 // then Model ▸, Effort ▸ and Fast mode ▸ for all of them. Then the single conversation's own actions for each of
-// them: Fork, Move to workspace ▸, Send elsewhere ▸, Push to ▸, Cancel waiting orders and Unpin from the map (new
+// them: Fork, Move to workspace ▸, Send elsewhere ▸, Push to ▸ and Cancel waiting orders (new
 // sessions with no id yet are left out of those that need one), each with one toast; a move or push has one Undo
 function sessionsMenu(list, x, y) {
   const desk = !!termApi();
@@ -3109,7 +3102,7 @@ function sessionsMenu(list, x, y) {
   openCtxMenu({ x, y, title: `${list.length} conversations`, dot: C.cyan, sub: list.map((s) => s.name).join(' · '), items: [
     orders, addManyItem(list), { sep: true },
     ...[forkManyItem(list), moveManyItem(list), desk && !singleAccount() ? sendManyItem(list) : null, pushHook() ? pushManyItem(list) : null,
-      cancelManyItem(list), unpinManyItem(list)].filter(Boolean),
+      cancelManyItem(list)].filter(Boolean),
     { sep: true },
     live.length ?{ label: 'Interrupt all', icon: 'stop', note: `${live.length} running here`, run: () => interruptAll(live) } : { label: 'Interrupt all', icon: 'stop', disabled: true, note: 'none of them runs here' },
     desk ? { label: 'Open all here', icon: 'shell', run: () => openAllHere(list) } : { label: 'Open all here', icon: 'shell', disabled: true, note: noTermNote() },
@@ -3240,14 +3233,6 @@ function cancelManyItem(list) {
       toast(n ? `Cancelled ${n === 1 ? 'the order' : `${n} orders`} waiting for ${whoOf(withQ)}` : 'they were sent already', C.dim);
       render();
     } };
-}
-// "Unpin from the map" (the map only): the pinned ones go back on their workspace's ring
-function unpinManyItem(list) {
-  if (local.view !== 'map' || !mapPins) return null;
-  const pins = list.filter((s) => mapPins.pinned({ kind: 'session', id: s.id }));
-  if (!pins.length) return { label: 'Unpin from the map', icon: 'reply', disabled: true, note: 'none of them is pinned' };
-  return { label: 'Unpin from the map', icon: 'reply', note: pins.length < list.length ? `${pins.length} pinned` : null,
-    run: () => { for (const s of pins) mapPins.unpin({ kind: 'session', id: s.id }); toast(`Unpinned ${whoOf(pins)}: back on ${pins.length === 1 ? 'its' : 'their'} workspace's ring`, C.dim); } };
 }
 // "Remove N conversations": the single Remove for each (ends the ones running here, takes them off every view)
 function removeAllItem(list) {
