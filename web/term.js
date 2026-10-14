@@ -1217,8 +1217,9 @@ export function screenText(id, lastN = 40, o = {}) {
 // screenText with what is drawn on a coloured background (or inverse) marked: such a run of a line reads
 // "\x01text\x02". A command's panel draws its selected tab that way ("Settings  Status  [Usage]  Stats"), which
 // plain text loses. Rows stay as drawn, not joined: a panel fills each row to the edge, which the terminal flags
-// as wrapped. [] when screenText would be.
-export function screenMarked(id, lastN = 40) {
+// as wrapped. [] when screenText would be. o.dim: dim runs marked too, "\x03text\x04" (Claude Code's grey prompt
+// suggestion and hint in an empty prompt: parsePromptBox drops them).
+export function screenMarked(id, lastN = 40, o = {}) {
   if (!screenReady(id)) return [];
   const b = views.get(id).term.buffer.active;
   const cell = b.getNullCell();
@@ -1226,17 +1227,21 @@ export function screenMarked(id, lastN = 40) {
   for (let y = Math.max(0, b.length - lastN - 10); y < b.length; y++) {
     const line = b.getLine(y);
     if (!line) continue;
-    let text = '', on = false;
+    let text = '', on = false, dim = false;
     for (let x = 0; x < line.length; x++) {
       if (!line.getCell(x, cell) || !cell.getWidth()) continue; // the second half of a wide character
       const hl = !cell.isBgDefault() || !!cell.isInverse();
+      const dm = !!o.dim && !!cell.isDim();
+      if (dm !== dim && !dm) { text += '\x04'; dim = false; }
       if (hl !== on) { text += hl ? '\x01' : '\x02'; on = hl; }
+      if (dm !== dim) { text += '\x03'; dim = true; }
       text += cell.getChars() || ' ';
     }
+    if (dim) text += '\x04';
     if (on) text += '\x02';
     out.push(text.replace(/\s+$/, ''));
   }
-  while (out.length && !out[out.length - 1].replace(/[\x01\x02]/g, '').trim()) out.pop();
+  while (out.length && !out[out.length - 1].replace(/[\x01-\x04]/g, '').trim()) out.pop();
   return out.slice(-lastN);
 }
 // screenText reads the real screen now: the view was fed its snapshot and xterm has drawn it

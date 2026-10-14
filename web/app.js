@@ -2726,7 +2726,7 @@ async function tellClaudeName(s, name) {
   const lines = screenText(id, 40);
   if (parseMenu(lines)) return 'Claude is asking something';
   if (parseSpinner(lines)) return 'Claude is busy';
-  const box = parsePromptBox(screenMarked(id, 40).map((l) => l.replace(/[\x01\x02]/g, '')));
+  const box = parsePromptBox(screenMarked(id, 40, { dim: true }));
   if (!box) return 'something covers its prompt';
   if (box.text) return 'its prompt has text in it';
   const w = await sendText(id, `/rename ${name}`, { beforeEnter: () => { const l = screenText(id, 40); return !l.length || !!parseMenu(l); } });

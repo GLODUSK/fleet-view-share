@@ -1673,11 +1673,11 @@ const CHORD_MS = 150; // between the two keys of Claude Code's "send now" chord 
 const QUEUE_LOOKS = 8, QUEUE_LOOK_MS = 250; // a message just sent may take a moment to show in the transcript's queue
 const flat = (v) => String(v || '').replace(/\[Image #\d+\]\s*/g, '').replace(/\s+/g, ' ').trim(); // compose.js flat
 const squash = (v) => String(v || '').replace(/\s+/g, ''); // the prompt box wraps a message at its width
-// the session's screen, its rows as drawn (the last n)
-async function rowsNow(host, p, n = 60) {
+// the session's screen, its rows as drawn (the last n); marks: dim and inverse runs marked (screen.js render)
+async function rowsNow(host, p, n = 60, marks = false) {
   const raw = await host.call('snapshot', p.id);
   const { cols, rows } = sizeOf(p);
-  return SCREEN.render(typeof raw === 'string' ? raw : '', cols, rows, n, false);
+  return SCREEN.render(typeof raw === 'string' ? raw : '', cols, rows, n, false, marks);
 }
 // the messages Claude Code holds queued for a conversation (typed while it works), oldest first, from its transcript's
 // queue-operation lines (conversation.js) -> [text]
@@ -1755,7 +1755,7 @@ async function unsendMessage(key, b, ctx) {
     const m = await menuNow(host, p);
     if (m) return [409, { ok: false, id: p.id, menu: m, message: MENU_UP }];
     return typeOne(p.id, async () => {
-      const box = async () => SCREEN.promptBox(await rowsNow(host, p));
+      const box = async () => SCREEN.promptBox(await rowsNow(host, p, 60, true));
       const b0 = await box();
       if (!b0 || b0.text) return [409, { ok: false, id: p.id, message: b0 ? 'something is typed in its prompt: clear it in the Session tab first' : 'its prompt is not on screen' }];
       await host.call('write', p.id, '\x1b[A');
@@ -1882,7 +1882,7 @@ async function switchModel(key, b, ctx, via = null) {
           const m = await menuNow(host, p);
           if (m && last) return closeOurs(m, last);
           if (m) return [409, { ...out, ok: false, menu: m, said, message: MENU_UP }];
-          const box = SCREEN.promptBox(await rowsNow(host, p));
+          const box = SCREEN.promptBox(await rowsNow(host, p, 60, true));
           if (!box || box.text) return [409, { ...out, ok: false, said, message: box ? 'something is typed in its prompt: clear it in the Session tab first' : 'its prompt is not on screen' }];
           const raw0 = String((await host.call('snapshot', p.id)) || '');
           const file0 = readSettings(file);

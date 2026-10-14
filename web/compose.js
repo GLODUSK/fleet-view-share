@@ -137,16 +137,22 @@ const ic = (name, size = 14) => icon(name, size) || icon(ALT[name] || 'dot', siz
 // row that fills the width to the next one): { text, lines } with the ❯ gone, text '' when it shows
 // only its hint; null when it isn't on screen (a menu or panel covers it). screen.js promptBox is a port of it for
 // the API (keep the two in step), as are its spinner and effortShown of parseSpinner and parseEffort below.
+// lines may carry screenMarked's marks ({ dim: true }): what the box draws dim is Claude Code's grey suggestion of a
+// next message (or its hint), not typed text, so it reads as empty (Ctrl+U can't clear it). The cursor on its first
+// letter is drawn inverse, not dim: that letter goes with it.
 const BOX_HINT = /^(?:Press up to edit queued messages|Try ".*")$/;
+const dropDim = (l, first) => (first ? l.replace(/^(\s*[❯>]\s?)\x01[^\x02]\x02(?=\x03)/, '$1') : l)
+  .replace(/\x03[^\x04]*(\x04|$)/g, '').replace(/[\x01-\x04]/g, '');
 export function parsePromptBox(lines) {
-  const L = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
+  const M = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
+  const L = M.map((l) => l.replace(/[\x01-\x04]/g, ''));
   let b = L.length - 1;
   while (b >= Math.max(0, L.length - 6) && !isRule(L[b])) b--;
   if (b < 1 || !isRule(L[b])) return null;
   let a = b - 1;
   while (a >= 0 && !isRule(L[a])) a--;
   if (a < 0 || b - a < 2 || !/^\s*[❯>](\s|$)/.test(L[a + 1])) return null;
-  const rows = L.slice(a + 1, b);
+  const rows = M.slice(a + 1, b).map((l, i) => dropDim(l, !i));
   const text = rows.map((l, i) => (i ? l.replace(/^ {2}/, '') : l.replace(/^\s*[❯>]\s?/, '')).trimEnd()).join('\n').trim();
   return { text: BOX_HINT.test(text) ? '' : text, lines: rows.length };
 }
@@ -1172,7 +1178,7 @@ export function mountCompose(slot, s) {
   // ----- Unsend and Rewind (see the top) -----
   // the screen's rows as drawn, colour marks dropped (rules and the rows by them fill the width, which screenText joins)
   const screenRows = (id, n) => (hosts.get(id)?.alive ? screenMarked(id, n).map((l) => l.replace(/[\x01\x02]/g, '')) : []);
-  const boxNow = (id) => parsePromptBox(screenRows(id, 60));
+  const boxNow = (id) => parsePromptBox(hosts.get(id)?.alive ? screenMarked(id, 60, { dim: true }) : []);
   const pasteKeys = (id, text) => typeInto(writeKey, cleanText(text));
   // Ctrl+U until the prompt is empty -> true when it is
   async function clearBox(id) {

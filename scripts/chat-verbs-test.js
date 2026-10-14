@@ -45,6 +45,16 @@ const RULE = '─'.repeat(40);
   assert.equal(SCREEN.effortShown(['…default for new sessions○xhigh·/effort']), 'xhigh');
   assert.equal(SCREEN.effortShown(['…default for new sessionshigh · /effort', RULE, '❯ ', RULE, '  ? for shortcuts']), 'high');
   ok('screen.js: promptBox, spinner and effortShown read what compose.js reads');
+  // Claude Code's grey suggestion of a next message in an empty prompt (dim, the cursor inverse on its first letter)
+  // reads as empty; typed text, and a colour whose numbers include a 2, do not
+  const E = '\x1b[', rule = `${E}38;2;2;2;2m${RULE}${E}39m`;
+  const boxOf = (row) => SCREEN.promptBox(SCREEN.render(['● hi', '', rule, row, rule, '  footer'].join('\r\n'), 60, 12, 60, false, true));
+  assert.deepEqual(boxOf(`❯ ${E}2mare u done${E}22m`), { text: '', lines: 1 });
+  assert.deepEqual(boxOf(`❯ ${E}7ma${E}27m${E}2mre u done${E}0m`), { text: '', lines: 1 });
+  assert.deepEqual(boxOf(`❯ fi${E}7mx${E}27m it`), { text: 'fix it', lines: 1 });
+  assert.deepEqual(boxOf(`❯ ${E}38;5;2mgreen${E}0m`), { text: 'green', lines: 1 });
+  assert.deepEqual(SCREEN.render(`a${E}2mb${E}0m`, 20, 4, 4, false), ['ab']);
+  ok('screen.js: a dim suggestion in the prompt reads as empty (render marks)');
 }
 
 // ---------- typing: a text ending in "\" (Claude Code takes "\" then Enter as a new line, leaving it unsent) ----------

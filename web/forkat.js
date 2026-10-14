@@ -34,6 +34,7 @@ export async function forkAt(key, text, nth = 0) {
 async function run(j) {
   const alive = () => !!hosts.get(j.key)?.alive;
   const rows = (n = 60) => (alive() ? screenMarked(j.key, n).map((l) => l.replace(/[\x01\x02]/g, '')) : []);
+  const boxRows = () => (alive() ? screenMarked(j.key, 60, { dim: true }) : []); // (parsePromptBox: dim is a suggestion)
   const menu = () => (alive() ? parseMenu(screenText(j.key, 40, { rows: true })) : null);
   const write = (d) => {
     const t = termApi();
@@ -49,7 +50,7 @@ async function run(j) {
     if (Date.now() > end) return { ok: false, message: 'the fork was not ready to go back within 3 minutes' };
     screenText(j.key, 40); // the first look builds its off-screen view
     const L = rows();
-    const ready = screenReady(j.key) && L.length > 0 && !menu() && parsePromptBox(L)?.text === '' && !parseSpinner(L.slice(-40))?.strong;
+    const ready = screenReady(j.key) && L.length > 0 && !menu() && parsePromptBox(boxRows())?.text === '' && !parseSpinner(L.slice(-40))?.strong;
     if (!ready) since = 0;
     else if (!since) since = Date.now();
     else if (Date.now() - since >= READY_MS) break;
@@ -86,11 +87,11 @@ async function run(j) {
 
   // 4. the restore puts the message back in its prompt: cleared there, it goes to the fork's chat box
   let box = null;
-  for (let i = 0; i < 40; i++) { await sleep(200); if (!alive()) return gone; box = menu() ? null : parsePromptBox(rows()); if (box && box.text) break; }
+  for (let i = 0; i < 40; i++) { await sleep(200); if (!alive()) return gone; box = menu() ? null : parsePromptBox(boxRows()); if (box && box.text) break; }
   for (let i = 0; i < 40 && box && box.text; i++) {
     if (!write('\x15'.repeat(Math.min(box.lines + 1, 30)))) break;
     await sleep(120);
-    box = parsePromptBox(rows());
+    box = parsePromptBox(boxRows());
   }
   handToChat(j.key, { text: j.text });
   return { ok: true, message: 'went back to just before your message' };

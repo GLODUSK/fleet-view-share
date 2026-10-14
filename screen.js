@@ -10,9 +10,11 @@
 // would pick the highlighted option), and to show a caller that menu and answer it (GET/POST /api/sessions/:id/menu,
 // /answer).
 //
-//   render(raw, cols, rows, lastN = 40, join = true) -> [line]  the last lastN lines (soft-wrapped rows joined
-//                                                   unless join is false, blank rows at the bottom dropped), like
-//                                                   term.js screenText
+//   render(raw, cols, rows, lastN = 40, join = true, marks = false) -> [line]  the last lastN lines (soft-wrapped
+//                                                   rows joined unless join is false, blank rows at the bottom
+//                                                   dropped), like term.js screenText; marks: inverse runs read
+//                                                   "\x01text\x02" and dim ones "\x03text\x04", like term.js
+//                                                   screenMarked(id, n, { dim: true }) (only those two: no colours)
 //   menuDetails(lines) -> { kind, title, context, more, options: [{ n, label, desc, on }], sig, unnumbered? } | null
 //                                                   (unnumbered: options drawn without numbers, numbered 1..k here;
 //                                                   pick one with ↑/↓ and Enter, a digit does nothing)
@@ -34,14 +36,16 @@ function widthOf(cp) {
   return 1;
 }
 
+const DIM = 1, INV = 2; // render's cell attributes
 const clampInt = (v, lo, hi, def) => (Number.isInteger(v) && v >= lo && v <= hi ? v : def);
 
-function render(raw, cols, rows, lastN = 40, join = true) {
+function render(raw, cols, rows, lastN = 40, join = true, marks = false) {
   const W = clampInt(cols, 2, 1000, 120), Hh = clampInt(rows, 2, 500, 32);
   const s = String(raw || '');
-  const blank = () => ({ c: [], w: false });
+  const blank = () => ({ c: [], a: [], w: false }); // a: each cell's DIM | INV
   let main = { lines: Array.from({ length: Hh }, blank) }, alt = null;
   let L = main.lines; // the active buffer: scrollback, then the Hh rows of the screen at its end
+  let attr = 0; // the pen's DIM | INV (SGR 2 and 7)
   let x = 0, y = 0, wrapNext = false, top = 0, bot = Hh - 1, saved = { x: 0, y: 0 }, savedMain = null;
   const row = (r) => L[L.length - Hh + r];
   const setRow = (r, v) => { L[L.length - Hh + r] = v; };
@@ -62,14 +66,15 @@ function render(raw, cols, rows, lastN = 40, join = true) {
     }
   };
   const lineFeed = () => { if (y === bot) scrollUp(1); else if (y < Hh - 1) y++; };
-  const erase = (r, from, to) => { const l = row(r); for (let i = from; i < to && i < l.c.length; i++) l.c[i] = ' '; };
+  const erase = (r, from, to) => { const l = row(r); for (let i = from; i < to && i < l.c.length; i++) { l.c[i] = ' '; l.a[i] = 0; } };
   const put = (ch, w) => {
     if (w === 0) { const l = row(y); const i = Math.max(0, x - 1); if (l.c[i] != null) l.c[i] += ch; return; }
     if (wrapNext || (w === 2 && x === W - 1)) { x = 0; lineFeed(); row(y).w = true; wrapNext = false; }
     const l = row(y);
     while (l.c.length < x) l.c.push(' ');
     l.c[x] = ch;
-    if (w === 2) l.c[x + 1] = '';
+    l.a[x] = attr;
+    if (w === 2) { l.c[x + 1] = ''; l.a[x + 1] = attr; }
     x += w;
     if (x >= W) { x = W - 1; wrapNext = true; }
   };
@@ -127,8 +132,8 @@ function render(raw, cols, rows, lastN = 40, join = true) {
             wrapNext = false;
             break;
           case 'X': erase(y, x, x + n); wrapNext = false; break;
-          case 'P': { const l = row(y); l.c.splice(x, n); wrapNext = false; break; }
-          case '@': { const l = row(y); if (l.c.length > x) { l.c.splice(x, 0, ...Array(n).fill(' ')); l.c.length = Math.min(l.c.length, W); } wrapNext = false; break; }
+          case 'P': { const l = row(y); l.c.splice(x, n); l.a.splice(x, n); wrapNext = false; break; }
+          case '@': { const l = row(y); if (l.c.length > x) { l.c.splice(x, 0, ...Array(n).fill(' ')); l.c.length = Math.min(l.c.length, W); l.a.splice(x, 0, ...Array(n).fill(0)); l.a.length = Math.min(l.a.length, W); } wrapNext = false; break; }
           case 'L': if (y >= top && y <= bot) { const t0 = top; top = y; scrollDown(Math.min(n, bot - y + 1)); top = t0; } x = 0; wrapNext = false; break;
           case 'M': if (y >= top && y <= bot) { const t0 = top; top = y; for (let k = 0; k < Math.min(n, bot - y + 1); k++) { L.splice(L.length - Hh + top, 1); L.splice(L.length - Hh + bot + 1, 0, blank()); } top = t0; } x = 0; wrapNext = false; break;
           case 'S': scrollUp(n); break;
@@ -141,7 +146,18 @@ function render(raw, cols, rows, lastN = 40, join = true) {
           }
           case 's': saved = { x, y }; break;
           case 'u': ({ x, y } = saved); clampCur(); break;
-          default: break; // colours (m) and the rest draw nothing
+          case 'm': // only dim and inverse are kept (render's marks); a colour's own numbers (38;5;n, 38;2;r;g;b) skipped
+            for (let k = 0; k < ps.length; k++) {
+              const q = Number.isFinite(ps[k]) ? ps[k] : 0;
+              if (q === 38 || q === 48 || q === 58) { if (!/:/.test(params.split(';')[k] || '')) k += ps[k + 1] === 5 ? 2 : ps[k + 1] === 2 ? 4 : 0; }
+              else if (q === 0) attr = 0;
+              else if (q === 2) attr |= DIM;
+              else if (q === 22) attr &= ~DIM;
+              else if (q === 7) attr |= INV;
+              else if (q === 27) attr &= ~INV;
+            }
+            break;
+          default: break; // the rest draw nothing
         }
         continue;
       }
@@ -180,10 +196,25 @@ function render(raw, cols, rows, lastN = 40, join = true) {
 
   const out = [];
   for (const l of L) {
-    const text = l.c.map((c) => (c == null ? ' ' : c)).join('').replace(/\s+$/, '');
+    let text = '';
+    if (!marks) text = l.c.map((c) => (c == null ? ' ' : c)).join('');
+    else {
+      let on = 0;
+      for (let k = 0; k < l.c.length; k++) {
+        const v = l.c[k] == null ? 0 : l.a[k] || 0;
+        if ((on & DIM) && !(v & DIM)) text += '\x04';
+        if ((on & INV) !== (v & INV)) text += v & INV ? '\x01' : '\x02';
+        if ((v & DIM) && !(on & DIM)) text += '\x03';
+        on = v;
+        text += l.c[k] == null ? ' ' : l.c[k];
+      }
+      if (on & DIM) text += '\x04';
+      if (on & INV) text += '\x02';
+    }
+    text = text.replace(/\s+$/, '');
     if (join && l.w && out.length) out[out.length - 1] += text; else out.push(text);
   }
-  while (out.length && !out[out.length - 1].trim()) out.pop();
+  while (out.length && !out[out.length - 1].replace(/[\x01-\x04]/g, '').trim()) out.pop();
   return out.slice(-lastN);
 }
 
@@ -400,17 +431,21 @@ const menuShown = (raw, cols, rows) => menuIn(render(raw, cols, rows, 40, false)
 
 // ---------- the rest of the chat's screen readers (ports of web/compose.js; keep each in step with its original) ----------
 // parsePromptBox: the prompt box at the bottom (between its two rules), over the rows as drawn: { text, lines } with
-// the ❯ gone, text '' when it shows only its hint; null when it isn't on screen (a menu or panel covers it)
+// the ❯ gone, text '' when it shows only its hint; null when it isn't on screen (a menu or panel covers it). lines
+// may carry render's marks: what the box draws dim is Claude Code's grey suggestion of a next message, not typed text
 const BOX_HINT = /^(?:Press up to edit queued messages|Try ".*")$/;
+const dropDim = (l, first) => (first ? l.replace(/^(\s*[❯>]\s?)\x01[^\x02]\x02(?=\x03)/, '$1') : l)
+  .replace(/\x03[^\x04]*(\x04|$)/g, '').replace(/[\x01-\x04]/g, '');
 function promptBox(lines) {
-  const L = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
+  const M = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
+  const L = M.map((l) => l.replace(/[\x01-\x04]/g, ''));
   let b = L.length - 1;
   while (b >= Math.max(0, L.length - 6) && !isRule(L[b])) b--;
   if (b < 1 || !isRule(L[b])) return null;
   let a = b - 1;
   while (a >= 0 && !isRule(L[a])) a--;
   if (a < 0 || b - a < 2 || !/^\s*[❯>](\s|$)/.test(L[a + 1])) return null;
-  const rows = L.slice(a + 1, b);
+  const rows = M.slice(a + 1, b).map((l, k) => dropDim(l, !k));
   const text = rows.map((l, i) => (i ? l.replace(/^ {2}/, '') : l.replace(/^\s*[❯>]\s?/, '')).trimEnd()).join('\n').trim();
   return { text: BOX_HINT.test(text) ? '' : text, lines: rows.length };
 }
