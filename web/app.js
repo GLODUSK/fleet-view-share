@@ -1514,6 +1514,9 @@ function render() {
   } catch (e) {
     console.error(e);
   }
+  // the map's sky is the page's backdrop behind every view (map.js renderSky); the Map draws it itself. Not in the
+  // Bots pop-out window
+  try { if (!SOLO && local.view !== 'map' && mapMod && typeof mapMod.renderSky === 'function') mapMod.renderSky(view, ui); } catch (e) { console.error(e); }
   markMulti(el);
   drawReplayPill();
   drawNotifyBtn();

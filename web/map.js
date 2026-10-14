@@ -194,7 +194,7 @@
 //
 // Tests (?fixture=1 or ?debug=1): window.__map = { nodes, stats, debug, comet(fromId, toId), merge(sessionId), sky(hour), skyGL,
 // rest(on), battery(on), meteor(), shower(), moon(date), satellites(n), rocket(hubId), event(name, skipSeconds) }. satellites(n) shows n satellites as if n agents ran (null: the
-// map's running agents; stats().satellites: { want, shown: [{ x, y, a, blink }] }, CSS px of the map). meteor() sends a shooting star now, shower() a meteor shower
+// map's running agents; stats().satellites: { want, shown: [{ x, y, a, blink }] }, CSS px of the window). meteor() sends a shooting star now, shower() a meteor shower
 // (not held back by SHOWER_GAP) (stats().meteor: how many streaks show or are about to; meteorIn: ms to the next shooting
 // star, null when none is due; showers: how many showers started). rocket(hubId) sends a deploy's rocket up now under
 // that hub (null: anywhere) (event(name) starts that space event now, ignoring EVENT_GAP; no name lists the registered ones, null stops
@@ -741,6 +741,30 @@ export function renderMap(el, state, ui) {
   start();
 }
 
+// The other views (Cards, Wall, Projects, Bots) call this on every draw: the sky goes on behind them, as the page's
+// backdrop (see ensureSky), with a satellite for each running agent of the conversations shown, a meteor shower for a
+// merge and a rocket for a deploy going live. The map itself waits for the Map to show again (renderMap).
+export function renderSky(state, ui) {
+  if (!state || typeof document === 'undefined') return;
+  if (!I) { I = createInstance(state); I.ui = ui || {}; }
+  ensureSky();
+  if (active()) return; // the Map shows: renderMap keeps it all
+  I.skew = Date.now() - (state.now || Date.now());
+  I.satRun = satRunOf(state);
+  ingestMerges(state, true);
+  ingestDeploys(state, true);
+  startLoop();
+}
+// the running agents of the conversations the map would show, keyed as their nodes are (rebuild), for the satellites
+function satRunOf(state) {
+  const fin = Array.isArray(state.finishedSessions) ? new Set(state.finishedSessions.map((s) => s && s.id)) : null, out = [];
+  for (const s of visibleSessions(state)) {
+    if (!s || (fin && fin.has(s.id) && s.state === 'DONE')) continue;
+    for (const a of (s.agents || []).slice(-MAX_AGENTS)) if (a && a.state === 'run') out.push(`a:${s.id}:${a.id}`);
+  }
+  return out;
+}
+
 // a repo's production deploy, by hub id: building (any build running), failed (the newest one failed), else
 // clean (the newest went live, or none in the last 3 hours). Only repos that deploy at all (state.deployRepos,
 // plus any with a deploy listed) get one; d is the deploy behind it (null when clean with none recent).
@@ -1243,8 +1267,11 @@ function createInstance(state) {
   return {
     el: null, canvas: null, ctx: null, tip: null, legendEl: null, emptyEl: null,
     skyCanvas: null, skyGL: null, // the sky's WebGL2 canvas (off the page) and its state (null: the canvas draws the sky)
+    // the page's backdrop (ensureSky): a canvas fixed over the whole window behind every view, its 2D context, its size
+    // (CSS px) and dpr; the sky is drawn there, the map's canvas over it is see-through but for the map itself
+    skyEl: null, skyCtx: null, skyW: 0, skyH: 0, skyDpr: 0, mapOn: false,
     glowGL: false,            // the last draw's repo glows came with the sky's picture (else the canvas drew them)
-    W: 0, H: 0, dpr: 1,
+    W: 0, H: 0, dpr: 1, mapDpr: 0,
     pos: new Map(),           // node id -> { x, y, vx, vy } in world units, kept between polls
     ang: new Map(),           // agent node id -> current orbit angle (eases toward its slot)
     homeOrder: [],
@@ -1307,10 +1334,8 @@ function attach(el) {
   I.el = el;
   if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
   el.style.overflow = 'hidden';
+  ensureSky();
   if (!I.canvas) {
-    // the sky's canvas (see drawSkyGL): never on the page, the map's canvas lays its picture down
-    I.skyCanvas = document.createElement('canvas');
-    I.skyGL = sky2d ? null : skyGLMake(I.skyCanvas);
     const cv = document.createElement('canvas');
     cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;cursor:default;outline:none';
     I.canvas = cv;
@@ -1356,21 +1381,59 @@ function attach(el) {
 }
 
 const active = () => !!(I && I.el && I.el.isConnected && I.el.getClientRects().length > 0);
+const skyOn = () => !!(I && I.skyEl && I.skyEl.isConnected);
+
+// The sky is the page's backdrop (Henry, 2026-10-14: "behind all tabs", and no menu or panel may move it): its own
+// canvas, fixed over the whole window under every view (the header, the strips, the panels and the cards are drawn
+// over it), so it is laid out in the window's CSS px, never the map's box. The map's canvas, when the Map shows, is
+// see-through but for the map's own things. The sky's WebGL2 canvas (drawSkyGL) stays off the page: the backdrop
+// copies its picture whenever it drew a new one (skyPaint).
+function ensureSky() {
+  if (!I.skyCanvas) {
+    I.skyCanvas = document.createElement('canvas');
+    I.skyGL = sky2d ? null : skyGLMake(I.skyCanvas);
+  }
+  if (!I.skyEl) {
+    const bg = document.createElement('canvas');
+    bg.className = 'sky-bg';
+    bg.setAttribute('aria-hidden', 'true');
+    bg.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;display:block;pointer-events:none;z-index:-1';
+    I.skyEl = bg; I.skyCtx = bg.getContext('2d');
+    I.skyW = I.skyH = 0; // sized by the next frame (skySize)
+  }
+  if (!I.skyEl.isConnected && document.body) document.body.prepend(I.skyEl);
+}
+// the backdrop's size: the window's, worked out each frame (cheap) so a resize lays it again at once
+function skySize(dpr) {
+  const w = Math.max(1, Math.round(window.innerWidth || 0)), h = Math.max(1, Math.round(window.innerHeight || 0));
+  if (w === I.skyW && h === I.skyH && dpr === I.skyDpr) return;
+  I.skyW = w; I.skyH = h; I.skyDpr = dpr;
+  I.skyEl.width = I.skyCanvas.width = Math.max(1, Math.round(w * dpr));
+  I.skyEl.height = I.skyCanvas.height = Math.max(1, Math.round(h * dpr));
+  if (I.skyGL) I.skyGL.drawn = false; // a new size clears both, so the sky is drawn again
+  I.sky = null;
+  // the solid page colour (Edge, no glass) comes from the shell's --bg when it sets one
+  try { I.bgFill = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || COL.bg; } catch { I.bgFill = COL.bg; }
+  I.dirty = true;
+}
 
 // Keys come through the shell's ui.keys.map hook, not a window listener of our own: the shell routes
 // keys to the open repo menu, the open-confirm box and the / filter first, and only then to the map.
 function start() {
   if (I.ui && I.ui.keys) I.ui.keys.map = onKey;
+  startLoop();
+}
+function startLoop() {
   if (I.running) { if (I.cometQ.length) wake(); return; } // a new state's comets launch now, not after a sleep
   if (document.hidden) return;
   I.running = true;
   I._dirty = true;
-  if (I.skyGL) I.skyGL.drawn = false; // and the sky once, after the map was hidden
+  if (I.skyGL) I.skyGL.drawn = false; // and the sky once, after the window was hidden
   I.lastT = 0;
   I.raf = requestAnimationFrame(frame);
 }
 // the loop stops while the window is hidden; come back without waiting for the next poll
-document.addEventListener('visibilitychange', () => { if (I && !document.hidden && active()) start(); });
+document.addEventListener('visibilitychange', () => { if (I && !document.hidden && (active() || skyOn())) startLoop(); });
 function stop() {
   I.running = false;
   cancelAnimationFrame(I.raf); I.raf = 0;
@@ -1416,7 +1479,10 @@ if (typeof window !== 'undefined') {
 // a shooting star, a fading ghost, merge sparks, a camera glide, a drag or band, a re-arrange, or what the last draw
 // saw (I.quick: a morph, birth, bump, kick, whirl, relay ring, or a size or level still gliding)
 function quickNow() {
-  return I._dirty || I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || !!(I.far && I.far.quick) || I.ghosts.length > 0 ||
+  const sky = I._dirty || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || !!(I.far && I.far.quick);
+  // with the Map hidden only the sky goes on: the map's own motion waits for it to show again
+  if (sky || !I.mapOn) return sky;
+  return I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 ||
     I.bursts.length > 0 || !!I.glide || !!I.drag || !!I.band || !!I.keep || !!(I.trail && I.trail.size) || performance.now() < (I.regrid || 0);
 }
 // the screen's refresh interval: the median of the last back-to-back frames
@@ -1813,14 +1879,18 @@ function ingestTeams(state) {
 // before, while the step also turns 'ok' the first time it looks up an old PR (after a restart, every merged PR at
 // once). Everything in the first state the map sees is history, an alert older than MERGE_MAX_AGE too (the map
 // was hidden); replay launches nothing, and the first live state after it is history again.
-function ingestMerges(state) {
+// sky: the Map is hidden, so a new merge sets off a meteor shower anywhere along the top instead (one at most)
+function ingestMerges(state, sky) {
   if (I.replay) { I.mergeInit = false; return; }
   const first = !I.mergeInit, nowC = Date.now() - I.skew;
   I.mergeInit = true;
   let top = first ? -Infinity : I.mergeN, at = performance.now();
   for (const a of Array.isArray(state.alerts) ? state.alerts : []) {
     if (!a || !Number.isFinite(a.n)) continue;
-    if (!first && a.n > I.mergeN && a.kind === 'merged' && a.sid && !(nowC - a.t > MERGE_MAX_AGE) && launchMerge(a.sid, at)) at += MERGE_STAGGER;
+    if (!first && a.n > I.mergeN && a.kind === 'merged' && a.sid && !(nowC - a.t > MERGE_MAX_AGE)) {
+      if (sky) { if (!I.still) shower(at, null); }
+      else if (launchMerge(a.sid, at)) at += MERGE_STAGGER;
+    }
     if (a.n > top) top = a.n;
   }
   I.mergeN = top;
@@ -1829,7 +1899,7 @@ function ingestMerges(state) {
 // deploys going live send up a rocket under their repo's hub: one seen building that is live now, or one first seen
 // already live that went live in the last ROCKET_RECENT (server clock); on the page's first state (and after a
 // replay) whatever is live is history. Each deploy goes up once (I.dpSeen, the newest ROCKET_SEEN remembered)
-function ingestDeploys(state) {
+function ingestDeploys(state, sky) {
   if (I.replay) { I.dpInit = false; return; }
   const first = !I.dpInit, seen = I.dpSeen, nowC = Date.now() - I.skew;
   I.dpInit = true;
@@ -1839,7 +1909,7 @@ function ingestDeploys(state) {
     seen.delete(key); seen.set(key, d.state); // newest last, so the oldest go first
     if (first || d.state !== 'live' || was === 'live') continue;
     if (was === 'building' || (was === undefined && Number.isFinite(d.readyAt) && nowC - d.readyAt < ROCKET_RECENT)) {
-      rocketLaunch(performance.now(), d.root ? I.byId.get(repoId(d.root)) : null);
+      rocketLaunch(performance.now(), d.root && !sky ? I.byId.get(repoId(d.root)) : null); // the Map hidden: anywhere along the bottom
     }
   }
   while (seen.size > ROCKET_SEEN) seen.delete(seen.keys().next().value);
@@ -2369,7 +2439,9 @@ function keepIn(ids) {
 // ---------- frame loop ----------
 function frame(ts) {
   I.raf = -1; // in a frame: a change marked now needs no wake (paceNext follows)
-  if (!active() || document.hidden) { stop(); return; }
+  // the Map shown: the map and the sky; any other view: the sky alone, behind it
+  I.mapOn = active();
+  if (document.hidden || !(I.mapOn || skyOn())) { stop(); return; }
   const P = I.pace;
   if (P.chain && ts - P.ts > 3 && ts - P.ts < 50) paceSample(P, ts - P.ts);
   P.ts = ts; P.chain = false;
@@ -2383,8 +2455,40 @@ function frame(ts) {
   const dt = I.lastT ? Math.min(100, t0 - I.lastT) : 16;
   I.lastT = tick ? 0 : t0; I.dt = dt; I.adt = rest ? 0 : dt;
   if (!I.still) I.time += I.adt;
-  const r = I.el.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
+  I.dpr = dpr;
+  if (I.skyEl) skySize(dpr);
+  if (I.mapOn) mapFrame(t0, dpr);
+  meteorStep(t0, rest);
+  eventStep(t0, rest);
+  farStep(t0, rest);
+  satStep(rest);
+  rocketStep(t0, rest);
+  // continuous motion while anything moves (the stars' drift too, even on an empty map), at the pace paceNext
+  // sets; otherwise only on change (and a slow tick for age fades)
+  const moving = (!I.still && !tick) || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || !!I.far ||
+    (I.mapOn && (I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 || I.bursts.length > 0));
+  const hot = I._dirty;
+  if (hot || moving || t0 - I.lastDraw > (tick ? REST_TICK_MS - 50 : 250)) {
+    I.quick = false; I.lively = false; // what this draw finds going on (see quickNow, paceNext)
+    if (I.mapOn) draw(); else drawSkyOnly();
+    I.lastDraw = t0; I._dirty = false;
+    P.draws.push(t0);
+    while (P.draws[0] < t0 - 1000) P.draws.shift();
+    const ms = performance.now() - t0, s = I.stats;
+    s.frames++;
+    s.sum += ms - (s.n === s.ring.length ? s.ring[s.i] : 0);
+    s.ring[s.i] = ms; s.i = (s.i + 1) % s.ring.length; s.n = Math.min(s.ring.length, s.n + 1);
+    if (ms > s.max) s.max = ms;
+  }
+  // the overlay (edge pointers, minimap, ...) follows every frame; its errors never stop the map
+  if (I.mapOn && I.overlay && typeof I.overlay.frame === 'function') { try { I.overlay.frame(performance.now()); } catch (err) { console.error(err); } }
+  paceNext(ts, hot);
+}
+
+// the map's part of a frame (the Map shown): its box, the layout, the camera
+function mapFrame(t0, dpr) {
+  const r = I.el.getBoundingClientRect();
   // the strips above the map (the alert line, Recently finished) change height without changing its size much:
   // its top edge moves on screen, and the view must not move with it
   const top0 = I.top, left0 = I.left;
@@ -2397,17 +2501,12 @@ function frame(ts) {
     I.keep.at = t0;
   }
   if (shifted) { holdPan((r.left - left0) / K(), (r.top - top0) / K()); I.dirty = true; }
-  if (!I.sized || Math.round(r.width) !== I.W || Math.round(r.height) !== I.H || dpr !== I.dpr) {
+  if (!I.sized || Math.round(r.width) !== I.W || Math.round(r.height) !== I.H || dpr !== I.mapDpr) {
     I.sized = true;
     const W0 = I.W, H0 = I.H;
-    I.W = Math.round(r.width); I.H = Math.round(r.height); I.dpr = dpr;
+    I.W = Math.round(r.width); I.H = Math.round(r.height); I.mapDpr = dpr;
     I.sf = screenFactor(I.W, I.H);
     I.canvas.width = Math.max(1, Math.round(I.W * dpr)); I.canvas.height = Math.max(1, Math.round(I.H * dpr));
-    // the sky's canvas, pixel for pixel the same; a new size clears it, so the sky is drawn again
-    I.skyCanvas.width = I.canvas.width; I.skyCanvas.height = I.canvas.height;
-    if (I.skyGL) I.skyGL.drawn = false;
-    // the solid page colour (Edge, no glass) comes from the shell's --bg when it sets one
-    try { I.bgFill = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || COL.bg; } catch { I.bgFill = COL.bg; }
     const before = I.homeSig;
     assignHomes(I.nodes);
     if (before && before !== I.homeSig) I.alpha = Math.max(I.alpha, 0.3);
@@ -2434,30 +2533,6 @@ function frame(ts) {
   if (stepGlide(t0)) I.dirty = true;
   if (I.savedCam && I.camInit && I.sim && I.sim.length) restoreCam();
   if (I.camInit && !I.savedCam) keepCam();
-  meteorStep(t0, rest);
-  eventStep(t0, rest);
-  farStep(t0, rest);
-  satStep(rest);
-  rocketStep(t0, rest);
-  // continuous motion while anything moves (the stars' drift too, even on an empty map), at the pace paceNext
-  // sets; otherwise only on change (and a slow tick for age fades)
-  const moving = (!I.still && !tick) || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || !!I.far ||
-    I.ghosts.length > 0 || I.bursts.length > 0;
-  const hot = I._dirty;
-  if (hot || moving || t0 - I.lastDraw > (tick ? REST_TICK_MS - 50 : 250)) {
-    I.quick = false; I.lively = false; // what this draw finds going on (see quickNow, paceNext)
-    draw(); I.lastDraw = t0; I._dirty = false;
-    P.draws.push(t0);
-    while (P.draws[0] < t0 - 1000) P.draws.shift();
-    const ms = performance.now() - t0, s = I.stats;
-    s.frames++;
-    s.sum += ms - (s.n === s.ring.length ? s.ring[s.i] : 0);
-    s.ring[s.i] = ms; s.i = (s.i + 1) % s.ring.length; s.n = Math.min(s.ring.length, s.n + 1);
-    if (ms > s.max) s.max = ms;
-  }
-  // the overlay (edge pointers, minimap, ...) follows every frame; its errors never stop the map
-  if (I.overlay && typeof I.overlay.frame === 'function') { try { I.overlay.frame(performance.now()); } catch (err) { console.error(err); } }
-  paceNext(ts, hot);
 }
 
 // ---------- drawing ----------
@@ -2913,20 +2988,25 @@ function starTile(L, dpr) {
 // is never negative and stays small enough for its floats (the shader's hash repeats with it, so no seam)
 const starPos = new Float64Array(STAR_LAYERS.length * 3), starWide = new Float64Array(STAR_LAYERS.length * 2);
 // the sky's camera this frame: how far (cx, cy, CSS px) the sky has slid, and the field's middle (mx, my, CSS px of
-// the map), which it scales about. Each change of the camera's middle (the pan, less what holdPan took back out) slides
-// the sky STAR_PAN of the px it moves the map at the zoom then, so a drag carries the stars with the orbs and a zoom
-// leaves them where they are
+// the window), which it scales about. Each change of the camera's middle (the pan, less what holdPan took back out)
+// slides the sky STAR_PAN of the px it moves the map at the zoom then, so a drag carries the stars with the orbs and a
+// zoom leaves them where they are. Before the Map ever showed (no camera yet) the sky has not slid; on the other views
+// it stays where the map's pan last left it
 function skyCam() {
-  const adj = I.starAdj || { x: 0, y: 0 }, k = K() * STAR_PAN;
-  const rx = I.cam.cx + I.pan.x - adj.x, ry = I.cam.cy + I.pan.y - adj.y;
-  const sp = I.skyPan || (I.skyPan = { x: 0, y: 0, rx, ry });
-  if (rx !== sp.rx || ry !== sp.ry) { sp.x += (rx - sp.rx) * k; sp.y += (ry - sp.ry) * k; sp.rx = rx; sp.ry = ry; }
-  // the field's middle is a fixed point in the window (where the map's middle first was), not the map's middle,
-  // which moves when a menu or panel takes room from the map
-  const lf = I.left || 0, tp = I.top || 0;
-  if (!I.starO) I.starO = { x: lf + I.W / 2, y: tp + I.H / 2 };
-  return { cx: sp.x, cy: sp.y, mx: I.starO.x - lf, my: I.starO.y - tp };
+  let sp = I.skyPan;
+  if (I.cam) {
+    const adj = I.starAdj || { x: 0, y: 0 }, k = K() * STAR_PAN;
+    const rx = I.cam.cx + I.pan.x - adj.x, ry = I.cam.cy + I.pan.y - adj.y;
+    if (!sp) sp = I.skyPan = { x: 0, y: 0, rx, ry };
+    if (rx !== sp.rx || ry !== sp.ry) { sp.x += (rx - sp.rx) * k; sp.y += (ry - sp.ry) * k; sp.rx = rx; sp.ry = ry; }
+  }
+  // the field's middle is a fixed point in the window (its middle as the sky was first laid), so no menu, panel or
+  // strip moves it
+  if (!I.starO) I.starO = { x: (I.skyW || 1) / 2, y: (I.skyH || 1) / 2 };
+  return { cx: sp ? sp.x : 0, cy: sp ? sp.y : 0, mx: I.starO.x, my: I.starO.y };
 }
+// the map's box in the window (CSS px): where a point on the map's canvas (a node's sx, sy) is in the sky
+const mapX = () => (I.mapOn ? I.left || 0 : 0), mapY = () => (I.mapOn ? I.top || 0 : 0);
 function starsAt() {
   const { cx, cy, mx, my } = skyCam(), ts = I.still ? 0 : I.time / 1000;
   for (let i = 0; i < STAR_LAYERS.length; i++) {
@@ -3034,7 +3114,7 @@ function drawStars(ctx) {
     const pat = I.stars.pats[i], s = at[i * 3];
     if (!pat || !pat.setTransform) continue;
     pat.setTransform(new DOMMatrix([s / dpr, 0, 0, s / dpr, at[i * 3 + 1], at[i * 3 + 2]]));
-    ctx.fillStyle = pat; ctx.fillRect(0, 0, I.W, I.H);
+    ctx.fillStyle = pat; ctx.fillRect(0, 0, I.skyW, I.skyH);
   }
 }
 
@@ -3046,10 +3126,10 @@ function meteorTint() {
   while (j < STAR_TINT.length - 1 && (w -= STAR_TINT[j][1]) > 0) j++;
   return STAR_TINT[j][0].split(',').map(Number);
 }
-// a shooting star starting at t (ms): somewhere in the map's upper half, its direction, tail and tint; v: its speed
+// a shooting star starting at t (ms): somewhere in the window's upper half, its direction, tail and tint; v: its speed
 // (CSS px/s)
 function meteorMake(t) {
-  const W = I.W || 1, H = I.H || 1, ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (Math.random() * 2 - 1) * METEOR_TURN;
+  const W = I.skyW || 1, H = I.skyH || 1, ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (Math.random() * 2 - 1) * METEOR_TURN;
   return { at: t, x: W * pickIn([0.1, 0.9]), y: H * pickIn([0.04, 0.5]), dx: Math.cos(ang) * (Math.random() < 0.4 ? -1 : 1),
     dy: Math.sin(ang), tail: pickIn(METEOR_TAIL), v: METEOR_SPEED, rgb: meteorTint() };
 }
@@ -3059,8 +3139,8 @@ function shower(t, n, force) {
   if (I.still || resting() || !I.running || document.hidden) return false;
   if (!force && t - I.showerAt < SHOWER_GAP) return false;
   I.showerAt = t; I.showers++;
-  const W = I.W || 1, H = I.H || 1;
-  const x = clamp(n && Number.isFinite(n.sx) ? n.sx : W * Math.random(), W * SHOWER_X[0], W * SHOWER_X[1]), y = H * pickIn(SHOWER_Y);
+  const W = I.skyW || 1, H = I.skyH || 1;
+  const x = clamp(n && I.mapOn && Number.isFinite(n.sx) ? n.sx + mapX() : W * Math.random(), W * SHOWER_X[0], W * SHOWER_X[1]), y = H * pickIn(SHOWER_Y);
   const k = Math.floor(pickIn([SHOWER_N[0], SHOWER_N[1] + 1]));
   for (let i = 0; i < k; i++) {
     // spread over the fan in even shares, each jittered inside its own, so no two fly the same way
@@ -3090,7 +3170,7 @@ function meteorStep(t, rest) {
 }
 // ---------- space events (see "Look", EVENT_*) ----------
 // The registry: a space event is one registerEvent(name, def) plus its own draw code (in the sky's shader and, if it
-// is worth it, the canvas fallback). def: { weight, start(t) -> its state (laid out in CSS px of the map; take
+// is worth it, the canvas fallback). def: { weight, start(t) -> its state (laid out in CSS px of the window; take
 // eventCam(depth) for its parallax), step(ev, t) -> false once it is over (t: the map's clock, ms), optional end(ev) }.
 // The director owns the timing and the gating; an event's draw reads I.event.ev while I.event is set.
 const EVENTS = new Map();
@@ -3103,8 +3183,7 @@ function eventCam(depth) {
   return { ...c, depth, sc: Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), depth * STAR_ZOOM) };
 }
 function eventAt(cam, x, y) {
-  // x, y were the map's CSS px when it was laid; the map's left and top may have moved since (a panel opening beside
-  // it: cam.mx - c.mx), and the point keeps its place in the window, as the stars do
+  // x, y were the window's CSS px when it was laid; it keeps its place in the window, as the stars do
   const c = skyCam(), sc = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), cam.depth * STAR_ZOOM), k = sc / (cam.sc || sc);
   return [c.mx + (x - cam.mx) * k - (c.cx - cam.cx) * sc, c.my + (y - cam.my) * k - (c.cy - cam.cy) * sc];
 }
@@ -3155,10 +3234,10 @@ function eventStep(t, rest) {
 }
 // ---------- the nebula drift (see "Look", NEBULA_*) ----------
 // start: the cloud's palette, size and straight path across the window at the far layer's depth, laid in CSS px of the
-// map as the camera is now (eventCam); its middle is where `at` (ms) and its speed put it, moved on with the camera
+// window as the camera is now (eventCam); its middle is where `at` (ms) and its speed put it, moved on with the camera
 registerEvent('nebula', {
   start(t) {
-    const W = I.W || 1, H = I.H || 1, cam = eventCam(EVENT_DEPTH.far), ms = pickIn(NEBULA_MS);
+    const W = I.skyW || 1, H = I.skyH || 1, cam = eventCam(EVENT_DEPTH.far), ms = pickIn(NEBULA_MS);
     const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (Math.random() * 2 - 1) * NEBULA_TURN, sg = Math.random() < 0.5 ? -1 : 1;
     const dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg, R = NEBULA_R * Math.max(W, H);
     // from where its soft edge just clears the window's far corner to where it just clears the near one, off the middle sideways
@@ -3169,7 +3248,7 @@ registerEvent('nebula', {
   },
   step(ev, t) { return t - ev.at < ev.ms; },
 });
-// the cloud as it is now, in CSS px of the map (null when none runs): its middle (x, y), long half-axis r, turn and
+// the cloud as it is now, in CSS px of the window (null when none runs): its middle (x, y), long half-axis r, turn and
 // aspect, seed, palette (index, colours), age (s) and alpha a (the fade at the ends of its life); the shader draws it
 function nebulaNow() {
   const e = I.event;
@@ -3189,7 +3268,7 @@ function nebulaNow() {
 // within the field (a slow far one may begin inside, fading in by its age), its place across it a pick
 registerEvent('asteroids', {
   start(t) {
-    const W = I.W || 1, H = I.H || 1, rnd = Math.random, ri = (r) => r[0] + Math.floor(rnd() * (r[1] - r[0] + 1));
+    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, ri = (r) => r[0] + Math.floor(rnd() * (r[1] - r[0] + 1));
     const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (rnd() * 2 - 1) * ASTEROID_TURN, sg = rnd() < 0.5 ? -1 : 1;
     const bx = Math.cos(ang) * sg, by = Math.sin(ang) * sg, la = -Math.PI + 0.55 + rnd() * (Math.PI - 1.1);
     const E = 0.575 * (Math.abs(W * bx) + Math.abs(H * by)), pad = (r, bl) => 3.3 * r + 2.5 * bl + 24;
@@ -3216,12 +3295,12 @@ registerEvent('asteroids', {
   },
   step(ev, t) { return t - ev.at < ev.ms; },
 });
-// the rocks in view now, far to near, at most ASTEROID_N, in CSS px of the map: middle (x, y), long radius r, edge blur,
+// the rocks in view now, far to near, at most ASTEROID_N, in CSS px of the window: middle (x, y), long radius r, edge blur,
 // alpha a (its age's fade-in), spin rot, aspect asp and seed; the shader draws them, the sharp ones before the close one
 function asteroidsNow() {
   const e = I.event;
   if (!e || e.name !== 'asteroids') return [];
-  const ev = e.ev, age = Math.max(0, performance.now() - ev.at) / 1000, W = I.W || 1, H = I.H || 1, out = [];
+  const ev = e.ev, age = Math.max(0, performance.now() - ev.at) / 1000, W = I.skyW || 1, H = I.skyH || 1, out = [];
   const fin = Math.min(1, age / ASTEROID_FADE), fade = fin * fin * (3 - 2 * fin);
   for (const o of ev.rocks) {
     const a = o.a0 + o.v * age;
@@ -3239,7 +3318,7 @@ function asteroidsNow() {
 // slides along (its direction, its miss distance), when it lines up behind the lens and its turn
 registerEvent('lens', {
   start(t) {
-    const W = I.W || 1, H = I.H || 1, rnd = Math.random, cam = eventCam(LENS_DEPTH), ms = pickIn(LENS_MS), R = pickIn(LENS_R);
+    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(LENS_DEPTH), ms = pickIn(LENS_MS), R = pickIn(LENS_R);
     const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (rnd() * 2 - 1) * LENS_TURN, sg = rnd() < 0.5 ? -1 : 1;
     const dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg;
     const len = 2 * (0.575 * (Math.abs(W * dx) + Math.abs(H * dy)) + LENS_PAD * R), off = (rnd() * 2 - 1) * LENS_OFF * H;
@@ -3248,7 +3327,7 @@ registerEvent('lens', {
   },
   step(ev, t) { return t - ev.at < ev.ms; },
 });
-// the lens as it is now, in CSS px of the map (null when none runs): its middle (x, y), Einstein radius r, size share a (it
+// the lens as it is now, in CSS px of the window (null when none runs): its middle (x, y), Einstein radius r, size share a (it
 // grows from nothing over LENS_FADE at the ends of its life), its ring's bright side phi, and its galaxies: each one's place
 // in the lens's plane from the lens's middle (bx, by), size sig, light amp, turn rot and aspect asp
 function lensNow() {
@@ -3272,7 +3351,7 @@ function lensNow() {
 let shipForce = null; // tests (__map.ship): whether the escort follows (null: a pick)
 registerEvent('ship', {
   start(t) {
-    const W = I.W || 1, H = I.H || 1, rnd = Math.random, cam = eventCam(SHIP_DEPTH), ms = pickIn(SHIP_MS), R = pickIn(SHIP_R);
+    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(SHIP_DEPTH), ms = pickIn(SHIP_MS), R = pickIn(SHIP_R);
     const ang = (rnd() * 2 - 1) * SHIP_TILT, sg = rnd() < 0.5 ? -1 : 1, dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg;
     const escort = shipForce != null ? shipForce : rnd() < SHIP_ESCORT_P;
     const eo = escort ? [-pickIn(SHIP_ESCORT_BACK), (rnd() < 0.5 ? -1 : 1) * pickIn(SHIP_ESCORT_SIDE), pickIn(SHIP_ESCORT_SCALE), rnd()] : null;
@@ -3283,7 +3362,7 @@ registerEvent('ship', {
   },
   step(ev, t) { return t - ev.at < ev.ms; },
 });
-// the ship as it is now, in CSS px of the map (null when none runs): its middle (x, y), half-length r (with the camera's zoom at its
+// the ship as it is now, in CSS px of the window (null when none runs): its middle (x, y), half-length r (with the camera's zoom at its
 // depth), alpha a (it fades in and out over SHIP_FADE at the ends of its life), its heading (cs, sn; unit), flip (-1 when it
 // goes left, so its top stays up), the seed and the escort's place and size as laid (eo, or null)
 function shipNow() {
@@ -3297,16 +3376,16 @@ function shipNow() {
   return { x, y, r, a: fade * fade * (3 - 2 * fade), cs: ev.dx, sn: ev.dy, flip: ev.dx < 0 ? -1 : 1, seed: ev.seed, eo: ev.eo };
 }
 // ---------- the warp drift (see "Look", WARP_*) ----------
-// start: its length, the squeeze's direction and its point, laid in CSS px of the map at WARP_DEPTH (eventCam)
+// start: its length, the squeeze's direction and its point, laid in CSS px of the window at WARP_DEPTH (eventCam)
 registerEvent('warp', {
   start(t) {
-    const W = I.W || 1, H = I.H || 1, rnd = Math.random, cam = eventCam(WARP_DEPTH);
+    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(WARP_DEPTH);
     const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (rnd() * 2 - 1) * WARP_TURN;
     return { at: t, ms: pickIn(WARP_MS), cam, dx: Math.cos(ang), dy: Math.sin(ang), x: cam.mx + (pickIn(WARP_AT) - 0.5) * W, y: cam.my + (pickIn(WARP_AT) - 0.5) * H };
   },
   step(ev, t) { return t - ev.at < ev.ms; },
 });
-// the warp as it is now (null when none runs): the stretch share a (0-1, eased in and out), its point (x, y, CSS px of the map,
+// the warp as it is now (null when none runs): the stretch share a (0-1, eased in and out), its point (x, y, CSS px of the window,
 // with the camera) and direction (dx, dy; unit)
 function warpNow() {
   const e = I.event;
@@ -3321,7 +3400,7 @@ function warpNow() {
 // the log (POST /sky-events, sky-events.js on the server): one line per event that starts, so "what was that at 3:42?"
 // has an answer; where: the window's third it is in. Never throws (the fixture page has no server)
 function skyLog(kind, label, what, ms, x, y) {
-  const W = I.W || 1, H = I.H || 1;
+  const W = I.skyW || 1, H = I.skyH || 1;
   const where = x == null ? 'across the sky' : `${y < H / 3 ? 'upper' : y > (2 * H) / 3 ? 'lower' : 'middle'} ${x < W / 3 ? 'left' : x > (2 * W) / 3 ? 'right' : 'centre'}`;
   const body = { shown: { kind, label, what: what || null, ms: Math.round(ms || 0), where, x: x == null ? null : Math.round(x), y: y == null ? null : Math.round(y), w: Math.round(W), h: Math.round(H) } };
   try { fetch('/sky-events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {}); } catch { /* no server */ }
@@ -3346,15 +3425,35 @@ function farPick() {
   }
   return null;
 }
+// whether the sky shows at (x, y) in the window: the map's canvas is there, or nothing with a fill of its own (a card,
+// a tile, a panel, the header, the footer, a menu, a button) lies over the backdrop there. covered: a cache of each
+// element's own fill for one call of farPlace
+function skyShowsAt(x, y, covered) {
+  const el = document.elementFromPoint(x, y);
+  if (!el) return false; // off the window
+  for (let e = el; e && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+    if (e === I.canvas) return true;
+    let c = covered.get(e);
+    if (c === undefined) {
+      const cs = getComputedStyle(e), bg = /rgba?\(([^)]+)\)/.exec(cs.backgroundColor || '');
+      const a = bg ? (bg[1].split(',').length > 3 ? Number(bg[1].split(',')[3]) : 1) : 0;
+      c = a > 0.02 || (cs.backgroundImage && cs.backgroundImage !== 'none');
+      covered.set(e, c);
+    }
+    if (c) return false;
+  }
+  return true;
+}
 // a place for an event reaching `reach` CSS px from its middle: of FAR_TRIES picks in the window (FAR_EDGE in from its
-// edges where it fits) where the map itself shows (its middle and four points round it are the canvas, not the header,
-// the finished strip, the footer, a panel or a button over it), the one furthest past FAR_CLEAR from every orb and hub
-// drawn (each node's own radius too); null when no pick shows
+// edges where it fits) where the sky itself shows (its middle and four points round it, skyShowsAt: not under the
+// header, the finished strip, the footer, a panel, a card or a button), the one furthest past FAR_CLEAR from every orb
+// and hub the Map drew (each node's own radius too); null when no pick shows
 function farPlace(reach) {
-  const W = I.W || 1, H = I.H || 1, m = Math.min(reach + FAR_EDGE, W / 3), mh = Math.min(reach + FAR_EDGE, H / 3), k = K();
-  const nodes = I.nodes.filter((n) => n.sx !== undefined).map((n) => [n.sx, n.sy, (n.R || 8) * k]);
-  const rc = I.canvas ? I.canvas.getBoundingClientRect() : null, e = Math.min(reach, 40) * 0.7;
-  const shows = (x, y) => !rc || [[0, 0], [e, 0], [-e, 0], [0, e], [0, -e]].every(([dx, dy]) => document.elementFromPoint(rc.left + x + dx, rc.top + y + dy) === I.canvas);
+  const W = I.skyW || 1, H = I.skyH || 1, m = Math.min(reach + FAR_EDGE, W / 3), mh = Math.min(reach + FAR_EDGE, H / 3);
+  const k = I.mapOn && I.cam ? K() : 1, ox = mapX(), oy = mapY();
+  const nodes = I.mapOn ? I.nodes.filter((n) => n.sx !== undefined).map((n) => [n.sx + ox, n.sy + oy, (n.R || 8) * k]) : [];
+  const e = Math.min(reach, 40) * 0.7, covered = new Map();
+  const shows = (x, y) => [[0, 0], [e, 0], [-e, 0], [0, e], [0, -e]].every(([dx, dy]) => skyShowsAt(x + dx, y + dy, covered));
   let best = null, bs = -Infinity;
   for (let i = 0; i < FAR_TRIES; i++) {
     const x = m + Math.random() * Math.max(1, W - 2 * m), y = mh + Math.random() * Math.max(1, H - 2 * mh);
@@ -3375,7 +3474,7 @@ function farStart(t, name) {
   if (!d || I.still) return false;
   if (I.far) farEnd();
   const R = { r: Math.random, in: (a, b) => a + Math.random() * (b - a), pick: (l) => l[Math.floor(Math.random() * l.length)], sg: () => (Math.random() < 0.5 ? -1 : 1) };
-  const side = Math.min(I.W || FAR_SCALE_AT, I.H || FAR_SCALE_AT);
+  const side = Math.min(I.skyW || FAR_SCALE_AT, I.skyH || FAR_SCALE_AT);
   const rec = d.make(R), sc = clamp(side / FAR_SCALE_AT, FAR_SCALE_K[0], FAR_SCALE_K[1]) * R.in(FAR_SIZE[0], FAR_SIZE[1]);
   const parts = rec.parts.slice(0, FAR_N).map((q) => {
     const p = { x: 0, y: 0, to: null, a: 0.5, t0: 0, t1: 1, env: 'smooth', rgb: [1, 1, 1], ang: 0, spin: 0, p: 0, u0: 0, u1: 1, grow: false, seed: Math.random(), ...q };
@@ -3445,7 +3544,7 @@ function farEnv(q, f, age) {
     default: return edge;
   }
 }
-// the far event's parts showing now, at most FAR_N, in CSS px of the map: middle (x, y), size r, alpha a, shape (form),
+// the far event's parts showing now, at most FAR_N, in CSS px of the window: middle (x, y), size r, alpha a, shape (form),
 // progress u, seed (+1: a trail that grows), turn ang, rgb and the shape's number p
 function farNow() {
   const e = I && I.far;
@@ -3465,7 +3564,7 @@ function farNow() {
   }
   return out;
 }
-// the streaks showing now (a shower's later ones not yet), at most METEOR_N, in CSS px of the map: each one's head
+// the streaks showing now (a shower's later ones not yet), at most METEOR_N, in CSS px of the window: each one's head
 // (hx, hy), tail end (tx, ty), rgb and alpha (> 0); the tail grows to its length as the head moves off, and the alpha
 // fades in over its first fifth, out over its last half
 function meteorsNow() {
@@ -3504,14 +3603,14 @@ function drawMeteors(ctx) {
 
 // ---------- the moon (see "Look", MOON_*) ----------
 // the moon this minute: its phase (0-1, 0 new, 0.5 full), lit share, waxing, alpha (0: not shown) and middle (CSS px of
-// the map); worked out again only when the minute or the map's place or size changes, so the sky's uniforms stay the
-// same between frames. Its path is laid over the map's box as it was when the window last changed size (I.moonF), not
-// as it is now, so a panel or strip opening beside the map leaves it where it was in the window, as the stars stay
+// the window); worked out again only when the minute or the window's size changes, so the sky's uniforms stay the
+// same between frames. Its path is laid over the window (I.moonF, the frame the satellites and rockets use too), so no
+// panel, strip or menu ever moves it
 function moonNow() {
   const d = moonForce || new Date(), min = Math.floor(d.getTime() / 60000), h = skyHour();
-  const lf = I.left || 0, tp = I.top || 0, vw = window.innerWidth, vh = window.innerHeight;
-  if (!I.moonF || I.moonF.vw !== vw || I.moonF.vh !== vh || !I.moonF.sized) I.moonF = { x: lf, y: tp, W: I.W || 1, H: I.H || 1, vw, vh, sized: !!I.sized };
-  const F = I.moonF, key = min + '|' + h.toFixed(3) + '|' + lf + ',' + tp + '|' + F.x + ',' + F.y + ',' + F.W + 'x' + F.H;
+  const vw = I.skyW || window.innerWidth || 1, vh = I.skyH || window.innerHeight || 1;
+  if (!I.moonF || I.moonF.W !== vw || I.moonF.H !== vh) I.moonF = { x: 0, y: 0, W: vw, H: vh };
+  const F = I.moonF, key = min + '|' + h.toFixed(3) + '|' + F.W + 'x' + F.H;
   if (I.moon && I.moon.key === key) return I.moon;
   const days = (d.getTime() - MOON_NEW) / 864e5, phase = (((days / MOON_MONTH) % 1) + 1) % 1;
   const frac = (1 - Math.cos(TAU * phase)) / 2;
@@ -3522,8 +3621,8 @@ function moonNow() {
   // shown by night, fading out over the morning and in at dusk, and as it nears the horizon
   const night = 1 - ss(MOON_DAY[0], MOON_DAY[1], h) * (1 - ss(MOON_DAY[2], MOON_DAY[3], h));
   const a = alt > 0 && frac >= MOON_MIN ? night * ss(0, 0.15, alt) : 0;
-  I.moon = { key, phase, frac, waxing: phase < 0.5, a, ecl: eclipseAt(d), x: F.x - lf + F.W * (0.5 + (MOON_SPAN * ha) / 6),
-    y: F.y - tp + F.H * (MOON_TOP + (MOON_LOW - MOON_TOP) * (1 - Math.max(0, alt))) };
+  I.moon = { key, phase, frac, waxing: phase < 0.5, a, ecl: eclipseAt(d), x: F.x + F.W * (0.5 + (MOON_SPAN * ha) / 6),
+    y: F.y + F.H * (MOON_TOP + (MOON_LOW - MOON_TOP) * (1 - Math.max(0, alt))) };
   return I.moon;
 }
 // the eclipses' contacts (ms, UTC) and the shadow's path, worked out once: the umbra's middle passes the moon's at
@@ -3657,7 +3756,7 @@ function satMake(t, snap) {
 // each frame: a satellite for each running agent (SAT_N at most), fading out once its agent ends, a new path for one
 // that crossed the window; at rest or under reduced motion they come and go at once (the clock fades go by is held)
 function satStep(rest) {
-  if (!I.sized) return; // its paths are laid over the window once the map has its size
+  if (!I.skyW) return; // its paths are laid over the window once the sky has its size
   if (!I.moonF) moonNow();
   const want = satWant(), on = new Set(want), t = I.time, snap = I.still || rest;
   let changed = false;
@@ -3673,7 +3772,7 @@ function satStep(rest) {
   }
   if (changed) I.dirty = true;
 }
-// the satellites showing now, in CSS px of the map: each one's middle (x, y), alpha (> 0), its beacon's flash (f,
+// the satellites showing now, in CSS px of the window: each one's middle (x, y), alpha (> 0), its beacon's flash (f,
 // 0-1, 0 under reduced motion) and colour (rgb, 0-1); laid over the window as the moon is, then panned and zoomed
 // with the nearest star layer (SAT_DEPTH) from where its path was laid
 function satsNow() {
@@ -3686,7 +3785,7 @@ function satsNow() {
     const fin = clamp((t - s.born) / SAT_FADE, 0, 1), fout = s.end == null ? 1 : clamp(1 - (t - s.end) / SAT_FADE, 0, 1);
     const a = SAT_A * day * fin * fout;
     if (!(a > 0)) continue;
-    const e = ts - s.t0, px = F.x - (I.left || 0) + s.x0 + s.vx * e, py = F.y - (I.top || 0) + s.y0 + s.vy * e;
+    const e = ts - s.t0, px = F.x + s.x0 + s.vx * e, py = F.y + s.y0 + s.vy * e;
     const k0 = sc / (s.sc0 || sc);
     const x = c.mx + (px - c.mx) * k0 - (c.cx - (s.cx0 ?? c.cx)) * sc;
     const y = c.my + (py - c.my) * k0 - (c.cy - (s.cy0 ?? c.cy)) * sc;
@@ -3719,7 +3818,7 @@ function drawSats(ctx) {
 // and trail in the window frame (I.moonF); its foot is placed once the hub is on screen (rocketFoot); none at rest,
 // hidden, under reduced motion or while ROCKET_N fly; false when none went up
 function rocketLaunch(t, n) {
-  if (I.still || resting() || !I.running || document.hidden || !I.sized || I.rockets.length >= ROCKET_N) return false;
+  if (I.still || resting() || !I.running || document.hidden || !I.skyW || I.rockets.length >= ROCKET_N) return false;
   if (!I.moonF) moonNow();
   const F = I.moonF, top = F.H * pickIn(ROCKET_TOP), side = Math.random() < 0.5 ? -1 : 1;
   I.rockets.push({ at: t, T: pickIn(ROCKET_MS), hub: n ? n.id : null, x0: null, top, lean: side * Math.tan(pickIn(ROCKET_TILT)),
@@ -3743,9 +3842,9 @@ function rocketStep(t, rest) {
 // false while it waits for one (its first 200 ms, when it is barely lit)
 function rocketFoot(r, F) {
   if (r.x0 != null) return true;
-  const n = r.hub ? I.byId.get(r.hub) : null;
+  const n = r.hub && I.mapOn ? I.byId.get(r.hub) : null;
   if (n && !Number.isFinite(n.sx) && performance.now() - r.at < 200) return false;
-  const sx = n && Number.isFinite(n.sx) ? n.sx + (I.left || 0) - F.x : F.W * Math.random();
+  const sx = n && Number.isFinite(n.sx) ? n.sx + mapX() - F.x : F.W * Math.random();
   r.x0 = clamp(sx, F.W * ROCKET_X[0], F.W * ROCKET_X[1]);
   return true;
 }
@@ -3754,14 +3853,14 @@ function rocketFoot(r, F) {
 function rocketWave(r, s, f) {
   return r.wave * Math.pow(1 - f, 1.2) * (0.6 * Math.sin(s * 0.035 + r.ph * 3.1 + r.seed * 37.7) + 0.4 * Math.sin(s * 0.011 - r.ph * 1.7));
 }
-// the rockets flying now, in CSS px of the map: each one's foot (x0, yb: just below the window's bottom edge), its
+// the rockets flying now, in CSS px of the window: each one's foot (x0, yb: just below the window's bottom edge), its
 // head's and its trail's tail end's heights above it (sh, st), lean and bend (x = x0 + lean s + bend s^2), the head's
 // alpha (ha: in over 200 ms, a faint flicker, a flare and gone at burnout), the trail's (ta: fading after burnout as it
 // shortens from below and wavers more), its clock (ph, s), the sparks' progress (puff, 0-1; -1: none) and seed
 function rocketsNow() {
   if (!I.rockets.length) return [];
   const F = I.moonF || (moonNow(), I.moonF), now = performance.now(), out = [];
-  const ox = F.x - (I.left || 0), yb = F.y - (I.top || 0) + F.H + 2;
+  const ox = F.x, yb = F.y + F.H + 2;
   for (const r of I.rockets) {
     const e = now - r.at;
     if (e < 0 || out.length >= ROCKET_N || !rocketFoot(r, F)) continue;
@@ -3775,7 +3874,7 @@ function rocketsNow() {
   }
   return out;
 }
-// where a rocket's head is (CSS px of the map)
+// where a rocket's head is (CSS px of the window)
 const rocketHead = (r) => [r.x0 + r.lean * r.sh + r.bend * r.sh * r.sh, r.yb - r.sh];
 // the canvas draws the rockets (no WebGL2) as the sky's shader does, simpler: the trail as short strokes up its path
 // (each in its colour and alpha, a wider faint one under it), the head a soft dot, the sparks tiny ones
@@ -3833,13 +3932,13 @@ let moonForce = null; // tests (__map.moon): the clock the moon and the tint go 
 const skyHour = () => { if (skyForce != null) return skyForce; const d = moonForce || new Date(); return d.getHours() + d.getMinutes() / 60; };
 // the canvas draws the tint (no WebGL2): one fillRect a frame; the gradient is rebuilt at most once a minute (or on a resize)
 function drawSky(ctx) {
-  const h = skyHour(), key = h.toFixed(3) + '|' + I.W + 'x' + I.H;
+  const h = skyHour(), key = h.toFixed(3) + '|' + I.skyW + 'x' + I.skyH;
   if (!I.sky || I.sky.key !== key) {
-    const [top, bot] = skyAt(h), g = ctx.createLinearGradient(0, 0, 0, I.H);
+    const [top, bot] = skyAt(h), g = ctx.createLinearGradient(0, 0, 0, I.skyH);
     g.addColorStop(0, `rgba(${top})`); g.addColorStop(1, `rgba(${bot})`);
     I.sky = { key, grad: g };
   }
-  ctx.fillStyle = I.sky.grad; ctx.fillRect(0, 0, I.W, I.H);
+  ctx.fillStyle = I.sky.grad; ctx.fillRect(0, 0, I.skyW, I.skyH);
 }
 
 // ---------- the sky on the graphics card ----------
@@ -3847,11 +3946,12 @@ function drawSky(ctx) {
 // glass), the tint, the deep sky, then the star layers (the back one a repeating texture placed by starsAt, the
 // front ones made per cell by the shader itself, STAR_FIELD_GLSL), the vignette, the repo glows (from their field,
 // a small texture filled just before) and last the dither. A frame only
-// works out the shader's uniforms and the glows' quads; when they are the ones last drawn it makes no GL calls and the canvas keeps its picture, which
-// the map's canvas lays down as its first layer (one drawImage, where it used to fill, tint and lay three patterns).
-// The sky's canvas is never on the page: shown, a WebGL canvas that changes keeps about four buffers of its size (a
-// 1600x665 map at dpr 2: +90 MB of GPU memory), off the page about two (+40 MB). No WebGL2 (or only a software one)
-// or the context lost: the map's canvas draws the sky itself (drawSky, drawStars).
+// works out the shader's uniforms and the glows' quads; when they are the ones last drawn it makes no GL calls and the canvas keeps its picture;
+// when it drew a new one, the page's backdrop (I.skyEl, a 2D canvas over the whole window behind every view) copies it
+// (one drawImage, skyPaint), and is left alone otherwise. The map's canvas, over the backdrop, is see-through but for
+// the map itself. The sky's canvas is never on the page: shown, a WebGL canvas that changes keeps about four buffers of
+// its size (a 1600x665 map at dpr 2: +90 MB of GPU memory), off the page about two (+40 MB). No WebGL2 (or only a
+// software one) or the context lost: the backdrop draws the sky itself (drawSky, drawStars).
 const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
   preserveDrawingBuffer: false, powerPreference: 'low-power', failIfMajorPerformanceCaveat: true };
 // the shader's uniforms, every one a vec4, in this order in I.skyGL.u: the canvas in device px (x, y), the page's
@@ -3859,8 +3959,8 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // offset in device px (x, y) and 1 / (scale x tile px) (z); made per cell, its star space at the top left (starWide;
 // x, y), star px per device px (z) and device px per star px (w); then the deep sky's offset in device px and 1 / its
 // size in device px (x, y), its star dust's the same way (1 / the tile's size in z), and the vignette, DEEP_A,
-// DUST_A and the dither, and the moon's picture's top left (device px; x, y), 1 / its size (z) and its alpha (w; 0:
-// none);
+// DUST_A and the dither, the moon's picture's top left (device px; x, y), 1 / its size (z) and its alpha (w; 0:
+// none), and the map's box in the window (uOrg: its top left and bottom right, device px; the glows are laid over it);
 // uSize's z is the dpr, for the streaks' width, and its w the twinkle's clock (s, wrapped by TWINKLE_WRAP;
 // -1 under reduced motion: none). After them (from SKY_M) the streaks' two arrays of METEOR_N vec4s: uM, each one's
 // head and tail end (device px; x, y and z, w), and uMc, its rgb and alpha; the ones showing come first, the rest
@@ -3878,7 +3978,7 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // (device px; x, y), size (device px) and light (w; 0: none), and its turn's cos and sin and aspect (the first one's w: the ring's bright side); then the capital ship's uSh (from SKY_SH), three: its middle (device px; x, y), half-length (device px) and alpha (w; 0: none), its heading's cos and sin, flip (-1: it goes left, its top still up) and seed (0-1), then its escort's place from the ship's middle (in half-lengths along its heading, x, and across it, y), size (z, in the ship's; 0: no escort) and seed. then the warp drift's uWp (from SKY_WP), two: its point (device px; x, y) and the squeeze's direction (z, w), then its stretch (x; 0: none), the direction's radial share (y) and the deep sky's share (z). Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
 // without a cell), the deep sky, its star dust, the glows' noise and their field, and the moon's picture (moonImage).
 // uTint (STAR_TINT) is set once.
-const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo'];
+const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo', 'uOrg'];
 const SKY_M = SKY_U.length * 4;
 const SKY_NB = SKY_M + METEOR_N * 8 + SAT_N * 8 + ROCKET_N * 12; // the nebula drift's five vec4s, after the rockets
 const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_SH = SKY_LN + 20, SKY_WP = SKY_SH + 12, SKY_FR = SKY_WP + 8, SKY_END = SKY_FR + FAR_N * 12; // the asteroid field's vec4s, after the nebula; the lens's five, then the ship's three, then the warp's two, then the far event's three per part (FAR_GLSL), after them
@@ -4394,7 +4494,7 @@ precision highp float;
 #define ROCKET_N ${ROCKET_N}
 #define ASTEROID_N ${ASTEROID_N}
 #define FAR_N ${FAR_N}
-uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uGlow, uN0, uN1;
+uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uOrg, uGlow, uN0, uN1;
 uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[5], uSh[3], uWp[2], uFr[FAR_N * 3];
 uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
 uniform int uGN;
@@ -4522,16 +4622,18 @@ void main() {
   }
   vec2 q = p / uSize.xy * 2.0 - 1.0;
   c = over(vec4(0.0, 0.0, 0.0, uFx.x * smoothstep(0.3, 2.0, dot(q, q))), c);
-  // the glows: per repo whose box holds the pixel, its field's texel; the noise is the same for every repo
-  vec2 f = p * uGlow.x;
+  // the glows: per repo whose box holds the pixel, its field's texel; the noise is the same for every repo. The field
+  // and the noise are laid over the map's box (uOrg: its top left and bottom right, device px), and none shows outside it
+  vec2 pm = p - uOrg.xy, f = pm * uGlow.x;
   float cut = -1.0;
-  for (int i = 0; i < uGN; i++) {
+  int gn = all(greaterThanEqual(p, uOrg.xy)) && all(lessThan(p, uOrg.zw)) ? uGN : 0;
+  for (int i = 0; i < gn; i++) {
     vec4 b = uGB[i];
     if (any(lessThan(f, b.xy)) || any(greaterThan(f, b.zw))) continue;
     vec4 e = uGE[i], m = uGC[i];
     vec4 v = texture(uField, (clamp(f, b.xy + 0.5, b.zw - 0.5) + vec2(e.w, m.w)) * uGlow.zw);
-    if (cut < 0.0) cut = (1.0 - ${NEB_GRAIN.toFixed(4)} * textureLod(uNoise, (p - uN0.xy) * uN0.z, uN0.w).a) *
-      (1.0 - ${(NEB_GRAIN * 0.6).toFixed(4)} * textureLod(uNoise, (p - uN1.xy) * uN1.z, uN1.w).a);
+    if (cut < 0.0) cut = (1.0 - ${NEB_GRAIN.toFixed(4)} * textureLod(uNoise, (pm - uN0.xy) * uN0.z, uN0.w).a) *
+      (1.0 - ${(NEB_GRAIN * 0.6).toFixed(4)} * textureLod(uNoise, (pm - uN1.xy) * uN1.z, uN1.w).a);
     // the cloud: its lobes (clamped), the noise cut out, the hearts put back; its colour: the edge's, turned to the
     // middle's by what the middles leave, then to the lit colour by what the lit spots leave
     float a = uGlow.y * min(1.0, min(1.0, v.r) * cut + v.g);
@@ -4821,6 +4923,9 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     G.moonKey = mo.im.key; G.drawn = false;
   }
   u[40] = mo ? mo.x : 0; u[41] = mo ? mo.y : 0; u[42] = mo ? 1 / mo.im.S : 0; u[43] = mo ? mo.a : 0;
+  // the map's box in the window, device px (the glows are laid over it; all 0 with the Map hidden: no glows)
+  const bx = mapX() * dpr, by = mapY() * dpr;
+  u[44] = I.mapOn ? bx : 0; u[45] = I.mapOn ? by : 0; u[46] = I.mapOn ? bx + I.W * dpr : 0; u[47] = I.mapOn ? by + I.H * dpr : 0;
   // the streaks (all 0 when none: the frame after the last ends draws the sky without it)
   const ms = meteorsNow(), M = SKY_M, MC = SKY_M + METEOR_N * 4;
   u.fill(0, M);
@@ -4926,7 +5031,41 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     gl.uniform1i(L[7], G.gn);
   }
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+  G.painted = true; // a new picture for the backdrop (skyPaint)
   return true;
+}
+
+// the sky on the page's backdrop (I.skyEl): the sky's shader's picture, copied only when it drew a new one (it carries
+// the page's colour when not in glass), or, without it, the canvas's own sky drawn there each time. glows: the repo
+// glows of the Map (null with the Map hidden), in the map's CSS px, for the shader (I.glowGL says it took them)
+function skyPaint(glass, glows, k, ox, oy) {
+  I.glowGL = false;
+  const g = I.skyCtx;
+  if (!g) return;
+  const w = I.skyEl.width, h = I.skyEl.height;
+  if (drawSkyGL(glass, glows, k, ox, oy)) {
+    if (!I.skyGL.painted) return;
+    I.skyGL.painted = false;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, w, h);
+    g.drawImage(I.skyCanvas, 0, 0);
+    return;
+  }
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  if (glass) g.clearRect(0, 0, w, h);
+  else { g.fillStyle = I.bgFill || COL.bg; g.fillRect(0, 0, w, h); }
+  screen(g);
+  drawSky(g);
+  drawStars(g);
+  drawSats(g);
+  drawMeteors(g);
+  drawRockets(g);
+  drawMoon(g);
+}
+// a frame with the Map hidden: the sky alone, behind the view that shows
+function drawSkyOnly() {
+  if (!I.skyW || !I.skyH) return;
+  skyPaint(document.documentElement.classList.contains('glass'), null, 1, 0, 0);
 }
 
 function draw() {
@@ -4940,21 +5079,9 @@ function draw() {
   const ox = I.W / 2 - (I.cam.cx + I.pan.x) * k, oy = I.H / 2 - (I.cam.cy + I.pan.y) * k;
   // the repo glows sit right over the sky, under everything else: the sky's shader draws them when it can
   const glows = territoryPuffs(k, ks, ox, oy);
-  I.glowGL = false;
-  if (drawSkyGL(glass, glows, k, ox, oy)) {
-    // the sky's picture first, pixel for pixel (it carries the page's colour when not in glass)
-    ctx.clearRect(0, 0, W, H);
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(I.skyCanvas, 0, 0); screen(ctx);
-  } else {
-    if (glass) ctx.clearRect(0, 0, W, H);
-    else { ctx.fillStyle = I.bgFill || COL.bg; ctx.fillRect(0, 0, W, H); }
-    drawSky(ctx);
-    drawStars(ctx);
-    drawSats(ctx);
-    drawMeteors(ctx);
-    drawRockets(ctx);
-    drawMoon(ctx);
-  }
+  skyPaint(glass, glows, k, ox, oy);
+  // the sky is the backdrop behind this canvas, which only carries the map
+  ctx.clearRect(0, 0, W, H);
   if (!I.glowGL) drawTerritories(ctx, k, ox, oy, glows);
   const nowC = Date.now() - I.skew;
   const selNode = I.sel ? I.byId.get(I.sel) : null;
