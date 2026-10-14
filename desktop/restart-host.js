@@ -45,7 +45,7 @@ if (!hf || typeof hf.pipe !== 'string' || typeof hf.token !== 'string') {
         continue;
       }
       if (m.t !== 'res' || m.n !== 1) continue;
-      if (m.err === 'unknown op') return finish(`The running session host (pid ${hf.pid}) is too old to restart itself; restart it the old way: end that process (electron.exe running host.js), and the window starts a new host that resumes the sessions.`, 2);
+      if (m.err === 'unknown op') return finish(`The running session host (pid ${hf.pid}) is too old to restart itself; restart it the old way: end that process (Fleet View.exe or electron.exe running host.js), and the window starts a new host that resumes the sessions.`, 2);
       if (m.err) return finish(`The session host failed: ${m.err}`, 1);
       const v = m.v || {};
       if (!v.ok) return finish(`Refused: ${v.message || 'no reason given'}`, 1);

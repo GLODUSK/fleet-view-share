@@ -1320,6 +1320,8 @@ if (!app.requestSingleInstanceLock()) {
     if (HIDDEN) global.__fvTest = { quitEverything, closeWindow: () => { if (win && !win.isDestroyed()) win.close(); }, terms, popChats, dockChats, chatsWindow: () => chats };
     if (!HIDDEN) createTray();
     if (SELFTEST) selfTest();
+    // Windows: makes "Fleet View.exe" (Task Manager shows Fleet View and its logo, not Electron) for the next start
+    if (P.isWin && !HIDDEN) setTimeout(() => require('./brand-exe').prepare(__dirname, hlog), 30000);
     screen.on('display-removed', () => { keepMiniOnScreen(); keepChatsOnScreen(); });
     screen.on('display-metrics-changed', () => { keepMiniOnScreen(); keepChatsOnScreen(); });
     // the Chats window opens again when it was open when the app quit (main.js's own record; with none yet, the

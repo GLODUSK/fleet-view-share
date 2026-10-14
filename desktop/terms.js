@@ -91,10 +91,10 @@ function createHost(opts = {}) {
         && x.pid !== process.pid).map((x) => x.pid);
       if (pids.length === 1) pid = pids[0];
     } else if (!pid && !process.env.FV_HOST_PIPE) {
-      // no host.json: look for electron.exe / node.exe running this host.js
+      // no host.json: look for electron.exe / Fleet View.exe (desktop/brand-exe.js) / node.exe running this host.js
       try {
         const ps = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-          "Get-CimInstance Win32_Process -Filter \"Name='electron.exe' or Name='node.exe'\" | Where-Object { $_.CommandLine -like '*desktop*host.js*' -and $_.CommandLine -notlike '*--selfcheck*' -and $_.CommandLine -notlike '*restart-host*' } | ForEach-Object { $_.ProcessId }"],
+          "Get-CimInstance Win32_Process -Filter \"Name='electron.exe' or Name='Fleet View.exe' or Name='node.exe'\" | Where-Object { $_.CommandLine -like '*desktop*host.js*' -and $_.CommandLine -notlike '*--selfcheck*' -and $_.CommandLine -notlike '*restart-host*' } | ForEach-Object { $_.ProcessId }"],
         { encoding: 'utf8', windowsHide: true, timeout: 8000 });
         const pids = String(ps.stdout || '').split(/\s+/).map(Number).filter((n) => n > 0 && n !== process.pid);
         if (pids.length === 1) pid = pids[0];

@@ -1571,9 +1571,10 @@ function runHost() {
     log(`restart: saved ${ptys.aliveCount()} session(s) to the restore list${asker ? ` (asked from ${asker})` : ''}; ending them`);
     const next = () => {
       try {
-        // the same electron.exe (or node) and file; FV_HOST_* test settings carry over (claude never sees FV_*)
+        // the same electron.exe (or node) and file, or "Fleet View.exe" once desktop/brand-exe.js has made it;
+        // FV_HOST_* test settings carry over (claude never sees FV_*)
         const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', FV_HOST_SUCCESSOR: String(process.pid) };
-        const c = spawn(process.execPath, [HOST_JS], { detached: true, windowsHide: true, stdio: 'ignore', env, cwd: DIR });
+        const c = spawn(P.brandedElectron(process.execPath), [HOST_JS], { detached: true, windowsHide: true, stdio: 'ignore', env, cwd: DIR });
         c.on('error', (e) => log(`restart: the next host failed: ${e.message}`));
         c.unref();
         log(`restart: started the next host (pid ${c.pid}); this one exits`);

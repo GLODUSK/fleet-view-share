@@ -21,10 +21,11 @@ function Get-ClaudeLogins {
 }
 
 # Fleet View's processes that run from this folder's desktop\node_modules: the window, the server it started and
-# the session host (all electron.exe), which npm ci can't replace while they run
+# the session host (all electron.exe, or Fleet View.exe once desktop\brand-exe.js has made it), which npm ci can't
+# replace while they run
 function Get-DesktopProcesses {
   $mods = (Join-Path $desk 'node_modules') + '\'
-  @(Get-CimInstance Win32_Process -Filter "Name='electron.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($mods, [StringComparison]::OrdinalIgnoreCase) })
+  @(Get-CimInstance Win32_Process -Filter "Name='electron.exe' or Name='Fleet View.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($mods, [StringComparison]::OrdinalIgnoreCase) })
 }
 
 # Closes the window the way its close button does (the sessions keep running in the host), and waits up to 15 s for
@@ -135,6 +136,11 @@ if (-not $NoDesktop) {
     Say 'Downloading electron.exe...'
     & node (Join-Path $desk 'node_modules\electron\install.js')
     if ($LASTEXITCODE -ne 0) { Warn 'electron.exe could not be downloaded; Fleet View opens in an Edge window until this runs again.' }
+  }
+  # Fleet View.exe: electron.exe with Fleet View's name and icon, so Task Manager shows those (the window makes it too)
+  if (Test-Path (Join-Path $desk 'node_modules\electron\dist\electron.exe')) {
+    & node (Join-Path $desk 'brand-exe.js') | Out-Null
+    if ($LASTEXITCODE -ne 0) { Warn 'Fleet View.exe could not be made; Task Manager shows Electron until the window makes it.' }
   }
   Say 'Desktop window ready'
 }

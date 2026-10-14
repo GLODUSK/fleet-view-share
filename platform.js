@@ -22,7 +22,10 @@
 //   shellQuote(s)           s as one word for sh
 //   resumeCommand(id, letter, configDir)   macOS and Linux: the sh line for `claude --resume <id>` in that account
 //   keychainCredentials(dir, viaEnv)   macOS: a Claude account's sign-in from the Keychain (Promise; null elsewhere)
-//   electronBinary(dir)     the Electron binary under <dir>/node_modules/electron/dist for this platform
+//   electronBinary(dir)     the Electron binary under <dir>/node_modules/electron/dist for this platform (on Windows
+//                           the branded copy when it is ready, see brandedElectron)
+//   brandedElectron(exe)    Windows: "Fleet View.exe" beside electron.exe when desktop/brand-exe.js made it from this
+//                           very electron.exe (Task Manager then shows Fleet View and its logo, not Electron), else exe
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -301,9 +304,25 @@ function keychainCredentials(configDir, viaEnv) {
   });
 }
 
+// desktop/brand-exe.js writes "Fleet View.exe" and then a stamp of the electron.exe it copied (size and time); a
+// stamp that no longer matches (Electron was updated in place) means the copy is stale, and electron.exe runs instead
+const BRANDED_EXE = 'Fleet View.exe';
+function electronStamp(exe) {
+  const st = fs.statSync(exe);
+  return `${st.size}:${Math.round(st.mtimeMs)}`;
+}
+function brandedElectron(exe) {
+  if (!isWin || !exe || path.basename(exe).toLowerCase() !== 'electron.exe') return exe;
+  const copy = path.join(path.dirname(exe), BRANDED_EXE);
+  try {
+    if (fs.readFileSync(`${copy}.stamp`, 'utf8').trim() === electronStamp(exe) && fs.existsSync(copy)) return copy;
+  } catch {}
+  return exe;
+}
+
 function electronBinary(desktopDir) {
   const dist = path.join(desktopDir, 'node_modules', 'electron', 'dist');
-  if (isWin) return path.join(dist, 'electron.exe');
+  if (isWin) return brandedElectron(path.join(dist, 'electron.exe'));
   if (isMac) return path.join(dist, 'Electron.app', 'Contents', 'MacOS', 'Electron');
   return path.join(dist, 'electron');
 }
@@ -311,4 +330,5 @@ function electronBinary(desktopDir) {
 module.exports = {
   isWin, isMac, dataDir, hostSocketPath, foldCase, detachGroup, processes, processesSync, commandLines, descendants, killTree,
   loginShellPath, applyLoginPath, which, shellQuote, openTerminal, resumeCommand, keychainCredentials, electronBinary,
+  brandedElectron, BRANDED_EXE, electronStamp,
 };

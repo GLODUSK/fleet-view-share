@@ -8194,13 +8194,14 @@ function handleRequest(req, res) {
 }
 
 // the desktop window (desktop/, Electron with Windows 11 acrylic) when `npm install` has been run there;
-// its electron.exe path comes from desktop/node_modules/electron. It keeps one window per port by itself.
+// its electron.exe path comes from desktop/node_modules/electron (on Windows "Fleet View.exe" beside it once
+// desktop/brand-exe.js has made it, so Task Manager names it Fleet View). It keeps one window per port by itself.
 function electronExe() {
   const dir = path.join(__dirname, 'desktop');
   if (!fs.existsSync(path.join(dir, 'node_modules', 'electron', 'package.json'))) return null;
   try {
     const exe = require(path.join(dir, 'node_modules', 'electron'));
-    if (typeof exe === 'string' && fs.existsSync(exe)) return exe;
+    if (typeof exe === 'string' && fs.existsSync(exe)) return P.brandedElectron(exe);
   } catch {}
   const bin = P.electronBinary(dir);
   return fs.existsSync(bin) ? bin : null;
