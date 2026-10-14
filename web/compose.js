@@ -967,6 +967,8 @@ export function mountCompose(slot, s) {
     drawAtts();
     drawQuote();
   }
+  // the draft changed under this box (another box sent it: clearSent): show it as it is now
+  st.reload = () => { clearTimeout(st.saveTimer); loadDraft(); drawSend(); };
   // ----- bash mode (see the top) -----
   function setShell(on) {
     on = !!on;
@@ -1813,7 +1815,12 @@ export function mountCompose(slot, s) {
     d.text = d.text.startsWith(raw) ? d.text.slice(raw.length).replace(/^\s+/, '') : d.text;
     storeText(id, d.text);
     if (d.quote === quote) { d.quote = ''; storeQuote(id, ''); }
+    // a draft save still due would put the sent text back (a reload shows it again)
+    clearTimeout(st.saveTimer);
     if (st.id === id) { ta.value = d.text; grow(); drawAtts(); drawQuote(); }
+    // every other box on this draft too: one the chat mounted while this send ran (this box gone with the old one),
+    // or the same chat open twice; never the sent text left in a box
+    for (const b of boxes) if (b !== st && b.alive && b.d === d && b.reload) b.reload();
   }
 
   // ----- a chat another machine runs (docs/sync-follow.md item 6, "Follow you") -----
@@ -2980,6 +2987,7 @@ export function mountCompose(slot, s) {
   fileIn.addEventListener('change', () => { addFiles(fileIn.files); fileIn.value = ''; ta.focus(); });
 
   pane.addEventListener('fv-chat-sendnow', (e) => { if (e.detail && sendNow(e.detail.id)) e.detail.ok = true; });
+  pane.addEventListener('fv-chat-resend', (e) => { const x = e.detail; if (x && x.id === st.id && x.text && !st.sending) { x.ok = true; send(x.text); } });
   pane.addEventListener('fv-chat-enter', (e) => { if (e.detail && enterAgain(e.detail.id)) e.detail.ok = true; });
   pane.addEventListener('fv-chat-unsend', (e) => { const x = e.detail; if (x) x.done = unsendQueued(x.id, x.text, typeof x.queue === 'function' ? x.queue : () => x.queue); });
   pane.addEventListener('fv-chat-rewind', (e) => { const x = e.detail; if (x) rewindTo(x.id, x.text, x.nth | 0, typeof x.edit === 'string' ? x.edit : null); });

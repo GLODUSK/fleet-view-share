@@ -1089,13 +1089,38 @@ function settleSent(c) {
     if (b && b.cmd == null) continue; // what a "!" command printed, not a message
     const k = String(it.key), t = Number(it.t) || 0, text = norm(userShown(it.text));
     const open = c.sent.filter((x) => !x.cmd && !x.used.has(k));
-    // the same text, else (the log wrote it another way) the oldest sent before this message was logged
-    const s = open.find((x) => t >= x.at - 5000 && (!x.text || text.includes(x.text.slice(0, 60))))
+    // the same text (the latest: after a Send again the first one is the lost copy), else (the log wrote it
+    // another way) the oldest sent before this message was logged
+    const s = [...open].reverse().find((x) => t >= x.at - 5000 && (!x.text || text.includes(x.text.slice(0, 60))))
       || open.find((x) => t >= x.at - 1000);
     if (!s) continue;
     dropSent(c, s);
     for (const x of c.sent) x.used.add(k);
   }
+  markLost(c, now);
+}
+// a message still unmatched after LOST_MS, not queued and not in Claude Code's queue, never reached Claude: say so,
+// with Send again, rather than leave it looking sent until SENT_MAX_MS
+const LOST_MS = 30 * 1000;
+function markLost(c, now) {
+  const queued = new Set((c.queue || []).map((q) => norm(typeof q === 'string' ? q : q?.text)));
+  for (const s of c.sent) {
+    if (s.cmd || s.queued || s.lost || now - s.at < LOST_MS || queued.has(s.text)) continue;
+    const stEl = s.el.querySelector('.cu-status');
+    if (!stEl || stEl.classList.contains('stuck')) continue;
+    s.lost = true;
+    s.el.classList.remove('sending', 'taken');
+    stEl.classList.add('stuck');
+    stEl.innerHTML = `<span>Not sent: Claude didn't get it</span>${s.images.length || !s.raw ? '' : `<button type="button" class="cu-now cu-new" data-resend title="Send this message again">${icon('send', 11)}<span>Send again</span></button>`}`;
+  }
+}
+// Send again on a lost message: compose.js sends its text once more, and the lost bubble goes
+function resend(c, el) {
+  const s = c.sent.find((x) => x.el === el);
+  if (!s) return;
+  const ev = new CustomEvent('fv-chat-resend', { detail: { id: c.id, text: s.raw, ok: false } });
+  c.pane.dispatchEvent(ev);
+  if (ev.detail.ok) dropSent(c, s);
 }
 
 // ---------- the bar at the top: your message, while it is scrolled out of view above ----------
@@ -1242,6 +1267,7 @@ function wire(c) {
     else if ((b = t.closest('[data-ho-sum]'))) { e.preventDefault(); const el = b.closest('.ci'); if (el) showSummary(c, el, b.getAttribute('aria-expanded') !== 'true'); }
     else if ((b = t.closest('[data-launch]'))) { e.preventDefault(); launchPicks(c, b.closest('.ci')); }
     else if ((b = t.closest('[data-now]'))) { e.preventDefault(); sendNow(c); }
+    else if ((b = t.closest('[data-resend]'))) { e.preventDefault(); resend(c, b.closest('.ci')); }
     else if ((b = t.closest('[data-enter]'))) { e.preventDefault(); enterAgain(c, b.closest('.cu-status')); }
     else if ((b = t.closest('[data-unsend]'))) { e.preventDefault(); unsend(c, b.closest('.ci')); }
     else if ((b = t.closest('[data-fork]'))) { e.preventDefault(); unsend(c, b.closest('.ci'), b.dataset.fork === 'new' ? 'new' : 'fork'); }
