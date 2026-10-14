@@ -2609,10 +2609,12 @@ export function mountCompose(slot, s) {
   function drawModel() {
     const t = termApi();
     const { model, effort } = current();
-    const dyn = dynNow(st.s), bot = !!(dyn && dyn.botId);
+    // a chat another machine runs: a pick is sent there, and Dynamic (which sizes what is sent from here) is not offered
+    const host = remoteOn() ? hostOfChat(st.s) : null;
+    const dyn = host ? null : dynNow(st.s), bot = !!(dyn && dyn.botId);
     const dm = !!(dyn && dyn.model), de = !!(dyn && dyn.effort);
     const name = dm ? 'Dynamic' : model ? modelLabel(model, true) : 'Model';
-    const key = `${name}|${model}|${effort}|${!!dyn}|${bot && dyn.name}|${dm}|${de}|${!!t}|${!!(st.menu || st.panel)}|${st.sending}`;
+    const key = `${name}|${model}|${effort}|${!!dyn}|${bot && dyn.name}|${dm}|${de}|${host && host.name}|${!!t}|${!!(st.menu || st.panel)}|${st.sending}`;
     if (st.drawn.model === key) return;
     st.drawn.model = key;
     // the model name shortens when space runs out; the effort, in its Claude Code color, always shows in full
@@ -2636,7 +2638,8 @@ export function mountCompose(slot, s) {
         + ` title="${on ? 'Sized for each message you send' : `Size the ${kind} for each message you send`}">${on ? ic('check', 11) : ''}<span>Dynamic</span></button></div>`);
     // the one it runs comes first in the list when it isn't one of the newest (an older version)
     const ids = model && !MODEL_IDS.includes(model) ? [model, ...MODEL_IDS] : MODEL_IDS;
-    const note = dm || de ? `A fixed pick turns Dynamic off for this ${bot ? 'bot' : 'chat'}, and becomes the default for new sessions` : 'Also becomes the default for new sessions';
+    const note = host ? `Sent to ${host.name}, where it runs; also becomes the default for new sessions there`
+      : dm || de ? `A fixed pick turns Dynamic off for this ${bot ? 'bot' : 'chat'}, and becomes the default for new sessions` : 'Also becomes the default for new sessions';
     modelMenu.innerHTML = head('Model', 'model', dm) + ids.map((k) => item(k, modelLabel(k), !dm && k === model, 'data-model', dm && k === model)).join('')
       + '<div class="cmp-msep" role="separator"></div>' + head('Effort', 'effort', de)
       + EFFORTS.map((e) => item(e, e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1), !de && e === effort, 'data-effort', de && e === effort)).join('')
@@ -2719,7 +2722,7 @@ export function mountCompose(slot, s) {
   }
   async function pickModel(kind, v) {
     openModelMenu(false);
-    const dyn = dynNow(st.s);
+    const dyn = remoteOn() ? null : dynNow(st.s); // (Dynamic sizes what is sent from here, so not a chat another machine runs)
     if (dyn && dyn[kind] && !(await setDynPart(dyn, kind, v))) return;
     const from = st.s.model || null;
     if (!(await send(kind === 'model' ? `/model ${v}` : `/effort ${v}`))) return;
@@ -2970,8 +2973,9 @@ export function mountCompose(slot, s) {
     if (b.dataset.dyn) { pickDynamic(b.dataset.dyn); return; }
     if (b.dataset.sl) { pickSlash(+b.dataset.sl, false); return; }
     const c = b.dataset.c;
-    // a chat another machine runs: the mode and model are its session's, there
-    if (remoteOn() && (c === 'mode' || c === 'model')) { contNeeded(c === 'mode' ? 'The permission mode' : 'Switching the model'); return; }
+    // a chat another machine runs: its mode is a key there (Shift+Tab), which the link can't press; a model or effort
+    // pick is a "/model <id>" or "/effort <level>" message, so it goes there as one (pickModel)
+    if (remoteOn() && c === 'mode') { contNeeded('The permission mode'); return; }
     if (c === 'off-go') { const o = st.offline; st.offline = null; drawNotes(); if (!o) return; if (o.kind === 'bound' || !hasDraft()) continueHere(true); else { st.forceMove = st.id; send(); } return; }
     if (c === 'off-x') { st.offline = null; drawNotes(); return; }
     // a chat pinned to its host by hand, and the offline card of a pinned chat: let it go (keeps.js setPin), then move it

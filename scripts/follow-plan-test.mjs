@@ -3,7 +3,7 @@
 // first; remote by default, Henry 2026-10-13: typing never moves a chat), hostOfChat, remoteMenu (the host's menu as the card's), movePhaseText and panelCommand.
 // Run: node scripts/follow-plan-test.mjs
 import assert from 'node:assert/strict';
-import { followPlan, hostOfChat, remoteMenu, movePhaseText, panelCommand } from '../web/compose.js';
+import { followPlan, hostOfChat, remoteMenu, movePhaseText, panelCommand, MODEL_IDS, EFFORTS } from '../web/compose.js';
 
 const PC = '0afc6f7f-c6f1-4f46-9d69-4e6006385910';
 const host = { device: PC, name: 'BlackBox' };
@@ -86,6 +86,10 @@ assert.equal(panelCommand('/usage'), '/usage');
 assert.equal(panelCommand('  /config  '), '/config');
 assert.equal(panelCommand('/model'), '/model', '/model alone opens its picker');
 assert.equal(panelCommand('/model opus'), null, '/model with a name just runs');
+// what the model menu sends to a chat another machine runs (pickModel): each goes through the link as a message
+for (const id of MODEL_IDS) assert.equal(panelCommand(`/model ${id}`), null, `/model ${id} goes to the host`);
+for (const e of EFFORTS) assert.equal(panelCommand(`/effort ${e}`), null, `/effort ${e} goes to the host`);
+assert.equal(panelCommand('/effort'), '/effort', '/effort alone opens its picker');
 assert.equal(panelCommand('/compact'), null);
 assert.equal(panelCommand('/my-skill do it'), null, 'a skill\'s command runs as a prompt');
 assert.equal(panelCommand('hello /usage'), null, 'not at the start');
