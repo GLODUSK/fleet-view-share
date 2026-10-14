@@ -55,11 +55,6 @@
 // faint earthshine on its dark side, a halo as bright as it is full) and crosses the top of the screen with the local
 // clock, east (left) to west: it lags the sun by its phase (full rises at dusk, last quarter is high at dawn), sets
 // below the horizon and fades out by day. Fixed to the screen, worked out once a minute, painted once per phase.
-// An aurora (AURORA_*; Henry asked for it, the one light here that follows how much is going on): soft green curtains,
-// violet up their rays, over the bottom of the window, as bright as how many conversations on the map work (none: dark,
-// one: faint, five or six: all of it, never much), gliding to a new level over a few seconds; its rays ripple and drift
-// sideways over many seconds, fixed to the window like the moon, held at rest, still under reduced motion, dimmer by
-// day. Only when the graphics card draws the sky.
 // Satellites (SAT_*; Henry asked for them): one small steady point, a little warm, for each background agent or
 // workflow agent running on the map (at most SAT_N), drifting slowly across the upper sky on a straight, slightly
 // tilted path (a minute or two to cross the window) with a faint red or white beacon blink every couple of seconds, so
@@ -137,8 +132,7 @@
 // it keeps the old node and its handing-off look, never the new-session one.
 //
 // Tests (?fixture=1 or ?debug=1): window.__map = { nodes, stats, debug, comet(fromId, toId), merge(sessionId), sky(hour), skyGL,
-// rest(on), battery(on), meteor(), shower(), moon(date), aurora(n), satellites(n), rocket(hubId) }. aurora(n) has the aurora go by n working conversations
-// (null: the map's; stats().aurora: { busy, level }). satellites(n) shows n satellites as if n agents ran (null: the
+// rest(on), battery(on), meteor(), shower(), moon(date), satellites(n), rocket(hubId) }. satellites(n) shows n satellites as if n agents ran (null: the
 // map's running agents; stats().satellites: { want, shown: [{ x, y, a, blink }] }, CSS px of the map). meteor() sends a shooting star now, shower() a meteor shower
 // (not held back by SHOWER_GAP) (stats().meteor: how many streaks show or are about to; meteorIn: ms to the next shooting
 // star, null when none is due; showers: how many showers started). rocket(hubId) sends a deploy's rocket up now under
@@ -423,17 +417,10 @@ const DEEP_CLOUDS = [[[0.62, 0.48, 1], 400, 72, 64, 0.55], [[0.36, 0.7, 0.78], 1
 const DEEP_GALAXIES = [[26, 138, 12, 0.62, 0.5, 'spiral', [0.4, 0.48, 0.62], 0.55],
   [210, 216, 8, 0.66, -0.4, 'elliptical', [0.5, 0.45, 0.38], 0.3],
   [488, 108, 10, 0.2, 2.4, 'spiral', [0.4, 0.46, 0.6], 0.45]];
-// the aurora (see "Look"): at most AURORA_A of light; its level is 1 - e^(-busy / AURORA_K) (one working conversation
-// faint, five or six about all of it), gliding to a new one with time constant AURORA_MS; by day (MOON_DAY's hours) it is
-// AURORA_DAY as bright. Its lower edge sways around AURORA_LOW of the window's height (front curtain; the back one a
-// little higher), its rays reaching AURORA_H of the height up; AURORA_GREEN its core's rgb (0-1), AURORA_VIOLET the
-// rays' tops. Its clock wraps every AURORA_WRAP s, every wave making whole cycles in it, so the wrap never shows.
-const AURORA_A = 0.2, AURORA_K = 2, AURORA_MS = 1400, AURORA_DAY = 0.45, AURORA_WRAP = 3600;
-const AURORA_LOW = 0.9, AURORA_H = 0.22, AURORA_GREEN = [0.33, 1, 0.62], AURORA_VIOLET = [0.62, 0.45, 1];
 // satellites (see "Look"): at most SAT_N (the sky's shader has a slot for each), each a point SAT_R CSS px across (a
 // Gaussian's radius, about a bright star's) of SAT_RGB (0-1, a little warm) at SAT_A, SAT_DAY as bright by day. Its
 // path crosses the window (I.moonF) in SAT_CROSS s (a pick), tilted SAT_TILT radians (a pick, either way), between
-// SAT_Y of the window's height (above the aurora), starting SAT_PAD px off one side; it fades in and out over SAT_FADE
+// SAT_Y of the window's height, starting SAT_PAD px off one side; it fades in and out over SAT_FADE
 // ms. Its beacon flashes every SAT_BLINK ms (a pick each), for SAT_FLASH ms, by turns SAT_RED and white, up to
 // SAT_FLASH_A over the point and a little wider (SAT_FLASH_R)
 const SAT_N = 8, SAT_R = 0.75, SAT_RGB = [1, 0.95, 0.86], SAT_A = 0.62, SAT_DAY = 0.45;
@@ -823,7 +810,7 @@ export function mapStats() {
     satellites: { want: satWant().length, shown: satsNow().map((s) => ({ x: Math.round(s.x), y: Math.round(s.y), a: Math.round(s.a * 1e3) / 1e3, blink: Math.round(s.f * 1e3) / 1e3 })) },
     rockets: { flying: I.rockets.length, launched: I.rocketsN, shown: rocketsNow().map((r) => { const [x, y] = rocketHead(r);
       return { x: Math.round(x), y: Math.round(y), head: Math.round(r.ha * 1e3) / 1e3, trail: Math.round(r.ta * 1e3) / 1e3, puff: Math.round(r.puff * 1e3) / 1e3 }; }) },
-    glow: I.glowGL ? 'webgl2' : '2d', aurora: { busy: auroraForce != null ? auroraForce : I.busyN || 0, level: Math.round((I.aurora || 0) * 1e3) / 1e3 },
+    glow: I.glowGL ? 'webgl2' : '2d',
     fps: I.pace.draws.filter((t) => t > performance.now() - 1000).length,
     pace: { fps: I.pace.fps, refreshMs: Math.round(I.pace.ms * 100) / 100, quick: I.quick, lively: I.lively, rest: resting(), battery: away.battery } };
 }
@@ -982,8 +969,6 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     // the moon's clock at that time (as moon) with the sky's hour at midnight, so a full moon is up: a real eclipse
     // then shows (null: both back to the clock); its shadow, or null when none is on
     eclipse: (d) => { skyForce = d == null ? null : 0; window.__map.moon(d); return I && I.moon ? I.moon.ecl : null; },
-    // the aurora as if n conversations worked (null: as many as do on the map); it glides there as it would
-    aurora: (n) => { auroraForce = n == null ? null : Math.max(0, Number(n) || 0); if (I) I.dirty = true; return auroraForce; },
     // n satellites as if n agents ran (null: the map's running agents); they come and go as they would
     satellites: (n) => { satForce = n == null ? null : Math.max(0, Math.floor(Number(n) || 0)); if (I) I.dirty = true; return satForce; },
     // a deploy's rocket now, under that hub (a repo node id; null: anywhere along the bottom)
@@ -1466,8 +1451,6 @@ function rebuild() {
   for (const id of [...I.hub.keys()]) if (!byId.has(id)) I.hub.delete(id);
   for (const id of [...I.look.keys()]) if (!byId.has(id) && !I.ghosts.some((g) => g.n.id === id)) I.look.delete(id);
 
-  // the working conversations on the map, for the aurora
-  I.busyN = list.reduce((n, s) => n + (BUSY.has(s.state) ? 1 : 0), 0);
   // the running agents of the conversations shown (not the finished ones), for the satellites, keyed as their nodes are
   I.satRun = [];
   for (const n of nodes) if (n.kind === 'agent' && n.a.state === 'run') I.satRun.push(n.id);
@@ -3021,24 +3004,6 @@ function drawMoon(ctx) {
   ctx.restore();
 }
 
-// ---------- the aurora (see "Look", AURORA_*) ----------
-let auroraForce = null; // tests (__map.aurora): the working conversations it goes by (null: the map's)
-// the aurora this frame: its level gliding toward what the working conversations on the map ask (I.aurora; reduced
-// motion snaps), its light (a: AURORA_A x level, less by day; 0: dark) and its clock (th, radians of one AURORA_WRAP,
-// held at rest as I.time is, 0 under reduced motion or while dark, so a dark or still aurora never redraws the sky)
-function auroraNow() {
-  const busy = auroraForce != null ? auroraForce : I.busyN || 0;
-  // it lands once within a hundredth (too faint to see), so its tail never keeps the map at full rate for long
-  const want = 1 - Math.exp(-busy / AURORA_K);
-  I.aurora = glide(I.aurora || 0, want, AURORA_MS);
-  if (Math.abs(I.aurora - want) < 0.01) I.aurora = want;
-  const h = skyHour(), ss = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
-  const day = ss(MOON_DAY[0], MOON_DAY[1], h) * (1 - ss(MOON_DAY[2], MOON_DAY[3], h));
-  const a = I.aurora > 0 ? AURORA_A * I.aurora * (1 - (1 - AURORA_DAY) * day) : 0;
-  const th = a > 0 && !I.still ? (((I.time / 1000) % AURORA_WRAP) * TAU) / AURORA_WRAP : 0;
-  return { busy, level: I.aurora, a, th };
-}
-
 // ---------- satellites (see "Look", SAT_*) ----------
 let satForce = null; // tests (__map.satellites): how many to show (null: one per running agent)
 const satWant = () => (satForce != null ? Array.from({ length: satForce }, (_, i) => 'test:' + i) : I.satRun || []);
@@ -3261,8 +3226,7 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // x, y), star px per device px (z) and device px per star px (w); then the deep sky's offset in device px and 1 / its
 // size in device px (x, y), its star dust's the same way (1 / the tile's size in z), and the vignette, DEEP_A,
 // DUST_A and the dither, and the moon's picture's top left (device px; x, y), 1 / its size (z) and its alpha (w; 0:
-// none), then the aurora's: the window frame's top left and size (device px, I.moonF) and its light (AURORA_A x level x
-// day), its clock (radians of one AURORA_WRAP; 0 under reduced motion) and the dpr (all 0 when it is dark);
+// none);
 // uSize's z is the dpr, for the streaks' width, and its w the twinkle's clock (s, wrapped by TWINKLE_WRAP;
 // -1 under reduced motion: none). After them (from SKY_M) the streaks' two arrays of METEOR_N vec4s: uM, each one's
 // head and tail end (device px; x, y and z, w), and uMc, its rgb and alpha; the ones showing come first, the rest
@@ -3273,7 +3237,7 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // waver (CSS px), sparks' progress (-1: none) and seed (> 0; 0: an empty slot). Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
 // without a cell), the deep sky, its star dust, the glows' noise and their field, and the moon's picture (moonImage).
 // uTint (STAR_TINT) is set once.
-const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo', 'uAu', 'uAv'];
+const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo'];
 const SKY_M = SKY_U.length * 4;
 const STAR_TILES = STAR_LAYERS.filter((L) => !L.cell);
 const SKY_TEX = [...STAR_TILES.map((L, t) => 'uS' + t), 'uDeep', 'uDust', 'uNoise', 'uField', 'uMoon'];
@@ -3408,7 +3372,7 @@ const STAR_GLSL = STAR_LAYERS.map((L, i) => (L.cell
   : `c = over(star(uS${STAR_TILES.indexOf(L)}, uL${i}, p), c);`)).join('\n  ');
 // per device pixel, premultiplied: the tint (mixed top to bottom unpremultiplied, as a canvas gradient mixes) over the
 // page's colour, the deep sky's light and its star dust (dense where the band is) over that, then each star layer,
-// back to front (STAR_GLSL), sampled where the pixel's centre falls on its tile or made there, the aurora, the satellites, the shooting
+// back to front (STAR_GLSL), sampled where the pixel's centre falls on its tile or made there, the satellites, the shooting
 // star and the moon; then the vignette
 // (black, so in glass it dims the acrylic a little too), the repo glows ('screen': 1 - (1 - sky)(1 - glow), on colour and alpha alike, as the canvas does) and
 // a dither fixed to the pixel (never to time) that breaks the faint gradients' 8-bit bands
@@ -3418,7 +3382,7 @@ precision highp float;
 #define METEOR_N ${METEOR_N}
 #define SAT_N ${SAT_N}
 #define ROCKET_N ${ROCKET_N}
-uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uAu, uAv, uGlow, uN0, uN1;
+uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uGlow, uN0, uN1;
 uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N];
 uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
 uniform int uGN;
@@ -3441,32 +3405,6 @@ void main() {
   c = over(vec4(g, max(g.r, max(g.g, g.b))), c);
   c = over(vec4(texture(uDust, (p - uDu.xy) * uDu.z).r * d.a * uFx.z), c);
   ${STAR_GLSL}
-  // the aurora (uAv.x its light; 0: dark): two curtains over the bottom of the window frame (uAu), the back one higher
-  // and dimmer, each a band whose lower edge sways slowly, lit by soft vertical rays that ripple sideways and bend a
-  // little up the band, in patches with gaps between; green at its foot turning violet up the rays. th, its clock, is
-  // in radians of one AURORA_WRAP, so each wave turns a whole number of times per wrap (th x 240: once in 15 s)
-  if (uAv.x > 0.0 && (p.y - uAu.y) / uAu.w > ${(AURORA_LOW - AURORA_H - 0.14).toFixed(3)}) {
-    float fy = (p.y - uAu.y) / uAu.w, x = (p.x - uAu.x) / uAv.z, th = uAv.y, al = 0.0;
-    vec3 ac = vec3(0.0);
-    for (int k = 0; k < 2; k++) {
-      float fk = float(k);
-      float yb = ${glf(AURORA_LOW)} - 0.07 * fk + 0.022 * sin(x * 0.0031 + th * 40.0 + fk * 2.1) + 0.012 * sin(x * 0.0083 - th * 60.0 + fk * 4.0);
-      float v = (yb - fy) / (${glf(AURORA_H)} * (0.85 + 0.15 * sin(x * 0.0019 + th * 24.0 + fk)));
-      // a soft foot with a brighter lower edge, the light falling off up the rays and gone at their tops
-      float vu = max(v, 0.0);
-      float prof = smoothstep(-0.1, 0.03, v) * (0.55 * exp(-5.0 * vu) + 0.45 * exp(-1.3 * vu)) * (1.0 - smoothstep(0.45, 1.0, v));
-      if (prof <= 0.0) continue;
-      // the rays: three waves across (about 30, 55 and 130 px), bent a little up the band by a slow fold
-      float xf = x + (8.0 + 36.0 * vu) * sin(x * 0.004 - th * 90.0 + fk * 3.0);
-      float r = 0.5 + 0.5 * (0.45 * sin(xf * 0.21 + th * 600.0 + fk * 1.3) + 0.35 * sin(xf * 0.115 - th * 360.0 + fk * 5.1) + 0.2 * sin(xf * 0.048 + th * 240.0));
-      float pa = smoothstep(-0.35, 0.85, 0.6 * sin(x * 0.0026 + th * 30.0 + fk * 2.4) + 0.4 * sin(x * 0.0061 - th * 50.0 + fk));
-      float m = prof * (0.25 + 0.75 * r * r) * pa * (1.0 - 0.45 * fk);
-      al += m;
-      ac += m * mix(vec3(${AURORA_GREEN.map(glf).join(', ')}), vec3(${AURORA_VIOLET.map(glf).join(', ')}), smoothstep(0.04, 0.5, v));
-    }
-    float aa = uAv.x * min(al, 1.0);
-    c = over(vec4(ac * (uAv.x / max(al, 1.0)), aa), c);
-  }
   // the satellites: each a small soft point (a Gaussian SAT_R CSS px across, uSat's z its alpha) and its beacon's
   // flash (w) a little wider in its colour (uSac); the first empty slot ends them, and a pixel far from one skips it
   for (int i = 0; i < SAT_N; i++) {
@@ -3833,13 +3771,6 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     G.moonKey = mo.im.key; G.drawn = false;
   }
   u[40] = mo ? mo.x : 0; u[41] = mo ? mo.y : 0; u[42] = mo ? 1 / mo.im.S : 0; u[43] = mo ? mo.a : 0;
-  // the aurora, in the window frame the moon goes by (moonAt set it this frame)
-  const au = auroraNow(), F = I.moonF;
-  u.fill(0, 44, 52);
-  if (au.a > 0) {
-    u[44] = (F.x - (I.left || 0)) * dpr; u[45] = (F.y - (I.top || 0)) * dpr; u[46] = F.W * dpr; u[47] = F.H * dpr;
-    u[48] = au.a; u[49] = au.th; u[50] = dpr;
-  }
   // the streaks (all 0 when none: the frame after the last ends draws the sky without it)
   const ms = meteorsNow(), M = SKY_M, MC = SKY_M + METEOR_N * 4;
   u.fill(0, M);
