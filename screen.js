@@ -436,11 +436,19 @@ const menuShown = (raw, cols, rows) => menuIn(render(raw, cols, rows, 40, false)
 const BOX_HINT = /^(?:Press up to edit queued messages|Try ".*")$/;
 const dropDim = (l, first) => (first ? l.replace(/^(\s*[❯>]\s?)\x01[^\x02]\x02(?=\x03)/, '$1') : l)
   .replace(/\x03[^\x04]*(\x04|$)/g, '').replace(/[\x01-\x04]/g, '');
+// the background agents Claude Code lists under its footer ("● main", a row per agent): where the rows end without it
+const AGENT_ROW = /^\s*[●◯]\s+\S/;
+function agentListStart(L) {
+  let e = L.length;
+  while (e > 0 && (AGENT_ROW.test(L[e - 1]) || !L[e - 1].trim())) e--;
+  return L.slice(e).some((l) => /^\s*●\s+main\b/.test(l)) ? e : L.length;
+}
 function promptBox(lines) {
   const M = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
   const L = M.map((l) => l.replace(/[\x01-\x04]/g, ''));
-  let b = L.length - 1;
-  while (b >= Math.max(0, L.length - 6) && !isRule(L[b])) b--;
+  const end = agentListStart(L);
+  let b = end - 1;
+  while (b >= Math.max(0, end - 6) && !isRule(L[b])) b--;
   if (b < 1 || !isRule(L[b])) return null;
   let a = b - 1;
   while (a >= 0 && !isRule(L[a])) a--;

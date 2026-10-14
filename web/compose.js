@@ -143,11 +143,20 @@ const ic = (name, size = 14) => icon(name, size) || icon(ALT[name] || 'dot', siz
 const BOX_HINT = /^(?:Press up to edit queued messages|Try ".*")$/;
 const dropDim = (l, first) => (first ? l.replace(/^(\s*[❯>]\s?)\x01[^\x02]\x02(?=\x03)/, '$1') : l)
   .replace(/\x03[^\x04]*(\x04|$)/g, '').replace(/[\x01-\x04]/g, '');
+// While background agents run, Claude Code lists them under its footer ("● main", then a row per agent: "◯ general-
+// purpose  Comparing…"), so the box can sit further up than the footer's few rows. -> where the rows end without it
+const AGENT_ROW = /^\s*[●◯]\s+\S/;
+function agentListStart(L) {
+  let e = L.length;
+  while (e > 0 && (AGENT_ROW.test(L[e - 1]) || !L[e - 1].trim())) e--;
+  return L.slice(e).some((l) => /^\s*●\s+main\b/.test(l)) ? e : L.length;
+}
 export function parsePromptBox(lines) {
   const M = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
   const L = M.map((l) => l.replace(/[\x01-\x04]/g, ''));
-  let b = L.length - 1;
-  while (b >= Math.max(0, L.length - 6) && !isRule(L[b])) b--;
+  const end = agentListStart(L);
+  let b = end - 1;
+  while (b >= Math.max(0, end - 6) && !isRule(L[b])) b--;
   if (b < 1 || !isRule(L[b])) return null;
   let a = b - 1;
   while (a >= 0 && !isRule(L[a])) a--;
@@ -174,6 +183,8 @@ export function parseRewind(lines) {
 // does a /rewind entry ("Reply ALPHA.…", its first line cut to the width) show this message?
 const flat = (v) => String(v || '').replace(/\[Image #\d+\]\s*/g, '').replace(/\s+/g, ' ').trim();
 const bare = (v) => flat(v).replace(/\s/g, ''); // with no spaces at all: the prompt box wraps a long word anywhere
+// what the prompt holds, short, for a message that says so
+const clip = (v) => { const s = String(v || '').replace(/\s+/g, ' ').trim(); return s.length > 60 ? `${s.slice(0, 59)}…` : s; };
 export function rewindMatches(sel, text) {
   const e = flat(sel).replace(/…$/, '').trim(), t = flat(String(text || '').split('\n')[0]);
   if (!e || e === '(current)') return false;
@@ -1209,10 +1220,14 @@ export function mountCompose(slot, s) {
     }
     if (!rest) { err('It isn\'t queued any more: Claude already took it'); return false; }
     if (st.menu || st.panel) { err('Answer or close what is open in the session first'); return false; }
-    const b0 = boxNow(id);
-    if (!b0 || b0.text) { err('Something is typed in the session\'s prompt: clear it in the Session tab first'); return false; }
     working = true;
     try {
+      // the prompt, empty: one read can miss it (this page's copy of the screen drawn again from a snapshot, a redraw
+      // on its way), so it is read again for a moment before Unsend gives up
+      let b0 = boxNow(id);
+      for (let i = 0; i < 10 && !(b0 && !b0.text); i++) { await sleep(150); b0 = boxNow(id); }
+      if (!b0) { err('Couldn\'t read the session\'s prompt: try again in a moment'); return false; }
+      if (b0.text) { err(`Something is typed in the session's prompt ("${clip(b0.text)}"): clear it in the Session tab first`); return false; }
       if (!writeKey('\x1b[A')) return false;
       let b = null;
       for (let i = 0; i < 10 && !(b && b.text); i++) { await sleep(150); b = boxNow(id); }
@@ -1292,7 +1307,8 @@ export function mountCompose(slot, s) {
       took = b.text;
       b = boxNow(id);
     }
-    if (!b || b.text) { err('Something is typed in the session\'s prompt: clear it first'); return null; }
+    if (!b) { err('Couldn\'t read the session\'s prompt: try again in a moment'); return null; }
+    if (b.text) { err(`Something is typed in the session's prompt ("${clip(b.text)}"): clear it first`); return null; }
     if (growRows(id, REWIND_ROWS)) await sleep(600); // the pty takes the new size and Claude Code redraws
     await pasteKeys(id, '/rewind');
     await sleep(ENTER_DELAY_MS);

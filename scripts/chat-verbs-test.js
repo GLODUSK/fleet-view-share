@@ -55,6 +55,16 @@ const RULE = '─'.repeat(40);
   assert.deepEqual(boxOf(`❯ ${E}38;5;2mgreen${E}0m`), { text: 'green', lines: 1 });
   assert.deepEqual(SCREEN.render(`a${E}2mb${E}0m`, 20, 4, 4, false), ['ab']);
   ok('screen.js: a dim suggestion in the prompt reads as empty (render marks)');
+  // background agents listed under the footer, a row each: the box is still read, however many there are
+  const foot = '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 3 agents · ↓ to manage';
+  const agents = (k) => ['  ', '  ● main', ...Array.from({ length: k }, (_, i) => `  ◯ general-purpose  Task ${i}        6m 56s · ↓ 161.2k tokens`)];
+  for (const k of [1, 3, 8]) {
+    assert.deepEqual(SCREEN.promptBox(['● done', RULE, '❯ ', RULE, foot, ...agents(k)]), { text: '', lines: 1 }, `${k} agents`);
+    assert.deepEqual(SCREEN.promptBox(['● done', RULE, '❯ typed', RULE, foot, ...agents(k)]), { text: 'typed', lines: 1 }, `${k} agents, typed`);
+  }
+  // reply rows that start with ● at the bottom are not an agent list: no box there
+  assert.equal(SCREEN.promptBox([RULE, '❯ ', RULE, foot, '● one', '● two', '● three', '● four', '● five', '● six']), null);
+  ok('screen.js: the box is read above a list of background agents');
 }
 
 // ---------- typing: a text ending in "\" (Claude Code takes "\" then Enter as a new line, leaving it unsent) ----------
