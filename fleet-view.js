@@ -1207,7 +1207,10 @@ function vote(s, root, t, top) {
   if (s.repoVotes.length > 400) s.repoVotes.shift();
 }
 
-function noteFile(s, t, p, wrote) {
+// u: the id of the transcript record that touched it (main log only). A fork (claude --resume --fork-session) copies
+// its parent's records, ids and all, so a touch whose record the other conversation has too is history the two share,
+// not a link between them (sharedTouch)
+function noteFile(s, t, p, wrote, u) {
   if (!p || !nativeAbs(winPath(String(p)))) return;
   const abs = path.resolve(winPath(String(p)));
   const g = gitInfo(abs);
@@ -1215,7 +1218,9 @@ function noteFile(s, t, p, wrote) {
   const rel = g ? path.relative(g.top, abs).replace(/\\/g, '/') : abs.replace(/\\/g, '/');
   const key = (g ? g.root + '|' : '') + rel.toLowerCase();
   const f = s.files.get(key) || { key, rel, root: g?.root, t: 0, wrote: false };
-  if (t >= f.t) f.abs = abs; // the copy it touched last (two worktrees of one repo share a key)
+  if (t >= f.t) { f.abs = abs; f.u = u || null; } // the copy it touched last (two worktrees of one repo share a key)
+  // past the cap the oldest stay: a fork's copied history starts its log, and a parent shares its oldest touches
+  if (u && (s.touchIds || (s.touchIds = new Set())).size < TOUCH_IDS_MAX) s.touchIds.add(u);
   f.t = Math.max(f.t, t);
   f.wrote = f.wrote || wrote;
   s.files.set(key, f);
@@ -1230,6 +1235,21 @@ function noteFile(s, t, p, wrote) {
     if (wrote) p.wrote[side] = true;
     s.paritySeen.set(k, p);
   }
+}
+const TOUCH_IDS_MAX = 20000;
+// whether a's last touch of a file (fa) or b's (fb) is a record the other one has too: history the two share
+// because one is a fork of the other, which links nothing (Henry: a fork takes the history and goes on separately)
+const sharedTouch = (a, fa, b, fb) => !!((fa.u && b.touchIds && b.touchIds.has(fa.u)) || (fb.u && a.touchIds && a.touchIds.has(fb.u)));
+// of the conversations that touched one file ([[s, f]]), the ones it links: each with at least one other whose touch
+// of it isn't history the two share. -> those [s, f], none when no two are linked
+function fileLinked(users) {
+  const out = new Set();
+  for (let i = 0; i < users.length; i++) {
+    for (let j = i + 1; j < users.length; j++) {
+      if (!sharedTouch(users[i][0], users[i][1], users[j][0], users[j][1])) { out.add(users[i]); out.add(users[j]); }
+    }
+  }
+  return [...out];
 }
 
 // the repos the first three absolute paths in a shell command point into ({ root, top } each). macOS and Linux:
@@ -1339,10 +1359,10 @@ function stayGlobs(mainRoot) {
   return [...new Set(hostRules.filter((r) => hostIs(r, me) && r.paths.length && repoMatches(r, mainRoot)).flatMap((r) => r.paths))];
 }
 
-function noteTool(s, t, c) {
+function noteTool(s, t, c, u) {
   notePin(s, t, c);
   if (c.name === 'Bash' || c.name === 'PowerShell') { noteCommand(s, t, c.input); noteEas(s, t, c); }
-  else if (c.name === 'Read' || c.name === 'Write' || c.name === 'Edit' || c.name === 'NotebookEdit') noteFile(s, t, c.input?.file_path || c.input?.notebook_path, c.name !== 'Read');
+  else if (c.name === 'Read' || c.name === 'Write' || c.name === 'Edit' || c.name === 'NotebookEdit') noteFile(s, t, c.input?.file_path || c.input?.notebook_path, c.name !== 'Read', u);
 }
 
 // ---------- the phone app's ship step: eas update / build / submit ----------
@@ -1940,7 +1960,7 @@ function ingestMain(s, recs) {
       for (const c of tools) {
         const [verb, what] = describeTool(c.name, c.input);
         pushEvent(s, t, 'main', verb, what, toolFile(c));
-        noteTool(s, t, c);
+        noteTool(s, t, c, d.uuid);
         if (BG_TOOLS.test(c.name)) { s.bgUse.set(c.id, { name: c.name, input: c.input || {} }); if (s.bgUse.size > 200) s.bgUse.delete(s.bgUse.keys().next().value); }
         if (c.name === 'AskUserQuestion') {
           s.asking = true;
@@ -3321,12 +3341,14 @@ function buildGraph(list, now) {
     }
     for (const fl of s.files.values()) {
       let u = fileUse.get(fl.key);
-      if (!u) fileUse.set(fl.key, (u = { f: fl, users: new Map() }));
-      u.users.set(s.id, u.users.get(s.id) || fl.wrote);
+      if (!u) fileUse.set(fl.key, (u = { f: fl, all: [] }));
+      u.all.push([s, fl]);
     }
   }
-  // only files two or more sessions touched: the collisions
+  // only files two or more sessions touched: the collisions (a fork and its parent's shared history aside)
   for (const [key, u] of fileUse) {
+    if (u.all.length < 2) continue;
+    u.users = new Map(fileLinked(u.all).map(([s, fl]) => [s.id, !!fl.wrote]));
     if (u.users.size < 2) continue;
     const writers = [...u.users.values()].filter(Boolean).length;
     const fn = add({ id: 'f:' + key, kind: 'file', label: u.f.rel.split('/').slice(-2).join('/'), rel: u.f.rel, root: u.f.root, users: u.users, writers, prio: writers >= 2 ? 58 : 40 });
@@ -5097,9 +5119,17 @@ function conflictsOf(list) {
     for (const f of s.files.values()) {
       if (!f.wrote || !f.root) continue;
       const m = MIGRATION_RE.exec('/' + f.rel);
-      if (m) add('migration', `${rootKey(f.root)}|${m[1]}`, '#' + m[1], f.root, s.id, { files: [{ sid: s.id, rel: f.rel, abs: fileAbs(f) }] });
+      if (m) add('migration', `${rootKey(f.root)}|${m[1]}`, '#' + m[1], f.root, s.id, { files: [{ sid: s.id, rel: f.rel, abs: fileAbs(f), s, f }] });
     }
   }
+  // a migration a fork and its parent wrote only in their shared history is no conflict between them
+  for (const g of groups.values()) {
+    if (g.kind !== 'migration' || g.ids.size < 2) continue;
+    const keep = new Set(fileLinked(g.files.map((x) => [x.s, x.f])).map(([s]) => s.id));
+    g.ids = new Set([...g.ids].filter((id) => keep.has(id)));
+    g.files = g.files.filter((x) => keep.has(x.sid));
+  }
+  for (const g of groups.values()) if (g.files) g.files = g.files.map(({ sid, rel, abs }) => ({ sid, rel, abs }));
   const out = [], ids = new Set(), sets = new Set();
   const all = [...groups.values()].filter((g) => g.ids.size >= 2);
   for (const g of all) if (g.kind === 'worktree') sets.add([...g.ids].sort().join(','));
@@ -6477,18 +6507,20 @@ function buildState() {
   // header numbers follow the picked repo and the / filter, like the terminal header
   const c = headerCounts(visibleList().filter((s) => !tagOf(s.id)), now);
   const al = alerts.length && now - alerts[alerts.length - 1].t < 120e3 ? alerts[alerts.length - 1] : null;
-  // files two or more unfinished conversations touched
+  // files two or more unfinished conversations touched, history a fork shares with its parent aside
   const use = new Map();
   for (const s of onMap) {
     if (s.state === 'DONE') continue;
     for (const f of s.files.values()) {
       let u = use.get(f.key);
-      if (!u) use.set(f.key, (u = { f, users: new Map() }));
-      u.users.set(s.id, u.users.get(s.id) || !!f.wrote);
+      if (!u) use.set(f.key, (u = { f, all: [] }));
+      u.all.push([s, f]);
     }
   }
   const clashes = [];
   for (const [key, u] of use) {
+    if (u.all.length < 2) continue;
+    u.users = new Map(fileLinked(u.all).map(([s, f]) => [s.id, !!f.wrote]));
     if (u.users.size < 2) continue;
     clashes.push({ key, rel: u.f.rel, root: u.f.root || null, writers: [...u.users.values()].filter(Boolean).length, sessions: [...u.users].map(([id, wrote]) => ({ id, wrote })) });
   }

@@ -1224,6 +1224,8 @@ function rebuild() {
     for (const f of files) {
       const age = nowC - f.t;
       const cc = clashKeys.get(f.key);
+      // a clash that leaves this one out (a fork's copy of its parent's history touched it): no line to it
+      if (cc && !cc.sessions.some((x) => x.id === s.id)) continue;
       if (!cc) {
         if (age >= FADE_MS || recentCount >= MAX_RECENT) continue;
         recentCount++;
