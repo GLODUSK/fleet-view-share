@@ -1233,11 +1233,13 @@ function back(ui) {
 }
 
 // ---------- the chat side ----------
-// A bot (or the Chief) working on its reply: a small copy of its face at the bottom right of its chat, above the box,
+// A bot (or the Chief) working on its reply: a small copy of its face at the bottom left of its chat, above the box,
 // bobbing beside three typing dots, Grok-style (Henry, 2026-10-13: "when they are typing back i should them bottom
-// right in a smaller version like in grokbot"); gone once it is idle, done or asks you something. Its face from the
-// conversation /state already gives (mascotState: working or thinking), nothing polled. The feed leaves room for it
-// under the last message (.ch-typing-on), and one at its end stays there.
+// right in a smaller version like in grokbot"; then "move the bot animation thinking from right to left and remove
+// the regular cooking status"): while it shows, the box's "Cooking…" line hides (chats.css). Gone once it is idle,
+// done or asks you something. Its face from the conversation /state already gives (mascotState: working or
+// thinking), nothing polled. The feed leaves room for it under the last message (.ch-typing-on), and one at its end
+// stays there.
 function drawTyping(el, c, s) {
   const main = el._chat.querySelector('.chat-main');
   if (!main) return;
@@ -1249,7 +1251,7 @@ function drawTyping(el, c, s) {
     t = el._typing = document.createElement('div');
     t.className = 'ch-typing';
     t.setAttribute('role', 'status');
-    t.innerHTML = '<span class="ch-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="ch-typing-av"></span>';
+    t.innerHTML = '<span class="ch-typing-av"></span><span class="ch-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>';
     t._av = t.querySelector('.ch-typing-av');
   }
   if (t.parentNode !== main) main.appendChild(t); // (a pane built again: put back)
