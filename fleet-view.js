@@ -8527,7 +8527,8 @@ function startupShortcut(action) {
 // opens a console (a Windows Terminal window) before it hands over to fleet-view.vbs. App Paths wins over PATH
 // for those launches (not for a terminal, where the .cmd still runs in place), so the name is registered there
 // to fleet-view.vbs, and a "Fleet View" Start menu shortcut (the app's icon, pinnable) runs it too. Done by the
-// real server (port 4777) at each start: reg add is cheap, the shortcut is made only when it is missing.
+// real server (port 4777) at each start: reg add is cheap, the shortcut is made only when it is missing. The desktop
+// window (desktop/launchers.js) also puts it and any taskbar pin right when something else rewrote them.
 const APP_PATHS_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\fleet-view.exe';
 function registerLauncher() {
   if (process.platform !== 'win32' || DEMO || PORT !== 4777 || process.env.FV_STARTUP_DIR) return;

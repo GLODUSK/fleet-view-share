@@ -1322,6 +1322,10 @@ if (!app.requestSingleInstanceLock()) {
     if (SELFTEST) selfTest();
     // Windows: makes "Fleet View.exe" (Task Manager shows Fleet View and its logo, not Electron) for the next start
     if (P.isWin && !HIDDEN) setTimeout(() => require('./brand-exe').prepare(__dirname, hlog), 30000);
+    // Windows: the Start menu entry and any taskbar pin run fleet-view.vbs (no console window), whatever made them
+    if (P.isWin && !HIDDEN && PORT === 4777) setTimeout(() => {
+      try { require('./launchers').repair({ repo: path.join(__dirname, '..'), read: (f) => shell.readShortcutLink(f), write: (f, op, o) => shell.writeShortcutLink(f, op, o), log: hlog }); } catch (e) { hlog(`launcher: ${e.message}`); }
+    }, 5000);
     screen.on('display-removed', () => { keepMiniOnScreen(); keepChatsOnScreen(); });
     screen.on('display-metrics-changed', () => { keepMiniOnScreen(); keepChatsOnScreen(); });
     // the Chats window opens again when it was open when the app quit (main.js's own record; with none yet, the
