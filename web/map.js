@@ -3958,7 +3958,8 @@ function drawSky(ctx) {
 // (one drawImage, skyPaint), and is left alone otherwise. The map's canvas, over the backdrop, is see-through but for
 // the map itself. The sky's canvas is never on the page: shown, a WebGL canvas that changes keeps about four buffers of
 // its size (a 1600x665 map at dpr 2: +90 MB of GPU memory), off the page about two (+40 MB). No WebGL2 (or only a
-// software one) or the context lost: the backdrop draws the sky itself (drawSky, drawStars).
+// software one, glSoftware), the context lost, or the sky's shader still compiling (skyGLInit): the backdrop draws the
+// sky itself (drawSky, drawStars).
 const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
   preserveDrawingBuffer: false, powerPreference: 'low-power', failIfMajorPerformanceCaveat: true };
 // the shader's uniforms, every one a vec4, in this order in I.skyGL.u: the canvas in device px (x, y), the page's
@@ -5110,25 +5111,40 @@ void main() {
   if (c.a > 0.998) c.rgb += n; else c *= 1.0 + n / max(c.a, 1.0 / 255.0);
   color = clamp(c, 0.0, 1.0);
 }`;
-// the sky's GL state on a canvas, or null without WebGL2
+// a software WebGL (SwiftShader, WARP / Microsoft Basic Render, llvmpipe): the sky's shader would take whole seconds a
+// frame there, so the canvas draws it. failIfMajorPerformanceCaveat (SKY_GL_ATTRS) refuses most of them already; this
+// catches one a browser hands out anyway. The renderer's name comes from WEBGL_debug_renderer_info, else RENDERER
+function glSoftware(gl) {
+  let name = '';
+  try {
+    const e = gl.getExtension('WEBGL_debug_renderer_info');
+    name = String(gl.getParameter(e ? e.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || '');
+  } catch { name = ''; }
+  return /swiftshader|software|llvmpipe|softpipe|basic render|mesa offscreen/i.test(name);
+}
+// the sky's GL state on a canvas, or null without WebGL2 (or with a software one)
 function skyGLMake(cv) {
   let gl = null;
   try { gl = cv.getContext('webgl2', SKY_GL_ATTRS); } catch { gl = null; }
   if (!gl) return null;
+  if (glSoftware(gl)) {
+    try { const lose = gl.getExtension('WEBGL_lose_context'); if (lose) lose.loseContext(); } catch { /* let it go */ }
+    return null;
+  }
   const n = SKY_END;
-  const G = { gl, ok: false, loc: [], u: new Float32Array(n), last: new Float32Array(n), drawn: false, dpr: 0, tw: 0, hour: '', tint: null, bgCss: null, bg: null,
+  const G = { gl, ok: false, pend: null, par: null, loc: [], u: new Float32Array(n), last: new Float32Array(n), drawn: false, dpr: 0, tw: 0, hour: '', tint: null, bgCss: null, bg: null,
     // the glows: their state (see "The repo glows" above and glowPrep)
     glow: false, gp: null, gloc: null, vao: null, buf: null, fb: null, ft: null, fw: 0, fh: 0, fieldOk: false, bufN: 0,
     inst: new Float32Array(64 * GLOW_INST), ni: 0, lastInst: new Float32Array(64 * GLOW_INST), lastNi: -1,
     gu: new Float32Array((3 + 4 * GLOW_MAX) * 4), lastGu: new Float32Array((3 + 4 * GLOW_MAX) * 4), gn: 0, lastGn: -1, cols: new Map() };
   // a lost context: the map's canvas draws the sky from the next frame on, until the context is back
-  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; I.dirty = true; });
+  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; G.pend = null; I.dirty = true; });
   cv.addEventListener('webglcontextrestored', () => { skyGLInit(G); I.dirty = true; });
   skyGLInit(G);
   return G;
 }
-// a linked program from two shaders' sources, or null (said once on the console, unless the context is lost)
-function glProgram(gl, vs, fs, what) {
+// two shaders' sources compiled and linked into a program, without waiting for the link (glLinked does)
+function glLink(gl, vs, fs) {
   const p = gl.createProgram();
   const sh = [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]].map(([type, src]) => {
     const s = gl.createShader(type);
@@ -5136,15 +5152,49 @@ function glProgram(gl, vs, fs, what) {
     return s;
   });
   gl.linkProgram(p);
+  return { p, sh };
+}
+// the program glLink started, once linked (this waits for it), or null (said once on the console, unless the
+// context is lost)
+function glLinked(gl, { p, sh }, what) {
   const ok = !!gl.getProgramParameter(p, gl.LINK_STATUS);
   if (!ok && !gl.isContextLost()) console.warn(`map: the ${what} shader failed, the canvas draws the ${what}:`, sh.map((s) => gl.getShaderInfoLog(s)).join(' ') || gl.getProgramInfoLog(p));
   for (const s of sh) gl.deleteShader(s);
   return ok ? p : null;
 }
+// a linked program from two shaders' sources, or null
+const glProgram = (gl, vs, fs, what) => glLinked(gl, glLink(gl, vs, fs), what);
+// The sky's shader is big: a driver without it in its shader cache can take minutes to compile it (D3D11 in a fresh
+// browser profile: 198 s, #461), and asking for the link's status waits for all of it with the page frozen. So where
+// the browser can link in the background (KHR_parallel_shader_compile) the sky's program is only started here:
+// skyGLPoll finishes it once the link is done, and until then the backdrop keeps what it has for SKY_GL_WAIT, then the
+// canvas draws the sky. Without the extension it waits for the link here, as it always did.
+const SKY_GL_WAIT = 400;
+function skyGLInit(G) {
+  const gl = G.gl;
+  G.ok = false;
+  try { G.par = gl.getExtension('KHR_parallel_shader_compile'); } catch { G.par = null; }
+  G.pend = glLink(gl, SKY_VS, SKY_FS);
+  G.pendAt = performance.now();
+  if (!G.par) skyGLFinish(G);
+}
+// whether the sky's program is ready (G.ok), finishing it when its link is done; never waits for the link
+function skyGLPoll(G) {
+  if (G.ok) return true;
+  if (!G.pend || G.gl.isContextLost()) return false;
+  let done = true;
+  try { done = !!G.gl.getProgramParameter(G.pend.p, G.par.COMPLETION_STATUS_KHR); } catch { done = true; }
+  if (done) { skyGLFinish(G); if (I) I.dirty = true; }
+  return G.ok;
+}
+// the sky's link still runs and began less than SKY_GL_WAIT ago: the backdrop keeps what it has (skyPaint), so a
+// driver with the shader in its cache never shows the canvas's sky for a frame first
+const skyGLWaits = (G) => !!(G && !G.ok && G.pend && performance.now() - G.pendAt < SKY_GL_WAIT);
 // the programs and the textures (the star tiles' pixels come in drawSkyGL, once per dpr); the sky's program and the
 // textures stay bound, the glows' program only while it fills the field (glowField)
-function skyGLInit(G) {
-  const gl = G.gl, p = glProgram(gl, SKY_VS, SKY_FS, 'sky');
+function skyGLFinish(G) {
+  const gl = G.gl, pend = G.pend, p = pend ? glLinked(gl, pend, 'sky') : null;
+  G.pend = null;
   G.ok = !!p;
   if (!G.ok) return;
   gl.useProgram(p);
@@ -5336,7 +5386,7 @@ function glowField(G) {
 // quads changed; false when the map's canvas must draw the sky itself
 function drawSkyGL(glass, glows, k, ox, oy) {
   const G = I.skyGL;
-  if (!G || !G.ok || G.gl.isContextLost()) return false;
+  if (!G || G.gl.isContextLost() || !skyGLPoll(G)) return false;
   const gl = G.gl, dpr = I.dpr || 1, cv = I.skyCanvas, u = G.u;
   if (G.dpr !== dpr) {
     // each tiled star layer's tile at this dpr into its texture; the tile's canvas is let go at once
@@ -5514,6 +5564,7 @@ function skyPaint(glass, glows, k, ox, oy) {
     g.drawImage(I.skyCanvas, 0, 0);
     return;
   }
+  if (skyGLWaits(I.skyGL)) return; // the sky's shader is about to be ready (skyGLInit)
   g.setTransform(1, 0, 0, 1, 0, 0);
   if (glass) g.clearRect(0, 0, w, h);
   else { g.fillStyle = I.bgFill || COL.bg; g.fillRect(0, 0, w, h); }
