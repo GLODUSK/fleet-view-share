@@ -177,6 +177,9 @@ import { renderProjects, followProjectsPick } from './projects.js';
 import { renderChats, botFace, seenNow, setPickedColors, selectChat } from './chats.js';
 import { BOT_JOBS, jobLabel, ownBots, onMap, watchesOf, botMascot, botName, watchName } from './map-bots.js';
 import { buildContacts } from './chats-model.js';
+// the New team form's rules (a team's size, its lead, a name cleaned, the checks before Make team sends), shared with
+// web/chats.js and the phone app; leadOf(t): a team's lead (★), its conversation id, or null (a team of peers)
+import { TEAM_MAX, leadOf, cleanName, checkTeam, nestStep, nestFailed } from './team-form.js';
 import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
@@ -2694,7 +2697,6 @@ async function forkFromMessage(s, text, nth) {
 // View's name changes, and the toast says so. A new session can't be renamed until it has an id.
 const renamesNow = new Map(); // id -> { name (null: back to its own title), until }
 const RENAME_SHOW_MS = 8000;
-const cleanName = (v) => String(v ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80).trim();
 function applyRenames(st) {
   if (!renamesNow.size || !st) return;
   const now = Date.now();
@@ -3294,13 +3296,10 @@ async function openAllHere(list) {
 // a newcomer gets the order with its teammates, the others a note with its id; one that leaves or is taken out,
 // and the rest, get a note; a disband tells everyone. Notes go only to conversations running now (each costs a
 // Claude turn), and wait behind a question. The page only asks and says what happened in a toast.
-const TEAM_MAX = 12;
 const isConvId = (id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''));
 const teamById = (id) => (id && (state?.teams || []).find((t) => t.id === id)) || null;
 // "told 2" from a team call's reply: the notes that went in or wait behind a question
 const toldN = (list) => `told ${(list || []).filter((x) => x.ok).length}`;
-// a team's lead (★): its conversation id, or null (a team of peers)
-const leadOf = (t) => (t && t.lead && (t.members || []).includes(t.lead) ? t.lead : null);
 const nameOfId = (id) => sessionsOf([id])[0]?.name || String(id || '').slice(0, 8);
 // a team (right-click its link or pill on the map, or a member's 'Team "x" ▸')
 function teamMenu(t, x, y, extra) {
@@ -3389,58 +3388,27 @@ function joinWhy(s, t) {
 }
 // why s can't be in a team made from this window (an order can't reach it, or it has no id yet), or null
 const memberWhy = (s) => unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
-// would lead reporting in team above make a loop? Up from above's lead, lead by lead (each one's plain seat), until
-// one of the new team's members: it would report to itself. The server checks the same (409); this says so before
-// the team is made, so a refused nesting never leaves a team half set up
-function aboveLoop(members, above) {
-  const seen = new Set();
-  for (let cur = leadOf(above); cur && !seen.has(cur); ) {
-    if (members.includes(cur)) return `${nameOfId(cur)} is in the new team and above it: a lead can't report to itself`;
-    seen.add(cur);
-    const up = (state?.teams || []).find((t) => t.members.includes(cur) && t.lead !== cur);
-    cur = leadOf(up);
-  }
-  return null;
-}
 // the Bots view's New team (ui.makeTeam): o { members: [ids], lead: id | null, name, order, above: team id | null }.
 // The same as the team menus' orders (runOrder, POST /teams with send: the server types each brief); with above,
 // its lead then joins that team as a plain member (POST /teams/add), so it reports there. -> { ok, team, message? }
+// The checks before anything is sent are team-form.js checkTeam's (the phone's New team runs the same ones)
 async function makeTeam(o) {
-  const ids = [...new Set((o.members || []).filter((x) => typeof x === 'string'))];
-  const list = sessionsOf(ids);
-  if (list.length < 2) return { ok: false, message: list.length < ids.length ? 'Fleet View does not list one of them now' : 'a team needs two or more' };
-  if (list.length > TEAM_MAX) return { ok: false, message: `a team has at most ${TEAM_MAX}` };
-  const bad = list.find((s) => memberWhy(s));
-  if (bad) return { ok: false, message: `${bad.name}: ${memberWhy(bad)}` };
-  const text = String(o.order || '').trim();
-  if (!text) return { ok: false, message: 'write the order first' };
-  const lead = o.lead ? list.find((s) => s.id === o.lead) || null : null;
-  if (o.lead && !lead) return { ok: false, message: 'the lead must be one of the members' };
-  const above = o.above ? teamById(o.above) : null;
-  if (o.above && !above) return { ok: false, message: 'the team above is gone' };
-  if (above && !lead) return { ok: false, message: 'only a team with a lead can report to a team above' };
-  const loop = above ? aboveLoop(list.map((s) => s.id), above) : null;
-  if (loop) return { ok: false, message: loop };
-  // the members that are plain members of the team above leave it for the new team (POST /teams), so it must keep
-  // two of its own, or the server disbands it before the lead can join; and it needs room for the lead
-  const already = !!(above && above.members.includes(lead.id));
-  if (above) {
-    const leave = above.members.filter((m) => m !== lead.id && m !== above.lead && list.some((s) => s.id === m));
-    const stay = above.members.length - leave.length;
-    if (stay < 2) return { ok: false, message: `"${above.name}" would be left with one member once ${leave.map(nameOfId).join(' and ')} ${leave.length === 1 ? 'moves' : 'move'} to the new team, and end: pick another team above, or none` };
-    if (!already && stay + 1 > TEAM_MAX) return { ok: false, message: `"${above.name}" is full (${TEAM_MAX})` };
-  }
-  const name = cleanName(o.name);
-  const res = await runOrder(list, text, { team: true, lead, name: (t) => name || `Bots · ${firstWords(t, 4, 34)}` });
+  const chk = checkTeam(o, { teams: state?.teams || [], max: TEAM_MAX, nameOf: nameOfId,
+    listed: (id) => sessionsOf([id]).length > 0, whyNot: (id) => { const s = sessionsOf([id])[0]; return s ? memberWhy(s) : null; } });
+  if (!chk.ok) return chk;
+  const list = sessionsOf(chk.members), above = chk.above;
+  const lead = chk.lead ? list.find((s) => s.id === chk.lead) || null : null;
+  const res = await runOrder(list, chk.order, { team: true, lead, name: () => chk.name });
   if (!res || !res.team) return { ok: false, message: (res && res.message) || (res ? orderSummary(res) : 'could not make the team') };
   const team = res.team;
-  // (a lead that is a member of the team above already stays there: it reports there now)
-  if (!above || (already && team.lead === lead.id)) return { ok: true, team };
-  // nested: its lead reports in the team above (the toast and the reply say what went wrong, the team stays made)
-  if (!team.lead) { const m = `"${team.name}" was made with no lead, so it is not under "${above.name}"`; toast(m, C.red, null, 9000); return { ok: true, team, message: m }; }
-  const r = await post('/teams/add', { id: above.id, member: team.lead });
+  // nested: its lead reports in the team above (a lead in it already stays there; the toast and the reply say what
+  // went wrong, the team stays made)
+  const step = nestStep(team, chk);
+  if (!step) return { ok: true, team };
+  if (step.message) { toast(step.message, C.red, null, 9000); return { ok: true, team, message: step.message }; }
+  const r = await post('/teams/add', step.body);
   if (FIXTURE && r == null) return { ok: true, team };
-  if (!r || !r.ok) { const m = `"${team.name}" was made, but ${nameOfId(team.lead)} did not join "${above.name}": ${(r && r.message) || 'Fleet View did not answer'}`; toast(m, C.red, null, 9000); return { ok: true, team, message: m }; }
+  if (!r || !r.ok) { const m = nestFailed(team, above, r, nameOfId); toast(m, C.red, null, 9000); return { ok: true, team, message: m }; }
   toast(`★ ${nameOfId(team.lead)} reports in "${above.name}" for "${team.name}" · ${toldN(r.told)}`, C.mint);
   return { ok: true, team };
 }

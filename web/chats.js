@@ -14,7 +14,7 @@
 // most ui.teamMax), Lead (one of them, or No lead: peers), Team above (only with a lead: an overseers' team its lead
 // reports in, teams nest) and the order. Make team goes the way the team menus' orders go (ui.makeTeam in app.js:
 // POST /teams, then /teams/add for the team above), and the new team's group chat is picked; the server's reason
-// shows in the form when it refuses. A bot's right-click has the conversation menu's Team ▸ too (ui.teamItems), whose
+// shows in the form when it refuses (the form's rules are team-form.js's, which the phone's New team shares). A bot's right-click has the conversation menu's Team ▸ too (ui.teamItems), whose
 // Start team ▸ lists the other overseers, since every bot works in a folder of its own.
 // Bots: "New bot" opens the New bot form in the chat side (name, what it does, account, model, effort, its shape and colour;
 // account B and a Dynamic model and effort by default (the account may be Dynamic too: the one with the most usage left), the shape and colour picked for it unless you pick), which POSTs
@@ -85,6 +85,8 @@ import { handToChat } from './handto.js';
 import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote,
   fullChatOrder, moveInChatOrder, pinInChatOrder, sameChatOrder } from './chats-model.js';
 import { mountPicker } from './picker.js';
+// New team's rules (who can be ticked, the lead and team above choices, the small lines), shared with the phone app
+import { TEAM_MAX, newTeamWhy, teamChoices as teamChoicesOf, memberRow, settleTeam, leadChoices, aboveChoices, countNote, orderHint } from './team-form.js';
 import { ASK_TEXT, WATCH_NOTE, BRIEF_MS, watchOn as watchFrom, watchBody, briefLines, briefSections, briefTime, fixtureBriefing } from './chief-model.js';
 
 export const SOLO = new URLSearchParams(location.search).get('solo') === 'chats';
@@ -611,11 +613,11 @@ function setOnTop(on, el) {
 // "+": a small menu under it, New bot and New team
 function newMenu(el, ui) {
   const r = el._new.getBoundingClientRect();
-  const can = (el._contacts || []).filter((c) => (c.kind === 'bot' || c.kind === 'chief') && c.id && !c.elsewhere).length;
+  const off = newTeamWhy(el._contacts || []);
   openCtxMenu({ x: r.left, y: r.bottom + 4, title: 'New', items: [
     { label: 'New bot', icon: 'plus', note: 'an overseer with standing tasks', run: () => openForm(el, ui) },
-    can >= 2 ? { label: 'New team', icon: 'merge', note: 'bots working on one order, in a group chat', run: () => openForm(el, ui, null, 'team') }
-      : { label: 'New team', icon: 'merge', disabled: true, note: 'needs two bots (or a bot and the Chief) that have started' },
+    !off ? { label: 'New team', icon: 'merge', note: 'bots working on one order, in a group chat', run: () => openForm(el, ui, null, 'team') }
+      : { label: 'New team', icon: 'merge', disabled: true, note: off },
   ] });
 }
 // the New bot form, in place of the chat (over the list in the narrow layout); with a bot's id, its Edit bot panel
@@ -768,49 +770,25 @@ async function saveEdit(el, ui, vals) {
 }
 
 // ---------- New team ----------
-const TEAM_MAX_DEF = 12; // a team's most members when the page has no ui.teamMax (app.js TEAM_MAX)
-const teamMax = () => Number(curUi().teamMax) || TEAM_MAX_DEF;
+const teamMax = () => Number(curUi().teamMax) || TEAM_MAX;
 // a contact's face at rest (the form's rows stay put while it works)
 const restFace = (c, size) => mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: 'idle', color: colorOf(c), size, shape: c.shape || undefined });
-// a conversation's teams in state.teams: the one it is a plain member of (up: it leaves it) and the one it leads (own)
-function teamsOfId(state, id) {
-  const ts = (state && state.teams) || [];
-  return { up: ts.find((t) => (t.members || []).includes(id) && t.lead !== id) || null, own: ts.find((t) => t.lead === id && (t.members || []).includes(id)) || null };
-}
-// who can be in it: the Chief and every bot, each with why not (greyed) or a note: not running (it is resumed to take
-// the order), the team it leaves, the one it still leads. Why not comes from app.js (ui.teamJoinWhy: the orders' checks)
+// who can be in it: the Chief and every bot (team-form.js teamChoices); why not comes from app.js (ui.teamJoinWhy:
+// the orders' checks)
 function teamChoices(state) {
   const ui = curUi();
-  return (pane?._contacts || []).filter((c) => c.kind === 'chief' || c.kind === 'bot').map((c) => {
-    let why = c.elsewhere ? 'runs on another machine' : !c.id ? (c.kind === 'chief' ? 'not started yet' : 'never started: Start it first') : null;
-    if (!why) { try { why = typeof ui.teamJoinWhy === 'function' ? ui.teamJoinWhy(c.id) : 'this page cannot make a team yet'; } catch (e) { why = String((e && e.message) || e); } }
-    const { up, own } = c.id ? teamsOfId(state, c.id) : {};
-    const note = why || [c.kind === 'bot' && c.live === false ? 'not running: it starts to take the order' : '',
-      up ? `in "${up.name}": it leaves it` : '', own ? `leads "${own.name}": still does` : ''].filter(Boolean).join(' · ');
-    return { c, id: c.id, why, note };
-  });
+  const joinWhy = typeof ui.teamJoinWhy === 'function' ? (id) => ui.teamJoinWhy(id) : () => 'this page cannot make a team yet';
+  return teamChoicesOf(pane?._contacts || [], (state && state.teams) || [], joinWhy);
 }
 const tickedOf = () => (form && form.v ? form.v.members : []).map((id) => (pane?._contacts || []).find((c) => c.id === id)).filter(Boolean);
-// Lead ▸: No lead (peers), then each one ticked
+// Lead ▸: No lead (peers), then each one ticked, with its face
 function leadOptions() {
-  const st = pane?._state || {};
-  return [{ value: '', label: 'No lead (peers)', note: 'they work it out between them' },
-    ...tickedOf().map((c, i) => {
-      const own = teamsOfId(st, c.id).own;
-      return { value: c.id, label: `${c.name} leads`, sep: i === 0, art: restFace(c, 18), btn: `${restFace(c, 18)}<span>${esc(c.name)} leads</span>`,
-        note: own ? `leads "${own.name}" now: it leaves that lead` : 'the others report to it' };
-    })];
+  return leadChoices(tickedOf(), (pane?._state || {}).teams || []).map(({ c, ...o }, i) => (!c ? o
+    : { ...o, sep: i === 1, art: restFace(c, 18), btn: `${restFace(c, 18)}<span>${esc(c.name)} leads</span>` }));
 }
 // Team above ▸: None, then each overseers' team (a group chat here); its lead reports there (teams nest)
 function aboveOptions() {
-  const st = pane?._state || {};
-  const ts = (pane?._contacts || []).filter((c) => c.kind === 'team');
-  return [{ value: '', label: 'None', note: 'a team of its own' },
-    ...ts.map((c, i) => {
-      const t = (st.teams || []).find((x) => x.id === c.teamId), lead = (c.members || []).find((m) => m.lead);
-      const n = t ? (t.members || []).length : (c.members || []).length;
-      return { value: c.teamId, label: c.name, sep: i === 0, note: `${n} members${lead ? `, led by ${lead.name}` : ', peers'}${n >= teamMax() ? ' · full' : ''}` };
-    })];
+  return aboveChoices(pane?._contacts || [], (pane?._state || {}).teams || [], teamMax()).map((o, i) => (i === 1 ? { ...o, sep: true } : o));
 }
 function drawTeamForm(el, state) {
   if (form.fresh) {
@@ -837,18 +815,14 @@ function drawTeamForm(el, state) {
   const f = el._form.querySelector('form');
   const max = teamMax(), choices = teamChoices(state);
   // a member that can't be in it any more (gone, ended elsewhere) is unticked; the lead and the team above follow
-  const can = new Set(choices.filter((x) => !x.why).map((x) => x.id));
-  form.v.members = form.v.members.filter((id) => can.has(id)).slice(0, max);
-  if (form.v.lead && !form.v.members.includes(form.v.lead)) form.v.lead = '';
+  Object.assign(form.v, settleTeam(form.v, choices, pane?._contacts || [], max));
   const teams = (pane?._contacts || []).filter((c) => c.kind === 'team');
-  if (!form.v.lead || !teams.some((c) => c.teamId === form.v.above)) form.v.above = '';
   const ms = form.v.members, n = ms.length;
   // the rows (rewritten only when something in them changed; the focus stays on the row it was on)
   const rows = choices.map((x) => {
-    const on = !!x.id && ms.includes(x.id), full = !on && !x.why && n >= max;
-    const note = full ? `a team has at most ${max}` : x.note;
-    return `<label class="ch-tm${on ? ' on' : ''}${x.why || full ? ' off' : ''}" title="${esc(x.why ? `${x.c.name}: ${x.why}` : x.c.name)}">`
-      + `<input type="checkbox" name="tm" value="${esc(x.id || x.c.key)}"${on ? ' checked' : ''}${x.why || full || form.busy ? ' disabled' : ''}>`
+    const { on, off, note } = memberRow(x, ms, max);
+    return `<label class="ch-tm${on ? ' on' : ''}${off ? ' off' : ''}" title="${esc(x.why ? `${x.c.name}: ${x.why}` : x.c.name)}">`
+      + `<input type="checkbox" name="tm" value="${esc(x.id || x.c.key)}"${on ? ' checked' : ''}${off || form.busy ? ' disabled' : ''}>`
       + `<span class="ch-tm-av">${restFace(x.c, 26)}</span><span class="ch-tm-b"><span class="ch-tm-name">${esc(x.c.name)}</span>`
       + `${note ? `<span class="ch-tm-note">${esc(note)}</span>` : ''}</span></label>`;
   }).join('') || '<div class="ch-tm-none">No bots yet: make two first.</div>';
@@ -859,7 +833,7 @@ function drawTeamForm(el, state) {
     list._html = rows;
     if (had) [...list.querySelectorAll('input[name="tm"]')].find((i) => i.value === had)?.focus();
   }
-  f.querySelector('.ch-tm-n').textContent = n < 2 ? `Tick two or more (at most ${max}).` : `${n} in the team${n >= max ? ` (the most a team has)` : ''}.`;
+  f.querySelector('.ch-tm-n').textContent = countNote(n, max);
   // the header: the ones ticked, overlapping as on a team's row
   const show = tickedOf().slice(0, 3);
   const sz = Math.round(44 * (show.length === 1 ? 1 : 0.62));
@@ -875,8 +849,7 @@ function drawTeamForm(el, state) {
   form.pk.above.disable(form.busy);
   f.querySelector('[data-f="above"]').hidden = !form.v.lead || !teams.length;
   const lead = form.v.lead ? tickedOf().find((c) => c.id === form.v.lead) : null;
-  f.elements.order.placeholder = lead ? `${lead.name} gets the order and directs the others; they report to it. The order:`
-    : 'The order for all of them. They become a team of peers and can message each other.';
+  f.elements.order.placeholder = orderHint(lead);
   const er = f.querySelector('.ch-nb-err');
   er.textContent = form.err;
   er.hidden = !form.err;

@@ -430,8 +430,9 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 `/api/teams/:id/add`, `/api/teams/:id/remove`, `/api/teams/:id/lead`, `/api/teams/:id/disband`,
 `/api/teams/:id/message`, `/api/chief/start`, `/api/bots`, `/api/bots/:id`, `/api/bots/:id/start`,
 `/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
-`/chat/image`, and the page's `/teams`, `/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`,
-`/teams/rename`, `/bots/:id/switch` and `/bots/:id/tasks/:taskId`, and `/accounts/add`, `/accounts/login`,
+`/chat/image`, and the page's `/teams` (the phone's New team sends it as the page's New team does: `{ members, order, name,
+lead, send: true }`, then `/teams/add` for a team above and `/teams/leave` with `quiet` for a member its order missed),
+`/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`, `/teams/rename`, `/bots/:id/switch` and `/bots/:id/tasks/:taskId`, and `/accounts/add`, `/accounts/login`,
 `/accounts/code` and `/accounts/cancel` (only to sign in a missing Claude A or B, below).
 
 **GET and POST:** `/sync/move` (Continue here, asked of a machine that is on for a chat whose host is off: "Several

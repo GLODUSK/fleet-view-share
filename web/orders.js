@@ -55,10 +55,11 @@
 // option) gets its text later: it waits in the queue below and comes back as { ok: true, queued: true }.
 import { ensureLive, sendText, isHosted, openElsewhere, termApi, screenText, screenReady, onRekey, noTermMsg } from './term.js';
 import { parseMenu } from './compose.js';
+// a team's limits, its POST /teams body and firstWords live with the New team form's rules (pure: the phone imports them)
+import { ORDER_MAX, TEAM_MAX, firstWords, newTeamBody } from './team-form.js';
+export { firstWords };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const ORDER_MAX = 4000; // the server's limit for a team's order
-const TEAM_MAX = 12; // members of one team
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // a conversation's id (the server's teams take only these)
 
 // a conversation that handed off (/state's handoff: { next, nextName, at }) and is done
@@ -72,12 +73,6 @@ export function unreachable(s) {
   if (handedOff(s)) return `it handed off${s.handoff.nextName ? ` to ${s.handoff.nextName}` : ''}: give it to that one`;
   if (openElsewhere(s) && !isHosted(s.id)) return 'open in another window: end it there or open it here';
   return null;
-}
-
-// the first words of a text, for a team's name ("Ship booking reminders on the website…" -> "Ship booking reminders on the")
-export function firstWords(text, n = 5, max = 40) {
-  const w = String(text || '').replace(/\s+/g, ' ').trim().split(' ').slice(0, n).join(' ');
-  return w.length > max ? `${w.slice(0, max - 1).trimEnd()}…` : w;
 }
 
 const repoOf = (s) => (s && s.repo ? s.repo.name || String(s.repo.root || '').split(/[\\/]/).filter(Boolean).pop() : null) || 'no workspace';
@@ -367,8 +362,7 @@ export async function sendOrder(sessions, text, o = {}) {
     // send: the server types each brief itself (it types the team's notes and the teammates' messages too, one at a
     // time per conversation, so they never mix in one prompt), following one that handed off to its successor
     // lead null for peers: a set that is a led team already becomes peers, as Work together asks
-    const want = { members: ids.map((s) => s.id), order: body, send: true, lead: leadS ? leadS.id : null };
-    if (o.name) want.name = String(o.name).slice(0, 80);
+    const want = newTeamBody({ members: ids.map((s) => s.id), order: body, lead: leadS ? leadS.id : null, name: o.name });
     const r = await post('/teams', want);
     // with ?fixture=1 nothing answers: a team as the server would make it
     team = r && r.ok && r.team ? r.team
