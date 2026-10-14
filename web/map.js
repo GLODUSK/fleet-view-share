@@ -2642,23 +2642,23 @@ function meteorNow() {
   const a = METEOR_A * Math.min(1, e / 0.2) * Math.min(1, (1 - e) / 0.5), l = Math.min(m.tail, d);
   return { hx: m.x + m.dx * d, hy: m.y + m.dy * d, tx: m.x + m.dx * (d - l), ty: m.y + m.dy * (d - l), rgb: m.rgb, a };
 }
-// the canvas draws the shooting star (no WebGL2): a soft faint halo and a thin core, each a gradient from nothing at
-// the tail to the head, and a small bright head
+// the canvas draws the shooting star (no WebGL2) as the sky's shader does: a line as wide as the shader's soft one
+// carries light (METEOR_W sqrt(pi), its alpha squared from nothing at the tail to the head), and the head's glow as
+// a radial gradient stepping down the same falloff (half the alpha in the middle, e^-(r / 2 METEOR_W)^2)
 function drawMeteor(ctx) {
   const m = meteorNow();
   if (!m || m.a <= 0) return;
-  const rgb = m.rgb.join(','), g = (k) => {
-    const gr = ctx.createLinearGradient(m.tx, m.ty, m.hx, m.hy);
-    gr.addColorStop(0, `rgba(${rgb},0)`); gr.addColorStop(0.6, `rgba(${rgb},${m.a * k * 0.36})`); gr.addColorStop(1, `rgba(${rgb},${m.a * k})`);
-    return gr;
-  };
+  const rgb = m.rgb.join(','), w = 2 * METEOR_W;
+  const line = ctx.createLinearGradient(m.tx, m.ty, m.hx, m.hy);
+  for (const h of [0, 0.25, 0.5, 0.75, 1]) line.addColorStop(h, `rgba(${rgb},${m.a * h * h})`);
+  const head = ctx.createRadialGradient(m.hx, m.hy, 0, m.hx, m.hy, 2 * w);
+  for (const f of [0, 0.25, 0.5, 0.75, 1]) head.addColorStop(f, `rgba(${rgb},${f < 1 ? m.a * 0.5 * Math.exp(-4 * f * f) : 0})`);
   ctx.save();
-  ctx.lineCap = 'round';
+  ctx.lineCap = 'butt';
   ctx.beginPath(); ctx.moveTo(m.tx, m.ty); ctx.lineTo(m.hx, m.hy);
-  ctx.strokeStyle = g(0.3); ctx.lineWidth = 2.4; ctx.stroke();
-  ctx.strokeStyle = g(1); ctx.lineWidth = 0.9; ctx.stroke();
-  ctx.fillStyle = `rgba(${rgb},${m.a * 0.5})`;
-  ctx.beginPath(); ctx.arc(m.hx, m.hy, 1.1, 0, TAU); ctx.fill();
+  ctx.strokeStyle = line; ctx.lineWidth = METEOR_W * Math.sqrt(Math.PI); ctx.stroke();
+  ctx.fillStyle = head;
+  ctx.beginPath(); ctx.arc(m.hx, m.hy, 2 * w, 0, TAU); ctx.fill();
   ctx.restore();
 }
 
