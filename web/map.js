@@ -2781,11 +2781,15 @@ function drawMeteors(ctx) {
 }
 
 // ---------- the moon (see "Look", MOON_*) ----------
-// the moon this minute: its phase (0-1, 0 new, 0.5 full), lit share, waxing, alpha (0: not shown) and middle (CSS px);
-// worked out again only when the minute or the map's size changes, so the sky's uniforms stay the same between frames
+// the moon this minute: its phase (0-1, 0 new, 0.5 full), lit share, waxing, alpha (0: not shown) and middle (CSS px of
+// the map); worked out again only when the minute or the map's place or size changes, so the sky's uniforms stay the
+// same between frames. Its path is laid over the map's box as it was when the window last changed size (I.moonF), not
+// as it is now, so a panel or strip opening beside the map leaves it where it was in the window, as the stars stay
 function moonNow() {
   const d = moonForce || new Date(), min = Math.floor(d.getTime() / 60000), h = skyHour();
-  const key = min + '|' + h.toFixed(3) + '|' + I.W + 'x' + I.H;
+  const lf = I.left || 0, tp = I.top || 0, vw = window.innerWidth, vh = window.innerHeight;
+  if (!I.moonF || I.moonF.vw !== vw || I.moonF.vh !== vh || !I.moonF.sized) I.moonF = { x: lf, y: tp, W: I.W || 1, H: I.H || 1, vw, vh, sized: !!I.sized };
+  const F = I.moonF, key = min + '|' + h.toFixed(3) + '|' + lf + ',' + tp + '|' + F.x + ',' + F.y + ',' + F.W + 'x' + F.H;
   if (I.moon && I.moon.key === key) return I.moon;
   const days = (d.getTime() - MOON_NEW) / 864e5, phase = (((days / MOON_MONTH) % 1) + 1) % 1;
   const frac = (1 - Math.cos(TAU * phase)) / 2;
@@ -2796,8 +2800,8 @@ function moonNow() {
   // shown by night, fading out over the morning and in at dusk, and as it nears the horizon
   const night = 1 - ss(MOON_DAY[0], MOON_DAY[1], h) * (1 - ss(MOON_DAY[2], MOON_DAY[3], h));
   const a = alt > 0 && frac >= MOON_MIN ? night * ss(0, 0.15, alt) : 0;
-  const W = I.W || 1, H = I.H || 1;
-  I.moon = { key, phase, frac, waxing: phase < 0.5, a, x: W * (0.5 + (MOON_SPAN * ha) / 6), y: H * (MOON_TOP + (MOON_LOW - MOON_TOP) * (1 - Math.max(0, alt))) };
+  I.moon = { key, phase, frac, waxing: phase < 0.5, a, x: F.x - lf + F.W * (0.5 + (MOON_SPAN * ha) / 6),
+    y: F.y - tp + F.H * (MOON_TOP + (MOON_LOW - MOON_TOP) * (1 - Math.max(0, alt))) };
   return I.moon;
 }
 // the moon's picture at this dpr for its phase (to a 500th, about 1.4 h), painted once into a small canvas (premultiplied
