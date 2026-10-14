@@ -77,8 +77,8 @@
 // palette picked from a few tasteful sets (NEBULA_PALETTES) each time. Its brightness is constant: it fades only by
 // its place (its edge is soft, and it starts and ends off the window), and follows the far star layer's pan and zoom.
 // The canvas fallback (no WebGL2) shows none.
-// The asteroid field (event 'asteroids', ASTEROID_*): a loose stream of tumbling dark rocks crosses the sky at three
-// depths (far ones tiny and slow, near ones bigger and quicker, so they slide past each other with the pan and zoom),
+// The asteroid field (event 'asteroids', ASTEROID_*): a loose stream of tumbling dark rocks crosses the sky at the far
+// star layer's depth (tiny and slow; Henry 2026-10-14: the mid, near and close ones were too big, so they are gone),
 // each with its own lumpy silhouette (a noise-bent ellipse, never a circle), a slow spin of its own, a mottled, faintly
 // bumpy surface, a thin warm rim light on the side facing the light (one direction for the whole field) and a cool
 // hint of fill on the other, with a few motes of dust about the bigger ones. Now and then (ASTEROID_CLOSE_P) one drifts
@@ -495,8 +495,8 @@ const NEBULA_PALETTES = [
   [[0.6, 0.34, 0.22], [0.96, 0.76, 0.5], [0.42, 0.46, 0.88]], // ember and gold, a blue edge
   [[0.2, 0.32, 0.68], [0.64, 0.8, 1], [0.96, 0.64, 0.5]], // deep blue and ice, a peach edge
 ];
-// the asteroid field (see "Look"): ASTEROID_CLASSES: the sharp rocks in three classes from the star layers' depths
-// (far, mid, near): how many (a pick), their long radius (CSS px), their speed (CSS px/s, along the stream), their
+// the asteroid field (see "Look"): ASTEROID_CLASSES: the sharp rocks by depth (only the far
+// class now): how many (a pick), their long radius (CSS px), their speed (CSS px/s, along the stream), their
 // spin (rad/s) and the share of the window's width they may start into (their start along the stream, so some are
 // already crossing when the field begins). The stream runs along STAR_DIR turned by up to ASTEROID_TURN radians (a rock
 // strays ASTEROID_STRAY from it), its rocks off the middle sideways by up to ASTEROID_OFF of the window's height.
@@ -508,12 +508,10 @@ const NEBULA_PALETTES = [
 // ASTEROID_DUST_A round rocks over ASTEROID_DUST_MIN CSS px; ASTEROID_OPACITY how far a rock hides what is behind it
 const ASTEROID_N = 12, ASTEROID_MS = [100e3, 140e3];
 const ASTEROID_CLASSES = [
-  { depth: EVENT_DEPTH.far, n: [4, 5], r: [1.5, 3.1], v: [6, 11], w: 0.12, start: 0.35 },
-  { depth: EVENT_DEPTH.mid, n: [3, 4], r: [3.6, 7.5], v: [13, 22], w: 0.16, start: 0.2 },
-  { depth: EVENT_DEPTH.near, n: [1, 2], r: [9, 17], v: [28, 42], w: 0.22, start: 0.05 },
+  { depth: EVENT_DEPTH.far, n: [6, 8], r: [1.5, 3.1], v: [6, 11], w: 0.12, start: 0.35 },
 ];
 const ASTEROID_TURN = 0.4, ASTEROID_STRAY = 0.1, ASTEROID_OFF = 0.38, ASTEROID_ASPECT = [0.62, 1], ASTEROID_FADE = 7;
-const ASTEROID_CLOSE_P = 0.6;
+const ASTEROID_CLOSE_P = 0; // the close one is off (too big)
 const ASTEROID_CLOSE = { depth: 0.85, r: [70, 105], v: [40, 56], w: 0.035, blur: [13, 20], wait: [18, 50] };
 const ASTEROID_BODY = [0.125, 0.118, 0.145], ASTEROID_RIM = [1, 0.76, 0.5], ASTEROID_RIM_A = 0.85, ASTEROID_CLOSE_RIM = 0.3;
 const ASTEROID_FILL = [0.5, 0.62, 0.98], ASTEROID_FILL_A = 0.1, ASTEROID_DUST = [0.95, 0.82, 0.68], ASTEROID_DUST_A = 0.5;
