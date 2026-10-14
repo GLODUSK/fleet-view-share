@@ -510,10 +510,10 @@ const EVENT_GAP = [150e3, 330e3];
 // its sizes times the window's shorter side over FAR_SCALE_AT (within FAR_SCALE_K) times FAR_SIZE (a pick, so they
 // differ), then held so its reach is FAR_REACH_K of that side (Henry, 2026-10-14: "dude that is TINY ... not all of
 // them the same but nothing should be that small"); its alphas times FAR_GAIN (at most 1); its life times FAR_LIFE
-// ([slow, quick]: "events dont last long"); FAR_CAP: its caption (the label, and the line on what it is, under it) at
-// [label, line] alpha times its fade; SKY_OFF_MS: how often the kinds switched off are read again
+// ([slow, quick]: "events dont last long"); no caption on screen (Henry, 2026-10-14: "remove them"), sky-events.log
+// names each; SKY_OFF_MS: how often the kinds switched off are read again
 const FAR_GAP = [35e3, 80e3], FAR_N = 10, FAR_CLEAR = 60, FAR_EDGE = 20, FAR_TRIES = 48, FAR_SCALE_AT = 900, FAR_SCALE_K = [0.8, 2.5];
-const FAR_SIZE = [2, 3.5], FAR_REACH_K = [0.09, 0.2], FAR_GAIN = 1.3, FAR_LIFE = [2.5, 1.5], FAR_CAP = [0.5, 0.32];
+const FAR_SIZE = [2, 3.5], FAR_REACH_K = [0.09, 0.2], FAR_GAIN = 1.3, FAR_LIFE = [2.5, 1.5];
 const SKY_OFF_MS = 120e3;
 const EVENT_DEPTH = { far: STAR_LAYERS[0].depth, mid: STAR_LAYERS[Math.floor(STAR_LAYERS.length / 2)].depth, near: SAT_DEPTH };
 // the nebula drift (see "Look"): it crosses the window in NEBULA_MS ms (a pick), its long half-axis NEBULA_R of the
@@ -3402,7 +3402,7 @@ function farStart(t, name) {
   const at = farPlace(reach);
   if (!at) return false;
   const cam = eventCam(EVENT_DEPTH.far), ms = rec.ms * FAR_LIFE[rec.quick ? 1 : 0];
-  I.far = { name, at: t, ms, quick: !!rec.quick, cam, x: at[0], y: at[1], parts, reach, label: d.label, what: d.what }; I.dirty = true;
+  I.far = { name, at: t, ms, quick: !!rec.quick, cam, x: at[0], y: at[1], parts, reach }; I.dirty = true;
   skyLog(name, d.label, d.what, ms, at[0], at[1]);
   return true;
 }
@@ -3460,32 +3460,6 @@ function farNow() {
     if (out.length >= FAR_N) break;
   }
   return out;
-}
-// the far event's caption (Henry, 2026-10-14: "not that meaningful"): its label, and under it the line on what it is,
-// faint, under the event (over it when that runs off the window), fading in and out with its life; drawn over the sky,
-// under the glows and the orbs
-function drawFarCaption(ctx) {
-  const e = I && I.far;
-  if (!e || !e.label) return;
-  const f = (performance.now() - e.at) / e.ms, sm = (v) => { v = clamp(v, 0, 1); return v * v * (3 - 2 * v); };
-  const fade = sm(f / 0.12) * sm((1 - f) / 0.15);
-  if (!(fade > 0.01)) return;
-  const sf = I.sf || 1, [x, y] = eventAt(e.cam, e.x, e.y), gap = Math.min(e.reach * 0.45, 110 * sf) + 8 * sf;
-  const lh = 15 * sf, below = y + gap + 2 * lh < I.H - 8;
-  let ty = below ? y + gap : y - gap - 2 * lh;
-  const lines = [[`600 ${11.5 * sf}px ${UI}`, e.label, FAR_CAP[0]], [`400 ${10.5 * sf}px ${UI}`, e.what || '', FAR_CAP[1]]];
-  ctx.save();
-  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  for (const [font, text, a] of lines) {
-    if (text) {
-      ctx.font = font;
-      const w = ctx.measureText(text).width, cx = clamp(x, w / 2 + 8, Math.max(w / 2 + 8, I.W - w / 2 - 8));
-      ctx.fillStyle = `rgba(214,222,240,${a * fade})`;
-      ctx.fillText(text, cx, ty);
-    }
-    ty += lh;
-  }
-  ctx.restore();
 }
 // the streaks showing now (a shower's later ones not yet), at most METEOR_N, in CSS px of the map: each one's head
 // (hx, hy), tail end (tx, ty), rgb and alpha (> 0); the tail grows to its length as the head moves off, and the alpha
@@ -4977,7 +4951,6 @@ function draw() {
     drawRockets(ctx);
     drawMoon(ctx);
   }
-  drawFarCaption(ctx);
   if (!I.glowGL) drawTerritories(ctx, k, ox, oy, glows);
   const nowC = Date.now() - I.skew;
   const selNode = I.sel ? I.byId.get(I.sel) : null;

@@ -20,7 +20,7 @@
 //          ripple's front, the knots in a jet); grow: an arc that grows from its start (a trail)
 // Sizes are in proportion to each other at a 900 px window: map.js scales each event up to the window, by a pick so
 // they differ, and holds the whole between 9% and 20% of the window's shorter side from its middle (FAR_SIZE,
-// FAR_REACH_K); it also brightens them a little (FAR_GAIN), lengthens their ms (FAR_LIFE) and captions them (FAR_CAP).
+// FAR_REACH_K); it also brightens them a little (FAR_GAIN), and lengthens their ms (FAR_LIFE).
 // Alphas are kept low on purpose, and only the cosmic washes are big, at a few percent alpha.
 
 // the shapes (the shader's farPart, map.js FAR_GLSL), with what p means for each
