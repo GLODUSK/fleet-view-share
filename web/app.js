@@ -111,7 +111,7 @@
 // chats it pins stay on that machine, Continue on this machine can't take them off it. The browser's own menu
 // is kept only in text inputs and the live terminal (and in Edge outside those targets).
 // Bots on the map: empty space on the map has "Add bot ▸", a bot's mascot its own menu (watch a conversation with a
-// job, its watches, Open chat, Start, Remove from map) and a conversation "Have a bot watch it ▸" (see "bots on the map").
+// job, its watches, Open chat, Start, Remove bot) and a conversation "Have a bot watch it ▸" (see "bots on the map").
 //
 // New sessions (term.js createSession) are listed in state.pending (and state.allSessions) as stand-ins
 // { id: 'new-<n>' or its id, pending: true, name: 'new session', state: 'NEW', repo, account, cwd } until
@@ -3801,7 +3801,7 @@ function raise(a) {
 // one picked goes where the menu was opened (POST /bots/:id/map { at }). A bot's right-click (botMenu): "Watch a
 // conversation ▸" (the ones it can watch: needing Henry first, then working, then the rest by last activity) ▸ the
 // three jobs, "Watching (N) ▸" (each watch ▸ its job, Stop watching), Open chat (the Bots tab on it), Start while it
-// isn't running, and "Remove from map" (POST map at null: the server stops its watches too). A conversation's own menu
+// isn't running, and "Remove bot" (off the map: POST map at null: the server stops its watches too). A conversation's own menu
 // has "Have a bot watch it ▸" (each own bot ▸ the jobs). POST /bots/:id/watch { id, job } adds or changes one, job null
 // stops it; at most 8 a bot. Each change shows at once (botEdits, laid over every /state until its POST answers; for
 // good with ?fixture=1, where nothing answers), then the server's state wins: a refusal toasts its message in red.
@@ -3921,7 +3921,7 @@ function botMenu(b, x, y) {
   if (onMap(b)) {
     const n = ws.length;
     items.push({ sep: true }, {
-      label: 'Remove from map', icon: 'close', danger: true,
+      label: 'Remove bot', icon: 'close', danger: true,
       confirm: n ? { text: n === 1 ? 'Its watch stops too.' : `Its ${n} watches stop too.`, yes: 'Remove' } : null,
       run: () => placeBot(b.id, null, `${name} is off the map${n ? ' and watches nothing' : ''}`),
     });
