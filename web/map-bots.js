@@ -93,11 +93,12 @@ export function botMascot(b, st, size = 20) {
   return mascotSVG(`bot:${(b && b.id) || ''}`, { state: 'idle', color: botColor(b, st), size, shape: (b && b.shape) || undefined });
 }
 export const botName = (b) => (b && typeof b.name === 'string' && b.name) || String((b && b.id) || '').slice(0, 8);
-// a watched conversation's name: the server's, else the listed conversation's, else its id's start
+// a watched conversation's name: the listed conversation's (so a rename shows at once), else the server's, else its
+// id's start
 export function watchName(w, st) {
-  if (w && typeof w.name === 'string' && w.name) return w.name;
   const s = w ? sessionsOf(st).find((x) => x.id === w.id) : null;
-  return (s && s.name) || String((w && w.id) || '').slice(0, 8);
+  if (s && s.name) return s.name;
+  return (w && typeof w.name === 'string' && w.name) || String((w && w.id) || '').slice(0, 8);
 }
 
 export function mountMapBots(layer, api) {

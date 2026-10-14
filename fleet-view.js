@@ -7028,13 +7028,14 @@ const apiCtx = {
 // ---------- the bots (bots.js) ----------
 // What a bot's watches read every few seconds (bots.js watchTick), for the watched ids only and straight from the raw
 // sessions (no buildState): its name, state, last reply (plain, ≤ 600) and when it came; next, the pickup when it
-// handed off (successorOf); gone, when it was removed from the map, or Fleet View lists it no more and its log is gone
+// handed off (successorOf); gone, when it was removed from the map, its workspace was removed (repoHidden), or Fleet
+// View lists it no more and its log is gone
 function botWatchFacts(ids) {
   return (ids || []).map((id) => {
     const s = sessions.get(id);
     const next = successorOf(id);
     return { id, name: nameNow(id, null) || null, state: s ? s.state || null : null, lastReply: s && s.lastReply ? plain(s.lastReply, 600) : null,
-      replyAt: s && s.replyAt ? Math.round(s.replyAt) : 0, gone: hiddenNow(id) || (!s && !conversationLog(id)), next: next && next !== id ? next : null };
+      replyAt: s && s.replyAt ? Math.round(s.replyAt) : 0, gone: hiddenNow(id) || !!(s && s.root && repoHidden(s.root)) || (!s && !conversationLog(id)), next: next && next !== id ? next : null };
   });
 }
 {

@@ -11,7 +11,9 @@
 //       shown with a ▸ and opened to the side as a second frosted menu (an input item works there too, and
 //       turns the main menu into its box; a submenu item with children of its own opens them in the submenu's
 //       place, under a back row: ← or Esc or the back row returns); load(): instead of children, a function
-//       resolving to them, called when the submenu first opens (it shows "loading…" until then); badge: a small
+//       resolving to them, called when the submenu first opens (it shows "loading…" until then); kids(): instead
+//       of children, a function returning them, called each time the submenu opens (lists that change while the
+//       menu is open: the conversations a bot can watch); badge: a small
 //       word on the right ("removed"); input: { placeholder, hint?, submit(text), alt?: { label, run() } }
 //       turns the menu into a one-line text box under the item's label: Enter calls submit(text), which returns
 //       (or resolves to) null when it worked (the menu closes) or a message to show under the box, in red (it
@@ -145,7 +147,7 @@ function ensure() {
   return el;
 }
 
-const hasKids = (it) => !!it && ((Array.isArray(it.children) && it.children.length > 0) || typeof it.load === 'function');
+const hasKids = (it) => !!it && ((Array.isArray(it.children) && it.children.length > 0) || typeof it.load === 'function' || typeof it.kids === 'function');
 const pickable = (i) => !!items[i] && !items[i].sep && !items[i].disabled;
 const subMatch = (c) => {
   if (!subQuery) return true;
@@ -367,7 +369,11 @@ function openSub(i, focus) {
   subStack = [];
   subEl.classList.toggle('ctx-scroll', !!it.scroll);
   subQuery = '';
-  if (Array.isArray(it.children)) subItems = it.children.filter(Boolean);
+  if (typeof it.kids === 'function') {
+    let kids = null;
+    try { kids = it.kids(); } catch (e) { console.warn(e); }
+    subItems = Array.isArray(kids) && kids.filter(Boolean).length ? kids.filter(Boolean) : [{ label: 'nothing to show', icon: 'info', disabled: true }];
+  } else if (Array.isArray(it.children)) subItems = it.children.filter(Boolean);
   else { subItems = [{ label: 'loading…', icon: 'clock', disabled: true }]; loadKids(it, i); }
   subScroll = !!it.scroll && subItems.filter((c) => !c.sep && !c.bulk).length >= FIND_MIN;
   subSel = focus ? subItems.findIndex((_, j) => subPickable(j)) : -1;

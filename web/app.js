@@ -3911,9 +3911,14 @@ function canWatch(s) {
   if (!s || s.pending || s.demo || s.bot || !isConvId(s.id) || isHidden(s)) return false;
   return !(s.repo && hiddenRepoKeys().has(normRoot(s.repo.root)));
 }
+// the conversations a bot can watch, from the newest /state: none removed (or in a removed workspace) and none that
+// handed off (its pickup is listed in its place, under the name it has now)
 function watchableSessions() {
   const seen = new Set(), out = [];
-  for (const s of view?.allSessions || state?.sessions || []) if (canWatch(s) && !seen.has(s.id)) { seen.add(s.id); out.push(s); }
+  for (const s of view?.allSessions || state?.sessions || []) {
+    if (!canWatch(s) || seen.has(s.id) || (s.state === 'DONE' && s.handoff && s.handoff.next)) continue;
+    seen.add(s.id); out.push(s);
+  }
   const rank = (s) => (needsYou(s.state) ? 0 : s.state === 'WORKING' || s.state === 'AGENTS' ? 1 : 2);
   return out.sort((a, b) => rank(a) - rank(b) || (b.last || 0) - (a.last || 0));
 }
@@ -3965,21 +3970,34 @@ function dropTeam(t, x, y) {
   for (const [m, px, py] of spots) { const at = mapMod.mapWorldAt(px, py); if (at && placeBot(m.botId, at)) last = m; }
   if (last) toast(`${t.name} is on the map: click one for its chat`, C.dim);
 }
-// a bot's own menu (its mascot on the map)
+// a bot's watches as the page has them now: the bot from the newest /state (its watches change while the menu is
+// open), less those on a conversation removed here, or in a removed workspace, that the server has not ended yet
+function watchesNow(b) {
+  const now = (state?.bots || []).find((x) => x && x.id === b.id) || b;
+  const hidR = hiddenRepoKeys();
+  return watchesOf(now).filter((w) => {
+    const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === w.id);
+    return !(s && (isHidden(s) || (s.repo && hidR.has(normRoot(s.repo.root)))));
+  });
+}
+// a bot's own menu (its mascot on the map). Its two lists are built each time their submenu opens (kids()), from
+// the newest /state, so renamed, removed and handed-off conversations show as they are now
 function botMenu(b, x, y) {
-  const ws = watchesOf(b), name = botName(b);
+  const ws = watchesNow(b), name = botName(b);
   const items = [];
-  const list = watchableSessions();
-  if (!list.length) items.push({ label: 'Watch a conversation', icon: 'read', disabled: true, note: 'no conversation to watch' });
+  if (!watchableSessions().length) items.push({ label: 'Watch a conversation', icon: 'read', disabled: true, note: 'no conversation to watch' });
   else {
-    items.push({ label: 'Watch a conversation', icon: 'read', scroll: true, children: list.map((s) => {
-      const w = ws.find((x) => x.id === s.id);
-      return { label: s.name || s.id.slice(0, 8), swatch: statusColor(s), note: `${s.label || s.state}${s.repo ? ` · ${s.repo.name}` : ''}`,
-        ...(w ? { badge: 'watching' } : {}), children: jobItems(b, s.id, w ? w.job : null) };
-    }) });
+    items.push({ label: 'Watch a conversation', icon: 'read', scroll: true, kids: () => {
+      const had = watchesNow(b);
+      return watchableSessions().map((s) => {
+        const w = had.find((x) => x.id === s.id);
+        return { label: s.name || s.id.slice(0, 8), swatch: statusColor(s), note: `${s.label || s.state}${s.repo ? ` · ${s.repo.name}` : ''}`,
+          ...(w ? { badge: 'watching' } : {}), children: jobItems(b, s.id, w ? w.job : null) };
+      });
+    } });
   }
   if (ws.length) {
-    items.push({ label: `Watching (${ws.length})`, icon: 'check', children: ws.map((w) => ({
+    items.push({ label: `Watching (${ws.length})`, icon: 'check', kids: () => watchesNow(b).map((w) => ({
       label: watchName(w, view || state), note: jobLabel(w.job), ...(w.last && w.last.what ? { badge: String(w.last.what) } : {}),
       children: [...jobItems(b, w.id, w.job), { sep: true }, stopWatchItem(b, w.id)],
     })) });
