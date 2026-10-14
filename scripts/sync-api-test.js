@@ -532,6 +532,22 @@ async function main() {
   ok(events.length === nEv, 'unsubscribed: no more events');
   ok(!logs.some((l) => [...fake.access.keys(), ...fake.refresh.keys(), KEY].some((t) => l.includes(t))), 'no token or key in the log');
 
+  // a read that fails (DPAPI slow while the PC starts up) is tried again 30 s later, not given up on until the file changes
+  {
+    const slow = memStore();
+    await slow.write(JSON.stringify({ v: 1, url: fakeUrl, uid: UID, email: 'member@example.com', member: true, refreshToken: 'rt-slow' }));
+    const realRead = slow.read;
+    let fails = 1, reads = 0;
+    slow.read = async () => { reads++; if (fails > 0) { fails--; throw new Error('DPAPI took too long (30 s)'); } return realRead(); };
+    const slowLogs = [];
+    const sa = S.createSync({ dataDir: liveDir, port: 4777, fetch: realFetch, now: () => clock, store: slow, allowLoopbackUrl: true, log: (t) => slowLogs.push(t) });
+    ok(!(await sa.status()).signedIn && slowLogs.some((l) => /could not be read: DPAPI took too long.*trying again/.test(l)), 'a failed read: not signed in, and the log says it tries again');
+    await sa.status();
+    eq(reads, 1, 'a failed read: not read again before 30 s');
+    clock += 30e3;
+    ok((await sa.status()).signedIn && reads === 2, 'a failed read: read again after 30 s, and signed in');
+  }
+
   // ---------- onlyEmail: one Google account may sync (Henry's machines, private.json's syncEmail) ----------
   {
     const dir = path.join(T, 'only');

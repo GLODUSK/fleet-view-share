@@ -443,6 +443,10 @@ function createSync(opts = {}) {
   // ---------- the session ----------
   // { url, uid, email, member, accessToken, refreshToken, expiresAt (ms) }; one for another project URL is ignored
   let session = null, sessionSeen, loading = null;
+  // a read that failed (DPAPI slow while the PC starts up) is tried again from this time on, not given up on: else the
+  // sign-in stays lost, and the phone with it, until the file changes
+  let readRetryAt = 0;
+  const READ_RETRY_MS = 30e3;
   const forThis = (s, c) => (s && c && s.url === c.url && allowed(s) ? s : null);
   function parseSession(text) {
     if (!text) return null;
@@ -465,11 +469,18 @@ function createSync(opts = {}) {
       if (was) emit('signed-out', was); // another process signed out
       return null;
     }
-    if (stamp !== sessionSeen) {
+    if (stamp !== sessionSeen && (loading || now() >= readRetryAt)) {
       if (!loading) {
         loading = (async () => {
           const was = session;
-          try { session = parseSession(await store.read()); } catch (e) { log(`sync: the sign-in could not be read: ${e.message}`); session = null; }
+          let text;
+          try { text = await store.read(); } catch (e) {
+            log(`sync: the sign-in could not be read: ${e.message} (trying again in ${READ_RETRY_MS / 1000} s)`);
+            readRetryAt = now() + READ_RETRY_MS;
+            return; // the session it had stays, and sessionSeen too, so the next load() reads it again
+          }
+          readRetryAt = 0;
+          session = parseSession(text);
           sessionSeen = stamp;
           // another process signed in or out (one that only renewed it changes nothing a listener holds)
           if (session && (!was || was.uid !== session.uid)) emit('signed-in', session);
