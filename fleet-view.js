@@ -8201,6 +8201,10 @@ function electronExe() {
 // Edge in app mode with its own profile; either opens where the window was last time. Returns electron.exe's
 // process when it started that.
 let noElectron = false;
+// the desktop window a plain launch started and then gave up waiting for (startWeb): while it still runs, its own
+// server is on its way, so finding the port served means the app made it and needs no second (Edge) window
+let lateElectron = null;
+const lateElectronUp = () => !!lateElectron && lateElectron.exitCode === null && lateElectron.signalCode === null;
 function openWindow() {
   const url = `http://127.0.0.1:${PORT}/`;
   const electron = noElectron ? null : electronExe();
@@ -8324,6 +8328,7 @@ function startWeb() {
       if (!failed && !exited && child && (waited < 20e3 || (child.exitCode === null && waited < 60e3))) return setTimeout(wait, 1000);
       logLine(`launch: the desktop window ${failed || !child ? 'could not start' : exited ? 'closed before it answered' : `did not answer within ${Math.round(waited / 1000)} s`}; serving here, with the Edge window`);
       noElectron = true;
+      if (child && !failed && !exited) lateElectron = child;
       startWeb();
     });
     setTimeout(wait, 1000);
@@ -8359,9 +8364,12 @@ function startWeb() {
     }
     probeFleetView((isFleet) => {
       if (isFleet) {
-        // another Fleet View already serves the page: show its window and leave
-        console.log(`Fleet View is already running on http://127.0.0.1:${PORT}/${NO_OPEN ? '' : '; opening its window'}`);
-        if (!NO_OPEN) openWindow();
+        // another Fleet View already serves the page: show its window and leave. When that is the desktop app this
+        // launch gave up waiting for (a slow sign-in), its window is already up: an Edge window would be a second one.
+        const late = lateElectronUp();
+        if (late) logLine('launch: the desktop app answered late; handed over to it (no Edge window)');
+        console.log(`Fleet View is already running on http://127.0.0.1:${PORT}/${NO_OPEN || late ? '' : '; opening its window'}`);
+        if (!NO_OPEN && !late) openWindow();
         setTimeout(() => exitWith(0, 'another Fleet View already serves this port'), 800);
       } else if (++tries <= 20) {
         // a reload or a restart after a crash: the old process may still be letting go of the port
@@ -8379,7 +8387,9 @@ function startWeb() {
     listening = true;
     console.log(`Fleet View on http://127.0.0.1:${PORT}/  (${DEMO ? 'demo data' : rootLabel()}${GITHUB ? '' : ', github off'})`);
     console.log('Close this window, or press Ctrl+C, to stop it.');
-    if (!NO_OPEN) openWindow();
+    // the desktop window this launch gave up on still runs: it shows this server's page, so no Edge window too
+    if (lateElectronUp()) logLine('launch: the desktop window is still starting; it will show this server (no Edge window)');
+    else if (!NO_OPEN) openWindow();
     // Ctrl+C, a kill, or the console window closing (SIGHUP on Windows): a clean stop, so the loop ends
     for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => exitWith(0, sig));
     watchForUpdates((names) => { console.log(`${names} changed: reloading`); logLine(`${names} changed on disk: reloading (exit 75)`); server.close(); exitWith(EXIT_UPDATE, 'update'); });
