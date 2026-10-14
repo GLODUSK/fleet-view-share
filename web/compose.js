@@ -30,8 +30,10 @@
 // browser (Edge, or the Mac through Tailscale) knows no path for it, so it is sent to the PC at once (POST /upload,
 // pcfiles.js; its chip shows how far it got) and the path the PC saved it at goes in the message instead; Send waits
 // for a file still on its way. A folder goes in by paste or drop (there is no folder button: attach does it).
-// In the Bots tab (chat.js opts.bubbles) the box is kept simple: a Dynamic switch
-// before a message shows nothing at all (only an error, if it fails), never which model it switches to.
+// The notes under the box (drawNotes) are only for trouble (Henry, 2026-10-14: "if ur gonna pop something in the text box it
+// better be an error otherwise forget it"): an error, or a warning you have to act on (a panel or dialog in the way, an
+// offline or unlinked machine, a move to cancel). Nothing that only says what is going on: no "Switching to Sonnet", no
+// "Starting session…", no "Runs on the Mac: your messages go there", no "Sent to …", no pin, no dictation progress.
 //
 // ↑ in an empty box (or with the caret at its start) brings back your last message, and again the one before;
 // ↓ goes forward again, back to what you had typed. The list: your messages in the feed, then the ones sent from
@@ -77,7 +79,7 @@
 import { esc } from './cards.js';
 import { voiceSupported, startVoice, stopVoice, onVoice } from './voice.js';
 import { icon } from './icons.js';
-import { termApi, hosts, refreshHosts, closePanel as closeHostPanel, typeInto, ensureLive, isStarting, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, keyNow, noTermMsg } from './term.js';
+import { termApi, hosts, refreshHosts, closePanel as closeHostPanel, typeInto, ensureLive, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, keyNow, noTermMsg } from './term.js';
 import { uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
 import { sizeTask, dynamicSwitch, DYNAMIC } from './chats-model.js';
@@ -888,7 +890,6 @@ export function mountCompose(slot, s) {
   const ta = $('.cmp-ta'), notes = $('.cmp-notes'), sendBtn = $('.cmp-send'), fileIn = $('.cmp-file');
   const modeBtn = $('.cmp-modeb'), modeMenu = $('.cmp-menu'), slashEl = $('.cmp-slash');
   const modelBtn = $('.cmp-modelb'), modelMenu = $('.cmp-modelw .cmp-menu');
-  const simple = !!slot.closest('.chat-bubbles'); // the Bots tab: no model talk
   const hsEl = $('.cmp-hs'), hsIn = $('.cmp-hs-in'), hsList = $('.cmp-hs-l'), hsN = $('.cmp-hs-n'), shTag = $('.cmp-shtag'), bgBtn = $('.cmp-bgb');
   const boxEl = $('.cmp-box'), ghost = $('.cmp-ghost'), ghostPad = $('.cmp-ghost-pad'), ghostT = $('.cmp-ghost-t');
   // the chat pane around us: drops anywhere on it land here, and chat.js sends its quotes to it
@@ -1117,10 +1118,9 @@ export function mountCompose(slot, s) {
     const t = termApi();
     const h = hosts.get(st.id);
     const bits = [];
-    if (!t) bits.push(`<span class="cmp-chip">${icon('info', 13)}<span>${esc(noTermMsg('Sending'))}</span></span>`);
-    else if (st.step || isStarting(st.id)) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>${esc(st.step || 'Starting session…')}</span>${st.moving === st.id ? '<button type="button" class="cmp-chip-b" data-c="move-x">Cancel</button>' : ''}</span>`);
-    else if (st.switching) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>Switching mode…</span></span>`);
-    else if (h && !h.alive && !remoteOn()) bits.push(`<span class="cmp-chip">${icon('info', 13)}<span>The session ended${h.exitCode != null ? ` (code ${esc(h.exitCode)})` : ''}; sending starts it again</span></span>`);
+    if (!t) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>${esc(noTermMsg('Sending'))}</span></span>`);
+    // a move here you started: only its Cancel shows (no progress words)
+    else if (st.moving === st.id) bits.push(`<span class="cmp-chip warn"><span class="cmp-spin" aria-hidden="true"></span><span>Moving here</span><button type="button" class="cmp-chip-b" data-c="move-x">Cancel</button></span>`);
     // waiting with no menu or panel card here: a panel such as /usage this tab can't read (it holds back
     // background updates), a startup dialog, or a prompt this tab can't show. An older host sends no waitingFor.
     else if (h && h.status === 'waiting' && !st.menu && !st.panel) {
@@ -1129,7 +1129,7 @@ export function mountCompose(slot, s) {
       // Any other dialog (trusting a folder, a new MCP server) is answered in the terminal: Esc there refuses it.
       if (h.slashPanel) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>The ${esc(h.slashPanel)} panel is open; background updates wait until it closes (sending closes it)</span><button type="button" class="cmp-chip-b" data-c="panel-esc">Close (Esc)</button></span>`);
       else if (!w || w === 'dialog open') bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>A dialog or panel is open in this session: answer or close it in the Session tab</span></span>`);
-      else bits.push(`<span class="cmp-chip info">${icon('info', 13)}<span>Claude is waiting: ${esc(w.length > 120 ? `${w.slice(0, 119)}…` : w)} — answer it in the Session tab</span></span>`);
+      else bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>Claude is waiting: ${esc(w.length > 120 ? `${w.slice(0, 119)}…` : w)} — answer it in the Session tab</span></span>`);
     }
     // another machine runs it (/state's workspace.host, syncOwner): what Send does (followPlan), and that machine's own
     // state as the link last read it
@@ -1139,15 +1139,8 @@ export function mountCompose(slot, s) {
       if (a && a.waiting === 'panel') chip('warn', `A panel is open in the session on ${n}`, '<button type="button" class="cmp-chip-b" data-c="rem-esc">Close it (Esc)</button>');
       // not linked: nothing moves by itself; Continue on this machine is the other way (not a bot's: it would lose its role)
       else if (p.how === 'link') chip('warn', `Runs on ${n}, which isn't linked with this machine yet: they link by themselves while both are on (Link in the Sync card if you unlinked it)`, p.why === 'bot' ? '' : contBtn(p.kind === 'bound' ? 'Continue on this machine anyway' : 'Continue on this machine'));
-      else if (p.how === 'offline') { if (!st.offline) chip('info', `${n} is offline: sending offers to continue on this machine`); }
-      else if (p.how === 'moving') chip('info', `Moving here from ${n}…`);
-      // pinned there by a stays-on rule (or by hand): why
-      else if (p.how === 'remote' && p.why === 'bound' && pinNow()) chip('info', `${esc(pinText(pinNow()))}: your messages go there`);
-      else if (p.how === 'remote') chip('info', p.why === 'busy' ? `Working on ${n}: what you send goes there` : p.why === 'bound' ? `Its workspace is only on ${n}: your messages go there` : `Runs on ${n}: your messages go there`);
     }
     else if (!h && openElsewhere(st.s)) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>Open in another window: sending here starts a second copy</span></span>`);
-    // runs here and stays here (this is the host its pin names): why
-    if (!remoteOn() && pinNow()) bits.push(`<span class="cmp-chip">${icon('pin', 13)}<span>${esc(pinText(pinNow()))}</span></span>`);
     if (st.offline && st.offline.id === st.id) {
       const o = st.offline, n = esc(o.name);
       // pinned to that machine: its move is refused, so the way here is to let it go first (then the cloud copy)
@@ -1167,12 +1160,9 @@ export function mountCompose(slot, s) {
     if (st.cont && st.cont.id === st.id) {
       // a rule's pin keeps it on its host: no way here, so the chip says why instead
       const btn = contBtn(), why = btn ? 'Continue on this machine to use this' : esc(pinText(pinNow()));
-      bits.push(`<span class="cmp-chip info">${icon('sync', 13)}<span>${esc(st.cont.what)} ${CONT_WORDS}: ${why}</span>`
+      bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${esc(st.cont.what)} ${CONT_WORDS}: ${why}</span>`
         + `${btn}<button type="button" class="cmp-chip-x" data-c="cont-x" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
     }
-    if (st.info && st.info.id === st.id && Date.now() < st.info.until) bits.push(`<span class="cmp-chip info">${icon('sync', 13)}<span>${esc(st.info.text)}</span></span>`);
-    const v = st.dict || st.drain;
-    if (v && (v.note || v.busy || st.sendAfter)) bits.push(`<span class="cmp-chip info"><span class="cmp-spin" aria-hidden="true"></span><span>${esc(v.note || (st.sendAfter ? 'Sending as soon as what you said is written out…' : 'Writing out what you said…'))}</span></span>`);
     for (const e of st.errs) bits.push(`<span class="cmp-chip err">${icon('error', 13)}<span>${esc(e.text)}</span><button type="button" class="cmp-chip-x" data-e="${e.key}" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
     const html = bits.join('');
     if (st.drawn.notes !== html) { notes.innerHTML = html; st.drawn.notes = html; }
@@ -2035,7 +2025,6 @@ export function mountCompose(slot, s) {
     const n = plan.host.name;
     st.sending = true;
     st.errs = [];
-    st.info = null;
     drawSend(); drawNotes();
     try {
       const paths = [];
@@ -2052,7 +2041,6 @@ export function mountCompose(slot, s) {
       const shown = messageText(text, []);
       pane.dispatchEvent(new CustomEvent('fv-chat-sent', { detail: { id, text: shown, images: shots, busy: st.busy || plan.why === 'busy', pick: null } }));
       rememberSent(id, shown);
-      st.info = { id, until: Date.now() + 15000, text: plan.why === 'busy' ? `Sent to ${n}: it's working there, so it goes in after what Claude is doing` : `Sent to ${n}` };
       st.rem.at = 0;
       if (fromBox) clearSent(id, raw, quote, list, false);
       return true;
@@ -2670,11 +2658,9 @@ export function mountCompose(slot, s) {
     let want = dynamicSwitch(dyn, size, cur, MODEL_IDS, !!dyn.botId);
     const pick = { model: cur.model || null, effort: cur.effort || null, label: size.label, switched: false, at: Date.now() };
     if (!want.model && !want.effort) return pick;
-    const say = (w) => [w.model && modelLabel(w.model, true), w.effort && `${w.effort} effort`].filter(Boolean).join(', ');
     // just started: its start notes may still be going; it is waited for a little, then switched if it went idle
     const h = hosts.get(id);
     if (st.busy && h && Date.now() - h.startedAt < DYN_START_MS) {
-      if (st.id === id) { st.step = simple ? '' : `Waiting for it to settle, then switching to ${say(want)}…`; drawNotes(); }
       for (const end = Date.now() + DYN_WAIT_MS; st.busy && st.alive && st.id === id && Date.now() < end;) await sleep(POLL_MS);
       cur = current();
       want = dynamicSwitch(dyn, size, cur, MODEL_IDS, !!dyn.botId);
@@ -2682,8 +2668,6 @@ export function mountCompose(slot, s) {
       if (!want.model && !want.effort) return pick;
     }
     if (st.busy || st.id !== id) { pick.label += ': not switched, it was busy'; return pick; }
-    st.step = simple ? '' : `Switching to ${say(want)} for this message…`;
-    drawNotes();
     const from = st.s.model || null;
     let r = null;
     try {
@@ -3199,7 +3183,7 @@ export function mountCompose(slot, s) {
         st.panel = null; st.panelOwned = false; st.cmdAt = 0; st.cmd = '';
         st.menu = null; st.mode = null; st.effort = null; st.want = null; st.busy = false; st.errs = []; st.step = ''; st.elsewhereAt = 0;
         st.freeDraft = null;
-        st.rem = newRem(st.rem.gen + 1); st.offline = null; st.cont = null; st.info = null; st.forceMove = null; st.noWork = null;
+        st.rem = newRem(st.rem.gen + 1); st.offline = null; st.cont = null; st.forceMove = null; st.noWork = null;
         st.drawn = {};
         loadDraft();
         st.s = next;
