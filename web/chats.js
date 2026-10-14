@@ -1264,6 +1264,16 @@ export function seenNow() {
   return s && typeof s === 'object' && !Array.isArray(s) ? s : {};
 }
 
+// a contact opened from outside this tab by its key ('bot:<id>': the map's bot menu, app.js openBotChat), even a bot
+// with no conversation yet; the next renderChats shows it
+export function selectChat(key) {
+  if (typeof key !== 'string' || !key) return;
+  selKey = key;
+  store.set(SEL_KEY, key);
+  form = null;
+  open = true;
+}
+
 // a bot's or the Chief's look for a note outside this tab (botnote.js): its row's name, colour and mascot, wearing
 // face ('done', 'needs', ...), for the conversation sid (raw /state or the derived one) -> { key, name, color, face,
 // preview } or null when sid is no overseer's

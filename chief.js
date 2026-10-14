@@ -432,5 +432,5 @@ function createChief(deps) {
     _state: () => ({ watch, lastId, told: [...teller.told()], live, wst, starting }) };
 }
 
-module.exports = { createChief, createTeller, frame, neutralise, fold, headName, buildBriefing, briefingText, watchItems, watchStep, watchCommit, shouldTell, idNote, pickChief,
+module.exports = { createChief, createTeller, frame, neutralise, fold, headName, oneLine, buildBriefing, briefingText, watchItems, watchStep, watchCommit, shouldTell, idNote, pickChief,
   convId, DEFAULTS, BRIEF_FILE, WATCH_EVERY_MS, ORDER_STUCK_MS, TELL_AFTER_MS, TELL_RETRY_MS, UNSIGNED, WATCH_MARK };

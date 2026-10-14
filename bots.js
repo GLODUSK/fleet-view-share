@@ -39,6 +39,14 @@
 //   sessions run on the 1M-context version of their model (longModel, runOpts), named in its folder's
 //   .claude/settings.json too (writeModel) so a resume does as well; ~/.claude/hooks/session-length.py leaves sessions
 //   in ~/Bots alone. The Bots tab shows all its conversations as one chat anyway (state.bots ids).
+// - On the map and watching (Henry, 2026-10-13): a bot may be put on the map (map: { x, y }, world coordinates; POST
+//   /bots/:id/map, the page only) and set to watch up to 8 conversations, each with a job (watches: [{ id, job, since,
+//   last? }]; WATCH_JOBS: report, answer, review; POST /bots/:id/watch, the page only, from the map or a conversation's
+//   menu). It is told once when a watch is set, changed or stopped. watchTick() (every few seconds, fleet-view.js)
+//   reads each watched conversation's facts from the raw sessions (d.watchFacts) and messages the bot, started first
+//   when it is not running, when one's turn ends, it asks something, errors or stalls (watchEvent: held 10 s, once per
+//   situation, never for what was there at first sight, so a restart fires nothing), so a bot never polls. A handoff
+//   moves the watch to the pickup; a conversation gone from Fleet View ends it. Off the map, every watch stops.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -78,6 +86,78 @@ const botOfRole = (role) => { const m = /^bot:([0-9a-f]{12})$/.exec(typeof role 
 const startPrompt = (name) => `[Fleet View] You are ${name}, one of Henry's bots. Your standing instructions are in CLAUDE.md in this folder. Your conversation id comes in the next message: reply to this one with just "ok".`;
 const idNote = (name, id, greet = false) => `[Fleet View] You are ${name}, one of Henry's bots. Your id: ${id}. ${greet ? 'Greet Henry in one short line, nothing more.' : 'Reply with just "ok".'}`;
 const CHANGED_NOTE = '[Fleet View] Your instructions changed: read CLAUDE.md again, then say so in one short line.';
+
+// ---------- on the map and watching ----------
+const MAP_MAX = 100000; // a map spot's x and y, either way from the middle
+const WATCHES_MAX = 8; // conversations one bot watches
+const WATCH_SETTLE_MS = 10e3; // a watched conversation's new state must hold this long before the bot hears of it (no flickers)
+const WATCH_TRIES = 3; // a watch note that could not go in: tried this many times, then dropped
+// the jobs a watch may have: label (the page's words for it) and line (the note's words for the bot; <id> is the
+// watched conversation's id)
+const WATCH_JOBS = {
+  report: { label: 'Tell me when it needs me', line: 'tell Henry in one or two lines what happened and whether he needs to do anything (`fv read <id>` for more).' },
+  answer: { label: 'Answer its questions', line: 'when it asks something and Henry\'s instructions or the conversation make the answer clear, answer it yourself (`fv menu <id>`, `fv answer <id> ...`, or `fv send <id> "..." --from <your id>`) and tell Henry in one line what you answered; otherwise tell Henry what it asks. When its turn just ended, say in one line what it did.' },
+  review: { label: "Review its work when it's done", line: 'when it says its work is done (a PR opened or merged, a fix shipped), review the change (`gh pr diff`, `fv transcript <id>`) and tell Henry what you found. Otherwise reply with just `[quiet]`.' },
+};
+const WATCH_WHAT = ['finished', 'asks', 'error', 'stalled'];
+const WHAT_SAYS = { finished: 'finished its turn', asks: 'is asking something', error: 'hit an error', stalled: 'looks stalled' };
+const isJob = (j) => typeof j === 'string' && Object.prototype.hasOwnProperty.call(WATCH_JOBS, j);
+// review hears only of a finished turn; report and answer of everything
+const jobWants = (job, what) => (job === 'review' ? what === 'finished' : true);
+const jobLine = (job, cid) => WATCH_JOBS[job].line.split('<id>').join(cid);
+// a map spot: rounded to a tenth, kept within MAP_MAX
+const coord = (n) => Math.round(Math.max(-MAP_MAX, Math.min(MAP_MAX, n)) * 10) / 10 || 0; // never -0
+const mapPoint = (v) => (v && typeof v === 'object' && Number.isFinite(v.x) && Number.isFinite(v.y) ? { x: coord(v.x), y: coord(v.y) } : null);
+// POST /bots/:id/map's at: { x, y } (numbers) or null (off the map). -> { at } or { err }
+function checkAt(v) {
+  if (v === null) return { at: null };
+  const at = mapPoint(v);
+  return at ? { at } : { err: 'at must be { x, y } (numbers, the map\'s world coordinates), or null: off the map' };
+}
+// the watches as saved, checked: a known job, a conversation id once, at most WATCHES_MAX; last only when it makes sense
+function readWatches(v) {
+  const out = [];
+  for (const w of Array.isArray(v) ? v : []) {
+    const cid = w && typeof w === 'object' ? convId(w.id) : null;
+    if (!cid || !isJob(w.job) || out.some((x) => x.id === cid)) continue;
+    const l = w.last && typeof w.last === 'object' && Number.isFinite(w.last.at) && WATCH_WHAT.includes(w.last.what) ? { at: Math.round(w.last.at), what: w.last.what } : null;
+    out.push({ id: cid, job: w.job, since: Number.isFinite(w.since) && w.since > 0 ? Math.round(w.since) : 0, ...(l ? { last: l } : {}) });
+    if (out.length >= WATCHES_MAX) break;
+  }
+  return out;
+}
+// what a watched conversation's state counts as: asks (ASKING, QUESTION), error, stalled, rest (IDLE, DONE: its turn
+// ended), busy (working), none (not listed)
+const classOf = (st) => (st === 'ASKING' || st === 'QUESTION' ? 'asks' : st === 'ERROR' ? 'error' : st === 'STALLED' ? 'stalled'
+  : st === 'IDLE' || st === 'DONE' ? 'rest' : st ? 'busy' : 'none');
+// One look at a watched conversation. seen: what the last look kept ({ cls, since (when cls began), replyAt (the
+// newest reply accounted for), fired (the last event's key) }), or null for the first; fact: { state, replyAt }.
+// -> { seen, event: null | { what, key } }. The first sight only records (what is there already, and after a restart,
+// is never news). An event once the state has held WATCH_SETTLE_MS: asks, error, stalled, or finished for a rest with
+// a newer reply (held from that reply). The key (what:since, or finished:replyAt) makes each situation fire once
+function watchEvent(seen, fact, now) {
+  const cls = classOf(fact && fact.state);
+  const replyAt = fact && Number.isFinite(fact.replyAt) ? fact.replyAt : 0;
+  const needs = cls === 'asks' || cls === 'error' || cls === 'stalled';
+  if (!seen) return { seen: { cls, since: now, replyAt, fired: needs ? `${cls}:${now}` : null }, event: null };
+  if (cls !== seen.cls) return { seen: { ...seen, cls, since: now }, event: null };
+  let what = null, key = null, held = seen.since;
+  if (needs) { what = cls; key = `${cls}:${seen.since}`; }
+  else if (cls === 'rest' && replyAt > (seen.replyAt || 0)) { what = 'finished'; key = `finished:${replyAt}`; held = Math.max(seen.since, replyAt); }
+  if (!what || now - held < WATCH_SETTLE_MS || key === seen.fired) return { seen, event: null };
+  return { seen: { ...seen, fired: key, ...(what === 'finished' ? { replyAt } : {}) }, event: { what, key } };
+}
+// a conversation inside a note's first line: its name in quotes (CHIEF.headName: no quote or bracket can end them), its id
+const quoted = (name, cid) => `"${CHIEF.headName(name || cid.slice(0, 8), 60)}" (${cid})`;
+// the note for one bot's events (each { id, name, what, lastReply, job }): one block each
+function watchNote(evs) {
+  const block = (e) => [`${quoted(e.name, e.id)} ${WHAT_SAYS[e.what]}.`, `Its last reply: ${CHIEF.oneLine(e.lastReply, 400) || 'none'}`, `Your job for it: ${jobLine(e.job, e.id)}`];
+  if (evs.length === 1) { const [first, ...rest] = block(evs[0]); return [`[Fleet View] Watch: ${first}`, ...rest].join('\n'); }
+  return [`[Fleet View] Watch: ${evs.length} updates.`, ...evs.flatMap((e) => ['', ...block(e)])].join('\n');
+}
+const watchSetNote = (name, cid, job) => `[Fleet View] Henry set you to watch ${quoted(name, cid)} with the job: ${jobLine(job, cid).replace(/\.$/, '')}. Fleet View will message you when its turn ends, it asks something, errors or stalls; you never need to poll it. Reply with just "ok".`;
+const watchStopNote = (name, cid) => `[Fleet View] Henry stopped your watch on ${quoted(name, cid)}. Reply with just "ok".`;
+const watchGoneNote = (name, cid) => `[Fleet View] ${quoted(name, cid)}, which you were watching, is gone from Fleet View; the watch ended. Reply with just "ok".`;
 
 // ---------- checks ----------
 // name: 1 to 40 characters on one line, no control characters (invisible ones dropped, as api.js cleanText does), and
@@ -275,17 +355,26 @@ function elsewhereBots(convs, base = BOTS_DIR, bots = []) {
 const elsewhereView = (e, look) => ({ id: e.id, name: e.name, brief: '', account: e.account, model: null, effort: null, folder: e.folder,
   createdAt: e.at, convId: e.convId, ids: [...e.ids], live: false,
   shape: look && SHAPES.includes(look.shape) ? look.shape : null, color: look && typeof look.color === 'string' && COLOR_RE.test(look.color) ? look.color.toLowerCase() : null,
-  tasks: [], elsewhere: true });
+  tasks: [], elsewhere: true, map: null, watches: [] });
+// one watch as state.bots shows it: name, the watched conversation's Fleet View name now (nameOf), else null; last,
+// the newest watch note it got for it ({ at, what }), else null
+function watchView(w, nameOf) {
+  let name = null;
+  try { const n = nameOf ? nameOf(w.id) : null; if (typeof n === 'string' && n.trim()) name = n; } catch {}
+  return { id: w.id, job: w.job, since: w.since, name, last: w.last ? { at: w.last.at, what: w.last.what } : null };
+}
 // one bot as state.bots and the answers show it; l: its running session from the host's list ({ id }), if any. ids:
-// every conversation it went through, oldest first (the Bots tab shows them as one chat: web/chat.js opts.history)
-function viewOf(b, l) {
+// every conversation it went through, oldest first (the Bots tab shows them as one chat: web/chat.js opts.history).
+// map: its spot on the map, else null; watches: what it watches (watchView; nameOf(id) -> a conversation's name)
+function viewOf(b, l, nameOf) {
   return { id: b.id, name: b.name, brief: b.brief, account: b.account, model: b.model, effort: b.effort, folder: b.folder, createdAt: b.createdAt,
-    convId: (l && l.id) || b.ids[b.ids.length - 1] || null, ids: [...b.ids], live: !!l, shape: b.shape || null, color: b.color || null };
+    convId: (l && l.id) || b.ids[b.ids.length - 1] || null, ids: [...b.ids], live: !!l, shape: b.shape || null, color: b.color || null,
+    map: b.map ? { x: b.map.x, y: b.map.y } : null, watches: (b.watches || []).map((w) => watchView(w, nameOf)) };
 }
 // state.bots: the bots not removed, newest first (of two made the same millisecond, the later). live: bot id -> its
 // running session
-const listView = (bots, live) => (bots || []).filter((b) => b && !b.removed).reverse().sort((a, b) => b.createdAt - a.createdAt)
-  .map((b) => viewOf(b, live && live.get(b.id)));
+const listView = (bots, live, nameOf) => (bots || []).filter((b) => b && !b.removed).reverse().sort((a, b) => b.createdAt - a.createdAt)
+  .map((b) => viewOf(b, live && live.get(b.id), nameOf));
 // the registry as saved, checked (an entry that makes no sense is dropped)
 function loadBots(saved, base = BOTS_DIR) {
   const out = [];
@@ -300,7 +389,9 @@ function loadBots(saved, base = BOTS_DIR) {
       effort: str(b.effort, CHIEF.DEFAULTS.effort), folder: b.folder, createdAt: Number.isFinite(b.createdAt) ? b.createdAt : 0, ids,
       told: Array.isArray(b.told) ? [...new Set(b.told.map(convId).filter(Boolean))] : [], ...(b.removed === true ? { removed: true } : {}),
       ...(SHAPES.includes(b.shape) ? { shape: b.shape } : {}), ...(typeof b.color === 'string' && COLOR_RE.test(b.color) ? { color: b.color.toLowerCase() } : {}),
-      ...(Number.isFinite(b.lookAt) && b.lookAt > 0 ? { lookAt: Math.round(b.lookAt) } : {}) });
+      ...(Number.isFinite(b.lookAt) && b.lookAt > 0 ? { lookAt: Math.round(b.lookAt) } : {}),
+      // on the map and watching (a removed bot is neither)
+      ...(b.removed !== true && mapPoint(b.map) ? { map: mapPoint(b.map) } : {}), watches: b.removed === true ? [] : readWatches(b.watches) });
   }
   return out;
 }
@@ -309,7 +400,9 @@ function loadBots(saved, base = BOTS_DIR) {
 // deps: { api (api.js: hostList, deliverText, startBot, openBot, endHosted), ctx (api.js's ctx), saved (settings.bots as
 //   saved), save() (the registry changed), log(text), demo, exists(id) -> its log is on disk, turnInfo(id) -> { promptAt }
 //   or null, sessionsFile, trustFolder(dir), accounts() -> the account letters, usage() -> /state's usage (a Dynamic
-//   account's pick: roomiest), rename(id, name) (its Fleet View name),
+//   account's pick: roomiest), rename(id, name) (its Fleet View name), and for watching: watchFacts(ids) -> [{ id,
+//   name, state, lastReply, replyAt, gone, next }] (fleet-view.js botWatchFacts), known(id) -> Fleet View lists it or
+//   its log is on disk, nameOf(id) -> its Fleet View name or null, chiefIds() -> the Chief's conversations,
 //   base (the Bots folder) and template (bot/BRIEF.md), which tests set }
 function createBots(deps) {
   const d = deps || {};
@@ -330,7 +423,8 @@ function createBots(deps) {
   const log = (t) => { try { if (d.log) d.log(`bots: ${t}`); } catch {} };
   const save = () => { try { if (d.save) d.save(); } catch {} };
   const byId = (id) => bots.find((b) => b.id === id) || null;
-  const view1 = (b) => viewOf(b, live.get(b.id));
+  const nameOf = (cid) => { try { return d.nameOf ? d.nameOf(cid) : null; } catch { return null; } };
+  const view1 = (b) => viewOf(b, live.get(b.id), nameOf);
   const accounts = () => { try { const a = d.accounts ? d.accounts() : null; if (Array.isArray(a) && a.length) return a; } catch {} return ['A', 'B']; };
   const usageNow = () => { try { return (d.usage && d.usage()) || {}; } catch { return {}; } };
   // bot/BRIEF.md with its CRs dropped (a CRLF checkout), so every CLAUDE.md has the same line ends
@@ -384,7 +478,7 @@ function createBots(deps) {
     do id = crypto.randomBytes(6).toString('hex'); while (byId(id));
     const folder = pickFolder(base, slugOf(n.name), bots, (p) => fs.existsSync(p));
     if (!folder) return [409, { ok: false, message: `no free folder for ${n.name} in ${base}` }];
-    const bot = { id, name: n.name, brief: br.brief, account: o.account, model: o.model, effort: o.effort, folder, createdAt: Date.now(), ids: [], told: [] };
+    const bot = { id, name: n.name, brief: br.brief, account: o.account, model: o.model, effort: o.effort, folder, createdAt: Date.now(), ids: [], told: [], watches: [] };
     applyLook(bot, lk);
     let text;
     try { text = fillBrief(template(), bot); } catch (e) { return [500, { ok: false, message: `could not read ${templateFile}: ${e.code || e.message}` }]; }
@@ -561,6 +655,10 @@ function createBots(deps) {
       if (bot.removed) return noBot();
       const ended = await endSessions(bot);
       bot.removed = true;
+      // off the map, and nothing watched any more
+      delete bot.map;
+      bot.watches = [];
+      forgetAll(bot);
       live.delete(bot.id);
       save();
       log(`removed ${bot.name}${ended ? ` (ended ${ended} session${ended === 1 ? '' : 's'})` : ''}`);
@@ -734,6 +832,224 @@ function createBots(deps) {
     return [400, { ok: false, message: 'action must be pause, resume, run or delete' }];
   }
 
+  // ---------- on the map and watching ----------
+  const seen = new Map(); // `${bot id}/${conversation id}` -> watchEvent's seen for that watch (memory only: a restart sees afresh)
+  const pending = new Map(); // bot id -> { events: [{ id, name, what, key, lastReply, tries }], gone: [{ id, name }] } not yet delivered
+  let watching = false, watchWaits = false;
+  const seenKey = (bot, cid) => `${bot.id}/${cid}`;
+  const watchOf = (bot, cid) => (bot.watches || []).find((w) => w.id === cid) || null;
+  const pendOf = (bot) => { let p = pending.get(bot.id); if (!p) { p = { events: [], gone: [] }; pending.set(bot.id, p); } return p; };
+  // a watch that stopped or moved: what was seen of it, and its undelivered events, go
+  function forget(bot, cid) {
+    seen.delete(seenKey(bot, cid));
+    const p = pending.get(bot.id);
+    if (p) p.events = p.events.filter((e) => e.id !== cid);
+  }
+  function forgetAll(bot) {
+    for (const k of [...seen.keys()]) if (k.startsWith(`${bot.id}/`)) seen.delete(k);
+    pending.delete(bot.id);
+  }
+  // the bot's running conversation, from the host's list, or null (not running, or the desktop app is down)
+  async function runningConv(bot) {
+    const list = await d.api.hostList();
+    const p = (list || []).find((x) => x && x.alive && (x.role === roleOf(bot.id) || bot.ids.includes(convId(x.id))) && convId(x.id));
+    return p ? convId(p.id) : null;
+  }
+  // how a watch note goes in: queued behind a menu, the bot's chat not opened, as Fleet View's own text (a fresh object each time)
+  const noteOpts = () => ({ kind: 'message', queue: true, open: false, via: 'server' });
+
+  // POST /bots/:id/map { at: { x, y } | null } (the page only): put it on the map or move it there; null takes it off,
+  // and every watch of it stops (the bot is not told of each)
+  function setMap(id, b) {
+    const bot = byId(id);
+    if (!bot || bot.removed) return noBot();
+    b = b && typeof b === 'object' ? b : {};
+    if (!('at' in b)) return [400, { ok: false, message: 'give at: { x, y }, or null to take it off the map' }];
+    const a = checkAt(b.at);
+    if (a.err) return [400, { ok: false, message: a.err }];
+    if (a.at) {
+      const moved = !!bot.map;
+      bot.map = a.at;
+      save();
+      return [200, { ok: true, bot: view1(bot), message: `${moved ? 'moved' : 'put'} ${bot.name} on the map` }];
+    }
+    const was = !!bot.map, n = bot.watches.length;
+    delete bot.map;
+    bot.watches = [];
+    forgetAll(bot);
+    save();
+    if (was || n) log(`${bot.name} is off the map${n ? `; its ${n} watch${n === 1 ? '' : 'es'} stopped` : ''}`);
+    return [200, { ok: true, bot: view1(bot), message: `took ${bot.name} off the map${n ? ` and stopped its ${n} watch${n === 1 ? '' : 'es'}` : ''}` }];
+  }
+
+  // POST /bots/:id/watch { id, job: report | answer | review | null } (the page only, from the map or a conversation's
+  // menu; the bot need not be on the map): watch that conversation with that job, change the job, or (null) stop. A
+  // bot's own conversation and the Chief's are never watched. The bot is told once, started first for a new watch or
+  // job; a stop is told only to a running bot. The answer is ok even when the note did not go in (message says so)
+  async function setWatch(id, b) {
+    const bot = byId(id);
+    if (!bot || bot.removed) return noBot();
+    b = b && typeof b === 'object' ? b : {};
+    const cid = typeof b.id === 'string' ? convId(b.id) : null;
+    if (!cid) return [400, { ok: false, message: 'id must be a conversation id' }];
+    const job = b.job;
+    if (job !== null && !isJob(job)) return [400, { ok: false, message: `job must be one of ${Object.keys(WATCH_JOBS).join(', ')}, or null to stop watching` }];
+    const w = watchOf(bot, cid);
+    const name = nameOf(cid);
+    if (job === null) {
+      if (!w) return [200, { ok: true, bot: view1(bot), message: `${bot.name} was not watching it` }];
+      bot.watches = bot.watches.filter((x) => x !== w);
+      forget(bot, cid);
+      save();
+      log(`${bot.name} stopped watching ${cid}`);
+      let untold = 'it is not running';
+      try {
+        const to = await runningConv(bot);
+        if (to) {
+          const [dc, dout] = await d.api.deliverText(to, watchStopNote(name, cid), noteOpts(), d.ctx);
+          untold = dc === 200 || dc === 202 ? null : (dout && dout.message) || `error ${dc}`;
+        }
+      } catch (e) { untold = (e && e.message) || String(e); }
+      return [200, { ok: true, bot: view1(bot), message: `${bot.name} stopped watching it${untold ? `; it was not told (${untold})` : ''}` }];
+    }
+    if (!w) {
+      const ownBot = bots.find((x) => x.ids.includes(cid));
+      if (ownBot) return [400, { ok: false, message: `that is ${ownBot.id === bot.id ? `${bot.name}'s own` : `a bot's (${ownBot.name})`} conversation: a bot watches only the fleet's` }];
+      let chief = [];
+      try { chief = (d.chiefIds && d.chiefIds()) || []; } catch {}
+      if (chief.map(convId).includes(cid)) return [400, { ok: false, message: "that is the Chief's conversation: a bot watches only the fleet's" }];
+      let known = true;
+      try { known = d.known ? !!d.known(cid) : true; } catch { known = false; }
+      if (!known) return [400, { ok: false, message: 'Fleet View does not know that conversation' }];
+      if (bot.watches.length >= WATCHES_MAX) return [409, { ok: false, message: `${bot.name} watches ${WATCHES_MAX} conversations already: stop one first` }];
+    } else if (w.job === job) return [200, { ok: true, bot: view1(bot), message: `${bot.name} watches it already, with that job` }];
+    if (w) w.job = job;
+    else { seen.delete(seenKey(bot, cid)); bot.watches = [...bot.watches, { id: cid, job, since: Date.now() }]; }
+    save();
+    log(`${bot.name} ${w ? 'watches' : 'now watches'} ${cid}: ${job}`);
+    const did = w ? `${bot.name} watches it now with the job "${WATCH_JOBS[job].label}"` : `${bot.name} watches it: "${WATCH_JOBS[job].label}"`;
+    try {
+      const [sc, so] = await start(bot.id);
+      const to = sc === 200 && so && so.ok !== false ? so.id : null;
+      if (!to) return [200, { ok: true, bot: view1(bot), message: `watching it; ${bot.name} did not start: ${(so && so.message) || `error ${sc}`}` }];
+      const [dc, dout] = await d.api.deliverText(to, watchSetNote(name, cid, job), noteOpts(), d.ctx);
+      if (dc !== 200 && dc !== 202) return [200, { ok: true, bot: view1(bot), message: `watching it; could not tell ${bot.name}: ${(dout && dout.message) || `error ${dc}`}` }];
+    } catch (e) { return [200, { ok: true, bot: view1(bot), message: `watching it; could not tell ${bot.name}: ${(e && e.message) || e}` }]; }
+    return [200, { ok: true, bot: view1(bot), message: `${did}; it was told` }];
+  }
+
+  // one look at a bot's watches (facts: conversation id -> its fact): a handoff moves a watch to the pickup, one gone
+  // from Fleet View ends (the bot is told, if it is running), and what is news for its job waits for delivery
+  function lookAtWatches(bot, facts, now) {
+    let changed = false;
+    for (const w of [...bot.watches]) {
+      const f = facts.get(w.id);
+      if (!f) continue;
+      const next = convId(f.next);
+      if (next && next !== w.id) {
+        const was = w.id;
+        forget(bot, was);
+        if (watchOf(bot, next)) bot.watches = bot.watches.filter((x) => x !== w); // it watched the pickup already
+        else w.id = next;
+        changed = true;
+        log(`${bot.name}'s watch on ${was} goes on in ${next} (a handoff)`);
+        continue;
+      }
+      if (f.gone) {
+        bot.watches = bot.watches.filter((x) => x !== w);
+        forget(bot, w.id);
+        pendOf(bot).gone.push({ id: w.id, name: f.name || nameOf(w.id) });
+        changed = true;
+        log(`${bot.name}'s watch on ${w.id} ended: it is gone from Fleet View`);
+        continue;
+      }
+      const k = seenKey(bot, w.id);
+      const r = watchEvent(seen.get(k), f, now);
+      seen.set(k, r.seen);
+      if (!r.event || !jobWants(w.job, r.event.what)) continue;
+      const p = pendOf(bot);
+      if (p.events.some((e) => e.id === w.id && e.key === r.event.key)) continue;
+      p.events.push({ id: w.id, name: f.name || nameOf(w.id), what: r.event.what, key: r.event.key, lastReply: f.lastReply || null, tries: 0 });
+    }
+    if (changed) save();
+  }
+  // what waits for one bot, delivered: the gone notes (to a running bot only, once), then its events in one note,
+  // the bot started first when it is not running. A note that did not go in is tried again next pass, WATCH_TRIES
+  // times at most per event
+  async function deliverWatch(bot) {
+    const p = pending.get(bot.id);
+    if (!p) return;
+    if (p.gone.length) {
+      const gone = p.gone;
+      p.gone = [];
+      const to = await runningConv(bot);
+      if (to) for (const g of gone) await d.api.deliverText(to, watchGoneNote(g.name, g.id), noteOpts(), d.ctx);
+    }
+    // only for watches it still has, as their job is now
+    p.events = p.events.filter((e) => { const w = watchOf(bot, e.id); return !!w && jobWants(w.job, e.what); });
+    const evs = [...p.events];
+    if (evs.length) {
+      const text = watchNote(evs.map((e) => ({ ...e, job: watchOf(bot, e.id).job })));
+      const [sc, so] = await start(bot.id);
+      const to = sc === 200 && so && so.ok !== false ? so.id : null;
+      let ok = false, why = '';
+      if (!to) why = `${bot.name} did not start (${(so && so.message) || `error ${sc}`})`;
+      else {
+        const [dc, dout] = await d.api.deliverText(to, text, noteOpts(), d.ctx);
+        ok = dc === 200 || dc === 202;
+        if (!ok) why = (dout && dout.message) || `error ${dc}`;
+      }
+      if (ok) {
+        const at = Date.now();
+        for (const e of evs) { const w = watchOf(bot, e.id); if (w) w.last = { at, what: e.what }; }
+        p.events = p.events.filter((e) => !evs.includes(e));
+        save();
+        log(`${bot.name}: watch note with ${evs.length} update${evs.length === 1 ? '' : 's'} (${evs.map((e) => `${e.id.slice(0, 8)} ${e.what}`).join(', ')})`);
+      } else {
+        for (const e of evs) e.tries++;
+        const dropped = evs.filter((e) => e.tries >= WATCH_TRIES);
+        p.events = p.events.filter((e) => !dropped.includes(e));
+        log(`${bot.name}: watch note not delivered (${why})${dropped.length ? `; ${dropped.length} update${dropped.length === 1 ? '' : 's'} dropped after ${WATCH_TRIES} tries` : '; tried again next pass'}`);
+      }
+    }
+    if (!p.events.length && !p.gone.length) pending.delete(bot.id);
+  }
+  // every few seconds (fleet-view.js): each watched conversation looked at (d.watchFacts, read only for the watched
+  // ids), and what is news delivered, one bot's after another of its own (firing: never beside one of its scheduled
+  // tasks). Nothing at all while no bot watches anything; with the desktop app down nothing is delivered (it waits).
+  // Resolves when every delivery this pass began has ended (the tests wait for that)
+  async function watchTick() {
+    if (d.demo || watching) return;
+    const mine = bots.filter((b) => !b.removed && b.watches.length);
+    if (!mine.length && !pending.size) return;
+    watching = true;
+    const jobs = [];
+    try {
+      if (mine.length) {
+        const now = Date.now();
+        const ids = [...new Set(mine.flatMap((b) => b.watches.map((w) => w.id)))];
+        let list = [];
+        try { list = (d.watchFacts && d.watchFacts(ids)) || []; } catch (e) { log(`watch facts failed: ${(e && e.message) || e}`); }
+        const facts = new Map(list.filter((f) => f && convId(f.id)).map((f) => [convId(f.id), f]));
+        for (const bot of mine) lookAtWatches(bot, facts, now);
+      }
+      const due = bots.filter((b) => !b.removed && !firing.has(b.id) && pending.has(b.id));
+      if (!due.length) return;
+      if ((await d.api.hostList()) === null) { if (!watchWaits) log(`watch notes wait: ${HOST_DOWN}`); watchWaits = true; return; }
+      watchWaits = false;
+      for (const bot of due) {
+        firing.add(bot.id);
+        jobs.push((async () => {
+          try { await deliverWatch(bot); } catch (e) { log(`${bot.name}: watch note failed: ${(e && e.message) || e}`); }
+          finally { firing.delete(bot.id); }
+        })());
+      }
+    } catch (e) {
+      log(`watch failed: ${(e && e.message) || e}`);
+    } finally { watching = false; }
+    await Promise.all(jobs);
+  }
+
   // bot/BRIEF.md changed since a bot's CLAUDE.md was written (a Fleet View update): written again, and a running bot is
   // told to read it (once; a bot not running reads it when it next starts)
   async function refreshBriefs() {
@@ -809,13 +1125,17 @@ function createBots(deps) {
 
   return {
     // state.bots, and GET /api/bots
-    view: () => (d.demo ? [] : listView(bots, live).map(withTasks)),
-    list: () => [200, { ok: true, bots: d.demo ? [] : listView(bots, live).map(withTasks) }],
+    view: () => (d.demo ? [] : listView(bots, live, nameOf).map(withTasks)),
+    list: () => [200, { ok: true, bots: d.demo ? [] : listView(bots, live, nameOf).map(withTasks) }],
     // the conversation each bot's row opens (its convId): fleet-view.js keeps these listed however quiet they are
     chatIds: () => (d.demo ? [] : listView(bots, live).map((v) => v.convId).filter(Boolean)),
     // ~/.fleet-view.json's bots
-    saveShape: () => bots.map((b) => ({ ...b, ids: [...b.ids], told: [...b.told] })),
+    saveShape: () => bots.map((b) => ({ ...b, ids: [...b.ids], told: [...b.told], ...(b.map ? { map: { ...b.map } } : {}),
+      watches: (b.watches || []).map((w) => ({ ...w, ...(w.last ? { last: { ...w.last } } : {}) })) })),
     create, start, update, remove, look, switchTo, tick,
+    // on the map and watching: POST /bots/:id/map and /bots/:id/watch (the page only), and the watcher (fleet-view.js
+    // runs it every few seconds)
+    setMap, setWatch, watchTick,
     // tasks and routines: the scheduler (fleet-view.js runs it every few seconds), GET and POST /bots/:id/tasks
     schedule, tasks, taskAction,
     // /state's tags, with the Chief's ids (chief.js chiefIds)
@@ -834,5 +1154,5 @@ function createBots(deps) {
   };
 }
 
-module.exports = { createBots, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
+module.exports = { createBots, watchEvent, watchNote, checkAt, readWatches, WATCH_JOBS, WATCH_SETTLE_MS, WATCHES_MAX, WATCH_TRIES, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
   startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX };

@@ -96,6 +96,8 @@
 // on another machine…" (in Workspace settings) opens keeps.js's sheet for its stays-on rule (settings.hostRules): the
 // chats it pins stay on that machine, Continue on this machine can't take them off it. The browser's own menu
 // is kept only in text inputs and the live terminal (and in Edge outside those targets).
+// Bots on the map: empty space on the map has "Add bot ▸", a bot's mascot its own menu (watch a conversation with a
+// job, its watches, Open chat, Start, Remove from map) and a conversation "Have a bot watch it ▸" (see "bots on the map").
 //
 // New sessions (term.js createSession) are listed in state.pending (and state.allSessions) as stand-ins
 // { id: 'new-<n>' or its id, pending: true, name: 'new session', state: 'NEW', repo, account, cwd } until
@@ -164,7 +166,8 @@
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects, followProjectsPick } from './projects.js';
-import { renderChats, botFace, seenNow, setPickedColors } from './chats.js';
+import { renderChats, botFace, seenNow, setPickedColors, selectChat } from './chats.js';
+import { BOT_JOBS, jobLabel, ownBots, onMap, watchesOf, botColor, botName, watchName } from './map-bots.js';
 import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
@@ -330,6 +333,10 @@ const ui = {
     return w.tab;
   },
   contextMenu: (target, x, y) => openContextMenu(target, x, y),
+  // the map's bots (map-bots.js): a bot dragged to a spot (world units), dropped on a conversation, double-clicked
+  placeBot: (id, x, y) => placeBot(id, { x, y }),
+  watchBot: (id, convId, job) => watchBot(id, convId, job),
+  openBotChat: (id) => openBotChat(id),
   // the map: a conversation dropped on another repo moves there (as the menu's "Move to workspace")
   moveSession: (id, root) => {
     const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === id);
@@ -433,6 +440,7 @@ function rebase(st) {
     b.createdAt = sh(b.createdAt);
     // its tasks' runs (bots.js tasks); a schedule's own times are wall-clock times and stay as they are
     for (const t of b.tasks || []) { t.nextRun = sh(t.nextRun); t.lastRun = sh(t.lastRun); for (const r of t.runs || []) r.at = sh(r.at); }
+    for (const w of b.watches || []) { w.since = sh(w.since); if (w.last) w.last.at = sh(w.last.at); }
   }
   for (const x of st.deploys || []) { x.createdAt = sh(x.createdAt); x.readyAt = sh(x.readyAt); }
   for (const w of st.worktrees || []) w.lastCommit = sh(w.lastCommit);
@@ -474,6 +482,7 @@ async function poll() {
     let st = await r.json();
     stateTag = r.headers.get('ETag');
     if (FIXTURE) st = rebase(st);
+    applyBotEdits(st);
     // new page code on the server (a merge changed web/ or fleet-view.js): load it, settings saved first
     if (st.build) {
       if (!pageBuild) pageBuild = st.build;
@@ -2390,6 +2399,7 @@ function openContextMenu(target, x, y) {
   }
   if (target.kind === 'conflict') { conflictMenu(target, x, y); return; }
   if (target.kind === 'file' || target.kind === 'pr') { dotMenu(target, x, y); return; }
+  if (target.kind === 'bot') { const b = botById(target.id); if (b) botMenu(b, x, y); return; }
   if (target.kind === 'repo') {
     const folder = String(target.root || '');
     if (!folder) return;
@@ -2443,7 +2453,9 @@ function openContextMenu(target, x, y) {
     if (lay) extra.push({ sep: true }, lay);
     if (accountsMenuItem()) extra.push(...(lay ? [] : [{ sep: true }]), accountsMenuItem());
     if (multi.size) extra.push({ label: `Clear selection (${multi.size})`, icon: 'close', run: () => setMulti([], 'menu') });
-    openCtxMenu({ x, y, items: [...show, addRepoMenuItem({ x, y }), ...(rmRepos ? [rmRepos] : []), ...(rmAll ? [rmAll] : []), ...extra] });
+    // the map's own: put a bot on it where the menu was opened (map-bots.js draws it)
+    const addBot = local.view === 'map' && typeof mapMod?.mapWorldAt === 'function' ? [addBotMenuItem(x, y)] : [];
+    openCtxMenu({ x, y, items: [...show, addRepoMenuItem({ x, y }), ...addBot, ...(rmRepos ? [rmRepos] : []), ...(rmAll ? [rmAll] : []), ...extra] });
     return;
   }
   const s = (view?.allSessions || state.sessions || []).find((x) => x.id === target.id);
@@ -2457,6 +2469,8 @@ function openContextMenu(target, x, y) {
   if (desk && !s.pending && !s.demo && !hosted) { const ci = continueItem(s); if (ci) items.push(ci); }
   if (desk && !s.pending && !s.demo && !singleAccount()) { const se = sendElsewhereItem(s, hosted); if (se) items.push(se); }
   items.push(...teamItems(s));
+  const bw = botWatchItem(s);
+  if (bw) items.push(bw);
   if (waitingOrderItem(s)) items.push(waitingOrderItem(s));
   // push and unpin sit at the bottom, just above Remove (Henry, 2026-10-10)
   const tail = [!s.pending && !s.demo && pushHook() ? sessionPushItem(s) : null, unpinItem(target)].filter(Boolean);
@@ -3724,6 +3738,152 @@ function raise(a) {
     };
   } catch (e) { console.warn(e); }
 }
+// ---------- bots on the map (map-bots.js draws them; Henry, 2026-10-13) ----------
+// Empty space on the map: "Add bot ▸" lists the own bots not on it (state.bots map; another machine's never), and the
+// one picked goes where the menu was opened (POST /bots/:id/map { at }). A bot's right-click (botMenu): "Watch a
+// conversation ▸" (the ones it can watch: needing Henry first, then working, then the rest by last activity) ▸ the
+// three jobs, "Watching (N) ▸" (each watch ▸ its job, Stop watching), Open chat (the Bots tab on it), Start while it
+// isn't running, and "Remove from map" (POST map at null: the server stops its watches too). A conversation's own menu
+// has "Have a bot watch it ▸" (each own bot ▸ the jobs). POST /bots/:id/watch { id, job } adds or changes one, job null
+// stops it; at most 8 a bot. Each change shows at once (botEdits, laid over every /state until its POST answers; for
+// good with ?fixture=1, where nothing answers), then the server's state wins: a refusal toasts its message in red.
+// An older server has no map or watches: the POSTs fail and say so.
+const BOT_WATCH_MAX = 8;
+const botEdits = new Map(); // bot id -> { map?, watches? } while its POST is out
+function applyBotEdits(st) {
+  if (!botEdits.size) return;
+  for (const b of st?.bots || []) { const e = b && botEdits.get(b.id); if (e) Object.assign(b, e); }
+}
+const botById = (id) => ownBots(state).find((b) => b.id === id) || null;
+const botLook = (b) => botColor(b, view || state);
+// a change to a bot: drawn at once, then POSTed; done: the toast once it's saved
+function editBot(b, change, url, body, done) {
+  botEdits.set(b.id, { ...(botEdits.get(b.id) || {}), ...change });
+  Object.assign(b, change);
+  render();
+  post(url, body).then((r) => {
+    if (FIXTURE) { if (done) toast(done, C.dim); return; } // fixture data: only recorded (window.__fvPosts)
+    botEdits.delete(b.id);
+    if (r && r.ok) { if (done) toast(done, C.dim); }
+    else toast((r && (r.message || r.error)) || 'Fleet View did not answer: it was not saved', C.red);
+    poll();
+  });
+}
+// at: world units, or null to take it off the map (its watches go with it)
+function placeBot(id, at, done = null) {
+  const b = botById(id);
+  if (!b) return false;
+  const spot = at && Number.isFinite(at.x) && Number.isFinite(at.y) ? { x: Math.round(at.x * 10) / 10, y: Math.round(at.y * 10) / 10 } : null;
+  editBot(b, spot ? { map: spot } : { map: null, watches: [] }, `/bots/${encodeURIComponent(id)}/map`, { at: spot }, done);
+  return true;
+}
+// job: 'report' | 'answer' | 'review', or null to stop watching it
+function watchBot(id, convId, job) {
+  const b = botById(id);
+  if (!b || !convId) return false;
+  const ws = watchesOf(b), had = ws.find((w) => w.id === convId);
+  const conv = watchName(had || { id: convId }, view || state);
+  if (!job && !had) return false;
+  if (job && had && had.job === job) { toast(`${botName(b)} already watches ${conv}: ${jobLabel(job)}`, C.dim); return false; }
+  if (job && !had && ws.length >= BOT_WATCH_MAX) { toast(`${botName(b)} watches ${BOT_WATCH_MAX} conversations already: stop one first`, C.red); return false; }
+  const s = sessionsOf([convId])[0];
+  const next = !job ? ws.filter((w) => w.id !== convId)
+    : had ? ws.map((w) => (w.id === convId ? { ...w, job } : w))
+    : [...ws, { id: convId, job, since: Date.now(), name: (s && s.name) || null, last: null }];
+  const done = job ? `${botName(b)} watches ${conv}: ${jobLabel(job)}` : `${botName(b)} stopped watching ${conv}`;
+  editBot(b, { watches: next }, `/bots/${encodeURIComponent(id)}/watch`, { id: convId, job: job || null }, done);
+  return true;
+}
+// its chat in the Bots tab (one with no conversation yet too)
+function openBotChat(id) {
+  if (!(state?.bots || []).some((b) => b && b.id === id)) return;
+  selectChat(`bot:${id}`);
+  if (local.view === 'chats') render(); else setView('chats');
+}
+// Start, as the Bots tab's (POST /bots/:id/start: its running conversation, else its last one resumed, else a new one)
+function startBotFromMenu(b) {
+  toast(`Starting ${botName(b)}…`, C.dim);
+  post(`/bots/${encodeURIComponent(b.id)}/start`, {}).then((r) => {
+    if (FIXTURE) return;
+    if (!r || r.ok === false) toast((r && (r.message || r.error)) || `could not start ${botName(b)}`, C.red);
+    poll();
+  });
+}
+// a conversation a bot can watch: started, no new one or demo, no overseer, not removed (nor its workspace)
+function canWatch(s) {
+  if (!s || s.pending || s.demo || s.bot || !isConvId(s.id) || isHidden(s)) return false;
+  return !(s.repo && hiddenRepoKeys().has(normRoot(s.repo.root)));
+}
+function watchableSessions() {
+  const seen = new Set(), out = [];
+  for (const s of view?.allSessions || state?.sessions || []) if (canWatch(s) && !seen.has(s.id)) { seen.add(s.id); out.push(s); }
+  const rank = (s) => (needsYou(s.state) ? 0 : s.state === 'WORKING' || s.state === 'AGENTS' ? 1 : 2);
+  return out.sort((a, b) => rank(a) - rank(b) || (b.last || 0) - (a.last || 0));
+}
+// the three jobs for one conversation, a check on the one it has
+const jobItems = (b, convId, cur) => BOT_JOBS.map(([job, label]) => ({ label, icon: cur === job ? 'check' : null, run: () => watchBot(b.id, convId, job) }));
+const stopWatchItem = (b, convId) => ({ label: 'Stop watching', icon: 'close', danger: true, run: () => watchBot(b.id, convId, null) });
+// empty space's "Add bot ▸": x, y where the menu was opened (client px), where the bot goes
+function addBotMenuItem(x, y) {
+  const bots = ownBots(state), off = bots.filter((b) => !onMap(b));
+  const quiet = (label) => ({ label: 'Add bot', icon: 'bots', children: [{ label, disabled: true }] });
+  if (!bots.length) return quiet('No bots yet: make one in the Bots tab');
+  if (!off.length) return quiet('Every bot is on the map');
+  return {
+    label: 'Add bot', icon: 'bots',
+    children: off.map((b) => ({ label: botName(b), swatch: botLook(b), note: b.live ? null : 'not running', run: () => {
+      const at = mapMod?.mapWorldAt?.(x, y);
+      if (!at) { toast('the map is not showing', C.red); return; }
+      placeBot(b.id, at, `${botName(b)} is on the map: right-click it to give it a job`);
+    } })),
+  };
+}
+// a bot's own menu (its mascot on the map)
+function botMenu(b, x, y) {
+  const ws = watchesOf(b), name = botName(b);
+  const items = [];
+  const list = watchableSessions();
+  if (!list.length) items.push({ label: 'Watch a conversation', icon: 'read', disabled: true, note: 'no conversation to watch' });
+  else {
+    items.push({ label: 'Watch a conversation', icon: 'read', scroll: true, children: list.map((s) => {
+      const w = ws.find((x) => x.id === s.id);
+      return { label: s.name || s.id.slice(0, 8), swatch: statusColor(s), note: `${s.label || s.state}${s.repo ? ` · ${s.repo.name}` : ''}`,
+        ...(w ? { badge: 'watching' } : {}), children: jobItems(b, s.id, w ? w.job : null) };
+    }) });
+  }
+  if (ws.length) {
+    items.push({ label: `Watching (${ws.length})`, icon: 'check', children: ws.map((w) => ({
+      label: watchName(w, view || state), note: jobLabel(w.job), ...(w.last && w.last.what ? { badge: String(w.last.what) } : {}),
+      children: [...jobItems(b, w.id, w.job), { sep: true }, stopWatchItem(b, w.id)],
+    })) });
+  }
+  items.push({ label: 'Open chat', icon: 'bots', run: () => openBotChat(b.id) });
+  if (!b.live) items.push({ label: 'Start', icon: 'play', run: () => startBotFromMenu(b) });
+  if (onMap(b)) {
+    const n = ws.length;
+    items.push({ sep: true }, {
+      label: 'Remove from map', icon: 'close', danger: true,
+      confirm: n ? { text: n === 1 ? 'Its watch stops too.' : `Its ${n} watches stop too.`, yes: 'Remove' } : null,
+      run: () => placeBot(b.id, null, `${name} is off the map${n ? ' and watches nothing' : ''}`),
+    });
+  }
+  openCtxMenu({ x, y, title: name, dot: botLook(b), sub: `${b.live ? 'running' : 'not running'}${ws.length ? ` · watching ${ws.length}` : ''}`, items });
+}
+// a conversation's "Have a bot watch it ▸": each own bot ▸ the jobs (and Stop watching when it watches it already)
+function botWatchItem(s) {
+  const bots = ownBots(state);
+  if (!bots.length || !canWatch(s)) return null;
+  return {
+    label: 'Have a bot watch it', icon: 'bots',
+    children: bots.map((b) => {
+      const ws = watchesOf(b), w = ws.find((x) => x.id === s.id), full = !w && ws.length >= BOT_WATCH_MAX;
+      if (full) return { label: botName(b), swatch: botLook(b), disabled: true, note: `watches ${BOT_WATCH_MAX} already` };
+      return { label: botName(b), swatch: botLook(b), note: w ? jobLabel(w.job) : b.live ? null : 'not running',
+        children: [...jobItems(b, s.id, w ? w.job : null), ...(w ? [{ sep: true }, stopWatchItem(b, s.id)] : [])] };
+    }),
+  };
+}
+
 // ---------- bot notes (botnote.js): a bot or the Chief finished a turn or needs you ----------
 // A card at the top right with its face and the line it ended on, on every view but the Bots tab (Henry,
 // 2026-10-12), from the same state.alerts (their own last n, in memory: a reload announces nothing old). A click

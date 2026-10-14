@@ -174,7 +174,8 @@
 //     of fitting everything (unless nothing would be on screen there; 0 recenters).
 //   `n` / `N`: the next / previous conversation that needs you, picked and glided to the middle.
 //   Overlay: ./map-overlay.js, when present, is mounted on the map's container with mountMapOverlay(el, API)
-//     (see overlayApi) and gets frame(now) every frame, the keys the map doesn't take, and destroy().
+//     (see overlayApi) and gets frame(now) every frame, the keys the map doesn't take, and destroy(). It draws
+//     the bots put on the map too (map-bots.js, state.bots map / watches); mapWorldAt gives "Add bot" its spot.
 //   Replay: setMapReplay(on). While on, the shell feeds the map a state rebuilt from the timeline: nothing
 //     is born or saved (spots, made during replay, are forgotten when it ends), and comets run on state.now.
 
@@ -666,6 +667,8 @@ function overlayApi() {
     lenses: () => LENSES.slice(),
     state: () => (I ? I.state : null),
     replay: () => !!(I && I.replay),
+    // the shell's ui (map-bots.js: a bot's menu, placeBot, watchBot, openBotChat)
+    ui: () => (I ? I.ui : null),
   };
 }
 // a non-conversation node's colour (the overlay's minimap)
@@ -775,6 +778,15 @@ export function mapPlaceRepo(root, clientX, clientY) {
   I.dirty = true;
   saveSpotsSoon(300, true);
   return true;
+}
+
+// "Add bot" from the map's empty-space menu (app.js): the world spot under a point (client coordinates), where the
+// bot's mascot goes (state.bots map); null when the map isn't showing
+export function mapWorldAt(clientX, clientY) {
+  if (!active() || !I.cam || !I.canvas || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const r = I.canvas.getBoundingClientRect();
+  const [x, y] = toWorld(clientX - r.left, clientY - r.top);
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
 }
 
 // Ctrl+V (app.js): the workspace whose group reaches a point on the map (client coordinates), the nearest one,

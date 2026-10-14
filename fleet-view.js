@@ -7020,6 +7020,17 @@ function chiefWatchFacts(chiefIds) {
     .map((e) => ({ to: successorOf(e.to) || e.to, t: e.t }));
   return { now, sessions: rows, orders, conflicts: st.conflicts.map((c) => ({ id: c.id, kind: c.kind, label: c.label, sessions: c.sessions })) };
 }
+// What a bot's watches read every few seconds (bots.js watchTick), for the watched ids only and straight from the raw
+// sessions (no buildState): its name, state, last reply (plain, ≤ 600) and when it came; next, the pickup when it
+// handed off (successorOf); gone, when it was removed from the map, or Fleet View lists it no more and its log is gone
+function botWatchFacts(ids) {
+  return (ids || []).map((id) => {
+    const s = sessions.get(id);
+    const next = successorOf(id);
+    return { id, name: nameNow(id, null) || null, state: s ? s.state || null : null, lastReply: s && s.lastReply ? plain(s.lastReply, 600) : null,
+      replyAt: s && s.replyAt ? Math.round(s.replyAt) : 0, gone: hiddenNow(id) || (!s && !conversationLog(id)), next: next && next !== id ? next : null };
+  });
+}
 {
   const HOSTJS = require(path.join(__dirname, 'desktop', 'host.js'));
   CHIEF = CHIEF_JS.createChief({
@@ -7039,6 +7050,9 @@ function chiefWatchFacts(chiefIds) {
     exists: (id) => !!conversationLog(id),
     turnInfo: (id) => apiCtx.turnInfo(id),
     sessionsFile: HOSTJS.sessionsFile(), trustFolder, accounts: () => accountsHere(), usage: () => (DEMO ? {} : USAGE.view()), rename: (id, name) => renameSession(id, name),
+    // watching (bots.js watchTick): the watched conversations' facts, and the checks and names POST /bots/:id/watch needs
+    watchFacts: botWatchFacts, known: (id) => sessions.has(id) || !!conversationLog(id), nameOf: (id) => { const n = nameNow(id, null); return typeof n === 'string' && n ? n : null; },
+    chiefIds: () => (CHIEF ? CHIEF.chiefIds() : []),
   });
   apiCtx.bots = { list: () => BOTS.list(), create: (b) => BOTS.create(b), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id), look: (b) => BOTS.look(b) };
   apiCtx.botOf = (id) => BOTS.vouch(id);
@@ -8084,7 +8098,10 @@ function handleRequest(req, res) {
     // removes one, /bots/:id/switch switches a dynamic one's model or effort before a message (Dynamic: chats-model.js
     // sizeTask); each answers { ok, bot?, key?, id?, message? }. Only the page itself (its Origin, as /live) makes,
     // changes, removes or switches one: a bot's brief is its standing orders (the API's take only Henry's phone, api.js)
-    // A bot's tasks (bot-tasks.js): POST /bots/:id/tasks/:taskId { action: pause | resume | run | delete }, the page only
+    // A bot's tasks (bot-tasks.js): POST /bots/:id/tasks/:taskId { action: pause | resume | run | delete }, the page only.
+    // The map and watching, the page only too: /bots/:id/map { at: { x, y } | null } puts it on the map, moves it or takes
+    // it off (its watches stop); /bots/:id/watch { id, job: report | answer | review | null } watches a conversation
+    // with a job, changes the job, or (null) stops (bots.js setMap, setWatch)
     const taskRoute = /^\/bots\/([0-9a-f]{12})\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/.exec(pathname);
     if (taskRoute) {
       return readBody(req, res, (b) => {
@@ -8093,13 +8110,14 @@ function handleRequest(req, res) {
         BOTS.taskAction(taskRoute[1], taskRoute[2], b).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
       });
     }
-    const botRoute = /^\/bots(?:\/([0-9a-f]{12})(?:\/(start|remove|switch))?)?$/.exec(pathname);
+    const botRoute = /^\/bots(?:\/([0-9a-f]{12})(?:\/(start|remove|switch|map|watch))?)?$/.exec(pathname);
     if (botRoute) {
       return readBody(req, res, (b) => {
         if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
         const [, bid, verb] = botRoute;
         if (verb !== 'start' && !liveCtx.authorize(req)) return sendJson(res, 403, { ok: false, message: 'only the Bots tab makes, changes, removes or switches a bot' });
-        const r = !bid ? BOTS.create(b) : verb === 'start' ? BOTS.start(bid) : verb === 'remove' ? BOTS.remove(bid) : verb === 'switch' ? BOTS.switchTo(bid, b) : BOTS.update(bid, b);
+        const r = !bid ? BOTS.create(b) : verb === 'start' ? BOTS.start(bid) : verb === 'remove' ? BOTS.remove(bid) : verb === 'switch' ? BOTS.switchTo(bid, b)
+          : verb === 'map' ? BOTS.setMap(bid, b) : verb === 'watch' ? BOTS.setWatch(bid, b) : BOTS.update(bid, b);
         Promise.resolve(r).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
       });
     }
@@ -8445,6 +8463,8 @@ function startWeb() {
     every(5000, 'bots', () => { BOTS.tick(); });
     // the bots' tasks and routines: each one that comes due is delivered to its bot (bots.js schedule)
     every(5000, 'bot-tasks', () => { BOTS.schedule(); });
+    // the bots' watches: a watched conversation's finished turn, question, error or stall goes to its bot (bots.js watchTick)
+    every(5000, 'bot-watch', () => { BOTS.watchTick(); });
     // messages and orders that waited for a menu before the last restart (api.js's queue)
     API.startQueue(apiCtx);
   });

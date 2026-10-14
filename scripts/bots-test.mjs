@@ -188,7 +188,8 @@ test('state.bots: not the removed ones, newest first, convId the running one els
   const bots = [mk(BID, T, { ids: [id(1), id(2)] }), mk(BID2, T + 1), mk('cccccccccccc', T + 2, { removed: true })];
   const v = B.listView(bots, new Map([[BID2, { id: id(7) }]]));
   assert.deepEqual(v.map((x) => x.id), [BID2, BID]);
-  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'color', 'convId', 'createdAt', 'effort', 'folder', 'id', 'ids', 'live', 'model', 'name', 'shape']);
+  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'color', 'convId', 'createdAt', 'effort', 'folder', 'id', 'ids', 'live', 'map', 'model', 'name', 'shape', 'watches']);
+  assert.equal(v[0].map, null); assert.deepEqual(v[0].watches, []);
   assert.equal(v[0].shape, null); assert.equal(v[0].color, null);
   assert.deepEqual(B.listView([mk(BID, T, { shape: 'heart', color: '#ff6b80' })], new Map()).map((x) => [x.shape, x.color]), [['heart', '#ff6b80']]);
   assert.equal(v[0].convId, id(7)); assert.equal(v[0].live, true);
@@ -249,6 +250,108 @@ test('api.js: the Chief and the bots are overseers; the API lists the bot routes
   assert.equal(B.botOfRole('chief'), null);
 });
 
+// ---------- on the map and watching ----------
+test('the registry as saved keeps a map spot and watches that make sense, and drops the rest', () => {
+  const one = (o) => B.loadBots([{ id: BID, name: 'Web', folder: path.join(dir, 'w'), createdAt: T, ids: [], told: [], ...o }], dir)[0];
+  assert.deepEqual(one({ map: { x: 12.345, y: -3 } }).map, { x: 12.3, y: -3 });
+  assert.deepEqual(one({ map: { x: 1e9, y: -1e9 } }).map, { x: 100000, y: -100000 }); // kept within the map
+  for (const bad of ['x', null, { x: '1', y: 2 }, { x: 1 }, { x: NaN, y: 0 }, { x: Infinity, y: 0 }]) assert.ok(!('map' in one({ map: bad })), JSON.stringify(bad));
+  assert.deepEqual(one({}).watches, []);
+  const U = id(70).toUpperCase();
+  const w = one({ watches: [
+    { id: U, job: 'report', since: T, last: { at: T + 1, what: 'asks' } },
+    { id: id(70), job: 'answer', since: T }, // the same conversation again
+    { id: id(71), job: 'boss', since: T }, // no such job
+    { id: 'nope', job: 'report', since: T },
+    { id: id(72), job: 'review', since: 'soon', last: { at: T, what: 'exploded' } },
+    { id: id(73), job: 'constructor' },
+    null,
+  ] }).watches;
+  assert.deepEqual(w, [{ id: id(70), job: 'report', since: T, last: { at: T + 1, what: 'asks' } }, { id: id(72), job: 'review', since: 0 }]);
+  const many = one({ watches: Array.from({ length: 12 }, (_, i) => ({ id: id(100 + i), job: 'report', since: T })) }).watches;
+  assert.equal(many.length, B.WATCHES_MAX);
+  // a removed bot is neither on the map nor watching
+  const gone = one({ removed: true, map: { x: 1, y: 2 }, watches: [{ id: id(70), job: 'report', since: T }] });
+  assert.ok(!('map' in gone)); assert.deepEqual(gone.watches, []);
+});
+test('POST /bots/:id/map\'s at: { x, y } numbers (rounded, kept within the map) or null', () => {
+  assert.deepEqual(B.checkAt({ x: 1.26, y: -0.04 }), { at: { x: 1.3, y: 0 } });
+  assert.deepEqual(B.checkAt(null), { at: null });
+  for (const bad of [undefined, 'x', 5, {}, { x: 1 }, { x: '1', y: '2' }, { x: NaN, y: 1 }]) assert.ok(B.checkAt(bad).err, JSON.stringify(bad));
+});
+test('the watch jobs: report, answer, review, each with the page\'s label and the line for the bot', () => {
+  assert.deepEqual(Object.keys(B.WATCH_JOBS), ['report', 'answer', 'review']);
+  assert.deepEqual(Object.values(B.WATCH_JOBS).map((j) => j.label), ['Tell me when it needs me', 'Answer its questions', "Review its work when it's done"]);
+  for (const j of Object.values(B.WATCH_JOBS)) assert.ok(j.line.includes('<id>'));
+});
+test('watchEvent: the first sight only records; an event once the state held 10 s, once per situation', () => {
+  const S = B.WATCH_SETTLE_MS;
+  let r = B.watchEvent(null, { state: 'ASKING', replyAt: T - 5e3 }, T);
+  assert.equal(r.event, null);
+  // asking already when first seen (a restart, a new watch): never news, however long it lasts
+  r = B.watchEvent(r.seen, { state: 'ASKING', replyAt: T - 5e3 }, T + S + 1);
+  assert.equal(r.event, null);
+  // it works, then rests with a new reply: finished, once it held 10 s from that reply
+  r = B.watchEvent(r.seen, { state: 'WORKING', replyAt: T - 5e3 }, T + 20e3);
+  assert.equal(r.event, null);
+  r = B.watchEvent(r.seen, { state: 'IDLE', replyAt: T + 24e3 }, T + 25e3);
+  assert.equal(r.event, null);
+  r = B.watchEvent(r.seen, { state: 'IDLE', replyAt: T + 24e3 }, T + 24e3 + S - 1);
+  assert.equal(r.event, null, 'not settled yet');
+  r = B.watchEvent(r.seen, { state: 'IDLE', replyAt: T + 24e3 }, T + 25e3 + S);
+  assert.deepEqual(r.event, { what: 'finished', key: `finished:${T + 24e3}` });
+  r = B.watchEvent(r.seen, { state: 'IDLE', replyAt: T + 24e3 }, T + 60e3);
+  assert.equal(r.event, null, 'once');
+  // a newer reply while it stays idle (a turn between two looks): finished again, for that reply
+  r = B.watchEvent(r.seen, { state: 'DONE', replyAt: T + 61e3 }, T + 62e3);
+  assert.equal(r.event, null); // DONE is a rest too: held from the new reply
+  r = B.watchEvent(r.seen, { state: 'DONE', replyAt: T + 61e3 }, T + 62e3 + S);
+  assert.deepEqual(r.event, { what: 'finished', key: `finished:${T + 61e3}` });
+  // a flicker: asking for 5 s, then working again, is no news
+  let t = T + 100e3;
+  r = B.watchEvent(r.seen, { state: 'ASKING', replyAt: T + 61e3 }, t);
+  r = B.watchEvent(r.seen, { state: 'ASKING', replyAt: T + 61e3 }, t + 5e3);
+  assert.equal(r.event, null);
+  r = B.watchEvent(r.seen, { state: 'WORKING', replyAt: T + 61e3 }, t + 6e3);
+  assert.equal(r.event, null);
+  // each kind: asks (ASKING or QUESTION, one situation), error, stalled
+  const kind = (state, seen) => {
+    let x = B.watchEvent(seen, { state, replyAt: T + 61e3 }, t += 1e3);
+    assert.equal(x.event, null);
+    x = B.watchEvent(x.seen, { state, replyAt: T + 61e3 }, t += S);
+    return x;
+  };
+  r = kind('QUESTION', r.seen); assert.equal(r.event.what, 'asks'); assert.match(r.event.key, /^asks:\d+$/);
+  const asked = r.event.key;
+  r = B.watchEvent(r.seen, { state: 'ASKING', replyAt: T + 61e3 }, t += S); // a menu after the question: the same situation
+  assert.equal(r.event, null);
+  r = kind('ERROR', r.seen); assert.equal(r.event.what, 'error');
+  r = kind('STALLED', r.seen); assert.equal(r.event.what, 'stalled');
+  r = kind('QUESTION', r.seen); assert.equal(r.event.what, 'asks'); assert.notEqual(r.event.key, asked); // asking again later: news again
+  // a rest with no newer reply (interrupted), or not listed: nothing
+  r = kind('IDLE', r.seen); assert.equal(r.event, null);
+  r = kind(null, r.seen); assert.equal(r.event, null);
+  // first sight at rest: its last reply is not news
+  r = B.watchEvent(null, { state: 'IDLE', replyAt: T }, T + 1);
+  assert.equal(B.watchEvent(r.seen, { state: 'IDLE', replyAt: T }, T + 60e3).event, null);
+});
+test('the watch note: one block per update, the job line with the id in it', () => {
+  const X = id(70), Y = id(71);
+  const one = B.watchNote([{ id: X, name: 'Fix "login"', what: 'finished', lastReply: 'Merged\n#12.', job: 'report' }]);
+  assert.equal(one, [`[Fleet View] Watch: "Fix 'login'" (${X}) finished its turn.`, 'Its last reply: Merged #12.',
+    `Your job for it: tell Henry in one or two lines what happened and whether he needs to do anything (\`fv read ${X}\` for more).`].join('\n'));
+  const two = B.watchNote([{ id: X, name: 'A', what: 'asks', lastReply: null, job: 'answer' }, { id: Y, name: null, what: 'error', lastReply: 'x'.repeat(500), job: 'review' }]).split('\n');
+  assert.equal(two[0], '[Fleet View] Watch: 2 updates.');
+  assert.equal(two[1], '');
+  assert.equal(two[2], `"A" (${X}) is asking something.`);
+  assert.equal(two[3], 'Its last reply: none');
+  assert.ok(two[4].startsWith(`Your job for it: when it asks something`) && two[4].includes(`\`fv menu ${X}\``) && two[4].includes('--from <your id>'));
+  assert.equal(two[5], '');
+  assert.equal(two[6], `"${Y.slice(0, 8)}" (${Y}) hit an error.`); // no name: the start of its id
+  assert.equal(two[7].length, 'Its last reply: '.length + 400);
+  assert.ok(two[8].includes(`\`fv transcript ${Y}\``));
+});
+
 // ---------- the server loop, against a fake host ----------
 const sessionsFile = path.join(dir, 'sessions.json');
 const writeFile = (sessions) => {
@@ -260,15 +363,19 @@ let seq = 100;
 function harness(o = {}) {
   const base = o.base || fs.mkdtempSync(path.join(dir, 'base-'));
   let list = o.list || [];
-  const calls = { deliver: [], startBot: [], openBot: [], end: [], trust: [], rename: [], switch: [], hostList: 0 };
+  const calls = { deliver: [], startBot: [], openBot: [], end: [], trust: [], rename: [], switch: [], hostList: 0, facts: [] };
   let saved = o.saved || [];
   const logs = new Set(o.logs || []); // conversation ids whose log is on disk
   const promptAt = new Map();
+  // watching: the watched conversations' facts (id -> fact), the ones Fleet View knows, their names, the Chief's ids
+  const facts = new Map(), known = new Set(), names = new Map(), chief = [];
+  let down = !!o.down, deliverCode = null;
   const roleOfConv = (cid) => { const b = bots._state().bots.find((x) => x.ids.includes(cid)); return b ? `bot:${b.id}` : null; };
   const api = {
-    hostList: async () => { calls.hostList++; return o.down ? null : list; },
+    hostList: async () => { calls.hostList++; return down ? null : list; },
     deliverText: async (to, text, opts) => {
       calls.deliver.push({ to, text, opts });
+      if (deliverCode) return [deliverCode, { ok: false, message: 'it did not go in' }];
       if (opts.onSent) opts.onSent(to, Date.now(), 'idle');
       return [200, { ok: true, id: to }];
     },
@@ -298,9 +405,12 @@ function harness(o = {}) {
     api, ctx: {}, saved, save: () => { saved = bots.saveShape(); }, log: () => {}, demo: !!o.demo,
     exists: (x) => logs.has(x), turnInfo: (x) => ({ promptAt: promptAt.get(x) || 0 }), sessionsFile,
     trustFolder: (f) => calls.trust.push(f), accounts: () => ['A', 'B'], rename: (x, name) => calls.rename.push({ id: x, name }),
+    watchFacts: (ids) => { calls.facts.push([...ids]); return ids.filter((x) => facts.has(x)).map((x) => ({ id: x, name: names.get(x) || null, ...facts.get(x) })); },
+    known: (x) => known.has(x) || logs.has(x), nameOf: (x) => names.get(x) || null, chiefIds: () => chief,
     base, template: B.TEMPLATE_FILE,
   });
-  return { bots, calls, base, logs, promptAt, setList: (l) => { list = l; }, list: () => list, saved: () => saved };
+  return { bots, calls, base, logs, promptAt, facts, known, names, chief, setList: (l) => { list = l; }, list: () => list, saved: () => saved,
+    setDown: (v) => { down = v; }, setDeliver: (c) => { deliverCode = c; } };
 }
 const realNow = Date.now;
 const clock = (t) => { Date.now = () => t; };
@@ -552,6 +662,208 @@ await (async () => {
     await h.bots.tick();
     assert.deepEqual(h.calls.end, [made.id, made.id]);
     n++; console.log('ok remove: ended, off the list, still tagged, folder kept');
+  }
+  // on the map (POST /bots/:id/map: put, move, off) and watching (POST /bots/:id/watch: add, change the job, stop, the
+  // refusals); off the map and removing stop every watch
+  {
+    const h = harness();
+    const t = T + 5e5;
+    clock(t);
+    const [, made] = await h.bots.create({ name: 'Pablito' });
+    const bid = made.bot.id, mine = made.id;
+    assert.equal(made.bot.map, null); assert.deepEqual(made.bot.watches, []);
+    assert.equal(h.bots.setMap(bid, {})[0], 400);
+    assert.equal(h.bots.setMap(bid, { at: { x: 'a', y: 1 } })[0], 400);
+    assert.equal(h.bots.setMap('ffffffffffff', { at: { x: 1, y: 1 } })[0], 404);
+    let [mc, mo] = h.bots.setMap(bid, { at: { x: 10.04, y: -20 } });
+    assert.equal(mc, 200); assert.deepEqual(mo.bot.map, { x: 10, y: -20 }); assert.match(mo.message, /put Pablito on the map/);
+    [, mo] = h.bots.setMap(bid, { at: { x: 30, y: 40 } });
+    assert.deepEqual(mo.bot.map, { x: 30, y: 40 }); assert.match(mo.message, /moved/);
+    assert.deepEqual(h.saved()[0].map, { x: 30, y: 40 });
+    assert.deepEqual(h.bots.view()[0].map, { x: 30, y: 40 });
+    // the refusals: not a conversation id, no such job (left out is not a stop), its own conversation, another bot's,
+    // the Chief's, one Fleet View does not know; nobody is told
+    const X = id(700), Y = id(701);
+    h.known.add(X); h.known.add(Y); h.names.set(X, 'Fix login');
+    const [, other] = await h.bots.create({ name: 'Other' });
+    h.chief.push(id(800)); h.known.add(id(800));
+    const sent = h.calls.deliver.length;
+    assert.equal((await h.bots.setWatch(bid, { id: 'nope', job: 'report' }))[0], 400);
+    assert.equal((await h.bots.setWatch(bid, { id: X, job: 'boss' }))[0], 400);
+    assert.equal((await h.bots.setWatch(bid, { id: X }))[0], 400);
+    assert.match((await h.bots.setWatch(bid, { id: mine, job: 'report' }))[1].message, /Pablito's own/);
+    assert.match((await h.bots.setWatch(bid, { id: other.id, job: 'report' }))[1].message, /a bot's \(Other\)/);
+    assert.match((await h.bots.setWatch(bid, { id: id(800), job: 'report' }))[1].message, /Chief/);
+    assert.equal((await h.bots.setWatch(bid, { id: id(801), job: 'report' }))[0], 400);
+    assert.equal((await h.bots.setWatch('ffffffffffff', { id: X, job: 'report' }))[0], 404);
+    assert.equal(h.calls.deliver.length, sent);
+    // add: the bot is told once, as Fleet View
+    const [wc, wo] = await h.bots.setWatch(bid, { id: X.toUpperCase(), job: 'report' });
+    assert.equal(wc, 200); assert.equal(wo.ok, true); assert.match(wo.message, /it was told/);
+    assert.deepEqual(wo.bot.watches, [{ id: X, job: 'report', since: t, name: 'Fix login', last: null }]);
+    const note = h.calls.deliver.at(-1);
+    assert.equal(note.to, mine);
+    assert.equal(note.text, `[Fleet View] Henry set you to watch "Fix login" (${X}) with the job: tell Henry in one or two lines what happened and whether he needs to do anything (\`fv read ${X}\` for more). Fleet View will message you when its turn ends, it asks something, errors or stalls; you never need to poll it. Reply with just "ok".`);
+    assert.deepEqual(note.opts, { kind: 'message', queue: true, open: false, via: 'server' });
+    // the same job again: nothing to tell; a new job: told again, since kept
+    const n1 = h.calls.deliver.length;
+    assert.match((await h.bots.setWatch(bid, { id: X, job: 'report' }))[1].message, /already/);
+    assert.equal(h.calls.deliver.length, n1);
+    const [, jo] = await h.bots.setWatch(bid, { id: X, job: 'review' });
+    assert.equal(jo.bot.watches[0].job, 'review'); assert.equal(jo.bot.watches[0].since, t);
+    assert.equal(h.calls.deliver.length, n1 + 1); assert.match(h.calls.deliver.at(-1).text, /with the job: when it says its work is done/);
+    // not running: started (its last conversation resumed) to be told; it need not be on the map
+    h.setList(h.list().map((x) => ({ ...x, alive: false })));
+    await h.bots.setWatch(bid, { id: Y, job: 'answer' });
+    assert.deepEqual(h.calls.openBot, [mine]);
+    assert.equal(h.calls.deliver.at(-1).to, mine);
+    assert.ok(h.calls.deliver.at(-1).text.startsWith(`[Fleet View] Henry set you to watch "${Y.slice(0, 8)}" (${Y}) with the job: when it asks something`));
+    // 8 at most
+    for (let i = 0; i < 6; i++) { h.known.add(id(710 + i)); assert.equal((await h.bots.setWatch(bid, { id: id(710 + i), job: 'report' }))[0], 200); }
+    h.known.add(id(720));
+    assert.equal((await h.bots.setWatch(bid, { id: id(720), job: 'report' }))[0], 409);
+    assert.equal(h.saved().find((x) => x.id === bid).watches.length, 8);
+    // stop: told while it runs, never started for it
+    const [sc2, so2] = await h.bots.setWatch(bid, { id: X, job: null });
+    assert.equal(sc2, 200); assert.equal(so2.bot.watches.length, 7);
+    assert.equal(h.calls.deliver.at(-1).text, `[Fleet View] Henry stopped your watch on "Fix login" (${X}). Reply with just "ok".`);
+    h.setList(h.list().map((x) => ({ ...x, alive: false })));
+    const opened = h.calls.openBot.length, started = h.calls.startBot.length, n2 = h.calls.deliver.length;
+    const [, so3] = await h.bots.setWatch(bid, { id: Y, job: null });
+    assert.match(so3.message, /not told \(it is not running\)/);
+    assert.equal(h.calls.deliver.length, n2); assert.equal(h.calls.openBot.length, opened); assert.equal(h.calls.startBot.length, started);
+    assert.match((await h.bots.setWatch(bid, { id: Y, job: null }))[1].message, /was not watching/);
+    // the note did not go in: watching all the same, and the answer says so
+    h.setDeliver(500);
+    h.known.add(id(721));
+    const [fc, fo] = await h.bots.setWatch(bid, { id: id(721), job: 'report' });
+    assert.equal(fc, 200); assert.equal(fo.ok, true); assert.match(fo.message, /^watching it; could not tell Pablito/);
+    h.setDeliver(null);
+    // off the map: every watch stops, the bot is not told of each
+    const n3 = h.calls.deliver.length;
+    const [oc, oo] = h.bots.setMap(bid, { at: null });
+    assert.equal(oc, 200); assert.equal(oo.bot.map, null); assert.deepEqual(oo.bot.watches, []);
+    assert.match(oo.message, /off the map and stopped its 7 watches/);
+    assert.equal(h.calls.deliver.length, n3);
+    assert.ok(!('map' in h.saved().find((x) => x.id === bid))); assert.deepEqual(h.saved().find((x) => x.id === bid).watches, []);
+    // removed: off the map and watching nothing
+    h.bots.setMap(bid, { at: { x: 1, y: 2 } });
+    await h.bots.setWatch(bid, { id: X, job: 'report' });
+    assert.equal(h.saved().find((x) => x.id === bid).watches.length, 1);
+    await h.bots.remove(bid);
+    const gone = h.saved().find((x) => x.id === bid);
+    assert.ok(!('map' in gone)); assert.deepEqual(gone.watches, []);
+    assert.equal(h.bots.setMap(bid, { at: { x: 1, y: 2 } })[0], 404);
+    assert.equal((await h.bots.setWatch(bid, { id: X, job: 'report' }))[0], 404);
+    n++; console.log('ok map and watch: put, move, off; add, change, stop, refusals; off the map and remove stop every watch');
+  }
+  // the watcher (watchTick): first sight, settle, one note for several, the job's filter, started first, the desktop
+  // app down, retries then dropped, a handoff moves the watch, one gone ends it
+  {
+    const h = harness();
+    let t = T + 1e6;
+    clock(t);
+    const [, made] = await h.bots.create({ name: 'Pablito' });
+    const bid = made.bot.id, mine = made.id;
+    const X = id(730), Y = id(731), Z = id(732);
+    for (const c of [X, Y, Z]) h.known.add(c);
+    h.names.set(X, 'Fix login'); h.names.set(Y, 'Docs'); h.names.set(Z, 'Deploy');
+    const tick = async (ms) => { clock(t += ms); await h.bots.watchTick(); };
+    await tick(0);
+    assert.equal(h.calls.facts.length, 0); // nothing watched: nothing read
+    await h.bots.setWatch(bid, { id: X, job: 'report' });
+    await h.bots.setWatch(bid, { id: Y, job: 'review' });
+    await h.bots.setWatch(bid, { id: Z, job: 'answer' });
+    const told = h.calls.deliver.length; // the three "set you to watch" notes
+    h.facts.set(X, { state: 'WORKING', lastReply: 'old', replyAt: t - 60e3 });
+    h.facts.set(Y, { state: 'WORKING', lastReply: null, replyAt: 0 });
+    h.facts.set(Z, { state: 'WORKING', lastReply: null, replyAt: 0 });
+    await tick(0); // first sight
+    assert.deepEqual([...h.calls.facts.at(-1)].sort(), [X, Y, Z].sort()); // only the watched ids are read
+    // X finishes, Y asks (review: not its job), Z errors; nothing until each held 10 s
+    clock(t += 5e3);
+    h.facts.set(X, { state: 'IDLE', lastReply: 'Merged #12.\nAll green.', replyAt: t - 1e3 });
+    h.facts.set(Y, { state: 'ASKING', lastReply: null, replyAt: 0 });
+    h.facts.set(Z, { state: 'ERROR', lastReply: 'API Error: 529', replyAt: 0 });
+    await tick(0);
+    assert.equal(h.calls.deliver.length, told);
+    await tick(11e3);
+    assert.equal(h.calls.deliver.length, told + 1);
+    const note = h.calls.deliver.at(-1);
+    assert.equal(note.to, mine); assert.equal(note.opts.via, 'server'); assert.equal(note.opts.open, false);
+    assert.equal(note.text.split('\n')[0], '[Fleet View] Watch: 2 updates.');
+    assert.ok(note.text.includes(`\n\n"Fix login" (${X}) finished its turn.\nIts last reply: Merged #12. All green.\nYour job for it: tell Henry`));
+    assert.ok(note.text.includes(`\n\n"Deploy" (${Z}) hit an error.\nIts last reply: API Error: 529\nYour job for it: when it asks something`));
+    assert.ok(!note.text.includes(Y));
+    const v = h.bots.view()[0].watches;
+    assert.deepEqual(v.map((w) => [w.id, w.name, w.last && w.last.what]), [[X, 'Fix login', 'finished'], [Y, 'Docs', null], [Z, 'Deploy', 'error']]);
+    assert.equal(v[0].last.at, t);
+    assert.deepEqual(h.saved()[0].watches[0].last, { at: t, what: 'finished' }); // saved: the page shows it after a restart
+    await tick(11e3);
+    assert.equal(h.calls.deliver.length, told + 1); // once
+    // not running: started first (its last conversation resumed), then told
+    h.setList(h.list().map((x) => ({ ...x, alive: false })));
+    h.facts.set(Z, { state: 'WORKING', lastReply: null, replyAt: 0 });
+    await tick(1e3);
+    h.facts.set(Z, { state: 'QUESTION', lastReply: 'Which branch?', replyAt: 0 });
+    await tick(1e3);
+    await tick(11e3);
+    assert.deepEqual(h.calls.openBot, [mine]);
+    assert.equal(h.calls.deliver.at(-1).text.split('\n')[0], `[Fleet View] Watch: "Deploy" (${Z}) is asking something.`);
+    assert.equal(h.calls.deliver.at(-1).text.split('\n')[1], 'Its last reply: Which branch?');
+    // the desktop app down: nothing goes in, and it does once the app is back
+    const d0 = h.calls.deliver.length;
+    h.setDown(true);
+    h.facts.set(X, { state: 'WORKING', lastReply: 'x', replyAt: t - 60e3 });
+    await tick(1e3);
+    clock(t += 1e3);
+    h.facts.set(X, { state: 'IDLE', lastReply: 'Second fix shipped.', replyAt: t });
+    await tick(0);
+    await tick(11e3);
+    assert.equal(h.calls.deliver.length, d0);
+    h.setDown(false);
+    await tick(5e3);
+    assert.equal(h.calls.deliver.length, d0 + 1);
+    assert.match(h.calls.deliver.at(-1).text, /^\[Fleet View\] Watch: "Fix login" .* finished its turn\.\nIts last reply: Second fix shipped\./);
+    // a note that does not go in: tried again each pass, 3 times, then dropped
+    h.setDeliver(500);
+    const d1 = h.calls.deliver.length;
+    h.facts.set(X, { state: 'WORKING', lastReply: 'x', replyAt: t - 60e3 });
+    await tick(1e3);
+    clock(t += 1e3);
+    h.facts.set(X, { state: 'IDLE', lastReply: 'Third.', replyAt: t });
+    await tick(0);
+    await tick(11e3); await tick(5e3); await tick(5e3); await tick(5e3);
+    assert.equal(h.calls.deliver.length, d1 + 3);
+    h.setDeliver(null);
+    await tick(5e3);
+    assert.equal(h.calls.deliver.length, d1 + 3);
+    assert.equal(h.saved()[0].watches[0].last.what, 'finished'); // still the last one that went in
+    // a handoff: the watch goes on in the pickup (saved), no note; the pickup's first sight is no news
+    const X2 = id(740);
+    h.facts.set(X, { state: 'DONE', lastReply: 'Handing off.', replyAt: t, next: X2 });
+    await tick(1e3);
+    assert.deepEqual(h.saved()[0].watches.map((w) => [w.id, w.job]), [[X2, 'report'], [Y, 'review'], [Z, 'answer']]);
+    h.facts.set(X2, { state: 'IDLE', lastReply: 'Picked up.', replyAt: t });
+    await tick(11e3); await tick(11e3);
+    assert.equal(h.calls.deliver.length, d1 + 3);
+    // gone from Fleet View: the watch ends, and the running bot is told
+    h.facts.set(Y, { state: 'WORKING', gone: true });
+    await tick(1e3);
+    assert.deepEqual(h.saved()[0].watches.map((w) => w.id), [X2, Z]);
+    assert.equal(h.calls.deliver.at(-1).text, `[Fleet View] "Docs" (${Y}), which you were watching, is gone from Fleet View; the watch ended. Reply with just "ok".`);
+    // gone while the bot is not running: the watch ends, nobody is started for it
+    h.setList(h.list().map((x) => ({ ...x, alive: false })));
+    const o1 = h.calls.openBot.length, d2 = h.calls.deliver.length;
+    h.facts.set(Z, { gone: true });
+    await tick(1e3);
+    assert.deepEqual(h.saved()[0].watches.map((w) => w.id), [X2]);
+    assert.equal(h.calls.openBot.length, o1); assert.equal(h.calls.deliver.length, d2);
+    // the demo watches nothing
+    const demo = harness({ demo: true });
+    await demo.bots.watchTick();
+    assert.equal(demo.calls.facts.length, 0);
+    n++; console.log('ok the watcher: settle, once, one note for several, job filter, started first, host down, retries, handoff, gone');
   }
 
   {

@@ -9,6 +9,8 @@
 //   panTo(worldX, worldY, zoom?), select(nodeId), lens(), setLens(name), state() -> the /state last drawn
 //
 // What it shows, all in the frosted look of the map's tooltip and legend (GLASS_BOX, copied from map.js):
+//   Bots: the bots put on the map, their mascots, drags and watch lines (map-bots.js, in a layer of its own under
+//     the pointers; it reaches the shell through api.ui()).
 //   Edge pointers: every conversation that needs you (asking, a question, stalled, an error) and sits off screen
 //     gets a small pill at the edge of the view, its chevron turned toward it, with its name and how long it has
 //     waited ("asking · 12m"), in its state colour. A click glides the view to it and picks it. Pointers that
@@ -35,6 +37,7 @@
 
 import { icon } from './icons.js';
 import { createReplay, replaySummary } from './replay.js';
+import { mountMapBots } from './map-bots.js';
 
 const COL = {
   text: '#eef0fa', dim: '#8a92b2', faint: '#4c5372', gold: '#ffc24a', violet: '#a47bff', cyan: '#3fd8ff', mint: '#3dffa8', red: '#ff4d5e',
@@ -117,6 +120,11 @@ export function mountMapOverlay(el, api) {
   style.textContent = STYLE;
   root.appendChild(style);
   el.appendChild(root);
+  // the bots put on the map (map-bots.js): over the canvas, under the edge pointers and the controls
+  const botLayer = div('position:absolute;inset:0;pointer-events:none;overflow:hidden');
+  root.appendChild(botLayer);
+  let bots = null;
+  try { bots = mountMapBots(botLayer, api); } catch (e) { console.error(e); }
   const ptrLayer = div('position:absolute;inset:0;pointer-events:none;overflow:hidden');
   root.appendChild(ptrLayer);
 
@@ -442,6 +450,7 @@ export function mountMapOverlay(el, api) {
     const st = call('state');
     if (st && !st.replay) O.live = st;
     updateLens();
+    if (bots) { try { bots.frame(now); } catch (e) { console.error(e); } }
     updatePointers(cam, nodes, st);
     updateMini(cam, nodes, typeof now === 'number' ? now : performance.now());
   }
@@ -462,6 +471,7 @@ export function mountMapOverlay(el, api) {
     window.removeEventListener('fv-replay-exit', onReplayExit);
     if (O.barOpen) closeBar();
     replay.destroy();
+    if (bots) { try { bots.destroy(); } catch (e) { console.error(e); } }
     O.dead = true;
     root.remove();
     O.ptrs.clear();
