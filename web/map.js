@@ -67,6 +67,60 @@
 // and faint down it and wavering; at the top it flares and burns out in a tiny puff of sparks, and the trail fades.
 // Up, warm and slowing, so never taken for a meteor. Once per deploy (not for ones already live when the page opens);
 // fixed to the window like the moon; none at rest, hidden or under reduced motion.
+// Space events (EVENT_*): every few minutes (EVENT_GAP, a pick) the director starts one ambient sight from the registry
+// (EVENTS, by weight, never the kind it showed last, never two at once), far rarer than a shooting star and slow; like
+// the meteors it is tied to no app state, moves with the sky's camera at the depth that suits it (eventCam), and none
+// starts while the map rests, is hidden or under reduced motion (one running ends, as the meteors do).
+// The nebula drift (event 'nebula', NEBULA_*): a huge, dim cloud of coloured dust takes a minute or two to drift across the
+// far sky, the stars showing through it (the shader lays it under them). Warped, layered noise gives it wispy
+// filaments and soft dark dust lanes, not a blob, in a body tint, a lighter wisp tint and a faint contrasting edge, a
+// palette picked from a few tasteful sets (NEBULA_PALETTES) each time. Its brightness is constant: it fades only by
+// its place (its edge is soft, and it starts and ends off the window), and follows the far star layer's pan and zoom.
+// The canvas fallback (no WebGL2) shows none.
+// The asteroid field (event 'asteroids', ASTEROID_*): a loose stream of tumbling dark rocks crosses the sky at three
+// depths (far ones tiny and slow, near ones bigger and quicker, so they slide past each other with the pan and zoom),
+// each with its own lumpy silhouette (a noise-bent ellipse, never a circle), a slow spin of its own, a mottled, faintly
+// bumpy surface, a thin warm rim light on the side facing the light (one direction for the whole field) and a cool
+// hint of fill on the other, with a few motes of dust about the bigger ones. Now and then (ASTEROID_CLOSE_P) one drifts
+// close: huge, dark, in soft focus (its edge blurred, its rim faint), crossing in front of everything, the moon too. Its
+// brightness is constant: rocks start off the window (or fade in by their age if they begin inside it) and leave it,
+// and nothing pulses. At most ASTEROID_N at once (the shader has a slot for each); the canvas fallback shows none.
+// The gravity lens (event 'lens', LENS_*): a black hole you can hardly see drifts across the sky at the middle star layer's
+// depth, and the sky bends round it: everything under the satellites (the stars, the nebula, the deep sky) is looked up
+// where a point lens would send the light (LENS_R squared over the distance), so the stars near it swing into a thin
+// Einstein ring and smeared arcs and the rest of the sky is only a little out of true, nothing at all past LENS_REACH
+// radii. At its middle sits a small dark core in a faint shade, and a thin, very dim, warm accretion ring a little brighter
+// on one side. A couple of far galaxies (LENS_SRC), too faint to see by themselves, slide behind it as it passes and are
+// pulled into arcs that wander round the ring, closing to a full one as one lines up. Brightness is constant: it comes in
+// off the window and leaves off it, and a galaxy's arcs only fade by where it lies. The canvas fallback shows none.
+// The passing planet (event 'planet', PLANET_*): a far-off world takes a few minutes to cross the sky at the far star layer's
+// depth, small and dim, lit from one side like the moon (its terminator soft, a whisper of cool earthshine on the night side).
+// One of a few looks (PLANET_LOOKS) is picked each time: a banded gas giant (bands bent by soft noise and sheared by a slow
+// spin, fine streaks along them, sometimes a storm spot that turns with the planet), with or without a tilted ring, or a
+// rocky world (mottled, lit with a little relief, a thin atmosphere glowing along its lit rim and just beyond the limb). Its
+// limb is smooth (no hard edge). The ring is a ring plane in the planet's own space: banded and ribbed, thin and see-through
+// at its inner and outer edges, with one thin gap; it passes in front of the disc on the near side and behind it on the far
+// side, the planet's shadow falls on it and its shadow falls across the planet. Brightness is constant: it comes in off the
+// window and leaves off it. The canvas fallback shows none.
+// The distant capital ship (event 'ship', SHIP_*): a huge, dim silhouette takes three to five minutes to cross the sky between
+// the far and the middle star layer's depth, level but for a slight tilt, either way, seen mostly as a dark shape against the
+// stars (it hides them). Its hull is a signed distance field in the shader (SHIP_HULL, SHIP_BOXES, SHIP_NOTCH): a long
+// layered wedge, a stepped upper deck, a keel with a hangar mouth, a bridge tower and a forward block with a mast, small
+// turrets, an engine block with two nozzles, and a few notches cut into its edges, so it is not one triangle. A thin cool rim
+// light runs along every edge that faces the light (one star, high and a little behind: warmer towards the bow), with a
+// soft sheen fading into the hull below it and a trace of bounce on the underside. A handful of tiny, warm windows (a hash
+// picks which cells of a few rows are lit, SHIP_WINDOW_P) and, at the stern, two dim engine glows with a short faint plume
+// are the only lights. Sometimes (SHIP_ESCORT_P) a small escort, the same ship at a fraction of the size, follows a little behind and
+// to one side. Brightness is constant, no light blinks or pulses: it comes in off the window and leaves off it. The canvas
+// fallback shows none.
+// The warp drift (event 'warp', WARP_*): now and then, for a second or two, the stars stretch into long streaks along one
+// direction and settle back, like a hyperspace jump seen from far away. Motion only: no flash, nothing brightens, a star
+// keeps its light and just lengthens (the shader looks each star layer up through a squeeze of the sky along that direction
+// about a point, so a star is drawn WARP_STRETCH times longer, its soft round ends tapering into the streak), eased in and
+// out (smoothstep, WARP_IN, WARP_OUT) with a slight radial feel from that point (WARP_RADIAL), the streaks fanning a little.
+// Every star layer stretches, the near ones more (WARP_LAYER), the deep sky only a little (WARP_DEEP). It sits under the lens
+// and the twinkle and the tile wrap as they are (it only moves the lookup point), and its point follows the middle star
+// layer's pan and zoom. The canvas fallback shows none.
 // The faint back layer is a tile repeated; the two front ones, sparse and bright enough that a repeat would show,
 // never repeat when the graphics card draws them: it places their stars itself, at most one per cell of a grid,
 // each cell's star (or none) from a hash of the cell (STAR_FIELD_GLSL). The canvas repeats a tile for all three.
@@ -132,11 +186,12 @@
 // it keeps the old node and its handing-off look, never the new-session one.
 //
 // Tests (?fixture=1 or ?debug=1): window.__map = { nodes, stats, debug, comet(fromId, toId), merge(sessionId), sky(hour), skyGL,
-// rest(on), battery(on), meteor(), shower(), moon(date), satellites(n), rocket(hubId) }. satellites(n) shows n satellites as if n agents ran (null: the
+// rest(on), battery(on), meteor(), shower(), moon(date), satellites(n), rocket(hubId), event(name, skipSeconds) }. satellites(n) shows n satellites as if n agents ran (null: the
 // map's running agents; stats().satellites: { want, shown: [{ x, y, a, blink }] }, CSS px of the map). meteor() sends a shooting star now, shower() a meteor shower
 // (not held back by SHOWER_GAP) (stats().meteor: how many streaks show or are about to; meteorIn: ms to the next shooting
 // star, null when none is due; showers: how many showers started). rocket(hubId) sends a deploy's rocket up now under
-// that hub (null: anywhere) (stats().rockets: { flying, launched, shown: [{ x, y, head, trail, puff }] }, the head in CSS px). moon(date) sets the clock the moon and the sky tint go by (null: the real one);
+// that hub (null: anywhere) (event(name) starts that space event now, ignoring EVENT_GAP; no name lists the registered ones, null stops
+// the one running, skipSeconds: begins that far into an event that has a clock; stats().event: { running, last, nextIn } as name / name / ms, null when none; stats().nebula: the cloud's middle and size in CSS px, its alpha and palette, null when none; stats().asteroids: the field's light direction and the rocks in view, far to near, { x, y, r, blur, a } in CSS px, null when none; stats().lens: the lens's middle and Einstein radius in CSS px, its size share a and its galaxies' light, null when none; planet(look, skipSeconds) starts the passing planet now, look: an index into PLANET_LOOKS (null: a pick); stats().planet: its middle and radius in CSS px, its look's name, whether it has a ring, the light's direction and its alpha, null when none; ship(escort, skipSeconds) starts the capital ship now, escort: true or false to force the escort (null: a pick); stats().ship: its middle and half-length in CSS px, its alpha, its heading as a unit vector and whether an escort follows, null when none; warp(skipSeconds) starts the warp drift now; stats().warp: its stretch share, point and direction, null when none) (stats().rockets: { flying, launched, shown: [{ x, y, head, trail, puff }] }, the head in CSS px). moon(date) sets the clock the moon and the sky tint go by (null: the real one);
 // stats().moon is its phase (0 new, 0.5 full), lit share, waxing, alpha and place (CSS px), shown when visible.
 // nodes() lists each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label
 // rectangles; merge('s:<id>') launches that conversation's merge now; stats().heads is where each comet's head is (CSS px); stats().sky says what draws the sky ('webgl2'
@@ -428,6 +483,144 @@ const SAT_DEPTH = STAR_LAYERS[STAR_LAYERS.length - 1].depth;
 const SAT_N = 8, SAT_R = 0.75, SAT_RGB = [1, 0.95, 0.86], SAT_A = 0.62, SAT_DAY = 0.45;
 const SAT_CROSS = [60, 120], SAT_TILT = [0.06, 0.32], SAT_Y = [0.05, 0.6], SAT_PAD = 12, SAT_FADE = 1500;
 const SAT_BLINK = [1500, 2000], SAT_FLASH = 160, SAT_RED = [1, 0.32, 0.26], SAT_FLASH_A = 0.38, SAT_FLASH_R = 1.6;
+// space events (see "Look"): the next one comes EVENT_GAP ms (a random pick in the range) after the last ended, or after
+// the map is active and awake again (never at once); EVENT_DEPTH: the star layers' depths (far, middle, near) an event
+// picks its parallax from through eventCam(depth), the fraction of the pan and zoom it follows
+const EVENT_GAP = [150e3, 330e3];
+const EVENT_DEPTH = { far: STAR_LAYERS[0].depth, mid: STAR_LAYERS[Math.floor(STAR_LAYERS.length / 2)].depth, near: SAT_DEPTH };
+// the nebula drift (see "Look"): it crosses the window in NEBULA_MS ms (a pick), its long half-axis NEBULA_R of the
+// window's longer side, its short one NEBULA_ASPECT times that (a pick), along STAR_DIR turned by up to NEBULA_TURN radians
+// (either way round), off the window's middle by up to NEBULA_OFF of its height; NEBULA_A: its densest light (the
+// colour's share over the sky; NEBULA_ALPHA of that is alpha, so it adds light more than it covers); NEBULA_FADE
+// ms: how long it takes to fade in and out at the ends of its life, which its place already makes unseen. NEBULA_PALETTES:
+// [body, wisp, edge] colours (0-1), as the deep sky's clouds and the star tints are
+const NEBULA_MS = [80e3, 120e3], NEBULA_R = 0.62, NEBULA_ASPECT = [0.55, 0.8], NEBULA_TURN = 0.5, NEBULA_OFF = 0.3;
+const NEBULA_A = 0.17, NEBULA_ALPHA = 0.5, NEBULA_FADE = 6000;
+const NEBULA_PALETTES = [
+  [[0.34, 0.28, 0.72], [0.66, 0.58, 0.98], [0.96, 0.52, 0.66]], // indigo and violet, a rose edge
+  [[0.14, 0.44, 0.66], [0.5, 0.82, 0.92], [0.9, 0.62, 0.36]], // blue-teal and cyan, an amber edge
+  [[0.62, 0.24, 0.5], [0.96, 0.6, 0.76], [0.36, 0.56, 0.92]], // rose and magenta, a blue edge
+  [[0.6, 0.34, 0.22], [0.96, 0.76, 0.5], [0.42, 0.46, 0.88]], // ember and gold, a blue edge
+  [[0.2, 0.32, 0.68], [0.64, 0.8, 1], [0.96, 0.64, 0.5]], // deep blue and ice, a peach edge
+];
+// the asteroid field (see "Look"): ASTEROID_CLASSES: the sharp rocks in three classes from the star layers' depths
+// (far, mid, near): how many (a pick), their long radius (CSS px), their speed (CSS px/s, along the stream), their
+// spin (rad/s) and the share of the window's width they may start into (their start along the stream, so some are
+// already crossing when the field begins). The stream runs along STAR_DIR turned by up to ASTEROID_TURN radians (a rock
+// strays ASTEROID_STRAY from it), its rocks off the middle sideways by up to ASTEROID_OFF of the window's height.
+// ASTEROID_MS: how long the field lasts (a pick; longer if a close one needs it). ASTEROID_CLOSE_P: the chance of a close one, ASTEROID_CLOSE: its depth (nearer than the nearest star layer), radius,
+// speed, spin, edge blur (all CSS px) and the seconds before it arrives (a pick each). ASTEROID_ASPECT: a rock's short
+// axis over its long. ASTEROID_FADE s: a rock that starts inside the window fades in over this. Look (0-1 colours):
+// ASTEROID_BODY the rock, ASTEROID_RIM the warm light along its lit edge at ASTEROID_RIM_A (the close one's share
+// ASTEROID_CLOSE_RIM), ASTEROID_FILL a cool glint on the dark edge at ASTEROID_FILL_A, ASTEROID_DUST the motes at
+// ASTEROID_DUST_A round rocks over ASTEROID_DUST_MIN CSS px; ASTEROID_OPACITY how far a rock hides what is behind it
+const ASTEROID_N = 12, ASTEROID_MS = [100e3, 140e3];
+const ASTEROID_CLASSES = [
+  { depth: EVENT_DEPTH.far, n: [4, 5], r: [1.5, 3.1], v: [6, 11], w: 0.12, start: 0.35 },
+  { depth: EVENT_DEPTH.mid, n: [3, 4], r: [3.6, 7.5], v: [13, 22], w: 0.16, start: 0.2 },
+  { depth: EVENT_DEPTH.near, n: [1, 2], r: [9, 17], v: [28, 42], w: 0.22, start: 0.05 },
+];
+const ASTEROID_TURN = 0.4, ASTEROID_STRAY = 0.1, ASTEROID_OFF = 0.38, ASTEROID_ASPECT = [0.62, 1], ASTEROID_FADE = 7;
+const ASTEROID_CLOSE_P = 0.6;
+const ASTEROID_CLOSE = { depth: 0.85, r: [70, 105], v: [40, 56], w: 0.035, blur: [13, 20], wait: [18, 50] };
+const ASTEROID_BODY = [0.125, 0.118, 0.145], ASTEROID_RIM = [1, 0.76, 0.5], ASTEROID_RIM_A = 0.85, ASTEROID_CLOSE_RIM = 0.3;
+const ASTEROID_FILL = [0.5, 0.62, 0.98], ASTEROID_FILL_A = 0.1, ASTEROID_DUST = [0.95, 0.82, 0.68], ASTEROID_DUST_A = 0.5;
+const ASTEROID_DUST_MIN = 6, ASTEROID_OPACITY = 0.96;
+// the gravity lens (see "Look"): it crosses the window in LENS_MS ms (a pick) along STAR_DIR turned by up to LENS_TURN radians
+// (either way round), off the window's middle by up to LENS_OFF of its height, at LENS_DEPTH (the middle star layer's). LENS_R: its
+// Einstein radius (CSS px, a pick), where the ring forms. A point d from it the sky is looked up LENS_R^2 / d away from the lens,
+// in full out to LENS_FULL radii and eased out to nothing by LENS_REACH radii (the shader's lensP). It starts and ends LENS_PAD radii off
+// the window, and grows from nothing over LENS_FADE ms at the ends of its life (unseen). LENS_CORE: the dark core's radius
+// (radii), LENS_SHADE: how far its soft shade reaches (radii), LENS_DARK: how dark the core is. LENS_RING_R: the accretion ring's
+// radius (radii), LENS_RING_W its width (CSS px), LENS_RING_RGB its colour (0-1) at LENS_RING_A, LENS_RING_SIDE how much
+// of it is brighter on one side (towards a direction picked for each lens). LENS_SRC: the far galaxies it bends into arcs, each
+// with rgb (0-1), sig (size, radii), asp (short axis over long), amp (its light, alpha LENS_SRC_A of that), miss (how far off the
+// lens's line it passes, radii; a pick), at (when in the lens's life, 0-1, it lines up behind it; a pick) and w (the sweep, in
+// radii, it keeps its light over: its light fades by where it lies). LENS_SWEEP: radii a galaxy slides across the lens in its life
+const LENS_DEPTH = EVENT_DEPTH.mid;
+const LENS_MS = [90e3, 130e3], LENS_R = [40, 56], LENS_TURN = 0.45, LENS_OFF = 0.3, LENS_PAD = 4.5, LENS_FADE = 6000;
+const LENS_FULL = 3, LENS_REACH = 7;
+const LENS_CORE = 0.15, LENS_SHADE = 0.55, LENS_DARK = 0.8;
+const LENS_RING_R = 0.27, LENS_RING_W = 1.1, LENS_RING_RGB = [1, 0.72, 0.42], LENS_RING_A = 0.22, LENS_RING_SIDE = 0.6;
+const LENS_SRC = [
+  { rgb: [0.62, 0.76, 1], sig: 0.14, asp: 0.5, amp: 0.4, miss: [0.06, 0.2], at: [0.4, 0.65], w: 0.5 },
+  { rgb: [1, 0.78, 0.58], sig: 0.09, asp: 0.65, amp: 0.4, miss: [0.12, 0.3], at: [0.15, 0.35], w: 0.4 },
+];
+const LENS_SRC_A = 0.55, LENS_SWEEP = 2.6;
+// the passing planet (see "Look"): it crosses the window in PLANET_MS ms (a pick) along STAR_DIR turned by up to PLANET_TURN radians
+// (either way round), off the window's middle by up to PLANET_OFF of its height, at PLANET_DEPTH (the far star layer's). PLANET_R:
+// its radius (CSS px, a pick). It starts and ends PLANET_PAD radii off the window and fades in and out over PLANET_FADE ms at the
+// ends of its life (unseen). PLANET_TILT: the ring plane's ratio of short axis over long (a pick; the planet's axis leans with it),
+// PLANET_ROT: how far the ring's long axis turns off level (radians, either way, the planet half the time upside down),
+// PLANET_LIGHT_Z: how much the light comes from the viewer's side (a pick; low: a crescent, high: nearly full), PLANET_LIGHT_ANG:
+// how far the light's direction in the sky turns off level (radians, from the right or the left). PLANET_RING_IN and PLANET_RING_W:
+// the ring's inner radius and width in planet radii (picks), PLANET_GAP: the thin gap's place (0-1 across the ring) and half width
+// (as much of the ring's width). PLANET_SPIN: the planet's turn (radians per second at its equator, slower at the poles),
+// PLANET_NIGHT: the night side's earthshine, PLANET_DIM: the whole thing's brightness (it is meant to be dim), PLANET_SUN: the
+// light's tint. Each look in PLANET_LOOKS: name, kind (0 a banded gas giant, 1 a rocky world), ring (the ring's opacity, 0: none),
+// bands (how many it has, as a rate over latitude), contrast, spot (a storm's size, or a rocky world's polar caps), a (light bands
+// or ground), b (dark), c (accent), atm (the atmosphere's rim colour), atmA (its strength), rr (the ring's colour); all 0-1
+const PLANET_DEPTH = EVENT_DEPTH.far;
+const PLANET_MS = [200e3, 290e3], PLANET_R = [34, 48], PLANET_TURN = 0.4, PLANET_OFF = 0.28, PLANET_PAD = 3, PLANET_FADE = 8000;
+const PLANET_TILT = [0.24, 0.38], PLANET_ROT = 0.4, PLANET_LIGHT_Z = [-0.15, 0.5], PLANET_LIGHT_ANG = 0.8;
+const PLANET_RING_IN = [1.3, 1.45], PLANET_RING_W = [0.62, 0.85], PLANET_GAP = [0.62, 0.03];
+const PLANET_SPIN = 0.012, PLANET_NIGHT = 0.1, PLANET_DIM = 0.72, PLANET_SUN = [1, 0.965, 0.9];
+const PLANET_LOOKS = [
+  { name: 'amber ringed', kind: 0, ring: 0.62, bands: 15, contrast: 0.85, spot: 0, a: [0.93, 0.84, 0.66], b: [0.6, 0.45, 0.32], c: [0.82, 0.62, 0.42],
+    atm: [1, 0.84, 0.58], atmA: 0.4, rr: [0.88, 0.8, 0.66] },
+  { name: 'ice ringed', kind: 0, ring: 0.42, bands: 9, contrast: 0.5, spot: 0, a: [0.74, 0.91, 0.96], b: [0.36, 0.58, 0.72], c: [0.56, 0.8, 0.9],
+    atm: [0.6, 0.86, 1], atmA: 0.5, rr: [0.72, 0.86, 0.93] },
+  { name: 'storm giant', kind: 0, ring: 0, bands: 21, contrast: 1, spot: 1, a: [0.93, 0.8, 0.62], b: [0.56, 0.3, 0.2], c: [0.8, 0.42, 0.28],
+    atm: [1, 0.72, 0.5], atmA: 0.35, rr: [0.8, 0.7, 0.6] },
+  { name: 'dusk ringed', kind: 0, ring: 0.55, bands: 13, contrast: 0.75, spot: 0, a: [0.82, 0.74, 0.95], b: [0.4, 0.3, 0.62], c: [0.66, 0.52, 0.86],
+    atm: [0.82, 0.66, 1], atmA: 0.45, rr: [0.84, 0.76, 0.95] },
+  { name: 'rust world', kind: 1, ring: 0, bands: 0, contrast: 1, spot: 0.5, a: [0.8, 0.54, 0.38], b: [0.32, 0.19, 0.16], c: [0.62, 0.4, 0.3],
+    atm: [0.55, 0.76, 1], atmA: 0.85, rr: [0.8, 0.7, 0.6] },
+  { name: 'frost world', kind: 1, ring: 0, bands: 0, contrast: 1, spot: 0.8, a: [0.86, 0.91, 0.96], b: [0.4, 0.48, 0.6], c: [0.62, 0.7, 0.82],
+    atm: [0.62, 0.84, 1], atmA: 0.9, rr: [0.8, 0.7, 0.6] },
+];
+// the distant capital ship (see "Look"): it crosses the window in SHIP_MS ms (a pick) at SHIP_DEPTH (halfway between the far and the middle
+// star layer's), bow first, level but for up to SHIP_TILT radians off (either way, and it may go either way round), off the window's
+// middle by up to SHIP_OFF of its height. SHIP_R: its half-length (CSS px, a pick; its whole length is twice that). It starts and ends
+// off the window and fades in and out over SHIP_FADE ms at the ends of its life (unseen). SHIP_ESCORT_P: the chance of an escort, which
+// follows SHIP_ESCORT_BACK half-lengths behind the ship's middle (a pick) and SHIP_ESCORT_SIDE to one side of its path (a pick, either
+// side), at SHIP_ESCORT_SCALE of its size (a pick). SHIP_BODY: the hull's colour (rgb 0-1, nearly black), SHIP_LIFT: the faint
+// lightening of its top, SHIP_BODY_A: how much of what is behind it the hull hides. SHIP_LIGHT: the star's direction on the screen (x, y
+// down); SHIP_RIM, SHIP_RIM_WARM: the rim light's tint (cool, warmer towards the bow), SHIP_RIM_A: its alpha. SHIP_WINDOW: the windows'
+// colour, SHIP_WINDOW_A their alpha, SHIP_WINDOW_P the share of the cells of a row that is lit (the tower's row has three times that;
+// the escort a third); SHIP_ENGINE, SHIP_ENGINE_A: the engine glow's colour and alpha. The hull, in units of its half-length with
+// x along the ship (-1 the stern, 1 the bow) and y across it (negative up): SHIP_HULL the polygons, SHIP_BOXES [middle x, y, half
+// width, half height] added to them, SHIP_NOTCH the same cut out of the whole, SHIP_ROWS the windows' rows' y, SHIP_ENGINES the
+// nozzles' glows [x, y]
+const SHIP_DEPTH = (EVENT_DEPTH.far + EVENT_DEPTH.mid) / 2;
+const SHIP_MS = [210e3, 300e3], SHIP_R = [118, 150], SHIP_TILT = 0.2, SHIP_OFF = 0.3, SHIP_FADE = 6000;
+const SHIP_ESCORT_P = 0.6, SHIP_ESCORT_BACK = [1.7, 2.2], SHIP_ESCORT_SIDE = [0.12, 0.4], SHIP_ESCORT_SCALE = [0.2, 0.26];
+const SHIP_BODY = [0.016, 0.02, 0.03], SHIP_LIFT = [0.03, 0.042, 0.066], SHIP_BODY_A = 0.95, SHIP_LIGHT = [-0.42, -0.91];
+const SHIP_RIM = [0.6, 0.72, 1], SHIP_RIM_WARM = [1, 0.84, 0.64], SHIP_RIM_A = 0.5;
+const SHIP_WINDOW = [1, 0.78, 0.46], SHIP_WINDOW_A = 0.7, SHIP_WINDOW_P = 0.14, SHIP_ENGINE = [0.6, 0.78, 1], SHIP_ENGINE_A = 0.6;
+const SHIP_HULL = [
+  [[-0.9, -0.085], [-0.4, -0.1], [0.3, -0.075], [0.97, -0.014], [1, 0], [0.92, 0.014], [0.3, 0.07], [-0.45, 0.105], [-0.9, 0.1]], // the main wedge
+  [[-0.78, -0.09], [-0.7, -0.135], [-0.1, -0.145], [0.2, -0.115], [0.5, -0.06], [0.2, -0.05]], // the stepped upper deck
+  [[-0.56, 0.1], [-0.46, 0.15], [0.14, 0.15], [0.36, 0.083], [0.1, 0.08]], // the keel
+];
+const SHIP_BOXES = [
+  [-0.56, -0.165, 0.06, 0.04], [-0.56, -0.218, 0.14, 0.017], [-0.56, -0.252, 0.022, 0.022], [-0.56, -0.3, 0.004, 0.03], // the tower, its bridge, mast and needle
+  [0.06, -0.16, 0.07, 0.02], [0.06, -0.19, 0.035, 0.014], [0.06, -0.23, 0.003, 0.03], // the forward block, its top and needle
+  [0.25, -0.112, 0.022, 0.014], [0.33, -0.098, 0.016, 0.012], [-0.2, -0.157, 0.026, 0.014], // turrets
+  [-0.945, 0.0075, 0.055, 0.0975], [-1.02, -0.043, 0.025, 0.028], [-1.02, 0.06, 0.025, 0.03], // the engine block and two nozzles
+];
+const SHIP_NOTCH = [[-0.34, -0.136, 0.014, 0.014], [-0.3, -0.136, 0.006, 0.014], [0.62, -0.044, 0.014, 0.012], [0.62, 0.045, 0.015, 0.01],
+  [-0.12, 0.152, 0.05, 0.016], [-0.3, 0.14, 0.012, 0.01], [0.28, -0.07, 0.01, 0.01]];
+const SHIP_ROWS = [-0.218, -0.03, 0.035, 0.092], SHIP_ENGINES = [[-1.047, -0.043], [-1.047, 0.06]];
+// the warp drift (see "Look"): it lasts WARP_MS ms (a pick), easing in over WARP_IN of that and out over WARP_OUT of it
+// (smoothstep). WARP_STRETCH: how many times longer than itself the nearest layer's star is drawn at the height of it;
+// WARP_LAYER: each star layer's share of that (far to near), WARP_DEEP the deep sky's. The sky is squeezed along a direction
+// (STAR_DIR turned by up to WARP_TURN radians, either way) about a point (a pick within WARP_AT of the window's width and
+// height, at WARP_DEPTH, the middle star layer's), the direction bending WARP_RADIAL of the way towards pointing away from
+// that point
+const WARP_DEPTH = EVENT_DEPTH.mid;
+const WARP_MS = [1500, 2200], WARP_IN = 0.4, WARP_OUT = 0.45, WARP_STRETCH = 90, WARP_LAYER = [0.3, 0.65, 1], WARP_DEEP = 0.1;
+const WARP_TURN = 0.3, WARP_AT = [0.3, 0.7], WARP_RADIAL = 0.3;
 // a deploy's rocket (see "Look"): at most ROCKET_N at once (the sky's shader has a slot for each). It rises from just
 // below the window's bottom edge, under the hub (kept within ROCKET_X of the window's width), for ROCKET_MS (a pick),
 // slowing all the way (ease-out, ROCKET_EASE), to ROCKET_TOP of the window's height (a pick); its path leans ROCKET_TILT
@@ -807,6 +1000,14 @@ export function mapStats() {
   return { avgMs: s.n ? s.sum / s.n : 0, maxMs: s.max, frames: s.frames, comets: I.comets.length, queued: I.cometQ.length,
     heads: cometHeads(), big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length, sky: I.skyGL && I.skyGL.ok ? 'webgl2' : '2d',
     meteor: I.meteors.length, showers: I.showers, meteorIn: I.meteorAt ? Math.round(I.meteorAt - performance.now()) : null,
+    event: { running: I.event ? I.event.name : null, last: I.eventLast, nextIn: I.eventAt ? Math.round(I.eventAt - performance.now()) : null },
+    asteroids: (() => { const e = I.event; if (!e || e.name !== 'asteroids') return null;
+      return { light: e.ev.light.map((v) => Math.round(v * 100) / 100), shown: asteroidsNow().map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.r * 10) / 10, blur: Math.round(r.blur), a: Math.round(r.a * 1e3) / 1e3 })) }; })(),
+    lens: (() => { const l = lensNow(); return l ? { x: Math.round(l.x), y: Math.round(l.y), r: Math.round(l.r * 10) / 10, a: Math.round(l.a * 1e3) / 1e3, src: l.srcs.map((o) => Math.round(o.amp * 1e3) / 1e3) } : null; })(),
+    planet: (() => { const q = planetNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, look: q.look.name, ring: q.look.ring > 0, light: q.L.map((v) => Math.round(v * 100) / 100), a: Math.round(q.a * 1e3) / 1e3 } : null; })(),
+    ship: (() => { const q = shipNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3, dir: [Math.round(q.cs * 1e3) / 1e3, Math.round(q.sn * 1e3) / 1e3], escort: !!q.eo } : null; })(),
+    warp: (() => { const q = warpNow(); return q ? { a: Math.round(q.a * 1e3) / 1e3, x: Math.round(q.x), y: Math.round(q.y), dir: [Math.round(q.dx * 1e3) / 1e3, Math.round(q.dy * 1e3) / 1e3] } : null; })(),
+    nebula: (() => { const n = nebulaNow(); return n ? { x: Math.round(n.x), y: Math.round(n.y), r: Math.round(n.r), a: Math.round(n.a * 1e3) / 1e3, pal: n.pal } : null; })(),
     moon: (({ phase, frac, waxing, a, x, y }) => ({ phase: Math.round(phase * 1e4) / 1e4, frac: Math.round(frac * 1e4) / 1e4, waxing, a: Math.round(a * 1e3) / 1e3,
       visible: a > 0, x: Math.round(x), y: Math.round(y) }))(moonNow()), skyDraws: I.skyGL ? I.skyGL.draws || 0 : 0,
     satellites: { want: satWant().length, shown: satsNow().map((s) => ({ x: Math.round(s.x), y: Math.round(s.y), a: Math.round(s.a * 1e3) / 1e3, blink: Math.round(s.f * 1e3) / 1e3 })) },
@@ -966,6 +1167,15 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     rest: (on) => { restForce = on == null ? null : !!on; wake(); return resting(); }, battery: (on) => { away.battery = !!on; wake(); },
     meteor: () => { if (!I) return false; I.meteors.push(meteorMake(performance.now())); I.dirty = true; return true; }, // a shooting star now
     shower: () => !!I && shower(performance.now(), null, true), // a meteor shower now
+    // a space event now by name (ignoring EVENT_GAP); no name: the registered ones; null: stop the one running
+    event: (n, skip) => { if (n === undefined) return [...EVENTS.keys()]; if (!I) return false; if (n === null) { eventEnd(); return true; }
+      const ok = eventStart(performance.now(), n); if (ok && skip > 0 && I.event.ev && I.event.ev.at != null) I.event.ev.at -= skip * 1000; return ok; },
+    // the passing planet now, with that look (an index into PLANET_LOOKS; null: a pick), skip seconds into its crossing
+    planet: (look, skip) => { if (!I) return false; planetForce = look == null ? null : clamp(Math.floor(look), 0, PLANET_LOOKS.length - 1); const ok = eventStart(performance.now(), 'planet'); planetForce = null; if (ok && skip > 0) I.event.ev.at -= skip * 1000; return ok; },
+    // the capital ship now, with the escort (true), without (false) or as a pick (null), skip seconds into its crossing
+    ship: (escort, skip) => { if (!I) return false; shipForce = escort == null ? null : !!escort; const ok = eventStart(performance.now(), 'ship'); shipForce = null; if (ok && skip > 0) I.event.ev.at -= skip * 1000; return ok; },
+    // the warp drift now, skip seconds into it
+    warp: (skip) => { if (!I) return false; const ok = eventStart(performance.now(), 'warp'); if (ok && skip > 0) I.event.ev.at -= skip * 1000; return ok; },
     // the clock the moon and the sky tint go by (a Date, ms or a date string; null: the real one)
     moon: (d) => { moonForce = d == null ? null : new Date(d); if (I) { I.moon = null; I.sky = null; I.dirty = true; } return I ? moonNow() : null; },
     // the moon's clock at that time (as moon) with the sky's hour at midnight, so a full moon is up: a real eclipse
@@ -1050,6 +1260,8 @@ function createInstance(state) {
     // the streaks showing or about to (meteorMake: the shooting star, a shower's), when the next shooting star is due
     // (0: not yet planned), when the last shower started and how many have
     meteors: [], meteorAt: 0, showerAt: -Infinity, showers: 0,
+    // the space event running ({ name, at, ev }: eventStep; ev is its own state), the last one's name, when the next is due (0: not yet planned)
+    event: null, eventLast: null, eventAt: 0,
     sats: new Map(), satRun: [], // the satellites (key -> satMake's), the running agents' keys (rebuild)
     // the deploys' rockets flying (rocketLaunch), how many went up, and the deploys seen (id -> state; ingestDeploys)
     rockets: [], rocketsN: 0, dpSeen: new Map(), dpInit: false,
@@ -1143,6 +1355,7 @@ function stop() {
   cancelAnimationFrame(I.raf); I.raf = 0;
   clearTimeout(I.pace.timer); I.pace.timer = 0;
   I.meteors.length = 0; I.meteorAt = 0; // the next shooting star is planned when the map shows again
+  I.event = null; I.eventAt = 0; // likewise the next space event
   I.rockets.length = 0;
   if (I.tip) I.tip.style.display = 'none';
 }
@@ -1181,7 +1394,7 @@ if (typeof window !== 'undefined') {
 // a shooting star, a fading ghost, merge sparks, a camera glide, a drag or band, a re-arrange, or what the last draw
 // saw (I.quick: a morph, birth, bump, kick, whirl, relay ring, or a size or level still gliding)
 function quickNow() {
-  return I._dirty || I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 || I.ghosts.length > 0 ||
+  return I._dirty || I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || I.ghosts.length > 0 ||
     I.bursts.length > 0 || !!I.glide || !!I.drag || !!I.band || !!I.keep || !!(I.trail && I.trail.size) || performance.now() < (I.regrid || 0);
 }
 // the screen's refresh interval: the median of the last back-to-back frames
@@ -2199,11 +2412,12 @@ function frame(ts) {
   if (I.savedCam && I.camInit && I.sim && I.sim.length) restoreCam();
   if (I.camInit && !I.savedCam) keepCam();
   meteorStep(t0, rest);
+  eventStep(t0, rest);
   satStep(rest);
   rocketStep(t0, rest);
   // continuous motion while anything moves (the stars' drift too, even on an empty map), at the pace paceNext
   // sets; otherwise only on change (and a slow tick for age fades)
-  const moving = (!I.still && !tick) || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 ||
+  const moving = (!I.still && !tick) || I.comets.length > 0 || I.cometQ.length > 0 || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event ||
     I.ghosts.length > 0 || I.bursts.length > 0;
   const hot = I._dirty;
   if (hot || moving || t0 - I.lastDraw > (tick ? REST_TICK_MS - 50 : 250)) {
@@ -2845,6 +3059,264 @@ function meteorStep(t, rest) {
   if (!I.meteorAt) I.meteorAt = t + pickIn(METEOR_GAP);
   else if (!M.length && t >= I.meteorAt) { M.push(meteorMake(t)); I.meteorAt = t + pickIn(METEOR_GAP); }
 }
+// ---------- space events (see "Look", EVENT_*) ----------
+// The registry: a space event is one registerEvent(name, def) plus its own draw code (in the sky's shader and, if it
+// is worth it, the canvas fallback). def: { weight, start(t) -> its state (laid out in CSS px of the map; take
+// eventCam(depth) for its parallax), step(ev, t) -> false once it is over (t: the map's clock, ms), optional end(ev) }.
+// The director owns the timing and the gating; an event's draw reads I.event.ev while I.event is set.
+const EVENTS = new Map();
+function registerEvent(name, def) { EVENTS.set(name, { weight: 1, ...def }); }
+// the sky's camera for an object at `depth` (EVENT_DEPTH, or any star layer's) as it is laid: keep this next to the
+// object's position at that moment, then eventAt(cam, x, y) is where that point is now, moved with the pan and the
+// zoom by that fraction of them, as the satellites are (SAT_DEPTH)
+function eventCam(depth) {
+  const c = skyCam();
+  return { ...c, depth, sc: Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), depth * STAR_ZOOM) };
+}
+function eventAt(cam, x, y) {
+  const c = skyCam(), sc = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), cam.depth * STAR_ZOOM), k = sc / (cam.sc || sc);
+  return [c.mx + (x - c.mx) * k - (c.cx - cam.cx) * cam.depth * sc, c.my + (y - c.my) * k - (c.cy - cam.cy) * cam.depth * sc];
+}
+// stop the one running (one more draw clears it)
+function eventEnd() {
+  const e = I.event;
+  if (!e) return;
+  const d = EVENTS.get(e.name);
+  if (d && d.end) d.end(e.ev);
+  I.event = null; I.dirty = true;
+  I.eventAt = performance.now() + pickIn(EVENT_GAP);
+}
+// start `name` at t (ms), replacing any running; false when it is not registered or the map is under reduced motion
+function eventStart(t, name) {
+  const d = EVENTS.get(name);
+  if (!d || I.still) return false;
+  if (I.event) eventEnd();
+  I.event = { name, at: t, ev: d.start(t) }; I.eventLast = name; I.dirty = true;
+  return true;
+}
+// the next kind by weight, never the one shown last (unless it is the only one)
+function eventPick() {
+  const ks = [...EVENTS.keys()].filter((k) => k !== I.eventLast);
+  const pool = ks.length ? ks : [...EVENTS.keys()];
+  let w = Math.random() * pool.reduce((a, k) => a + EVENTS.get(k).weight, 0);
+  for (const k of pool) if ((w -= EVENTS.get(k).weight) < 0) return k;
+  return pool[pool.length - 1];
+}
+// each frame: none while resting or under reduced motion (a running one ends, none planned); otherwise the running one
+// steps until it says it is over, and the next comes EVENT_GAP after (or after the map woke), once none runs
+function eventStep(t, rest) {
+  if (I.still || rest) {
+    if (I.event) { eventEnd(); }
+    I.eventAt = 0;
+    return;
+  }
+  if (I.event) {
+    if (EVENTS.get(I.event.name).step(I.event.ev, t) === false) eventEnd();
+    return;
+  }
+  if (!I.eventAt) I.eventAt = t + pickIn(EVENT_GAP);
+  else if (t >= I.eventAt && EVENTS.size) eventStart(t, eventPick());
+}
+// ---------- the nebula drift (see "Look", NEBULA_*) ----------
+// start: the cloud's palette, size and straight path across the window at the far layer's depth, laid in CSS px of the
+// map as the camera is now (eventCam); its middle is where `at` (ms) and its speed put it, moved on with the camera
+registerEvent('nebula', {
+  start(t) {
+    const W = I.W || 1, H = I.H || 1, cam = eventCam(EVENT_DEPTH.far), ms = pickIn(NEBULA_MS);
+    const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (Math.random() * 2 - 1) * NEBULA_TURN, sg = Math.random() < 0.5 ? -1 : 1;
+    const dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg, R = NEBULA_R * Math.max(W, H);
+    // from where its soft edge just clears the window's far corner to where it just clears the near one, off the middle sideways
+    const len = 2 * (0.85 * R + 0.5 * Math.hypot(W, H)), off = (Math.random() * 2 - 1) * NEBULA_OFF * H;
+    const mx = cam.mx - dx * len / 2 - dy * off, my = cam.my - dy * len / 2 + dx * off;
+    return { at: t, ms, cam, x: mx, y: my, vx: dx * len / (ms / 1000), vy: dy * len / (ms / 1000), R, aspect: pickIn(NEBULA_ASPECT),
+      rot: ang + (Math.random() * 2 - 1) * 0.6, seed: Math.random(), pal: Math.floor(Math.random() * NEBULA_PALETTES.length) };
+  },
+  step(ev, t) { return t - ev.at < ev.ms; },
+});
+// the cloud as it is now, in CSS px of the map (null when none runs): its middle (x, y), long half-axis r, turn and
+// aspect, seed, palette (index, colours), age (s) and alpha a (the fade at the ends of its life); the shader draws it
+function nebulaNow() {
+  const e = I.event;
+  if (!e || e.name !== 'nebula') return null;
+  const ev = e.ev, age = Math.max(0, performance.now() - ev.at), s = age / 1000;
+  const [x, y] = eventAt(ev.cam, ev.x + ev.vx * s, ev.y + ev.vy * s);
+  const k = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), EVENT_DEPTH.far * STAR_ZOOM) / ev.cam.sc;
+  const fade = Math.min(1, age / NEBULA_FADE, (ev.ms - age) / NEBULA_FADE);
+  if (fade <= 0) return null;
+  const sm = fade * fade * (3 - 2 * fade);
+  return { x, y, r: ev.R * k, rot: ev.rot, aspect: ev.aspect, seed: ev.seed, age: s, a: NEBULA_A * sm, pal: ev.pal, rgb: NEBULA_PALETTES[ev.pal] };
+}
+// ---------- the asteroid field (see "Look", ASTEROID_*) ----------
+// start: the stream's direction and the light's (towards it, in the upper half of the sky), the field's length (a pick, or
+// as long as the close rock needs) and every rock laid on its straight path in the plane of its depth (eventCam), as the
+// nebula is: a rock's place along the stream is where its speed puts it so that it leaves the window at a time picked
+// within the field (a slow far one may begin inside, fading in by its age), its place across it a pick
+registerEvent('asteroids', {
+  start(t) {
+    const W = I.W || 1, H = I.H || 1, rnd = Math.random, ri = (r) => r[0] + Math.floor(rnd() * (r[1] - r[0] + 1));
+    const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (rnd() * 2 - 1) * ASTEROID_TURN, sg = rnd() < 0.5 ? -1 : 1;
+    const bx = Math.cos(ang) * sg, by = Math.sin(ang) * sg, la = -Math.PI + 0.55 + rnd() * (Math.PI - 1.1);
+    const E = 0.575 * (Math.abs(W * bx) + Math.abs(H * by)), pad = (r, bl) => 3.3 * r + 2.5 * bl + 24;
+    // a close rock enters after its wait and crosses at its speed; the field lasts until it has left
+    const close = rnd() < ASTEROID_CLOSE_P ? { r: pickIn(ASTEROID_CLOSE.r), v: pickIn(ASTEROID_CLOSE.v), bl: pickIn(ASTEROID_CLOSE.blur), wait: pickIn(ASTEROID_CLOSE.wait) } : null;
+    let ms = pickIn(ASTEROID_MS);
+    if (close) ms = Math.max(ms, (close.wait + (2 * E + 2 * pad(close.r, close.bl)) / close.v + 4) * 1000);
+    const T = ms / 1000, rocks = [];
+    const lay = (cam, r, v, w, bl, a0, off) => {
+      const da = (rnd() * 2 - 1) * ASTEROID_STRAY, c = Math.cos(da), s = Math.sin(da);
+      rocks.push({ cam, dx: bx * c - by * s, dy: bx * s + by * c, a0, off, v, r, blur: bl, asp: pickIn(ASTEROID_ASPECT), rot0: rnd() * TAU,
+        w: w * (rnd() < 0.5 ? -1 : 1) * (0.4 + 0.6 * rnd()), seed: rnd() * 0.98 });
+    };
+    for (const L of ASTEROID_CLASSES) {
+      const cam = eventCam(L.depth);
+      for (let i = ri(L.n); i > 0; i--) {
+        const r = pickIn(L.r), v = pickIn(L.v), p = pad(r, 0), te = T * (0.4 + 0.6 * rnd());
+        lay(cam, r, v, L.w, 0, Math.min(E + p - v * te, -E + L.start * 2 * E), (rnd() * 2 - 1) * ASTEROID_OFF * H);
+      }
+    }
+    if (close) lay(eventCam(ASTEROID_CLOSE.depth), close.r, close.v, ASTEROID_CLOSE.w, close.bl,
+      -(E + pad(close.r, close.bl)) - close.v * close.wait, (rnd() * 2 - 1) * 0.28 * H);
+    return { at: t, ms, rocks, light: [Math.cos(la), Math.sin(la)] };
+  },
+  step(ev, t) { return t - ev.at < ev.ms; },
+});
+// the rocks in view now, far to near, at most ASTEROID_N, in CSS px of the map: middle (x, y), long radius r, edge blur,
+// alpha a (its age's fade-in), spin rot, aspect asp and seed; the shader draws them, the sharp ones before the close one
+function asteroidsNow() {
+  const e = I.event;
+  if (!e || e.name !== 'asteroids') return [];
+  const ev = e.ev, age = Math.max(0, performance.now() - ev.at) / 1000, W = I.W || 1, H = I.H || 1, out = [];
+  const fin = Math.min(1, age / ASTEROID_FADE), fade = fin * fin * (3 - 2 * fin);
+  for (const o of ev.rocks) {
+    const a = o.a0 + o.v * age;
+    const [x, y] = eventAt(o.cam, o.cam.mx + o.dx * a - o.dy * o.off, o.cam.my + o.dy * a + o.dx * o.off);
+    const k = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), o.cam.depth * STAR_ZOOM) / o.cam.sc, r = o.r * k, bl = o.blur * k, reach = 3.3 * r + 2.5 * bl + 4;
+    if (x < -reach || x > W + reach || y < -reach || y > H + reach) continue;
+    out.push({ x, y, r, blur: bl, a: ASTEROID_OPACITY * fade, rot: o.rot0 + o.w * age, asp: o.asp, seed: o.seed });
+    if (out.length >= ASTEROID_N) break;
+  }
+  return out;
+}
+// ---------- the gravity lens (see "Look", LENS_*) ----------
+// start: the lens's straight path across the window at LENS_DEPTH (eventCam), from LENS_PAD radii off one side to as far off
+// the other, as the camera is now, its radius, the direction its ring is brighter on, and for each far galaxy the line it
+// slides along (its direction, its miss distance), when it lines up behind the lens and its turn
+registerEvent('lens', {
+  start(t) {
+    const W = I.W || 1, H = I.H || 1, rnd = Math.random, cam = eventCam(LENS_DEPTH), ms = pickIn(LENS_MS), R = pickIn(LENS_R);
+    const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (rnd() * 2 - 1) * LENS_TURN, sg = rnd() < 0.5 ? -1 : 1;
+    const dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg;
+    const len = 2 * (0.575 * (Math.abs(W * dx) + Math.abs(H * dy)) + LENS_PAD * R), off = (rnd() * 2 - 1) * LENS_OFF * H;
+    return { at: t, ms, cam, R, x0: cam.mx - dx * len / 2 - dy * off, y0: cam.my - dy * len / 2 + dx * off, vx: dx * len / (ms / 1000), vy: dy * len / (ms / 1000),
+      phi: rnd() * TAU, srcs: LENS_SRC.map((o) => ({ dir: rnd() * TAU, miss: pickIn(o.miss) * (rnd() < 0.5 ? -1 : 1), at: pickIn(o.at), rot: rnd() * TAU })) };
+  },
+  step(ev, t) { return t - ev.at < ev.ms; },
+});
+// the lens as it is now, in CSS px of the map (null when none runs): its middle (x, y), Einstein radius r, size share a (it
+// grows from nothing over LENS_FADE at the ends of its life), its ring's bright side phi, and its galaxies: each one's place
+// in the lens's plane from the lens's middle (bx, by), size sig, light amp, turn rot and aspect asp
+function lensNow() {
+  const e = I.event;
+  if (!e || e.name !== 'lens') return null;
+  const ev = e.ev, age = Math.max(0, performance.now() - ev.at), s = age / 1000, f = age / ev.ms;
+  const fade = Math.min(1, age / LENS_FADE, (ev.ms - age) / LENS_FADE);
+  if (fade <= 0) return null;
+  const sm = fade * fade * (3 - 2 * fade), [x, y] = eventAt(ev.cam, ev.x0 + ev.vx * s, ev.y0 + ev.vy * s);
+  const r = ev.R * sm * Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), LENS_DEPTH * STAR_ZOOM) / ev.cam.sc;
+  const srcs = LENS_SRC.map((o, i) => {
+    const q = ev.srcs[i], u = LENS_SWEEP * (f - q.at), c = Math.cos(q.dir), n = Math.sin(q.dir);
+    return { bx: (q.miss * -n + u * c) * r, by: (q.miss * c + u * n) * r, sig: o.sig * r, amp: o.amp * Math.exp(-((u / o.w) ** 2)), rot: q.rot, asp: o.asp };
+  });
+  return { x, y, r, a: sm, phi: ev.phi, srcs };
+}
+// ---------- the passing planet (see "Look", PLANET_*) ----------
+// start: the look (a pick, or planetForce), the planet's size, its straight path across the window at PLANET_DEPTH (eventCam), from
+// PLANET_PAD radii off one side to as far off the other, as the camera is now, the ring plane's tilt and turn, the ring's inner
+// radius and width, and the light's direction in the planet's own frame (x along the ring's long axis, y across, z towards the
+// viewer): from the side, turned off level, with the ring's lit face kept towards the viewer most of the time
+let planetForce = null; // tests (__map.planet): the look the planet starts with
+registerEvent('planet', {
+  start(t) {
+    const W = I.W || 1, H = I.H || 1, rnd = Math.random, cam = eventCam(PLANET_DEPTH), ms = pickIn(PLANET_MS), R = pickIn(PLANET_R);
+    const li = planetForce != null ? planetForce : Math.floor(rnd() * PLANET_LOOKS.length), ringIn = pickIn(PLANET_RING_IN), rw = pickIn(PLANET_RING_W);
+    const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (rnd() * 2 - 1) * PLANET_TURN, sg = rnd() < 0.5 ? -1 : 1;
+    const dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg, pad = PLANET_PAD + ringIn + rw;
+    const len = 2 * (0.575 * (Math.abs(W * dx) + Math.abs(H * dy)) + pad * R), off = (rnd() * 2 - 1) * PLANET_OFF * H;
+    const k = pickIn(PLANET_TILT), lz = pickIn(PLANET_LIGHT_Z), sl = Math.sqrt(1 - lz * lz);
+    const psi = (rnd() * 2 - 1) * PLANET_LIGHT_ANG + (rnd() < 0.5 ? 0 : Math.PI);
+    let ly = Math.sin(psi) * sl;
+    if (ly * Math.sqrt(1 - k * k) + lz * k < 0.12 && rnd() < 0.85) ly = -ly;
+    return { at: t, ms, cam, R, look: li, x0: cam.mx - dx * len / 2 - dy * off, y0: cam.my - dy * len / 2 + dx * off, vx: dx * len / (ms / 1000), vy: dy * len / (ms / 1000),
+      k, rot: (rnd() * 2 - 1) * PLANET_ROT + (rnd() < 0.5 ? 0 : Math.PI), L: [Math.cos(psi) * sl, ly, lz], ringIn, ringOut: ringIn + rw,
+      seed: rnd() };
+  },
+  step(ev, t) { return t - ev.at < ev.ms; },
+});
+// the planet as it is now, in CSS px of the map (null when none runs): its middle (x, y), radius r (with the camera's zoom at its
+// depth), alpha a (it fades in and out over PLANET_FADE at the ends of its life), look (the PLANET_LOOKS entry), age (s), and the
+// rest of its state (k, rot, L, ringIn, ringOut, seed) as laid
+function planetNow() {
+  const e = I.event;
+  if (!e || e.name !== 'planet') return null;
+  const ev = e.ev, age = Math.max(0, performance.now() - ev.at), s = age / 1000;
+  const fade = Math.min(1, age / PLANET_FADE, (ev.ms - age) / PLANET_FADE);
+  if (fade <= 0) return null;
+  const [x, y] = eventAt(ev.cam, ev.x0 + ev.vx * s, ev.y0 + ev.vy * s);
+  const r = ev.R * Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), PLANET_DEPTH * STAR_ZOOM) / ev.cam.sc;
+  return { x, y, r, a: fade * fade * (3 - 2 * fade), look: PLANET_LOOKS[ev.look], age: s, k: ev.k, rot: ev.rot, L: ev.L, ringIn: ev.ringIn, ringOut: ev.ringOut, seed: ev.seed };
+}
+// ---------- the distant capital ship (see "Look", SHIP_*) ----------
+// start: the ship's size, its straight, nearly level path across the window at SHIP_DEPTH (eventCam), from just clear of one side
+// to just clear of the other (with room for the escort behind it, if it has one), as the camera is now, and the escort's place
+// (behind and to one side, in half-lengths) and size; seed: which cells of its rows are lit
+let shipForce = null; // tests (__map.ship): whether the escort follows (null: a pick)
+registerEvent('ship', {
+  start(t) {
+    const W = I.W || 1, H = I.H || 1, rnd = Math.random, cam = eventCam(SHIP_DEPTH), ms = pickIn(SHIP_MS), R = pickIn(SHIP_R);
+    const ang = (rnd() * 2 - 1) * SHIP_TILT, sg = rnd() < 0.5 ? -1 : 1, dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg;
+    const escort = shipForce != null ? shipForce : rnd() < SHIP_ESCORT_P;
+    const eo = escort ? [-pickIn(SHIP_ESCORT_BACK), (rnd() < 0.5 ? -1 : 1) * pickIn(SHIP_ESCORT_SIDE), pickIn(SHIP_ESCORT_SCALE), rnd()] : null;
+    const proj = 0.575 * (Math.abs(W * dx) + Math.abs(H * dy)), rear = (escort ? 2.6 : 1.3) * R, len = 2 * proj + rear + 1.2 * R;
+    const off = (rnd() * 2 - 1) * SHIP_OFF * H, a0 = -(proj + rear);
+    return { at: t, ms, cam, R, dx, dy, x0: cam.mx + dx * a0 - dy * off, y0: cam.my + dy * a0 + dx * off, vx: dx * len / (ms / 1000), vy: dy * len / (ms / 1000),
+      eo, seed: rnd() };
+  },
+  step(ev, t) { return t - ev.at < ev.ms; },
+});
+// the ship as it is now, in CSS px of the map (null when none runs): its middle (x, y), half-length r (with the camera's zoom at its
+// depth), alpha a (it fades in and out over SHIP_FADE at the ends of its life), its heading (cs, sn; unit), flip (-1 when it
+// goes left, so its top stays up), the seed and the escort's place and size as laid (eo, or null)
+function shipNow() {
+  const e = I.event;
+  if (!e || e.name !== 'ship') return null;
+  const ev = e.ev, age = Math.max(0, performance.now() - ev.at), s = age / 1000;
+  const fade = Math.min(1, age / SHIP_FADE, (ev.ms - age) / SHIP_FADE);
+  if (fade <= 0) return null;
+  const [x, y] = eventAt(ev.cam, ev.x0 + ev.vx * s, ev.y0 + ev.vy * s);
+  const r = ev.R * Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), SHIP_DEPTH * STAR_ZOOM) / ev.cam.sc;
+  return { x, y, r, a: fade * fade * (3 - 2 * fade), cs: ev.dx, sn: ev.dy, flip: ev.dx < 0 ? -1 : 1, seed: ev.seed, eo: ev.eo };
+}
+// ---------- the warp drift (see "Look", WARP_*) ----------
+// start: its length, the squeeze's direction and its point, laid in CSS px of the map at WARP_DEPTH (eventCam)
+registerEvent('warp', {
+  start(t) {
+    const W = I.W || 1, H = I.H || 1, rnd = Math.random, cam = eventCam(WARP_DEPTH);
+    const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (rnd() * 2 - 1) * WARP_TURN;
+    return { at: t, ms: pickIn(WARP_MS), cam, dx: Math.cos(ang), dy: Math.sin(ang), x: cam.mx + (pickIn(WARP_AT) - 0.5) * W, y: cam.my + (pickIn(WARP_AT) - 0.5) * H };
+  },
+  step(ev, t) { return t - ev.at < ev.ms; },
+});
+// the warp as it is now (null when none runs): the stretch share a (0-1, eased in and out), its point (x, y, CSS px of the map,
+// with the camera) and direction (dx, dy; unit)
+function warpNow() {
+  const e = I.event;
+  if (!e || e.name !== 'warp') return null;
+  const ev = e.ev, f = clamp((performance.now() - ev.at) / ev.ms, 0, 1);
+  const a = clamp(f / WARP_IN, 0, 1) * clamp((1 - f) / WARP_OUT, 0, 1);
+  if (a <= 0) return null;
+  const [x, y] = eventAt(ev.cam, ev.x, ev.y);
+  return { a: a * a * (3 - 2 * a), x, y, dx: ev.dx, dy: ev.dy };
+}
 // the streaks showing now (a shower's later ones not yet), at most METEOR_N, in CSS px of the map: each one's head
 // (hx, hy), tail end (tx, ty), rgb and alpha (> 0); the tail grows to its length as the head moves off, and the alpha
 // fades in over its first fifth, out over its last half
@@ -3248,11 +3720,20 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // middle (device px; x, y), alpha and its beacon's flash alpha, and uSac, the flash's rgb, packed the same way; then the
 // rockets' three arrays of ROCKET_N vec4s: uRk, each one's foot (device px; x, y) and its head's and trail's tail end's
 // heights above it (device px), uRp, its lean, bend (per device px), head alpha and trail alpha, and uRw, its clock (s),
-// waver (CSS px), sparks' progress (-1: none) and seed (> 0; 0: an empty slot). Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
+// waver (CSS px), sparks' progress (-1: none) and seed (> 0; 0: an empty slot); then the nebula drift's five vec4s, uNb
+// (from SKY_NB): its middle (device px; x, y), long half-axis (device px) and alpha (w; 0: none), the cos and sin of its
+// turn, its aspect and seed, its body, wisp and edge colours (rgb; w of the last: its age, s); then the asteroid field's
+// uAs (from SKY_AS): ASTEROID_N rocks' vec4s, each one's middle (device px; x, y), long radius (device px) and alpha (w; 0: an
+// empty slot), then ASTEROID_N more, its spin's cos and sin, aspect, and in w the edge blur (device px, whole; 0: a sharp
+// rock) plus its seed (0-1) in the fraction, then one with the light's direction (x, y); then the gravity lens's uLn (from SKY_LN): its
+// middle (device px; x, y), Einstein radius (device px) and alpha (w; 0: none), then per far galaxy two: its place from the lens's middle
+// (device px; x, y), size (device px) and light (w; 0: none), and its turn's cos and sin and aspect (the first one's w: the ring's bright side); then the passing planet's uPl (from SKY_PL), nine: its middle (device px; x, y), radius (device px) and alpha (w; 0: none), its ring's cos and sin of turn, tilt (short axis over long) and seed, the light's direction in its own frame (x, y, z) and its age (s), the ring's inner and outer radius (planet radii), opacity (0: none) and kind (w: 0 gas, 1 rock), then its light colour (rgb) with the bands' rate (w), its dark colour with the contrast, its accent with the spot's size, its atmosphere's colour with its strength, and its ring's colour; then the capital ship's uSh (from SKY_SH), three: its middle (device px; x, y), half-length (device px) and alpha (w; 0: none), its heading's cos and sin, flip (-1: it goes left, its top still up) and seed (0-1), then its escort's place from the ship's middle (in half-lengths along its heading, x, and across it, y), size (z, in the ship's; 0: no escort) and seed. then the warp drift's uWp (from SKY_WP), two: its point (device px; x, y) and the squeeze's direction (z, w), then its stretch (x; 0: none), the direction's radial share (y) and the deep sky's share (z). Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
 // without a cell), the deep sky, its star dust, the glows' noise and their field, and the moon's picture (moonImage).
 // uTint (STAR_TINT) is set once.
 const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo'];
 const SKY_M = SKY_U.length * 4;
+const SKY_NB = SKY_M + METEOR_N * 8 + SAT_N * 8 + ROCKET_N * 12; // the nebula drift's five vec4s, after the rockets
+const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_PL = SKY_LN + 20, SKY_SH = SKY_PL + 36, SKY_WP = SKY_SH + 12, SKY_END = SKY_WP + 8; // the asteroid field's vec4s, after the nebula; the lens's five, then the planet's nine, then the ship's three, then the warp's two, after them
 const STAR_TILES = STAR_LAYERS.filter((L) => !L.cell);
 const SKY_TEX = [...STAR_TILES.map((L, t) => 'uS' + t), 'uDeep', 'uDust', 'uNoise', 'uField', 'uMoon'];
 const TEX_DEEP = SKY_TEX.indexOf('uDeep'), TEX_DUST = TEX_DEEP + 1, TEX_NOISE = TEX_DEEP + 2, TEX_FIELD = TEX_DEEP + 3;
@@ -3379,11 +3860,415 @@ vec4 starField(vec2 p, vec4 l, float k, float dens, float spark, float share, ve
   if (sp) v = 1.0 - (1.0 - v) * (1.0 - a * 0.8 * max(starLine(d, 3.2 * s, 0.6 * s), starLine(d.yx, 3.2 * s, 0.6 * s)));
   return vec4(col * v, v);
 }`;
+// the warp drift (see "Look", WARP_*), uWp (see SKY_U's comment): where the sky is looked up for the pixel at p when its stars
+// are stretched by up to k of the warp's stretch: the distance from the point along the direction (turned towards pointing
+// away from the point by the radial share) is squeezed by 1 / (1 + stretch), so what is drawn there is that much longer
+// along it and nothing else about it changes (its light, its width); p itself when there is no warp
+const WARP_GLSL = `vec2 warpP(vec2 p, float k) {
+  float s = uWp[1].x * k;
+  if (s <= 0.0) return p;
+  vec2 d = p - uWp[0].xy, dir = normalize(mix(uWp[0].zw, d / max(length(d), 1.0), uWp[1].y));
+  return p - dir * (dot(d, dir) * s / (1.0 + s));
+}`;
 // per star layer its line in SKY_FS: its tile's texel, or its stars made per cell
 const STAR_GLSL = STAR_LAYERS.map((L, i) => (L.cell
-  ? `c = over(starField(p, uL${i}, ${glf(L.cell)}, ${glf(L.n * (L.cell / STAR_TILE) ** 2)}, ${glf((L.sparkle || 0) / L.n)}, ` +
+  ? `c = over(starField(warpP(pl, ${glf(WARP_LAYER[i])}), uL${i}, ${glf(L.cell)}, ${glf(L.n * (L.cell / STAR_TILE) ** 2)}, ${glf((L.sparkle || 0) / L.n)}, ` +
     `${glf(L.cl ? L.cl[1] : 0)}, vec4(${L.r.concat(L.a).map(glf).join(', ')}), ${L.seed}u, ${glf(L.twinkle || 0)}, uSize.w), c);`
-  : `c = over(star(uS${STAR_TILES.indexOf(L)}, uL${i}, p), c);`)).join('\n  ');
+  : `c = over(star(uS${STAR_TILES.indexOf(L)}, uL${i}, warpP(pl, ${glf(WARP_LAYER[i])})), c);`)).join('\n  ');
+// the nebula drift (see "Look", NEBULA_*), premultiplied, at device px p; uNb (see SKY_U's comment): the cloud lives in its
+// own plane (middle, turn, long half-axis = 1), so its noise travels with it. A value noise, summed over octaves each turned
+// and doubled (nbF), warped twice by itself (the dust looks pulled into streams), gives its density; a ridged noise along
+// the same warp gives the filaments, and a thin band round one level of another noise the dark lanes. The cloud's edge is
+// that density added to its ellipse, so it frays into wisps instead of ending in a curve. Colour: the body tint, pulled to
+// the wisp tint where the warp is high and along the filaments, and to the edge tint in a ring where the cloud thins out.
+const NEBULA_GLSL = `float nbN(vec2 x) {
+  vec2 i = floor(x), f = x - i;
+  f = f * f * (3.0 - 2.0 * f);
+  uvec2 u = uvec2(ivec2(i) + 8192);
+  return mix(mix(hash(u), hash(u + uvec2(1u, 0u)), f.x), mix(hash(u + uvec2(0u, 1u)), hash(u + uvec2(1u, 1u)), f.x), f.y);
+}
+// n octaves of nbN (at most 5), each turned and about twice as fine, half as strong; 0-1, around 0.5
+float nbF(vec2 x, int n) {
+  float s = 0.0, a = 0.5, t = 0.0;
+  for (int i = 0; i < 5; i++) {
+    if (i >= n) break;
+    s += a * nbN(x); t += a;
+    x = mat2(0.8, 0.6, -0.6, 0.8) * x * 2.03 + 11.7;
+    a *= 0.5;
+  }
+  return s / t;
+}
+vec4 nebula(vec2 p) {
+  vec4 a = uNb[0], b = uNb[1];
+  vec2 d = p - a.xy;
+  // outside its reach (a little over its long half-axis): nothing
+  if (dot(d, d) > 1.3 * a.z * a.z) return vec4(0.0);
+  vec2 u = vec2(dot(d, b.xy), dot(d, vec2(-b.y, b.x))) / a.z;
+  u.y /= b.z;
+  float r = length(u), tm = uNb[4].w * 0.01;
+  vec2 x = u * 1.9 + b.w * 61.0;
+  vec2 q = vec2(nbF(x + vec2(tm, 0.0), 3), nbF(x + vec2(5.2, 1.3 - tm), 3));
+  vec2 w = vec2(nbF(x + 2.4 * q + vec2(1.7, 9.2), 3), nbF(x + 2.4 * q + vec2(8.3 + tm, 2.8), 3));
+  float f = nbF(x * 1.1 + 2.6 * w, 5);
+  float fl = 1.0 - abs(2.0 * nbF(x * 2.3 + 3.0 * w + 3.3, 4) - 1.0);
+  fl *= fl * fl;
+  float ln = nbF(x * 1.5 + 2.0 * w + 7.1, 3);
+  float lane = exp(-pow((ln - 0.5) / 0.09, 2.0));
+  // the ellipse's soft edge frayed by the density; the dust itself from the density's upper part, over a faint veil
+  float env = smoothstep(0.0, 0.7, 1.0 - r + 0.55 * (f - 0.5));
+  float dn = smoothstep(0.34, 0.74, f);
+  float dens = env * (0.22 + 0.78 * dn) * (0.7 + 0.5 * fl) * (1.0 - 0.6 * lane);
+  vec3 col = mix(uNb[2].rgb, uNb[3].rgb, clamp(0.3 + 1.3 * (w.x - 0.42), 0.0, 1.0));
+  col = mix(col, uNb[3].rgb, fl * dn * 0.6);
+  float rim = smoothstep(0.04, 0.3, env) * (1.0 - smoothstep(0.3, 0.75, env));
+  col = mix(col, uNb[4].rgb, rim * 0.5);
+  float al = a.w * dens;
+  return vec4(col * al, al * ${glf(NEBULA_ALPHA)});
+}`;
+// the asteroid field (see "Look", ASTEROID_*), premultiplied, for one rock at device px p (a, b: its two vec4s in uAs, see
+// SKY_U's comment; L: the light's direction, towards it). The rock lives in its own plane (middle, spin, long radius = 1,
+// squashed by its aspect): its outline is that unit circle's radius bent by two noises over the angle (so it is lumpy and
+// turns with the rock), the distance to it (in device px) gives the edge, soft by the blur (a sharp rock's is about a
+// pixel). The surface is a sphere-like normal bumped by a noise's gradient and lit by L (a dark rock, mottled); the rim is
+// the thin band just inside the edge, warm where the edge faces the light (broken up by a noise), with a cooler hint where
+// it faces away. Dust: tiny soft specks, one at most in each cell of a grid laid on the rock, brighter on its lit side
+// and fading out with the distance, drawn under it.
+const ASTEROID_GLSL = `vec4 rock(vec2 p, vec4 a, vec4 b, vec2 L) {
+  float bl = floor(b.w), seed = b.w - bl, R = a.z, dp = uSize.z;
+  bool dusty = R > ${glf(ASTEROID_DUST_MIN)} * dp;
+  vec2 d = p - a.xy;
+  float reach = R * (dusty ? 3.3 : 1.5) + 2.5 * bl + 3.0 * dp;
+  if (dot(d, d) > reach * reach) return vec4(0.0);
+  vec2 u = vec2(dot(d, b.xy), dot(d, vec2(-b.y, b.x))) / R;
+  u.y /= b.z;
+  float rr = length(u);
+  vec2 dir = u / max(rr, 1e-3);
+  float lump = nbF(dir * 1.3 + seed * 53.0, 3) - 0.5, fine = nbF(dir * 3.4 + seed * 17.0 + 5.0, 2) - 0.5;
+  float prof = 1.0 + 0.62 * lump + 0.2 * fine;
+  float sc = R * length(vec2(dir.x, dir.y * b.z));
+  float sd = (rr - prof) * sc;
+  float w = max(0.8 * dp, bl);
+  float cov = 1.0 - smoothstep(-w, w, sd);
+  vec2 dn = d / max(length(d), 1e-3);
+  vec4 o = vec4(0.0);
+  if (cov > 0.002) {
+    float soft = 1.0 - clamp(bl / (0.5 * R), 0.0, 0.6);
+    vec2 g0 = u * 2.6 + seed * 91.0;
+    float h = nbF(g0, 3);
+    vec2 gr = vec2(nbF(g0 + vec2(0.07, 0.0), 3) - h, nbF(g0 + vec2(0.0, 0.07), 3) - h) / 0.07;
+    vec2 gs = vec2(gr.x * b.x - gr.y * b.y, gr.x * b.y + gr.y * b.x);
+    vec2 nn = d / max(sc * prof, 1.0);
+    float nl = length(nn);
+    vec3 N = normalize(vec3(nn - 0.3 * soft * gs, 0.8 * sqrt(max(1.0 - nl * nl, 0.02))));
+    float diff = max(dot(N, normalize(vec3(L, 0.5))), 0.0);
+    float mott = 1.0 + (0.72 + 0.56 * nbF(u * 5.2 + seed * 33.0, 3) - 1.0) * soft, far = bl > 0.5 ? 0.0 : 1.0;
+    vec3 body = vec3(${ASTEROID_BODY.map(glf).join(', ')}) * mott * mix(0.22 + 0.5 * diff, 0.4 + 1.1 * diff, far) +
+      vec3(${ASTEROID_RIM.map((v) => glf(v * 0.045)).join(', ')}) * diff * diff * far;
+    float lit = smoothstep(-0.15, 0.9, dot(nl > 1e-3 ? nn / nl : dn, L));
+    float rw = max(dp, 0.09 * R) * mix(0.55, 1.0, far) + 0.4 * bl, edge = exp(-pow(max(-sd, 0.0) / rw, 1.6));
+    float brk = 0.6 + 0.8 * nbF(u * 7.0 + seed * 5.0, 2);
+    float rimA = ${glf(ASTEROID_RIM_A)} * (bl > 0.5 ? ${glf(ASTEROID_CLOSE_RIM)} : 1.0);
+    vec3 rim = vec3(${ASTEROID_RIM.map(glf).join(', ')}) * (rimA * pow(lit, 1.3) * edge * brk) + vec3(${ASTEROID_FILL.map(glf).join(', ')}) * (${glf(ASTEROID_FILL_A)} * pow(1.0 - lit, 2.0) * edge * (bl > 0.5 ? 0.5 : 1.0));
+    o = vec4(body + rim, 1.0) * (cov * a.w);
+  }
+  if (dusty) {
+    float cs = max(0.42 * R, 7.0 * dp), rn = length(d) / R;
+    vec2 g = d / cs + seed * 91.0, id = floor(g), f = fract(g);
+    uvec2 k = uvec2(ivec2(id) + 8192);
+    float h1 = hash(k), h2 = hash(k + uvec2(17u, 91u)), h3 = hash(k + uvec2(53u, 7u)), h4 = hash(k + uvec2(5u, 211u));
+    float sg = (0.55 + 0.35 * h4) * dp + 0.3 * bl;
+    vec2 e = (f - vec2(0.3 + 0.4 * h2, 0.3 + 0.4 * h3)) * cs;
+    float lit = 0.35 + 0.65 * smoothstep(-0.5, 1.0, dot(dn, L));
+    float m = step(0.68, h1) * (1.0 - smoothstep(1.1, 3.2, rn)) * ${glf(ASTEROID_DUST_A)} * (0.35 + 0.65 * h4) * lit * a.w;
+    m *= exp(-dot(e, e) / (sg * sg)) * min(1.0, 0.36 * dp * dp / (sg * sg));
+    o += vec4(vec3(${ASTEROID_DUST.map(glf).join(', ')}) * m, m) * (1.0 - o.a);
+  }
+  return o;
+}`;
+// the gravity lens (see "Look", LENS_*), uLn (see SKY_U's comment). lensP: where the sky is looked up for the pixel at p: the
+// point lens sends the light seen at d from its middle to the source at d - R^2 d / |d|^2 (R: the Einstein radius), a map with no
+// tear in it, so a star near the ring is stretched round it and the tiles and cells it falls on are read as ever. The pull is
+// eased out between LENS_FULL and LENS_REACH radii (a smooth window, so nothing ends in an edge) and kept off a pole at the
+// middle, under the core. lensLight: the far galaxies' light at a lookup point b from the lens's middle (soft ellipses, each
+// turned and squashed), which the pull sends into arcs; lensHole: the core in its shade, then the accretion ring (a Gaussian
+// across with a fainter skirt, brighter towards one side), at p itself
+const LENS_GLSL = `vec2 lensP(vec2 p) {
+  vec4 a = uLn[0];
+  if (a.w <= 0.0) return p;
+  vec2 d = p - a.xy;
+  float r2 = dot(d, d), R = a.z;
+  if (r2 > ${glf(LENS_REACH * LENS_REACH)} * R * R) return p;
+  float w = 1.0 - smoothstep(${glf(LENS_FULL)} * R, ${glf(LENS_REACH)} * R, sqrt(r2));
+  return p - d * (w * R * R / max(r2, 0.0025 * R * R));
+}
+vec4 lensLight(vec2 b) {
+  vec4 o = vec4(0.0);
+  if (uLn[0].w <= 0.0 || dot(b, b) > 4.0 * uLn[0].z * uLn[0].z) return o;
+  for (int i = 0; i < 2; i++) {
+    vec4 s = uLn[1 + 2 * i], t = uLn[2 + 2 * i];
+    if (s.w <= 0.0) continue;
+    vec2 q = b - s.xy;
+    q = vec2(dot(q, t.xy), dot(q, vec2(-t.y, t.x)));
+    float m = s.w * exp(-(q.x * q.x + q.y * q.y / (t.z * t.z)) / (s.z * s.z));
+    vec3 col = i == 0 ? vec3(${LENS_SRC[0].rgb.map(glf).join(', ')}) : vec3(${LENS_SRC[1].rgb.map(glf).join(', ')});
+    o += vec4(col * m, m * ${glf(LENS_SRC_A)});
+  }
+  return o;
+}
+vec4 lensHole(vec2 p) {
+  vec4 a = uLn[0];
+  vec2 d = p - a.xy;
+  float R = a.z, r = length(d), dp = uSize.z;
+  if (a.w <= 0.0 || r > ${glf(LENS_SHADE)} * R + 8.0 * dp) return vec4(0.0);
+  float core = 1.0 - smoothstep(${glf(LENS_CORE)} * R - dp, ${glf(LENS_CORE)} * R + dp, r);
+  float shade = 1.0 - smoothstep(0.0, ${glf(LENS_SHADE)} * R, r);
+  vec4 o = vec4(0.0, 0.0, 0.0, min(1.0, core + 0.5 * shade * shade) * ${glf(LENS_DARK)});
+  float e = (r - ${glf(LENS_RING_R)} * R) / max(${glf(LENS_RING_W)} * dp, 0.02 * R);
+  float side = 1.0 - ${glf(LENS_RING_SIDE)} + ${glf(LENS_RING_SIDE)} * (0.5 + 0.5 * cos(atan(d.y, d.x) - uLn[2].w));
+  float m = ${glf(LENS_RING_A)} * side * (exp(-e * e) + 0.2 * exp(-e * e / 14.0));
+  return over(vec4(vec3(${LENS_RING_RGB.map(glf).join(', ')}) * m, m * 0.5), o);
+}`;
+// the passing planet (see "Look", PLANET_*), premultiplied, at device px p; uPl (see SKY_U's comment). The planet lives in its own
+// frame (middle, ring's long axis along x, radius = 1). Its ring plane holds the axis (0, aa, k) (aa: the rest of a unit vector)
+// as its normal, so a screen point u is at ring radius rho = |(u.x, u.y / k)| and at depth u.y * aa / k in front of or behind the
+// middle: every pixel meets the ring once, in front of the disc on the near side, behind it on the far. ringDens: the ring's
+// density across it (x: 0 inner edge, 1 outer; wx: a pixel's share of it, so the ribs too fine to resolve fade out and nothing
+// crawls): broad bands from a noise, ribs, a faint inner part, thinner outwards and a thin gap. The planet's surface point n gives its
+// latitude (n . axis) and longitude (from the middle meridian, spun with the age, slower at the poles); a gas giant's bands are sines
+// of the latitude bent by noise, with streaks along them and perhaps a storm; a rocky world is a warped 3D noise of the point on the sphere (turned with the
+// spin, so no pole stretches it) lit with its own relief (the gradient of the noise bends the normal). Lit by L with a soft terminator (softer on a gas giant), a cool trace on the
+// night side, the ring's shadow falling across it (the ray from the surface point to the light meets the ring plane in the ring) and
+// a thin atmosphere's glow along the lit rim and a little beyond the limb. The ring is lit on its face towards the light (dim from
+// behind), and the planet's shadow falls on it (the ray from the ring point to the light passes the sphere's middle within 1)
+const PLANET_GLSL = `float nb3(vec3 x) {
+  vec3 i = floor(x), f = x - i;
+  f = f * f * (3.0 - 2.0 * f);
+  uvec3 u = uvec3(ivec3(i) + 8192);
+  float c[8];
+  for (int j = 0; j < 8; j++) {
+    uvec3 q = u + uvec3(uint(j & 1), uint((j >> 1) & 1), uint(j >> 2));
+    c[j] = hash(uvec2(q.x ^ (q.z * 7919u), q.y + q.z * 104729u));
+  }
+  return mix(mix(mix(c[0], c[1], f.x), mix(c[2], c[3], f.x), f.y), mix(mix(c[4], c[5], f.x), mix(c[6], c[7], f.x), f.y), f.z);
+}
+float nb3F(vec3 x, int n) {
+  float s = 0.0, a = 0.5, t = 0.0;
+  for (int i = 0; i < 4; i++) {
+    if (i >= n) break;
+    s += a * nb3(x); t += a;
+    x = x * 2.03 + 11.7;
+    a *= 0.5;
+  }
+  return s / t;
+}
+float ringDens(float x, float wx, float sd) {
+  float span = ${glf(PLANET_GAP[1])};
+  float f = mix(0.5, nbF(vec2(x * 9.0, sd * 13.0 + 3.0), 3), smoothstep(1.0, 4.0, 0.11 / max(wx, 1e-4)));
+  float rib = mix(0.5, 0.5 + 0.5 * sin(x * 70.0 + 6.0 * nbF(vec2(x * 7.0, sd * 5.0), 2)), smoothstep(2.0, 6.0, 0.09 / max(wx, 1e-4)));
+  float d = (0.3 + 0.95 * smoothstep(0.2, 0.8, f)) * (0.78 + 0.22 * rib);
+  d *= mix(0.4, 1.0, smoothstep(0.0, 0.22, x));
+  d *= 1.0 - 0.4 * smoothstep(0.8, 1.0, x);
+  float gw = max(span, 1.3 * wx);
+  return d * (1.0 - 0.94 * exp(-pow((x - ${glf(PLANET_GAP[0])}) / gw, 2.0)));
+}
+vec4 planet(vec2 p) {
+  vec4 a = uPl[0], b = uPl[1], l = uPl[2], g = uPl[3];
+  if (a.w <= 0.0) return vec4(0.0);
+  float R = a.z, dp = uSize.z, k = b.z, aa = sqrt(1.0 - k * k), sd = b.w;
+  bool ring = g.z > 0.0, stone = g.w > 0.5;
+  vec2 d = p - a.xy;
+  float reach = (ring ? g.y : 1.0) + 0.5;
+  if (dot(d, d) > reach * reach * R * R) return vec4(0.0);
+  vec2 u = vec2(dot(d, b.xy), dot(d, vec2(-b.y, b.x))) / R;
+  vec3 L = l.xyz, P = vec3(0.0, aa, k);
+  vec3 sun = vec3(${PLANET_SUN.map(glf).join(', ')});
+  float r = length(u);
+  // the ring
+  vec4 rg = vec4(0.0);
+  float zr = 0.0;
+  if (ring) {
+    zr = -u.y * aa / k;
+    float rho = sqrt(u.x * u.x + u.y * u.y / (k * k));
+    float wr = max(0.9 * dp * sqrt(u.x * u.x + u.y * u.y / (k * k * k * k)) / max(rho, 0.001) / R, 0.0015);
+    float x = (rho - g.x) / (g.y - g.x), wx = wr / (g.y - g.x), e = wx + 0.012;
+    float env = smoothstep(-e, e, x) * (1.0 - smoothstep(1.0 - e, 1.0 + e, x));
+    if (env > 0.0) {
+      float dens = ringDens(clamp(x, 0.0, 1.0), wx, sd);
+      float lf = mix(0.2, 1.0, smoothstep(-0.05, 0.3, dot(L, P)));
+      vec3 rp = vec3(u, zr);
+      float s = -dot(rp, L);
+      if (s > 0.0) lf *= mix(0.04, 1.0, smoothstep(0.93, 1.07, sqrt(max(dot(rp, rp) - s * s, 0.0))));
+      vec3 rc = uPl[8].rgb * (0.88 + 0.24 * nbF(vec2(x * 5.0, sd * 3.0), 2));
+      float ra = g.z * dens * env;
+      rg = vec4(rc * sun * lf * ra, ra);
+    }
+  }
+  // the disc and the glow round it
+  vec4 body = vec4(0.0);
+  float cov = smoothstep(-0.7 * dp, 0.9 * dp, (1.0 - r) * R);
+  vec2 uu = r > 1.0 ? u / r : u;
+  float z = sqrt(max(1.0 - dot(uu, uu), 0.0));
+  vec3 n = vec3(uu, z), S = n;
+  vec4 atm = uPl[7];
+  float lit = 0.0;
+  if (cov > 0.0) {
+    float sl = clamp(dot(n, P), -1.0, 1.0), cl = max(sqrt(1.0 - sl * sl), 0.2);
+    float lon = asin(clamp(n.x / cl, -1.0, 1.0)) + l.w * ${glf(PLANET_SPIN)} * (1.0 - 0.3 * sl * sl);
+    vec3 col;
+    if (!stone) {
+      float wv = nbF(vec2(lon * 1.2, sl * 5.0) + sd * 31.0, 3) - 0.5;
+      float s = sl + 0.07 * wv;
+      float F = uPl[4].w;
+      float bd = 0.65 * (0.5 + 0.5 * sin(s * F + sd * 6.283)) + 0.35 * (0.5 + 0.5 * sin(s * F * 2.37 + 1.9 + sd * 11.0));
+      float st = nbF(vec2(lon * 0.9, s * F * 0.55) + sd * 17.0 + 4.0, 3);
+      col = mix(uPl[5].rgb, uPl[4].rgb, smoothstep(0.15, 0.85, bd));
+      col = mix(col, uPl[6].rgb, clamp((st - 0.35) * 1.6, 0.0, 1.0) * 0.5);
+      col = mix(mix(uPl[4].rgb, uPl[5].rgb, 0.4), col, uPl[5].w);
+      if (uPl[6].w > 0.0) {
+        float dl = mod(lon - sd * 6.283 + 3.1416, 6.2832) - 3.1416;
+        float e = pow(dl * cl / 0.5, 2.0) + pow((sl + 0.34) / 0.12, 2.0);
+        col += 0.08 * exp(-e / 5.0) * (1.0 - exp(-e));
+        col = mix(col, uPl[6].rgb * 0.85, 0.85 * exp(-e));
+      }
+    } else {
+      // a rock's ground is a noise of the point on the sphere, turned with the spin (no pole to stretch it)
+      float sa = l.w * ${glf(PLANET_SPIN)}, cs = cos(sa), sn = sin(sa);
+      vec3 m = (n * cs + cross(P, n) * sn + P * dot(P, n) * (1.0 - cs)) * 2.2 + sd * 29.0;
+      vec3 w = vec3(nb3F(m + 3.1, 2), nb3F(m + 7.7, 2), nb3F(m + 1.3, 2)) - 0.5;
+      m += 1.3 * w;
+      float h = nb3F(m, 3), h2 = nb3F(m * 2.1 + 5.0, 2);
+      vec3 gr = vec3(nb3F(m + vec3(0.07, 0.0, 0.0), 3), nb3F(m + vec3(0.0, 0.07, 0.0), 3), nb3F(m + vec3(0.0, 0.0, 0.07), 3)) - h;
+      gr = gr * cs - cross(P, gr) * sn + P * dot(P, gr) * (1.0 - cs);
+      gr -= n * dot(gr, n);
+      col = mix(uPl[5].rgb, uPl[4].rgb, smoothstep(0.4, 0.6, h));
+      col = mix(col, uPl[6].rgb, smoothstep(0.45, 0.8, h2) * 0.4);
+      col = mix(col, mix(uPl[4].rgb, vec3(1.0), 0.5), smoothstep(0.8, 0.94, abs(sl) + 0.05 * (h2 - 0.5)) * uPl[6].w);
+      n = normalize(n - gr * 5.0);
+    }
+    lit = smoothstep(stone ? -0.1 : -0.25, stone ? 0.5 : 0.75, dot(n, L)) * (0.55 + 0.45 * clamp(dot(n, L), 0.0, 1.0));
+    if (ring) {
+      float lp = dot(L, P), t = -dot(S, P) / (abs(lp) < 0.03 ? 0.03 : lp);
+      if (t > 0.0) {
+        vec3 H = S + t * L;
+        float xx = (sqrt(H.x * H.x + pow(H.y * k - H.z * aa, 2.0)) - g.x) / (g.y - g.x);
+        float rs = g.z * ringDens(clamp(xx, 0.0, 1.0), 0.07, sd) * smoothstep(-0.02, 0.02, xx) * (1.0 - smoothstep(0.98, 1.02, xx));
+        lit *= 1.0 - 0.85 * rs;
+      }
+    }
+    vec3 sc = col * (sun * lit + vec3(0.55, 0.66, 1.0) * ${glf(PLANET_NIGHT)});
+    sc += atm.rgb * atm.w * 0.9 * pow(1.0 - z, 2.6) * smoothstep(-0.3, 0.55, dot(S, L));
+    body = vec4(min(sc, 1.0) * cov, cov);
+  }
+  // the atmosphere beyond the limb, brightest on the lit side
+  float ex = max(r - 1.0, 0.0) * R / dp, hw = max(2.5, 0.07 * R / dp);
+  float ha = atm.w * 0.5 * exp(-ex / hw) * (1.0 - cov) * smoothstep(-0.35, 0.6, dot(u / max(r, 0.001), L.xy) / max(length(L.xy), 0.25));
+  body += vec4(atm.rgb * ha, 0.6 * ha);
+  body.rgb *= ${glf(PLANET_DIM)};
+  rg.rgb *= ${glf(PLANET_DIM)};
+  return (zr > 0.0 ? rg + body * (1.0 - rg.a) : body + rg * (1.0 - body.a)) * a.w;
+}`;
+// the distant capital ship (see "Look", SHIP_*), premultiplied, at device px p; uSh (see SKY_U's comment). shipOne draws one hull in
+// its own frame (half-length = 1, x along its heading, y across with the top at negative y: the ship's lit side stays up on the
+// screen when it goes left), shSD its signed distance (SHIP_HULL's polygons and SHIP_BOXES' boxes joined, SHIP_NOTCH's cut out; one
+// function a polygon, from the table). The hull is nearly black and hides what is behind it. The rim light: the distance's gradient
+// (four more lookups, only within a few px of the edge) is the surface's normal, so an edge facing the light (SHIP_LIGHT, turned
+// into the ship's frame) gets a thin glow as bright as it faces, fading over about a px in and a little less out, varied along the
+// ship by a slow noise, and a fainter, wider sheen into the hull below it, with a trace of bounce on the sides facing away. The
+// windows: a few rows of cells, each lit or not by a hash of its cell and the ship's seed, drawn only where the cell is well inside
+// the hull, a tiny soft point with a faint wider glow. The engines: a small glow at each nozzle with a short plume behind
+const SHIP_GLSL = (() => {
+  const f2 = (v) => `vec2(${glf(v[0])}, ${glf(v[1])})`, f4 = (v) => `vec4(${v.map(glf).join(', ')})`;
+  const polys = SHIP_HULL.map((pts, k) => `float shP${k}(vec2 p) {
+  vec2 v[${pts.length}] = vec2[${pts.length}](${pts.map(f2).join(', ')});
+  float d = dot(p - v[0], p - v[0]), s = 1.0;
+  for (int i = 0; i < ${pts.length}; i++) {
+    int j = i == 0 ? ${pts.length - 1} : i - 1;
+    vec2 e = v[j] - v[i], w = p - v[i];
+    vec2 b = w - e * clamp(dot(w, e) / dot(e, e), 0.0, 1.0);
+    d = min(d, dot(b, b));
+    bvec3 c = bvec3(p.y >= v[i].y, p.y < v[j].y, e.x * w.y > e.y * w.x);
+    if (all(c) || all(not(c))) s = -s;
+  }
+  return s * sqrt(d);
+}`).join('\n');
+  const col = (v) => `vec3(${v.map(glf).join(', ')})`;
+  const Ls = `vec2(${glf(SHIP_LIGHT[0])}, ${glf(SHIP_LIGHT[1])})`;
+  return `${polys}
+float shB(vec2 p, vec4 b) {
+  vec2 q = abs(p - b.xy) - b.zw;
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+}
+float shSD(vec2 q) {
+  float d = min(shP0(q), min(shP1(q), shP2(q)));
+${SHIP_BOXES.map((b) => `  d = min(d, shB(q, ${f4(b)}));`).join('\n')}
+  float n = 1000.0;
+${SHIP_NOTCH.map((b) => `  n = min(n, shB(q, ${f4(b)}));`).join('\n')}
+  return max(d, -n);
+}
+const float SH_ROWS[${SHIP_ROWS.length}] = float[${SHIP_ROWS.length}](${SHIP_ROWS.map(glf).join(', ')});
+const vec2 SH_ENG[${SHIP_ENGINES.length}] = vec2[${SHIP_ENGINES.length}](${SHIP_ENGINES.map(f2).join(', ')});
+vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A) {
+  vec2 d = p - c, e1 = fr.xy, e2 = vec2(-fr.y, fr.x);
+  vec2 u = vec2(dot(d, e1), fr.z * dot(d, e2)) / R;
+  if (u.x < -1.55 || u.x > 1.15 || abs(u.y) > 0.42) return vec4(0.0);
+  float dp = uSize.z, w = (0.7 + 0.3 * dp) / R;
+  float sd = shSD(u), dd = sd * R;
+  float cov = 1.0 - smoothstep(-w, w, sd);
+  float plate = nbF(vec2(u.x * 36.0, u.y * 120.0) + fr.w * 71.0, 2);
+  vec3 body = ${col(SHIP_BODY)} * (0.8 + 0.5 * plate) + ${col(SHIP_LIFT)} * smoothstep(0.12, -0.14, u.y);
+  float ba = cov * ${glf(SHIP_BODY_A)} * A;
+  vec4 o = vec4(body * ba, ba);
+  if (abs(dd) < 16.0 * dp) {
+    float e = 1.6 / R;
+    vec2 g = vec2(shSD(u + vec2(e, 0.0)) - shSD(u - vec2(e, 0.0)), shSD(u + vec2(0.0, e)) - shSD(u - vec2(0.0, e)));
+    vec2 n = g / max(length(g), 1e-5);
+    vec2 L = normalize(vec2(dot(${Ls}, e1), fr.z * dot(${Ls}, e2)));
+    float fc = max(dot(n, L), 0.0), fb = max(-dot(n, L), 0.0);
+    float vr = clamp(0.55 + 0.9 * nbF(u * 4.0 + fr.w * 30.0, 2), 0.4, 1.3);
+    vec3 rc = mix(${col(SHIP_RIM)}, ${col(SHIP_RIM_WARM)}, 0.6 * smoothstep(0.1, 1.0, u.x));
+    float edge = exp(min(dd, 0.0) / (1.1 * dp)) * exp(-pow(max(dd, 0.0) / (1.2 * dp), 2.0));
+    float m = (${glf(SHIP_RIM_A)} * pow(fc, 1.3) * vr * edge + (dd < 0.0 ? 0.1 * fc * vr * exp(dd / (6.0 * dp)) : 0.0)) * A;
+    o = over(vec4(rc * m, m), o);
+    float mb = 0.07 * fb * (dd < 0.0 ? exp(dd / (1.4 * dp)) : 0.0) * A;
+    o = over(vec4(vec3(0.45, 0.42, 0.66) * mb, mb), o);
+  }
+  // the windows
+  for (int r = 0; r < ${SHIP_ROWS.length}; r++) {
+    float ry = SH_ROWS[r];
+    if (abs(u.y - ry) > 0.03 || sd > 0.0) continue;
+    float cell = floor(u.x / 0.05), h = hash(uvec2(uint(int(cell) + 64), uint(r * 977 + int(fr.w * 65535.0))));
+    if (h > ${glf(SHIP_WINDOW_P)} * wp * (r == 0 ? 3.0 : 1.0)) continue;
+    vec2 wc = vec2((cell + 0.5) * 0.05, ry);
+    if (shSD(wc) > -0.018) continue;
+    vec2 q = (u - wc) * R;
+    float rw = 0.62 * dp, q2 = dot(q, q);
+    float m = ${glf(SHIP_WINDOW_A)} * (exp(-q2 / (rw * rw)) + 0.12 * exp(-q2 / (6.0 * rw * rw))) * A;
+    o = over(vec4(${col(SHIP_WINDOW)} * m, m), o);
+  }
+  // the engines
+  for (int k = 0; k < ${SHIP_ENGINES.length}; k++) {
+    vec2 q = (u - SH_ENG[k]) * R;
+    float q2 = dot(q, q), rc = max(1.1 * dp, 0.011 * R), rh = 0.035 * R;
+    float pl = q.x < 0.0 ? exp(q.x / (0.1 * R)) * exp(-pow(q.y / (0.012 * R + 0.5 * dp), 2.0)) : 0.0;
+    float m = ${glf(SHIP_ENGINE_A)} * (exp(-q2 / (rc * rc)) + 0.28 * exp(-q2 / (rh * rh)) + 0.34 * pl) * A;
+    o = over(vec4(${col(SHIP_ENGINE)} * m, m), o);
+  }
+  return o;
+}
+vec4 ship(vec2 p) {
+  vec4 a = uSh[0], f = uSh[1], e = uSh[2];
+  if (a.w <= 0.0) return vec4(0.0);
+  vec2 d = p - a.xy;
+  float reach = a.z * (e.z > 0.0 ? 2.9 : 1.7);
+  if (dot(d, d) > reach * reach) return vec4(0.0);
+  vec4 o = shipOne(p, a.xy, a.z, f, 1.0, a.w);
+  if (e.z > 0.0) {
+    vec2 c2 = a.xy + a.z * (e.x * f.xy + e.y * f.z * vec2(-f.y, f.x));
+    o = over(o, shipOne(p, c2, a.z * e.z, vec4(f.xyz, e.w), 0.34, a.w));
+  }
+  return o;
+}`;
+})();
 // per device pixel, premultiplied: the tint (mixed top to bottom unpremultiplied, as a canvas gradient mixes) over the
 // page's colour, the deep sky's light and its star dust (dense where the band is) over that, then each star layer,
 // back to front (STAR_GLSL), sampled where the pixel's centre falls on its tile or made there, the satellites, the shooting
@@ -3396,8 +4281,9 @@ precision highp float;
 #define METEOR_N ${METEOR_N}
 #define SAT_N ${SAT_N}
 #define ROCKET_N ${ROCKET_N}
+#define ASTEROID_N ${ASTEROID_N}
 uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uGlow, uN0, uN1;
-uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N];
+uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[5], uPl[9], uSh[3], uWp[2];
 uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
 uniform int uGN;
 uniform sampler2D ${SKY_TEX.join(', ')};
@@ -3410,15 +4296,38 @@ float hash(uvec2 v) {
   h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12; h *= 0x297a2d39u; h ^= h >> 15;
   return float(h) / 4294967295.0;
 }
+${NEBULA_GLSL}
+${ASTEROID_GLSL}
+${LENS_GLSL}
+${PLANET_GLSL}
+${SHIP_GLSL}
+${WARP_GLSL}
 void main() {
   vec2 p = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y); // the pixel's centre, device px from the top left
   vec4 t = mix(uTop, uBot, p.y / uSize.y);
   vec4 c = over(vec4(t.rgb * t.a, t.a), uBg);
-  vec4 d = texture(uDeep, (p - uD.xy) * uD.zw);
+  vec2 pl = lensP(p); // where the sky under the satellites is looked up (the gravity lens bends it; p without one)
+  vec2 pw = warpP(pl, uWp[1].z); // the deep sky's lookup, stretched a little by the warp drift
+  vec4 d = texture(uDeep, (pw - uD.xy) * uD.zw);
   vec3 g = d.rgb * uFx.y;
   c = over(vec4(g, max(g.r, max(g.g, g.b))), c);
-  c = over(vec4(texture(uDust, (p - uDu.xy) * uDu.z).r * d.a * uFx.z), c);
+  c = over(vec4(texture(uDust, (pw - uDu.xy) * uDu.z).r * d.a * uFx.z), c);
+  // the nebula drift, over the deep sky and under the stars, which show through it
+  if (uNb[0].w > 0.0) c = over(nebula(pl), c);
+  // the lens's far galaxies, bent into arcs, over those and under the stars
+  c = over(lensLight(pl - uLn[0].xy), c);
   ${STAR_GLSL}
+  // the lens's dark core and accretion ring, over the bent stars
+  c = over(lensHole(p), c);
+  // the passing planet, ring and all, over the stars and under the asteroids, satellites and streaks
+  c = over(planet(p), c);
+  // the distant capital ship (and its escort), over the planet and the stars and under the asteroids, satellites and streaks
+  c = over(ship(p), c);
+  // the asteroids' sharp rocks, over the stars and under the satellites and streaks; an empty slot is skipped
+  for (int i = 0; i < ASTEROID_N; i++) {
+    vec4 a = uAs[i], b = uAs[ASTEROID_N + i];
+    if (a.w > 0.0 && b.w < 1.0) c = over(rock(p, a, b, uAs[2 * ASTEROID_N].xy), c);
+  }
   // the satellites: each a small soft point (a Gaussian SAT_R CSS px across, uSat's z its alpha) and its beacon's
   // flash (w) a little wider in its colour (uSac); the first empty slot ends them, and a pixel far from one skips it
   for (int i = 0; i < SAT_N; i++) {
@@ -3490,6 +4399,11 @@ void main() {
     vec2 mq = (p - uMo.xy) * uMo.z;
     if (all(greaterThanEqual(mq, vec2(0.0))) && all(lessThan(mq, vec2(1.0)))) c = over(texture(uMoon, mq) * uMo.w, c);
   }
+  // the close asteroid (soft focus, its blur 1 px or more), in front of all that, the moon too
+  for (int i = 0; i < ASTEROID_N; i++) {
+    vec4 a = uAs[i], b = uAs[ASTEROID_N + i];
+    if (a.w > 0.0 && b.w >= 1.0) c = over(rock(p, a, b, uAs[2 * ASTEROID_N].xy), c);
+  }
   vec2 q = p / uSize.xy * 2.0 - 1.0;
   c = over(vec4(0.0, 0.0, 0.0, uFx.x * smoothstep(0.3, 2.0, dot(q, q))), c);
   // the glows: per repo whose box holds the pixel, its field's texel; the noise is the same for every repo
@@ -3520,7 +4434,7 @@ function skyGLMake(cv) {
   let gl = null;
   try { gl = cv.getContext('webgl2', SKY_GL_ATTRS); } catch { gl = null; }
   if (!gl) return null;
-  const n = SKY_M + METEOR_N * 8 + SAT_N * 8 + ROCKET_N * 12;
+  const n = SKY_END;
   const G = { gl, ok: false, loc: [], u: new Float32Array(n), last: new Float32Array(n), drawn: false, dpr: 0, tw: 0, hour: '', tint: null, bgCss: null, bg: null,
     // the glows: their state (see "The repo glows" above and glowPrep)
     glow: false, gp: null, gloc: null, vao: null, buf: null, fb: null, ft: null, fw: 0, fh: 0, fieldOk: false, bufN: 0,
@@ -3558,6 +4472,12 @@ function skyGLInit(G) {
   G.mloc = ['uM', 'uMc'].map((name) => gl.getUniformLocation(p, name));
   G.sloc = ['uSat', 'uSac'].map((name) => gl.getUniformLocation(p, name));
   G.rloc = ['uRk', 'uRp', 'uRw'].map((name) => gl.getUniformLocation(p, name));
+  G.nbloc = gl.getUniformLocation(p, 'uNb');
+  G.asloc = gl.getUniformLocation(p, 'uAs');
+  G.lnloc = gl.getUniformLocation(p, 'uLn');
+  G.plloc = gl.getUniformLocation(p, 'uPl');
+  G.shloc = gl.getUniformLocation(p, 'uSh');
+  G.wploc = gl.getUniformLocation(p, 'uWp');
   G.gloc = ['uGlow', 'uN0', 'uN1', 'uGB', 'uGE', 'uGC', 'uGL', 'uGN'].map((name) => gl.getUniformLocation(p, name));
   SKY_TEX.forEach((name, i) => {
     gl.activeTexture(gl.TEXTURE0 + i);
@@ -3807,6 +4727,63 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     u[o + RN] = r.lean; u[o + RN + 1] = r.bend / dpr; u[o + RN + 2] = r.ha; u[o + RN + 3] = r.ta;
     u[o + 2 * RN] = r.ph; u[o + 2 * RN + 1] = r.wave; u[o + 2 * RN + 2] = r.puff; u[o + 2 * RN + 3] = r.seed;
   });
+  // the nebula drift, after the rockets (all 0 when none)
+  const nb = nebulaNow();
+  if (nb) {
+    const o = SKY_NB;
+    u[o] = nb.x * dpr; u[o + 1] = nb.y * dpr; u[o + 2] = nb.r * dpr; u[o + 3] = nb.a;
+    u[o + 4] = Math.cos(nb.rot); u[o + 5] = Math.sin(nb.rot); u[o + 6] = nb.aspect; u[o + 7] = nb.seed;
+    for (let q = 0; q < 3; q++) for (let j = 0; j < 3; j++) u[o + 8 + q * 4 + j] = nb.rgb[q][j];
+    u[o + 19] = nb.age;
+  }
+  // the asteroid field, after the nebula (all 0 when none): far to near, the light's direction last
+  const rk = asteroidsNow();
+  if (rk.length) {
+    rk.forEach((r, i) => {
+      const o = SKY_AS + i * 4, ob = o + ASTEROID_N * 4;
+      u[o] = r.x * dpr; u[o + 1] = r.y * dpr; u[o + 2] = r.r * dpr; u[o + 3] = r.a;
+      u[ob] = Math.cos(r.rot); u[ob + 1] = Math.sin(r.rot); u[ob + 2] = r.asp; u[ob + 3] = Math.floor(r.blur * dpr) + r.seed;
+    });
+    const l = I.event.ev.light, ol = SKY_AS + ASTEROID_N * 8;
+    u[ol] = l[0]; u[ol + 1] = l[1];
+  }
+  // the gravity lens, after the asteroids (all 0 when none)
+  const ln = lensNow();
+  if (ln) {
+    const o = SKY_LN;
+    u[o] = ln.x * dpr; u[o + 1] = ln.y * dpr; u[o + 2] = ln.r * dpr; u[o + 3] = 1;
+    ln.srcs.forEach((q, i) => {
+      const b = o + 4 + i * 8;
+      u[b] = q.bx * dpr; u[b + 1] = q.by * dpr; u[b + 2] = q.sig * dpr; u[b + 3] = q.amp;
+      u[b + 4] = Math.cos(q.rot); u[b + 5] = Math.sin(q.rot); u[b + 6] = q.asp;
+    });
+    u[o + 11] = ln.phi;
+  }
+  // the passing planet, after the lens (all 0 when none)
+  const pl = planetNow();
+  if (pl) {
+    const o = SKY_PL, lk = pl.look, vec = (b, c, w) => { u[o + b] = c[0]; u[o + b + 1] = c[1]; u[o + b + 2] = c[2]; u[o + b + 3] = w; };
+    u[o] = pl.x * dpr; u[o + 1] = pl.y * dpr; u[o + 2] = pl.r * dpr; u[o + 3] = pl.a;
+    u[o + 4] = Math.cos(pl.rot); u[o + 5] = Math.sin(pl.rot); u[o + 6] = pl.k; u[o + 7] = pl.seed;
+    vec(8, pl.L, pl.age);
+    u[o + 12] = pl.ringIn; u[o + 13] = pl.ringOut; u[o + 14] = lk.ring; u[o + 15] = lk.kind;
+    vec(16, lk.a, lk.bands); vec(20, lk.b, lk.contrast); vec(24, lk.c, lk.spot); vec(28, lk.atm, lk.atmA); vec(32, lk.rr, 0);
+  }
+  // the capital ship, after the planet (all 0 when none)
+  const sh = shipNow();
+  if (sh) {
+    const o = SKY_SH;
+    u[o] = sh.x * dpr; u[o + 1] = sh.y * dpr; u[o + 2] = sh.r * dpr; u[o + 3] = sh.a;
+    u[o + 4] = sh.cs; u[o + 5] = sh.sn; u[o + 6] = sh.flip; u[o + 7] = sh.seed;
+    if (sh.eo) for (let j = 0; j < 4; j++) u[o + 8 + j] = sh.eo[j];
+  }
+  // the warp drift, after the ship (all 0 when none)
+  const wp = warpNow();
+  if (wp) {
+    const o = SKY_WP;
+    u[o] = wp.x * dpr; u[o + 1] = wp.y * dpr; u[o + 2] = wp.dx; u[o + 3] = wp.dy;
+    u[o + 4] = wp.a * WARP_STRETCH; u[o + 5] = WARP_RADIAL; u[o + 6] = WARP_DEEP;
+  }
   I.glowGL = glowPrep(G, glows, k, ox, oy, dpr);
   // the field again when its quads changed; the sky's pass when anything it shows did
   let fresh = !G.gn || (G.fieldOk && G.ni === G.lastNi);
@@ -3823,6 +4800,12 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   for (let j = 0; j < 2; j++) gl.uniform4fv(G.mloc[j], u, SKY_M + j * METEOR_N * 4, METEOR_N * 4);
   for (let j = 0; j < 2; j++) gl.uniform4fv(G.sloc[j], u, SKY_M + METEOR_N * 8 + j * SAT_N * 4, SAT_N * 4);
   for (let j = 0; j < 3; j++) gl.uniform4fv(G.rloc[j], u, SKY_M + METEOR_N * 8 + SAT_N * 8 + j * ROCKET_N * 4, ROCKET_N * 4);
+  gl.uniform4fv(G.nbloc, u, SKY_NB, 20);
+  gl.uniform4fv(G.asloc, u, SKY_AS, ASTEROID_N * 8 + 4);
+  gl.uniform4fv(G.lnloc, u, SKY_LN, 20);
+  gl.uniform4fv(G.plloc, u, SKY_PL, 36);
+  gl.uniform4fv(G.shloc, u, SKY_SH, 12);
+  gl.uniform4fv(G.wploc, u, SKY_WP, 8);
   if (G.glow) {
     const L = G.gloc, gu = G.gu, M = GLOW_MAX * 4;
     for (let j = 0; j < 3; j++) gl.uniform4fv(L[j], gu, j * 4, 4);
