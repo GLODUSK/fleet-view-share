@@ -361,6 +361,7 @@ const FIN_R = 6.5, FIN_CHARGE_CUT = 50; // finished conversations: smaller, and 
 const NEEDS_YOU = new Set(['ASKING', 'QUESTION', 'STALLED', 'ERROR']);
 const GHOST_MS = 650;                // a conversation that leaves the map shrinks and fades out over this
 const DASH_NEW = [3, 3];             // a new session's ring (steady, never moving)
+const Q_GAP = Math.PI * 50 / 180;    // half the opening at the top of an "asked you" ring (100° in all)
 const DASH_HO = [5, 4];              // a handing-off conversation's ring, turning slowly: it is in transit
 const HANDOFF_GHOST_MS = 950;        // a handed-off node flies into its pickup and is absorbed over this (a pickup already on the map elsewhere)
 const RELAY_MS = 900;                // a picked-up node's violet ring, as it turns from handing off to live
@@ -5870,16 +5871,13 @@ function drawLook(ctx, key, s, x, y, R, ks) {
       orb(ctx, x, y, Math.max(1.5, R - 4.6 * ks), COL.gold);
       break;
     case 'QUESTION':
-      // its reply ends on a question (nothing is blocked): a solid gold orb with a steady rim and a "?" on it
-      orb(ctx, x, y, R, COL.gold);
-      ctx.strokeStyle = rgba(COL.gold, 0.4); ctx.lineWidth = 1.2 * ks;
-      circle(ctx, x, y, R + 1.8 * ks); ctx.stroke();
-      if (R >= 4) {
-        ctx.font = `700 ${Math.round(R * 1.15)}px ${DISPLAY}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.lineWidth = Math.max(1, R * 0.16); ctx.strokeStyle = 'rgba(5,7,13,0.45)'; ctx.strokeText('?', x, y + R * 0.06);
-        ctx.fillStyle = 'rgba(255,255,255,0.96)'; ctx.fillText('?', x, y + R * 0.06);
-        ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-      }
+      // its reply ends on a question (nothing is blocked): ASKING's look with the ring left open at the top
+      ctx.fillStyle = HOLE; circle(ctx, x, y, R); ctx.fill();
+      ctx.fillStyle = rgba(COL.gold, 0.14); ctx.fill();
+      ctx.strokeStyle = COL.gold; ctx.lineWidth = 2 * ks; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.arc(x, y, Math.max(0.5, R - ks), -Math.PI / 2 + Q_GAP, Math.PI * 1.5 - Q_GAP); ctx.stroke();
+      ctx.lineCap = 'butt';
+      orb(ctx, x, y, Math.max(1.5, R - 4.6 * ks), COL.gold);
       break;
     case 'STALLED':
       ctx.fillStyle = HOLE; circle(ctx, x, y, R); ctx.fill();
@@ -6956,8 +6954,8 @@ function buildLegend() {
   item(orbSvg(15, 10, 6, COL.cyan), 'working (an orb in its colour)');
   item(orbSvg(15, 10, 5, COL.violet) + orbSvg(5, 10, 2, COL.violet) + orbSvg(25, 10, 2, COL.violet) + orbSvg(15, 2.2, 1.8, COL.violet, 0.45), 'agents running (orbs around it)');
   item(`<circle cx="15" cy="10" r="6.5" fill="${rgba(COL.gold, 0.14)}" stroke="${COL.gold}" stroke-width="1.8"/>` + orbSvg(15, 10, 2.6, COL.gold), 'needs you (blocked on a question or permission)');
-  item(`<circle cx="15" cy="10" r="7.6" fill="none" stroke="${rgba(COL.gold, 0.4)}" stroke-width="1"/>` + orbSvg(15, 10, 6, COL.gold) +
-    `<text x="15" y="13.4" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">?</text>`, 'asked you (its reply ends on a question)');
+  item(`<circle cx="15" cy="10" r="6.5" fill="${rgba(COL.gold, 0.14)}"/><path d="M19.98 5.82A6.5 6.5 0 1 1 10.02 5.82" fill="none" stroke="${COL.gold}" stroke-width="1.8" stroke-linecap="round"/>`
+    + orbSvg(15, 10, 2.6, COL.gold), 'asked you (its reply ends on a question; the ring is open)');
   item(`<circle cx="15" cy="10" r="6.5" fill="none" stroke="${rgba(COL.gold, 0.6)}" stroke-width="2" stroke-linecap="round" stroke-dasharray="0.1 3.6"/>`, 'stalled? (quiet 5 min mid-turn)');
   item(`<circle cx="15" cy="10" r="6.5" fill="${rgba(COL.red, 0.14)}" stroke="${COL.red}" stroke-width="1.8"/><path d="M12.6 7.6l4.8 4.8M17.4 7.6l-4.8 4.8" stroke="${COL.red}" stroke-width="1.6" stroke-linecap="round"/>`, 'API error');
   item(orbSvg(15, 10, 4.4, mixHex(COL.cyan, COL.faint, 0.5)), 'finished, in "Recently finished" (smaller and muted, on its repo; removing it there removes it here)');
