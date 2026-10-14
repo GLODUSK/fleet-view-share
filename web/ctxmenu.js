@@ -685,7 +685,11 @@ const inside = (t) => t instanceof Node && (el.contains(t) || (subEl && subEl.co
 document.addEventListener('pointerdown', (e) => { if (open && !inside(e.target)) closeCtxMenu(false); }, true);
 document.addEventListener('wheel', (e) => { if (open && !inside(e.target)) closeCtxMenu(false); }, { capture: true, passive: true });
 let keepUntil = 0; // until then a scroll outside the menu (the page redrawing after a stay item) leaves it open
-document.addEventListener('scroll', (e) => { if (open && !inside(e.target) && Date.now() > keepUntil) closeCtxMenu(false); }, true);
+// only the page itself scrolling closes it: a pane scrolling by itself (a chat following its new messages) never
+// moves the menu, and one scrolled by hand already closed it (the wheel or the press above). Else a Give orders box
+// closed mid-sentence each time a chat got a message
+const pageScroll = (t) => t === document || t === document.documentElement || t === document.body;
+document.addEventListener('scroll', (e) => { if (open && pageScroll(e.target) && Date.now() > keepUntil) closeCtxMenu(false); }, true);
 // a resize that leaves the window its size (the page redrawing after a stay item fires these) leaves it open
 let openSize = '';
 const winSize = () => `${window.innerWidth}x${window.innerHeight}`;
