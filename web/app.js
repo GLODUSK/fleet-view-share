@@ -56,6 +56,14 @@
 //                          (every member not removed, each on its own, prefixed with the team's name). Returns null
 //                          when it went off (a toast says how it went), else why it can't. ui.teamReach(teamId):
 //                          that "why" before anything is written, or null
+//   ui.makeTeam({ members, lead, name, order, above })   the Bots view's New team form: one team of those
+//                          conversations (ids, 2 to ui.teamMax), led by lead (one of them) or of peers (null), sent the
+//                          order the way the team menus' orders go (runOrder: POST /teams, the server types each brief),
+//                          named name or "Bots · <the order's first words>"; above: a team id its lead then joins as a
+//                          member (teams nest: POST /teams/add). -> Promise of { ok, team, message? } or { ok: false,
+//                          message } (the server's reason when it refuses). ui.teamJoinWhy(id): why that conversation
+//                          can't be in a team made from this window, or null. ui.teamItems(id): its menu's "Team ▸" row
+//                          (a bot's right-click in the Bots list). ui.teamMax: the most a team has
 //   ui.solo                read only: true on the Bots pop-out window's page (?solo=chats; see SOLO)
 //   Links: any element with data-act="url" data-url="…", or data-act="reveal" data-kind="file|folder"
 //   data-path="…" [data-line="n"], or data-act="session" data-id="…" (another conversation: the handoff
@@ -168,6 +176,7 @@ import { renderWall } from './wall.js';
 import { renderProjects, followProjectsPick } from './projects.js';
 import { renderChats, botFace, seenNow, setPickedColors, selectChat } from './chats.js';
 import { BOT_JOBS, jobLabel, ownBots, onMap, watchesOf, botMascot, botName, watchName } from './map-bots.js';
+import { buildContacts } from './chats-model.js';
 import { mountBotNotes } from './botnote.js';
 import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
@@ -388,6 +397,11 @@ const ui = {
     runOrder(teamMembers(t), String(text), teamMsgOpts(t));
     return null;
   },
+  // the Bots view's New team form and a bot's right-click (chats.js): the team menus' own paths
+  makeTeam: (o) => makeTeam(o || {}),
+  teamJoinWhy: (id) => { const s = sessionsOf([id])[0]; return s ? memberWhy(s) : 'Fleet View does not list its conversation'; },
+  teamItems: (id) => { const s = sessionsOf([id])[0]; return s ? teamItems(s) : []; },
+  get teamMax() { return TEAM_MAX; },
   solo: SOLO,
 };
 
@@ -3371,7 +3385,64 @@ async function renameTeam(t, raw) {
 // why s can't join t, or null
 function joinWhy(s, t) {
   if (t.members.length >= TEAM_MAX) return `a team has at most ${TEAM_MAX} conversations`;
-  return unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
+  return memberWhy(s);
+}
+// why s can't be in a team made from this window (an order can't reach it, or it has no id yet), or null
+const memberWhy = (s) => unreachable(s) || (isConvId(s.id) ? null : 'it has not started yet: wait until it has');
+// would lead reporting in team above make a loop? Up from above's lead, lead by lead (each one's plain seat), until
+// one of the new team's members: it would report to itself. The server checks the same (409); this says so before
+// the team is made, so a refused nesting never leaves a team half set up
+function aboveLoop(members, above) {
+  const seen = new Set();
+  for (let cur = leadOf(above); cur && !seen.has(cur); ) {
+    if (members.includes(cur)) return `${nameOfId(cur)} is in the new team and above it: a lead can't report to itself`;
+    seen.add(cur);
+    const up = (state?.teams || []).find((t) => t.members.includes(cur) && t.lead !== cur);
+    cur = leadOf(up);
+  }
+  return null;
+}
+// the Bots view's New team (ui.makeTeam): o { members: [ids], lead: id | null, name, order, above: team id | null }.
+// The same as the team menus' orders (runOrder, POST /teams with send: the server types each brief); with above,
+// its lead then joins that team as a plain member (POST /teams/add), so it reports there. -> { ok, team, message? }
+async function makeTeam(o) {
+  const ids = [...new Set((o.members || []).filter((x) => typeof x === 'string'))];
+  const list = sessionsOf(ids);
+  if (list.length < 2) return { ok: false, message: list.length < ids.length ? 'Fleet View does not list one of them now' : 'a team needs two or more' };
+  if (list.length > TEAM_MAX) return { ok: false, message: `a team has at most ${TEAM_MAX}` };
+  const bad = list.find((s) => memberWhy(s));
+  if (bad) return { ok: false, message: `${bad.name}: ${memberWhy(bad)}` };
+  const text = String(o.order || '').trim();
+  if (!text) return { ok: false, message: 'write the order first' };
+  const lead = o.lead ? list.find((s) => s.id === o.lead) || null : null;
+  if (o.lead && !lead) return { ok: false, message: 'the lead must be one of the members' };
+  const above = o.above ? teamById(o.above) : null;
+  if (o.above && !above) return { ok: false, message: 'the team above is gone' };
+  if (above && !lead) return { ok: false, message: 'only a team with a lead can report to a team above' };
+  const loop = above ? aboveLoop(list.map((s) => s.id), above) : null;
+  if (loop) return { ok: false, message: loop };
+  // the members that are plain members of the team above leave it for the new team (POST /teams), so it must keep
+  // two of its own, or the server disbands it before the lead can join; and it needs room for the lead
+  const already = !!(above && above.members.includes(lead.id));
+  if (above) {
+    const leave = above.members.filter((m) => m !== lead.id && m !== above.lead && list.some((s) => s.id === m));
+    const stay = above.members.length - leave.length;
+    if (stay < 2) return { ok: false, message: `"${above.name}" would be left with one member once ${leave.map(nameOfId).join(' and ')} ${leave.length === 1 ? 'moves' : 'move'} to the new team, and end: pick another team above, or none` };
+    if (!already && stay + 1 > TEAM_MAX) return { ok: false, message: `"${above.name}" is full (${TEAM_MAX})` };
+  }
+  const name = cleanName(o.name);
+  const res = await runOrder(list, text, { team: true, lead, name: (t) => name || `Bots · ${firstWords(t, 4, 34)}` });
+  if (!res || !res.team) return { ok: false, message: (res && res.message) || (res ? orderSummary(res) : 'could not make the team') };
+  const team = res.team;
+  // (a lead that is a member of the team above already stays there: it reports there now)
+  if (!above || (already && team.lead === lead.id)) return { ok: true, team };
+  // nested: its lead reports in the team above (the toast and the reply say what went wrong, the team stays made)
+  if (!team.lead) { const m = `"${team.name}" was made with no lead, so it is not under "${above.name}"`; toast(m, C.red, null, 9000); return { ok: true, team, message: m }; }
+  const r = await post('/teams/add', { id: above.id, member: team.lead });
+  if (FIXTURE && r == null) return { ok: true, team };
+  if (!r || !r.ok) { const m = `"${team.name}" was made, but ${nameOfId(team.lead)} did not join "${above.name}": ${(r && r.message) || 'Fleet View did not answer'}`; toast(m, C.red, null, 9000); return { ok: true, team, message: m }; }
+  toast(`★ ${nameOfId(team.lead)} reports in "${above.name}" for "${team.name}" · ${toldN(r.told)}`, C.mint);
+  return { ok: true, team };
 }
 // a conversation's teams: up, the one it is a plain member of (where it reports), and own, the one it leads. Teams
 // nest (fleet-view.js team-tree.js): a lead can report in a team above, so a conversation may be in both
@@ -3426,17 +3497,27 @@ function teamItems(s) {
   const note = [up ? `in "${up.name}"` : '', own ? `leads "${own.name}"` : ''].filter(Boolean).join(', ');
   return [{ label: 'Team', icon: 'merge', note: note || null, children: out }];
 }
+// the overseers' conversations now: the Chief's and each bot's of this machine, the one its Bots row opens
+// (chats-model.js buildContacts), for a bot's "Start team ▸" and the Bots view's New team
+function overseerSessions() {
+  let rows = [];
+  try { rows = buildContacts(view || state || {}, { chiefId: state?.settings?.chief?.id || null }); } catch { rows = []; }
+  return sessionsOf(rows.filter((c) => c.kind !== 'team' && c.id && !c.elsewhere).map((c) => c.id));
+}
 // "Start team ▸": a checklist of the other conversations in its workspace (ticking keeps the menu open), "<it>
 // leads" (on: it gets the order and the others report to it; off: one team of peers), then "Start team" opens the
-// box for the order. The ticks live as long as the menu.
+// box for the order. The ticks live as long as the menu. An overseer's (the Chief, a bot: tagged bot) are the other
+// overseers instead: each bot works in a folder of its own (~/Bots/<name>), so its workspace has no one else in it
 function startTeamItem(s, why) {
   const label = 'Start team';
   if (why) return { label, icon: 'plus', disabled: true, note: why };
   if (!termApi()) return { label, icon: 'plus', disabled: true, note: noTermNote() };
-  const folder = s.repo && s.repo.root;
-  const repo = s.repo ? s.repo.name || repoName(folder) : null;
-  const cands = folder ? repoSessions(folder).filter((c) => c.id !== s.id && !c.demo) : [];
-  if (!cands.length) return { label, icon: 'plus', disabled: true, note: repo ? `no other conversation in ${repo}` : 'no workspace known for it' };
+  const over = !!s.bot;
+  const folder = !over && s.repo && s.repo.root;
+  const repo = over ? 'Bots' : s.repo ? s.repo.name || repoName(folder) : null;
+  const cands = over ? overseerSessions().filter((c) => c.id !== s.id && c.bot !== s.bot && !c.demo)
+    : folder ? repoSessions(folder).filter((c) => c.id !== s.id && !c.demo) : [];
+  if (!cands.length) return { label, icon: 'plus', disabled: true, note: over ? 'no other bot has a conversation yet' : repo ? `no other conversation in ${repo}` : 'no workspace known for it' };
   const picked = new Set();
   let lead = true;
   const build = () => {

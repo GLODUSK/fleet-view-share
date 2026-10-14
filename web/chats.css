@@ -201,6 +201,24 @@
 .ch-nb-b .btn:disabled { opacity: 0.6; cursor: default; }
 .ch-narrow .ch-form { padding: 16px 14px; }
 .ch-narrow .ch-f-row, .ch-narrow .ch-f-row.two { grid-template-columns: minmax(0, 1fr); }
+/* New team: the members to tick, one row each (its face, name and a note), in the text boxes' look */
+.ch-tm-list {
+  display: flex; flex-direction: column; max-height: 34vh; overflow-y: auto; padding: 4px; border-radius: 10px;
+  background: rgba(255, 255, 255, 0.045); border: 1px solid var(--glass-edge);
+}
+.ch-tm { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
+.ch-tm:hover:not(.off) { background: var(--hover); }
+.ch-tm.on { background: rgba(63, 216, 255, 0.08); }
+.ch-tm.off { cursor: default; }
+.ch-tm.off .ch-tm-av, .ch-tm.off .ch-tm-name { opacity: 0.5; }
+.ch-tm input { flex: none; width: 15px; height: 15px; margin: 0; accent-color: var(--cyan); }
+.ch-tm-av { flex: none; display: grid; place-items: center; width: 28px; height: 28px; }
+.ch-tm-b { display: flex; flex-direction: column; min-width: 0; }
+.ch-tm-name { color: var(--text); font-size: 13.5px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-tm-note { color: var(--dim); font-size: 11.5px; line-height: 1.35; overflow-wrap: anywhere; }
+.ch-tm-n, .ch-tm-none { color: var(--faint); font-size: 12px; line-height: 1.4; }
+.ch-tm-none { padding: 6px 8px; }
+.ch-nt [data-f][hidden] { display: none; }
 /* the header's mascot previews the bot as picked */
 .ch-nb-av { flex: none; display: grid; place-items: center; width: 48px; height: 48px; }
 /* the form's pickers (picker.js): a button like the text boxes showing the pick, opening a menu in the chat box's

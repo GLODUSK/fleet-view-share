@@ -8,7 +8,15 @@
 // left, Fleet View's setup notes as small grey lines), a team's is its thread as bubbles with
 // a box that sends to every member the way the team menu's "Message the team" does (ui.messageTeam in app.js).
 //
-// Bots: "+" opens the New bot form in the chat side (name, what it does, account, model, effort, its shape and colour;
+// "+" opens a small menu: New bot and New team (Henry, 2026-10-13: "it should be within the same bots menu"), each a
+// form in the chat side. New team: a name (else "Bots · <the order's first words>"), the members ticked from the
+// Chief and the bots (one with no conversation yet, or that this window can't reach, is greyed with the reason; at
+// most ui.teamMax), Lead (one of them, or No lead: peers), Team above (only with a lead: an overseers' team its lead
+// reports in, teams nest) and the order. Make team goes the way the team menus' orders go (ui.makeTeam in app.js:
+// POST /teams, then /teams/add for the team above), and the new team's group chat is picked; the server's reason
+// shows in the form when it refuses. A bot's right-click has the conversation menu's Team ▸ too (ui.teamItems), whose
+// Start team ▸ lists the other overseers, since every bot works in a folder of its own.
+// Bots: "New bot" opens the New bot form in the chat side (name, what it does, account, model, effort, its shape and colour;
 // account B and a Dynamic model and effort by default (the account may be Dynamic too: the one with the most usage left), the shape and colour picked for it unless you pick), which POSTs
 // /bots: the server makes its folder ~/Bots/<slug> with its CLAUDE.md and starts it, and the new row is picked.
 // Account, model, effort, shape and colour are styled pickers (picker.js, in the chat box's model-menu look), not
@@ -21,8 +29,8 @@
 // its header, its last chat read only (or, never started, a card with its instructions and a Start button) and a box of
 // its own: what you type there starts it (POST /bots/:id/start: its running conversation, else its last one resumed,
 // else a new one), and goes in once its session is up (handto.js hands it to that conversation's chat box, which sends
-// it). Right-click a bot: Start, Edit bot..., a quick Rename, Colour ▸ and Shape ▸ (its look; POST /bots/:id), Remove
-// bot (asks first; POST /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
+// it). Right-click a bot: Start, Edit bot..., a quick Rename, Colour ▸ and Shape ▸ (its look; POST /bots/:id), Team ▸,
+// Remove bot (asks first; POST /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
 //
 // The list's order is Henry's (Henry, 2026-10-12: "dont move them up and down when one sends a message"):
 // settings.chatOrder (chats-model.js sortContacts), the pinned rows on top, then the rest; activity shows in the row,
@@ -128,8 +136,9 @@ setDynamicBots((s) => {
 // be up), err, note, draft (its box), restore (the draft goes back in the box) }
 const botUi = new Map();
 const bu = (id) => { let u = botUi.get(id); if (!u) botUi.set(id, (u = { starting: false, wait: null, err: '', note: '', draft: '', restore: false })); return u; };
-// the New bot form or a bot's Edit bot panel while it shows: { mode: 'new' | 'edit', botId (edit), busy, err, fresh,
-// v: { account, model, effort, shape, color } as picked, pk: the pickers }
+// the New bot form, a bot's Edit bot panel or the New team form while it shows: { mode: 'new' | 'edit' | 'team',
+// botId (edit), busy, err, fresh, v: { account, model, effort, shape, color } as picked (team: { members: [ids],
+// lead, above }), pk: the pickers }
 let form = null;
 const made = new Map(); // bot id -> { bot, at }: made here, until /state lists it (?fixture=1: for good)
 // a bot of this machine's; another machine's (elsewhere: bots.js) has no Start, Edit, menu or Tasks here
@@ -370,7 +379,7 @@ function build(el, ui) {
     + `<div class="ch"><nav class="ch-side" aria-label="bots">`
     + `<div class="ch-top"><span class="ch-title">Bots</span><span class="grow"></span>`
     + `<button type="button" class="ch-ib ch-pop" title="Open Bots in its own window" hidden>${icon('external', 15)}</button>`
-    + `<button type="button" class="ch-ib ch-new" title="New bot" aria-label="New bot">${icon('plus', 16)}</button></div>`
+    + `<button type="button" class="ch-ib ch-new" title="New bot or team" aria-label="New bot or team" aria-haspopup="menu">${icon('plus', 16)}</button></div>`
     + `<label class="ch-search">${icon('search', 14)}<input type="search" spellcheck="false" autocomplete="off" placeholder="Search bots" aria-label="Search bots"></label>`
     + `<div class="ch-list" role="listbox" aria-label="bots"></div></nav>`
     + `<section class="ch-main"><header class="ch-head" hidden><button type="button" class="ch-ib ch-back" title="Back to the bots (Esc)" aria-label="Back">${icon('chevron', 16)}</button>`
@@ -465,7 +474,7 @@ function build(el, ui) {
       else focusCompose(el);
     }
   });
-  el._new.addEventListener('click', (e) => { e.stopPropagation(); openForm(el, ui); });
+  el._new.addEventListener('click', (e) => { e.stopPropagation(); newMenu(el, ui); });
   el._pop.addEventListener('click', (e) => { e.stopPropagation(); desk()?.popChats?.(); });
   el._popped.addEventListener('click', (e) => {
     if (e.target.closest('[data-dock]')) desk()?.dockChats?.();
@@ -518,10 +527,12 @@ function build(el, ui) {
     if (e.target.closest('[data-newbot]')) openForm(el, ui);
     else if (e.target.closest('.ch-start-btn')) startChief(el, ui);
   });
-  // the New bot form and Edit bot: Enter in the name (or Ctrl+Enter anywhere) makes or saves it, Esc or Cancel closes
-  // it (a picker's open menu takes Esc first: picker.js)
+  // the New bot form, Edit bot and New team: Enter in the name (or Ctrl+Enter anywhere) makes or saves it, Esc or
+  // Cancel closes it (a picker's open menu takes Esc first: picker.js)
   el._form.addEventListener('submit', (e) => { e.preventDefault(); submitForm(el, ui); });
   el._form.addEventListener('click', (e) => { if (e.target.closest('[data-cancel]')) closeForm(ui); });
+  // New team: a member ticked or unticked
+  el._form.addEventListener('change', (e) => { if (e.target.name === 'tm') tickMember(el, e.target.value, e.target.checked); });
   el._form.addEventListener('keydown', (e) => {
     e.stopPropagation(); // the page's one-key shortcuts stay out of the form
     if (e.key === 'Escape') { e.preventDefault(); closeForm(ui); }
@@ -594,12 +605,22 @@ function setOnTop(on, el) {
   if (b) { b.setAttribute('aria-pressed', String(onTop)); b.classList.toggle('on', onTop); b.title = onTop ? 'Kept on top: click to let other windows cover it' : 'Keep on top'; }
 }
 
-// ---------- bots: + New bot, Start, the right-click menu ----------
-// "+": the New bot form, in place of the chat (over the list in the narrow layout); with a bot's id, its Edit bot
-// panel (the same form, filled in)
-function openForm(el, ui, botId = null) {
+// ---------- bots: + New bot / New team, Start, the right-click menu ----------
+// "+": a small menu under it, New bot and New team
+function newMenu(el, ui) {
+  const r = el._new.getBoundingClientRect();
+  const can = (el._contacts || []).filter((c) => (c.kind === 'bot' || c.kind === 'chief') && c.id && !c.elsewhere).length;
+  openCtxMenu({ x: r.left, y: r.bottom + 4, title: 'New', items: [
+    { label: 'New bot', icon: 'plus', note: 'an overseer with standing tasks', run: () => openForm(el, ui) },
+    can >= 2 ? { label: 'New team', icon: 'merge', note: 'bots working on one order, in a group chat', run: () => openForm(el, ui, null, 'team') }
+      : { label: 'New team', icon: 'merge', disabled: true, note: 'needs two bots (or a bot and the Chief) that have started' },
+  ] });
+}
+// the New bot form, in place of the chat (over the list in the narrow layout); with a bot's id, its Edit bot panel
+// (the same form, filled in); mode 'team': the New team form
+function openForm(el, ui, botId = null, mode = null) {
   if (form) for (const p of Object.values(form.pk || {})) p.close();
-  form = { mode: botId ? 'edit' : 'new', botId, busy: false, err: '', fresh: true, v: null, pk: null };
+  form = { mode: mode || (botId ? 'edit' : 'new'), botId, busy: false, err: '', fresh: true, v: null, pk: null };
   if (el.classList.contains('ch-narrow')) open = true;
   ui.refresh();
 }
@@ -646,6 +667,7 @@ function formChoices(state, bot) {
   };
 }
 function drawForm(el, state) {
+  if (form.mode === 'team') { drawTeamForm(el, state); return; }
   const edit = form.mode === 'edit';
   const bot = edit ? botOf(state, form.botId) : null;
   if (form.fresh) {
@@ -696,6 +718,7 @@ function drawLook(el) {
 }
 async function submitForm(el, ui) {
   if (!form || form.busy) return;
+  if (form.mode === 'team') { submitTeam(el, ui); return; }
   const f = el._form.querySelector('form');
   const v = (n) => String((f && f.elements[n] && f.elements[n].value) || '');
   const vals = { name: v('name'), brief: v('brief'), ...form.v };
@@ -740,6 +763,157 @@ async function saveEdit(el, ui, vals) {
   if ('color' in body) lk.color = body.color;
   if (Object.keys(lk).length) looks.set(id, { ...(looks.get(id) || {}), ...lk, at: Date.now() });
   closeForm(ui);
+}
+
+// ---------- New team ----------
+const TEAM_MAX_DEF = 12; // a team's most members when the page has no ui.teamMax (app.js TEAM_MAX)
+const teamMax = () => Number(curUi().teamMax) || TEAM_MAX_DEF;
+// a contact's face at rest (the form's rows stay put while it works)
+const restFace = (c, size) => mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: 'idle', color: colorOf(c), size, shape: c.shape || undefined });
+// a conversation's teams in state.teams: the one it is a plain member of (up: it leaves it) and the one it leads (own)
+function teamsOfId(state, id) {
+  const ts = (state && state.teams) || [];
+  return { up: ts.find((t) => (t.members || []).includes(id) && t.lead !== id) || null, own: ts.find((t) => t.lead === id && (t.members || []).includes(id)) || null };
+}
+// who can be in it: the Chief and every bot, each with why not (greyed) or a note: not running (it is resumed to take
+// the order), the team it leaves, the one it still leads. Why not comes from app.js (ui.teamJoinWhy: the orders' checks)
+function teamChoices(state) {
+  const ui = curUi();
+  return (pane?._contacts || []).filter((c) => c.kind === 'chief' || c.kind === 'bot').map((c) => {
+    let why = c.elsewhere ? 'runs on another machine' : !c.id ? (c.kind === 'chief' ? 'not started yet' : 'never started: Start it first') : null;
+    if (!why) { try { why = typeof ui.teamJoinWhy === 'function' ? ui.teamJoinWhy(c.id) : 'this page cannot make a team yet'; } catch (e) { why = String((e && e.message) || e); } }
+    const { up, own } = c.id ? teamsOfId(state, c.id) : {};
+    const note = why || [c.kind === 'bot' && c.live === false ? 'not running: it starts to take the order' : '',
+      up ? `in "${up.name}": it leaves it` : '', own ? `leads "${own.name}": still does` : ''].filter(Boolean).join(' · ');
+    return { c, id: c.id, why, note };
+  });
+}
+const tickedOf = () => (form && form.v ? form.v.members : []).map((id) => (pane?._contacts || []).find((c) => c.id === id)).filter(Boolean);
+// Lead ▸: No lead (peers), then each one ticked
+function leadOptions() {
+  const st = pane?._state || {};
+  return [{ value: '', label: 'No lead (peers)', note: 'they work it out between them' },
+    ...tickedOf().map((c, i) => {
+      const own = teamsOfId(st, c.id).own;
+      return { value: c.id, label: `${c.name} leads`, sep: i === 0, art: restFace(c, 18), btn: `${restFace(c, 18)}<span>${esc(c.name)} leads</span>`,
+        note: own ? `leads "${own.name}" now: it leaves that lead` : 'the others report to it' };
+    })];
+}
+// Team above ▸: None, then each overseers' team (a group chat here); its lead reports there (teams nest)
+function aboveOptions() {
+  const st = pane?._state || {};
+  const ts = (pane?._contacts || []).filter((c) => c.kind === 'team');
+  return [{ value: '', label: 'None', note: 'a team of its own' },
+    ...ts.map((c, i) => {
+      const t = (st.teams || []).find((x) => x.id === c.teamId), lead = (c.members || []).find((m) => m.lead);
+      const n = t ? (t.members || []).length : (c.members || []).length;
+      return { value: c.teamId, label: c.name, sep: i === 0, note: `${n} members${lead ? `, led by ${lead.name}` : ', peers'}${n >= teamMax() ? ' · full' : ''}` };
+    })];
+}
+function drawTeamForm(el, state) {
+  if (form.fresh) {
+    form.fresh = false;
+    form.v = { members: [], lead: '', above: '' };
+    const field = (k, label) => `<div class="ch-f" data-f="${k}"><span id="ch-nt-${k}">${label}</span><div data-pk="${k}"></div></div>`;
+    el._form.innerHTML = `<form class="ch-nb ch-nt" novalidate autocomplete="off">`
+      + `<div class="ch-nb-h"><span class="ch-nb-av"></span><div><div class="ch-nb-t">New team</div>`
+      + `<div class="ch-nb-s">Bots that work on one order together, with a group chat here. Each gets the order, its teammates and how to reach them; under a lead, the lead directs and the others report to it.</div></div></div>`
+      + `<label class="ch-f"><span>Name</span><input name="name" maxlength="80" spellcheck="false" placeholder="Bots · the order's first words"></label>`
+      + `<div class="ch-f"><span id="ch-nt-members">Members</span><div class="ch-tm-list" role="group" aria-labelledby="ch-nt-members"></div><div class="ch-tm-n"></div></div>`
+      + `<div class="ch-f-row two">${field('lead', 'Lead')}${field('above', 'Team above')}</div>`
+      + `<label class="ch-f"><span>The order</span><textarea name="order" maxlength="4000" rows="5"></textarea></label>`
+      + `<div class="ch-nb-err" role="alert" hidden></div>`
+      + `<div class="ch-nb-b"><button type="button" class="btn" data-cancel="1">Cancel</button><button type="submit" class="btn primary" data-make="1"></button></div></form>`;
+    form.pk = {
+      lead: mountPicker(el._form.querySelector('[data-pk="lead"]'), { options: leadOptions, value: '', labelId: 'ch-nt-lead',
+        onChange: (v) => { if (!form || !form.v) return; form.v.lead = v; if (!v) form.v.above = ''; curUi().refresh?.(); } }),
+      above: mountPicker(el._form.querySelector('[data-pk="above"]'), { options: aboveOptions, value: '', labelId: 'ch-nt-above',
+        onChange: (v) => { if (form && form.v) form.v.above = v; } }),
+    };
+    requestAnimationFrame(() => el._form.querySelector('input[name="name"]')?.focus());
+  }
+  const f = el._form.querySelector('form');
+  const max = teamMax(), choices = teamChoices(state);
+  // a member that can't be in it any more (gone, ended elsewhere) is unticked; the lead and the team above follow
+  const can = new Set(choices.filter((x) => !x.why).map((x) => x.id));
+  form.v.members = form.v.members.filter((id) => can.has(id)).slice(0, max);
+  if (form.v.lead && !form.v.members.includes(form.v.lead)) form.v.lead = '';
+  const teams = (pane?._contacts || []).filter((c) => c.kind === 'team');
+  if (!form.v.lead || !teams.some((c) => c.teamId === form.v.above)) form.v.above = '';
+  const ms = form.v.members, n = ms.length;
+  // the rows (rewritten only when something in them changed; the focus stays on the row it was on)
+  const rows = choices.map((x) => {
+    const on = !!x.id && ms.includes(x.id), full = !on && !x.why && n >= max;
+    const note = full ? `a team has at most ${max}` : x.note;
+    return `<label class="ch-tm${on ? ' on' : ''}${x.why || full ? ' off' : ''}" title="${esc(x.why ? `${x.c.name}: ${x.why}` : x.c.name)}">`
+      + `<input type="checkbox" name="tm" value="${esc(x.id || x.c.key)}"${on ? ' checked' : ''}${x.why || full || form.busy ? ' disabled' : ''}>`
+      + `<span class="ch-tm-av">${restFace(x.c, 26)}</span><span class="ch-tm-b"><span class="ch-tm-name">${esc(x.c.name)}</span>`
+      + `${note ? `<span class="ch-tm-note">${esc(note)}</span>` : ''}</span></label>`;
+  }).join('') || '<div class="ch-tm-none">No bots yet: make two first.</div>';
+  const list = f.querySelector('.ch-tm-list');
+  if (list._html !== rows) {
+    const had = document.activeElement && list.contains(document.activeElement) ? document.activeElement.value : null;
+    list.innerHTML = rows;
+    list._html = rows;
+    if (had) [...list.querySelectorAll('input[name="tm"]')].find((i) => i.value === had)?.focus();
+  }
+  f.querySelector('.ch-tm-n').textContent = n < 2 ? `Tick two or more (at most ${max}).` : `${n} in the team${n >= max ? ` (the most a team has)` : ''}.`;
+  // the header: the ones ticked, overlapping as on a team's row
+  const show = tickedOf().slice(0, 3);
+  const sz = Math.round(44 * (show.length === 1 ? 1 : 0.62));
+  setHTML(el._form.querySelector('.ch-nb-av'), !show.length ? mascotSVG('new-team', { state: 'new', color: C.cyan, size: 44 })
+    : `<span class="ch-cluster n${show.length}" style="--cb:44px;--cs:${sz}px">${show.map((c, i) => `<span class="ch-cm m${i}">${restFace(c, Math.round(sz * 0.84))}</span>`).join('')}</span>`);
+  // Lead and Team above follow the ticks; Team above only with a lead, and only when there is a team to report to
+  // (each one drawn again only when its choices or its pick changed: a redraw while its menu is open moves the focus)
+  const sig = `${ms.join(',')}|${teams.map((c) => `${c.teamId}:${c.name}:${(c.members || []).length}`).join(',')}`;
+  if (form.pk.lead.value !== form.v.lead) form.pk.lead.set(form.v.lead);
+  if (form.pk.above.value !== form.v.above) form.pk.above.set(form.v.above);
+  if (form.sig !== sig) { form.sig = sig; form.pk.lead.redraw(); form.pk.above.redraw(); }
+  form.pk.lead.disable(form.busy || n < 2);
+  form.pk.above.disable(form.busy);
+  f.querySelector('[data-f="above"]').hidden = !form.v.lead || !teams.length;
+  const lead = form.v.lead ? tickedOf().find((c) => c.id === form.v.lead) : null;
+  f.elements.order.placeholder = lead ? `${lead.name} gets the order and directs the others; they report to it. The order:`
+    : 'The order for all of them. They become a team of peers and can message each other.';
+  const er = f.querySelector('.ch-nb-err');
+  er.textContent = form.err;
+  er.hidden = !form.err;
+  const mk = f.querySelector('[data-make]');
+  mk.disabled = form.busy;
+  mk.textContent = form.busy ? 'Making it...' : 'Make team';
+}
+// a member ticked or unticked: the lead and the team above follow (drawTeamForm)
+function tickMember(el, id, on) {
+  if (!form || form.mode !== 'team' || !form.v) return;
+  form.v.members = form.v.members.filter((x) => x !== id);
+  if (on) form.v.members.push(id);
+  form.err = '';
+  curUi().refresh?.();
+}
+// Make team: ui.makeTeam (app.js) does what the team menus' orders do; the new team's group chat is picked once
+// it is made, else the form says why (the server's reason when it refuses)
+async function submitTeam(el, ui) {
+  const mine = form;
+  const f = el._form.querySelector('form');
+  const v = (n) => String((f && f.elements[n] && f.elements[n].value) || '');
+  const say = (m, focus) => { mine.err = m; ui.refresh(); focus?.focus(); };
+  const members = [...mine.v.members];
+  if (members.length < 2) { say('Tick two or more to make a team.'); return; }
+  const order = v('order').trim();
+  if (!order) { say('Write the order: what the team is to do.', f.elements.order); return; }
+  if (typeof ui.makeTeam !== 'function') { say('This page cannot make a team yet.'); return; }
+  mine.busy = true;
+  mine.err = '';
+  ui.refresh();
+  let r;
+  try { r = await ui.makeTeam({ members, lead: mine.v.lead || null, name: v('name').trim(), order, above: (mine.v.lead && mine.v.above) || null }); }
+  catch (e) { r = { ok: false, message: String((e && e.message) || e) }; }
+  if (form !== mine) return; // closed meanwhile
+  if (!r || !r.ok) { mine.busy = false; mine.err = (r && r.message) || 'Could not make the team'; ui.refresh(); return; }
+  for (const p of Object.values(mine.pk || {})) p.close();
+  form = null;
+  if (r.team && typeof r.team.id === 'string') pick(`team:${r.team.id}`, ui, true);
+  else ui.refresh();
 }
 
 // Start, and with text: the text goes in once its session is up (pumpBots). The text is back in its box when it fails
@@ -805,10 +979,18 @@ function botMenu(el, ui, botId, x, y) {
       { label: 'Rename', icon: 'edit', input: { value: b.name, placeholder: 'its name: 1 to 40 characters', hint: 'Enter saves · Esc', empty: 'a bot needs a name', busy: 'saving…', submit: (t) => saveBot(ui, botId, { name: t.trim() }) } },
       lookColorItem(ui, botId),
       lookShapeItem(ui, botId),
+      ...botTeamItems(ui, c),
       { sep: true },
       { label: 'Remove bot', icon: 'trash', danger: true, note: 'its folder and chats are kept', confirm: { text: `Remove ${b.name}? Its session ends. Its folder and its conversations are kept.`, yes: 'Remove' }, run: () => removeBot(ui, botId, b.name) },
     ],
   });
+}
+// Team ▸: the conversation menu's (app.js teamItems: Start team ▸ with the other bots, Add to team ▸, Lead team ▸,
+// its teams), for the conversation its row opens; one that never started has none yet
+function botTeamItems(ui, c) {
+  if (typeof ui.teamItems !== 'function') return [];
+  if (!c || !c.id) return [{ label: 'Team', icon: 'merge', disabled: true, note: 'start it first' }];
+  try { return ui.teamItems(c.id) || []; } catch (e) { console.warn('chats: team items', e); return []; }
 }
 // Colour ▸ / Shape ▸: its look (the bot's one colour, kept with the bot whatever conversation it is in; Edit bot and fv
 // look change the same); a tick (a colour: "now") on the one it wears; picking one keeps the menu open (stay) and wears it at once
