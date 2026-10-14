@@ -40,8 +40,9 @@
 // conversations, and the ring turns faster (plus an inner counter-turning dash ring grows) while they work.
 // A dormant hub (no live conversation) is smaller, its arcs short, turning slowly; PRs are small rings with a pull-request glyph; edges are gentle curves (always
 // bent to the same side for a pair, the bend swaying slowly like a rope) with a colour gradient, and names sit on small frosted pills.
-// Behind it all, three layers of faint tiny stars (STAR_LAYERS) at fixed brightness: each follows the camera at
-// its own fraction of the pan and of the zoom, so the sky feels deep, and creeps slowly by itself (not when still).
+// Behind it all, three layers of faint tiny stars (STAR_LAYERS) at fixed brightness: all of them slide with the
+// pan as the map does (no parallax: panning shows more sky), hold still on zoom and when a panel opens beside the
+// map, and creep slowly by themselves (not when still).
 // Some gather in loose clusters; most are white, a few blue-white to amber (STAR_TINT), a few are tiny sparkles.
 // A few of the brightest in the two front layers (mostly the nearest) twinkle faintly (TWINKLE_*): a slow, calm
 // swell of their brightness, each at its own pace; none while the map rests, is hidden or under reduced motion, and
@@ -395,14 +396,16 @@ const WT_MAX = 16;                  // worktree satellites drawn per hub
 // drift in px/s.
 // A layer's scale is zoom^(depth * STAR_ZOOM); STAR_ZOOM is 0 (Henry 2026-10-14: the sky is far away, so zooming leaves the
 // stars, the deep sky's galaxies and the space events exactly where they are; zoomAt keeps them from sliding too).
-// A layer follows depth * STAR_PAN of the pan; STAR_PAN is 0 too (Henry 2026-10-14: panning, by dragging or the middle
-// mouse, moves the map over a sky that stays put), so a layer's and an event's depth only tells how it drifts.
+// Every layer, the deep sky and the space events slide STAR_PAN of the px the pan moves the map, all alike (Henry
+// 2026-10-14: "if im moving the camera i should just see more space ... without ... feeling parallax-y"); what only
+// makes up for a panel or a resize (holdPan, keepIn's glide) never moves them ("nothing that is happening in the bg
+// should be affected by this chat box"). A layer's and an event's depth only tells how it drifts.
 // cl: [loose clusters per tile, their share of the stars, spread in px]; sparkle: how many are tiny 4-point sparkles.
 // cell: the sky's shader makes this layer itself (STAR_FIELD_GLSL) instead of repeating its tile: at most one star
 // per square of cell px, at the tile's density and mix; its stars repeat only every STAR_WRAP px, and its clusters
 // become a gentle unevenness (cl's share of the stars gathers in some squares of STAR_SUPER px). STAR_EDGE: how far
 // (px) a made star keeps from its cell's edges, so its glow and sparkle are never cut. The canvas repeats all three tiles.
-const STAR_TILE = 512, STAR_ZOOM = 0, STAR_PAN = 0, STAR_DIR = [0.83, 0.56], STAR_WRAP = 32768, STAR_SUPER = 256, STAR_EDGE = 5;
+const STAR_TILE = 512, STAR_ZOOM = 0, STAR_PAN = 1, STAR_DIR = [0.83, 0.56], STAR_WRAP = 32768, STAR_SUPER = 256, STAR_EDGE = 5;
 const STAR_LAYERS = [
   { depth: 0.15, n: 46, r: [0.45, 0.8], a: [0.12, 0.3], drift: 0.8, seed: 11, cl: [3, 0.45, 34] },
   { depth: 0.35, n: 20, r: [0.6, 1.0], a: [0.16, 0.38], drift: 1.8, seed: 23, cl: [2, 0.35, 46], sparkle: 1, cell: 32, twinkle: 0.15 },
@@ -474,7 +477,7 @@ const LUNAR_ECLIPSES = [['2026-03-03T11:34:52', 1.151, 207, 58], ['2026-08-28T04
   ['2033-10-08T10:56:23', 1.35, 202, 79], ['2034-09-28T02:47:37', 0.014, 27, 0], ['2035-08-19T01:12:15', 0.104, 77, 0]];
 const ECL_DT = 72, ECL_RU = 2.7, ECL_RED = [178, 74, 38], ECL_TOT = 0.5, ECL_PART = 0.1, ECL_PEN = 0.3;
 // the deep sky (see "Look"), the sky's deepest layer, under the stars: a texture of DEEP_W x DEEP_H painted once,
-// each texel DEEP_PX CSS px, following DEEP_DEPTH of the pan and drifting DEEP_DRIFT px/s; DEEP_A is its brightest
+// each texel DEEP_PX CSS px, sliding with the pan as the stars do and drifting DEEP_DRIFT px/s; DEEP_A is its brightest
 // light. Its star dust is a DUST_T device px tile of DUST_N specks, as bright as DUST_A where the band is densest.
 const DEEP_W = 512, DEEP_H = 256, DEEP_PX = 8, DEEP_DEPTH = 0.06, DEEP_DRIFT = 0.3, DEEP_A = 0.07;
 const DUST_T = 512, DUST_N = 2600, DUST_A = 0.3;
@@ -492,21 +495,25 @@ const DEEP_GALAXIES = [[26, 138, 12, 0.62, 0.5, 'spiral', [0.4, 0.48, 0.62], 0.5
 // SAT_Y of the window's height, starting SAT_PAD px off one side; it fades in and out over SAT_FADE
 // ms. Its beacon flashes every SAT_BLINK ms (a pick each), for SAT_FLASH ms, by turns SAT_RED and white, up to
 // SAT_FLASH_A over the point and a little wider (SAT_FLASH_R)
-// SAT_DEPTH: the fraction of the pan and zoom it follows, the nearest star layer's, so it moves with the sky
+// SAT_DEPTH: the fraction of the zoom it follows, the nearest star layer's; it slides with the pan as the sky does
 const SAT_DEPTH = STAR_LAYERS[STAR_LAYERS.length - 1].depth;
 const SAT_N = 8, SAT_R = 0.75, SAT_RGB = [1, 0.95, 0.86], SAT_A = 0.62, SAT_DAY = 0.45;
 const SAT_CROSS = [60, 120], SAT_TILT = [0.06, 0.32], SAT_Y = [0.05, 0.6], SAT_PAD = 12, SAT_FADE = 1500;
 const SAT_BLINK = [1500, 2000], SAT_FLASH = 160, SAT_RED = [1, 0.32, 0.26], SAT_FLASH_A = 0.38, SAT_FLASH_R = 1.6;
 // space events (see "Look"): the next one comes EVENT_GAP ms (a random pick in the range) after the last ended, or after
 // the map is active and awake again (never at once); EVENT_DEPTH: the star layers' depths (far, middle, near) an event
-// picks its parallax from through eventCam(depth), the fraction of the pan and zoom it follows
+// picks through eventCam(depth), the fraction of the zoom it follows (it slides with the pan as the sky does)
 const EVENT_GAP = [150e3, 330e3];
 // the far events (see "Look", FAR_*; web/sky-far.js is the catalog): the next comes FAR_GAP ms (a pick) after the last
 // ended; FAR_N parts drawn at most (the shader has a slot for each); a new one's middle keeps FAR_CLEAR CSS px plus its
 // own reach from every orb and hub on screen and FAR_EDGE from the window's edge, the best of FAR_TRIES places;
-// FAR_SCALE: its sizes times this, by the window's shorter side (FAR_SCALE_AT px is 1), within FAR_SCALE_K;
-// SKY_OFF_MS: how often the kinds switched off are read again
-const FAR_GAP = [35e3, 80e3], FAR_N = 10, FAR_CLEAR = 60, FAR_EDGE = 20, FAR_TRIES = 48, FAR_SCALE_AT = 900, FAR_SCALE_K = [0.8, 1.3];
+// its sizes times the window's shorter side over FAR_SCALE_AT (within FAR_SCALE_K) times FAR_SIZE (a pick, so they
+// differ), then held so its reach is FAR_REACH_K of that side (Henry, 2026-10-14: "dude that is TINY ... not all of
+// them the same but nothing should be that small"); its alphas times FAR_GAIN (at most 1); its life times FAR_LIFE
+// ([slow, quick]: "events dont last long"); FAR_CAP: its caption (the label, and the line on what it is, under it) at
+// [label, line] alpha times its fade; SKY_OFF_MS: how often the kinds switched off are read again
+const FAR_GAP = [35e3, 80e3], FAR_N = 10, FAR_CLEAR = 60, FAR_EDGE = 20, FAR_TRIES = 48, FAR_SCALE_AT = 900, FAR_SCALE_K = [0.8, 2.5];
+const FAR_SIZE = [2, 3.5], FAR_REACH_K = [0.09, 0.2], FAR_GAIN = 1.3, FAR_LIFE = [2.5, 1.5], FAR_CAP = [0.5, 0.32];
 const SKY_OFF_MS = 120e3;
 const EVENT_DEPTH = { far: STAR_LAYERS[0].depth, mid: STAR_LAYERS[Math.floor(STAR_LAYERS.length / 2)].depth, near: SAT_DEPTH };
 // the nebula drift (see "Look"): it crosses the window in NEBULA_MS ms (a pick), its long half-axis NEBULA_R of the
@@ -858,20 +865,25 @@ function flash(text) {
   I.noteTimer = setTimeout(() => { if (I && I.noteEl) I.noteEl.style.display = 'none'; }, 1600);
 }
 
-// glide the view so the world point (x, y) sits in the middle, at zoom z (the user's zoom factor; default: as is)
-function glideTo(x, y, z) {
+// glide the view so the world point (x, y) sits in the middle, at zoom z (the user's zoom factor; default: as is);
+// hold: the glide only makes up for a panel (keepIn), so the sky does not move with it (holdPan)
+function glideTo(x, y, z, hold) {
   if (!I.cam || !Number.isFinite(x) || !Number.isFinite(y)) return;
   const tz = clamp(Number.isFinite(z) && z > 0 ? z : I.zoom, ZMIN, ZMAX);
   const to = { x: x - I.cam.cx, y: y - I.cam.cy, z: tz };
   I.camUntil = -1; // the camera holds still: the glide decides (not 0: the next poll's rebuild would start a fit)
-  if (I.still) { I.pan = { x: to.x, y: to.y }; I.zoom = to.z; I.glide = null; saveZoomSoon(); I.dirty = true; return; }
-  I.glide = { from: { x: I.pan.x, y: I.pan.y, z: I.zoom }, to, at: performance.now() };
+  if (I.still) {
+    if (hold) holdPan(to.x - I.pan.x, to.y - I.pan.y);
+    I.pan = { x: to.x, y: to.y }; I.zoom = to.z; I.glide = null; saveZoomSoon(); I.dirty = true; return;
+  }
+  I.glide = { from: { x: I.pan.x, y: I.pan.y, z: I.zoom }, to, at: performance.now(), hold: !!hold };
   I.dirty = true;
 }
 function stepGlide(now) {
   const g = I.glide;
   if (!g) return false;
   const u = clamp((now - g.at) / GLIDE_MS, 0, 1), e = ease(u);
+  if (g.hold) holdPan(g.from.x + (g.to.x - g.from.x) * e - I.pan.x, g.from.y + (g.to.y - g.from.y) * e - I.pan.y);
   I.pan.x = g.from.x + (g.to.x - g.from.x) * e;
   I.pan.y = g.from.y + (g.to.y - g.from.y) * e;
   I.zoom = g.from.z * Math.pow(g.to.z / g.from.z, e);
@@ -2347,7 +2359,7 @@ function keepIn(ids) {
   const hw = (I.W / 2 - m) / k2, hh = (I.H / 2 - m) / k2;
   if (x1 - x0 > 2 * hw) cx = (x0 + x1) / 2; else if (x0 < cx - hw) cx = x0 + hw; else if (x1 > cx + hw) cx = x1 - hw;
   if (y1 - y0 > 2 * hh) cy = (y0 + y1) / 2; else if (y0 < cy - hh) cy = y0 + hh; else if (y1 > cy + hh) cy = y1 - hh;
-  glideTo(cx, cy, zoom);
+  glideTo(cx, cy, zoom, true);
 }
 
 // ---------- frame loop ----------
@@ -2896,23 +2908,28 @@ function starTile(L, dpr) {
 // star space (a tile's px, unscaled) at the map's top left, wrapped into [0, STAR_WRAP), so the shader's star space
 // is never negative and stays small enough for its floats (the shader's hash repeats with it, so no seam)
 const starPos = new Float64Array(STAR_LAYERS.length * 3), starWide = new Float64Array(STAR_LAYERS.length * 2);
-// the sky's camera this frame: the pan (cx, cy) times fit times STAR_PAN, which a layer follows a fraction (its depth)
-// of, and the field's middle (mx, my, CSS px of the map), which it scales about
+// the sky's camera this frame: how far (cx, cy, CSS px) the sky has slid, and the field's middle (mx, my, CSS px of
+// the map), which it scales about. Each change of the camera's middle (the pan, less what holdPan took back out) slides
+// the sky STAR_PAN of the px it moves the map at the zoom then, so a drag carries the stars with the orbs and a zoom
+// leaves them where they are
 function skyCam() {
-  const adj = I.starAdj || { x: 0, y: 0 }, fit = (I.cam.fit || 1) * STAR_PAN;
+  const adj = I.starAdj || { x: 0, y: 0 }, k = K() * STAR_PAN;
+  const rx = I.cam.cx + I.pan.x - adj.x, ry = I.cam.cy + I.pan.y - adj.y;
+  const sp = I.skyPan || (I.skyPan = { x: 0, y: 0, rx, ry });
+  if (rx !== sp.rx || ry !== sp.ry) { sp.x += (rx - sp.rx) * k; sp.y += (ry - sp.ry) * k; sp.rx = rx; sp.ry = ry; }
   // the field's middle is a fixed point in the window (where the map's middle first was), not the map's middle,
   // which moves when a menu or panel takes room from the map
   const lf = I.left || 0, tp = I.top || 0;
   if (!I.starO) I.starO = { x: lf + I.W / 2, y: tp + I.H / 2 };
-  return { cx: (I.cam.cx + I.pan.x - adj.x) * fit, cy: (I.cam.cy + I.pan.y - adj.y) * fit, mx: I.starO.x - lf, my: I.starO.y - tp };
+  return { cx: sp.x, cy: sp.y, mx: I.starO.x - lf, my: I.starO.y - tp };
 }
 function starsAt() {
   const { cx, cy, mx, my } = skyCam(), ts = I.still ? 0 : I.time / 1000;
   for (let i = 0; i < STAR_LAYERS.length; i++) {
     const L = STAR_LAYERS[i], s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), L.depth * STAR_ZOOM), P = STAR_TILE * s;
-    // the field scales about the screen's middle and slides with a fraction of the pan, plus its drift
-    let ex = mx - (cx * L.depth - ts * L.drift * STAR_DIR[0]) * s;
-    let ey = my - (cy * L.depth - ts * L.drift * STAR_DIR[1]) * s;
+    // the field scales about the screen's middle and slides with the sky (every layer alike: no parallax), plus its drift
+    let ex = mx - (cx - ts * L.drift * STAR_DIR[0]) * s;
+    let ey = my - (cy - ts * L.drift * STAR_DIR[1]) * s;
     const wx = -ex / s, wy = -ey / s;
     starWide[i * 2] = wx - Math.floor(wx / STAR_WRAP) * STAR_WRAP; starWide[i * 2 + 1] = wy - Math.floor(wy / STAR_WRAP) * STAR_WRAP;
     ex -= Math.floor(ex / P) * P; ey -= Math.floor(ey / P) * P;
@@ -2921,8 +2938,8 @@ function starsAt() {
   // the deep sky the same way, left unwrapped (its band and its dust repeat at different sizes)
   const s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), DEEP_DEPTH * STAR_ZOOM);
   deepPos[0] = s;
-  deepPos[1] = mx - (cx * DEEP_DEPTH - ts * DEEP_DRIFT * STAR_DIR[0]) * s;
-  deepPos[2] = my - (cy * DEEP_DEPTH - ts * DEEP_DRIFT * STAR_DIR[1]) * s;
+  deepPos[1] = mx - (cx - ts * DEEP_DRIFT * STAR_DIR[0]) * s;
+  deepPos[2] = my - (cy - ts * DEEP_DRIFT * STAR_DIR[1]) * s;
   return starPos;
 }
 const deepPos = new Float64Array(3);
@@ -3075,15 +3092,17 @@ function meteorStep(t, rest) {
 const EVENTS = new Map();
 function registerEvent(name, def) { EVENTS.set(name, { weight: 1, ...def }); }
 // the sky's camera for an object at `depth` (EVENT_DEPTH, or any star layer's) as it is laid: keep this next to the
-// object's position at that moment, then eventAt(cam, x, y) is where that point is now, moved with the pan and the
-// zoom by that fraction of them, as the satellites are (SAT_DEPTH)
+// object's position at that moment, then eventAt(cam, x, y) is where that point is now, slid with the sky and scaled
+// with the zoom by that fraction of it, as the satellites are (SAT_DEPTH)
 function eventCam(depth) {
   const c = skyCam();
   return { ...c, depth, sc: Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), depth * STAR_ZOOM) };
 }
 function eventAt(cam, x, y) {
+  // x, y were the map's CSS px when it was laid; the map's left and top may have moved since (a panel opening beside
+  // it: cam.mx - c.mx), and the point keeps its place in the window, as the stars do
   const c = skyCam(), sc = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), cam.depth * STAR_ZOOM), k = sc / (cam.sc || sc);
-  return [c.mx + (x - c.mx) * k - (c.cx - cam.cx) * cam.depth * sc, c.my + (y - c.my) * k - (c.cy - cam.cy) * cam.depth * sc];
+  return [c.mx + (x - cam.mx) * k - (c.cx - cam.cx) * sc, c.my + (y - cam.my) * k - (c.cy - cam.cy) * sc];
 }
 // stop the one running (one more draw clears it)
 function eventEnd() {
@@ -3352,25 +3371,39 @@ function farStart(t, name) {
   if (!d || I.still) return false;
   if (I.far) farEnd();
   const R = { r: Math.random, in: (a, b) => a + Math.random() * (b - a), pick: (l) => l[Math.floor(Math.random() * l.length)], sg: () => (Math.random() < 0.5 ? -1 : 1) };
-  const rec = d.make(R), sc = clamp(Math.min(I.W || FAR_SCALE_AT, I.H || FAR_SCALE_AT) / FAR_SCALE_AT, FAR_SCALE_K[0], FAR_SCALE_K[1]);
+  const side = Math.min(I.W || FAR_SCALE_AT, I.H || FAR_SCALE_AT);
+  const rec = d.make(R), sc = clamp(side / FAR_SCALE_AT, FAR_SCALE_K[0], FAR_SCALE_K[1]) * R.in(FAR_SIZE[0], FAR_SIZE[1]);
   const parts = rec.parts.slice(0, FAR_N).map((q) => {
     const p = { x: 0, y: 0, to: null, a: 0.5, t0: 0, t1: 1, env: 'smooth', rgb: [1, 1, 1], ang: 0, spin: 0, p: 0, u0: 0, u1: 1, grow: false, seed: Math.random(), ...q };
     p.r1 = p.r1 == null ? p.r0 : p.r1;
-    p.x *= sc; p.y *= sc; p.r0 *= sc; p.r1 *= sc;
-    if (p.to) p.to = [p.to[0] * sc, p.to[1] * sc];
+    p.a = Math.min(1, p.a * FAR_GAIN);
     return p;
   });
+  const scale = (s) => {
+    for (const p of parts) {
+      p.x *= s; p.y *= s; p.r0 *= s; p.r1 *= s;
+      if (p.to) p.to = [p.to[0] * s, p.to[1] * s];
+    }
+  };
   // its reach: the furthest any part's edge gets, the big faint washes counted at no more than a fifth of the window
-  let reach = 0;
-  for (const p of parts) {
-    const ex = Math.max(Math.hypot(p.x, p.y), p.to ? Math.hypot(p.to[0], p.to[1]) : 0), rr = Math.max(p.r0, p.r1) * (FAR_REACH[p.f] || 1.5);
-    reach = Math.max(reach, Math.min(ex + rr, Math.min(I.W || 1, I.H || 1) / 5));
-  }
+  const reachOf = () => {
+    let r = 0;
+    for (const p of parts) {
+      const ex = Math.max(Math.hypot(p.x, p.y), p.to ? Math.hypot(p.to[0], p.to[1]) : 0), rr = Math.max(p.r0, p.r1) * (FAR_REACH[p.f] || 1.5);
+      r = Math.max(r, Math.min(ex + rr, side / 5));
+    }
+    return r;
+  };
+  scale(sc);
+  let reach = reachOf();
+  // never too small to see nor so big it is in the way: its reach held within FAR_REACH_K of the shorter side
+  const want = clamp(reach, FAR_REACH_K[0] * side, FAR_REACH_K[1] * side);
+  if (reach > 0 && Math.abs(want / reach - 1) > 0.01) { scale(want / reach); reach = reachOf(); }
   const at = farPlace(reach);
   if (!at) return false;
-  const cam = eventCam(EVENT_DEPTH.far);
-  I.far = { name, at: t, ms: rec.ms, quick: !!rec.quick, cam, x: at[0], y: at[1], parts }; I.dirty = true;
-  skyLog(name, d.label, d.what, rec.ms, at[0], at[1]);
+  const cam = eventCam(EVENT_DEPTH.far), ms = rec.ms * FAR_LIFE[rec.quick ? 1 : 0];
+  I.far = { name, at: t, ms, quick: !!rec.quick, cam, x: at[0], y: at[1], parts, reach, label: d.label, what: d.what }; I.dirty = true;
+  skyLog(name, d.label, d.what, ms, at[0], at[1]);
   return true;
 }
 function farEnd() {
@@ -3427,6 +3460,32 @@ function farNow() {
     if (out.length >= FAR_N) break;
   }
   return out;
+}
+// the far event's caption (Henry, 2026-10-14: "not that meaningful"): its label, and under it the line on what it is,
+// faint, under the event (over it when that runs off the window), fading in and out with its life; drawn over the sky,
+// under the glows and the orbs
+function drawFarCaption(ctx) {
+  const e = I && I.far;
+  if (!e || !e.label) return;
+  const f = (performance.now() - e.at) / e.ms, sm = (v) => { v = clamp(v, 0, 1); return v * v * (3 - 2 * v); };
+  const fade = sm(f / 0.12) * sm((1 - f) / 0.15);
+  if (!(fade > 0.01)) return;
+  const sf = I.sf || 1, [x, y] = eventAt(e.cam, e.x, e.y), gap = Math.min(e.reach * 0.45, 110 * sf) + 8 * sf;
+  const lh = 15 * sf, below = y + gap + 2 * lh < I.H - 8;
+  let ty = below ? y + gap : y - gap - 2 * lh;
+  const lines = [[`600 ${11.5 * sf}px ${UI}`, e.label, FAR_CAP[0]], [`400 ${10.5 * sf}px ${UI}`, e.what || '', FAR_CAP[1]]];
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (const [font, text, a] of lines) {
+    if (text) {
+      ctx.font = font;
+      const w = ctx.measureText(text).width, cx = clamp(x, w / 2 + 8, Math.max(w / 2 + 8, I.W - w / 2 - 8));
+      ctx.fillStyle = `rgba(214,222,240,${a * fade})`;
+      ctx.fillText(text, cx, ty);
+    }
+    ty += lh;
+  }
+  ctx.restore();
 }
 // the streaks showing now (a shower's later ones not yet), at most METEOR_N, in CSS px of the map: each one's head
 // (hx, hy), tail end (tx, ty), rgb and alpha (> 0); the tail grows to its length as the head moves off, and the alpha
@@ -3651,8 +3710,8 @@ function satsNow() {
     if (!(a > 0)) continue;
     const e = ts - s.t0, px = F.x - (I.left || 0) + s.x0 + s.vx * e, py = F.y - (I.top || 0) + s.y0 + s.vy * e;
     const k0 = sc / (s.sc0 || sc);
-    const x = c.mx + (px - c.mx) * k0 - (c.cx - (s.cx0 ?? c.cx)) * SAT_DEPTH * sc;
-    const y = c.my + (py - c.my) * k0 - (c.cy - (s.cy0 ?? c.cy)) * SAT_DEPTH * sc;
+    const x = c.mx + (px - c.mx) * k0 - (c.cx - (s.cx0 ?? c.cx)) * sc;
+    const y = c.my + (py - c.my) * k0 - (c.cy - (s.cy0 ?? c.cy)) * sc;
     // the beacon: a short soft flash every s.per ms, red and white by turns
     const b = t + s.ph, k = Math.floor(b / s.per), w = b - k * s.per;
     const f = !I.still && w < SAT_FLASH ? Math.sin((Math.PI * w) / SAT_FLASH) : 0;
@@ -4030,7 +4089,8 @@ const FAR_GLSL = `vec4 farPart(vec2 p, vec4 A, vec4 B, vec4 C) {
   } else if (fm == 6) { // a pair spiralling in: closer and faster as u goes to 1; pr the second's light
     if (L > 1.3) return vec4(0.0);
     float v = max(1.0 - u, 0.0), sep = pow(v, 0.25), ph = sd * 6.2832 + 70.0 * (1.0 - pow(v, 0.625));
-    vec2 o = 0.5 * sep * vec2(cos(ph), sin(ph)), a1 = (q - o) / (1.5 * px), a2 = (q + o) / (1.5 * px);
+    float pw = max(0.07, 1.5 * px);
+    vec2 o = 0.5 * sep * vec2(cos(ph), sin(ph)), a1 = (q - o) / pw, a2 = (q + o) / pw;
     m = exp(-dot(a1, a1)) + pr * exp(-dot(a2, a2));
   } else if (fm == 7) { // a debris swirl: one arm winding in to a dark middle, turning with u
     if (L > 1.2) return vec4(0.0);
@@ -4917,6 +4977,7 @@ function draw() {
     drawRockets(ctx);
     drawMoon(ctx);
   }
+  drawFarCaption(ctx);
   if (!I.glowGL) drawTerritories(ctx, k, ox, oy, glows);
   const nowC = Date.now() - I.skew;
   const selNode = I.sel ? I.byId.get(I.sel) : null;
