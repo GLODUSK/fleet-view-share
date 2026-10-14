@@ -284,7 +284,7 @@ function toldLines(list) {
 function teamLines(t) {
   const lead = t.lead ? (t.roster || []).find((m) => m.id === t.lead) : null;
   const out = [`${t.id}  "${t.name}"  ${(t.members || []).length} members${t.lead ? ` · led by ${lead ? lead.name : short(t.lead)}` : ''} · ${clip(t.order, 70)}`];
-  for (const m of t.roster || []) out.push(`${m.id === t.lead ? '★ ' : '  '}${short(m.id)}  ${pad(clip(m.name || '', 32), 32)}  ${pad(m.state || 'gone', 8)}  ${m.repo || ''}${m.branch ? ` · ${m.branch}` : ''}${m.removed ? '  (removed from the map)' : ''}`.replace(/\s+$/, ''));
+  for (const m of t.roster || []) out.push(`${m.id === t.lead ? '★ ' : '  '}${short(m.id)}  ${pad(clip(m.name || '', 32), 32)}  ${pad(m.state || 'gone', 8)}  ${m.repo || ''}${m.branch ? ` · ${m.branch}` : ''}${m.role ? `  role: ${clip(m.role, 60)}` : ''}${m.removed ? '  (removed from the map)' : ''}`.replace(/\s+$/, ''));
   return out;
 }
 // "5 min ago", "2 h ago" for a time in ms
@@ -298,7 +298,7 @@ function statusLines(j) {
   // a mid-level lead's from: both its teams (the one it leads first)
   for (const t of j.teams || (j.team ? [j.team] : [])) out.push(`team ${t.id} "${t.name}"${t.lead ? '' : ' (no lead: peers)'}`);
   for (const m of j.members || []) {
-    out.push(`${m.lead ? '★ ' : '  '}${short(m.id)}  ${clip(m.name || '', 40)}  ${m.state || 'gone'}${m.doing && m.doing !== m.state ? ` · ${clip(m.doing, 80)}` : ''}${m.queued ? ' · text waiting for it' : ''}${m.removed ? ' · removed from the map' : ''}`);
+    out.push(`${m.lead ? '★ ' : '  '}${short(m.id)}  ${clip(m.name || '', 40)}${m.role ? ` (role: ${clip(m.role, 60)})` : ''}  ${m.state || 'gone'}${m.doing && m.doing !== m.state ? ` · ${clip(m.doing, 80)}` : ''}${m.queued ? ' · text waiting for it' : ''}${m.removed ? ' · removed from the map' : ''}`);
     const where = [m.repo, m.branch ? `branch ${m.branch}` : '', m.pr ? `PR #${m.pr.number}${m.pr.state ? ` (${m.pr.state})` : ''}` : '',
       m.ctx != null ? `ctx ${Math.round(m.ctx * 100)}%` : '', m.cost ? `$${Number(m.cost).toFixed(2)}` : ''].filter(Boolean).join(' · ');
     if (where) out.push(`      ${where}`);

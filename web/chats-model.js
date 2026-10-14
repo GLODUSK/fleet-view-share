@@ -24,6 +24,15 @@
 //   fullChatOrder(order, list), moveInChatOrder(order, list, key, { pin, before }), pinInChatOrder(order, list, key,
 //       pin), stepInChatOrder(order, list, key, 'up' | 'down' | 'top', shown?) -> a new order (step: null when it
 //       can't go that way); sameChatOrder(a, b) -> boolean. Keys of rows not in list keep their places
+//   contactTree(list, folded?) -> [{ c, depth, parent, path, open?, kids?, under? }]   the Bots list as drawn (Henry,
+//       2026-10-13: a team's members show under it, and it folds): list sorted (sortContacts), folded the team keys
+//       folded (a Set, an array or { [key]: true }; none: every team open). Top to bottom: each top row (no
+//       parentTeam), a team's rows right under it when it is open, one level deeper (its members in member order, the
+//       lead first; a member that leads a team under it shows as that team, which nests the same way). parent: the team
+//       key it shows under (null at the top); path: every team key above it, outermost first; team rows: open, kids (rows
+//       directly under it) and under (every row below it, folded or not). A team's place is its row's in the order
+//   teamFlags(node, seen) -> { asks, unread }   any row under a team (contactTree's node) asks you / has something
+//       new: a folded team shows it on its own row
 //   teamThread(team, state) -> [{ t, from, fromName, to, toName, text }]   a team's messages, oldest first
 //   createChainStore(storage = localStorage) -> ChainStore
 //       ChainStore: { keyFor(id) -> string, link(fromId, toId), save() }. A conversation that picked up another's
@@ -84,8 +93,9 @@
 //       no longer offered (an account gone, an older model) as the first choice. The model and effort lists start
 //       with Dynamic ({ value: 'dynamic', label: 'Dynamic', note }: sized for each message, sizeTask); the account
 //       list ends with it (each new conversation starts on the account with the most usage left: bots.js)
-//   botEdits(bot, values) -> body for POST /bots/:id: only the fields that changed (name and brief trimmed; shape and
-//       color '' or null: back to the automatic pick, sent as null); {} when nothing did
+//   botEdits(bot, values) -> body for POST /bots/:id: only the fields that changed (name, role and brief trimmed; role
+//       '' clears it; shape and color '' or null: back to the automatic pick, sent as null); {} when nothing did
+//   ROLE_MAX   60, a bot's role's most characters (bots.js); roleOf(bot) -> its role on one line, '' for none
 //   taskSchedule(task) -> string   a task's schedule (state.bots[].tasks, bots.js): "Daily 9:00", "Weekdays 9:00",
 //       "Weekly Mon 9:00", "Monthly 1st 9:00", "Hourly :15", "Once Oct 12 15:00", "To do", "No valid schedule"
 //   taskWhen(ms, now) -> string   a run's time, short: "in 5 min", "in 3 h", "Mon 9:00", "Oct 12", "5 min ago", "Yesterday 9:00"
@@ -110,7 +120,14 @@
 //                     listed: when it was made
 //     newAt,          bot and Chief rows with a conversation: ms its chat last showed something new, for the unread
 //                     dot (newOf: its last reply shown, or the question it waits on; at with an older server)
-//     needsYou, busy, pinned (the Chief; sortContacts with an order sets each row's), teamId (team rows), members (team rows: [{ id, name, lead }])
+//     needsYou, busy, pinned (the Chief; sortContacts with an order sets each row's), teamId (team rows),
+//     members         team rows: [{ id, name, lead, key, role, memberId }], the lead first, then the team's order: id the
+//                     member's row opens, key its row's, role its bot's ('' for none), memberId the conversation as the
+//                     team lists it (what /teams/leave and /teams/lead take)
+//     parentTeam      the key of the team row it shows under in the Bots list, when there is one (contactTree): a bot or
+//                     the Chief under the team it leads, else the one it is a plain member of; a team under the team its
+//                     lead is a plain member of (teams nest). Absent at the top
+//     role,           bot rows: what it is for in its teams ("Reviewer"), from state.bots; '' for none
 //     turnStart, lastAction, running, waitingOn   bot and Chief rows: its conversation's, as /state has them (null
 //                     when unknown), so mascot.js mascotState can tell thinking from working and doingOf can say what
 //     shape, color,   bot rows: the bot's own pick (state.bots, bots.js), or null: the page picks one
@@ -257,11 +274,15 @@ function newOf(members, s, at) {
   if (!members.some((x) => has(x, 'shownAt'))) return at;
   return Math.max(0, ...members.map((x) => Number(x.shownAt) || 0), NEEDS.has(s.state) ? activeAt(s) : 0);
 }
-// a bot's own shape and colour (bots.js checks them; a colour here is #rrggbb only)
+// a bot's own shape and colour (bots.js checks them; a colour here is #rrggbb only), and its role
 const lookOf = (b) => ({
   shape: (b && typeof b.shape === 'string' && b.shape) || null,
   color: (b && typeof b.color === 'string' && /^#[0-9a-f]{6}$/i.test(b.color) && b.color) || null,
+  role: roleOf(b),
 });
+export const ROLE_MAX = 60;
+// a bot's role (state.bots role: bots.js keeps it short), on one line; '' for none
+export const roleOf = (b) => (b && typeof b.role === 'string' ? b.role.replace(/\s+/g, ' ').trim().slice(0, ROLE_MAX).trim() : '');
 
 export function buildContacts(input, opts = {}) {
   // the page's derived state has allSessions; anything else is taken as raw GET /state
@@ -353,26 +374,50 @@ export function buildContacts(input, opts = {}) {
     const tag = tagFor(s);
     return tag ? rowOf.get(tag) : null;
   };
+  const teamRows = [];
+  const ownOf = new Map(), upOf = new Map(); // a member's row -> the team row it leads / it is a plain member of
   for (const t of state.teams || []) {
     const rows = [];
     const members = [];
-    const leadRow = t.lead ? rowFor(t.lead) : null;
+    const leadRow = t.lead && (t.members || []).includes(t.lead) ? rowFor(t.lead) : null;
     let mapped = false;
     for (const id of t.members || []) {
       const r = rowFor(id);
       if (r === null) { mapped = true; break; }
       if (!r || rows.includes(r)) continue;
       rows.push(r);
-      members.push({ id: r.id || id, name: r.name, lead: r === leadRow });
+      members.push({ id: r.id || id, name: r.name, lead: r === leadRow, key: r.key, role: r.role || '', memberId: id });
     }
     if (mapped || !rows.length) continue;
+    // the lead first (★ on top of its group), the rest as the team lists them
+    members.sort((x, y) => Number(y.lead) - Number(x.lead));
     const m = t.messages && t.messages.length ? t.messages[t.messages.length - 1] : null;
-    out.push({
+    const row = {
       key: 'team:' + t.id, kind: 'team', id: null, ids: members.map((x) => x.id), name: t.name, account: null, repo: null,
       state: 'TEAM', label: 'GROUP', statusColor: t.color,
       preview: oneLine(m ? `${nameIn(m.from, known) || short(m.from)}: ${m.text}` : t.order),
       at: m ? m.t : t.at || 0, needsYou: rows.some((r) => r.needsYou), busy: rows.some((r) => r.busy), pinned: false, teamId: t.id, members,
-    });
+    };
+    out.push(row);
+    teamRows.push(row);
+    for (const r of rows) { const into = r === leadRow ? ownOf : upOf; if (!into.has(r)) into.set(r, row); }
+  }
+  // where each row shows in the Bots list (contactTree): a member under the team it leads, else the one it is a plain
+  // member of; a team under the team its lead is a plain member of (teams nest: team-tree.js)
+  for (const [r, t] of upOf) if (!ownOf.has(r)) r.parentTeam = t.key;
+  for (const [r, t] of ownOf) {
+    r.parentTeam = t.key;
+    const up = upOf.get(r);
+    if (up && up !== t) t.parentTeam = up.key;
+  }
+  // a loop (the server refuses one) would leave its rows nowhere: cut it at the first team that comes round again
+  const teamAt = new Map(teamRows.map((t) => [t.key, t]));
+  for (const t of teamRows) {
+    const seen = new Set([t.key]);
+    for (let p = t.parentTeam; p; p = teamAt.get(p) && teamAt.get(p).parentTeam) {
+      if (seen.has(p)) { delete t.parentTeam; break; }
+      seen.add(p);
+    }
   }
   return out;
 }
@@ -460,6 +505,48 @@ export function stepInChatOrder(order, list, key, to, shown = null) {
 export function sameChatOrder(a, b) {
   const x = orderIn(a), y = orderIn(b);
   return !!x && !!y && x.pinned.join('\n') === y.pinned.join('\n') && x.keys.join('\n') === y.keys.join('\n');
+}
+
+// ---------- the list as a tree: teams and their members ----------
+const foldedSet = (f) => (f instanceof Set ? f : new Set(Array.isArray(f) ? f : f && typeof f === 'object' ? Object.keys(f).filter((k) => f[k]) : []));
+export function contactTree(list, folded) {
+  const shut = foldedSet(folded);
+  const rows = Array.isArray(list) ? list : [];
+  const byKey = new Map(rows.map((c) => [c.key, c]));
+  const kidsOf = new Map(); // team key -> the rows that show under it
+  for (const c of rows) {
+    if (!c.parentTeam || !byKey.has(c.parentTeam)) continue;
+    if (!kidsOf.has(c.parentTeam)) kidsOf.set(c.parentTeam, []);
+    kidsOf.get(c.parentTeam).push(c);
+  }
+  const leadKey = (t) => ((t.members || []).find((m) => m.lead) || {}).key;
+  // under a team: its members in its order (the lead first); a member that leads a team under it shows as that team
+  const ordered = (t) => {
+    const kids = kidsOf.get(t.key) || [], out = [];
+    for (const m of t.members || []) {
+      const k = kids.find((x) => !out.includes(x) && (x.kind === 'team' ? leadKey(x) === m.key : x.key === m.key));
+      if (k) out.push(k);
+    }
+    return out.concat(kids.filter((x) => !out.includes(x)));
+  };
+  const out = [];
+  const walk = (c, depth, path) => {
+    const node = { c, depth, parent: path.length ? path[path.length - 1] : null, path };
+    out.push(node);
+    if (c.kind !== 'team') return [c];
+    const kids = ordered(c).filter((k) => !path.includes(k.key) && k.key !== c.key);
+    const at = out.length, under = [];
+    for (const k of kids) under.push(...walk(k, depth + 1, [...path, c.key]));
+    Object.assign(node, { open: !shut.has(c.key), kids: kids.length, under });
+    if (!node.open) out.length = at; // folded: its rows are not drawn
+    return [c, ...under];
+  };
+  for (const c of rows) if (!c.parentTeam || !byKey.has(c.parentTeam)) walk(c, 0, []);
+  return out;
+}
+export function teamFlags(node, seen) {
+  const under = (node && node.under) || [];
+  return { asks: under.some((c) => asksYou(c, seen)), unread: under.some((c) => unread(c, seen)) };
 }
 
 export function teamThread(team, state) {
@@ -626,6 +713,9 @@ export function botEdits(bot, v) {
   const b = bot || {}, out = {};
   const str = (x) => (x == null ? '' : String(x));
   if ('name' in v && str(v.name).trim() !== str(b.name)) out.name = str(v.name).trim();
+  // its role: '' clears it (bots.js keeps none then)
+  const role = (x) => str(x).replace(/\s+/g, ' ').trim().slice(0, ROLE_MAX).trim();
+  if ('role' in v && role(v.role) !== role(b.role)) out.role = role(v.role);
   if ('brief' in v && str(v.brief).trim() !== str(b.brief).trim()) out.brief = str(v.brief).trim();
   for (const k of ['account', 'model', 'effort']) if (k in v && v[k] && v[k] !== b[k]) out[k] = v[k];
   // the look: '' or null is the automatic pick; colours compare in lower case (bots.js keeps them so)

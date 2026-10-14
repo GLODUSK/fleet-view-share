@@ -5226,15 +5226,30 @@ function loopWhy(me) {
 }
 const teamJson = (t) => ({ id: t.id, name: t.name, color: t.color, members: [...t.members], lead: t.lead || null, order: t.order, at: t.at, messages: t.messages.slice(-TEAM_MSGS_MAX).map((m) => ({ ...m })),
   successors: (t.successors || []).map((x) => ({ ...x })) });
-// a member as briefs and notes name it: its name, repo and branch, as /state shows them
+// a bot member's role (bots.js: Henry gives it in the bot's profile), '' for none or not a bot: a bot's here from its
+// registry, another machine's from the look its machine sent (botLooks, by its ~/Bots folder's name)
+function botRoleOf(id, s) {
+  if (!BOTS || !id) return '';
+  const own = BOTS.roleFor(id);
+  if (own) return own;
+  const p = s && (s.root || s.cwd);
+  if (!p || !inBots(p)) return '';
+  const slug = path.relative(path.resolve(BOTS_JS.BOTS_DIR), path.resolve(p)).split(/[\\/]/)[0].toLowerCase();
+  const look = slug ? botLooks.find((x) => x.slug === slug) : null;
+  return (look && typeof look.role === 'string' && look.role) || '';
+}
+// a member as briefs and notes name it: its name, repo and branch, as /state shows them, and a bot's role when it has one
 function memberOf(id) {
   const s = sessions.get(id);
-  if (!s) return { id, name: nameNow(id, null) || String(id).slice(0, 8), repo: 'no workspace', branch: null };
+  const role = botRoleOf(id, s);
+  if (!s) return { id, name: nameNow(id, null) || String(id).slice(0, 8), repo: 'no workspace', branch: null, ...(role ? { role } : {}) };
   const root = s.root || null;
   return { id, name: plain(baseName(s) || s.name || id.slice(0, 8), 80), repo: root ? repoName(root) : 'no workspace',
-    branch: (s.demo ? s.demo.branch : branchOf(topOf(s, root)) || s.gitBranch) || null };
+    branch: (s.demo ? s.demo.branch : branchOf(topOf(s, root)) || s.gitBranch) || null, ...(role ? { role } : {}) };
 }
-const memberLine = (m) => `- ${m.name} (id ${m.id}, repo ${m.repo}, branch ${m.branch || 'none'})`;
+// its name as briefs and notes say it: "Deploy watch (role: QA)" for a bot with a role, else just the name
+const whoOf = (m) => (m.role ? `${m.name} (role: ${plain(m.role, 60)})` : m.name);
+const memberLine = (m) => `- ${whoOf(m)} (id ${m.id}, repo ${m.repo}, branch ${m.branch || 'none'})`;
 // members talk with fv, which is on the PATH of the sessions Fleet View starts
 const talkLine = (me) => `Talk to them directly: fv send <their id> "message" --from ${me}.`;
 // The text a member gets with the team's order: the order, its teammates and how to reach them. This is the one
@@ -5269,7 +5284,7 @@ function leadBrief(t, me) {
 // the lines that tell a member of a team with a lead who leads it and how to report to it -> [lines]
 function leadLines(t, me) {
   const lead = memberOf(t.lead);
-  return [`Your lead is ${lead.name} (id ${lead.id}, repo ${lead.repo}, branch ${lead.branch || 'none'}): it gives you your part.`,
+  return [`Your lead is ${whoOf(lead)} (id ${lead.id}, repo ${lead.repo}, branch ${lead.branch || 'none'}): it gives you your part.`,
     `Report to it with fv send ${lead.id} "…" --from ${me} when you finish, when you are blocked, and before you merge.`,
     'Its questions arrive as [Question from your lead …]: just answer in your reply, and Fleet View passes it back; don\'t fv send '
     + 'the answer too. Its instructions arrive as [Message from your lead …].'];
@@ -5476,7 +5491,7 @@ async function addMember(b) {
   if (loop) { undo(); return [409, { ok: false, message: loop }]; }
   t.seenAt = Date.now();
   saveSettings();
-  const who = memberOf(m).name;
+  const who = whoOf(memberOf(m));
   const note = b.lead !== true ? `${who} joined the team.`
     : (id) => (id === was ? `${who} joined the team and leads it now, in your place: you are a member and report to it.${seatNote(moved, was)}` : `${who} joined the team and leads it now.`);
   const [brief, told, left, above] = await Promise.all([
@@ -5581,7 +5596,7 @@ async function setLead(b) {
     const [told, left] = await Promise.all([noteEach(t, t.members, (id) => `${memberOf(was).name} doesn't lead the team any more.${id === was ? seatNote(moved, was) : ''} ${NO_LEAD}`, t.members), elsewhere()]);
     return [200, { ok: true, team: teamJson(t), told: toldJson(told), ...(left.length ? { left } : {}) }];
   }
-  const who = memberOf(m).name;
+  const who = whoOf(memberOf(m));
   const note = (id) => (id === was ? `${who} (id ${m}) leads the team now, in your place: you are a member, it gives you your part, and you report to it.${seatNote(moved, was)}`
     : `${who} (id ${m}) leads the team now: it gives you your part, and you report to it.`);
   const [brief, told, left] = await Promise.all([tell(m, leadBrief(t, m), 'order'), noteEach(t, t.members.filter((x) => x !== m), note, t.members), elsewhere()]);
@@ -5607,14 +5622,14 @@ function teamFor(id) {
   const t = teams.find((x) => x.id === id);
   return t ? { id: t.id, name: t.name, lead: t.lead || null, members: t.members.filter((m) => !hiddenNow(m)) } : null;
 }
-// GET /api/teams: every team, with its members' names, repos, branches, states and which one leads
+// GET /api/teams: every team, with its members' names, repos, branches, states, which one leads and a bot's role (role?)
 function teamsList() {
   return teams.map((t) => ({ ...teamJson(t), roster: t.members.map((m) => ({ ...memberOf(m), state: sessions.get(m)?.state || null, removed: hiddenNow(m), lead: t.lead === m })) }));
 }
 // GET /api/status: what members are doing, free (nothing is typed into them). q: { team, ids, from }: a team's
 // members, these conversations, or from's teams (the one it leads first, then the one it reports in, each member
 // once); none of them: every unfinished conversation not removed from the map. Each row: { id, name, repo, branch,
-// state, label, doing, lastReply (≤ 600), lastReplyAt, pr, ctx (0..1), cost, removed, lead } (api.js adds queued).
+// state, label, doing, lastReply (≤ 600), lastReplyAt, pr, ctx (0..1), cost, removed, lead, role? (a bot's) } (api.js adds queued).
 // -> [code, { ok, team? (from's: the one it leads), teams? (from's two), members }]
 function statusOf(q) {
   let t = null, ids, both = null;
@@ -5638,7 +5653,7 @@ function statusOf(q) {
   const members = ids.map((id) => {
     const s = byId.get(id), raw = sessions.get(id), m = memberOf(id);
     const lead = t ? (both || [t]).some((x) => x.lead === id) : !!ledTeamOf(id);
-    if (!s) return { id, name: m.name, repo: m.repo, branch: m.branch, state: raw ? raw.state || null : null, label: null, doing: null, lastReply: null, lastReplyAt: null, pr: null, ctx: null, cost: 0, removed: hiddenNow(id), lead };
+    if (!s) return { id, name: m.name, repo: m.repo, branch: m.branch, state: raw ? raw.state || null : null, label: null, doing: null, lastReply: null, lastReplyAt: null, pr: null, ctx: null, cost: 0, removed: hiddenNow(id), lead, ...(m.role ? { role: m.role } : {}) };
     const doing = doingOf(s);
     const shp = raw && raw.lastPr ? ships.get(`${raw.repo}#${raw.lastPr}`) : null;
     return {
@@ -5646,7 +5661,7 @@ function statusOf(q) {
       lastReply: s.lastReply ? plain(s.lastReply, 600) : null, lastReplyAt: raw && raw.replyAt ? Math.round(raw.replyAt) : null,
       pr: s.ship && s.ship.pr ? { number: s.ship.pr, state: shp ? String(shp.state || '').toLowerCase() || null : null, url: s.links ? s.links.pr : null } : null,
       ctx: s.context && s.context.limit ? Math.round((s.context.used / s.context.limit) * 1000) / 1000 : null,
-      cost: Math.round((s.cost || 0) * 100) / 100, removed: hiddenNow(id), lead,
+      cost: Math.round((s.cost || 0) * 100) / 100, removed: hiddenNow(id), lead, ...(m.role ? { role: m.role } : {}),
     };
   });
   const brief = (x) => ({ id: x.id, name: x.name, lead: x.lead || null });
@@ -6534,7 +6549,7 @@ function buildState() {
     queuedText: DEMO ? [] : API.queuedIds(),
     feed: feed.filter((e) => !tagOf(e.sid) && !(e.to && tagOf(e.to))).slice(-120)
       .map((e) => { const x = { t: Math.round(e.t), sid: e.sid, who: e.who, verb: e.verb, what: e.what }; if (e.to) x.to = e.to; return x; }),
-    // the bots (bots.js), newest first: { id, name, brief, account, model, effort, folder, createdAt, convId, live, shape, color,
+    // the bots (bots.js), newest first: { id, name, brief, role ('' none), account, model, effort, folder, createdAt, convId, live, shape, color,
     // tasks: its tasks.json as the Tasks list shows it (bot-tasks.js viewTask), tasksError? }
     // and another machine's, elsewhere: true (bots.js elsewhereView)
     // wearing the look its machine gave it (botLooks)

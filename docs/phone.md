@@ -465,14 +465,15 @@ The Chief and the bots:
   or adopts the one running: `{ ok, id, key, started }`, and 503 while the desktop app (the session host) is not
   running. The relay passes on only `account`, `model` and `effort` and drops anything else. The Chief starts
   only this way: `POST /api/sessions` with a `role` in its body (any value) is 403.
-- **Bots** (bots.js, api.js): `POST /api/bots { name, brief?, account?, model?, effort?, shape?, color? }` makes a
-  bot and starts it, `POST /api/bots/:id { name?, brief?, account?, model?, effort?, shape?, color? }` changes one
+- **Bots** (bots.js, api.js): `POST /api/bots { name, brief?, role?, account?, model?, effort?, shape?, color? }` makes a
+  bot and starts it, `POST /api/bots/:id { name?, brief?, role?, account?, model?, effort?, shape?, color? }` changes one
   (the phone's Edit bot sends only what changed), `POST /api/bots/:id/start` starts one, `POST /api/bots/:id/remove`
   takes one off the list. `model` and `effort` may each be `"dynamic"` (a new bot's default: each message is sized
-  for it); `shape` is one of web/mascot.js `SHAPES` and `color` a `#rrggbb`, `null` for the automatic pick. A bot id
-  is 12 lowercase hex digits (bots.js `BOT_ID_RE`). api.js takes making, changing and removing a bot only from
-  Henry, which from the phone means the relay's marker (below); starting one is open to any caller, so `/start` is
-  not marked. A message for a bot goes through `POST /api/sessions/:id/message` to its conversation (`convId` in
+  for it); `role` is what the bot does (one line, at most 60 characters, `""` for none; in its CLAUDE.md and next to its
+  name in team briefs; `/state`'s `bots[].role`); `shape` is one of web/mascot.js `SHAPES` and `color` a `#rrggbb`,
+  `null` for the automatic pick. A bot id is 12 lowercase hex digits (bots.js `BOT_ID_RE`). api.js takes making,
+  changing and removing a bot only from Henry, which from the phone means the relay's marker (below); starting one
+  is open to any caller, so `/start` is not marked. A message for a bot goes through `POST /api/sessions/:id/message` to its conversation (`convId` in
   `/state`'s `bots`), as for any session. `POST /api/bots/look` (a bot changing its own look) is the bot's alone,
   never the phone's.
 - **A dynamic bot's switch** (bots.js `switchTo`): before a message to a bot whose model or effort is `"dynamic"`,
@@ -497,7 +498,7 @@ Narrower rules:
 - `chief` in `POST /settings` must be `{ watch: true | false }` (the Chief's watch mode), else 400. Only `watch`
   goes on: the `id` that `/state`'s `settings.chief` carries (and anything else in it) is dropped, so the phone
   may send back what it read with `watch` changed.
-- `POST /api/bots` and `POST /api/bots/:id` take only `name`, `brief`, `account`, `model`, `effort`, `shape` and
+- `POST /api/bots` and `POST /api/bots/:id` take only `name`, `brief`, `role`, `account`, `model`, `effort`, `shape` and
   `color` (what bots.js reads; it checks the values itself); any other key, `folder` included, makes the request
   403. `POST /api/bots/:id/start` and `/remove` take no fields at all (403 otherwise).
 - `POST /bots/:id/switch` takes only `id`, `model` and `effort` (403 otherwise): `id` a conversation id, and at

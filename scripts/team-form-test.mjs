@@ -2,11 +2,11 @@
 // app's New team screen): who can be ticked and why not, the rows when the team is full, the ticks settling after
 // /state moved, the Lead and Team above choices, the default name, the checks before Make team sends (the loop
 // refusal, the team above left with one member, full), the POST /teams body, the members that lost their order, and
-// the step for a team above. Plain asserts, no dependencies:
+// the step for a team above, and the Bots list's groups (a member in or out: joinPlan, leavePlan). Plain asserts, no dependencies:
 // node scripts/team-form-test.mjs
 import assert from 'node:assert/strict';
 import { TEAM_MAX, firstWords, cleanName, leadOf, teamsOfId, newTeamWhy, teamChoices, memberRow, settleTeam, leadChoices, aboveChoices, countNote, orderHint,
-  defaultTeamName, aboveLoop, checkTeam, newTeamBody, lostOf, nestStep, nestFailed } from '../web/team-form.js';
+  defaultTeamName, aboveLoop, checkTeam, newTeamBody, lostOf, nestStep, nestFailed, joinPlan, leavePlan } from '../web/team-form.js';
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log('ok', name); };
@@ -155,6 +155,34 @@ test('the request bodies', () => {
   assert.deepEqual(nestStep({ id: 'tn', name: 'New', lead: null }, chk), { message: '"New" was made with no lead, so it is not under "Top"' });
   assert.equal(nestFailed({ name: 'New', lead: B }, t0, { message: 'it is in that team already' }, nameOf), '"New" was made, but Watch did not join "Top": it is in that team already');
   assert.equal(nestFailed({ name: 'New', lead: B }, t0, null, nameOf), '"New" was made, but Watch did not join "Top": Fleet View did not answer');
+});
+
+test('joinPlan and leavePlan: a member in or out of a team in the Bots list', () => {
+  // Top: A leads, B and C report; Rel: B leads, with D (so Rel is under Top); E in none
+  const top = { id: 'top', name: 'Top', members: [A, B, Cc], lead: A }, rel = { id: 'rel', name: 'Rel', members: [B, D], lead: B };
+  const teams = [top, rel];
+  assert.deepEqual(joinPlan(teams, E, 'top', TEAM_MAX, nameOf), { why: null, leaves: null, ends: null, nests: null });
+  assert.equal(joinPlan(teams, E, 'gone').why, 'that team is gone');
+  assert.equal(joinPlan(teams, null, 'top').why, 'it has not started yet');
+  assert.equal(joinPlan(teams, Cc, 'top').why, 'it is in "Top" already');
+  assert.equal(joinPlan(teams, E, 'top', 3).why, '"Top" is full (3)');
+  // D moves from Rel to Top: Rel is left with B alone and ends
+  const p = joinPlan(teams, D, 'top', TEAM_MAX, nameOf);
+  assert.deepEqual([p.why, p.leaves && p.leaves.id, p.ends && p.ends.id, p.nests], [null, 'rel', 'rel', null]);
+  // C moves from Top (three) to Rel: Top goes on
+  const q = joinPlan(teams, Cc, 'rel', TEAM_MAX, nameOf);
+  assert.deepEqual([q.leaves && q.leaves.id, q.ends], ['top', null]);
+  // A leads Top, which Rel reports up to: A in Rel would report to itself
+  assert.equal(joinPlan(teams, A, 'rel', TEAM_MAX, nameOf).why, '"Rel" reports up to Chief');
+  // B leads Rel: joining another team keeps it leading, and Rel goes under that one
+  const other = { id: 'o', name: 'Other', members: [E, ID('f')], lead: E };
+  const b = joinPlan([...teams, other], B, 'o', TEAM_MAX, nameOf);
+  assert.deepEqual([b.why, b.leaves && b.leaves.id, b.nests && b.nests.id], [null, 'top', 'rel']);
+  assert.deepEqual(leavePlan(teams, Cc, 'top'), { why: null, ends: false, lead: false });
+  assert.deepEqual(leavePlan(teams, A, 'top'), { why: null, ends: false, lead: true });
+  assert.deepEqual(leavePlan(teams, D, 'rel'), { why: null, ends: true, lead: false });
+  assert.equal(leavePlan(teams, E, 'top').why, 'it is not in that team now');
+  assert.equal(leavePlan(teams, E, 'gone').why, 'that team is gone');
 });
 
 console.log(`${n} tests passed`);

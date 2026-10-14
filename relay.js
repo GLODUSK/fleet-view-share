@@ -93,8 +93,9 @@
 //                       /model  only model and effort (403), one or both, as api.js MODEL_RE and EFFORTS take them
 //                       (400);  /message  now, when there, true or false (400)
 //   POST /api/chief/start  only account, model and effort go on (the rest is dropped)
-//   POST /api/bots, /api/bots/:id   only name, brief, account, model and effort, as bots.js reads (anything else:
-//                       403);  POST /api/bots/:id/start and /remove  no fields at all (403). A bot id: 12 hex digits
+//   POST /api/bots, /api/bots/:id   only name, brief, role, account, model, effort, shape and color, as bots.js
+//                       reads (anything else: 403);  POST /api/bots/:id/start and /remove  no fields at all (403). A
+//                       bot id: 12 hex digits
 //   POST /repos/add     path a known root;  POST /sessions/move  root null or a known root
 //   POST /push-target   { id } or root a known root;  GET /repo-history  root a known root
 //   POST /sync/move     only id (a conversation id) and force (true or false): Continue here for a chat whose host is
@@ -370,9 +371,9 @@ const isPeerPath = (p) => typeof p === 'string' && p.startsWith('/peer/');
 // what POST /settings may set from the phone (the Chats window's chatsBounds, chatsOpen, chatsOnTop are desktop state)
 const SETTINGS_KEYS = new Set(['repo', 'repos', 'hidden', 'hiddenRepos', 'finishedOpen', 'repoNames', 'repoOrder', 'forgotten', 'chief', 'chatOrder']);
 // what goes on to POST /api/chief/start (chief.js start reads no more), and what a bot may be given from the phone
-// (bots.js create and update read no more: shape and color are its avatar's look)
+// (bots.js create and update read no more: role is its profile's role, text bots.js checks; shape and color are its avatar's look)
 const CHIEF_START_KEYS = new Set(['account', 'model', 'effort']);
-const BOT_KEYS = new Set(['name', 'brief', 'account', 'model', 'effort', 'shape', 'color']);
+const BOT_KEYS = new Set(['name', 'brief', 'role', 'account', 'model', 'effort', 'shape', 'color']);
 const BOT_ONE = new RegExp(`^/api/bots/${BOT}$`), BOT_ACT = new RegExp(`^/api/bots/${BOT}/(?:start|remove)$`);
 // a dynamic bot's switch before a message (bots.js switchTo: { id, model?, effort? }), and an action on one of its
 // tasks (bots.js taskAction: { action }; run sends it to the bot now, starting the bot first when it is not running)

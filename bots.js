@@ -3,14 +3,17 @@
 // holds Henry's standing instructions for it. Henry gives it tasks in its chat; they need not touch the fleet or a repo.
 // fleet-view.js requires it and hands it what it needs (createBots below).
 //
-// - The registry: settings.bots in ~/.fleet-view.json, [{ id, name, brief, account, model, effort, folder, createdAt,
+// - The registry: settings.bots in ~/.fleet-view.json, [{ id, name, brief, role, account, model, effort, folder, createdAt,
 //   ids: [its conversations, oldest first, at most 50], told: [the ids told theirs], removed?, shape?, color?, lookAt? }].
+//   role (Henry, 2026-10-13: "give them roles in their bot profile"): a short line, at most 60 characters ('' none),
+//   in its CLAUDE.md (bot/BRIEF.md {{role}}) and next to its name in the team briefs and notes (fleet-view.js memberOf).
 //   A removed bot keeps its folder, its logs and its ids: they stay tagged in /state, so its conversations never show on
 //   the map. shape and color are its avatar's look (web/mascot.js), set when it is made or changed, or by the bot
 //   itself (look below: POST /api/bots/look, fv look); left out, the page picks them. lookAt: when they last changed
-//   (lookItems below: the look goes to Henry's other machines, sync-prefs.js botLooks). model and effort may each be
-//   'dynamic' (a new bot's are): its sessions start on DYNAMIC_START, and the page sizes each message Henry sends it
-//   and switches first when needed (switchTo below: POST /bots/:id/switch, the page only).
+//   (lookItems below: the look, and the role, go to Henry's other machines, sync-prefs.js botLooks; lookAt moves when
+//   either changes). model and effort may each be 'dynamic' (a new bot's are): its sessions start on DYNAMIC_START,
+//   and the page sizes each message Henry sends it and switches first when needed (switchTo below: POST
+//   /bots/:id/switch, the page only).
 // - Start, one at a time per bot: the conversation running already is taken as it is; else its newest one is resumed
 //   with the role (api.js openBot); else a new session starts in its folder (api.js startBot: the folder is not a listed
 //   repo, the registry vouches for it), named after the bot.
@@ -60,7 +63,7 @@ const SWITCH = require(path.join(__dirname, 'account-switch.js'));
 
 const BOTS_DIR = path.join(os.homedir(), 'Bots');
 const TEMPLATE_FILE = path.join(__dirname, 'bot', 'BRIEF.md');
-const NAME_MAX = 40, BRIEF_MAX = 4000, SLUG_MAX = 32;
+const NAME_MAX = 40, BRIEF_MAX = 4000, ROLE_MAX = 60, SLUG_MAX = 32;
 const IDS_MAX = 50; // conversation ids kept per bot
 const BOTS_MAX = 50; // bots not removed
 const HOST_EVERY_MS = 10e3; // while a bot is in sessions.json: how often the host's list is read
@@ -160,13 +163,13 @@ const watchStopNote = (name, cid) => `[Fleet View] Henry stopped your watch on $
 const watchGoneNote = (name, cid) => `[Fleet View] ${quoted(name, cid)}, which you were watching, is gone from Fleet View; the watch ended. Reply with just "ok".`;
 
 // ---------- checks ----------
+// C1 controls (0x80-0x9f): cleanText keeps them, and a name or a role goes into one line of the bot's prompts
+const hasC1 = (s) => [...s].some((ch) => ch.charCodeAt(0) >= 0x80 && ch.charCodeAt(0) <= 0x9f);
 // name: 1 to 40 characters on one line, no control characters (invisible ones dropped, as api.js cleanText does), and
 // no other bot's that is not removed, in any case. self: the bot being changed. -> { name } or { err }
 function checkName(v, bots, self = null) {
   const t = typeof v === 'string' ? API.cleanText(v) : null;
-  // C1 controls (0x80-0x9f) too: cleanText keeps them, and the name goes into the first line of the bot's prompts
-  const c1 = (s) => [...s].some((ch) => ch.charCodeAt(0) >= 0x80 && ch.charCodeAt(0) <= 0x9f);
-  const name = t && !/[\n\t]/.test(t) && !c1(t) ? t.trim() : '';
+  const name = t && !/[\n\t]/.test(t) && !hasC1(t) ? t.trim() : '';
   if (!name || name.length > NAME_MAX) return { err: `name must be 1 to ${NAME_MAX} characters on one line, without control characters` };
   const low = name.toLowerCase();
   if ((bots || []).some((b) => b && !b.removed && b.id !== self && String(b.name).toLowerCase() === low)) return { err: `there is a bot called ${name} already` };
@@ -182,6 +185,19 @@ function checkBrief(v) {
   const brief = (t || '').trim();
   if (brief.length > BRIEF_MAX) return { err: `brief must be at most ${BRIEF_MAX} characters` };
   return { brief };
+}
+// role: what the bot does, in a few words ("QA", "Deploy watch"): up to 60 characters on one line, cleaned as a name is
+// (invisible characters dropped, no control characters), trimmed; left out, null or blank is none (''). -> { role } or { err }
+function checkRole(v) {
+  if (v == null) return { role: '' };
+  if (typeof v !== 'string') return { err: 'role must be text' };
+  const t = API.cleanText(v);
+  // cleanText says null for blank text too: with a character in front, only bad characters still do
+  const bad = t === null ? API.cleanText(`.${v}`) === null : /[\n\t]/.test(t.trim()) || hasC1(t);
+  if (bad) return { err: 'role must be one line of text, without control characters' };
+  const role = (t || '').trim();
+  if (role.length > ROLE_MAX) return { err: `role must be at most ${ROLE_MAX} characters` };
+  return { role };
 }
 // account, model, effort, as POST /api/sessions takes them, or 'dynamic' for the model or the effort (sized for each
 // message Henry sends from the page: web/chats-model.js sizeTask, switched through switchTo below) or for the account
@@ -259,12 +275,12 @@ function applyLook(bot, look, now = Date.now()) {
 }
 // a bot's folder's name, lower case: its key on every machine (sync-prefs.js botLooks, chatOrder's bots:<slug>)
 const slugKey = (folder) => path.basename(String(folder)).toLowerCase();
-// its look as the botLooks group carries it, or null with none: { slug, shape?, color?, at? } (at: lookAt, else
-// when it was made)
+// its look and role as the botLooks group carries them, or null with none: { slug, shape?, color?, role?, at? } (at:
+// lookAt, else when it was made)
 function lookItem(b) {
-  if (!b || (!b.shape && !b.color)) return null;
+  if (!b || (!b.shape && !b.color && !b.role)) return null;
   const at = Number.isFinite(b.lookAt) && b.lookAt > 0 ? b.lookAt : Number.isFinite(b.createdAt) && b.createdAt > 0 ? b.createdAt : 0;
-  return { slug: slugKey(b.folder), ...(b.shape ? { shape: b.shape } : {}), ...(b.color ? { color: b.color } : {}), ...(at ? { at: Math.round(at) } : {}) };
+  return { slug: slugKey(b.folder), ...(b.shape ? { shape: b.shape } : {}), ...(b.color ? { color: b.color } : {}), ...(b.role ? { role: b.role } : {}), ...(at ? { at: Math.round(at) } : {}) };
 }
 // the folder names the bots here own (not a removed one's: another machine's bot of that name may show here)
 const ownSlugs = (bots) => new Set((bots || []).filter((b) => b && !b.removed && typeof b.folder === 'string').map((b) => slugKey(b.folder)));
@@ -303,10 +319,14 @@ function inBots(p, base = BOTS_DIR) {
   const k = pathKey(p), b = pathKey(base);
   return k === b || k.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
 }
-// its CLAUDE.md: the template with {{name}} and {{brief}} filled in, in one pass (a brief holding "{{name}}" keeps it)
+// what bot/BRIEF.md's {{role}} says: the role, or that there is none
+const roleLine = (role) => (role ? `Your role: ${role}\n\nHenry set it in your bot profile. In a team, the others see it next to your name, so keep to it.`
+  : 'Henry has not given you a role (he sets one in your bot profile): your standing instructions below say what you do.');
+// its CLAUDE.md: the template with {{name}}, {{role}} and {{brief}} filled in, in one pass (a brief holding "{{name}}"
+// keeps it)
 function fillBrief(template, bot) {
-  const vals = { name: bot.name, brief: bot.brief || 'None yet.' };
-  return String(template).replace(/\{\{(name|brief)\}\}/g, (_, k) => vals[k]);
+  const vals = { name: bot.name, role: roleLine(bot.role), brief: bot.brief || 'None yet.' };
+  return String(template).replace(/\{\{(name|role|brief)\}\}/g, (_, k) => vals[k]);
 }
 
 // ---------- /state ----------
@@ -351,8 +371,10 @@ function elsewhereBots(convs, base = BOTS_DIR, bots = []) {
   });
 }
 // one of those as state.bots shows it: it never runs here and has nothing to change here. look: the one its machine
-// gave it ({ shape?, color? }: sync-prefs.js botLooks), if any; else the page draws it in its account's colour
-const elsewhereView = (e, look) => ({ id: e.id, name: e.name, brief: '', account: e.account, model: null, effort: null, folder: e.folder,
+// gave it ({ shape?, color?, role? }: sync-prefs.js botLooks), if any; else the page draws it in its account's colour
+// (and its role is '')
+const lookRole = (look) => { const r = look && typeof look.role === 'string' ? checkRole(look.role) : null; return r && !r.err ? r.role : ''; };
+const elsewhereView = (e, look) => ({ id: e.id, name: e.name, brief: '', role: lookRole(look), account: e.account, model: null, effort: null, folder: e.folder,
   createdAt: e.at, convId: e.convId, ids: [...e.ids], live: false,
   shape: look && SHAPES.includes(look.shape) ? look.shape : null, color: look && typeof look.color === 'string' && COLOR_RE.test(look.color) ? look.color.toLowerCase() : null,
   tasks: [], elsewhere: true, map: null, watches: [] });
@@ -367,7 +389,7 @@ function watchView(w, nameOf) {
 // every conversation it went through, oldest first (the Bots tab shows them as one chat: web/chat.js opts.history).
 // map: its spot on the map, else null; watches: what it watches (watchView; nameOf(id) -> a conversation's name)
 function viewOf(b, l, nameOf) {
-  return { id: b.id, name: b.name, brief: b.brief, account: b.account, model: b.model, effort: b.effort, folder: b.folder, createdAt: b.createdAt,
+  return { id: b.id, name: b.name, brief: b.brief, role: b.role || '', account: b.account, model: b.model, effort: b.effort, folder: b.folder, createdAt: b.createdAt,
     convId: (l && l.id) || b.ids[b.ids.length - 1] || null, ids: [...b.ids], live: !!l, shape: b.shape || null, color: b.color || null,
     map: b.map ? { x: b.map.x, y: b.map.y } : null, watches: (b.watches || []).map((w) => watchView(w, nameOf)) };
 }
@@ -385,7 +407,8 @@ function loadBots(saved, base = BOTS_DIR) {
     if (!inBots(b.folder, base) || pathKey(b.folder) === pathKey(base)) continue;
     if (out.some((x) => x.id === b.id)) continue;
     const ids = Array.isArray(b.ids) ? [...new Set(b.ids.map(convId).filter(Boolean))].slice(-IDS_MAX) : [];
-    out.push({ id: b.id, name: b.name, brief: str(b.brief, ''), account: str(b.account, CHIEF.DEFAULTS.account), model: str(b.model, CHIEF.DEFAULTS.model),
+    const role = checkRole(b.role);
+    out.push({ id: b.id, name: b.name, brief: str(b.brief, ''), role: role.err ? '' : role.role, account: str(b.account, CHIEF.DEFAULTS.account), model: str(b.model, CHIEF.DEFAULTS.model),
       effort: str(b.effort, CHIEF.DEFAULTS.effort), folder: b.folder, createdAt: Number.isFinite(b.createdAt) ? b.createdAt : 0, ids,
       told: Array.isArray(b.told) ? [...new Set(b.told.map(convId).filter(Boolean))] : [], ...(b.removed === true ? { removed: true } : {}),
       ...(SHAPES.includes(b.shape) ? { shape: b.shape } : {}), ...(typeof b.color === 'string' && COLOR_RE.test(b.color) ? { color: b.color.toLowerCase() } : {}),
@@ -460,7 +483,7 @@ function createBots(deps) {
     return p;
   }
 
-  // POST /bots, /api/bots { name, brief?, account?, model?, effort?, shape?, color? }: the bot, its folder (trusted for
+  // POST /bots, /api/bots { name, brief?, role?, account?, model?, effort?, shape?, color? }: the bot, its folder (trusted for
   // every account) and its CLAUDE.md, then it starts. Made but not started: ok false, with bot
   async function create(b) {
     if (d.demo) return [503, { ok: false, message: 'the demo makes no bots' }];
@@ -469,6 +492,8 @@ function createBots(deps) {
     if (n.err) return [400, { ok: false, message: n.err }];
     const br = checkBrief(b.brief);
     if (br.err) return [400, { ok: false, message: br.err }];
+    const rl = checkRole(b.role);
+    if (rl.err) return [400, { ok: false, message: rl.err }];
     const o = checkOpts(b, NEW_BOT, accounts());
     if (o.err) return [400, { ok: false, message: o.err }];
     const lk = checkLook(b);
@@ -478,7 +503,7 @@ function createBots(deps) {
     do id = crypto.randomBytes(6).toString('hex'); while (byId(id));
     const folder = pickFolder(base, slugOf(n.name), bots, (p) => fs.existsSync(p));
     if (!folder) return [409, { ok: false, message: `no free folder for ${n.name} in ${base}` }];
-    const bot = { id, name: n.name, brief: br.brief, account: o.account, model: o.model, effort: o.effort, folder, createdAt: Date.now(), ids: [], told: [], watches: [] };
+    const bot = { id, name: n.name, brief: br.brief, role: rl.role, account: o.account, model: o.model, effort: o.effort, folder, createdAt: Date.now(), ids: [], told: [], watches: [] };
     applyLook(bot, lk);
     let text;
     try { text = fillBrief(template(), bot); } catch (e) { return [500, { ok: false, message: `could not read ${templateFile}: ${e.code || e.message}` }]; }
@@ -553,9 +578,9 @@ function createBots(deps) {
     } finally { starting.delete(bot.id); }
   }
 
-  // POST /bots/:id, /api/bots/:id { name?, brief?, account?, model?, effort?, shape?, color? }: CLAUDE.md is written
-  // again, and a running bot is told once to read it. Account, model and effort take effect in its next new
-  // conversation (a resume keeps them); shape and color at once (they are not in CLAUDE.md)
+  // POST /bots/:id, /api/bots/:id { name?, brief?, role?, account?, model?, effort?, shape?, color? }: CLAUDE.md is
+  // written again (the role is in it too), and a running bot is told once to read it. Account, model and effort take
+  // effect in its next new conversation (a resume keeps them); shape and color at once (they are not in CLAUDE.md)
   async function update(id, b) {
     const bot = byId(id);
     if (!bot || bot.removed) return noBot();
@@ -563,6 +588,7 @@ function createBots(deps) {
     const next = {};
     if ('name' in b) { const n = checkName(b.name, bots, bot.id); if (n.err) return [400, { ok: false, message: n.err }]; next.name = n.name; }
     if ('brief' in b) { const br = checkBrief(b.brief); if (br.err) return [400, { ok: false, message: br.err }]; next.brief = br.brief; }
+    if ('role' in b) { const rl = checkRole(b.role); if (rl.err) return [400, { ok: false, message: rl.err }]; next.role = rl.role; }
     const o = checkOpts(b, bot, accounts());
     if (o.err) return [400, { ok: false, message: o.err }];
     Object.assign(next, o);
@@ -579,8 +605,10 @@ function createBots(deps) {
       }
     }
     const renamed = next.name !== undefined && next.name !== bot.name;
+    const reroled = next.role !== undefined && next.role !== (bot.role || '');
     Object.assign(bot, next);
     applyLook(bot, lk);
+    if (reroled) bot.lookAt = Date.now(); // its role goes to the other machines with its look (botLooks)
     save();
     try { writeModel(bot); } catch (e) { log(`could not write ${bot.name}'s .claude/settings.json: ${e.code || e.message}`); }
     const now = (live.get(bot.id) || {}).id || bot.ids[bot.ids.length - 1];
@@ -1143,6 +1171,8 @@ function createBots(deps) {
     // api.js resumable: a bot's conversation (not a removed bot's) may be resumed in its folder, with its role
     vouch: (id) => { const b = bots.find((x) => !x.removed && x.ids.includes(id)); return b ? { role: roleOf(b.id), folder: b.folder } : null; },
     inBots: (p) => inBots(p, base),
+    // a conversation's bot's role (not a removed bot's), '' for none or no bot: the team briefs name it (fleet-view.js memberOf)
+    roleFor: (cid) => { const b = cid ? bots.find((x) => !x.removed && x.ids.includes(cid)) : null; return (b && b.role) || ''; },
     // another machine's bots, from these conversations (elsewhereBots)
     elsewhere: (convs) => (d.demo ? [] : elsewhereBots(convs, base, bots)),
     // the botLooks group (sync-prefs.js) as this machine holds it, with others (fleet-view.js settings.botLooks); and
@@ -1154,5 +1184,5 @@ function createBots(deps) {
   };
 }
 
-module.exports = { createBots, watchEvent, watchNote, checkAt, readWatches, WATCH_JOBS, WATCH_SETTLE_MS, WATCHES_MAX, WATCH_TRIES, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, tagger, tagState, viewOf, listView, loadBots,
-  startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX };
+module.exports = { createBots, watchEvent, watchNote, checkAt, readWatches, WATCH_JOBS, WATCH_SETTLE_MS, WATCHES_MAX, WATCH_TRIES, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkRole, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, roleLine, tagger, tagState, viewOf, listView, loadBots,
+  startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX, ROLE_MAX };

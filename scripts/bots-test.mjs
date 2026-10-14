@@ -1,4 +1,5 @@
-// Tests for bots.js (the server side of Bots): name and brief checks, the folder's slug and its clash suffix, the
+// Tests for bots.js (the server side of Bots): name, brief and role checks (a role in CLAUDE.md, state.bots and
+// botLooks; scripts/bot-roles-test.js has it in the team briefs), the folder's slug and its clash suffix, the
 // CLAUDE.md fill, /state's tags (sessions, finished, removed; the Chief's too), state.bots, and make / start / follow /
 // tell / change / remove against a fake session host, a bot's look (shape and colour: checked, saved, set by the page
 // and by the bot itself through POST /api/bots/look), every folder under a temp one (never ~/Bots). No live host:
@@ -52,6 +53,23 @@ test('a brief is up to 4000 characters, cleaned like cleanText; blank or left ou
   assert.ok(B.checkBrief('lone\rreturn').err);
   assert.ok(B.checkBrief(12).err);
   assert.equal(B.checkBrief(' watch\r\nthe deploys​ ').brief, 'watch\nthe\ndeploys');
+});
+test('a role is up to 60 characters on one line, cleaned like a name; blank or left out is none', () => {
+  assert.deepEqual(B.checkRole(undefined), { role: '' });
+  assert.deepEqual(B.checkRole(null), { role: '' });
+  assert.deepEqual(B.checkRole(''), { role: '' });
+  assert.deepEqual(B.checkRole('   '), { role: '' });
+  assert.deepEqual(B.checkRole('​'), { role: '' });
+  assert.deepEqual(B.checkRole('  QA  '), { role: 'QA' });
+  assert.deepEqual(B.checkRole('Deploy ​watch'), { role: 'Deploy watch' }); // invisible characters dropped
+  assert.equal(B.checkRole('x'.repeat(60)).role.length, 60);
+  assert.equal(B.checkRole('x'.repeat(61)).err, 'role must be at most 60 characters');
+  assert.equal(B.checkRole(5).err, 'role must be text');
+  assert.equal(B.checkRole({}).err, 'role must be text');
+  for (const bad of ['two\nlines', 'tab\there', 'bell\x07', 'lone\rreturn', 'c1' + String.fromCharCode(0x85) + 'x', 'c1' + String.fromCharCode(0x9b) + 'x']) {
+    assert.equal(B.checkRole(bad).err, 'role must be one line of text, without control characters', JSON.stringify(bad));
+  }
+  assert.equal(B.ROLE_MAX, 60);
 });
 test('account, model and effort: the defaults, or what POST /api/sessions takes', () => {
   assert.deepEqual(B.checkOpts({}, C.DEFAULTS, ['A', 'B']), { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium' });
@@ -144,7 +162,10 @@ test('another machine\'s bots: one per ~/Bots folder no bot here owns, from its 
   assert.equal(B.elsewhereBots(convs.slice(0, 1), base, []).find((x) => x.folder === pan).id, p.id); // the same id each time
   assert.equal(q.name, 'quiet'); // no name: the folder's
   const v = B.elsewhereView(p);
-  assert.deepEqual([v.id, v.name, v.convId, v.live, v.elsewhere, v.tasks, v.shape, v.color], [p.id, 'Panchito', 'p2', false, true, [], null, null]);
+  assert.deepEqual([v.id, v.name, v.convId, v.live, v.elsewhere, v.tasks, v.shape, v.color, v.role], [p.id, 'Panchito', 'p2', false, true, [], null, null, '']);
+  // its role, as its machine sent it with its look (botLooks); a bad one is not worn
+  assert.equal(B.elsewhereView(p, { slug: 'panchito', role: 'QA' }).role, 'QA');
+  assert.equal(B.elsewhereView(p, { slug: 'panchito', role: 'two\nlines' }).role, '');
   // the look its machine gave it (sync-prefs.js botLooks), by its folder's name; a bad one is not worn
   assert.equal(p.slug, 'panchito');
   const worn = B.elsewhereView(p, { slug: 'panchito', shape: 'heart', color: '#FF6B80' });
@@ -163,6 +184,13 @@ test('CLAUDE.md: the template with the name and the brief, in one pass', () => {
   assert.ok(out.includes('[Fleet View · unsigned, not from Henry]'));
   assert.ok(out.includes('`fv start`'));
   assert.ok(B.fillBrief(tpl, { name: 'Scout', brief: '' }).includes('None yet.'));
+  // its role, in the same pass ({{role}} in a brief is left as it is); none: a neutral line
+  const withRole = B.fillBrief(tpl, { name: 'Scout', role: 'QA', brief: 'Say {{role}} never.' });
+  assert.ok(withRole.includes('\nYour role: QA\n'));
+  assert.ok(withRole.includes('Say {{role}} never.'));
+  assert.ok(!/\{\{role\}\}/.test(withRole.replace('Say {{role}} never.', '')));
+  const none = B.fillBrief(tpl, { name: 'Scout', brief: '' });
+  assert.ok(!none.includes('Your role:') && none.includes('Henry has not given you a role') && !none.includes('{{role}}'));
 });
 
 // ---------- /state ----------
@@ -188,7 +216,9 @@ test('state.bots: not the removed ones, newest first, convId the running one els
   const bots = [mk(BID, T, { ids: [id(1), id(2)] }), mk(BID2, T + 1), mk('cccccccccccc', T + 2, { removed: true })];
   const v = B.listView(bots, new Map([[BID2, { id: id(7) }]]));
   assert.deepEqual(v.map((x) => x.id), [BID2, BID]);
-  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'color', 'convId', 'createdAt', 'effort', 'folder', 'id', 'ids', 'live', 'map', 'model', 'name', 'shape', 'watches']);
+  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'color', 'convId', 'createdAt', 'effort', 'folder', 'id', 'ids', 'live', 'map', 'model', 'name', 'role', 'shape', 'watches']);
+  assert.equal(v[0].role, ''); // none
+  assert.equal(B.listView([mk(BID, T, { role: 'QA' })], new Map())[0].role, 'QA');
   assert.equal(v[0].map, null); assert.deepEqual(v[0].watches, []);
   assert.equal(v[0].shape, null); assert.equal(v[0].color, null);
   assert.deepEqual(B.listView([mk(BID, T, { shape: 'heart', color: '#ff6b80' })], new Map()).map((x) => [x.shape, x.color]), [['heart', '#ff6b80']]);
@@ -206,6 +236,11 @@ test('the registry as saved: a bad entry is dropped, ids are checked and capped'
   assert.equal(out[0].ids[B.IDS_MAX - 1], id(59));
   assert.deepEqual(out[0].told, [id(1)]);
   assert.equal(out[0].account, 'B'); assert.equal(out[0].model, 'claude-sonnet-5-5'); assert.equal(out[0].effort, 'medium');
+  // its role: kept when it is one, '' when it is missing (made before roles) or not one
+  assert.equal(out[0].role, '');
+  assert.equal(B.loadBots([{ ...ok, role: ' QA ' }], dir)[0].role, 'QA');
+  assert.equal(B.loadBots([{ ...ok, role: 'x'.repeat(61) }], dir)[0].role, '');
+  assert.equal(B.loadBots([{ ...ok, role: 7 }], dir)[0].role, '');
 });
 test("a look: a shape from mascot.js's list, a #rrggbb colour; null or blank clears; left out stays", () => {
   assert.deepEqual(B.checkLook({}), {});
@@ -633,6 +668,48 @@ await (async () => {
     assert.equal((await h.bots.update('cccccccccccc', { name: 'x' }))[0], 404);
     assert.equal(h.saved().find((x) => x.id === bid).name, 'Ranger');
     n++; console.log('ok change: CLAUDE.md, the note, the rename, the checks');
+  }
+  // its role: made with one, changed or cleared like its brief (CLAUDE.md written again, a running bot told once),
+  // stored, in state.bots, in the botLooks item and roleFor (the team briefs); a bad one refused, nothing changed
+  {
+    const h = harness();
+    assert.equal((await h.bots.create({ name: 'Bad role', role: 'a'.repeat(61) }))[0], 400);
+    assert.equal((await h.bots.create({ name: 'Bad role', role: 3 }))[1].message, 'role must be text');
+    assert.equal(h.calls.startBot.length, 0);
+    const [code, made] = await h.bots.create({ name: 'Deploy watch', role: '  QA ' });
+    assert.equal(code, 200); assert.equal(made.bot.role, 'QA');
+    const bid = made.bot.id, md = path.join(made.bot.folder, 'CLAUDE.md');
+    assert.ok(fs.readFileSync(md, 'utf8').includes('\nYour role: QA\n'));
+    assert.equal(h.saved()[0].role, 'QA');
+    assert.equal(h.bots.view()[0].role, 'QA');
+    assert.equal(h.bots.list()[1].bots[0].role, 'QA');
+    assert.equal(h.bots.roleFor(made.id), 'QA');
+    assert.equal(h.bots.roleFor(id(998)), '');
+    assert.equal(h.bots.lookItems([])[0].role, 'QA'); // to the other machines, with its look
+    // changed: CLAUDE.md again, the bot told once
+    const [uc, uo] = await h.bots.update(bid, { role: 'Release captain' });
+    assert.equal(uc, 200); assert.equal(uo.bot.role, 'Release captain');
+    assert.match(uo.message, /reads CLAUDE.md again/);
+    const text = fs.readFileSync(md, 'utf8');
+    assert.ok(text.includes('\nYour role: Release captain\n') && !text.includes('Your role: QA'));
+    assert.equal(h.calls.deliver.length, 1); assert.equal(h.calls.deliver[0].text, B.CHANGED_NOTE); assert.equal(h.calls.deliver[0].to, made.id);
+    const lookAt = h.saved()[0].lookAt;
+    assert.ok(lookAt > 0); // the other machines hear of the change
+    // the same role again: nothing written, nobody told
+    await h.bots.update(bid, { role: 'Release captain' });
+    assert.equal(h.calls.deliver.length, 1);
+    // bad: refused, nothing changed
+    for (const bad of ['two\nlines', 'x'.repeat(61), 12]) assert.equal((await h.bots.update(bid, { role: bad }))[0], 400, JSON.stringify(bad));
+    assert.equal(h.saved()[0].role, 'Release captain');
+    // left out: kept; '' or null: none
+    await h.bots.update(bid, { brief: 'new orders' });
+    assert.equal(h.saved()[0].role, 'Release captain');
+    const [, cl] = await h.bots.update(bid, { role: '' });
+    assert.equal(cl.bot.role, '');
+    assert.ok(fs.readFileSync(md, 'utf8').includes('Henry has not given you a role'));
+    assert.equal(h.bots.roleFor(made.id), '');
+    assert.equal(h.bots.lookItems([]).length, 0); // no look and no role: no item
+    n++; console.log('ok role: made with one, changed, cleared, refused; CLAUDE.md, the note, state.bots, botLooks, roleFor');
   }
   // remove: its session ended, off state.bots, its ids still tagged, its folder kept; its name is free again
   {

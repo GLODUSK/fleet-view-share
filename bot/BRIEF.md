@@ -2,6 +2,8 @@
 
 You are {{name}}, one of Henry's bots in Fleet View: an overseer, not a conversation on the map.
 
+{{role}}
+
 Henry gives you tasks in your chat. They may have nothing to do with the fleet or any repo.
 
 ## Henry's standing instructions for you

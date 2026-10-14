@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, rawToContactsState, previewOf, botPreview, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
   sizeTask, dynamicSwitch, switchNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
-  sameChatOrder } from '../web/chats-model.js';
+  sameChatOrder, contactTree, teamFlags } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
 const KEY = 'fv.chats.chains';
@@ -140,11 +140,89 @@ test('teams: only when every member the state knows is an overseer; members reso
   const teams = rows.filter((r) => r.kind === 'team');
   assert.deepEqual(teams.map((t) => t.key), ['team:t1']);
   const t = teams[0];
-  assert.deepEqual(t.members, [{ id: 'c', name: 'c', lead: true }, { id: 'q', name: 'q', lead: false }, { id: 'ch', name: 'Chief', lead: false }]);
+  assert.deepEqual(t.members, [{ id: 'c', name: 'c', lead: true, key: `bot:${B1}`, role: '', memberId: 'a' }, { id: 'q', name: 'q', lead: false, key: `bot:${B2}`, role: '', memberId: 'q' },
+    { id: 'ch', name: 'Chief', lead: false, key: 'chief', role: '', memberId: 'ch' }]);
   assert.equal(t.at, T + 40); assert.equal(t.needsYou, true); assert.equal(t.busy, true);
   assert.equal(t.preview, 'unknown-: last');
   const noMsg = build(st({ allSessions: [a, b, c], teams: [{ ...team, messages: [] }] })).find((r) => r.kind === 'team');
   assert.equal(noMsg.preview, 'ship it'); assert.equal(noMsg.at, T + 10);
+});
+
+// teams as groups in the list: a team "ops" (the Chief leads, bots 1 and 2), a team "rel" led by bot 2 with bot 3
+// (nested: bot 2 is a plain member of ops), bot 4 in none, and the map's m
+const B3 = 'b3b3b3b3b3b3', B4 = 'b4b4b4b4b4b4';
+const g = {
+  ch: S('ch', { bot: 'chief', state: 'IDLE', last: T + 4 }), x1: S('x1', { bot: B1, state: 'IDLE', last: T + 5 }), x2: S('x2', { bot: B2, state: 'IDLE', last: T + 6 }),
+  x3: S('x3', { bot: B3, state: 'ASKING', waitingOn: 'ship it?', last: T + 7 }), x4: S('x4', { bot: B4, state: 'IDLE', last: T + 8 }),
+};
+const gBots = [BOT(B1, { convId: 'x1', live: true, role: '  Release\n manager ' }), BOT(B2, { convId: 'x2', live: true }), BOT(B3, { convId: 'x3', live: true, role: 'x'.repeat(80) }), BOT(B4, { convId: 'x4', live: true })];
+const gTeams = [
+  { id: 'ops', name: 'ops', lead: 'ch', members: ['x1', 'ch', 'x2'], messages: [] },
+  { id: 'rel', name: 'rel', lead: 'x2', members: ['x3', 'x2'], messages: [] },
+];
+const gState = (o = {}) => st({ allSessions: Object.values(g), bots: gBots, teams: gTeams, ...o });
+const keysOf = (nodes) => nodes.map((x) => `${'  '.repeat(x.depth)}${x.c.key}`);
+
+test('teams nest in the list: members under their team (the lead first), a led team under its lead\'s team, never twice', () => {
+  const rows = sortContacts(build(gState()), { pinned: ['chief'], keys: [`bot:${B4}`, 'team:ops', `bot:${B1}`, `bot:${B2}`, `bot:${B3}`, 'team:rel'] });
+  const by = (k) => rows.find((r) => r.key === k);
+  assert.equal(by('chief').parentTeam, 'team:ops', 'the Chief leads ops');
+  assert.equal(by(`bot:${B1}`).parentTeam, 'team:ops');
+  assert.equal(by(`bot:${B2}`).parentTeam, 'team:rel', 'it leads rel: under rel, which is under ops');
+  assert.equal(by(`bot:${B3}`).parentTeam, 'team:rel');
+  assert.equal(by('team:rel').parentTeam, 'team:ops');
+  assert.equal('parentTeam' in by('team:ops'), false);
+  assert.equal('parentTeam' in by(`bot:${B4}`), false);
+  assert.deepEqual(by('team:ops').members.map((m) => [m.key, m.lead]), [['chief', true], [`bot:${B1}`, false], [`bot:${B2}`, false]]);
+  assert.equal(by(`bot:${B1}`).role, 'Release manager', 'the role on one line');
+  assert.equal(by(`bot:${B3}`).role.length, 60);
+  assert.equal(by('team:ops').members[1].role, 'Release manager');
+  const tree = contactTree(rows);
+  // the order puts B4 first, then ops (the Chief's pin goes with it: it shows under its team)
+  assert.deepEqual(keysOf(tree), [`bot:${B4}`, 'team:ops', '  chief', `  bot:${B1}`, '  team:rel', `    bot:${B2}`, `    bot:${B3}`]);
+  assert.equal(new Set(tree.map((x) => x.c.key)).size, tree.length, 'no row twice');
+  const rel = tree.find((x) => x.c.key === 'team:rel');
+  assert.deepEqual([rel.depth, rel.parent, rel.path, rel.open, rel.kids], [1, 'team:ops', ['team:ops'], true, 2]);
+  assert.deepEqual(tree.find((x) => x.c.key === `bot:${B3}`).path, ['team:ops', 'team:rel']);
+  const ops = tree.find((x) => x.c.key === 'team:ops');
+  assert.deepEqual(ops.under.map((c) => c.key), ['chief', `bot:${B1}`, 'team:rel', `bot:${B2}`, `bot:${B3}`]);
+});
+
+test('a folded team hides its rows, and what they have shows on it', () => {
+  const rows = sortContacts(build(gState()));
+  assert.deepEqual(keysOf(contactTree(rows, ['team:ops'])).filter((k) => !k.startsWith(' ')).sort(), [`bot:${B4}`, 'team:ops']);
+  assert.equal(contactTree(rows, ['team:ops']).length, 2);
+  const inner = contactTree(rows, new Set(['team:rel']));
+  assert.deepEqual(keysOf(inner).filter((k) => k.includes('team:ops') || k.startsWith(' ')), ['team:ops', '  chief', `  bot:${B1}`, '  team:rel']);
+  assert.equal(inner.find((x) => x.c.key === 'team:rel').open, false);
+  assert.equal(contactTree(rows, { 'team:rel': true, 'team:ops': false }).length, inner.length);
+  // B3 asks: its team and the team above say so while folded; seen, the gold goes
+  const ops = contactTree(rows, ['team:ops']).find((x) => x.c.key === 'team:ops');
+  assert.equal(ops.under.length, 5, 'folded: its rows are still counted under it');
+  assert.deepEqual(teamFlags(ops, {}), { asks: true, unread: true });
+  const seenAll = Object.fromEntries(rows.map((r) => [r.key, T * 2]));
+  assert.deepEqual(teamFlags(ops, seenAll), { asks: false, unread: false });
+  assert.deepEqual(teamFlags({ c: rows[0] }, {}), { asks: false, unread: false });
+  assert.equal(rows.find((r) => r.key === 'team:rel').needsYou, true);
+  assert.equal(rows.find((r) => r.key === 'team:ops').needsYou, false, "ops's own: only its direct members");
+});
+
+test('a team that is not a row (a map conversation in it) leaves its bots at the top; a loop is cut', () => {
+  const mixed = gState({ allSessions: [...Object.values(g), m], teams: [{ id: 'mx', name: 'mx', lead: 'x1', members: ['x1', 'm'], messages: [] }] });
+  const rows = build(mixed);
+  assert.equal(rows.some((r) => r.kind === 'team'), false);
+  assert.equal(rows.some((r) => r.parentTeam), false);
+  // two teams whose leads are plain members of each other's (never from the server): both still show, once each
+  const loop = build(gState({ teams: [{ id: 'p', name: 'p', lead: 'x1', members: ['x1', 'x2'], messages: [] }, { id: 'q', name: 'q', lead: 'x2', members: ['x2', 'x1'], messages: [] }] }));
+  const tree = contactTree(sortContacts(loop));
+  assert.deepEqual(tree.filter((x) => x.c.kind === 'team').map((x) => x.c.key).sort(), ['team:p', 'team:q']);
+  assert.equal(new Set(tree.map((x) => x.c.key)).size, tree.length);
+  assert.ok(tree.some((x) => x.c.kind === 'team' && x.depth === 0));
+  // the order of the top rows is the list's; a team's rows follow its member order
+  const order = { pinned: [], keys: ['team:ops', `bot:${B4}`] };
+  assert.deepEqual(keysOf(contactTree(sortContacts(build(gState()), order))).filter((k) => !k.startsWith(' ')), ['team:ops', `bot:${B4}`]);
+  assert.deepEqual(contactTree([]), []);
+  assert.deepEqual(contactTree(null), []);
 });
 
 test('teamThread: oldest first, names resolved through handoffs, unknown ids shortened', () => {
@@ -474,6 +552,12 @@ test('botEdits: only what changed, trimmed; the look back to auto is null; colou
   assert.deepEqual(botEdits(bot, { ...same, brief: '' }), { brief: '' });
   assert.deepEqual(botEdits(bot, { account: '' }), {}); // an empty pick never clears one
   assert.deepEqual(botEdits(null, { name: 'n' }), { name: 'n' });
+  // its role: trimmed to one line, '' clears it, the same one sends nothing
+  assert.deepEqual(botEdits({ name: 'x', role: 'Reviewer' }, { name: 'x', role: ' Reviewer ' }), {});
+  assert.deepEqual(botEdits({ name: 'x', role: 'Reviewer' }, { name: 'x', role: '' }), { role: '' });
+  assert.deepEqual(botEdits({ name: 'x' }, { name: 'x', role: 'Release\nmanager' }), { role: 'Release manager' });
+  assert.deepEqual(botEdits({ name: 'x' }, { name: 'x', role: '' }), {});
+  assert.equal(botEdits({ name: 'x' }, { role: 'y'.repeat(90) }).role.length, 60);
 });
 
 test('sizeTask: quick questions low on Haiku, tasks medium on Sonnet, plans and bugs high on Opus, never Fable, big ones xhigh; go-aheads keep', () => {

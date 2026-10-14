@@ -29,8 +29,23 @@
 // its header, its last chat read only (or, never started, a card with its instructions and a Start button) and a box of
 // its own: what you type there starts it (POST /bots/:id/start: its running conversation, else its last one resumed,
 // else a new one), and goes in once its session is up (handto.js hands it to that conversation's chat box, which sends
-// it). Right-click a bot: Start, Edit bot..., a quick Rename, Colour ▸ and Shape ▸ (its look; POST /bots/:id), Team ▸,
-// Remove bot (asks first; POST /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
+// it). Right-click a bot: Start, Profile... (the Edit bot form: its name, role, instructions, look and what it runs on;
+// Henry, 2026-10-13: "remove shape color rename from right click options all of that in their profile only"), Put in
+// team ▸ (or, under a team: Take out of team, Make lead, Move to team ▸), Team ▸, Remove bot (asks first; POST
+// /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
+// A bot's role (Edit bot's Role: "Reviewer", at most 60 characters) shows under its name in its chat's header and on
+// its row under a team; its CLAUDE.md and its team briefs say it (bots.js).
+//
+// Teams are groups in the list (Henry, 2026-10-13: "if i make a team i can see them in the team ... expand take them
+// out put them in etc dynamically"): a team's row has a chevron that folds it; open, its members show under it, one
+// step in (★ on the lead, each with its role), and a bot in a team is there only, never also a row of its own. A team
+// whose lead reports in a team above shows inside that one, in its lead's place (chats-model.js contactTree). Folded,
+// its row says how many are in it, and a member that needs you or has something new shows on the team's row. Folded
+// or open is kept in this window's storage (fv.chats.folded: the folded ones; open by default). Drag a bot (or the
+// Chief) onto a team's row or its group to put it in (the group lights up; POST /teams/add: one in another team
+// leaves that one), out of its group into the list to take it out (POST /teams/leave), or from one group to another
+// to move it; between rows it is the order, as before. Each goes the way the team menus' do (ui.teamAdd,
+// ui.teamLeave, ui.teamLead in app.js, with their toasts), and asks first when it would end a team (left with one).
 //
 // The list's order is Henry's (Henry, 2026-10-12: "dont move them up and down when one sends a message"):
 // settings.chatOrder (chats-model.js sortContacts), the pinned rows on top, then the rest; activity shows in the row,
@@ -73,7 +88,8 @@
 // (GET /chief/briefing when the pane opens and at most every 60 s while it shows; free, it sends the Chief nothing)
 // and the Watch mode switch (POST /settings { chief: { watch } }). With ?fixture=1 nothing is posted: Start fakes
 // a Chief from a fixture conversation and the briefing is built here from the fixture sessions; a bot made with the
-// form is kept in the page, and Start, Edit bot, Rename and Remove bot only record their POSTs.
+// form is kept in the page, and Start, Edit bot and Remove bot only record their POSTs (a team's member in or out
+// too: app.js's post records them).
 import { C, esc, setHTML, badge, acctColor, isAcct, repoChip } from './cards.js';
 import { icon } from './icons.js';
 import { renderChatPane } from './chat.js';
@@ -83,10 +99,11 @@ import { mascotSVG, mascotState, mascotAck, SHAPES } from './mascot.js';
 import { MODEL_IDS, EFFORTS, modelLabel, setDynamicBots } from './compose.js';
 import { handToChat } from './handto.js';
 import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote,
-  fullChatOrder, moveInChatOrder, pinInChatOrder, sameChatOrder } from './chats-model.js';
+  fullChatOrder, moveInChatOrder, pinInChatOrder, sameChatOrder, contactTree, teamFlags, ROLE_MAX } from './chats-model.js';
 import { mountPicker } from './picker.js';
-// New team's rules (who can be ticked, the lead and team above choices, the small lines), shared with the phone app
-import { TEAM_MAX, newTeamWhy, teamChoices as teamChoicesOf, memberRow, settleTeam, leadChoices, aboveChoices, countNote, orderHint } from './team-form.js';
+// New team's rules (who can be ticked, the lead and team above choices, the small lines), shared with the phone app,
+// and the list's team groups' (a member in or out)
+import { TEAM_MAX, newTeamWhy, teamChoices as teamChoicesOf, memberRow, settleTeam, leadChoices, aboveChoices, countNote, orderHint, joinPlan, leavePlan } from './team-form.js';
 import { ASK_TEXT, WATCH_NOTE, BRIEF_MS, watchOn as watchFrom, watchBody, briefLines, briefSections, briefTime, fixtureBriefing } from './chief-model.js';
 
 export const SOLO = new URLSearchParams(location.search).get('solo') === 'chats';
@@ -110,6 +127,15 @@ let open = false; // narrow layout: the chat is over the list
 let popped = false; // Bots is in its own window (main window only)
 let onTop = !!store.get(TOP_KEY, false);
 let tasksOpen = !!store.get(TASKS_KEY, false); // the Tasks strip is open (else folded to its one line)
+// the teams folded in the list (their keys); every other one is open
+const FOLD_KEY = 'fv.chats.folded';
+const folded = new Set((() => { const v = store.get(FOLD_KEY, []); return Array.isArray(v) ? v.filter((k) => typeof k === 'string') : []; })());
+function setFold(key, shut, ui) {
+  if (shut === folded.has(key)) return;
+  if (shut) folded.add(key); else folded.delete(key);
+  store.set(FOLD_KEY, [...folded].slice(-200));
+  ui.refresh();
+}
 let syncedSel = null; // the last ui.selectedId this view followed
 let selLast = null; // the last copy of the picked bot's conversation, kept if it leaves the lists
 let pane = null;
@@ -158,7 +184,7 @@ const elsewhereBot = (state, id) => (state.bots || []).some((b) => b && b.id ===
 // a bot's look as just picked here (bot id -> { shape?, color?, at }), worn until /state agrees or LOOK_MS passes
 const looks = new Map();
 const LOOK_MS = 15000;
-// colours to pick from (the form and Look ▸): steady, readable on the dark page; none picked: its account's colour
+// colours to pick from (the form): steady, readable on the dark page; none picked: its account's colour
 const PALETTE = [['#58a6ff', 'Blue'], ['#3fd8ff', 'Cyan'], ['#4eba65', 'Green'], ['#7ee0a1', 'Mint'], ['#ffc857', 'Gold'],
   ['#ff9f5a', 'Orange'], ['#ff6b80', 'Coral'], ['#f78fd0', 'Pink'], ['#af87ff', 'Violet'], ['#c9d1d9', 'Silver']];
 const SHAPE_NAMES = { hex: 'Hexagon', drop: 'Drop', round: 'Round', pill: 'Pill', tri: 'Triangle', square: 'Square', star: 'Star', clover: 'Clover', flower: 'Flower', heart: 'Heart' };
@@ -265,28 +291,52 @@ function matches(c, q) {
   return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
 }
 
-function rowHtml(state, c, now) {
+// node: its place in the list (chats-model.js contactTree): depth, the team it shows under, a team's open and rows
+function rowHtml(state, c, now, node) {
   const on = c.key === selKey;
-  const un = !on && unread(c, seen);
-  const ask = !on && asksYou(c, seen); // opening it clears the gold, as it does the unread dot
-  const pin = c.pinned ? `<span class="ch-pin" title="pinned">${icon('pin', 11)}</span>` : '';
-  return `<button type="button" class="ch-row${on ? ' on' : ''}${ask ? ' needs' : ''}${un ? ' unread' : ''}${c.kind !== 'team' && !c.id ? ' ghost' : ''}" role="option" aria-selected="${on}"`
-    + ` data-key="${esc(c.key)}"${c.pinned ? ' data-pin="1"' : ''}${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''}${c.botId ? ` data-bot="${esc(c.botId)}"` : ''} style="--rc:${esc(colorOf(c))}" title="${esc(c.name || '')}">`
-    + `<span class="ch-av"${c.kind === 'team' ? '' : ` title="${esc(doingTip(c))}"`}>${avatar(state, c, 40)}</span>`
-    + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${esc(c.name || 'bot')}</span>`
+  const team = c.kind === 'team';
+  const depth = (node && node.depth) || 0;
+  const shut = team && node && node.open === false;
+  // a folded team shows what its members have: gold when one needs you, the dot when one has something new
+  const fl = shut ? teamFlags(node, seen) : { asks: false, unread: false };
+  const un = !on && (unread(c, seen) || fl.unread);
+  const ask = !on && (asksYou(c, seen) || fl.asks); // opening it clears the gold, as it does the unread dot
+  // a pin only at the top: a row under a team goes where its team goes
+  const pinned = c.pinned && !depth;
+  const pin = pinned ? `<span class="ch-pin" title="pinned">${icon('pin', 11)}</span>` : '';
+  // under a team: ★ on its lead, and its role
+  const par = depth && node.parent ? (pane?._contacts || []).find((x) => x.key === node.parent) : null;
+  const mem = par && !team ? (par.members || []).find((m) => m.key === c.key) : null;
+  const role = !team && c.role ? `<span class="ch-role" title="${esc(`${c.name}'s role`)}">${esc(c.role)}</span>` : '';
+  const n = team ? (c.members || []).length : 0;
+  const tree = !!(node && 'open' in node); // a search lists the matches flat: nothing to fold
+  const fold = team && tree ? `<span class="ch-fold" data-fold="1" role="button" aria-expanded="${!shut}" aria-label="${shut ? 'Show' : 'Hide'} its members" title="${shut ? 'Show its members' : 'Fold it'}">${icon('chevron', 13)}</span>` : '';
+  return `<button type="button" class="ch-row${on ? ' on' : ''}${ask ? ' needs' : ''}${un ? ' unread' : ''}${!team && !c.id ? ' ghost' : ''}${depth ? ' nest' : ''}${team ? ' grp' : ''}${shut ? ' shut' : ''}" role="option" aria-selected="${on}"`
+    + ` data-key="${esc(c.key)}"${pinned ? ' data-pin="1"' : ''}${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''}${c.botId ? ` data-bot="${esc(c.botId)}"` : ''}`
+    + ` data-depth="${depth}"${node && node.parent ? ` data-parent="${esc(node.parent)}" data-path="${esc(node.path.join(' '))}"` : ''}${mem ? ` data-member="${esc(mem.memberId)}"` : ''}`
+    + ` style="--rc:${esc(colorOf(c))};--dep:${depth}" title="${esc(c.name || '')}${mem && mem.lead ? ` leads ${par.name}` : ''}${team ? ` · ${n} member${n === 1 ? '' : 's'}` : ''}">`
+    + fold
+    + `<span class="ch-av"${team ? '' : ` title="${esc(doingTip(c))}"`}>${avatar(state, c, depth ? 32 : 40)}</span>`
+    + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${mem && mem.lead ? '<span class="ch-star" aria-label="lead">★</span>' : ''}${esc(c.name || 'bot')}</span>${depth ? role : ''}`
     + `<span class="ch-time">${pin}${esc(when(c.at, now))}</span></span>`
-    + `<span class="ch-l2"><span class="ch-prev">${esc(previewOf(c))}</span>${ask ? '<span class="ch-flag" title="needs you">!</span>' : un ? '<span class="ch-dot" aria-label="unread"></span>' : ''}</span>`
+    + `<span class="ch-l2">${shut ? `<span class="ch-cnt">${n} member${n === 1 ? '' : 's'}</span>` : ''}<span class="ch-prev">${esc(previewOf(c))}</span>${ask ? '<span class="ch-flag" title="needs you">!</span>' : un ? '<span class="ch-dot" aria-label="unread"></span>' : ''}</span>`
     + `</span></button>`;
 }
 
 // with no bot yet (the Chief aside): what bots are for, and the New bot button
 const BOTS_FOR = 'Bots are overseers you give standing tasks, away from the map.';
 const newBotBtn = () => `<button type="button" class="btn primary ch-newbot" data-newbot="1">${icon('plus', 14)}<span>New bot</span></button>`;
-function listHtml(state, list, now, noBots) {
+// nodes: the rows as drawn (contactTree; a search: the matches, flat)
+function listHtml(state, nodes, now, noBots) {
   const intro = noBots && !query ? `<div class="ch-none ch-intro"><div>${esc(BOTS_FOR)}</div>${newBotBtn()}</div>` : '';
-  if (!list.length) return query ? `<div class="ch-none">No bots match “${esc(query)}”.</div>` : intro || '<div class="ch-none">No bots yet. Make one with +.</div>';
-  // a hairline under the pinned rows, when the rest follow
-  return list.map((c, i) => (i && list[i - 1].pinned && !c.pinned ? '<div class="ch-pinsep" aria-hidden="true"></div>' : '') + rowHtml(state, c, now)).join('') + intro;
+  if (!nodes.length) return query ? `<div class="ch-none">No bots match “${esc(query)}”.</div>` : intro || '<div class="ch-none">No bots yet. Make one with +.</div>';
+  // a hairline under the pinned rows, when the rest follow (rows under a team go with it)
+  let lastTop = null;
+  return nodes.map((x) => {
+    const sep = !x.depth && lastTop && lastTop.pinned && !x.c.pinned ? '<div class="ch-pinsep" aria-hidden="true"></div>' : '';
+    if (!x.depth) lastTop = x.c;
+    return sep + rowHtml(state, x.c, now, x);
+  }).join('') + intro;
 }
 
 // ---------- the order: drag, Pin / Unpin ----------
@@ -324,28 +374,61 @@ const pinItem = (ui, c) => ({ label: c.pinned ? 'Unpin' : 'Pin', icon: 'pin', no
   run: () => saveOrder(ui, pinInChatOrder(orderNow(pane?._state || {}), pane?._contacts || [], c.key, !c.pinned)) });
 
 // dragging a row (mouse or pen; a touch scrolls): it starts once the pointer goes DRAG_PX, the list holds still
-// meanwhile (renderChats leaves it alone) and a line shows where it goes; dropped in the pinned rows it is pinned, in
-// the rest it is not. Esc cancels. The click that ends a drag picks nothing
+// meanwhile (renderChats leaves it alone). Between the rows at the top a line shows where it goes; dropped in the
+// pinned rows it is pinned, in the rest it is not. A bot or the Chief held over a team's row (its middle) or any row
+// of its group lights that group up: dropped there it goes in that team; one under a team dropped between the rows at
+// the top comes out of it, and stays where it was dropped. Esc cancels. The click that ends a drag picks nothing
 const DRAG_PX = 5;
-let drag = null; // { key, id (pointer), y0, on, slot: { pin, before, y } | null }
+let drag = null; // { key, id (pointer), y0, x, y, on, slot: { pin, before, y } | null, into: team key | null }
 let dragEnded = 0;
+// the team rows' contacts, and whether a row is in a team's group already (as a member, or as the lead of a team in it)
+const teamRowOf = (el, key) => (el._contacts || []).find((x) => x.kind === 'team' && x.key === key) || null;
+const inGroup = (t, c) => !!t && (t.members || []).some((m) => m.key === c.key || (c.kind === 'team' && (c.members || []).some((x) => x.lead && x.key === m.key)));
 function dragOver(el, y) {
   const list = el._list, rows = [...list.querySelectorAll('.ch-row')];
   if (!drag || !rows.length) return;
   const box = list.getBoundingClientRect();
   if (y < box.top + 28) list.scrollTop -= 12;
   else if (y > box.bottom - 28) list.scrollTop += 12;
-  // the first row whose middle is below the pointer: in front of it, unless the pointer is still over the last pinned
-  // row's lower half or the line under it (then: the end of the pinned rows)
-  const i = rows.findIndex((r) => { const b = r.getBoundingClientRect(); return y < b.top + b.height / 2; });
-  const prev = i < 0 ? rows[rows.length - 1] : rows[i - 1] || null, next = i < 0 ? null : rows[i];
+  const d = (el._contacts || []).find((x) => x.key === drag.key);
+  const nested = !!(d && d.parentTeam && teamRowOf(el, d.parentTeam));
+  // a team goes in no team from here (its lead does: Lead team ▸ in its menu)
+  const canIn = !!(d && d.kind !== 'team' && d.id && typeof curUi().teamAdd === 'function');
+  const over = rows.find((r) => { const b = r.getBoundingClientRect(); return y >= b.top && y < b.bottom; });
+  const dep = over ? Number(over.dataset.depth) || 0 : 0;
+  let into = null, stay = false;
+  if (over && (dep > 0 || over.dataset.team)) {
+    const b = over.getBoundingClientRect(), mid = y > b.top + b.height * 0.25 && y < b.bottom - b.height * 0.25;
+    // the innermost group under the pointer: a team's own row (its middle, or any part of it inside a group), else
+    // the group the row is in
+    const g = over.dataset.team && (dep > 0 || mid) ? over.dataset.key : dep > 0 ? over.dataset.parent : null;
+    if (g && (canIn || nested)) {
+      // over its own group: it stays (the order in a team is the team's); else it goes in
+      if (inGroup(teamRowOf(el, g), d) || g === d.key || (over.dataset.path || '').split(' ').includes(d.key)) stay = true;
+      else if (canIn) into = g;
+      else stay = true;
+    }
+  }
+  if (nested && dep === 0 && !into && !stay && d.kind === 'team') stay = true; // a team under a team comes out through its lead's menu
+  drag.into = into;
+  for (const r of list.querySelectorAll('.ch-row.ch-into')) r.classList.remove('ch-into');
+  if (into) for (const r of rows) if (r.dataset.key === into || (r.dataset.path || '').split(' ').includes(into)) r.classList.add('ch-into');
+  if (into || stay) { drag.slot = null; if (el._drop) { el._drop.remove(); el._drop = null; } return; }
+  // the rows at the top: the first whose middle is below the pointer, in front of it, unless the pointer is still over
+  // the last pinned row's lower half or the line under it (then: the end of the pinned rows)
+  const tops = rows.filter((r) => !Number(r.dataset.depth));
+  const i = tops.findIndex((r) => { const b = r.getBoundingClientRect(); return y < b.top + b.height / 2; });
+  const prev = i < 0 ? tops[tops.length - 1] : tops[i - 1] || null, next = i < 0 ? null : tops[i];
   const edge = next && prev && !!prev.dataset.pin && !next.dataset.pin && y < next.getBoundingClientRect().top;
+  // after a row: under its group's last row
+  const after = (r) => { let e = r; for (let k = rows.indexOf(r) + 1; k < rows.length && Number(rows[k].dataset.depth); k++) e = rows[k]; return e.offsetTop + e.offsetHeight + 1; };
   let slot;
   if (next && !edge) slot = { pin: !!next.dataset.pin, before: next.dataset.key, y: next.offsetTop - 1 };
-  else slot = { pin: !!prev.dataset.pin, before: null, y: prev.offsetTop + prev.offsetHeight + 1 };
+  else slot = { pin: !!prev.dataset.pin, before: null, y: after(prev) };
   drag.slot = slot;
   if (!el._drop || !el._drop.isConnected) { el._drop = document.createElement('div'); el._drop.className = 'ch-drop'; list.appendChild(el._drop); }
   el._drop.classList.toggle('pin', slot.pin);
+  el._drop.classList.toggle('out', nested); // out of its team
   el._drop.style.top = `${slot.y}px`;
 }
 function dragKey(e) {
@@ -362,13 +445,83 @@ function endDrag(el, ui, drop) {
   dragEnded = Date.now();
   el._list.classList.remove('ch-dragging');
   el._list.querySelector('.ch-row.ch-drag')?.classList.remove('ch-drag');
+  for (const r of el._list.querySelectorAll('.ch-row.ch-into')) r.classList.remove('ch-into');
   if (el._drop) { el._drop.remove(); el._drop = null; }
+  const c = (el._contacts || []).find((x) => x.key === d.key);
+  if (drop && c && d.into) { const g = teamRowOf(el, d.into); if (g) putIn(el, ui, c, g, d.x, d.y); ui.refresh(); return; }
   if (drop && d.slot) {
     const cur = orderNow(el._state || {});
     const next = moveInChatOrder(cur, el._contacts || [], d.key, { pin: d.slot.pin, before: d.slot.before });
+    const par = c && c.kind !== 'team' && c.parentTeam ? teamRowOf(el, c.parentTeam) : null;
+    // out of its team: it shows where it was dropped once it is out
+    if (par) { takeOut(el, ui, c, par, d.x, d.y, () => { if (!sameChatOrder(next, fullChatOrder(cur, el._contacts || []))) saveOrder(ui, next); }); ui.refresh(); return; }
     if (!sameChatOrder(next, fullChatOrder(cur, el._contacts || []))) { saveOrder(ui, next); return; }
   }
   ui.refresh();
+}
+
+// ---------- the teams' groups: a member in, out, made the lead ----------
+// the conversation a team knows a row by (the one it lists; a bot's current one when it is in none)
+function teamIdOf(state, c) {
+  if (!c) return null;
+  const ids = [c.id, ...[...(c.ids || [])].reverse()].filter(Boolean);
+  for (const t of state.teams || []) { const m = (t.members || []).find((x) => ids.includes(x)); if (m) return m; }
+  return c.id || null;
+}
+const nameIn = (el) => (id) => ((el._contacts || []).find((x) => x.kind !== 'team' && (x.id === id || (x.ids || []).includes(id))) || {}).name || String(id || '').slice(0, 8);
+// what putting c in team row g does (team-form.js joinPlan), in a few words
+function joinNote(p) {
+  return p.why || [p.leaves ? `it leaves "${p.leaves.name}"` : '', p.ends ? `"${p.ends.name}" ends: one is left` : '', p.nests ? `"${p.nests.name}" goes under it` : ''].filter(Boolean).join(' · ');
+}
+// c in team row g (a drop on its group, Move to team ▸, Put in team ▸): refused with a toast, asked first when it
+// would end the team it leaves (x, y: where to ask), else at once
+function putIn(el, ui, c, g, x, y) {
+  const st = el._state || {};
+  const p = joinPlan(st.teams || [], teamIdOf(st, c), g.teamId, teamMax(), nameIn(el));
+  if (p.why) { ui.toast?.(`${c.name} can't go in "${g.name}": ${p.why}`, 'bad'); return; }
+  const go = () => ui.teamAdd(g.teamId, c.id);
+  if (!p.ends) { go(); return; }
+  openCtxMenu({ x, y, title: `Move ${c.name} to "${g.name}"?`, sub: `"${p.ends.name}" is left with one member and ends`, items: [
+    { label: `Move ${c.name}`, icon: 'merge', danger: true, run: go }, { label: 'Cancel', icon: 'close', run: () => {} }] });
+}
+// c out of team row g (a drop out of its group, Take out of team): asked first when it ends the team, else at once;
+// then() once it is asked for
+function takeOut(el, ui, c, g, x, y, then) {
+  const st = el._state || {}, id = teamIdOf(st, c);
+  const p = leavePlan(st.teams || [], id, g.teamId);
+  if (p.why) { ui.toast?.(`${c.name}: ${p.why}`, 'bad'); return; }
+  const go = () => { ui.teamLeave(g.teamId, id); then?.(); };
+  if (!p.ends) { go(); return; }
+  openCtxMenu({ x, y, title: `Take ${c.name} out of "${g.name}"?`, sub: 'It is left with one member and ends', items: [
+    { label: 'Take it out', icon: 'close', danger: true, run: go }, { label: 'Cancel', icon: 'close', run: () => {} }] });
+}
+// a row's team items on its right-click (Henry, 2026-10-13: "take them out put them in"): under a team, Take out of
+// team, Make lead and Move to team ▸; at the top, Put in team ▸ (each team of overseers)
+function groupItems(el, ui, c) {
+  if (!c || c.kind === 'team' || typeof ui.teamAdd !== 'function') return [];
+  const st = el._state || {}, teams = st.teams || [], groups = (el._contacts || []).filter((x) => x.kind === 'team');
+  const par = c.parentTeam ? teamRowOf(el, c.parentTeam) : null;
+  if (!par && !groups.length) return [];
+  if (!c.id) return [{ label: 'Put in team', icon: 'merge', disabled: true, note: 'start it first' }];
+  const id = teamIdOf(st, c), nameOf = nameIn(el);
+  const into = (g) => {
+    const p = joinPlan(teams, id, g.teamId, teamMax(), nameOf);
+    return { label: g.name, icon: 'merge', disabled: !!p.why, note: joinNote(p) || `${(g.members || []).length} members`,
+      ...(p.ends ? { confirm: { text: `Move ${c.name} to "${g.name}"? "${p.ends.name}" is left with one member and ends.`, yes: 'Move' } } : {}),
+      run: () => ui.teamAdd(g.teamId, c.id) };
+  };
+  // the teams it is in already are not offered
+  const others = groups.filter((g) => !(g.members || []).some((m) => m.key === c.key));
+  if (!par) return [{ label: 'Put in team', icon: 'merge', note: `${groups.length} team${groups.length === 1 ? '' : 's'}`, children: others.map(into) }];
+  const lp = leavePlan(teams, id, par.teamId);
+  const out = [{ label: 'Take out of team', icon: 'close', disabled: !!lp.why, note: lp.why || `"${par.name}"`,
+    confirm: { text: lp.ends ? `Take ${c.name} out of "${par.name}"? It is left with one member and ends.`
+      : lp.lead ? `Take ${c.name} out of "${par.name}"? It leads it: the others go on as peers.` : `Take ${c.name} out of "${par.name}"? It and the team are told.`, yes: 'Take out' },
+    run: () => ui.teamLeave(par.teamId, id) }];
+  const mem = (par.members || []).find((m) => m.key === c.key);
+  if (mem && !mem.lead && typeof ui.teamLead === 'function') out.push({ label: 'Make lead', icon: 'star', note: `of "${par.name}": the others report to it`, run: () => ui.teamLead(par.teamId, id) });
+  if (others.length) out.push({ label: 'Move to team', icon: 'merge', children: others.map(into) });
+  return out;
 }
 
 // ---------- build ----------
@@ -426,19 +579,25 @@ function build(el, ui) {
     if (e.target.closest('[data-newbot]')) { openForm(el, ui); return; }
     const r = e.target.closest('.ch-row');
     if (!r) return;
+    // a team's chevron folds or opens it, and picks nothing
+    if (e.target.closest('[data-fold]')) { setFold(r.dataset.key, !folded.has(r.dataset.key), ui); return; }
     pick(r.dataset.key, ui, true);
   });
-  // every row's menu starts with Pin / Unpin
+  // every row's menu starts with Pin / Unpin (a row at the top: one under a team goes where its team goes), then its
+  // team items (groupItems)
   el._list.addEventListener('contextmenu', (e) => {
     const r = e.target.closest('.ch-row');
     if (!r) return;
     e.preventDefault();
     const st = el._state || {};
     const c = (el._contacts || []).find((x) => x.key === r.dataset.key);
-    const extra = c ? [pinItem(ui, c)] : [];
+    const top = !Number(r.dataset.depth);
+    const extra = c && top ? [pinItem(ui, c)] : [];
     if (r.dataset.team) { ui.contextMenu({ kind: 'team', id: r.dataset.team, extra }, e.clientX, e.clientY); return; }
     if (r.dataset.bot && botOf(st, r.dataset.bot)) { botMenu(el, ui, r.dataset.bot, e.clientX, e.clientY); return; }
-    if (r.dataset.id && inState(st, r.dataset.id) && !(r.dataset.bot && elsewhereBot(st, r.dataset.bot))) { ui.contextMenu({ kind: 'session', id: r.dataset.id, extra }, e.clientX, e.clientY); return; }
+    // the Chief: the conversation menu, with its team items on top
+    const grp = c && c.kind === 'chief' ? groupItems(el, ui, c) : [];
+    if (r.dataset.id && inState(st, r.dataset.id) && !(r.dataset.bot && elsewhereBot(st, r.dataset.bot))) { ui.contextMenu({ kind: 'session', id: r.dataset.id, extra: [...extra, ...(extra.length && grp.length ? [{ sep: true }] : []), ...grp] }, e.clientX, e.clientY); return; }
     // another machine's bot (run on its own machine), the Chief stand-in, a gone conversation: Pin / Unpin alone
     if (c) openCtxMenu({ x: e.clientX, y: e.clientY, title: c.name, dot: colorOf(c), items: extra });
   });
@@ -446,10 +605,12 @@ function build(el, ui) {
   el._list.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || e.pointerType === 'touch' || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
     const r = e.target.closest('.ch-row');
-    if (r && r.dataset.key) drag = { key: r.dataset.key, id: e.pointerId, y0: e.clientY, on: false, slot: null };
+    if (r && r.dataset.key && !e.target.closest('[data-fold]')) drag = { key: r.dataset.key, id: e.pointerId, y0: e.clientY, x: e.clientX, y: e.clientY, on: false, slot: null, into: null };
   });
   el._list.addEventListener('pointermove', (e) => {
     if (!drag || e.pointerId !== drag.id) return;
+    drag.x = e.clientX;
+    drag.y = e.clientY;
     if (!drag.on) {
       if (!(e.buttons & 1)) { drag = null; return; }
       if (Math.abs(e.clientY - drag.y0) < DRAG_PX) return;
@@ -594,6 +755,8 @@ function build(el, ui) {
     if (k === '/') { el._search.focus(); el._search.select(); return true; }
     if (k === 'Escape') { if (el.classList.contains('ch-narrow') && open) { back(ui); return true; } return false; }
     if (k === 'Enter' || k === 'o') { if (!el._cur) return false; if (el.classList.contains('ch-narrow')) { open = true; ui.refresh(); } focusCompose(el); return true; }
+    // ← folds the team picked, → opens it
+    if ((k === 'ArrowLeft' || k === 'ArrowRight') && el._cur && el._cur.kind === 'team' && !query) { setFold(el._cur.key, k === 'ArrowLeft', ui); return true; }
     const d = k === 'ArrowDown' || k === 'j' ? 1 : k === 'ArrowUp' || k === 'k' ? -1 : 0;
     if (!d) return false;
     move(d, ui);
@@ -682,10 +845,12 @@ function drawForm(el, state) {
       : { account: accts.includes(DEF.account) ? DEF.account : accts[0], model: DEF.model, effort: DEF.effort, shape: '', color: '' };
     const field = (k, label) => `<div class="ch-f"><span id="ch-nb-${k}">${label}</span><div data-pk="${k}"></div></div>`;
     el._form.innerHTML = `<form class="ch-nb" novalidate autocomplete="off">`
-      + `<div class="ch-nb-h"><span class="ch-nb-av"></span><div><div class="ch-nb-t">${edit ? `Edit ${esc(bot.name)}` : 'New bot'}</div>`
-      + `<div class="ch-nb-s">${edit ? 'Its name, instructions and look change at once (a running bot reads its instructions again), and so does Dynamic: each message you send is sized for it. Account, and a fixed model or effort, apply from its next new conversation.'
+      + `<div class="ch-nb-h"><span class="ch-nb-av"></span><div><div class="ch-nb-t">${edit ? `${esc(bot.name)}'s profile` : 'New bot'}</div>`
+      + `<div class="ch-nb-s">${edit ? 'Its name, role, instructions and look change at once (a running bot reads its instructions again), and so does Dynamic: each message you send is sized for it. Account, and a fixed model or effort, apply from its next new conversation.'
         : 'An overseer you give standing tasks. It works in a folder of its own (~/Bots), never on the map, and starts once it is made.'}</div></div></div>`
       + `<label class="ch-f"><span>Name</span><input name="name" maxlength="40" spellcheck="false" placeholder="e.g. Deploy watch" value="${edit ? esc(bot.name) : ''}"></label>`
+      // what it is for in its teams: its CLAUDE.md and team briefs say it (bots.js)
+      + `<label class="ch-f"><span>Role</span><input name="role" maxlength="${ROLE_MAX}" spellcheck="true" placeholder="e.g. Reviewer, Release manager" value="${edit ? esc(bot.role || '') : ''}"></label>`
       + `<label class="ch-f"><span>${edit ? 'Instructions' : 'What it does'}</span><textarea name="brief" maxlength="4000" rows="6" placeholder="Its standing instructions: what it watches, what it does, when it tells you">${edit ? esc(bot.brief || '') : ''}</textarea></label>`
       + `<div class="ch-f-row">${field('account', 'Account')}${field('model', 'Model')}${field('effort', 'Effort')}</div>`
       + `<div class="ch-f-row two">${field('shape', 'Shape')}${field('color', 'Colour')}</div>`
@@ -725,10 +890,12 @@ async function submitForm(el, ui) {
   if (form.mode === 'team') { submitTeam(el, ui); return; }
   const f = el._form.querySelector('form');
   const v = (n) => String((f && f.elements[n] && f.elements[n].value) || '');
-  const vals = { name: v('name'), brief: v('brief'), ...form.v };
+  const vals = { name: v('name'), role: v('role'), brief: v('brief'), ...form.v };
   if (!vals.name.trim()) { form.err = 'Give it a name.'; ui.refresh(); f.elements.name.focus(); return; }
   if (form.mode === 'edit') { saveEdit(el, ui, vals); return; }
   const body = { name: vals.name.trim(), brief: vals.brief.trim(), account: vals.account, model: vals.model, effort: vals.effort };
+  const role = vals.role.replace(/\s+/g, ' ').trim().slice(0, ROLE_MAX);
+  if (role) body.role = role;
   // the look only when picked: else the server leaves it out and the page picks one from the bot's id
   if (vals.shape) body.shape = vals.shape;
   if (vals.color) body.color = vals.color;
@@ -820,7 +987,8 @@ function drawTeamForm(el, state) {
   const ms = form.v.members, n = ms.length;
   // the rows (rewritten only when something in them changed; the focus stays on the row it was on)
   const rows = choices.map((x) => {
-    const { on, off, note } = memberRow(x, ms, max);
+    const mr = memberRow(x, ms, max), { on, off } = mr;
+    const note = [x.c.role, mr.note].filter(Boolean).join(' · '); // its role first
     return `<label class="ch-tm${on ? ' on' : ''}${off ? ' off' : ''}" title="${esc(x.why ? `${x.c.name}: ${x.why}` : x.c.name)}">`
       + `<input type="checkbox" name="tm" value="${esc(x.id || x.c.key)}"${on ? ' checked' : ''}${off || form.busy ? ' disabled' : ''}>`
       + `<span class="ch-tm-av">${restFace(x.c, 26)}</span><span class="ch-tm-b"><span class="ch-tm-name">${esc(x.c.name)}</span>`
@@ -937,23 +1105,24 @@ function pumpBots(state) {
   }
 }
 
-// the right-click menu of a bot's row: Pin / Unpin, Start, Edit bot (its panel), a quick Rename, Look, Remove bot (the
-// Chief keeps the conversation menu)
+// the right-click menu of a bot's row: Pin / Unpin (at the top), Start, Profile... (its Edit bot panel: name, role,
+// look and the rest live there only), its team items (groupItems), Team ▸, Remove bot (the Chief keeps the
+// conversation menu)
 function botMenu(el, ui, botId, x, y) {
   const b = botOf(el._state || {}, botId);
   if (!b) return;
   const c = (el._contacts || []).find((k) => k.botId === botId);
   const u = bu(botId);
+  const top = !(c && c.parentTeam && teamRowOf(el, c.parentTeam));
+  const grp = groupItems(el, ui, c);
   openCtxMenu({
-    x, y, title: b.name, dot: colorOf(c), sub: b.live ? 'running' : 'not running',
+    x, y, title: b.name, dot: colorOf(c), sub: [b.live ? 'running' : 'not running', c && c.role].filter(Boolean).join(' · '),
     items: [
-      ...(c ? [pinItem(ui, c), { sep: true }] : []),
+      ...(c && top ? [pinItem(ui, c), { sep: true }] : []),
       ...(b.live ? [] : [u.starting || u.wait ? { label: 'Start', icon: 'shell', disabled: true, note: 'starting...' }
         : { label: 'Start', icon: 'shell', note: b.convId ? 'goes on in its last conversation' : 'its first conversation', run: () => startBot(ui, botId) }]),
-      { label: 'Edit bot...', icon: 'mode', note: 'name, instructions, model, look', run: () => { pick(`bot:${botId}`, ui, true); openForm(el, ui, botId); } },
-      { label: 'Rename', icon: 'edit', input: { value: b.name, placeholder: 'its name: 1 to 40 characters', hint: 'Enter saves · Esc', empty: 'a bot needs a name', busy: 'saving…', submit: (t) => saveBot(ui, botId, { name: t.trim() }) } },
-      lookColorItem(ui, botId),
-      lookShapeItem(ui, botId),
+      { label: 'Profile...', icon: 'mode', note: 'name, role, instructions, look, model', run: () => { pick(`bot:${botId}`, ui, true); openForm(el, ui, botId); } },
+      ...(grp.length ? [{ sep: true }, ...grp] : []),
       ...botTeamItems(ui, c),
       { sep: true },
       { label: 'Remove bot', icon: 'trash', danger: true, note: 'its folder and chats are kept', confirm: { text: `Remove ${b.name}? Its session ends. Its folder and its conversations are kept.`, yes: 'Remove' }, run: () => removeBot(ui, botId, b.name) },
@@ -966,47 +1135,6 @@ function botTeamItems(ui, c) {
   if (typeof ui.teamItems !== 'function') return [];
   if (!c || !c.id) return [{ label: 'Team', icon: 'merge', disabled: true, note: 'start it first' }];
   try { return ui.teamItems(c.id) || []; } catch (e) { console.warn('chats: team items', e); return []; }
-}
-// Colour ▸ / Shape ▸: its look (the bot's one colour, kept with the bot whatever conversation it is in; Edit bot and fv
-// look change the same); a tick (a colour: "now") on the one it wears; picking one keeps the menu open (stay) and wears it at once
-function lookNow(botId) {
-  // the look just picked counts at once: the menu redraws before the list does (read here, never cleared: lookOf
-  // clears it, once the list from /state agrees)
-  const c = (pane?._contacts || []).find((k) => k.botId === botId) || {};
-  const l = looks.get(botId) || {};
-  const color = ('color' in l ? l.color : c.color);
-  return { shape: ('shape' in l ? l.shape : c.shape) || null, color: COLOR6.test(String(color || '')) ? color : null };
-}
-function setLook(ui, botId, o) { looks.set(botId, { ...(looks.get(botId) || {}), ...o, at: Date.now() }); ui.refresh(); saveLook(ui, botId, o); }
-// each redraws itself after a pick (ctxmenu.js refresh)
-function lookColorItem(ui, botId) {
-  const now = lookNow(botId).color;
-  return { label: 'Colour', icon: 'star', badge: now ? (PALETTE.find((x) => x[0] === now) || [0, now])[1] : 'auto', refresh: () => lookColorItem(ui, botId), children: [
-    { label: 'Its account\'s colour', icon: now ? null : 'check', stay: true, run: () => setLook(ui, botId, { color: null }) },
-    { sep: true },
-    ...PALETTE.map(([hex, name]) => ({ label: name, swatch: hex, note: now === hex ? 'now' : null, stay: true, run: () => setLook(ui, botId, { color: hex }) })),
-  ] };
-}
-function lookShapeItem(ui, botId) {
-  const now = lookNow(botId).shape;
-  return { label: 'Shape', icon: 'edit', badge: now ? SHAPE_NAMES[now] || now : 'auto', refresh: () => lookShapeItem(ui, botId), children: [
-    { label: 'Pick for me', icon: now ? null : 'check', stay: true, run: () => setLook(ui, botId, { shape: null }) },
-    ...SHAPES.map((k) => ({ label: SHAPE_NAMES[k] || k, icon: now === k ? 'check' : null, stay: true, run: () => setLook(ui, botId, { shape: k }) })),
-  ] };
-}
-// POST /bots/:id with its look; when it fails the look goes back and the bot's box says why
-async function saveLook(ui, botId, o) {
-  const r = await postJson(`/bots/${botId}`, o);
-  if (FIXTURE) { const m = made.get(botId); if (m) Object.assign(m.bot, o); return; }
-  if (!r.ok) { looks.delete(botId); bu(botId).err = failText(r, 'Could not change its look'); ui.refresh(); }
-}
-// POST /bots/:id -> null when it is saved (the menu's box closes), else why not
-async function saveBot(ui, botId, body) {
-  const r = await postJson(`/bots/${botId}`, body);
-  if (FIXTURE) { const m = made.get(botId); if (m) Object.assign(m.bot, body); ui.refresh(); return null; }
-  if (!r.ok) return failText(r, 'Could not save it');
-  ui.refresh();
-  return null;
 }
 async function removeBot(ui, botId, name) {
   const r = await postJson(`/bots/${botId}/remove`, {});
@@ -1071,7 +1199,7 @@ function drawHead(el, state, c, s) {
   if (c.kind === 'team') {
     setHTML(el._headAv, cluster(state, c, 36));
     el._headAv.title = '';
-    const ms = (c.members || []).map((m) => `<span class="ch-mem${m.lead ? ' lead' : ''}" title="${esc(m.lead ? `${m.name} leads the team` : m.name)}">${memberMascot(state, m, 16)}<span>${m.lead ? '★ ' : ''}${esc(m.name)}</span></span>`).join('');
+    const ms = (c.members || []).map((m) => `<span class="ch-mem${m.lead ? ' lead' : ''}" title="${esc([m.lead ? `${m.name} leads the team` : m.name, m.role].filter(Boolean).join(' · '))}">${memberMascot(state, m, 16)}<span>${m.lead ? '★ ' : ''}${esc(m.name)}</span>${m.role ? `<span class="ch-mrole">${esc(m.role)}</span>` : ''}</span>`).join('');
     setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name)}</span><span class="state" style="color:${esc(colorOf(c))}">GROUP</span></div><div class="ch-head-m ch-mems">${ms}</div>`);
     setHTML(el._headB, '');
     return;
@@ -1082,16 +1210,18 @@ function drawHead(el, state, c, s) {
   const u = c.botId ? bu(c.botId) : null;
   // a bot's settings: its Edit bot panel
   const edit = c.kind === 'bot' && c.botId && botOf(state, c.botId)
-    ? `<button type="button" class="ch-ib ch-edit" data-edit="1" title="Edit bot: name, instructions, model, effort and look" aria-label="Edit bot">${icon('mode', 15)}</button>` : '';
+    ? `<button type="button" class="ch-ib ch-edit" data-edit="1" title="Profile: name, role, instructions, model, effort and look" aria-label="Profile">${icon('mode', 15)}</button>` : '';
   const start = c.kind === 'bot' && c.live === false
     ? `<button type="button" class="btn primary" data-start="1"${u.starting || u.wait ? ' disabled' : ''} title="Start it: its running conversation, else its last one, else a new one in its folder">${icon('shell', 14)}<span>${u.starting || u.wait ? 'Starting...' : 'Start'}</span></button>` : null;
+  // its role under its name (its Profile's Role)
+  const role = c.role ? `<span class="ch-role" title="${esc(`${c.name}'s role`)}">${esc(c.role)}</span>` : '';
   if (!s) {
-    setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || 'Chief')}</span></div><div class="ch-head-m">${esc(previewOf(c))}</div>`);
+    setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || 'Chief')}</span></div><div class="ch-head-m">${role}<span class="ch-goal">${esc(previewOf(c))}</span></div>`);
     setHTML(el._headB, edit + (start || ''));
     return;
   }
   setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || s.name)}</span>${badge(s)}</div>`
-    + `<div class="ch-head-m">${repoChip(s)}${s.goal && setupNote(s.goal) == null ? `<span class="ch-goal" title="${esc(s.goal)}">${esc(s.goal)}</span>` : ''}</div>`);
+    + `<div class="ch-head-m">${role}${repoChip(s)}${s.goal && setupNote(s.goal) == null ? `<span class="ch-goal" title="${esc(s.goal)}">${esc(s.goal)}</span>` : ''}</div>`);
   if (start) { setHTML(el._headB, edit + start); return; }
   const live = !s.past && inState(state, s.id);
   const solo = SOLO && typeof desk()?.showMain === 'function';
@@ -1277,9 +1407,9 @@ function introHtml(c, b, u) {
   const defs = b ? [dynBoth ? 'Dynamic model and effort' : b.model === DYNAMIC ? 'Dynamic model' : b.model ? modelLabel(b.model) : '',
     dynBoth ? '' : b.effort === DYNAMIC ? 'dynamic effort' : b.effort || ''].filter(Boolean).join(' · ') : '';
   return `<div class="ch-empty ch-start">${mascotSVG(c.key, { state: 'new', color: colorOf(c), size: 72, shape: c.shape || undefined })}<div class="ch-empty-t">${esc(c.name)}</div>`
-    + (b && b.brief ? `<div class="ch-brief">${esc(b.brief)}</div>` : '<div class="ch-empty-s">No instructions yet: give it some in Edit bot.</div>')
+    + (b && b.brief ? `<div class="ch-brief">${esc(b.brief)}</div>` : '<div class="ch-empty-s">No instructions yet: give it some in its Profile.</div>')
     + (defs ? `<div class="ch-defaults" title="What it starts with">${esc(defs)}</div>` : '')
-    + `<div class="ch-intro-b"><button type="button" class="btn" data-edit="1">${icon('mode', 14)}<span>Edit bot</span></button>`
+    + `<div class="ch-intro-b"><button type="button" class="btn" data-edit="1">${icon('mode', 14)}<span>Profile</span></button>`
     + `<button type="button" class="btn primary ch-start-btn" data-start="1"${busy ? ' disabled' : ''}>${busy ? 'Starting...' : `Start ${esc(c.name)}`}</button></div></div>`;
 }
 function drawBot(el, state, c, s, visible) {
@@ -1489,10 +1619,13 @@ export function renderChats(el, view, ui) {
     if (c && c.key !== selKey) { selKey = c.key; store.set(SEL_KEY, selKey); markSeen(c); }
   }
   const noBots = !contacts.some((x) => x.kind === 'bot');
-  const shown = contacts.filter((c) => matches(c, query));
+  // the rows as drawn: teams with their members under them (folded ones without), a search's matches flat
+  let nodes;
+  try { nodes = query ? contacts.filter((c) => matches(c, query)).map((c) => ({ c, depth: 0, parent: null, path: [] })) : contactTree(contacts, folded); }
+  catch (e) { console.error('chats: tree', e); nodes = contacts.map((c) => ({ c, depth: 0, parent: null, path: [] })); }
   if (!(drag && drag.on)) {
-    el._shown = shown;
-    setHTML(el._list, listHtml(state, shown, now, noBots));
+    el._shown = nodes.map((x) => x.c);
+    setHTML(el._list, listHtml(state, nodes, now, noBots));
   }
 
   const c = contacts.find((x) => x.key === selKey) || null;

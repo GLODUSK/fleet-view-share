@@ -653,6 +653,17 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     ok([{ slug: 'p' }, { slug: 'p', shape: 'blob' }, { slug: 'p', shape: 'heart', color: 'red' }, { slug: 'p', color: '#fff' }, { slug: 'p', shape: '', color: '#000000' }, { slug: '-bad', shape: 'heart' },
       { slug: 'a/b', shape: 'heart' }, { slug: 'x'.repeat(65), shape: 'heart' }, { shape: 'heart' }, null, 'x'].every((x) => P.cleanBotLook(x) === null), 'botLooks clean: no look, a bad shape, colour or slug is nothing');
     ok(P.GROUP_NAMES.includes('botLooks') && P.GROUPS.botLooks.key({ slug: 'panchito' }) === 'panchito', 'botLooks: a shared group, one per bot folder');
+    // its role rides along (bots.js checkRole): a role alone is an item; a bad role is left out, the look still goes
+    eq(P.cleanBotLook({ slug: 'qa', role: '  QA  ', at: 7 }), { slug: 'qa', role: 'QA', at: 7 }, 'botLooks clean: a role alone, trimmed');
+    eq(P.cleanBotLook({ slug: 'qa', shape: 'star', role: 'two\nlines' }), { slug: 'qa', shape: 'star' }, 'botLooks clean: a role on two lines is left out');
+    eq(P.cleanBotLook({ slug: 'qa', shape: 'star', role: 'x'.repeat(61) }), { slug: 'qa', shape: 'star' }, 'botLooks clean: a role over 60 characters is left out');
+    ok(P.cleanBotLook({ slug: 'qa', role: 5 }) === null && P.cleanBotLook({ slug: 'qa', role: '   ' }) === null, 'botLooks clean: no look and no role is nothing');
+    {
+      const reg = [{ id: 'a3a3a3a3a3a3', folder: '/pc/Bots/Deploy', createdAt: 5, role: 'QA', lookAt: 9 }];
+      const item = BJ.lookItems(reg, [])[0];
+      eq([item, P.cleanBotLook(item)], [{ slug: 'deploy', role: 'QA', at: 9 }, { slug: 'deploy', role: 'QA', at: 9 }], 'botLooks: a bot with only a role sends it');
+      eq(BJ.elsewhereView({ id: 'e', name: 'Deploy', folder: '/mac/Bots/deploy', ids: [], convId: null, at: 0 }, item).role, 'QA', "botLooks: the other machine's elsewhere bot wears its role");
+    }
     const X = pair();
     const regA = [{ id: 'a1a1a1a1a1a1', folder: '/pc/Bots/Panchito', createdAt: X.ca.t - 9e3, shape: 'heart', color: '#ff6b80', lookAt: X.ca.t - 5e3 },
       { id: 'a2a2a2a2a2a2', folder: '/pc/Bots/plain', createdAt: X.ca.t - 9e3 }];

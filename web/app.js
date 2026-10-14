@@ -64,6 +64,12 @@
 //                          message } (the server's reason when it refuses). ui.teamJoinWhy(id): why that conversation
 //                          can't be in a team made from this window, or null. ui.teamItems(id): its menu's "Team ▸" row
 //                          (a bot's right-click in the Bots list). ui.teamMax: the most a team has
+//   ui.teamAdd(teamId, id, lead?), ui.teamLeave(teamId, id), ui.teamLead(teamId, id)   the Bots list's team groups
+//                          (drag a bot onto a team or out of one, a member's right-click: chats.js): the team menus' own
+//                          paths with their toasts (POST /teams/add, /teams/leave { why: 'removed' }, /teams/lead); id
+//                          a conversation. A refusal before anything is sent (full, can't be reached here) is a toast too.
+//                          -> a Promise that settles once the reply is in
+//   ui.toast(text, tone?)  a toast (tone 'bad': red, 'ok': green, else plain), for what a view says about its own action
 //   ui.solo                read only: true on the Bots pop-out window's page (?solo=chats; see SOLO)
 //   Links: any element with data-act="url" data-url="…", or data-act="reveal" data-kind="file|folder"
 //   data-path="…" [data-line="n"], or data-act="session" data-id="…" (another conversation: the handoff
@@ -405,6 +411,24 @@ const ui = {
   teamJoinWhy: (id) => { const s = sessionsOf([id])[0]; return s ? memberWhy(s) : 'Fleet View does not list its conversation'; },
   teamItems: (id) => { const s = sessionsOf([id])[0]; return s ? teamItems(s) : []; },
   get teamMax() { return TEAM_MAX; },
+  // the Bots list's team groups (chats.js): a member put in, taken out, made the lead, as the team menus do it
+  teamAdd: async (teamId, id, lead = false) => {
+    const t = teamById(teamId), s = sessionsOf([id])[0];
+    const why = !t ? 'that team is gone' : !s ? 'Fleet View does not list its conversation' : joinWhy(s, t);
+    if (why) { toast(why, C.red); return; }
+    await addToTeam(t, s, !!lead);
+  },
+  teamLeave: async (teamId, id) => {
+    const t = teamById(teamId);
+    if (!t) { toast('that team is gone', C.red); return; }
+    await leaveTeam(t, sessionsOf([id])[0] || { id, name: nameOfId(id) }, 'removed');
+  },
+  teamLead: async (teamId, id) => {
+    const t = teamById(teamId), s = sessionsOf([id])[0];
+    if (!t || !s) { toast(!t ? 'that team is gone' : 'Fleet View does not list its conversation', C.red); return; }
+    await setLead(t, s);
+  },
+  toast: (text, tone) => toast(String(text || ''), tone === 'bad' ? C.red : tone === 'ok' ? C.mint : C.dim),
   solo: SOLO,
 };
 

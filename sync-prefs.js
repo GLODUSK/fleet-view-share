@@ -219,8 +219,8 @@ const GROUPS = {
     },
     key: (p) => p.k, lkey: (l) => l.key,
   },
-  // a bot's look (its avatar's shape and colour: bots.js) by its folder's name, lower case (fleet-view.js botLooks):
-  // { slug, shape?, color?, at? }, one of shape and color at least, at when the look last changed. A bot's registry is
+  // a bot's look (its avatar's shape and colour: bots.js) and its role, by its folder's name, lower case (fleet-view.js
+  // botLooks): { slug, shape?, color?, role?, at? }, one of the three at least, at when the look or role last changed. A bot's registry is
   // its machine's own, but the other machine lists it as an elsewhere bot from that folder, which wears this look. Each
   // machine's items for its own bots are made from its registry every read (that machine alone changes them); a bot back
   // to Default on both, or removed, has none (its elsewhere bot is its account's colour again)
@@ -396,15 +396,19 @@ function cleanDynamicChat(x) {
 }
 
 // a bot's look (the botLooks group): { slug: its folder's name, lower case, shape?: one of BOT_SHAPES, color?: #rrggbb
-// (lower case), at? }; null when the slug, a shape or a colour given is not one, or it has neither
+// (lower case), role?: its role (bots.js checkRole: one line, at most BOT_ROLE_MAX), at? }; null when the slug, a shape
+// or a colour given is not one, or it has none of the three. A role that is not one is left out (the look still goes)
 const BOT_SHAPES = ['hex', 'drop', 'round', 'pill', 'tri', 'square', 'star', 'clover', 'flower', 'heart']; // bots.js SHAPES (scripts/sync-prefs-test.js checks the two agree)
 const BOT_SLUG_RE = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+const BOT_ROLE_MAX = 60; // bots.js ROLE_MAX
+const botRole = (v) => { const t = typeof v === 'string' ? v.trim() : ''; return t && t.length <= BOT_ROLE_MAX && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(t) ? t : ''; };
 function cleanBotLook(x) {
   if (!x || typeof x !== 'object' || typeof x.slug !== 'string' || !BOT_SLUG_RE.test(lower(x.slug))) return null;
   if (x.shape != null && !BOT_SHAPES.includes(x.shape)) return null;
   if (x.color != null && (typeof x.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(x.color))) return null;
-  if (!x.shape && !x.color) return null;
-  return { slug: lower(x.slug), ...(x.shape ? { shape: x.shape } : {}), ...(x.color ? { color: lower(x.color) } : {}), ...(num(x.at) > 0 ? { at: num(x.at) } : {}) };
+  const role = botRole(x.role);
+  if (!x.shape && !x.color && !role) return null;
+  return { slug: lower(x.slug), ...(x.shape ? { shape: x.shape } : {}), ...(x.color ? { color: lower(x.color) } : {}), ...(role ? { role } : {}), ...(num(x.at) > 0 ? { at: num(x.at) } : {}) };
 }
 
 // the Bots list's order (fleet-view.js settings.chatOrder, web/chats-model.js sortContacts): { pinned: [keys], keys:

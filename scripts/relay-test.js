@@ -880,7 +880,11 @@ async function main() {
     ['/api/bots', { name: 'Scout', folder: KNOWN }, 403],
     ['/api/bots', { name: 'Scout', folder: null }, 403],
     ['/api/bots', { name: 'Scout', createdAt: 1 }, 403],
-    ['/api/bots', { name: 'Scout', role: 'chief' }, 403],
+    // role is the bot profile's text (bots.js checkRole), never a session role: the bot's session role is bots.js's own
+    ['/api/bots', { name: 'Scout', role: 'QA' }, 200, null, true],
+    ['/api/bots', { name: 'Scout', ids: [SID] }, 403],
+    [`/api/bots/${BOT}`, { role: 'Release captain' }, 200, null, true],
+    [`/api/bots/${BOT}`, { role: '', told: [SID] }, 403],
     [`/api/bots/${BOT}`, { name: 'Scout 2', brief: 'b', effort: 'high' }, 200, null, true],
     [`/api/bots/${BOT}`, { id: 'b2' }, 403],
     [`/api/bots/${BOT}`, { convId: SID }, 403],

@@ -135,17 +135,19 @@ new conversation's log, which does, so the chain and its Summary show on both ma
       `at` when it was picked (a pick after a "Default" elsewhere wins). Its conversations' shades follow it.
     - `sessHues` (since 2026-10-12): `{ id, hue, at? }` a conversation's own colour (`settings.sessHues`, POST /settings
       `sessHue`), one per chat; it wins over its workspace's. "Default" takes an item out of either group.
-    - `botLooks` (since 2026-10-13): `{ slug, shape?, color?, at? }` a bot's look (its avatar's shape, one of `bots.js`
-      `SHAPES`, and `#rrggbb` colour in lower case; one of them at least), keyed by the bot's folder name under `~/Bots`
-      in lower case; `at` when the look last changed (the registry's `lookAt`, else when the bot was made). A machine's
+    - `botLooks` (since 2026-10-13): `{ slug, shape?, color?, role?, at? }` a bot's look (its avatar's shape, one of
+      `bots.js` `SHAPES`, and `#rrggbb` colour in lower case) and its role (`bots.js` `checkRole`: one line, at most 60
+      characters; a bad one is left out and the rest still goes); one of the three at least. Keyed by the bot's folder
+      name under `~/Bots` in lower case; `at` when the look or role last changed (the registry's `lookAt`, else when the
+      bot was made). A device from before roles drops an item with only a role, and the role of the others. A machine's
       items for its own bots (not removed) are made from its registry (`bots.js` `looks()`) every read, so only that
       machine changes them, and an item that comes in for a folder one of its bots owns is never put in there. The rest
       are kept in `settings.botLooks` (at most 200) and worn by the elsewhere bot of that folder (`bots.js`
-      `elsewhereView`). A bot back to Default (no shape, no colour) or removed has no item: the other machine draws its
-      elsewhere bot in its account's colour again.
+      `elsewhereView`). A bot back to Default (no shape, no colour) with no role, or removed, has no item: the other
+      machine draws its elsewhere bot in its account's colour again, with no role.
 
     Never synced (each screen's own): view, zoom, the map's camera and saved views, window bounds, query, the
-    workspace filter (`repo`, `repos`), `offAccounts`, `pushTargets`, bots (the registry; only their looks go, in
+    workspace filter (`repo`, `repos`), `offAccounts`, `pushTargets`, bots (the registry; only their looks and roles go, in
     `botLooks`), compact, finishedOpen, steady, notify.
     A root goes up as `{ origin, name }` and comes back as the root here with that origin (the one with that folder
     name first), else one with that folder name and no other origin; root keys compare in lower case, `\` and `/`

@@ -60,6 +60,31 @@
 .ch-l1 .acct { flex: none; width: 15px; height: 15px; font-size: 9.5px; }
 .ch-time { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--faint); font: 11.5px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
 .ch-pin { display: inline-flex; color: var(--gold); opacity: 0.8; }
+/* teams are groups (chats.js contactTree): the chevron in the team row's margin folds it; its rows sit one step in,
+   smaller, on a faint guide line; a folded one says how many are in it */
+.ch-row { position: relative; }
+.ch-fold {
+  position: absolute; top: 50%; left: calc(var(--dep, 0) * 22px - 7px); width: 16px; height: 22px; margin-top: -11px; display: grid; place-items: center;
+  border-radius: 5px; color: var(--dim); transform: rotate(90deg); transition: transform 160ms var(--ease), color 120ms var(--ease);
+}
+.ch-fold:hover { color: var(--text); background: var(--hover); }
+.ch-row.shut .ch-fold { transform: none; }
+.ch-row.nest { height: 50px; padding-left: calc(10px + var(--dep) * 22px); gap: 10px; }
+.ch-row.nest:not(.grp)::before { content: ''; position: absolute; top: 4px; bottom: 4px; left: calc(var(--dep) * 22px - 1px); width: 1px; background: var(--line); }
+.ch-row.nest .ch-av { width: 34px; height: 34px; }
+.ch-row.nest .ch-name { font-size: 13px; }
+.ch-row.nest .ch-prev { font-size: 12px; }
+.ch-star { color: var(--gold); margin-right: 3px; }
+/* the role gives way before the name does */
+.ch-role { flex: 0 100 auto; min-width: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.06); color: var(--dim); font-size: 10.5px; line-height: 1.4; }
+.ch-head-m .ch-role { flex: none; max-width: 40%; min-width: 0; font-size: 11px; }
+.ch-mrole { color: var(--faint); font-size: 11px; }
+.ch-cnt { flex: none; color: var(--faint); font-size: 11.5px; }
+.ch-cnt::after { content: '·'; margin-left: 6px; }
+/* dragging a bot over a team: its row and its group light up (it goes in); the line out of a team is violet */
+.ch-row.ch-into, .ch-row.ch-into:hover { background: rgba(63, 216, 255, 0.11); box-shadow: inset 0 0 0 1px rgba(63, 216, 255, 0.34); }
+.ch-row.nest.ch-into { background: rgba(63, 216, 255, 0.07); box-shadow: none; }
+.ch-drop.out { background: var(--violet, #af87ff); box-shadow: 0 0 6px rgba(175, 135, 255, 0.5); }
 /* the pinned rows end here; dragging a row (chats.js): it fades, a line shows where it goes (gold: it goes in pinned) */
 .ch-pinsep { flex: none; height: 1px; margin: 3px 12px; background: var(--line); }
 .ch-list.ch-dragging, .ch-list.ch-dragging .ch-row { cursor: grabbing; user-select: none; }
@@ -418,5 +443,5 @@ html.solo .ch-title { display: none; } /* the window's header says Bots already 
 html.solo .ch-top { padding-left: 12px; }
 
 @media (prefers-reduced-motion: reduce) {
-  .ch-row, .ch-ib, .ch-track, .ch-track::after, .ch-narrow .ch-main, .ch-narrow.ch-open .ch-main, .pk-b, .pk-b > .ic, .ch-tk-h, .ch-tk-chev { transition: none; }
+  .ch-row, .ch-ib, .ch-track, .ch-track::after, .ch-narrow .ch-main, .ch-narrow.ch-open .ch-main, .pk-b, .pk-b > .ic, .ch-tk-h, .ch-tk-chev, .ch-fold { transition: none; }
 }

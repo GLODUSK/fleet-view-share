@@ -22,6 +22,12 @@
 //   newTeamBody(o)                         POST /teams { members, order, send: true, lead, name? } (orders.js sends it)
 //   lostOf(reply)                          the members POST /teams could not give the order (not queued either)
 //   nestStep(team, chk), nestFailed(...)   what follows for a team above: POST /teams/add { id, member }, or why not
+//   joinPlan(teams, id, toId, max, nameOf)  putting conversation id in team toId (the Bots list's drag in, Move to team,
+//                                          Put in team: POST /teams/add): { why } when it can't, else { why: null,
+//                                          leaves (the team it is a plain member of, which it leaves), ends (that team,
+//                                          left with one: the server ends it), nests (the team it leads: it goes under) }
+//   leavePlan(teams, id, fromId)           taking it out (POST /teams/leave): { why, ends (left with one: it ends),
+//                                          lead (it leads it: the rest go on as peers) }
 
 export const TEAM_MAX = 12;
 export const ORDER_MAX = 4000; // the server's limit for a team's order
@@ -173,3 +179,25 @@ export function nestStep(team, chk) {
 }
 export const nestFailed = (team, above, reply, nameOf = (id) => String(id || '').slice(0, 8)) =>
   `"${team.name}" was made, but ${nameOf(team.lead)} did not join "${above.name}": ${(reply && reply.message) || 'Fleet View did not answer'}`;
+
+// The Bots list's team groups (web/chats.js, the phone's Bots tab): a member in or out, said before anything is sent.
+// The server moves a plain member out of its old team when it joins another (a lead keeps the team it leads, which
+// then goes under the new one), and ends a team left with one member
+export function joinPlan(teams, id, toId, max = TEAM_MAX, nameOf = (x) => String(x || '').slice(0, 8)) {
+  const ts = arr(teams), to = ts.find((t) => t && t.id === toId) || null;
+  const no = (why) => ({ why, leaves: null, ends: null, nests: null });
+  if (!to) return no('that team is gone');
+  if (!id) return no('it has not started yet');
+  if (arr(to.members).includes(id)) return no(`it is in "${to.name}" already`);
+  if (arr(to.members).length >= max) return no(`"${to.name}" is full (${max})`);
+  // it leads a team "to" reports up to: in "to", it would report to itself
+  if (aboveLoop(ts, [id], to, nameOf)) return no(`"${to.name}" reports up to ${nameOf(id)}`);
+  const { up, own } = teamsOfId(ts, id);
+  const leaves = up && up.id !== to.id ? up : null;
+  return { why: null, leaves, ends: leaves && arr(leaves.members).length - 1 < 2 ? leaves : null, nests: own };
+}
+export function leavePlan(teams, id, fromId) {
+  const t = arr(teams).find((x) => x && x.id === fromId) || null;
+  if (!t || !id || !arr(t.members).includes(id)) return { why: t ? 'it is not in that team now' : 'that team is gone', ends: false, lead: false };
+  return { why: null, ends: arr(t.members).length - 1 < 2, lead: leadOf(t) === id };
+}
