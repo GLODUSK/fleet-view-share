@@ -423,6 +423,8 @@ const DEEP_GALAXIES = [[26, 138, 12, 0.62, 0.5, 'spiral', [0.4, 0.48, 0.62], 0.5
 // SAT_Y of the window's height, starting SAT_PAD px off one side; it fades in and out over SAT_FADE
 // ms. Its beacon flashes every SAT_BLINK ms (a pick each), for SAT_FLASH ms, by turns SAT_RED and white, up to
 // SAT_FLASH_A over the point and a little wider (SAT_FLASH_R)
+// SAT_DEPTH: the fraction of the pan and zoom it follows, the nearest star layer's, so it moves with the sky
+const SAT_DEPTH = STAR_LAYERS[STAR_LAYERS.length - 1].depth;
 const SAT_N = 8, SAT_R = 0.75, SAT_RGB = [1, 0.95, 0.86], SAT_A = 0.62, SAT_DAY = 0.45;
 const SAT_CROSS = [60, 120], SAT_TILT = [0.06, 0.32], SAT_Y = [0.05, 0.6], SAT_PAD = 12, SAT_FADE = 1500;
 const SAT_BLINK = [1500, 2000], SAT_FLASH = 160, SAT_RED = [1, 0.32, 0.26], SAT_FLASH_A = 0.38, SAT_FLASH_R = 1.6;
@@ -2672,19 +2674,23 @@ function starTile(L, dpr) {
 // star space (a tile's px, unscaled) at the map's top left, wrapped into [0, STAR_WRAP), so the shader's star space
 // is never negative and stays small enough for its floats (the shader's hash repeats with it, so no seam)
 const starPos = new Float64Array(STAR_LAYERS.length * 3), starWide = new Float64Array(STAR_LAYERS.length * 2);
-function starsAt() {
-  const adj = I.starAdj || { x: 0, y: 0 };
-  const fit = I.cam.fit || 1, cx = I.cam.cx + I.pan.x - adj.x, cy = I.cam.cy + I.pan.y - adj.y, ts = I.still ? 0 : I.time / 1000;
+// the sky's camera this frame: the pan (cx, cy) times fit, which a layer follows a fraction (its depth) of, and the
+// field's middle (mx, my, CSS px of the map), which it scales about
+function skyCam() {
+  const adj = I.starAdj || { x: 0, y: 0 }, fit = I.cam.fit || 1;
   // the field's middle is a fixed point in the window (where the map's middle first was), not the map's middle,
   // which moves when a menu or panel takes room from the map
   const lf = I.left || 0, tp = I.top || 0;
   if (!I.starO) I.starO = { x: lf + I.W / 2, y: tp + I.H / 2 };
-  const mx = I.starO.x - lf, my = I.starO.y - tp;
+  return { cx: (I.cam.cx + I.pan.x - adj.x) * fit, cy: (I.cam.cy + I.pan.y - adj.y) * fit, mx: I.starO.x - lf, my: I.starO.y - tp };
+}
+function starsAt() {
+  const { cx, cy, mx, my } = skyCam(), ts = I.still ? 0 : I.time / 1000;
   for (let i = 0; i < STAR_LAYERS.length; i++) {
     const L = STAR_LAYERS[i], s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), L.depth * STAR_ZOOM), P = STAR_TILE * s;
     // the field scales about the screen's middle and slides with a fraction of the pan, plus its drift
-    let ex = mx - (cx * fit * L.depth - ts * L.drift * STAR_DIR[0]) * s;
-    let ey = my - (cy * fit * L.depth - ts * L.drift * STAR_DIR[1]) * s;
+    let ex = mx - (cx * L.depth - ts * L.drift * STAR_DIR[0]) * s;
+    let ey = my - (cy * L.depth - ts * L.drift * STAR_DIR[1]) * s;
     const wx = -ex / s, wy = -ey / s;
     starWide[i * 2] = wx - Math.floor(wx / STAR_WRAP) * STAR_WRAP; starWide[i * 2 + 1] = wy - Math.floor(wy / STAR_WRAP) * STAR_WRAP;
     ex -= Math.floor(ex / P) * P; ey -= Math.floor(ey / P) * P;
@@ -2693,8 +2699,8 @@ function starsAt() {
   // the deep sky the same way, left unwrapped (its band and its dust repeat at different sizes)
   const s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), DEEP_DEPTH * STAR_ZOOM);
   deepPos[0] = s;
-  deepPos[1] = mx - (cx * fit * DEEP_DEPTH - ts * DEEP_DRIFT * STAR_DIR[0]) * s;
-  deepPos[2] = my - (cy * fit * DEEP_DEPTH - ts * DEEP_DRIFT * STAR_DIR[1]) * s;
+  deepPos[1] = mx - (cx * DEEP_DEPTH - ts * DEEP_DRIFT * STAR_DIR[0]) * s;
+  deepPos[2] = my - (cy * DEEP_DEPTH - ts * DEEP_DRIFT * STAR_DIR[1]) * s;
   return starPos;
 }
 const deepPos = new Float64Array(3);
@@ -3018,6 +3024,9 @@ function satPath(s, mid) {
   s.x0 = dir > 0 ? -SAT_PAD : W + SAT_PAD; s.y0 = lo + Math.max(0, -dy) + Math.random() * (room - Math.abs(dy));
   s.vx = (dir * L) / T; s.vy = dy / T; s.T = T;
   s.t0 = I.time / 1000 - (mid ? Math.random() * T : 0);
+  // the sky's camera as the path was laid, so it moves on from there with the nearest stars (SAT_DEPTH)
+  const c = skyCam();
+  s.cx0 = c.cx; s.cy0 = c.cy; s.sc0 = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), SAT_DEPTH * STAR_ZOOM);
 }
 // a new satellite at the map's clock t (ms): its path, its beacon's rate and phase, fading in from t (snap: shown at once)
 function satMake(t, snap) {
@@ -3045,17 +3054,22 @@ function satStep(rest) {
   if (changed) I.dirty = true;
 }
 // the satellites showing now, in CSS px of the map: each one's middle (x, y), alpha (> 0), its beacon's flash (f,
-// 0-1, 0 under reduced motion) and colour (rgb, 0-1); window-anchored as the moon is
+// 0-1, 0 under reduced motion) and colour (rgb, 0-1); laid over the window as the moon is, then panned and zoomed
+// with the nearest star layer (SAT_DEPTH) from where its path was laid
 function satsNow() {
   if (!I.sats.size) return [];
   const F = I.moonF || (moonNow(), I.moonF), t = I.time, ts = t / 1000, out = [];
+  const c = skyCam(), sc = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), SAT_DEPTH * STAR_ZOOM);
   const h = skyHour(), ss = (a, b, v) => { const q = clamp((v - a) / (b - a), 0, 1); return q * q * (3 - 2 * q); };
   const day = 1 - (1 - SAT_DAY) * ss(MOON_DAY[0], MOON_DAY[1], h) * (1 - ss(MOON_DAY[2], MOON_DAY[3], h));
   for (const s of I.sats.values()) {
     const fin = clamp((t - s.born) / SAT_FADE, 0, 1), fout = s.end == null ? 1 : clamp(1 - (t - s.end) / SAT_FADE, 0, 1);
     const a = SAT_A * day * fin * fout;
     if (!(a > 0)) continue;
-    const e = ts - s.t0, x = F.x - (I.left || 0) + s.x0 + s.vx * e, y = F.y - (I.top || 0) + s.y0 + s.vy * e;
+    const e = ts - s.t0, px = F.x - (I.left || 0) + s.x0 + s.vx * e, py = F.y - (I.top || 0) + s.y0 + s.vy * e;
+    const k0 = sc / (s.sc0 || sc);
+    const x = c.mx + (px - c.mx) * k0 - (c.cx - (s.cx0 ?? c.cx)) * SAT_DEPTH * sc;
+    const y = c.my + (py - c.my) * k0 - (c.cy - (s.cy0 ?? c.cy)) * SAT_DEPTH * sc;
     // the beacon: a short soft flash every s.per ms, red and white by turns
     const b = t + s.ph, k = Math.floor(b / s.per), w = b - k * s.per;
     const f = !I.still && w < SAT_FLASH ? Math.sin((Math.PI * w) / SAT_FLASH) : 0;
