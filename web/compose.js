@@ -31,7 +31,7 @@
 // pcfiles.js; its chip shows how far it got) and the path the PC saved it at goes in the message instead; Send waits
 // for a file still on its way. A folder goes in by paste or drop (there is no folder button: attach does it).
 // In the Bots tab (chat.js opts.bubbles) the box is kept simple: a Dynamic switch
-// before a message shows as "Sending…", never which model it switches to.
+// before a message shows nothing at all (only an error, if it fails), never which model it switches to.
 //
 // ↑ in an empty box (or with the caret at its start) brings back your last message, and again the one before;
 // ↓ goes forward again, back to what you had typed. The list: your messages in the feed, then the ones sent from
@@ -2641,7 +2641,7 @@ export function mountCompose(slot, s) {
     // just started: its start notes may still be going; it is waited for a little, then switched if it went idle
     const h = hosts.get(id);
     if (st.busy && h && Date.now() - h.startedAt < DYN_START_MS) {
-      if (st.id === id) { st.step = simple ? 'Sending…' : `Waiting for it to settle, then switching to ${say(want)}…`; drawNotes(); }
+      if (st.id === id) { st.step = simple ? '' : `Waiting for it to settle, then switching to ${say(want)}…`; drawNotes(); }
       for (const end = Date.now() + DYN_WAIT_MS; st.busy && st.alive && st.id === id && Date.now() < end;) await sleep(POLL_MS);
       cur = current();
       want = dynamicSwitch(dyn, size, cur, MODEL_IDS, !!dyn.botId);
@@ -2649,7 +2649,7 @@ export function mountCompose(slot, s) {
       if (!want.model && !want.effort) return pick;
     }
     if (st.busy || st.id !== id) { pick.label += ': not switched, it was busy'; return pick; }
-    st.step = simple ? 'Sending…' : `Switching to ${say(want)} for this message…`;
+    st.step = simple ? '' : `Switching to ${say(want)} for this message…`;
     drawNotes();
     const from = st.s.model || null;
     let r = null;
