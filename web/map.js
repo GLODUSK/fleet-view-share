@@ -378,12 +378,14 @@ const WT_MAX = 16;                  // worktree satellites drawn per hub
 // drift in px/s.
 // A layer's scale is zoom^(depth * STAR_ZOOM); STAR_ZOOM is 0 (Henry 2026-10-14: the sky is far away, so zooming leaves the
 // stars, the deep sky's galaxies and the space events exactly where they are; zoomAt keeps them from sliding too).
+// A layer follows depth * STAR_PAN of the pan; STAR_PAN is 0 too (Henry 2026-10-14: panning, by dragging or the middle
+// mouse, moves the map over a sky that stays put), so a layer's and an event's depth only tells how it drifts.
 // cl: [loose clusters per tile, their share of the stars, spread in px]; sparkle: how many are tiny 4-point sparkles.
 // cell: the sky's shader makes this layer itself (STAR_FIELD_GLSL) instead of repeating its tile: at most one star
 // per square of cell px, at the tile's density and mix; its stars repeat only every STAR_WRAP px, and its clusters
 // become a gentle unevenness (cl's share of the stars gathers in some squares of STAR_SUPER px). STAR_EDGE: how far
 // (px) a made star keeps from its cell's edges, so its glow and sparkle are never cut. The canvas repeats all three tiles.
-const STAR_TILE = 512, STAR_ZOOM = 0, STAR_DIR = [0.83, 0.56], STAR_WRAP = 32768, STAR_SUPER = 256, STAR_EDGE = 5;
+const STAR_TILE = 512, STAR_ZOOM = 0, STAR_PAN = 0, STAR_DIR = [0.83, 0.56], STAR_WRAP = 32768, STAR_SUPER = 256, STAR_EDGE = 5;
 const STAR_LAYERS = [
   { depth: 0.15, n: 46, r: [0.45, 0.8], a: [0.12, 0.3], drift: 0.8, seed: 11, cl: [3, 0.45, 34] },
   { depth: 0.35, n: 20, r: [0.6, 1.0], a: [0.16, 0.38], drift: 1.8, seed: 23, cl: [2, 0.35, 46], sparkle: 1, cell: 32, twinkle: 0.15 },
@@ -559,9 +561,9 @@ const LENS_SRC_A = 0.55, LENS_SWEEP = 2.6;
 const SHIP_DEPTH = EVENT_DEPTH.far;
 const SHIP_MS = [210e3, 300e3], SHIP_R = [86, 110], SHIP_TILT = 0.2, SHIP_OFF = 0.3, SHIP_FADE = 6000;
 const SHIP_ESCORT_P = 0.6, SHIP_ESCORT_BACK = [1.7, 2.2], SHIP_ESCORT_SIDE = [0.12, 0.4], SHIP_ESCORT_SCALE = [0.2, 0.26];
-const SHIP_BODY = [0.016, 0.02, 0.03], SHIP_LIFT = [0.03, 0.042, 0.066], SHIP_BODY_A = 0.93, SHIP_LIGHT = [-0.42, -0.91];
-const SHIP_HAZE = [0.08, 0.106, 0.13], SHIP_HAZE_A = 0.5, SHIP_HAZE_MAX = 0.78, SHIP_HAZE_GLOW = 0.07, SHIP_SOFT = 1.1;
-const SHIP_RIM = [0.6, 0.72, 1], SHIP_RIM_WARM = [1, 0.84, 0.64], SHIP_RIM_A = 0.3;
+const SHIP_BODY = [0.016, 0.02, 0.03], SHIP_LIFT = [0.03, 0.042, 0.066], SHIP_BODY_A = 0.9, SHIP_LIGHT = [-0.42, -0.91];
+const SHIP_HAZE = [0.08, 0.106, 0.13], SHIP_HAZE_A = 0.66, SHIP_HAZE_MAX = 0.88, SHIP_HAZE_GLOW = 0.1, SHIP_SOFT = 1.8;
+const SHIP_RIM = [0.6, 0.72, 1], SHIP_RIM_WARM = [1, 0.84, 0.64], SHIP_RIM_A = 0.24;
 const SHIP_WINDOW = [1, 0.78, 0.46], SHIP_WINDOW_A = 0.45, SHIP_WINDOW_P = 0.14, SHIP_ENGINE = [0.6, 0.78, 1], SHIP_ENGINE_A = 0.42;
 const SHIP_HULL = [
   [[-0.9, -0.085], [-0.4, -0.1], [0.3, -0.075], [0.97, -0.014], [1, 0], [0.92, 0.014], [0.3, 0.07], [-0.45, 0.105], [-0.9, 0.1]], // the main wedge
@@ -2850,10 +2852,10 @@ function starTile(L, dpr) {
 // star space (a tile's px, unscaled) at the map's top left, wrapped into [0, STAR_WRAP), so the shader's star space
 // is never negative and stays small enough for its floats (the shader's hash repeats with it, so no seam)
 const starPos = new Float64Array(STAR_LAYERS.length * 3), starWide = new Float64Array(STAR_LAYERS.length * 2);
-// the sky's camera this frame: the pan (cx, cy) times fit, which a layer follows a fraction (its depth) of, and the
-// field's middle (mx, my, CSS px of the map), which it scales about
+// the sky's camera this frame: the pan (cx, cy) times fit times STAR_PAN, which a layer follows a fraction (its depth)
+// of, and the field's middle (mx, my, CSS px of the map), which it scales about
 function skyCam() {
-  const adj = I.starAdj || { x: 0, y: 0 }, fit = I.cam.fit || 1;
+  const adj = I.starAdj || { x: 0, y: 0 }, fit = (I.cam.fit || 1) * STAR_PAN;
   // the field's middle is a fixed point in the window (where the map's middle first was), not the map's middle,
   // which moves when a menu or panel takes room from the map
   const lf = I.left || 0, tp = I.top || 0;
@@ -3999,7 +4001,7 @@ const vec2 SH_ENG[${SHIP_ENGINES.length}] = vec2[${SHIP_ENGINES.length}](${SHIP_
 vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A) {
   vec2 d = p - c, e1 = fr.xy, e2 = vec2(-fr.y, fr.x);
   vec2 u = vec2(dot(d, e1), fr.z * dot(d, e2)) / R;
-  if (u.x < -1.55 || u.x > 1.15 || abs(u.y) > 0.42) return vec4(0.0);
+  if (u.x < -1.7 || u.x > 1.35 || abs(u.y) > 0.62) return vec4(0.0);
   float dp = uSize.z, w = (0.7 + (0.3 + ${glf(SHIP_SOFT)}) * dp) / R;
   float sd = shSD(u), dd = sd * R;
   float cov = 1.0 - smoothstep(-w, w, sd);
@@ -4009,9 +4011,11 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A) {
   body = mix(body, ${col(SHIP_HAZE)}, hz);
   float ba = cov * ${glf(SHIP_BODY_A)} * A, lit = A * (1.0 - 0.6 * hz);
   vec4 o = vec4(body * ba, ba);
-  if (abs(dd) < 16.0 * dp) {
-    float hg = dd > 0.0 ? ${glf(SHIP_HAZE_GLOW)} * exp(-dd / (5.0 * dp)) * A : 0.0;
+  if (dd > 0.0 && dd < 40.0 * dp) {
+    float hg = ${glf(SHIP_HAZE_GLOW)} * exp(-dd / (9.0 * dp)) * A;
     o = over(o, vec4(${col(SHIP_HAZE)} * 2.2 * hg, hg));
+  }
+  if (abs(dd) < 16.0 * dp) {
     float e = 1.6 / R;
     vec2 g = vec2(shSD(u + vec2(e, 0.0)) - shSD(u - vec2(e, 0.0)), shSD(u + vec2(0.0, e)) - shSD(u - vec2(0.0, e)));
     vec2 n = g / max(length(g), 1e-5);
