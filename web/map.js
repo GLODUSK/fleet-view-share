@@ -302,6 +302,9 @@ const ZMIN = 0.2, ZMAX = 6;
 const CHARGE = { session: 100, repo: 115, pr: 30, clash: 42, conflict: 42, recent: 20 };
 const MASS = { session: 3, repo: 5, pr: 1.2, clash: 1.5, conflict: 1.5, recent: 1 };
 const REST = { repo: 115, pr: 42, clash: 85, conflict: 80, recent: 55 };
+// the ring a repo holds its conversations on (world units): wider with more of them, so their labels have room. Henry
+// kept dragging new ones out from the old 70 + 17n (a median of ~280 from the hub), so they start out there
+const ringR = (repo) => 150 + 25 * repo.sessions.length;
 // hard spacing (Henry: removing a repo or a conversation must never leave things crowded; the canvas is big):
 // a repo's whole group keeps CLUSTER_GAP clear of every other group, nodes of different repos keep APART_OTHER,
 // conversations of one repo keep APART_SAME. Enforced by moving positions, so it holds after the layout settles.
@@ -1550,7 +1553,7 @@ function rebuild() {
   // a repo's territory is drawn around its conversations and their PRs
   for (const n of nodes) if ((n.kind === 'session' || n.kind === 'pr') && n.cl !== '_none') { const r = byId.get(n.cl); if (r && r.members) r.members.push(n); }
   // a repo with more conversations holds them on a wider ring, so their labels have room
-  for (const e of springs) if (e.repo) e.rest = 70 + 17 * e.repo.sessions.length;
+  for (const e of springs) if (e.repo) e.rest = ringR(e.repo);
   for (const cc of clashes) {
     const first = byId.get('s:' + cc.sessions[0].id);
     add({ id: cc.id, kind: 'clash', c: cc, sid: null, cl: first ? first.cl : '_none' });
@@ -1638,7 +1641,8 @@ function rebuild() {
       const anchor = (nb.get(n.id) || []).map((id) => I.pos.get(id)).find(Boolean);
       const home = I.homeXY.get(n.kind === 'repo' ? n.id : n.cl) || { x: 0, y: 0 };
       const base = anchor || home;
-      const r = anchor ? (n.kind === 'session' ? REST.repo : n.kind === 'pr' ? REST.pr : REST.recent) : n.kind === 'repo' ? 0 : 60;
+      const hubN = n.kind === 'session' && byId.get(n.cl);
+      const r = anchor ? (n.kind === 'session' ? (hubN && hubN.sessions ? ringR(hubN) : REST.repo) : n.kind === 'pr' ? REST.pr : REST.recent) : n.kind === 'repo' ? 0 : 60;
       let a = hashNum(n.id) * Math.PI * 2;
       // a new conversation takes the widest free gap around its repo, so the ring fills evenly
       if (n.kind === 'session' && anchor) {
