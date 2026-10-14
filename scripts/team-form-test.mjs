@@ -12,10 +12,10 @@ let n = 0;
 const test = (name, fn) => { fn(); n++; console.log('ok', name); };
 const ID = (k) => `${k}${k}${k}${k}${k}${k}${k}${k}-0000-4000-8000-000000000000`;
 const A = ID('a'), B = ID('b'), Cc = ID('c'), D = ID('d'), E = ID('e');
-const names = { [A]: 'Chief', [B]: 'Watch', [Cc]: 'Inbox', [D]: 'Deploys', [E]: 'Ledger' };
+const names = { [A]: 'Scout', [B]: 'Watch', [Cc]: 'Inbox', [D]: 'Deploys', [E]: 'Ledger' };
 const nameOf = (id) => names[id] || String(id).slice(0, 8);
-const chief = { key: 'chief', kind: 'chief', id: A, name: 'Chief' };
 const bot = (id, o = {}) => ({ key: `bot:${id.slice(0, 2)}`, kind: 'bot', id, name: names[id], live: true, ...o });
+const scout = bot(A);
 const teamRow = (t, o = {}) => ({ key: `team:${t.id}`, kind: 'team', id: null, teamId: t.id, name: t.name, members: t.members.map((m) => ({ id: m, name: nameOf(m), lead: m === t.lead })), ...o });
 
 test('firstWords, cleanName, the default name', () => {
@@ -35,24 +35,24 @@ test('leadOf and teamsOfId: the team it reports in and the one it leads', () => 
   assert.deepEqual(teamsOfId([up, own], D), { up: null, own: null });
 });
 
-test('New team in the "+" menu needs two overseers started here', () => {
-  assert.equal(newTeamWhy([chief, bot(B)]), null);
-  assert.equal(newTeamWhy([chief, bot(B, { elsewhere: true })]), 'needs two bots (or a bot and the Chief) that have started');
-  assert.equal(newTeamWhy([{ ...chief, id: null }, bot(B)]), 'needs two bots (or a bot and the Chief) that have started');
-  assert.equal(newTeamWhy([bot(B), { kind: 'team', id: Cc }]), 'needs two bots (or a bot and the Chief) that have started');
+test('New team in the "+" menu needs two bots started here', () => {
+  assert.equal(newTeamWhy([scout, bot(B)]), null);
+  assert.equal(newTeamWhy([scout, bot(B, { elsewhere: true })]), 'needs two bots that have started');
+  assert.equal(newTeamWhy([{ ...scout, id: null }, bot(B)]), 'needs two bots that have started');
+  assert.equal(newTeamWhy([bot(B), { kind: 'team', id: Cc }]), 'needs two bots that have started');
 });
 
 test('eligibility: elsewhere, never started, the caller\'s why, and the notes', () => {
   const t = { id: 't1', name: 'Squad', members: [B, D], lead: D };
-  const list = [chief, bot(B, { live: false }), bot(Cc, { elsewhere: true }), { ...bot(D), id: null, key: 'bot:dd' }, bot(E), { kind: 'chat', id: ID('f') }, teamRow(t)];
+  const list = [scout, bot(B, { live: false }), bot(Cc, { elsewhere: true }), { ...bot(D), id: null, key: 'bot:dd' }, bot(E), { kind: 'chat', id: ID('f') }, teamRow(t)];
   const joinWhy = (id) => (id === E ? 'open in another window: end it there or open it here' : null);
   const ch = teamChoices(list, [t], joinWhy);
-  assert.deepEqual(ch.map((x) => x.c.key), ['chief', 'bot:bb', 'bot:cc', 'bot:dd', 'bot:ee']);
+  assert.deepEqual(ch.map((x) => x.c.key), ['bot:aa', 'bot:bb', 'bot:cc', 'bot:dd', 'bot:ee']);
   assert.deepEqual(ch.map((x) => x.why), [null, null, 'runs on another machine', 'never started: Start it first', 'open in another window: end it there or open it here']);
   assert.equal(ch[0].note, '');
   assert.equal(ch[1].note, 'not running: it starts to take the order · in "Squad": it leaves it');
   assert.equal(ch[4].note, 'open in another window: end it there or open it here');
-  assert.equal(teamChoices([{ ...chief, id: null }], [], () => null)[0].why, 'not started yet');
+  assert.equal(teamChoices([{ ...scout, id: null }], [], () => null)[0].why, 'never started: Start it first');
   // a joinWhy that throws greys the row with its words
   assert.equal(teamChoices([bot(B)], [], () => { throw new Error('boom'); })[0].why, 'boom');
   // the one it leads
@@ -84,11 +84,11 @@ test('the ticks settle: one that can\'t any more is unticked, the lead and the t
 test('Lead and Team above choices', () => {
   const t = { id: 't1', name: 'Up', members: [D, E, A], lead: D };
   const own = { id: 't2', name: 'Own', members: [B, Cc], lead: B };
-  const lc = leadChoices([chief, bot(B)], [t, own]);
+  const lc = leadChoices([scout, bot(B)], [t, own]);
   assert.deepEqual(lc.map((o) => [o.value, o.label, o.note]), [['', 'No lead (peers)', 'they work it out between them'],
-    [A, 'Chief leads', 'the others report to it'], [B, 'Watch leads', 'leads "Own" now: it leaves that lead']]);
-  assert.equal(lc[1].c, chief);
-  const ac = aboveChoices([chief, teamRow(t), teamRow(own)], [t, own], 3);
+    [A, 'Scout leads', 'the others report to it'], [B, 'Watch leads', 'leads "Own" now: it leaves that lead']]);
+  assert.equal(lc[1].c, scout);
+  const ac = aboveChoices([scout, teamRow(t), teamRow(own)], [t, own], 3);
   assert.deepEqual(ac.map((o) => [o.value, o.label, o.note]), [['', 'None', 'a team of its own'], ['t1', 'Up', '3 members, led by Deploys · full'], ['t2', 'Own', '2 members, led by Watch']]);
   // a team /state no longer has: its row's member count
   assert.equal(aboveChoices([teamRow({ id: 't9', name: 'Peers', members: [A, B], lead: null })], [])[1].note, '2 members, peers');
@@ -99,7 +99,7 @@ test('aboveLoop: a lead can\'t report to itself, up the levels', () => {
   const t0 = { id: 't0', name: 'Top', members: [A, D, E], lead: A };
   const t1 = { id: 't1', name: 'Mid', members: [D, Cc], lead: D };
   assert.equal(aboveLoop([t0, t1], [B, Cc], t1, nameOf), null);
-  assert.equal(aboveLoop([t0, t1], [A, B], t1, nameOf), 'Chief is in the new team and above it: a lead can\'t report to itself');
+  assert.equal(aboveLoop([t0, t1], [A, B], t1, nameOf), 'Scout is in the new team and above it: a lead can\'t report to itself');
   assert.equal(aboveLoop([t0, t1], [D, B], t1, nameOf), 'Deploys is in the new team and above it: a lead can\'t report to itself');
   // a cycle in the data never hangs
   const x = { id: 'x', name: 'X', members: [A, B], lead: A }, y = { id: 'y', name: 'Y', members: [B, A], lead: B };
@@ -119,8 +119,8 @@ test('checkTeam: the page\'s checks, in its order', () => {
   assert.deepEqual(ok({ members: [B, Cc], lead: D }), { ok: false, message: 'the lead must be one of the members' });
   assert.deepEqual(ok({ members: [B, Cc], lead: B, above: 'gone' }), { ok: false, message: 'the team above is gone' });
   assert.deepEqual(ok({ members: [B, Cc], above: 't0' }), { ok: false, message: 'only a team with a lead can report to a team above' });
-  // the loop: the Chief leads Top, and is in the new team
-  assert.deepEqual(ok({ members: [A, B], lead: B, above: 't0' }), { ok: false, message: 'Chief is in the new team and above it: a lead can\'t report to itself' });
+  // the loop: Scout leads Top, and is in the new team
+  assert.deepEqual(ok({ members: [A, B], lead: B, above: 't0' }), { ok: false, message: 'Scout is in the new team and above it: a lead can\'t report to itself' });
   // the team above left with one member: D moves out of Top (A leads it, E stays): Top keeps A and E, fine;
   // with D and E both moving, only A stays
   const t1 = { id: 't1', name: 'Pair', members: [D, Cc, B], lead: D };
@@ -173,7 +173,7 @@ test('joinPlan and leavePlan: a member in or out of a team in the Bots list', ()
   const q = joinPlan(teams, Cc, 'rel', TEAM_MAX, nameOf);
   assert.deepEqual([q.leaves && q.leaves.id, q.ends], ['top', null]);
   // A leads Top, which Rel reports up to: A in Rel would report to itself
-  assert.equal(joinPlan(teams, A, 'rel', TEAM_MAX, nameOf).why, '"Rel" reports up to Chief');
+  assert.equal(joinPlan(teams, A, 'rel', TEAM_MAX, nameOf).why, '"Rel" reports up to Scout');
   // B leads Rel: joining another team keeps it leading, and Rel goes under that one
   const other = { id: 'o', name: 'Other', members: [E, ID('f')], lead: E };
   const b = joinPlan([...teams, other], B, 'o', TEAM_MAX, nameOf);

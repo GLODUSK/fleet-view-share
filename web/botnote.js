@@ -1,4 +1,4 @@
-// Bot notes: a small card at the top right when a bot or the Chief finishes a turn or needs you, on any view but the
+// Bot notes: a small card at the top right when a bot finishes a turn or needs you, on any view but the
 // Bots tab (app.js feeds it from state.alerts; Henry, 2026-10-12). Its face (mascot.js, smiling when done, the "?"
 // bubble when it needs you), its name and the line it ended on. A click opens its chat; the x (on hover) closes it,
 // and so does opening its chat any other way (app.js drop; the Bots tab clears them all).

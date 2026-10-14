@@ -1,4 +1,4 @@
-// bots.js: the server side of Bots, Henry's overseers besides the Chief (chief.js). Each bot is one hosted session
+// bots.js: the server side of Bots, Henry's overseers of the fleet. Each bot is one hosted session
 // whose role is 'bot:<id>' (desktop/host.js), in its own folder ~/Bots/<slug>, whose CLAUDE.md (bot/BRIEF.md filled in)
 // holds Henry's standing instructions for it. Henry gives it tasks in its chat; they need not touch the fleet or a repo.
 // fleet-view.js requires it and hands it what it needs (createBots below).
@@ -18,9 +18,9 @@
 //   with the role (api.js openBot); else a new session starts in its folder (api.js startBot: the folder is not a listed
 //   repo, the registry vouches for it), named after the bot.
 // - Follow it: tick() reads the host's list while sessions.json shows a bot's role, and adds each conversation with
-//   that role (a handoff's pickup, a /clear) to its bot's ids. Each new one is told its id once, as the Chief is
-//   (chief.js createTeller). A removed bot's session that comes back (a restore) is ended.
-// - /state: tagger() and tagState() put bot: '<bot id>' ('chief' for the Chief's) on each overseer conversation in
+//   that role (a handoff's pickup, a /clear) to its bot's ids. Each new one is told its id once
+//   (overseer.js createTeller). A removed bot's session that comes back (a restore) is ended.
+// - /state: tagger() and tagState() put bot: '<bot id>' on each overseer conversation in
 //   sessions, finished and removed; view() is state.bots. The ~/Bots folders are never a workspace (inBots).
 // - Another machine's bots: registries never sync (sync-prefs.js), but sync brings their chats here, into ~/Bots/<slug>.
 //   elsewhere() makes one bot of each such folder that no bot here owns, from its conversations: tagged like a bot's,
@@ -28,7 +28,7 @@
 //   Tasks here: it is run and changed on its own machine). Henry, 2026-10-11: the PC's Panchito on the Mac. Its look is
 //   the one its machine gave it: each bot's look syncs by its folder's name (lookItems, sync-prefs.js botLooks), and
 //   elsewhereView wears it (fleet-view.js settings.botLooks keeps the other machines').
-// - Who is talking: api.js frames what reaches a bot as it does for the Chief (isOverseer).
+// - Who is talking: api.js frames what reaches a bot by where it came from (isOverseer, overseer.js frame).
 // - Tasks and routines: each bot keeps its task list in tasks.json in its folder (bot-tasks.js has the format), one-off
 //   and recurring, updated by the bot itself as Henry gives, finishes, changes or cancels work (bot/BRIEF.md says so).
 //   schedule() (every few seconds, fleet-view.js) delivers each task that comes due to its bot as a "[Fleet View]
@@ -55,7 +55,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const CHIEF = require(path.join(__dirname, 'chief.js'));
+const OVERSEER = require(path.join(__dirname, 'overseer.js'));
 const API = require(path.join(__dirname, 'api.js'));
 const P = require(path.join(__dirname, 'platform.js'));
 const TASKS = require(path.join(__dirname, 'bot-tasks.js'));
@@ -78,8 +78,10 @@ const COLOR_RE = /^#[0-9a-f]{6}$/i;
 // from the page, the page sizes it (web/chats-model.js sizeTask) and switches through switchTo when it needs to
 const DYNAMIC = 'dynamic';
 const DYNAMIC_START = { model: 'claude-sonnet-5-5', effort: 'low' };
-const NEW_BOT = { account: CHIEF.DEFAULTS.account, model: DYNAMIC, effort: DYNAMIC };
-const { convId } = CHIEF;
+// what a registry entry without its own account, model or effort runs on
+const FALLBACK = { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium' };
+const NEW_BOT = { account: FALLBACK.account, model: DYNAMIC, effort: DYNAMIC };
+const { convId } = OVERSEER;
 const roleOf = (id) => `bot:${id}`;
 const botOfRole = (role) => { const m = /^bot:([0-9a-f]{12})$/.exec(typeof role === 'string' ? role : ''); return m ? m[1] : null; };
 // What Fleet View says to a bot. A new bot gets two notes, the start prompt and then its id, and greeted Henry after
@@ -150,11 +152,11 @@ function watchEvent(seen, fact, now) {
   if (!what || now - held < WATCH_SETTLE_MS || key === seen.fired) return { seen, event: null };
   return { seen: { ...seen, fired: key, ...(what === 'finished' ? { replyAt } : {}) }, event: { what, key } };
 }
-// a conversation inside a note's first line: its name in quotes (CHIEF.headName: no quote or bracket can end them), its id
-const quoted = (name, cid) => `"${CHIEF.headName(name || cid.slice(0, 8), 60)}" (${cid})`;
+// a conversation inside a note's first line: its name in quotes (OVERSEER.headName: no quote or bracket can end them), its id
+const quoted = (name, cid) => `"${OVERSEER.headName(name || cid.slice(0, 8), 60)}" (${cid})`;
 // the note for one bot's events (each { id, name, what, lastReply, job }): one block each
 function watchNote(evs) {
-  const block = (e) => [`${quoted(e.name, e.id)} ${WHAT_SAYS[e.what]}.`, `Its last reply: ${CHIEF.oneLine(e.lastReply, 400) || 'none'}`, `Your job for it: ${jobLine(e.job, e.id)}`];
+  const block = (e) => [`${quoted(e.name, e.id)} ${WHAT_SAYS[e.what]}.`, `Its last reply: ${OVERSEER.oneLine(e.lastReply, 400) || 'none'}`, `Your job for it: ${jobLine(e.job, e.id)}`];
   if (evs.length === 1) { const [first, ...rest] = block(evs[0]); return [`[Fleet View] Watch: ${first}`, ...rest].join('\n'); }
   return [`[Fleet View] Watch: ${evs.length} updates.`, ...evs.flatMap((e) => ['', ...block(e)])].join('\n');
 }
@@ -330,11 +332,10 @@ function fillBrief(template, bot) {
 }
 
 // ---------- /state ----------
-// each overseer conversation -> its tag: its bot's id (a removed bot's too), 'chief' for the Chief's (chiefIds)
-function tagger(chiefIds, bots) {
+// each overseer conversation -> its tag: its bot's id (a removed bot's too)
+function tagger(bots) {
   const m = new Map();
   for (const b of bots || []) for (const id of (b && b.ids) || []) m.set(id, b.id);
-  for (const id of chiefIds || []) if (id) m.set(id, 'chief');
   return (id) => m.get(id) || null;
 }
 // bot: <tag> on each overseer entry of st.sessions, st.finished and st.removed (the page and the phone filter by it)
@@ -408,8 +409,8 @@ function loadBots(saved, base = BOTS_DIR) {
     if (out.some((x) => x.id === b.id)) continue;
     const ids = Array.isArray(b.ids) ? [...new Set(b.ids.map(convId).filter(Boolean))].slice(-IDS_MAX) : [];
     const role = checkRole(b.role);
-    out.push({ id: b.id, name: b.name, brief: str(b.brief, ''), role: role.err ? '' : role.role, account: str(b.account, CHIEF.DEFAULTS.account), model: str(b.model, CHIEF.DEFAULTS.model),
-      effort: str(b.effort, CHIEF.DEFAULTS.effort), folder: b.folder, createdAt: Number.isFinite(b.createdAt) ? b.createdAt : 0, ids,
+    out.push({ id: b.id, name: b.name, brief: str(b.brief, ''), role: role.err ? '' : role.role, account: str(b.account, FALLBACK.account), model: str(b.model, FALLBACK.model),
+      effort: str(b.effort, FALLBACK.effort), folder: b.folder, createdAt: Number.isFinite(b.createdAt) ? b.createdAt : 0, ids,
       told: Array.isArray(b.told) ? [...new Set(b.told.map(convId).filter(Boolean))] : [], ...(b.removed === true ? { removed: true } : {}),
       ...(SHAPES.includes(b.shape) ? { shape: b.shape } : {}), ...(typeof b.color === 'string' && COLOR_RE.test(b.color) ? { color: b.color.toLowerCase() } : {}),
       ...(Number.isFinite(b.lookAt) && b.lookAt > 0 ? { lookAt: Math.round(b.lookAt) } : {}),
@@ -425,7 +426,7 @@ function loadBots(saved, base = BOTS_DIR) {
 //   or null, sessionsFile, trustFolder(dir), accounts() -> the account letters, usage() -> /state's usage (a Dynamic
 //   account's pick: roomiest), rename(id, name) (its Fleet View name), and for watching: watchFacts(ids) -> [{ id,
 //   name, state, lastReply, replyAt, gone, next }] (fleet-view.js botWatchFacts), known(id) -> Fleet View lists it or
-//   its log is on disk, nameOf(id) -> its Fleet View name or null, chiefIds() -> the Chief's conversations,
+//   its log is on disk, nameOf(id) -> its Fleet View name or null,
 //   base (the Bots folder) and template (bot/BRIEF.md), which tests set }
 function createBots(deps) {
   const d = deps || {};
@@ -434,7 +435,7 @@ function createBots(deps) {
   let live = new Map(); // bot id -> { id, key, status, pending } of its running session, from the host's list
   const chains = new Map(); // bot id -> its starts and its removal, one after another
   const starting = new Set(); // bots whose start may be typing its prompt: no id note meanwhile
-  const tellers = new Map(); // bot id -> chief.js createTeller
+  const tellers = new Map(); // bot id -> overseer.js createTeller
   const firstSeen = new Map(); // conversation id -> when it was first seen as a bot's
   const greet = new Set(); // conversations a start began fresh: their id note asks for the one hello (idNote)
   let ticking = false, fileM = -1, fileBots = false, askedAt = 0, askedM = -1, hostDown = false;
@@ -468,7 +469,7 @@ function createBots(deps) {
   function tellerOf(bot) {
     let t = tellers.get(bot.id);
     if (!t) {
-      t = CHIEF.createTeller({ api: d.api, ctx: d.ctx, note: (id) => idNote(bot.name, id, greet.has(id)), told: bot.told, log: (x) => log(`${bot.name}: ${x}`),
+      t = OVERSEER.createTeller({ api: d.api, ctx: d.ctx, note: (id) => idNote(bot.name, id, greet.has(id)), told: bot.told, log: (x) => log(`${bot.name}: ${x}`),
         save: () => { bot.told = t.told(); save(); } });
       tellers.set(bot.id, t);
     }
@@ -912,7 +913,7 @@ function createBots(deps) {
 
   // POST /bots/:id/watch { id, job: report | answer | review | null } (the page only, from the map or a conversation's
   // menu; the bot need not be on the map): watch that conversation with that job, change the job, or (null) stop. A
-  // bot's own conversation and the Chief's are never watched. The bot is told once, started first for a new watch or
+  // bot's own conversation is never watched. The bot is told once, started first for a new watch or
   // job; a stop is told only to a running bot. The answer is ok even when the note did not go in (message says so)
   async function setWatch(id, b) {
     const bot = byId(id);
@@ -943,9 +944,6 @@ function createBots(deps) {
     if (!w) {
       const ownBot = bots.find((x) => x.ids.includes(cid));
       if (ownBot) return [400, { ok: false, message: `that is ${ownBot.id === bot.id ? `${bot.name}'s own` : `a bot's (${ownBot.name})`} conversation: a bot watches only the fleet's` }];
-      let chief = [];
-      try { chief = (d.chiefIds && d.chiefIds()) || []; } catch {}
-      if (chief.map(convId).includes(cid)) return [400, { ok: false, message: "that is the Chief's conversation: a bot watches only the fleet's" }];
       let known = true;
       try { known = d.known ? !!d.known(cid) : true; } catch { known = false; }
       if (!known) return [400, { ok: false, message: 'Fleet View does not know that conversation' }];
@@ -1119,7 +1117,7 @@ function createBots(deps) {
       try { m = fs.statSync(d.sessionsFile).mtimeMs; } catch {}
       if (m !== fileM) { fileM = m; fileBots = sessionsHaveBots(); }
       if (!fileBots) { live = new Map(); return; }
-      // as chief.js: the host's list when sessions.json changed, and every HOST_EVERY_MS while a bot runs or the list
+      // the host's list when sessions.json changed, and every HOST_EVERY_MS while a bot runs or the list
       // did not come; a bot that ended (still in the file for the restore) is not polled for
       if (m === askedM && ((!live.size && !hostDown) || now - askedAt < HOST_EVERY_MS)) return;
       askedAt = now; askedM = m; hostDown = true;
@@ -1166,8 +1164,8 @@ function createBots(deps) {
     setMap, setWatch, watchTick,
     // tasks and routines: the scheduler (fleet-view.js runs it every few seconds), GET and POST /bots/:id/tasks
     schedule, tasks, taskAction,
-    // /state's tags, with the Chief's ids (chief.js chiefIds)
-    tagOf: (chiefIds) => tagger(chiefIds, bots),
+    // /state's tags
+    tagOf: () => tagger(bots),
     // api.js resumable: a bot's conversation (not a removed bot's) may be resumed in its folder, with its role
     vouch: (id) => { const b = bots.find((x) => !x.removed && x.ids.includes(id)); return b ? { role: roleOf(b.id), folder: b.folder } : null; },
     inBots: (p) => inBots(p, base),

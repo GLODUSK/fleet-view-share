@@ -1,10 +1,10 @@
 // Chats model: turns the page's state into the Bots tab's contact list (chats.js draws it). Pure functions plus a
 // small localStorage store; no DOM.
 //
-// The tab lists overseers only: the Chief and Henry's bots (bots.js), each one row however many conversations it
-// went through. GET /state tags each overseer conversation with bot: 'chief' or its bot's id, and lists the bots in
-// state.bots; every other conversation is the map's and never shows here (app.js derive() leaves the overseers out
-// of the map's lists in turn).
+// The tab lists overseers only: Henry's bots (bots.js), each one row however many conversations it went through.
+// GET /state tags each bot's conversation with bot: its bot's id, and lists the bots in state.bots; every other
+// conversation is the map's and never shows here (app.js derive() leaves the overseers out of the map's lists in
+// turn). A tag state.bots does not list (a removed bot's) gets no row.
 //
 // CONTRACT (chats.js builds on it; keep these names and shapes):
 //   buildContacts(state, opts) -> Contact[] (unsorted)
@@ -12,15 +12,11 @@
 //              settings, ...), or raw GET /state (no allSessions: rawToContactsState turns it into those lists; the
 //              phone app passes it). The overseers' conversations are read from all of those lists by their tag;
 //              settings.hidden leaves one out unless it worked again after (app.js isHidden)
-//       opts:  { chiefId?: string|null, chains?: ChainStore, now?: number, chiefPlaceholder?: boolean }
-//              chiefId: the Chief's conversation (settings.chief.id), for a state without tags: it and the
-//              conversations in its chain of handoffs count as the Chief's
-//              chiefPlaceholder: with no Chief conversation, add a pinned Chief row { key: 'chief', kind: 'chief', id: null,
-//              ids: [], state: 'NEW', preview: 'Not started yet' } so the tab can start one
+//       opts:  { now?: number } (older callers' other options are ignored)
 //   sortContacts(list, order?) -> Contact[]   order: settings.chatOrder { pinned: [keys], keys: [keys] }, Henry's own
-//       (rows never move by themselves): the pinned rows in their order, then new rows (in neither list; a Chief in
-//       neither is pinned, on top), then the rest in theirs; each row's pinned set to match. With no order: Chief
-//       first, then needs-you (longest waiting first), then newest activity (the phone's Projects list)
+//       (rows never move by themselves): the pinned rows in their order, then new rows (in neither list), then the
+//       rest in theirs; each row's pinned set to match. A key no row has (a removed bot's) is skipped. With no order:
+//       pinned first, then needs-you (longest waiting first), then newest activity (the phone's Projects list)
 //   fullChatOrder(order, list), moveInChatOrder(order, list, key, { pin, before }), pinInChatOrder(order, list, key,
 //       pin), stepInChatOrder(order, list, key, 'up' | 'down' | 'top', shown?) -> a new order (step: null when it
 //       can't go that way); sameChatOrder(a, b) -> boolean. Keys of rows not in list keep their places
@@ -36,8 +32,8 @@
 //   teamThread(team, state) -> [{ t, from, fromName, to, toName, text }]   a team's messages, oldest first
 //   createChainStore(storage = localStorage) -> ChainStore
 //       ChainStore: { keyFor(id) -> string, link(fromId, toId), save() }. A conversation that picked up another's
-//       handoff (s.pickedUpFrom.id) gets the same chain key. Only the chiefId fallback uses it: the tags keep a bot's
-//       conversations together by themselves
+//       handoff (s.pickedUpFrom.id) gets the same chain key. buildContacts no longer needs it (the tags keep a bot's
+//       conversations together by themselves); kept for callers that still make one
 //   unread(contact, seen) -> boolean  seen: { [contact.key]: ms the user last opened it }; something new since
 //       (contact.newAt when it has one, else at)
 //   asksYou(contact, seen) -> boolean   its row shows needs-you (gold, "!"): it waits on you and you haven't opened it
@@ -46,14 +42,14 @@
 //       the lists above (buildContacts calls it by itself when state has no allSessions); the tags and state.bots stay
 //   previewOf(session) -> string   a conversation's one-line preview: the question it asks, what it is doing now, or
 //       its last reply (the map's rows)
-//   botPreview(session, older = []) -> string   a bot's or the Chief's row (Contact.preview): the question it asks,
+//   botPreview(session, older = []) -> string   a bot's row (Contact.preview): the question it asks,
 //       else the last finished reply its chat shows (s.doneReply when /state sends it, else s.lastReply), else that of
 //       its older conversations (newest first), else its goal unless that is a "[Fleet View]" note; never a step
 //       mid-turn or a reply botFeed leaves out
 //   replyLine(text) -> string   the first line of a reply that says something: no heading, code fence, table or
 //       rule, list and quote marks and * _ ` stripped; '' for none. A bot's reaction at its start (reactionOf) is
 //       left out, and a reply that is only a reaction reads as its emoji
-//   botFeed(items) -> items   a bot's or the Chief's chat items (chat.js, GET /conversation; its earlier
+//   botFeed(items) -> items   a bot's chat items (chat.js, GET /conversation; its earlier
 //       conversations' items first, as one chat) as the Bots tab shows them, kept simple (Henry, 2026-10-12: "super
 //       normie friendly", no noise). A message of Fleet View's own (its text starts "[Fleet View]") becomes
 //       { ...it, kind: 'setup', text: without that header }, drawn as a small grey note, not your bubble; the ones
@@ -93,7 +89,7 @@
 //       family stays); model is the family's 1M-context one in modelIds when long (a bot keeps its whole chat: bots.js
 //       longModel), else its 200k one; failing that its first
 //   DYNAMIC   'dynamic', a bot's model or effort sized per message
-//   doingOf(contact, face) -> string   what a bot or the Chief is doing now, in a few words, for its avatar's hover:
+//   doingOf(contact, face) -> string   what a bot is doing now, in a few words, for its avatar's hover:
 //       face is mascot.js mascotState(contact) ('thinking': "Thinking about your message"; working: the tool running
 //       or its last action; needs: its question; done / idle: its last reply), "Not running" for a bot that is not
 //   botChoices({ accounts, models, efforts, modelLabel, current? }) -> { account, model, effort }: the New bot and Edit
@@ -109,34 +105,36 @@
 //   taskWhen(ms, now) -> string   a run's time, short: "in 5 min", "in 3 h", "Mon 9:00", "Oct 12", "5 min ago", "Yesterday 9:00"
 //   taskLine(task, now) -> string   the task's meta line: next run, last run and its result, or why it does not run
 //   tasksHead(tasks, now) -> { count, open, text }   the collapsed Tasks strip: how many are open, and the next due
+//   profileTasks(tasks) -> { live, done }   a bot's profile's Tasks list: live the open ones (next run soonest first,
+//       one with no next run after them) then the paused ones; done the done ones, last run newest first
 //   Nothing here touches the DOM or window at import time, and it imports nothing, so the phone app (phone/) imports it as it is.
 //
 //   Contact = {
-//     key,            stable row key: 'chief', 'bot:<bot id>' or 'team:<team id>'
-//     kind,           'chief' | 'bot' | 'team'
+//     key,            stable row key: 'bot:<bot id>' or 'team:<team id>'
+//     kind,           'bot' | 'team'
 //     id,             the conversation the row opens now: the bot's running one (state.bots convId), else its newest
-//                     live one, else its newest; null for a team, a Chief not started yet and a bot with none known
+//                     live one, else its newest; null for a team and a bot with none known
 //     ids,            every conversation id it went through, oldest first (a team: its members)
 //     botId,          bot rows: the bot's id (state.bots)
 //     live,           bot rows: whether it runs now (state.bots), null when there is no state.bots to say or the bot
 //                     is another machine's (elsewhere: true, a row only while its chats are listed)
-//     name,           a Fleet View rename of one of its conversations (the newest), else the bot's name, else 'Chief'
+//     name,           a Fleet View rename of one of its conversations (the newest), else the bot's name
 //     account, repo ({ name, root, color } | null), state, label, statusColor,
 //     preview,        one line: the question it asks, or its last finished reply (botPreview); a bot with no
 //                     conversation listed: its brief's first line, else "Not started yet"
 //     at,             ms of its latest activity (for sorting and the time on the row); a bot with no conversation
 //                     listed: when it was made
-//     newAt,          bot and Chief rows with a conversation: ms its chat last showed something new, for the unread
-//                     dot (newOf: its last reply shown, or the question it waits on; at with an older server)
-//     needsYou, busy, pinned (the Chief; sortContacts with an order sets each row's), teamId (team rows),
+//     newAt,          bot rows with a conversation: ms its chat last showed something new, for the unread dot
+//                     (newOf: its last reply shown, or the question it waits on; at with an older server)
+//     needsYou, busy, pinned (sortContacts with an order sets each row's), teamId (team rows),
 //     members         team rows: [{ id, name, lead, key, role, memberId }], the lead first, then the team's order: id the
 //                     member's row opens, key its row's, role its bot's ('' for none), memberId the conversation as the
 //                     team lists it (what /teams/leave and /teams/lead take)
-//     parentTeam      the key of the team row it shows under in the Bots list, when there is one (contactTree): a bot or
-//                     the Chief under the team it leads, else the one it is a plain member of; a team under the team its
-//                     lead is a plain member of (teams nest). Absent at the top
+//     parentTeam      the key of the team row it shows under in the Bots list, when there is one (contactTree): a bot
+//                     under the team it leads, else the one it is a plain member of; a team under the team its lead is
+//                     a plain member of (teams nest). Absent at the top
 //     role,           bot rows: what it is for in its teams ("Reviewer"), from state.bots; '' for none
-//     turnStart, lastAction, running, waitingOn   bot and Chief rows: its conversation's, as /state has them (null
+//     turnStart, lastAction, running, waitingOn   bot rows: its conversation's, as /state has them (null
 //                     when unknown), so mascot.js mascotState can tell thinking from working and doingOf can say what
 //     shape, color,   bot rows: the bot's own pick (state.bots, bots.js), or null: the page picks one
 //   }
@@ -153,7 +151,7 @@ const oneLine = (t, n = 140) => {
   return x.length > n ? x.slice(0, n - 1).trimEnd() + '…' : x;
 };
 const short = (id) => String(id == null ? '' : id).slice(0, 8);
-// an overseer conversation's tag from /state: 'chief' or its bot's id
+// an overseer conversation's tag from /state: its bot's id
 const tagOf = (s) => (s && typeof s.bot === 'string' && s.bot ? s.bot : null);
 
 // { conversation id: chain key }, kept in storage; the newest links sit last, so the cap drops the oldest
@@ -216,7 +214,7 @@ export function previewOf(s) {
   return oneLine(replyLine(s.lastReply) || s.goal || '');
 }
 
-// a bot's or the Chief's row, as a chat app's: the question it asks, else the last reply its chat shows, finished;
+// a bot's row, as a chat app's: the question it asks, else the last reply its chat shows, finished;
 // never what it is doing along the way (a tool, a step mid-turn) or a reply the chat leaves out (Henry, 2026-10-12).
 // doneReply is there only when it differs from lastReply (fleet-view.js); its earlier conversations (older, newest
 // first) are looked in when this one has none, then its goal unless that is one of Fleet View's own notes
@@ -274,7 +272,7 @@ const nowOf = (s) => ({
   turnStart: (s && Number.isFinite(s.turnStart) && s.turnStart) || null, lastAction: (s && s.lastAction) || null,
   running: (s && Array.isArray(s.running) && s.running.length && s.running) || null, waitingOn: (s && s.waitingOn) || null,
 });
-// when a bot's or the Chief's chat last showed something new (Contact.newAt): the last reply its chat shows
+// when a bot's chat last showed something new (Contact.newAt): the last reply its chat shows
 // (s.shownAt: a "[react:👍]" too, not a quiet task run, a hushed reply, its tool steps or a title Claude Code writes
 // after the turn), or the question it waits on now. Its log's time (at) moves with all of those, so a dot cleared by
 // opening the chat came back with nothing new in it. An older server sends no shownAt: its latest activity then
@@ -298,24 +296,12 @@ export function buildContacts(input, opts = {}) {
   // every conversation the state knows; a stand-in (pending, sessions) wins over the raw copy of the same id
   const known = new Map();
   for (const s of (state.allSessions || []).concat(state.finishedSessions || [], state.pending || [], state.sessions || [])) if (s && s.id != null) known.set(s.id, s);
-  const pairs = [];
   const prev = new Map();
   for (const s of known.values()) {
-    if (s.pickedUpFrom && s.pickedUpFrom.id) { pairs.push([s.pickedUpFrom.id, s.id]); prev.set(s.id, s.pickedUpFrom.id); }
-    if (s.handoff && s.handoff.next) { pairs.push([s.id, s.handoff.next]); if (!prev.has(s.handoff.next)) prev.set(s.handoff.next, s.id); }
+    if (s.pickedUpFrom && s.pickedUpFrom.id) prev.set(s.id, s.pickedUpFrom.id);
+    if (s.handoff && s.handoff.next && !prev.has(s.handoff.next)) prev.set(s.handoff.next, s.id);
   }
   const depth = (id) => { let d = 0; for (let c = prev.get(id), n = 0; c && n < 500; c = prev.get(c), n++) d++; return d; };
-  // the Chief by its id alone (a state without tags): it and its chain of handoffs, remembered across them
-  let chiefOf = () => false;
-  if (opts.chiefId) {
-    const chains = opts.chains || createChainStore(null);
-    pairs.sort((a, b) => depth(a[0]) - depth(b[0])); // oldest links first, so a key spreads down a chain in one pass
-    for (const [f, t] of pairs) chains.link(f, t);
-    chains.save();
-    const ck = chains.keyFor(opts.chiefId);
-    chiefOf = (id) => id === opts.chiefId || chains.keyFor(id) === ck;
-  }
-  const tagFor = (s) => tagOf(s) || (chiefOf(s.id) ? 'chief' : null);
   // the bots not removed; a removed bot's conversations keep their tag (off the map) but get no row. Without the
   // list (an older server) every bot tag gets one
   const bots = Array.isArray(state.bots) ? state.bots.filter((b) => b && typeof b.id === 'string' && b.id) : null;
@@ -323,8 +309,8 @@ export function buildContacts(input, opts = {}) {
   const hidden = hiddenTest(state.settings);
   const groups = new Map(); // tag -> its conversations
   for (const s of known.values()) {
-    const tag = tagFor(s);
-    if (!tag || hidden(s) || (tag !== 'chief' && bots && !botOf.has(tag))) continue;
+    const tag = tagOf(s);
+    if (!tag || hidden(s) || (bots && !botOf.has(tag))) continue;
     if (!groups.has(tag)) groups.set(tag, []);
     groups.get(tag).push(s);
   }
@@ -332,8 +318,7 @@ export function buildContacts(input, opts = {}) {
   const out = [];
   const rowOf = new Map(); // tag -> its row
   for (const [tag, members] of groups) {
-    const isChief = tag === 'chief';
-    const b = isChief ? null : botOf.get(tag) || null;
+    const b = botOf.get(tag) || null;
     // oldest first: its resumes have no handoff link between them, so by time, a handoff's order for a tie
     members.sort((x, y) => (lastOf(x) - lastOf(y)) || (depth(x.id) - depth(y.id)));
     const live = members.filter((m) => m.state !== 'DONE');
@@ -342,15 +327,15 @@ export function buildContacts(input, opts = {}) {
     const s = (b && b.convId && members.find((m) => m.id === b.convId)) || pool.reduce((best, m) => (lastOf(m) >= lastOf(best) ? m : best), pool[0]);
     const ren = members.filter((m) => m.renamed && m.name).sort((x, y) => lastOf(y) - lastOf(x))[0];
     const row = {
-      key: isChief ? 'chief' : `bot:${tag}`, kind: isChief ? 'chief' : 'bot', id: s.id, ids: members.map((m) => m.id),
-      name: ren ? ren.name : isChief ? 'Chief' : (b && b.name) || s.name || short(s.id),
+      key: `bot:${tag}`, kind: 'bot', id: s.id, ids: members.map((m) => m.id),
+      name: ren ? ren.name : (b && b.name) || s.name || short(s.id),
       account: s.account, repo: s.repo || null, state: s.state, label: s.label, statusColor: s.stateColor,
-      preview: botPreview(s, members.filter((m) => m !== s).reverse()), at: Math.max(...members.map(lastOf)), needsYou: NEEDS.has(s.state), busy: BUSY.has(s.state), pinned: isChief,
+      preview: botPreview(s, members.filter((m) => m !== s).reverse()), at: Math.max(...members.map(lastOf)), needsYou: NEEDS.has(s.state), busy: BUSY.has(s.state), pinned: false,
       ...nowOf(s),
     };
     row.newAt = newOf(members, s, row.at);
     // another machine's bot (state.bots elsewhere: bots.js): its chat as any synced one's, nothing to start here
-    if (!isChief) Object.assign(row, { botId: tag, live: b && !b.elsewhere ? !!b.live : null, ...(b && b.elsewhere ? { elsewhere: true } : {}), ...lookOf(b) });
+    Object.assign(row, { botId: tag, live: b && !b.elsewhere ? !!b.live : null, ...(b && b.elsewhere ? { elsewhere: true } : {}), ...lookOf(b) });
     out.push(row);
     rowOf.set(tag, row);
   }
@@ -369,17 +354,11 @@ export function buildContacts(input, opts = {}) {
     out.push(row);
     rowOf.set(b.id, row);
   }
-  if (!rowOf.has('chief') && opts.chiefPlaceholder) {
-    out.push({
-      key: 'chief', kind: 'chief', id: null, ids: [], name: 'Chief', account: null, repo: null, state: 'NEW', label: 'NEW',
-      statusColor: null, preview: 'Not started yet', at: 0, needsYou: false, busy: false, pinned: true,
-    });
-  }
   // a member's row: undefined when the state doesn't know it (or its overseer has no row), null when it is the map's
   const rowFor = (id) => {
     const s = known.get(id);
     if (!s) return undefined;
-    const tag = tagFor(s);
+    const tag = tagOf(s);
     return tag ? rowOf.get(tag) : null;
   };
   const teamRows = [];
@@ -431,7 +410,7 @@ export function buildContacts(input, opts = {}) {
 }
 
 const byActivity = (a, b) => {
-  const ac = a.kind === 'chief' || !!a.pinned, bc = b.kind === 'chief' || !!b.pinned;
+  const ac = !!a.pinned, bc = !!b.pinned;
   if (ac !== bc) return ac ? -1 : 1;
   if (!!a.needsYou !== !!b.needsYou) return a.needsYou ? -1 : 1;
   if (a.needsYou) return (a.at || 0) - (b.at || 0);
@@ -448,24 +427,25 @@ const CHAT_ORDER_MAX = 300; // each list (fleet-view.js keeps no more)
 
 // order: settings.chatOrder { pinned: [keys], keys: [keys] } (Henry's, set by hand: rows never move by themselves).
 // The pinned rows first in that order, then the rest in theirs; a row in neither is new: at the top of the rest (the
-// newest activity first among new ones), but a Chief in neither is pinned, on top. Each row's pinned says where it
-// went. With no order (the phone's Projects list): the Chief first, then needs-you (longest waiting), then newest
+// newest activity first among new ones). A key no row has (a removed bot's, an old one) is skipped. Each row's pinned
+// says where it went. With no order (the phone's Projects list): pinned first, then needs-you (longest waiting), then
+// newest
 export function sortContacts(list, order) {
   const o = orderIn(order);
   if (!o) return list.slice().sort(byActivity);
   const pinAt = new Map(o.pinned.map((k, i) => [k, i])), keyAt = new Map(o.keys.map((k, i) => [k, i]));
   const top = [], fresh = [], rest = [];
   for (const c of list) {
-    if (pinAt.has(c.key) || (c.key === 'chief' && !keyAt.has(c.key))) top.push({ ...c, pinned: true });
+    if (pinAt.has(c.key)) top.push({ ...c, pinned: true });
     else if (keyAt.has(c.key)) rest.push({ ...c, pinned: false });
     else fresh.push({ ...c, pinned: false });
   }
-  top.sort((a, b) => (pinAt.has(a.key) ? pinAt.get(a.key) : -1) - (pinAt.has(b.key) ? pinAt.get(b.key) : -1));
+  top.sort((a, b) => pinAt.get(a.key) - pinAt.get(b.key));
   rest.sort((a, b) => keyAt.get(a.key) - keyAt.get(b.key));
   return [...top, ...fresh.sort(byActivity), ...rest];
 }
 // the whole order with the rows list shows that it lacks put where sortContacts shows them (new ones on top of the
-// rest, a Chief in neither on top of the pinned): what the page saves (chatOrderAdd) so they stay where they are
+// rest): what the page saves (chatOrderAdd) so they stay where they are
 export function fullChatOrder(order, list) {
   const o = orderIn(order) || { pinned: [], keys: [] };
   const have = new Set([...o.pinned, ...o.keys]);
@@ -571,7 +551,6 @@ const FACE_WORDS = { thinking: 'Thinking about your message', working: 'Working'
 export function doingOf(c, face) {
   if (!c) return '';
   if (c.kind === 'bot' && c.live === false) return c.id ? 'Not running: Start it, or send it a message' : 'Not started yet';
-  if (c.kind === 'chief' && !c.id) return 'Not started yet';
   const head = FACE_WORDS[face] || FACE_WORDS.idle;
   const more = (t) => (t ? `${head}: ${oneLine(t, 120)}` : head);
   if (face === 'thinking') return head;
@@ -591,25 +570,17 @@ export const unread = (c, seen) => {
   return !!(at && (!seen || !seen[c.key] || seen[c.key] < at));
 };
 export const asksYou = (c, seen) => !!c.needsYou && unread(c, seen);
-// a bot's or the Chief's own colour, before the page's fallbacks (the Chief's gold, its repo's, its account's); null
-// when it has none. A bot has one colour: its look's (state.bots color: Colour on its right-click, Edit bot, fv look),
-// kept with the bot, so every conversation it goes on in wears it. The Chief's is the one picked on its conversation's
-// right-click (settings.sessHues; picked(id) -> CSS colour or null): its running one's, else the newest of its others,
-// so a new Chief conversation keeps it. A team's is never its own: its members wear theirs
-export function ownColorOf(c, picked) {
+// a bot's own colour, before the page's fallbacks (its repo's, its account's); null when it has none. A bot has one
+// colour: its look's (state.bots color: Edit bot, fv look), kept with the bot, so every conversation it goes on in
+// wears it. A team's is never its own: its members wear theirs. (picked, the second argument, is no longer read)
+export function ownColorOf(c) {
   if (!c || c.kind === 'team') return null;
-  if (c.kind === 'chief') {
-    if (typeof picked !== 'function') return null;
-    const ids = [c.id, ...(Array.isArray(c.ids) ? [...c.ids].reverse() : [])].filter(Boolean);
-    for (const id of ids) { const p = picked(id); if (typeof p === 'string' && p) return p; }
-    return null;
-  }
   return typeof c.color === 'string' && /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : null;
 }
 
 // ---------- a bot's chat as the Bots tab shows it (botFeed) ----------
 // Only Fleet View starts a message with "[Fleet View]": anyone else's is framed ("[Fleet View · unsigned…") or
-// marked "(quoted)" by chief.js frame, so this header alone says it is a setup note
+// marked "(quoted)" by the server, so this header alone says it is a setup note
 const SETUP = /^\[Fleet View\][ \t]*/;
 export const setupNote = (text) => { const t = String(text == null ? '' : text); return SETUP.test(t) ? t.replace(SETUP, '') : null; };
 // what a bot answers a setup note with when it asks for "ok" (bots.js startPrompt, idNote)
@@ -622,11 +593,11 @@ export function reactionOf(text) {
   const m = REACT.exec(String(text == null ? '' : text));
   return m && EMOJI.test(m[1]) ? { emoji: m[1], text: String(text).slice(m[0].length) } : null;
 }
-// Fleet View's notes that are only plumbing (bots.js startPrompt, idNote, CHANGED_NOTE; chief.js idNote; the host's
-// cut-off note), and what botFeed leaves out after each
+// Fleet View's notes that are only plumbing (bots.js startPrompt, idNote, CHANGED_NOTE; the host's cut-off note),
+// and what botFeed leaves out after each
 export function quietNote(text) {
   const t = String(text == null ? '' : text);
-  if (/^You are (?:the Chief\b|.{1,80}?, one of Henry's bots\b)/.test(t)) return /Greet Henry/.test(t) ? 'skip' : 'ack';
+  if (/^You are .{1,80}?, one of Henry's bots\b/.test(t)) return /Greet Henry/.test(t) ? 'skip' : 'ack';
   if (/^Your instructions changed\b/.test(t)) return 'one';
   if (/^You were cut off mid-turn\b/.test(t)) return 'skip';
   return null;
@@ -892,4 +863,12 @@ export function tasksHead(tasks, now = Date.now()) {
   const next = open.filter((t) => Number.isFinite(t.nextRun)).sort((a, b) => a.nextRun - b.nextRun)[0];
   const text = next ? `next: ${oneLine(next.title, 60)}, ${taskWhen(next.nextRun, now)}` : open.length ? `${open.length} open` : list.length ? 'all done' : 'none yet';
   return { count: list.length, open: open.length, text };
+}
+export function profileTasks(tasks) {
+  const list = (Array.isArray(tasks) ? tasks : []).filter((t) => t && typeof t === 'object');
+  const at = (t) => (Number.isFinite(t.nextRun) ? t.nextRun : Number.MAX_SAFE_INTEGER);
+  const open = list.filter((t) => t.status !== 'done' && t.status !== 'paused').sort((a, b) => at(a) - at(b));
+  const paused = list.filter((t) => t.status === 'paused');
+  const done = list.filter((t) => t.status === 'done').sort((a, b) => (Number(b.lastRun) || 0) - (Number(a.lastRun) || 0));
+  return { live: [...open, ...paused], done };
 }

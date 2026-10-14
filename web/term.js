@@ -131,7 +131,7 @@ export const noTermNote = () => ({ nodesk: 'desktop window only', host: 'the ses
 export const hosts = new Map(); // id -> { id, pid, alive, exitCode, startedAt, pending, created, forked, cwd, account, status, interrupted,
 //                                        waitingFor, autoContinue, slashPanel (null/false from an older host),
 //                                        handoffFrom (it picked up a handoff of that conversation, desktop/host.js),
-//                                        role ('chief' or 'bot:<id>': an overseer, never on the map; else null) }
+//                                        role ('bot:<id>': a bot, never on the map; else null) }
 const listeners = new Set();
 const rekeyListeners = new Set();
 // a new conversation was given its id: cb(oldKey, id), after this module has moved everything over
@@ -173,7 +173,7 @@ function applyList(list) {
       waitingFor: typeof p.waitingFor === 'string' ? p.waitingFor.slice(0, 300) : null, autoContinue: !!p.autoContinue,
       slashPanel: typeof p.slashPanel === 'string' && /^\/[\w:-]{1,39}$/.test(p.slashPanel) ? p.slashPanel : null,
       handoffFrom: typeof p.handoffFrom === 'string' && ID_RE.test(p.handoffFrom) ? p.handoffFrom : null,
-      role: typeof p.role === 'string' && /^(?:chief|bot:[0-9a-f]{12})$/.test(p.role) ? p.role : null,
+      role: typeof p.role === 'string' && /^bot:[0-9a-f]{12}$/.test(p.role) ? p.role : null,
       cols: Number.isInteger(p.cols) && p.cols > 0 ? p.cols : 0, rows: Number.isInteger(p.rows) && p.rows > 0 ? p.rows : 0,
     });
   }

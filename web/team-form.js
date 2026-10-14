@@ -9,7 +9,7 @@
 //   leadOf(t)                              a team's lead (its conversation id), or null (peers)
 //   teamsOfId(teams, id)                   { up: the team it is a plain member of, own: the one it leads }
 //   newTeamWhy(contacts)                   why "+" ▸ New team is off (fewer than two overseers started), or null
-//   teamChoices(contacts, teams, joinWhy)  who can be ticked: the Chief and the bots, each { c, id, why, note }
+//   teamChoices(contacts, teams, joinWhy)  who can be ticked: the bots, each { c, id, why, note }
 //   memberRow(x, picked, max)              one row as drawn: { on, off, note } (off: greyed, with why or "full")
 //   settleTeam(v, choices, contacts, max)  the ticks, lead and team above that still hold after /state moved
 //   leadChoices(ticked, teams)             Lead ▸: No lead (peers), then "<name> leads" per ticked one
@@ -47,19 +47,19 @@ export function teamsOfId(teams, id) {
   return { up: ts.find((t) => arr(t.members).includes(id) && t.lead !== id) || null, own: ts.find((t) => t.lead === id && arr(t.members).includes(id)) || null };
 }
 
-// the Chief's and the bots' rows (chats-model.js buildContacts) that have a conversation on this machine
-const overseer = (c) => !!c && (c.kind === 'bot' || c.kind === 'chief');
+// the bots' rows (chats-model.js buildContacts)
+const overseer = (c) => !!c && c.kind === 'bot';
 export function newTeamWhy(contacts) {
   const n = arr(contacts).filter((c) => overseer(c) && c.id && !c.elsewhere).length;
-  return n >= 2 ? null : 'needs two bots (or a bot and the Chief) that have started';
+  return n >= 2 ? null : 'needs two bots that have started';
 }
 
-// who can be in it: the Chief and every bot, each with why not (greyed) or a note: not running (it is resumed to take
+// who can be in it: every bot, each with why not (greyed) or a note: not running (it is resumed to take
 // the order), the team it leaves, the one it still leads. joinWhy(id): why that conversation can't be in a team made
 // from here (the page: the orders' checks, ui.teamJoinWhy; the phone: the PC's list), or null
 export function teamChoices(contacts, teams, joinWhy) {
   return arr(contacts).filter(overseer).map((c) => {
-    let why = c.elsewhere ? 'runs on another machine' : !c.id ? (c.kind === 'chief' ? 'not started yet' : 'never started: Start it first') : null;
+    let why = c.elsewhere ? 'runs on another machine' : !c.id ? 'never started: Start it first' : null;
     if (!why) { try { why = joinWhy(c.id) || null; } catch (e) { why = String((e && e.message) || e); } }
     const { up, own } = c.id ? teamsOfId(teams, c.id) : {};
     const note = why || [c.kind === 'bot' && c.live === false ? 'not running: it starts to take the order' : '',

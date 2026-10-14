@@ -1,6 +1,6 @@
 // Tests for bots.js (the server side of Bots): name, brief and role checks (a role in CLAUDE.md, state.bots and
 // botLooks; scripts/bot-roles-test.js has it in the team briefs), the folder's slug and its clash suffix, the
-// CLAUDE.md fill, /state's tags (sessions, finished, removed; the Chief's too), state.bots, and make / start / follow /
+// CLAUDE.md fill, /state's tags (sessions, finished, removed), state.bots, and make / start / follow /
 // tell / change / remove against a fake session host, a bot's look (shape and colour: checked, saved, set by the page
 // and by the bot itself through POST /api/bots/look), every folder under a temp one (never ~/Bots). No live host:
 // node scripts/bots-test.mjs
@@ -13,7 +13,8 @@ import { SHAPES as MASCOT_SHAPES } from '../web/mascot.js';
 
 const require = createRequire(import.meta.url);
 const B = require('../bots.js');
-const C = require('../chief.js');
+// what checkOpts falls back on, as a caller passes it
+const DEF = { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium' };
 const API = require('../api.js');
 
 let n = 0;
@@ -72,10 +73,10 @@ test('a role is up to 60 characters on one line, cleaned like a name; blank or l
   assert.equal(B.ROLE_MAX, 60);
 });
 test('account, model and effort: the defaults, or what POST /api/sessions takes', () => {
-  assert.deepEqual(B.checkOpts({}, C.DEFAULTS, ['A', 'B']), { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium' });
-  assert.deepEqual(B.checkOpts({ account: 'A', model: 'opus', effort: 'high' }, C.DEFAULTS, ['A', 'B']), { account: 'A', model: 'opus', effort: 'high' });
-  assert.ok(B.checkOpts({ account: 'Z' }, C.DEFAULTS, ['A', 'B']).err);
-  assert.equal(B.checkOpts({ account: 'dynamic' }, C.DEFAULTS, ['A', 'B']).account, 'dynamic');
+  assert.deepEqual(B.checkOpts({}, DEF, ['A', 'B']), { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium' });
+  assert.deepEqual(B.checkOpts({ account: 'A', model: 'opus', effort: 'high' }, DEF, ['A', 'B']), { account: 'A', model: 'opus', effort: 'high' });
+  assert.ok(B.checkOpts({ account: 'Z' }, DEF, ['A', 'B']).err);
+  assert.equal(B.checkOpts({ account: 'dynamic' }, DEF, ['A', 'B']).account, 'dynamic');
   // a Dynamic account: the one with the most usage left, by the fuller of its two limits, the weekly one breaking a tie
   const u = (five, week) => ({ five: five == null ? null : { pct: five }, week: week == null ? null : { pct: week } });
   assert.equal(B.roomiest(['A', 'B'], { A: u(80, 20), B: u(10, 50) }), 'B');
@@ -83,12 +84,12 @@ test('account, model and effort: the defaults, or what POST /api/sessions takes'
   assert.equal(B.roomiest(['A', 'B'], { A: u(5, 5) }), 'A', 'an account with no read comes after one with a read');
   assert.equal(B.roomiest(['A', 'B'], {}), 'B', 'none read: the default');
   assert.equal(B.roomiest(['A'], null), 'A');
-  assert.ok(B.checkOpts({ account: 'a' }, C.DEFAULTS, ['A', 'B']).err);
-  assert.ok(B.checkOpts({ model: 'x y' }, C.DEFAULTS, ['A', 'B']).err);
-  assert.ok(B.checkOpts({ effort: 'huge' }, C.DEFAULTS, ['A', 'B']).err);
+  assert.ok(B.checkOpts({ account: 'a' }, DEF, ['A', 'B']).err);
+  assert.ok(B.checkOpts({ model: 'x y' }, DEF, ['A', 'B']).err);
+  assert.ok(B.checkOpts({ effort: 'huge' }, DEF, ['A', 'B']).err);
   // Dynamic: either may be 'dynamic'; a session of the bot starts on the dynamic base for that part
-  assert.deepEqual(B.checkOpts({ model: 'dynamic', effort: 'dynamic' }, C.DEFAULTS, ['A', 'B']), { account: 'B', model: 'dynamic', effort: 'dynamic' });
-  assert.ok(B.checkOpts({ model: 'Dynamic' }, C.DEFAULTS, ['A', 'B']).err === undefined); // a name MODEL_RE takes, not Dynamic
+  assert.deepEqual(B.checkOpts({ model: 'dynamic', effort: 'dynamic' }, DEF, ['A', 'B']), { account: 'B', model: 'dynamic', effort: 'dynamic' });
+  assert.ok(B.checkOpts({ model: 'Dynamic' }, DEF, ['A', 'B']).err === undefined); // a name MODEL_RE takes, not Dynamic
   // long context: a session runs on the model's 1M-context version, where it has one
   assert.deepEqual(B.runOpts({ model: 'dynamic', effort: 'high' }), { model: `${B.DYNAMIC_START.model}[1m]`, effort: 'high' });
   assert.deepEqual(B.runOpts({ model: 'opus', effort: 'dynamic' }), { model: 'opus[1m]', effort: B.DYNAMIC_START.effort });
@@ -194,9 +195,9 @@ test('CLAUDE.md: the template with the name and the brief, in one pass', () => {
 });
 
 // ---------- /state ----------
-test('/state tags: a bot\'s conversations (a removed bot\'s too) and the Chief\'s, in sessions, finished and removed', () => {
+test('/state tags: a bot\'s conversations (a removed bot\'s too), in sessions, finished and removed', () => {
   const bots = [{ id: BID, ids: [id(1), id(2)] }, { id: BID2, ids: [id(3)], removed: true }];
-  const tagOf = B.tagger([id(9)], bots);
+  const tagOf = B.tagger(bots);
   const st = {
     sessions: [{ id: id(1) }, { id: id(2) }, { id: id(4) }, { id: id(9) }],
     finished: [{ id: id(3) }, { id: id(5) }],
@@ -204,12 +205,12 @@ test('/state tags: a bot\'s conversations (a removed bot\'s too) and the Chief\'
     feed: [{ sid: id(1) }],
   };
   B.tagState(st, tagOf);
-  assert.deepEqual(st.sessions.map((x) => x.bot || null), [BID, BID, null, 'chief']);
+  assert.deepEqual(st.sessions.map((x) => x.bot || null), [BID, BID, null, null]);
   assert.ok(!('bot' in st.sessions[2]));
   assert.deepEqual(st.finished.map((x) => x.bot || null), [BID2, null]);
   assert.deepEqual(st.removed.map((x) => x.bot || null), [BID, null]);
   assert.ok(!('bot' in st.feed[0]));
-  assert.equal(B.tagger([], [])(id(1)), null);
+  assert.equal(B.tagger([])(id(1)), null);
 });
 test('state.bots: not the removed ones, newest first, convId the running one else the newest, live', () => {
   const mk = (bid, at, o = {}) => ({ id: bid, name: bid, brief: '', account: 'B', model: 'm', effort: 'low', folder: `/b/${bid}`, createdAt: at, ids: [], told: [], ...o });
@@ -275,12 +276,12 @@ test('a look goes to the other machines by its folder\'s name (botLooks): lookAt
   assert.deepEqual(B.lookItems(reg, others), [B.lookItem(bot), { slug: 'gone', shape: 'star' }, { slug: 'panchito', color: '#58a6ff' }]);
   assert.deepEqual(B.othersOf(reg, [...others, { slug: 'PETAL', shape: 'tri' }, null]), [{ slug: 'gone', shape: 'star' }, { slug: 'panchito', color: '#58a6ff' }]);
 });
-test('api.js: the Chief and the bots are overseers; the API lists the bot routes', () => {
-  assert.equal(API.isOverseer('chief'), true);
+test('api.js: the bots are the overseers (the old "chief" role is none); the API lists the bot routes and no Chief', () => {
   assert.equal(API.isOverseer(`bot:${BID}`), true);
-  for (const r of [null, undefined, '', 'boss', 'bot:', 'bot:XYZ', 'bot:AAAAAAAAAAAA', `bot:${BID}0`, `x bot:${BID}`]) assert.equal(API.isOverseer(r), false, String(r));
+  for (const r of [null, undefined, '', 'chief', 'boss', 'bot:', 'bot:XYZ', 'bot:AAAAAAAAAAAA', `bot:${BID}0`, `x bot:${BID}`]) assert.equal(API.isOverseer(r), false, String(r));
   const paths = API.ENDPOINTS.map((e) => `${e.method} ${e.path}`);
   for (const p of ['GET /api/bots', 'POST /api/bots', 'POST /api/bots/:id', 'POST /api/bots/:id/start', 'POST /api/bots/:id/remove', 'POST /api/bots/look']) assert.ok(paths.includes(p), p);
+  assert.ok(!paths.some((p) => /chief/i.test(p)), 'no Chief route');
   assert.equal(B.botOfRole(`bot:${BID}`), BID);
   assert.equal(B.botOfRole('chief'), null);
 });
@@ -402,8 +403,8 @@ function harness(o = {}) {
   let saved = o.saved || [];
   const logs = new Set(o.logs || []); // conversation ids whose log is on disk
   const promptAt = new Map();
-  // watching: the watched conversations' facts (id -> fact), the ones Fleet View knows, their names, the Chief's ids
-  const facts = new Map(), known = new Set(), names = new Map(), chief = [];
+  // watching: the watched conversations' facts (id -> fact), the ones Fleet View knows, their names
+  const facts = new Map(), known = new Set(), names = new Map();
   let down = !!o.down, deliverCode = null;
   const roleOfConv = (cid) => { const b = bots._state().bots.find((x) => x.ids.includes(cid)); return b ? `bot:${b.id}` : null; };
   const api = {
@@ -441,10 +442,10 @@ function harness(o = {}) {
     exists: (x) => logs.has(x), turnInfo: (x) => ({ promptAt: promptAt.get(x) || 0 }), sessionsFile,
     trustFolder: (f) => calls.trust.push(f), accounts: () => ['A', 'B'], rename: (x, name) => calls.rename.push({ id: x, name }),
     watchFacts: (ids) => { calls.facts.push([...ids]); return ids.filter((x) => facts.has(x)).map((x) => ({ id: x, name: names.get(x) || null, ...facts.get(x) })); },
-    known: (x) => known.has(x) || logs.has(x), nameOf: (x) => names.get(x) || null, chiefIds: () => chief,
+    known: (x) => known.has(x) || logs.has(x), nameOf: (x) => names.get(x) || null,
     base, template: B.TEMPLATE_FILE,
   });
-  return { bots, calls, base, logs, promptAt, facts, known, names, chief, setList: (l) => { list = l; }, list: () => list, saved: () => saved,
+  return { bots, calls, base, logs, promptAt, facts, known, names, setList: (l) => { list = l; }, list: () => list, saved: () => saved,
     setDown: (v) => { down = v; }, setDeliver: (c) => { deliverCode = c; } };
 }
 const realNow = Date.now;
@@ -631,9 +632,9 @@ await (async () => {
     await again.bots.tick();
     assert.equal(again.calls.deliver.length, 0);
     assert.equal(again.bots.view()[0].live, true);
-    // the tags follow it: both its conversations, and the Chief's
-    const tagOf = again.bots.tagOf([id(900)]);
-    assert.equal(tagOf(first), bid); assert.equal(tagOf(next), bid); assert.equal(tagOf(id(900)), 'chief'); assert.equal(tagOf(id(502)), null);
+    // the tags follow it: both its conversations
+    const tagOf = again.bots.tagOf();
+    assert.equal(tagOf(first), bid); assert.equal(tagOf(next), bid); assert.equal(tagOf(id(502)), null);
     // resumable: its conversation in its folder, with its role
     assert.deepEqual(again.bots.vouch(next), { role, folder: made.bot.folder });
     assert.equal(again.bots.vouch(id(502)), null);
@@ -724,7 +725,7 @@ await (async () => {
     assert.deepEqual(h.bots.view(), []);
     assert.deepEqual(h.bots.chatIds(), []); // a removed bot's chat ages off like any other
     assert.equal(h.saved()[0].removed, true);
-    assert.equal(h.bots.tagOf([])(made.id), bid);
+    assert.equal(h.bots.tagOf()(made.id), bid);
     assert.equal(h.bots.vouch(made.id), null); // not resumed through the API any more
     assert.ok(fs.existsSync(path.join(made.bot.folder, 'CLAUDE.md')));
     assert.equal((await h.bots.start(bid))[0], 404);
@@ -759,18 +760,16 @@ await (async () => {
     assert.deepEqual(h.saved()[0].map, { x: 30, y: 40 });
     assert.deepEqual(h.bots.view()[0].map, { x: 30, y: 40 });
     // the refusals: not a conversation id, no such job (left out is not a stop), its own conversation, another bot's,
-    // the Chief's, one Fleet View does not know; nobody is told
+    // one Fleet View does not know; nobody is told
     const X = id(700), Y = id(701);
     h.known.add(X); h.known.add(Y); h.names.set(X, 'Fix login');
     const [, other] = await h.bots.create({ name: 'Other' });
-    h.chief.push(id(800)); h.known.add(id(800));
     const sent = h.calls.deliver.length;
     assert.equal((await h.bots.setWatch(bid, { id: 'nope', job: 'report' }))[0], 400);
     assert.equal((await h.bots.setWatch(bid, { id: X, job: 'boss' }))[0], 400);
     assert.equal((await h.bots.setWatch(bid, { id: X }))[0], 400);
     assert.match((await h.bots.setWatch(bid, { id: mine, job: 'report' }))[1].message, /Pablito's own/);
     assert.match((await h.bots.setWatch(bid, { id: other.id, job: 'report' }))[1].message, /a bot's \(Other\)/);
-    assert.match((await h.bots.setWatch(bid, { id: id(800), job: 'report' }))[1].message, /Chief/);
     assert.equal((await h.bots.setWatch(bid, { id: id(801), job: 'report' }))[0], 400);
     assert.equal((await h.bots.setWatch('ffffffffffff', { id: X, job: 'report' }))[0], 404);
     assert.equal(h.calls.deliver.length, sent);

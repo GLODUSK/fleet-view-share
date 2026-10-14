@@ -48,7 +48,7 @@
 // terminal's transcript view): every folded line, tool row and thinking row opens; off again, each goes back to how it was.
 // A "!" command (bash mode, see compose.js) shows as your message "! <command>"; what it printed as a block under it.
 // opts.bubbles (the Bots tab, chats.js; the map's panes leave it off): a messenger look. Claude's replies sit in
-// bubbles on the left (chat.css .chat-bubbles), Fleet View's own setup notes to a bot or the Chief ("[Fleet View] …")
+// bubbles on the left (chat.css .chat-bubbles), Fleet View's own setup notes to a bot ("[Fleet View] …")
 // are a small centred grey line instead of your bubble, and the bare "ok" the bot answers one with is left out
 // (chats-model.js botFeed). Only the drawing changes: c.items keeps them as they came. Kept simple: no model or
 // effort switch notes (botFeed), no Fork (on a message, a selection or a queued one), and a reaction the bot gave your

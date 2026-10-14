@@ -294,8 +294,8 @@ since 2026-10-13, Send in the Chat tab of a chat another machine runs does one o
 
 | The chat | What Send does |
 |---|---|
-| any, linked (portable or bound, idle or busy, a bot or the Chief) | `/link/send`: it goes in there (queued there while Claude works or asks; resumed there when it isn't running) and the chat stays there. "Runs on <host>: your messages go there" (busy: "Working on <host>: what you send goes there"; bound: "Its workspace is only on <host>") |
-| any, machines not linked | nothing is sent: "<host> isn't linked with this machine yet" (they link by themselves while both are on), with **Continue on this machine** (not for a bot or the Chief: a move would lose the role) |
+| any, linked (portable or bound, idle or busy, a bot or not) | `/link/send`: it goes in there (queued there while Claude works or asks; resumed there when it isn't running) and the chat stays there. "Runs on <host>: your messages go there" (busy: "Working on <host>: what you send goes there"; bound: "Its workspace is only on <host>") |
+| any, machines not linked | nothing is sent: "<host> isn't linked with this machine yet" (they link by themselves while both are on), with **Continue on this machine** (not for a bot: a move would lose the role) |
 | host offline (the link's presence) | a card: "<host> is offline. Continue on this machine from its last copy?" (a forced move; a draft then goes in here), or for a bound one "Only on <host>, which is offline", with Continue on this machine anyway (the conversation, not its files) |
 
 **Continue on this machine** in the chat's right-click menu (`web/app.js` continueItem, shown on the desktop window

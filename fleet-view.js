@@ -12,7 +12,6 @@ const P = require(path.join(__dirname, 'platform.js'));
 // macOS: started from the window, launchd or Finder, PATH is a bare one; the login shell's has git, gh, claude, node
 P.applyLoginPath();
 const API = require(path.join(__dirname, 'api.js'));
-const CHIEF_JS = require(path.join(__dirname, 'chief.js'));
 const BOTS_JS = require(path.join(__dirname, 'bots.js'));
 const CONV = require(path.join(__dirname, 'conversation.js'));
 const CMDS = require(path.join(__dirname, 'commands.js'));
@@ -171,8 +170,8 @@ const OLD_SETTINGS_FILE = path.join(os.homedir(), '.agent-pulse.json'); // from 
 let saved = {};
 try { saved = JSON.parse(fs.readFileSync(fs.existsSync(SETTINGS_FILE) ? SETTINGS_FILE : OLD_SETTINGS_FILE, 'utf8')) || {}; } catch {}
 if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
-// the Chief's part of the server (chief.js) and the bots' (bots.js), made once the API's ctx is there (below apiCtx)
-let CHIEF = null, BOTS = null;
+// the bots' part of the server (bots.js), made once the API's ctx is there (below apiCtx)
+let BOTS = null;
 // ~/Bots and the bots' folders in it are never a workspace
 const inBots = (p) => !!BOTS && BOTS.inBots(p);
 // remote access (remote.js): the page in a browser on another device, over Tailscale. settings.remote.enabled is the
@@ -595,10 +594,10 @@ function cleanRepoOrder(list) {
 }
 let repoOrder = DEMO ? [] : cleanRepoOrder(saved.repoOrder) || [];
 // the Bots list's order, Henry's alone (Henry, 2026-10-12: "dont move them up and down when one sends a message"):
-// settings.chatOrder { pinned: [keys], keys: [keys] } (sync-prefs.js cleanChatOrder), the rows' keys ('chief',
-// 'bot:<id>', 'team:<id>': web/chats-model.js) in the order they show, the pinned ones on top. Set by dragging a row
-// or Pin / Unpin on the page, Pin and Move up / down / to top on the phone; a row in neither list is new and goes at
-// the top of the rest (the Chief: pinned), and the page adds it (chatOrderAdd). The same on every device (the chatOrder group)
+// settings.chatOrder { pinned: [keys], keys: [keys] } (sync-prefs.js cleanChatOrder), the rows' keys ('bot:<id>',
+// 'team:<id>': web/chats-model.js; an old 'chief' key is dropped) in the order they show, the pinned ones on top. Set
+// by dragging a row or Pin / Unpin on the page, Pin and Move up / down / to top on the phone; a row in neither list is
+// new and goes at the top of the rest, and the page adds it (chatOrderAdd). The same on every device (the chatOrder group)
 const EMPTY_CHAT_ORDER = { pinned: [], keys: [] };
 let chatOrder = DEMO ? EMPTY_CHAT_ORDER : SYNC_PREFS.cleanChatOrder(saved.chatOrder) || EMPTY_CHAT_ORDER;
 // lazily, as a new order is saved: a team that is gone and a bot removed here leave it (another machine's bot stays:
@@ -844,7 +843,7 @@ function flushSettings() {
   const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, chatOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, autoSwitchAccount: autoSwitch, offAccounts, teams, apiTemp, pinOverrides: [...pinOverrides.values()],
     dynamicChats: [...dynamicChats.values()], botLooks,
-    chief: CHIEF ? CHIEF.saveShape() : saved.chief,
+    chief: undefined, // the Chief is gone (2026-10-13): an older file's chief key is dropped
     bots: BOTS ? BOTS.saveShape() : saved.bots,
     remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
     moved: [...moved.values()],
@@ -1801,7 +1800,7 @@ const ACCTS = ACCOUNTS.createAccounts({
 // rescue is told "continue"). One move at a time; never one another device has (sync owners, away.json); the account
 // it moved to is remembered at once, so cards, the map and the bots show the new letter. Each move raises an alert
 // ("moved from Claude A to Claude B: A at 92% of its 5-hour limit"), a feed line and a server.log line; when nothing
-// has room it says so once, until one has again. New conversations: switchPick (the API, bots, the Chief) and
+// has room it says so once, until one has again. New conversations: switchPick (the API, bots) and
 // /state's accountSwitch.pick (the page).
 const switchLast = new Map(); // id -> { at, from, to }: its last move (the cooldown)
 const switching = new Set(); // ids with a move in flight
@@ -1821,7 +1820,7 @@ function switchView() {
   switchCache = { at: Date.now(), on: autoSwitch, v: { on: autoSwitch, pick } };
   return switchCache.v;
 }
-// a new conversation the API, a bot or the Chief starts on `a`: { account, text } of the one it starts on instead, or null
+// a new conversation the API or a bot starts on `a`: { account, text } of the one it starts on instead, or null
 function switchPick(a, name) {
   const inp = switchInput();
   const p = inp.on ? SWITCH.pickNew(a, inp) : null;
@@ -2539,7 +2538,7 @@ function hushOf(typed, texts) {
   if (!n) return null;
   if (/^You were cut off mid-turn\b/.test(n[1])) return null;
   if (/^Your instructions changed\b/.test(n[1])) return 'turn';
-  if (/^You are (?:the Chief\b|.{1,80}?, one of Henry's bots\b)/.test(n[1]) && /Greet Henry/.test(n[1])) return null;
+  if (/^You are .{1,80}?, one of Henry's bots\b/.test(n[1]) && /Greet Henry/.test(n[1])) return null;
   return 'ack';
 }
 const hushed = (hush, said) => hush === 'turn' || (hush === 'ack' && HUSH_ACK.test(said))
@@ -2640,14 +2639,13 @@ const endedLongAgo = (s, now) => s.state === 'DONE' && !s.turnOpen && !s.remote?
 const keepRemembered = (s, now) => s.state !== 'DONE' && remembered.sessions.has(s.id) && now - (s.actT || s.mtime || 0) < REMEMBER_MS;
 // its live claude waits on you (a prompt, or a panel left open): kept however long its log has been quiet
 const liveWaiting = (id) => liveProcs.get(id)?.status === 'waiting';
-// the conversations the Bots tab opens, the Chief's and each bot's (chief.js view, bots.js chatIds): kept however long
+// the conversations the Bots tab opens, each bot's (bots.js chatIds): kept however long
 // their logs have been quiet, as the tab draws a chat and its box only for a conversation /state lists (read once per
 // discover)
 let overseerKeep = new Set();
 function overseerIds() {
   const out = new Set();
   if (DEMO) return out;
-  try { const id = CHIEF && CHIEF.view().id; if (id) out.add(id); } catch {}
   try { for (const id of (BOTS && BOTS.chatIds()) || []) out.add(id); } catch {}
   return out;
 }
@@ -5360,9 +5358,9 @@ const joinNames = (a) => (a.length < 2 ? a.join('') : `${a.slice(0, -1).join(', 
 
 // Text for one conversation, through api.js deliverText (it follows a handoff, waits behind a menu, resumes one that
 // is not running). kind 'order' (a brief) may resume it; 'note' (who joined or left) goes only to a conversation
-// running now, since every typed note costs a Claude turn. Nothing is typed in the demo. No via: a chief gets team
-// text marked unsigned (chief.js frame) even from the page, since a bot makes teams through /api/teams too and the
-// brief carries its order and names (chief/BRIEF.md tells the Chief to ask Henry).
+// running now, since every typed note costs a Claude turn. Nothing is typed in the demo. No via: a bot gets team
+// text marked unsigned (overseer.js frame) even from the page, since a bot makes teams through /api/teams too and the
+// brief carries its order and names.
 // -> Promise of { id, name, ok, queued?, message }
 async function tell(id, text, kind) {
   const name = memberOf(id).name;
@@ -5699,7 +5697,7 @@ function statusOf(q) {
 }
 
 // what a conversation (as /state lists it) is doing, in a few words: the tool running, the question it asks, why it
-// stalled, its last action while it works, else its state's label (GET /api/status, the Chief's briefing)
+// stalled, its last action while it works, else its state's label (GET /api/status)
 function doingOf(s) {
   const run = s.running && s.running[0];
   const act = s.lastAction;
@@ -6463,13 +6461,13 @@ function buildState() {
   all.sort((a, b) => (RANK[a.state] ?? 9) - (RANK[b.state] ?? 9) || b.last - a.last);
   const owners = syncOwners();
   const out = all.map((s) => sessionJson(s, now, owners));
-  // the overseers' conversations, the Chief's and the bots' (bots.js): tagged bot: '<bot id>' or 'chief' in sessions,
+  // the overseers' conversations, the bots' (bots.js): tagged bot: '<bot id>' in sessions,
   // finished and removed (below), and never a repo's live count, a clash, a conflict, a header count or the feed
   // another machine's bots (bots.js elsewhere): their synced chats are tagged the same way
   const away = BOTS ? BOTS.elsewhere([...sessions.values()].map((s) => ({ id: s.id, root: s.root, cwd: s.cwd, name: nameNow(s.id, s.name), last: s.last, account: s.account }))) : [];
   const awayTag = new Map();
   for (const b of away) for (const id of b.ids) awayTag.set(id, b.id);
-  const ownTag = BOTS ? BOTS.tagOf(CHIEF ? CHIEF.chiefIds() : []) : () => null;
+  const ownTag = BOTS ? BOTS.tagOf() : () => null;
   const tagOf = (id) => ownTag(id) || awayTag.get(id) || null;
   const onMap = all.filter((s) => !tagOf(s.id));
   // the repo menu: every repo in the window, busiest first, less the ones taken off it; the picked one stays listed
@@ -6532,9 +6530,7 @@ function buildState() {
     home: DEMO ? null : os.homedir(),
     // hiddenSync: bumped when another device's hidden list was put in (sync-prefs.js): the page takes hidden whole then
     settings: { view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, chatOrder, hostRules, compact, finishedOpen, steady, miniBounds, miniOpen, chatsBounds, chatsOpen, chatsOnTop, hidden, forgotten, hiddenSync, hiddenRepos, addedRepos, mapSpots, autostart: autostartOn(),
-      mapLens, mapViews, mapCamera, notify, autoSwitchAccount: autoSwitch, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() },
-      // the Chief: { id: the live Chief's conversation id, else the last one's while its log is there, else null; watch }
-      chief: CHIEF ? CHIEF.view() : { id: null, watch: false } },
+      mapLens, mapViews, mapCamera, notify, autoSwitchAccount: autoSwitch, parity: parityRules, offAccounts, remote: { enabled: REMOTE.enabled() } },
     // remote access (remote.js): the switch, the address, how turning it on went, browsers waiting for approval
     // (with their codes) and the approved ones
     remote: REMOTE.view(),
@@ -6631,7 +6627,6 @@ function toolsHere() {
 // sync-prefs.js applyOps) applied to the list as it is here, which the page sends instead of a whole list (a whole list
 // from a page that missed another device's change would undo it); the whole-list keys stay for an older page
 // (docs/sync-format.md says until when)
-// chief ({ watch: bool }: the Chief's watch mode, chief.js; other keys in it are left alone),
 // remote ({ enabled }: remote access, remote.js) is taken from this PC's own page only, in the route itself
 function applySettings(b) {
   if (!b || typeof b !== 'object') return;
@@ -6714,7 +6709,6 @@ function applySettings(b) {
   else if (okBounds(b.miniBounds, 80, 40)) miniBounds = roundBounds(b.miniBounds);
   if (b.chatsBounds === null) chatsBounds = null;
   else if (okBounds(b.chatsBounds, CHATS_MIN_W, CHATS_MIN_H)) chatsBounds = roundBounds(b.chatsBounds);
-  if (b.chief && typeof b.chief === 'object' && typeof b.chief.watch === 'boolean' && CHIEF) CHIEF.setWatch(b.chief.watch);
   saveSettings();
 }
 
@@ -7039,34 +7033,7 @@ const apiCtx = {
   whereIs,
 };
 
-// ---------- the Chief (chief.js) ----------
-// What its briefing and watch mode read, all of it from what /state has already: each conversation /state lists (less
-// the ones removed from the map, and the overseers': its own and the bots'), the recently finished strip, the
-// production deploys, the conflicts, and the Chief's orders (its messages to other conversations, from the timeline's
-// events). No model call, no GitHub call.
-function chiefRows() {
-  const now = Date.now(), st = buildState();
-  const rows = st.sessions.filter((s) => !hiddenNow(s.id) && !s.bot).map((s) => {
-    const raw = sessions.get(s.id);
-    return { id: s.id, name: s.name, repo: s.repo ? s.repo.name : null, state: s.state, label: s.label, doing: doingOf(s), waitingOn: s.waitingOn || null,
-      since: raw ? waitSince(raw) : s.active || 0, turnStart: s.turnStart || null, active: s.active || null,
-      lastReply: s.lastReply ? plain(s.lastReply, 600) : null, replyAt: raw && raw.replyAt ? Math.round(raw.replyAt) : 0, actionAt: s.lastAction ? s.lastAction.t : 0 };
-  });
-  return { now, st, rows };
-}
-function chiefFacts() {
-  const { now, st, rows } = chiefRows();
-  return { now, sessions: rows,
-    finished: st.finished.filter((x) => !x.bot).map((x) => ({ id: x.id, name: x.name, repo: x.repo ? x.repo.name : null, summary: x.summary, at: x.endedAt })),
-    deploys: st.deploys.map((x) => ({ repo: x.name || x.repo, state: x.state, title: x.title, at: x.readyAt || x.createdAt })) };
-}
-function chiefWatchFacts(chiefIds) {
-  const { now, st, rows } = chiefRows();
-  const ids = new Set(chiefIds);
-  const orders = tl.events.filter((e) => e.verb === 'message' && e.to && ids.has(e.sid) && now - e.t < 24 * 3600e3)
-    .map((e) => ({ to: successorOf(e.to) || e.to, t: e.t }));
-  return { now, sessions: rows, orders, conflicts: st.conflicts.map((c) => ({ id: c.id, kind: c.kind, label: c.label, sessions: c.sessions })) };
-}
+// ---------- the bots (bots.js) ----------
 // What a bot's watches read every few seconds (bots.js watchTick), for the watched ids only and straight from the raw
 // sessions (no buildState): its name, state, last reply (plain, ≤ 600) and when it came; next, the pickup when it
 // handed off (successorOf); gone, when it was removed from the map, or Fleet View lists it no more and its log is gone
@@ -7080,16 +7047,6 @@ function botWatchFacts(ids) {
 }
 {
   const HOSTJS = require(path.join(__dirname, 'desktop', 'host.js'));
-  CHIEF = CHIEF_JS.createChief({
-    api: API, ctx: apiCtx, saved: saved.chief, save: saveSettings, demo: DEMO, dir: __dirname,
-    log: (t) => logOnce(t, t),
-    exists: (id) => !!conversationLog(id),
-    facts: chiefFacts, watchFacts: chiefWatchFacts,
-    turnInfo: (id) => apiCtx.turnInfo(id),
-    sessionsFile: HOSTJS.sessionsFile(), normDir: HOSTJS.normDir,
-  });
-  // POST /api/chief/start from a token caller (the phone relay, a script): api.js routes it here
-  apiCtx.chiefStart = (b) => CHIEF.start(b);
   // the bots (bots.js): /api/bots from a token caller, and a bot's own folder for resuming its conversations
   BOTS = BOTS_JS.createBots({
     api: API, ctx: apiCtx, saved: saved.bots, save: saveSettings, demo: DEMO,
@@ -7099,7 +7056,6 @@ function botWatchFacts(ids) {
     sessionsFile: HOSTJS.sessionsFile(), trustFolder, accounts: () => accountsHere(), usage: () => (DEMO ? {} : USAGE.view()), rename: (id, name) => renameSession(id, name),
     // watching (bots.js watchTick): the watched conversations' facts, and the checks and names POST /bots/:id/watch needs
     watchFacts: botWatchFacts, known: (id) => sessions.has(id) || !!conversationLog(id), nameOf: (id) => { const n = nameNow(id, null); return typeof n === 'string' && n ? n : null; },
-    chiefIds: () => (CHIEF ? CHIEF.chiefIds() : []),
   });
   apiCtx.bots = { list: () => BOTS.list(), create: (b) => BOTS.create(b), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id), look: (b) => BOTS.look(b) };
   apiCtx.botOf = (id) => BOTS.vouch(id);
@@ -8037,10 +7993,7 @@ function handleRequest(req, res) {
     res.fvZip = zipFor(req);
     if (REMOTE.route(req, res, pathname, who, pageCtx)) return;
   } else {
-    // POST /api/chief/start is the page's too (the Chats tab's Start): with an Origin it goes on to the page's routes
-    // below and their Origin check; without one it is the API's (token)
-    const pageChief = pathname === '/api/chief/start' && req.headers.origin !== undefined;
-    if (!pageChief && (pathname === '/api' || pathname.startsWith('/api/'))) return API.handle(req, res, pathname, apiCtx);
+    if (pathname === '/api' || pathname.startsWith('/api/')) return API.handle(req, res, pathname, apiCtx);
     const origin = req.headers.origin;
     if (origin && origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) return sendJson(res, 403, { ok: false, message: 'bad origin' });
   }
@@ -8134,13 +8087,6 @@ function handleRequest(req, res) {
       });
     }
     if (pathname === '/chat/image') return CONV.saveImage(req, res, convCtx);
-    // the Chats tab's Start for the Chief (chief.js): starts it, or adopts the one running
-    if (pathname === '/api/chief/start') {
-      return readBody(req, res, (b) => {
-        if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
-        CHIEF.start(b).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
-      });
-    }
     // the Bots tab (bots.js): POST /bots makes a bot, /bots/:id changes one, /bots/:id/start starts one, /bots/:id/remove
     // removes one, /bots/:id/switch switches a dynamic one's model or effort before a message (Dynamic: chats-model.js
     // sizeTask); each answers { ok, bot?, key?, id?, message? }. Only the page itself (its Origin, as /live) makes,
@@ -8211,8 +8157,6 @@ function handleRequest(req, res) {
   if (pathname === '/state') return sendState(req, res);
   if (pathname === '/timeline') return sendJson(res, 200, timelineOut(new URL(req.url, 'http://x').searchParams));
   if (pathname === '/since') return sendJson(res, 200, sinceOut(new URL(req.url, 'http://x').searchParams));
-  // the Chief's free briefing (chief.js): needs you, working, finished, deploys, and the same as a few lines
-  if (pathname === '/chief/briefing') return sendJson(res, 200, CHIEF.briefing());
   // the Accounts list alone (accounts.js view(), as /state's accountList): the phone's Claude accounts screen reads it
   // through the relay, which passes on only the fields it needs. On the PC only, like the /accounts/* changes
   if (pathname === '/accounts') {
@@ -8504,9 +8448,7 @@ function startWeb() {
     every(10000, 'api-temp', sweepTemp);
     // conversations on an account close to its limit move to one with room (switchTick)
     every(15000, 'account-switch', () => { switchTick().catch((e) => logOnce('account-switch:' + (e && e.message), `account switch failed\n${errorText(e)}`)); });
-    // the Chief: follow it through handoffs, tell a new one its id, watch mode (chief.js)
-    every(5000, 'chief', () => { CHIEF.tick(); });
-    // the bots: the same following and telling, for each (bots.js)
+    // the bots: follow each through handoffs, tell a new one its id (bots.js)
     every(5000, 'bots', () => { BOTS.tick(); });
     // the bots' tasks and routines: each one that comes due is delivered to its bot (bots.js schedule)
     every(5000, 'bot-tasks', () => { BOTS.schedule(); });

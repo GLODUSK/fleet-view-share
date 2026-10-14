@@ -37,7 +37,7 @@
 // list() gives each session: id, pid, alive, exitCode, startedAt, pending, created, forkFrom, cwd, handoffFrom,
 // pickingUp, account, status, waitingFor (what its pid file says it waits for, while waiting), claudePid,
 // interrupted, restored, autoContinue (a note is due, see below), slashPanel (the "/" command whose panel is
-// open, see Panels), role ('chief', 'bot:<id>' or null, see Roles), cols, rows, moving (a switchAccount is ending it).
+// open, see Panels), role ('bot:<id>' or null, see Roles), cols, rows, moving (a switchAccount is ending it).
 // The pipe is the lock: a second host finds the name taken and exits. The pipe keeps the default ACL (the
 // user, SYSTEM and administrators), and the token keeps out anything that did not read the user's own folder.
 //
@@ -62,7 +62,7 @@
 // (FV_HOST_RESTORE_GAP_MS in tests), so a client is let in and answered throughout and 40 sessions never start at once
 // (2026-10-13: a 12 s synchronous restore made the window take the host for stuck, kill it and start another, five
 // times in 71 s). Started straight away, in this order: the restart asker (restartBy) and the conversation the window
-// showed (ui.selectedId); the busy or interrupted ones; the Chief, bots (role) and pickups; idle ones whose transcript
+// showed (ui.selectedId); the busy or interrupted ones; bots (role) and pickups; idle ones whose transcript
 // shows background tasks still running (runningTasks, read before the resume reports them stopped). Every other idle
 // one is parked: not started, kept in the restore list (parked: true) across saves and hosts until it is opened, and
 // then resumed as the restore would have (its saved folder, account and role). open() or sendTo() of one still waiting
@@ -106,17 +106,13 @@
 // restore list with the handoff file, and a host that restores it resumes the picked-up conversation when the
 // handoff names it (next_session), else runs the pickup again.
 //
-// Roles: create({ role: 'chief' }) starts the Chief (../chief/BRIEF.md), the session that oversees the others for the
-// user; create({ role: 'bot:<id>' }) (id: 12 lowercase hex, which the server makes) starts one of the user's bots
-// (../bots.js), overseers too. Any other value is ignored. A chief's claude may also run fv start, open, hosted,
-// wait and menu without asking (FV_CHIEF below); fv answer, stop, rm (remove) and interrupt are blocked outright
-// (FV_CHIEF_DENIED), since a session with every tool allowed would never ask. A bot gets the usual fv commands. One
-// Chief at a time: create() refuses a second (chiefRunning: the running one's id), and anything else that would start
-// one while another runs (open, sendTo, a pickup, a restore) starts it without the role; the server keeps each bot to
-// one session. The role stays with the session: through a re-key, in the
+// Roles: create({ role: 'bot:<id>' }) (id: 12 lowercase hex, which the server makes) starts one of the user's bots
+// (../bots.js), the sessions that oversee the others for the user. Any other value is ignored, the old 'chief' too
+// (a restore list that still has one starts it as an ordinary session). A bot gets the usual fv commands; the server
+// keeps each bot to one session. The role stays with the session: through a re-key, in the
 // restore list (a host that resumes it gives it back), when it is opened again after it ended, sent to another
 // account, and when it hands off (the pickup gets it). A /clear keeps it; a /resume of an older conversation (one
-// begun more than CHIEF_NEW_MS ago) drops it, so an old conversation never takes a role by being resumed there.
+// begun more than ROLE_NEW_MS ago) drops it, so an old conversation never takes a role by being resumed there.
 //
 // Switching accounts (the server's "Switch accounts when one runs low", ../account-switch.js): switchAccount({ id,
 // account, rescue }) ends a running conversation at a pause and resumes the same conversation under the other account,
@@ -448,20 +444,13 @@ const FV_DIR = path.resolve(__dirname, '..');
 // "--allowedTools=a,b,…" in quotes (the commas split the list; a comma inside parentheses would be kept): as two
 // words the flag would take every word after it as one more tool, a prompt after it too.
 const FV_ALLOWED = ['send', 'status', 'ask', 'read', 'ls', 'teams', 'team', 'transcript'];
-// the Chief (see Roles) also starts and resumes sessions and watches them. It never answers another session's
-// prompt, stops, removes or interrupts one: those are blocked, the same one-argument form (remove is rm's alias)
-const FV_CHIEF = [...FV_ALLOWED, 'start', 'open', 'hosted', 'wait', 'menu'];
-const FV_CHIEF_DENIED = ['answer', 'stop', 'rm', 'remove', 'interrupt'];
-const toolsArg = (flag, cmds) => `"--${flag}=${cmds.map((c) => `Bash(fv ${c}:*)`).join(',')}"`;
-const allowArg = (cmds) => toolsArg('allowedTools', cmds);
-const ALLOW_FV = allowArg(FV_ALLOWED), ALLOW_CHIEF = `${allowArg(FV_CHIEF)} ${toolsArg('disallowedTools', FV_CHIEF_DENIED)}`;
+const ALLOW_FV = `"--allowedTools=${FV_ALLOWED.map((c) => `Bash(fv ${c}:*)`).join(',')}"`;
 // a session with a role whose claude goes on in a conversation begun longer ago than this resumed an old one: it
 // loses the role
-const CHIEF_NEW_MS = 10 * 60 * 1000;
-// a role as create takes it: 'chief' or 'bot:<id>', else none
+const ROLE_NEW_MS = 10 * 60 * 1000;
+// a role as create takes it: 'bot:<id>', else none (an old restore list's 'chief' too)
 const BOT_ROLE_RE = /^bot:[0-9a-f]{12}$/;
-const roleOf = (v) => (v === 'chief' ? 'chief' : typeof v === 'string' && BOT_ROLE_RE.test(v) ? v : null);
-const allowFor = (role) => (role === 'chief' ? ALLOW_CHIEF : ALLOW_FV);
+const roleOf = (v) => (typeof v === 'string' && BOT_ROLE_RE.test(v) ? v : null);
 
 function childEnv(account, launchKey) {
   const env = {};
@@ -619,11 +608,11 @@ function createPtys(opts = {}) {
   const send = opts.send || (() => {});
   const changed = opts.changed || (() => {});
   const program = opts.program || 'claude';
-  // each command line: claude, the fv commands its role may run without asking, then the rest; a resume in the mode
+  // each command line: claude, the fv commands it may run without asking, then the rest; a resume in the mode
   // the conversation last ran in (lastModeOf; cwd: where to look for its transcript first)
-  const commandFor = (id, role, cwd) => `${program} ${allowFor(role)}${modeFlag(id, cwd)} --resume ${id}`;
-  const newCommand = (role) => `${program} ${allowFor(role)}`;
-  const pickupFor = (file, role) => HO.pickupCommand(file).replace(/^claude /, () => `${program} ${allowFor(role)} `);
+  const commandFor = (id, cwd) => `${program} ${ALLOW_FV}${modeFlag(id, cwd)} --resume ${id}`;
+  const newCommand = () => `${program} ${ALLOW_FV}`;
+  const pickupFor = (file) => HO.pickupCommand(file).replace(/^claude /, () => `${program} ${ALLOW_FV} `);
   const log = opts.log || (() => {});
   const dirs = () => sessionDirs(opts.sessionDirs);
   const getSettings = opts.settings || (() => settings());
@@ -642,7 +631,7 @@ function createPtys(opts = {}) {
   //          outAt (its last output), inputAt (its last key), line / inPaste (what is typed into the prompt since
   //          the last Enter), slash (a "/" command sent with Enter, until its panel closes: see panelTick),
   //          nudge (the note due after a restore: see nudgeTick), restartBy (it asked for the host restart),
-  //          role ('chief', 'bot:<id>' or null: see Roles) }
+  //          role ('bot:<id>' or null: see Roles) }
   const terms = new Map();
   let newSeq = 0;
   let screenLib = null;
@@ -654,7 +643,7 @@ function createPtys(opts = {}) {
   const heldOf = (key) => held.get(String(key).toLowerCase()) || null;
   // the restore's turn for one: it leaves the map (null when a client opened or closed it meanwhile)
   function take(key) { const h = held.get(key) || null; held.delete(key); return h; }
-  const parked = () => [...held.values()].map(({ s, extra }) => ({ id: s.id, cwd: s.cwd, account: s.account, role: s.role || null, pickup: !!s.pickup, parked: !extra }));
+  const parked = () => [...held.values()].map(({ s, extra }) => ({ id: s.id, cwd: s.cwd, account: s.account, role: roleOf(s.role), pickup: !!s.pickup, parked: !extra }));
 
   function flush(t) {
     clearTimeout(t.timer);
@@ -673,15 +662,6 @@ function createPtys(opts = {}) {
   }
 
   const aliveCount = () => [...terms.values()].filter((t) => t.alive).length;
-  // the live Chief other than the session under `key`, if any (see Roles: one at a time)
-  const otherChief = (key) => [...terms.values()].find((t) => t.alive && t.role === 'chief' && String(t.id).toLowerCase() !== String(key).toLowerCase()) || null;
-  // the role a session under `key` starts with: not 'chief' while another Chief runs
-  function soleRole(role, key, what) {
-    const c = role === 'chief' ? otherChief(key) : null;
-    if (!c) return role;
-    log(`chief: ${what} ${key} starts without the role: ${c.id} is the Chief`);
-    return null;
-  }
   const noPty = () => ({ ok: false, message: `No pty module: ${ptyError ? ptyError.message : 'not installed'}` });
 
   // starts `command` in a pty under `key`; extra fields go onto the entry. No cap on how many run at once (Henry,
@@ -773,12 +753,12 @@ function createPtys(opts = {}) {
     if (!loadPty()) return noPty();
     const known = new Set(readPidFiles(dirs()).map((f) => f.pid));
     const k = key || `new-${++newSeq}`;
-    const role = soleRole(roleOf(extra && extra.role), k, 'pickup');
-    return spawnPty(k, pickupFor(file, role), o || {}, { isNew: true, known, pickup: file, ...(extra || {}), role });
+    const role = roleOf(extra && extra.role);
+    return spawnPty(k, pickupFor(file), o || {}, { isNew: true, known, pickup: file, ...(extra || {}), role });
   }
 
-  // extra: { interrupted, restored, nudge, role } when the host resumes it after a shutdown. o.role ('chief' or
-  // 'bot:<id>') opens it with that role; one that ended here keeps the role it had
+  // extra: { interrupted, restored, nudge, role } when the host resumes it after a shutdown. o.role ('bot:<id>')
+  // opens it with that role; one that ended here keeps the role it had
   function open(o, extra) {
     const { id } = o || {};
     if (typeof id !== 'string' || !ID_RE.test(id)) throw new Error('bad conversation id');
@@ -798,8 +778,8 @@ function createPtys(opts = {}) {
       if (!extra) extra = h.extra ? h.extra() : { restored: true, role: h.s.role };
       log(`open: ${id} ${h.extra ? 'was waiting for its turn in the restore; it starts now' : 'was parked; resumed'}`);
     }
-    const role = soleRole(roleOf(extra && extra.role) || roleOf(o.role) || (old ? old.role : null), id, 'open');
-    const r = spawnPty(id, commandFor(id, role, o.cwd), o, { ...(extra || {}), role });
+    const role = roleOf(extra && extra.role) || roleOf(o.role) || (old ? old.role : null);
+    const r = spawnPty(id, commandFor(id, o.cwd), o, { ...(extra || {}), role });
     delete r.key;
     return r;
   }
@@ -831,8 +811,8 @@ function createPtys(opts = {}) {
       if (terms.get(id) === old) terms.delete(id);
       if (terms.get(id)?.alive) return { ok: false, message: 'it was started again meanwhile' };
       const note = `The user sent this conversation to account ${account} from Fleet View; the pickup carries on there`;
-      const role = soleRole(old ? old.role : h ? roleOf(h.s.role) : null, id, `send to ${account}:`);
-      const r = spawnPty(id, `${commandFor(id, role, cwd)} "/handoff ${note}"`, { ...o, account, cwd }, { role });
+      const role = old ? old.role : h ? roleOf(h.s.role) : null;
+      const r = spawnPty(id, `${commandFor(id, cwd)} "/handoff ${note}"`, { ...o, account, cwd }, { role });
       log(`send to ${account}: ${id} ${r.ok ? `resumed with /handoff (pid ${r.pid})` : `failed: ${r.message}`}`);
       delete r.key;
       return r;
@@ -885,8 +865,8 @@ function createPtys(opts = {}) {
   function moveOn(t) {
     const m = t.moveTo;
     flush(t);
-    const role = soleRole(t.role, t.id, `switch to ${m.account}:`);
-    const r = spawnPty(t.id, commandFor(t.id, role, t.cwd), { cwd: t.cwd, account: m.account, cols: t.cols, rows: t.rows },
+    const role = t.role;
+    const r = spawnPty(t.id, commandFor(t.id, t.cwd), { cwd: t.cwd, account: m.account, cols: t.cols, rows: t.rows },
       { chunks: t.chunks.slice(), size: t.size, created: t.created, forkFrom: t.forkFrom || null, handoffFrom: t.handoffFrom, role,
         nudge: m.rescue ? { kind: 'continue', cause: `it hit the limit of Claude ${m.from}` } : null });
     log(`switch to ${m.account}: ${t.id} ${r.ok ? `resumed under ${m.account} (pid ${r.pid})${m.rescue ? ', "continue" due once it has loaded' : ''}` : `could not start again: ${r.message}`}`);
@@ -909,17 +889,10 @@ function createPtys(opts = {}) {
   // o.model (letters, digits, . - [ ] only) adds --model <m>, and o.effort (a level) --effort <e> in place of the set
   // one: for this session only, where /model and /effort typed in it would save them as the default for every new
   // session. The reply echoes both.
-  // o.role 'chief' starts the Chief (see Roles): the same command with the Chief's allowed fv commands. The reply
-  // echoes role. While another Chief runs it starts nothing: { ok: false, chiefRunning: <its id> }. The check is
-  // here, where nothing else runs between it and the start. o.role 'bot:<id>' starts a bot: the usual command.
+  // o.role 'bot:<id>' starts a bot (see Roles): the usual command. The reply echoes role.
   function create(o) {
     if (!loadPty()) return noPty();
     o = o || {};
-    const running = roleOf(o.role) === 'chief' ? otherChief(null) : null;
-    if (running) {
-      log(`chief: a second Chief was refused: ${running.id} is the Chief`);
-      return { ok: false, chiefRunning: running.id, message: `the Chief is running already (${running.id})` };
-    }
     const fork = typeof o.forkFrom === 'string' && ID_RE.test(o.forkFrom) ? o.forkFrom.toLowerCase() : null;
     const key = `new-${++newSeq}`;
     const flag = o.chrome === true ? ' --chrome' : o.chrome === false ? ' --no-chrome' : '';
@@ -930,7 +903,7 @@ function createPtys(opts = {}) {
     const asked = EFFORT_LEVELS.has(o.effort) ? o.effort : null;
     const effort = asked || (fork ? '' : newEffort(getSettings().newSessionEffort));
     const role = roleOf(o.role);
-    const cmd = (fork ? `${commandFor(fork, role, o.cwd)} --fork-session` : newCommand(role)) + (model ? ` --model ${P.isWin ? model : `'${model}'`}` : '') + (effort ? ` --effort ${effort}` : '');
+    const cmd = (fork ? `${commandFor(fork, o.cwd)} --fork-session` : newCommand()) + (model ? ` --model ${P.isWin ? model : `'${model}'`}` : '') + (effort ? ` --effort ${effort}` : '');
     const r = spawnPty(key, cmd + flag, o, { isNew: true, created: true, known, forkFrom: fork, role });
     if (r.ok && flag) r.chrome = o.chrome;
     if (r.ok && fork) r.forkFrom = fork;
@@ -974,8 +947,8 @@ function createPtys(opts = {}) {
       if (t.claudePid && !t.isNew && mine.length && mine[0].sessionId !== t.id.toLowerCase() && !terms.has(mine[0].sessionId)) {
         // a role carries on in a new conversation (/clear), not in an older one it resumed
         const began = t.role ? transcriptStart(mine[0].sessionId, t.cwd) : null;
-        if (began !== null && now - began > CHIEF_NEW_MS) {
-          log(`${t.role === 'chief' ? 'chief' : t.role}: ${t.id} went on in an older conversation (${mine[0].sessionId}), which does not take the role`);
+        if (began !== null && now - began > ROLE_NEW_MS) {
+          log(`${t.role}: ${t.id} went on in an older conversation (${mine[0].sessionId}), which does not take the role`);
           t.role = null;
         }
         rekey(t, mine[0]);
@@ -1749,7 +1722,7 @@ function runHost() {
 
 module.exports = {
   createPtys, sessionDirs, readPidFiles, normDir, pipeName, dataDir, hostFile, sessionsFile, logFile, fileHash, readJson, runningTasks,
-  HOST_JS, ID_RE, KEY_RE, NEW_RE, PROTO, FV_ALLOWED, FV_CHIEF, FV_CHIEF_DENIED, BOT_ROLE_RE, ptyName: () => ptyName, ptyError: () => ptyError,
+  HOST_JS, ID_RE, KEY_RE, NEW_RE, PROTO, FV_ALLOWED, BOT_ROLE_RE, ptyName: () => ptyName, ptyError: () => ptyError,
 };
 
 // `host.js --selfcheck`: what a restart runs before it ends anything. Getting here means this file and

@@ -761,8 +761,8 @@ const BUSY_THERE = new Set(['WORKING', 'AGENTS', 'ASKING', 'QUESTION']);
 //   { how: 'moving', host }                a move here is under way: wait for it
 //   { how: 'offline', host, kind }         the host is off: a card offers Continue on this machine (its last copy)
 //   { how: 'link', host, kind, why }       the machines aren't linked: link them first (or Continue on this machine)
-//   { how: 'remote', host, kind, why }     sent to the host through the link, and it stays there: why 'bot' (a bot or
-//                                          the Chief), 'bound' (its workspace is only there), 'busy' (Claude works
+//   { how: 'remote', host, kind, why }     sent to the host through the link, and it stays there: why 'bot' (a bot),
+//                                          'bound' (its workspace is only there), 'busy' (Claude works
 //                                          there, or asks something: it is queued there) or 'idle'
 // A forced move (the offline card's button with a draft) is Send's own { how: 'move', force: true }, never followPlan's.
 export function followPlan(s, o = {}) {

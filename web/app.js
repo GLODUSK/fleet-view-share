@@ -82,7 +82,7 @@
 // sessions and state.feed only their tool calls. In steady order (the default, key s) the conversations that
 // need you come first (ASKING, QUESTION, ERROR, STALLED, then longest waiting) and the rest keep the order they
 // first appeared in; in live order everything is sorted by today's activity. state.allSessions and state.allClashes are unfiltered.
-// The overseers (the Chief and the bots: /state tags them bot) are in no list but allSessions: only Bots shows them.
+// The overseers (the bots: /state tags them bot) are in no list but allSessions: only Bots shows them.
 // state.settings.zoom is the saved map zoom.
 //
 // Test without the server: ?fixture=1 loads ./fixtures/state-sample.json (timestamps moved to now);
@@ -906,10 +906,10 @@ function sessionColorItem(s) {
     if (h == null) sessHues.delete(s.id); else sessHues.set(s.id, h);
     saveSettings({ sessHue: { id: s.id, hue: h } });
     toast(h == null ? `${s.name} follows its workspace's colour again` : `${s.name} is ${HUE_PICKS.find(([, x]) => x === h)?.[0].toLowerCase() || 'recoloured'}`, C.mint);
-    render(); // the Chief's Bots row reads sessHues itself (setPickedColors): it wears it now
+    render(); // a team member's mascot in the Bots view reads sessHues itself (setPickedColors): it wears it now
   });
 }
-// the Bots view's rows (chats.js): the Chief's conversation, and a team member's, wear the colour picked for it
+// the Bots view's team members (chats.js) wear the colour picked for their conversation
 setPickedColors((id) => (sessHues.has(id) ? hueCss(sessHues.get(id)) : null));
 function repoRenameItem(root) {
   const r = repoRootOf({ root });
@@ -1397,7 +1397,7 @@ function followPickups(pairs) {
 
 function derive(st) {
   const q = queryRe();
-  // the overseers (the Chief and the bots: /state tags them bot) are the Bots tab's alone: out of every list the map,
+  // the overseers (the bots: /state tags them bot) are the Bots tab's alone: out of every list the map,
   // cards, wall, Projects, the strip and the counts read; allSessions keeps them, so their chats and panels open
   const over = (st.sessions || []).filter((s) => s && s.bot);
   const all = (st.sessions || []).filter((s) => !(s && s.bot));
@@ -3489,16 +3489,16 @@ function teamItems(s) {
   const note = [up ? `in "${up.name}"` : '', own ? `leads "${own.name}"` : ''].filter(Boolean).join(', ');
   return [{ label: 'Team', icon: 'merge', note: note || null, children: out }];
 }
-// the overseers' conversations now: the Chief's and each bot's of this machine, the one its Bots row opens
+// the overseers' conversations now: each bot's of this machine, the one its Bots row opens
 // (chats-model.js buildContacts), for a bot's "Start team ▸" and the Bots view's New team
 function overseerSessions() {
   let rows = [];
-  try { rows = buildContacts(view || state || {}, { chiefId: state?.settings?.chief?.id || null }); } catch { rows = []; }
+  try { rows = buildContacts(view || state || {}); } catch { rows = []; }
   return sessionsOf(rows.filter((c) => c.kind !== 'team' && c.id && !c.elsewhere).map((c) => c.id));
 }
 // "Start team ▸": a checklist of the other conversations in its workspace (ticking keeps the menu open), "<it>
 // leads" (on: it gets the order and the others report to it; off: one team of peers), then "Start team" opens the
-// box for the order. The ticks live as long as the menu. An overseer's (the Chief, a bot: tagged bot) are the other
+// box for the order. The ticks live as long as the menu. A bot's (tagged bot) are the other
 // overseers instead: each bot works in a folder of its own (~/Bots/<name>), so its workspace has no one else in it
 function startTeamItem(s, why) {
   const label = 'Start team';
@@ -3943,7 +3943,7 @@ function botWatchItem(s) {
   };
 }
 
-// ---------- bot notes (botnote.js): a bot or the Chief finished a turn or needs you ----------
+// ---------- bot notes (botnote.js): a bot finished a turn or needs you ----------
 // A card at the top right with its face and the line it ended on, on every view but the Bots tab (Henry,
 // 2026-10-12), from the same state.alerts (their own last n, in memory: a reload announces nothing old). A click
 // opens its chat in the Bots tab.

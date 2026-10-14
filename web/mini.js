@@ -143,7 +143,7 @@ function draw() {
   if (counts._html !== ch) { counts.innerHTML = ch; counts._html = ch; }
   drawClock();
   if (!state) { setRows([{ key: '_note', cls: 'note', html: offline ? 'Waiting for Fleet View…' : 'Loading…' }]); fit(); return; }
-  // the overseers (/state's bot tag: the Chief, the bots) are the Bots tab's, as they are off the counts
+  // the overseers (/state's bot tag: the bots) are the Bots tab's, as they are off the counts
   const sessions = (Array.isArray(state.sessions) ? state.sessions : []).filter((s) => s && s.id && !s.bot);
   const t = now();
   const waiting = sessions.filter((s) => s.state in NEEDS)

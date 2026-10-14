@@ -30,7 +30,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { headName } = require(path.join(__dirname, 'chief.js'));
+const { headName } = require(path.join(__dirname, 'overseer.js'));
 
 const FILE = 'tasks.json';
 const VERSION = 1;

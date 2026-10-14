@@ -1,14 +1,13 @@
 // Tests for web/chats-model.js (the Bots tab's contact model): overseers only (map conversations left out), one row
-// per bot across its handoffs and resumes, state.bots rows with no conversation, renames, the Chief row and its
-// fallbacks, hidden ones, teams of overseers only, sorting (and the Bots list's own order: chatOrder), unread, a storage that throws and raw GET /state (the
+// per bot across its handoffs and resumes, state.bots rows with no conversation, renames, hidden ones, teams of overseers only, sorting (and the Bots list's own order: chatOrder), unread, a storage that throws and raw GET /state (the
 // phone app), a row's moment and look (turnStart, lastAction, running, shape, color), doingOf (the avatar's hover), botChoices and
 // botEdits (the New bot and Edit bot forms), mascot.js (thinking, the shapes, the same markup for the same call) and Dynamic
 // (sizeTask, dynamicSwitch, the switch notes left out), the transcript noise a bot's chat leaves out (noiseNote) and a bot's Tasks strip (taskSchedule,
-// taskWhen, taskLine, tasksHead). Plain asserts, no dependencies:
+// taskWhen, taskLine, tasksHead) and its profile's list (profileTasks). Plain asserts, no dependencies:
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
 import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, rawToContactsState, previewOf, botPreview, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
-  sizeTask, dynamicSwitch, switchNote, noiseNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
+  sizeTask, dynamicSwitch, switchNote, noiseNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, profileTasks, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
   sameChatOrder, contactTree, teamFlags } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
@@ -19,12 +18,12 @@ const fake = (init = {}) => {
 };
 const S = (id, o = {}) => ({ id, name: id, state: 'DONE', label: 'DONE', stateColor: '#fff', account: 'A', repo: null, last: 1000, lastReply: null, waitingOn: null, lastAction: null, goal: null, ...o });
 const T = 1e12;
-const B1 = 'b1b1b1b1b1b1', B2 = 'b2b2b2b2b2b2', GONE = 'dededededede';
+const B1 = 'b1b1b1b1b1b1', B2 = 'b2b2b2b2b2b2', B5 = 'b5b5b5b5b5b5', GONE = 'dededededede';
 const BOT = (id, o = {}) => ({ id, name: `bot ${id.slice(0, 2)}`, brief: '', account: 'B', model: 'claude-sonnet-5-5', effort: 'medium', folder: `C:\\Users\\h\\Bots\\${id}`, createdAt: T, convId: null, live: false, ...o });
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log('ok', name); };
 const st = (o) => ({ allSessions: [], sessions: [], pending: [], finishedSessions: [], teams: [], ...o });
-const build = (state, o = {}) => buildContacts(state, { chains: createChainStore(fake()), ...o });
+const build = (state, o = {}) => buildContacts(state, o);
 
 // a bot's conversations a -> b -> c across two handoffs; c is live. m is a map conversation
 const a = S('a', { bot: B1, last: T + 1, handoff: { next: 'b', at: T + 1 } });
@@ -90,47 +89,17 @@ test('another machine\'s bot (elsewhere): a row while its chats are listed, live
   // its chats gone from the list: no quiet row (it can't be started here)
   assert.equal(build(st({ allSessions: [m], sessions: [m], bots: [BOT(E, { convId: 'x', elsewhere: true })] })).length, 0);
 });
-test('the Chief by its tag, renamed or not, and the placeholder', () => {
-  const ch = S('ch', { bot: 'chief', state: 'IDLE', last: T + 4 });
-  const rows = build(st({ allSessions: [ch, a, b, c], bots: [BOT(B1)] }), { chiefPlaceholder: true });
-  const chief = rows.filter((r) => r.key === 'chief');
-  assert.equal(chief.length, 1);
-  assert.deepEqual([chief[0].kind, chief[0].pinned, chief[0].name, chief[0].id, chief[0].botId], ['chief', true, 'Chief', 'ch', undefined]);
-  assert.equal(sortContacts(rows)[0].key, 'chief');
-  const boss = { ...ch, renamed: true, name: 'Boss' };
-  assert.deepEqual(build(st({ allSessions: [boss] }))[0].name, 'Boss');
-  const none = build(st({ sessions: [m] }), { chiefPlaceholder: true });
-  assert.equal(none.length, 1);
-  const ph = none[0];
-  assert.deepEqual([ph.key, ph.kind, ph.id, ph.ids, ph.name, ph.state, ph.preview, ph.pinned], ['chief', 'chief', null, [], 'Chief', 'NEW', 'Not started yet', true]);
-  assert.equal(build(st({ sessions: [m] })).some((r) => r.key === 'chief'), false);
+test('hidden bot conversations are left out unless they worked again after', () => {
+  const h = S('h', { bot: B1, state: 'DONE', last: T + 4 });
+  const hid = { hidden: [{ id: 'h', at: T + 5 }] };
+  assert.deepEqual(build(st({ allSessions: [h], settings: hid })), []);
+  const back = { ...h, state: 'WORKING', active: T + 9 };
+  assert.equal(build(st({ allSessions: [back], settings: hid }))[0].id, 'h');
+  // a renamed conversation names its row
+  assert.equal(build(st({ allSessions: [{ ...h, renamed: true, name: 'Boss' }] }))[0].name, 'Boss');
 });
 
-test('chiefId still finds an untagged Chief and its chain of handoffs', () => {
-  const x = S('x', { last: T + 1, handoff: { next: 'y', at: T + 1 } });
-  const y = S('y', { last: T + 2, state: 'IDLE', pickedUpFrom: { id: 'x' } });
-  const rows = build(st({ allSessions: [x, y, m] }), { chiefId: 'x', chiefPlaceholder: true });
-  assert.equal(rows.length, 1);
-  assert.deepEqual([rows[0].key, rows[0].id, rows[0].ids], ['chief', 'y', ['x', 'y']]);
-  // the store remembers the chain when its first one has left the lists
-  const store = createChainStore(fake());
-  buildContacts(st({ allSessions: [x, y] }), { chains: store, chiefId: 'x' });
-  const later = S('z', { last: T + 3, state: 'WORKING', pickedUpFrom: { id: 'y' } });
-  const r2 = buildContacts(st({ allSessions: [y, later] }), { chains: store, chiefId: 'x' });
-  assert.deepEqual([r2.length, r2[0].key, r2[0].id], [1, 'chief', 'z']);
-  // a tag wins over the fallback
-  assert.equal(build(st({ allSessions: [{ ...x, bot: B1 }] }), { chiefId: 'x' })[0].key, `bot:${B1}`);
-});
-
-test('hidden overseer conversations are left out unless they worked again after', () => {
-  const ch = S('ch', { bot: 'chief', state: 'DONE', last: T + 4 });
-  const hid = { hidden: [{ id: 'ch', at: T + 5 }] };
-  assert.equal(build(st({ allSessions: [ch], settings: hid }), { chiefPlaceholder: true })[0].id, null);
-  const back = { ...ch, state: 'WORKING', active: T + 9 };
-  assert.equal(build(st({ allSessions: [back], settings: hid }), { chiefPlaceholder: true })[0].id, 'ch');
-});
-
-const ch = S('ch', { bot: 'chief', state: 'IDLE', last: T + 4 });
+const ch = S('ch', { bot: B5, state: 'IDLE', last: T + 4 });
 const q = S('q', { bot: B2, state: 'ASKING', waitingOn: 'which one?' });
 const team = { id: 't1', name: 'duo', color: '#0f0', order: 'ship it', at: T + 10, lead: 'a', members: ['a', 'zzz', 'q', 'ch'], messages: [
   { t: T + 30, from: 'q', to: 'a', text: 'second' }, { t: T + 20, from: 'a', to: 'q', text: 'first' }, { t: T + 40, from: 'unknown-id-123456', to: 'a', text: 'last' }] };
@@ -141,21 +110,21 @@ test('teams: only when every member the state knows is an overseer; members reso
   assert.deepEqual(teams.map((t) => t.key), ['team:t1']);
   const t = teams[0];
   assert.deepEqual(t.members, [{ id: 'c', name: 'c', lead: true, key: `bot:${B1}`, role: '', memberId: 'a' }, { id: 'q', name: 'q', lead: false, key: `bot:${B2}`, role: '', memberId: 'q' },
-    { id: 'ch', name: 'Chief', lead: false, key: 'chief', role: '', memberId: 'ch' }]);
+    { id: 'ch', name: 'ch', lead: false, key: `bot:${B5}`, role: '', memberId: 'ch' }]);
   assert.equal(t.at, T + 40); assert.equal(t.needsYou, true); assert.equal(t.busy, true);
   assert.equal(t.preview, 'unknown-: last');
   const noMsg = build(st({ allSessions: [a, b, c], teams: [{ ...team, messages: [] }] })).find((r) => r.kind === 'team');
   assert.equal(noMsg.preview, 'ship it'); assert.equal(noMsg.at, T + 10);
 });
 
-// teams as groups in the list: a team "ops" (the Chief leads, bots 1 and 2), a team "rel" led by bot 2 with bot 3
+// teams as groups in the list: a team "ops" (bot 5 leads, bots 1 and 2), a team "rel" led by bot 2 with bot 3
 // (nested: bot 2 is a plain member of ops), bot 4 in none, and the map's m
 const B3 = 'b3b3b3b3b3b3', B4 = 'b4b4b4b4b4b4';
 const g = {
-  ch: S('ch', { bot: 'chief', state: 'IDLE', last: T + 4 }), x1: S('x1', { bot: B1, state: 'IDLE', last: T + 5 }), x2: S('x2', { bot: B2, state: 'IDLE', last: T + 6 }),
+  ch: S('ch', { bot: B5, state: 'IDLE', last: T + 4 }), x1: S('x1', { bot: B1, state: 'IDLE', last: T + 5 }), x2: S('x2', { bot: B2, state: 'IDLE', last: T + 6 }),
   x3: S('x3', { bot: B3, state: 'ASKING', waitingOn: 'ship it?', last: T + 7 }), x4: S('x4', { bot: B4, state: 'IDLE', last: T + 8 }),
 };
-const gBots = [BOT(B1, { convId: 'x1', live: true, role: '  Release\n manager ' }), BOT(B2, { convId: 'x2', live: true }), BOT(B3, { convId: 'x3', live: true, role: 'x'.repeat(80) }), BOT(B4, { convId: 'x4', live: true })];
+const gBots = [BOT(B1, { convId: 'x1', live: true, role: '  Release\n manager ' }), BOT(B2, { convId: 'x2', live: true }), BOT(B3, { convId: 'x3', live: true, role: 'x'.repeat(80) }), BOT(B4, { convId: 'x4', live: true }), BOT(B5, { convId: 'ch', live: true })];
 const gTeams = [
   { id: 'ops', name: 'ops', lead: 'ch', members: ['x1', 'ch', 'x2'], messages: [] },
   { id: 'rel', name: 'rel', lead: 'x2', members: ['x3', 'x2'], messages: [] },
@@ -164,28 +133,28 @@ const gState = (o = {}) => st({ allSessions: Object.values(g), bots: gBots, team
 const keysOf = (nodes) => nodes.map((x) => `${'  '.repeat(x.depth)}${x.c.key}`);
 
 test('teams nest in the list: members under their team (the lead first), a led team under its lead\'s team, never twice', () => {
-  const rows = sortContacts(build(gState()), { pinned: ['chief'], keys: [`bot:${B4}`, 'team:ops', `bot:${B1}`, `bot:${B2}`, `bot:${B3}`, 'team:rel'] });
+  const rows = sortContacts(build(gState()), { pinned: [`bot:${B5}`], keys: [`bot:${B4}`, 'team:ops', `bot:${B1}`, `bot:${B2}`, `bot:${B3}`, 'team:rel'] });
   const by = (k) => rows.find((r) => r.key === k);
-  assert.equal(by('chief').parentTeam, 'team:ops', 'the Chief leads ops');
+  assert.equal(by(`bot:${B5}`).parentTeam, 'team:ops', 'bot 5 leads ops');
   assert.equal(by(`bot:${B1}`).parentTeam, 'team:ops');
   assert.equal(by(`bot:${B2}`).parentTeam, 'team:rel', 'it leads rel: under rel, which is under ops');
   assert.equal(by(`bot:${B3}`).parentTeam, 'team:rel');
   assert.equal(by('team:rel').parentTeam, 'team:ops');
   assert.equal('parentTeam' in by('team:ops'), false);
   assert.equal('parentTeam' in by(`bot:${B4}`), false);
-  assert.deepEqual(by('team:ops').members.map((m) => [m.key, m.lead]), [['chief', true], [`bot:${B1}`, false], [`bot:${B2}`, false]]);
+  assert.deepEqual(by('team:ops').members.map((m) => [m.key, m.lead]), [[`bot:${B5}`, true], [`bot:${B1}`, false], [`bot:${B2}`, false]]);
   assert.equal(by(`bot:${B1}`).role, 'Release manager', 'the role on one line');
   assert.equal(by(`bot:${B3}`).role.length, 60);
   assert.equal(by('team:ops').members[1].role, 'Release manager');
   const tree = contactTree(rows);
-  // the order puts B4 first, then ops (the Chief's pin goes with it: it shows under its team)
-  assert.deepEqual(keysOf(tree), [`bot:${B4}`, 'team:ops', '  chief', `  bot:${B1}`, '  team:rel', `    bot:${B2}`, `    bot:${B3}`]);
+  // the order puts B4 first, then ops (bot 5's pin goes with it: it shows under its team)
+  assert.deepEqual(keysOf(tree), [`bot:${B4}`, 'team:ops', `  bot:${B5}`, `  bot:${B1}`, '  team:rel', `    bot:${B2}`, `    bot:${B3}`]);
   assert.equal(new Set(tree.map((x) => x.c.key)).size, tree.length, 'no row twice');
   const rel = tree.find((x) => x.c.key === 'team:rel');
   assert.deepEqual([rel.depth, rel.parent, rel.path, rel.open, rel.kids], [1, 'team:ops', ['team:ops'], true, 2]);
   assert.deepEqual(tree.find((x) => x.c.key === `bot:${B3}`).path, ['team:ops', 'team:rel']);
   const ops = tree.find((x) => x.c.key === 'team:ops');
-  assert.deepEqual(ops.under.map((c) => c.key), ['chief', `bot:${B1}`, 'team:rel', `bot:${B2}`, `bot:${B3}`]);
+  assert.deepEqual(ops.under.map((c) => c.key), [`bot:${B5}`, `bot:${B1}`, 'team:rel', `bot:${B2}`, `bot:${B3}`]);
 });
 
 test('a folded team hides its rows, and what they have shows on it', () => {
@@ -193,7 +162,7 @@ test('a folded team hides its rows, and what they have shows on it', () => {
   assert.deepEqual(keysOf(contactTree(rows, ['team:ops'])).filter((k) => !k.startsWith(' ')).sort(), [`bot:${B4}`, 'team:ops']);
   assert.equal(contactTree(rows, ['team:ops']).length, 2);
   const inner = contactTree(rows, new Set(['team:rel']));
-  assert.deepEqual(keysOf(inner).filter((k) => k.includes('team:ops') || k.startsWith(' ')), ['team:ops', '  chief', `  bot:${B1}`, '  team:rel']);
+  assert.deepEqual(keysOf(inner).filter((k) => k.includes('team:ops') || k.startsWith(' ')), ['team:ops', `  bot:${B5}`, `  bot:${B1}`, '  team:rel']);
   assert.equal(inner.find((x) => x.c.key === 'team:rel').open, false);
   assert.equal(contactTree(rows, { 'team:rel': true, 'team:ops': false }).length, inner.length);
   // B3 asks: its team and the team above say so while folded; seen, the gold goes
@@ -242,64 +211,64 @@ test('previews: question, first real reply line, goal, never the activity; one l
   assert.ok(long.length <= 140 && !long.includes('\n'));
 });
 
-test('sortContacts: Chief, then needs-you longest waiting, then newest', () => {
+test('sortContacts: pinned, then needs-you longest waiting, then newest', () => {
   const r = (key, at, o = {}) => ({ key, kind: 'bot', at, needsYou: false, pinned: false, ...o });
-  const out = sortContacts([r('new', 50), r('old', 10), r('n2', 40, { needsYou: true }), r('n1', 20, { needsYou: true }), r('chief', 1, { kind: 'chief', pinned: true })]);
-  assert.deepEqual(out.map((x) => x.key), ['chief', 'n1', 'n2', 'new', 'old']);
+  const out = sortContacts([r('new', 50), r('old', 10), r('n2', 40, { needsYou: true }), r('n1', 20, { needsYou: true }), r('pin', 1, { pinned: true })]);
+  assert.deepEqual(out.map((x) => x.key), ['pin', 'n1', 'n2', 'new', 'old']);
 });
 
 // the Bots list's order, Henry's (settings.chatOrder): rows never move by themselves
 {
-  const r = (key, at, o = {}) => ({ key, kind: key === 'chief' ? 'chief' : key.startsWith('team:') ? 'team' : 'bot', at, needsYou: false, pinned: key === 'chief', ...o });
+  const r = (key, at, o = {}) => ({ key, kind: key.startsWith('team:') ? 'team' : 'bot', at, needsYou: false, pinned: false, ...o });
   const keys = (l) => l.map((x) => `${x.pinned ? '*' : ''}${x.key}`);
-  const rows = [r('chief', 5), r('bot:a', 10), r('bot:b', 20), r('team:t1', 30), r('bot:c', 40)];
-  const order = { pinned: ['bot:b', 'chief'], keys: ['bot:a', 'team:t1', 'bot:c'] };
+  const rows = [r('bot:p', 5), r('bot:a', 10), r('bot:b', 20), r('team:t1', 30), r('bot:c', 40)];
+  const order = { pinned: ['bot:b', 'bot:p'], keys: ['bot:a', 'team:t1', 'bot:c'] };
 
   test('sortContacts(order): pinned first in their order, then the rest in theirs', () => {
-    assert.deepEqual(keys(sortContacts(rows, order)), ['*bot:b', '*chief', 'bot:a', 'team:t1', 'bot:c']);
+    assert.deepEqual(keys(sortContacts(rows, order)), ['*bot:b', '*bot:p', 'bot:a', 'team:t1', 'bot:c']);
   });
   test('sortContacts(order): stable under activity, needs-you and a new message', () => {
     const busy = rows.map((x) => (x.key === 'bot:c' ? { ...x, at: 999, needsYou: true } : x.key === 'bot:b' ? { ...x, at: 1 } : x));
     assert.deepEqual(keys(sortContacts(busy, order)), keys(sortContacts(rows, order)));
     assert.deepEqual(keys(sortContacts(rows.slice().reverse(), order)), keys(sortContacts(rows, order)), 'whatever order they come in');
   });
-  test('sortContacts(order): the Chief is pinned by default, on top; once unpinned it stays where it was put', () => {
-    assert.deepEqual(keys(sortContacts(rows, { pinned: ['bot:b'], keys: ['bot:a', 'team:t1', 'bot:c'] })), ['*chief', '*bot:b', 'bot:a', 'team:t1', 'bot:c']);
-    assert.deepEqual(keys(sortContacts(rows, { pinned: [], keys: [] })).slice(0, 1), ['*chief']);
-    assert.deepEqual(keys(sortContacts(rows, { pinned: ['bot:b'], keys: ['bot:a', 'chief', 'team:t1', 'bot:c'] })), ['*bot:b', 'bot:a', 'chief', 'team:t1', 'bot:c']);
+  test('sortContacts(order): a saved key no row has (the old Chief\'s "chief") still loads, skipped and kept', () => {
+    assert.deepEqual(keys(sortContacts(rows, { pinned: ['chief', 'bot:b', 'bot:p'], keys: ['bot:a', 'chief', 'team:t1', 'bot:c'] })), ['*bot:b', '*bot:p', 'bot:a', 'team:t1', 'bot:c']);
+    assert.deepEqual(keys(sortContacts(rows, { pinned: [], keys: [] })), ['bot:c', 'team:t1', 'bot:b', 'bot:a', 'bot:p'], 'none pinned by default');
+    assert.deepEqual(fullChatOrder({ pinned: ['chief'], keys: [] }, rows), { pinned: ['chief'], keys: ['bot:c', 'team:t1', 'bot:b', 'bot:a', 'bot:p'] });
   });
   test('sortContacts(order): new rows at the top of the rest (newest first among them), then they stay put', () => {
     const more = [...rows, r('bot:new', 1), r('team:t2', 2)];
-    assert.deepEqual(keys(sortContacts(more, order)), ['*bot:b', '*chief', 'team:t2', 'bot:new', 'bot:a', 'team:t1', 'bot:c']);
+    assert.deepEqual(keys(sortContacts(more, order)), ['*bot:b', '*bot:p', 'team:t2', 'bot:new', 'bot:a', 'team:t1', 'bot:c']);
     const saved = fullChatOrder(order, more);
-    assert.deepEqual(saved, { pinned: ['bot:b', 'chief'], keys: ['team:t2', 'bot:new', 'bot:a', 'team:t1', 'bot:c'] });
+    assert.deepEqual(saved, { pinned: ['bot:b', 'bot:p'], keys: ['team:t2', 'bot:new', 'bot:a', 'team:t1', 'bot:c'] });
     const later = more.map((x) => (x.key === 'bot:new' ? { ...x, at: 5000 } : x));
     assert.deepEqual(keys(sortContacts(later, saved)), keys(sortContacts(more, saved)), 'saved: activity no longer moves it');
   });
   test('sortContacts(order): keys with no row are left out; the rows keep their places', () => {
     const gone = rows.filter((x) => x.key !== 'bot:a');
-    assert.deepEqual(keys(sortContacts(gone, { pinned: ['bot:zz', ...order.pinned], keys: ['team:old', ...order.keys] })), ['*bot:b', '*chief', 'team:t1', 'bot:c']);
+    assert.deepEqual(keys(sortContacts(gone, { pinned: ['bot:zz', ...order.pinned], keys: ['team:old', ...order.keys] })), ['*bot:b', '*bot:p', 'team:t1', 'bot:c']);
     // a key in both lists is pinned
-    assert.deepEqual(keys(sortContacts(rows, { pinned: ['bot:a'], keys: ['bot:a', 'bot:b'] })).slice(0, 2), ['*chief', '*bot:a']);
+    assert.deepEqual(keys(sortContacts(rows, { pinned: ['bot:a'], keys: ['bot:a', 'bot:b'] })).slice(0, 1), ['*bot:a']);
   });
   test('sortContacts without an order: as before (the Projects list)', () => {
-    assert.deepEqual(keys(sortContacts(rows)), ['*chief', 'bot:c', 'team:t1', 'bot:b', 'bot:a']);
+    assert.deepEqual(keys(sortContacts(rows)), ['bot:c', 'team:t1', 'bot:b', 'bot:a', 'bot:p']);
   });
   test('moveInChatOrder / pinInChatOrder / stepInChatOrder: by hand, other keys keep their places', () => {
     const o = { ...order, keys: [...order.keys, 'bot:elsewhere'] }; // a key with no row here
-    assert.deepEqual(moveInChatOrder(o, rows, 'bot:c', { pin: false, before: 'bot:a' }), { pinned: ['bot:b', 'chief'], keys: ['bot:c', 'bot:a', 'team:t1', 'bot:elsewhere'] });
-    assert.deepEqual(moveInChatOrder(o, rows, 'bot:a', { pin: true, before: 'chief' }), { pinned: ['bot:b', 'bot:a', 'chief'], keys: ['team:t1', 'bot:c', 'bot:elsewhere'] }, 'dropped among the pinned: pinned');
-    assert.deepEqual(moveInChatOrder(o, rows, 'chief', { pin: false, before: null }), { pinned: ['bot:b'], keys: ['bot:a', 'team:t1', 'bot:c', 'bot:elsewhere', 'chief'] }, 'the Chief unpinned, last');
+    assert.deepEqual(moveInChatOrder(o, rows, 'bot:c', { pin: false, before: 'bot:a' }), { pinned: ['bot:b', 'bot:p'], keys: ['bot:c', 'bot:a', 'team:t1', 'bot:elsewhere'] });
+    assert.deepEqual(moveInChatOrder(o, rows, 'bot:a', { pin: true, before: 'bot:p' }), { pinned: ['bot:b', 'bot:a', 'bot:p'], keys: ['team:t1', 'bot:c', 'bot:elsewhere'] }, 'dropped among the pinned: pinned');
+    assert.deepEqual(moveInChatOrder(o, rows, 'bot:p', { pin: false, before: null }), { pinned: ['bot:b'], keys: ['bot:a', 'team:t1', 'bot:c', 'bot:elsewhere', 'bot:p'] }, 'unpinned, last');
     assert.deepEqual(moveInChatOrder(o, rows, 'team:t1', { pin: false, before: 'team:t1' }), o, 'in front of itself: no change');
-    assert.deepEqual(pinInChatOrder(o, rows, 'bot:c', true), { pinned: ['bot:b', 'chief', 'bot:c'], keys: ['bot:a', 'team:t1', 'bot:elsewhere'] }, 'Pin: last of the pinned');
-    assert.deepEqual(pinInChatOrder(o, rows, 'chief', false), { pinned: ['bot:b'], keys: ['chief', 'bot:a', 'team:t1', 'bot:c', 'bot:elsewhere'] }, 'Unpin: first of the rest');
-    assert.deepEqual(pinInChatOrder({ pinned: [], keys: [] }, rows, 'chief', false).pinned, [], 'the default-pinned Chief unpins');
-    assert.deepEqual(stepInChatOrder(o, rows, 'team:t1', 'up'), { pinned: ['bot:b', 'chief'], keys: ['team:t1', 'bot:a', 'bot:c', 'bot:elsewhere'] });
-    assert.deepEqual(stepInChatOrder(o, rows, 'team:t1', 'down'), { pinned: ['bot:b', 'chief'], keys: ['bot:a', 'bot:c', 'team:t1', 'bot:elsewhere'] });
-    assert.deepEqual(stepInChatOrder(o, rows, 'bot:c', 'top'), { pinned: ['bot:b', 'chief'], keys: ['bot:c', 'bot:a', 'team:t1', 'bot:elsewhere'] });
-    assert.deepEqual(stepInChatOrder(o, rows, 'chief', 'up'), { pinned: ['chief', 'bot:b'], keys: ['bot:a', 'team:t1', 'bot:c', 'bot:elsewhere'] }, 'within the pinned ones');
+    assert.deepEqual(pinInChatOrder(o, rows, 'bot:c', true), { pinned: ['bot:b', 'bot:p', 'bot:c'], keys: ['bot:a', 'team:t1', 'bot:elsewhere'] }, 'Pin: last of the pinned');
+    assert.deepEqual(pinInChatOrder(o, rows, 'bot:p', false), { pinned: ['bot:b'], keys: ['bot:p', 'bot:a', 'team:t1', 'bot:c', 'bot:elsewhere'] }, 'Unpin: first of the rest');
+    assert.deepEqual(pinInChatOrder({ pinned: [], keys: [] }, rows, 'bot:p', false).pinned, [], 'unpinning one not pinned: none pinned');
+    assert.deepEqual(stepInChatOrder(o, rows, 'team:t1', 'up'), { pinned: ['bot:b', 'bot:p'], keys: ['team:t1', 'bot:a', 'bot:c', 'bot:elsewhere'] });
+    assert.deepEqual(stepInChatOrder(o, rows, 'team:t1', 'down'), { pinned: ['bot:b', 'bot:p'], keys: ['bot:a', 'bot:c', 'team:t1', 'bot:elsewhere'] });
+    assert.deepEqual(stepInChatOrder(o, rows, 'bot:c', 'top'), { pinned: ['bot:b', 'bot:p'], keys: ['bot:c', 'bot:a', 'team:t1', 'bot:elsewhere'] });
+    assert.deepEqual(stepInChatOrder(o, rows, 'bot:p', 'up'), { pinned: ['bot:p', 'bot:b'], keys: ['bot:a', 'team:t1', 'bot:c', 'bot:elsewhere'] }, 'within the pinned ones');
     assert.equal(stepInChatOrder(o, rows, 'bot:a', 'up'), null, 'the first of the rest never goes into the pinned ones');
-    assert.equal(stepInChatOrder(o, rows, 'chief', 'down'), null, 'the last pinned one never goes into the rest');
+    assert.equal(stepInChatOrder(o, rows, 'bot:p', 'down'), null, 'the last pinned one never goes into the rest');
     assert.equal(stepInChatOrder(o, rows, 'bot:c', 'down'), null);
     assert.equal(sameChatOrder(o, { pinned: [...o.pinned], keys: [...o.keys] }), true);
     assert.equal(sameChatOrder(o, order), false);
@@ -365,7 +334,6 @@ test('chain store: persists, saves only on change, caps at 2000, survives a thro
   const sb = createChainStore(bad);
   sb.link('m', 'n'); sb.save(); sb.save();
   assert.equal(sb.keyFor('n'), 'm');
-  assert.equal(buildContacts(st({ allSessions: [S('k1', { state: 'IDLE' })] }), { chains: sb, chiefId: 'k1' })[0].key, 'chief');
   assert.equal(createChainStore(null).keyFor('k'), 'k');
 });
 
@@ -373,25 +341,25 @@ test('raw GET /state: overseers get rows (tags and state.bots kept), map ones ne
   const live = S('live', { state: 'WORKING', label: 'WORKING', last: T + 9 });
   const fin = S('fin', { last: T + 5 });
   const hid = S('hid', { bot: B2, state: 'ASKING', last: T + 2 });
-  const back = S('back', { bot: 'chief', state: 'WORKING', last: T + 50, active: T + 50 }); // hidden, worked again after
+  const back = S('back', { bot: B5, state: 'WORKING', last: T + 50, active: T + 50 }); // hidden, worked again after
   const raw = {
     sessions: [a, b, c, live, fin, hid, back],
     finished: [{ id: 'a' }, { id: 'b' }, { id: 'fin' }],
     settings: { hidden: [{ id: 'hid', at: T + 3 }, { id: 'back', at: T + 10 }] },
     teams: [{ id: 't1', name: 'pair', members: ['live', 'fin'], messages: [] }, { id: 't2', name: 'overseers', members: ['c', 'back'], messages: [] }],
-    bots: [BOT(B1, { name: 'Watcher', convId: 'c', live: true }), BOT(B2, { name: 'Asker' })],
+    bots: [BOT(B1, { name: 'Watcher', convId: 'c', live: true }), BOT(B2, { name: 'Asker' }), BOT(B5, { name: 'Boss' })],
   };
   const d = rawToContactsState(raw);
   assert.deepEqual(d.sessions.map((x) => x.id), ['live']);
   assert.deepEqual(d.finishedSessions.map((x) => x.id), ['fin']);
   assert.equal(d.allSessions.length, 7);
   assert.equal(d.allSessions.find((x) => x.id === 'c').bot, B1);
-  assert.equal(d.bots.length, 2);
+  assert.equal(d.bots.length, 3);
   assert.deepEqual(d.pending, []);
   const rows = build(raw);
-  assert.deepEqual(rows.map((r) => r.key).sort(), [`bot:${B1}`, `bot:${B2}`, 'chief', 'team:t2']);
+  assert.deepEqual(rows.map((r) => r.key).sort(), [`bot:${B1}`, `bot:${B2}`, `bot:${B5}`, 'team:t2']);
   assert.deepEqual(rows.find((r) => r.key === `bot:${B1}`).ids, ['a', 'b', 'c']);
-  assert.equal(rows.find((r) => r.key === 'chief').id, 'back');
+  assert.equal(rows.find((r) => r.key === `bot:${B5}`).id, 'back');
   assert.deepEqual([rows.find((r) => r.key === `bot:${B2}`).id, rows.find((r) => r.key === `bot:${B2}`).state], [null, 'NEW']); // its one conversation is hidden
   assert.equal(rows.find((r) => r.kind === 'team').members.length, 2);
   assert.deepEqual(rawToContactsState(null).sessions, []);
@@ -470,18 +438,15 @@ test("a bot row carries its conversation's moment and the bot's own look; a bad 
   assert.deepEqual([r1.turnStart, r1.lastAction.what, r1.running[0].tool, r1.shape, r1.color], [T + 5, 'a.md', 'Bash', 'heart', '#FF6B80']);
   assert.deepEqual([r2.turnStart, r2.lastAction, r2.running, r2.shape, r2.color], [null, null, null, 'blob', null]); // a shape mascot.js does not know is ignored there
 });
-test("ownColorOf: a bot wears its look's colour whatever conversation it is in; the Chief its newest picked one", () => {
-  const rows = build(st({ allSessions: [S('L', { bot: B1 }), S('M', { bot: B2 }), S('C', { bot: 'chief' })], bots: [BOT(B1, { convId: 'L', live: true, color: '#ff6b80' }), BOT(B2, { convId: 'M', live: true })] }));
-  const r1 = rows.find((r) => r.botId === B1), r2 = rows.find((r) => r.botId === B2), ch = rows.find((r) => r.kind === 'chief');
-  const picked = (id) => ({ L: 'hsl(212 85% 62%)', M: 'hsl(44 85% 62%)', C: 'hsl(120 85% 62%)', C0: 'hsl(8 85% 62%)', K: 'hsl(8 85% 62%)' })[id] || null;
+test("ownColorOf: a bot wears its look's colour whatever conversation it is in", () => {
+  const rows = build(st({ allSessions: [S('L', { bot: B1 }), S('M', { bot: B2 })], bots: [BOT(B1, { convId: 'L', live: true, color: '#ff6b80' }), BOT(B2, { convId: 'M', live: true })] }));
+  const r1 = rows.find((r) => r.botId === B1), r2 = rows.find((r) => r.botId === B2);
+  const picked = (id) => ({ L: 'hsl(212 85% 62%)', M: 'hsl(44 85% 62%)' })[id] || null;
   assert.equal(ownColorOf(r1, picked), '#ff6b80'); // one colour per bot: a pick on its conversation is not it
   assert.equal(ownColorOf(r1), '#ff6b80');
-  assert.equal(ownColorOf({ ...r1, id: 'N', ids: ['L', 'N'] }, () => null), '#ff6b80'); // a new conversation keeps it
+  assert.equal(ownColorOf({ ...r1, id: 'N', ids: ['L', 'N'] }), '#ff6b80'); // a new conversation keeps it
   assert.equal(ownColorOf(r2, picked), null); // no look colour: the page's fallbacks (account)
-  assert.equal(ownColorOf(ch, picked), 'hsl(120 85% 62%)'); // the Chief's beats its gold
-  assert.equal(ownColorOf({ ...ch, id: 'C1', ids: ['C0', 'C', 'C1'] }, picked), 'hsl(120 85% 62%)'); // a new Chief conversation: the newest pick
-  assert.equal(ownColorOf({ ...ch, id: 'C1', ids: ['C1'] }, picked), null);
-  assert.equal(ownColorOf({ kind: 'team', id: 'K', key: 'team:k' }, picked), null);
+  assert.equal(ownColorOf({ kind: 'team', id: 'K', key: 'team:k' }), null);
 });
 test("doingOf: what the avatar's hover says, per face", () => {
   const bot = (o) => ({ kind: 'bot', id: 'x', live: true, preview: '', ...o });
@@ -495,7 +460,6 @@ test("doingOf: what the avatar's hover says, per face", () => {
   assert.equal(doingOf(bot({}), 'idle'), 'Idle');
   assert.equal(doingOf(bot({ live: false }), 'idle'), 'Not running: Start it, or send it a message');
   assert.equal(doingOf(bot({ live: false, id: null }), 'new'), 'Not started yet');
-  assert.equal(doingOf({ kind: 'chief', id: null }, 'new'), 'Not started yet');
   assert.equal(doingOf(null, 'idle'), '');
   assert.ok(doingOf(bot({ preview: 'x'.repeat(300) }), 'done').length < 140);
 });
@@ -511,7 +475,7 @@ test('mascot.js: thinking until a tool runs in this turn; the shapes; the same c
   assert.equal(mascotState(null), 'idle');
   for (const k of ['clover', 'flower', 'heart']) assert.ok(SHAPES.includes(k));
   // a seed's pick is what it was before the new shapes came
-  for (const seed of ['chief', 'bot:aaaaaaaaaaaa', 'x', '']) assert.ok(SHAPES.slice(0, 7).includes(shapeFor(seed)));
+  for (const seed of ['new-bot', 'bot:aaaaaaaaaaaa', 'x', '']) assert.ok(SHAPES.slice(0, 7).includes(shapeFor(seed)));
   for (const shape of SHAPES) {
     for (const state of ['working', 'thinking', 'needs', 'error', 'done', 'idle', 'new']) {
       const svg = mascotSVG('seed', { state, shape, color: '#58a6ff', size: 40 });
@@ -680,7 +644,6 @@ test('botFeed: no plumbing: quiet setup notes, handoffs, pickups, compactions an
   assert.equal(quietNote("You are Pan, one of Henry's bots. Your standing instructions are in CLAUDE.md in this folder."), 'ack');
   assert.equal(quietNote("You are Pan DetailForge, one of Henry's bots. Your id: x. Reply with just \"ok\"."), 'ack');
   assert.equal(quietNote("You are Pan, one of Henry's bots. Your id: x. Greet Henry in one short line, nothing more."), 'skip');
-  assert.equal(quietNote('You are the Chief. Your id: x. Read chief/BRIEF.md in the Fleet View folder.'), 'ack');
   assert.equal(quietNote('Your instructions changed: read CLAUDE.md again, then say so in one short line.'), 'one');
   assert.equal(quietNote('You were cut off mid-turn: the session host restarted for an update. Check what finished, then carry on.'), 'skip');
   assert.equal(quietNote('Scheduled task: Watch the map (hourly at :00, task t-map)'), null);
@@ -801,6 +764,15 @@ test("a bot's tasks: the schedule's label, a run's time, the meta line, the fold
   assert.deepEqual(tasksHead([{ ...t, title: 'Deploys' }, { ...t, id: 'p', status: 'paused' }, { id: 'd', title: 'D', status: 'done' }], now), { count: 3, open: 1, text: 'next: Deploys, in 1 h' });
   assert.equal(tasksHead([{ id: 'x', title: 'X', status: 'open', nextRun: null }], now).text, '1 open');
   assert.equal(tasksHead([{ id: 'd', title: 'D', status: 'done' }], now).text, 'all done');
+});
+
+test("profileTasks: a bot's profile lists the open ones (next run soonest first), then the paused, the done apart", () => {
+  const k = (id, status, nextRun = null, lastRun = null) => ({ id, title: id, status, nextRun, lastRun });
+  const { live, done } = profileTasks([k('later', 'open', 900), k('d1', 'done', null, 10), k('p', 'paused'), k('todo', 'open'), k('soon', 'open', 100), k('d2', 'done', null, 20), null]);
+  assert.deepEqual(live.map((x) => x.id), ['soon', 'later', 'todo', 'p']);
+  assert.deepEqual(done.map((x) => x.id), ['d2', 'd1'], 'the last run newest first');
+  assert.deepEqual(profileTasks(undefined), { live: [], done: [] });
+  assert.deepEqual(profileTasks('x'), { live: [], done: [] });
 });
 
 console.log(`${n} tests passed`);

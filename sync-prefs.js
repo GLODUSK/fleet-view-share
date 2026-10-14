@@ -196,7 +196,7 @@ const GROUPS = {
     key: (p) => rootKey(p), lkey: (l) => spotId(l),
   },
   // the Bots list's order and pins (fleet-view.js chatOrder): { key, pin? } here, the pinned ones first; { k, pin? } in
-  // the row. The Chief's and a team's key go as they are; a bot's goes by its folder's name ('bots:<slug>'), since its
+  // the row. A team's key goes as it is; a bot's goes by its folder's name ('bots:<slug>'), since its
   // id is each machine's own: the other machine lists it as one of its elsewhere bots (bots.js), whose id comes from
   // that name (translate.bot: { out(bot id) -> slug | null, in(slug) -> bot id | null })
   chatOrder: {
@@ -412,10 +412,10 @@ function cleanBotLook(x) {
 }
 
 // the Bots list's order (fleet-view.js settings.chatOrder, web/chats-model.js sortContacts): { pinned: [keys], keys:
-// [keys] }, a row's key ('chief', 'bot:<bot id>', 'team:<team id>') in one list only (pinned wins), at most max in each;
-// null when it is not one
-const CHAT_KEY_RE = /^(?:chief|bot:[0-9a-f]{12}|team:t[0-9a-f]{6,16})$/;
-const CHAT_PORTABLE_RE = /^(?:chief|team:t[0-9a-f]{6,16}|bots:[a-z0-9][a-z0-9_.-]{0,63})$/;
+// [keys] }, a row's key ('bot:<bot id>', 'team:<team id>') in one list only (pinned wins), at most max in each; any
+// other key is dropped (an older file's or machine's 'chief', from before the Chief was removed); null when it is not one
+const CHAT_KEY_RE = /^(?:bot:[0-9a-f]{12}|team:t[0-9a-f]{6,16})$/;
+const CHAT_PORTABLE_RE = /^(?:team:t[0-9a-f]{6,16}|bots:[a-z0-9][a-z0-9_.-]{0,63})$/;
 const CHAT_ORDER_MAX = 300;
 function cleanChatOrder(o, max = CHAT_ORDER_MAX) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null;

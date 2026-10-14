@@ -1,7 +1,7 @@
 # Fleet View for iPhone: the relay protocol (v2)
 
 The phone app (`phone/`, Expo) shows Cards, Wall and Projects (Projects as a Claude-app-style chat list with the
-Chats tab's bots, Chief and team group chats). It never calls the server's routes itself: the PC's **relay**
+Chats tab's bots and team group chats). It never calls the server's routes itself: the PC's **relay**
 (`relay.js`, inside the Fleet View server) opens each encrypted envelope, checks it, and answers the phone by calling
 the server's own routes over loopback. The envelopes travel one of two ways, picked on the phone's start screen (and
 in the PC's Pair an iPhone dialog) when it pairs:
@@ -362,7 +362,7 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
 
   | Route | Relay | With `wait` | The phone waits |
   |---|---|---|---|
-  | `POST /api/sessions`, `/api/chief/start`, `/api/bots`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it); the page's `/bots/:id/tasks/:taskId` (Run now starts the bot first when it is not running) | 95 s | 95 s + the wait | 100 s (+ the wait) |
+  | `POST /api/sessions`, `/api/bots`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it); the page's `/bots/:id/tasks/:taskId` (Run now starts the bot first when it is not running) | 95 s | 95 s + the wait | 100 s (+ the wait) |
   | `POST /api/sessions/:id/message` and `/open`; `POST /api/teams`, `/api/teams/:id/add`, `/lead` and `/message`; the page's `/teams`, `/teams/add` and `/teams/lead` (each may resume a stopped conversation first, up to 60 s, before it types) | 75 s | 75 s + the wait | 80 s (+ the wait) |
   | any other `/api/*` POST with `wait` (e.g. `/answer`) | 60 s | | the wait + 15 s |
   | `GET /api/sessions/:id/activity` (the chat's activity line, polled) | 5 s | | 20 s |
@@ -400,7 +400,7 @@ Per device, on the relay:
 - **30 envelopes a second and 1,200 a minute**, counting every envelope that opens: requests, their repeats, parts
   and hellos. Over that, a `req` or `hello` gets 429 with `retryAfter`, and a part is dropped.
 - **The routes that start or resume a Claude: 2 at once, and 12 in 10 minutes.** Each counts one (`POST
-  /api/sessions`, `/api/sessions/:id/open`, `/api/chief/start`, `/api/bots`, `/api/bots/:id/start`,
+  /api/sessions`, `/api/sessions/:id/open`, `/api/bots`, `/api/bots/:id/start`,
   `/api/teams/:id/add`, the page's `/teams/add`, and the page's `/bots/:id/tasks/:taskId` with `action: "run"`), a team one per distinct member (`POST /api/teams`, the page's
   `/teams`; 12 at most), and a lead only when there is one (`/api/teams/:id/lead`, `/teams/lead`). A message counts
   what it may resume, as `/state` says it (read again when over 15 s old): `POST /api/sessions/:id/message` that
@@ -420,7 +420,7 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 `/peer/...` routes of `PEER_ALLOW`, which a phone may never call (403).
 
 **GET:** `/state`, `/conversation`, `/conversation/image`, `/repo-history`, `/chat/commands`, `/chat/files`,
-`/chat/kind`, `/file`, `/since`, `/chief/briefing`, `/api/sessions`, `/api/sessions/:id`, `/api/sessions/:id/menu`,
+`/chat/kind`, `/file`, `/since`, `/api/sessions`, `/api/sessions/:id`, `/api/sessions/:id/menu`,
 `/api/sessions/:id/transcript` (with `queue`, the messages queued in Claude Code), `/api/sessions/:id/activity`,
 `/api/conversations`, `/api/teams`, `/api/status`, `/accounts`.
 
@@ -428,7 +428,7 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 `/api/sessions/:id/open`, `/api/sessions/:id/stop`, `/api/sessions/:id/remove`, `/api/sessions/:id/now`,
 `/api/sessions/:id/unsend`, `/api/sessions/:id/model`, `/api/teams`,
 `/api/teams/:id/add`, `/api/teams/:id/remove`, `/api/teams/:id/lead`, `/api/teams/:id/disband`,
-`/api/teams/:id/message`, `/api/chief/start`, `/api/bots`, `/api/bots/:id`, `/api/bots/:id/start`,
+`/api/teams/:id/message`, `/api/bots`, `/api/bots/:id`, `/api/bots/:id/start`,
 `/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
 `/chat/image`, and the page's `/teams` (the phone's New team sends it as the page's New team does: `{ members, order, name,
 lead, send: true }`, then `/teams/add` for a team above and `/teams/leave` with `quiet` for a member its order missed),
@@ -458,13 +458,10 @@ The Claude accounts (accounts.js; the phone's "Claude accounts" step after pairi
   or removed, no other letter is added, and no email is chosen; `/accounts/remove` and every other `/accounts/*` stay
   off.
 
-The Chief and the bots:
+The bots:
 
-- `GET /chief/briefing` is the Chief's free briefing (chief.js: who needs Henry, what is working, finished and
-  deployed, and the same as a few lines). `POST /api/chief/start { account?, model?, effort? }` starts the Chief,
-  or adopts the one running: `{ ok, id, key, started }`, and 503 while the desktop app (the session host) is not
-  running. The relay passes on only `account`, `model` and `effort` and drops anything else. The Chief starts
-  only this way: `POST /api/sessions` with a `role` in its body (any value) is 403.
+- A bot's session starts only by its own route: `POST /api/sessions` with a `role` in its body (any value) is 403.
+  (The Chief's `GET /chief/briefing` and `POST /api/chief/start` went with it on 2026-10-13: 403.)
 - **Bots** (bots.js, api.js): `POST /api/bots { name, brief?, role?, account?, model?, effort?, shape?, color? }` makes a
   bot and starts it, `POST /api/bots/:id { name?, brief?, role?, account?, model?, effort?, shape?, color? }` changes one
   (the phone's Edit bot sends only what changed), `POST /api/bots/:id/start` starts one, `POST /api/bots/:id/remove`
@@ -489,15 +486,12 @@ The Chief and the bots:
 Narrower rules:
 
 - `POST /settings` may set only `repo`, `repos`, `hidden`, `hiddenRepos`, `finishedOpen`, the list features'
-  `repoNames`, `repoOrder` and `forgotten`, `chief`, and the Bots list's order `chatOrder` (`{ pinned, keys }`: row
-  keys `chief`, `bot:<id>`, `team:<id>`; the server cleans it). Any other key makes the whole request 403. `repo` and each
+  `repoNames`, `repoOrder` and `forgotten`, and the Bots list's order `chatOrder` (`{ pinned, keys }`: row
+  keys `bot:<id>`, `team:<id>`; the server cleans it, dropping any other). Any other key makes the whole request 403. `repo` and each
   `repos` entry that is a path (a bare name only filters by name), and each `hiddenRepos` root, must be a root Fleet
   View already knows (`/state`'s repos, its removed workspaces, its added repos); each `repoNames` and `repoOrder`
   root may also be one the list features' settings already hold. The Chats window keys (`chatsBounds`,
   `chatsOpen`, `chatsOnTop`) stay off: they are desktop state.
-- `chief` in `POST /settings` must be `{ watch: true | false }` (the Chief's watch mode), else 400. Only `watch`
-  goes on: the `id` that `/state`'s `settings.chief` carries (and anything else in it) is dropped, so the phone
-  may send back what it read with `watch` changed.
 - `POST /api/bots` and `POST /api/bots/:id` take only `name`, `brief`, `role`, `account`, `model`, `effort`, `shape` and
   `color` (what bots.js reads; it checks the values itself); any other key, `folder` included, makes the request
   403. `POST /api/bots/:id/start` and `/remove` take no fields at all (403 otherwise).
@@ -573,7 +567,7 @@ that goes in a header is `etag`, as `If-None-Match`, which must be printable tex
 
 ### The relay's marker: what Henry sent from his phone
 
-A Chief (chief.js) reads text with no `from` as Henry's own words only when it comes from the phone, and api.js
+A bot reads text with no `from` as Henry's own words only when it comes from the phone (overseer.js frame), and api.js
 lets only Henry make, change or remove a bot. Every Claude session on the PC can read the API token, so the token
 alone can't prove either. The relay marks the phone's requests with **`"via": "phone"` in the body and the header
 `X-Fleet-View-Relay: <key>`**. The key is api.js's `relayKey()`: it is made when the server starts and kept in
@@ -590,11 +584,11 @@ key counts as unsigned.
 - **Phone-sent copies:** the relay deletes `via` from every body the phone sends, on every route, before anything
   else reads the body. So the phone can't mark a request itself and can't unmark one. It never sends `via`.
 - Without a key (an older server, or a bad one) the relay sends no marker at all, and says so once in
-  `server.log`. The phone's text then reaches a Chief as unsigned, and making a bot from the phone is refused.
+  `server.log`. The phone's text then reaches a bot as unsigned, and making a bot from the phone is refused.
 - **What it proves, and what it doesn't.** The marker raises the bar for a local process that has only the API
   token: it can't pass its text off as Henry's. It is not proof against a process running as the same Windows user
   that can read the server's memory (a debugger, a memory dump): that one can get the key. Every Claude session
-  runs as that user, so a Chief should still weigh what a "Henry" message asks for.
+  runs as that user, so a bot should still weigh what a "Henry" message asks for.
 
 ## Several machines
 

@@ -374,7 +374,7 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     // busy, an overseer without the phone, bad input: nothing typed
     reset(); live({ status: 'busy' });
     assert.equal((await call('POST', `${S}/model`, { effort: 'low' }))[0], 409);
-    reset(); live({ status: 'idle', role: 'chief' });
+    reset(); live({ status: 'idle', role: 'bot:a1b2c3d4e5f6' });
     assert.equal((await call('POST', `${S}/model`, { effort: 'low' }))[0], 403);
     assert.equal((await call('POST', `${S}/model`, { effort: 'low', via: 'phone' }))[0], 403); // no relay key
     assert.equal((await call('POST', `${S}/model`, { effort: 'nope' }))[0], 400);

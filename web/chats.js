@@ -1,16 +1,16 @@
 // Bots view (the tab users see as Bots; its id, file, storage keys and ?solo=chats keep the old name "chats"):
-// Fleet View as a phone messenger for the overseers only: the Chief and Henry's bots (bots.js), never a conversation
-// of the map's. On the left, one row per contact (chats-model.js): the Chief pinned on top, then every bot (one row
-// however many conversations it went through) and every team of overseers as a group chat, each with its blob
-// mascot (mascot.js), name, time and a one-line preview; on the right, the picked one's chat (all its conversations as
-// one chat, the oldest first: historyOf, chat.js opts.history): a running bot's or the Chief's is the same chat pane
+// Fleet View as a phone messenger for the overseers only: Henry's bots (bots.js), never a conversation of the map's.
+// On the left, one row per contact (chats-model.js): every bot (one row however many conversations it went through)
+// and every team of overseers as a group chat, each with its blob mascot (mascot.js), name, time and a one-line
+// preview; on the right, the picked one's chat (all its conversations as one chat, the oldest first: historyOf,
+// chat.js opts.history): a running bot's is the same chat pane
 // and chat box as the Projects view (chat.js), in its messenger look (opts.bubbles: the replies in bubbles on the
 // left, Fleet View's setup notes as small grey lines), a team's is its thread as bubbles with
 // a box that sends to every member the way the team menu's "Message the team" does (ui.messageTeam in app.js).
 //
 // "+" opens a small menu: New bot and New team (Henry, 2026-10-13: "it should be within the same bots menu"), each a
 // form in the chat side. New team: a name (else "Bots · <the order's first words>"), the members ticked from the
-// Chief and the bots (one with no conversation yet, or that this window can't reach, is greyed with the reason; at
+// bots (one with no conversation yet, or that this window can't reach, is greyed with the reason; at
 // most ui.teamMax), Lead (one of them, or No lead: peers), Team above (only with a lead: an overseers' team its lead
 // reports in, teams nest) and the order. Make team goes the way the team menus' orders go (ui.makeTeam in app.js:
 // POST /teams, then /teams/add for the team above), and the new team's group chat is picked; the server's reason
@@ -35,14 +35,17 @@
 // /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
 // A bot's role (Edit bot's Role: "Reviewer", at most 60 characters) shows under its name in its chat's header and on
 // its row under a team; its CLAUDE.md and its team briefs say it (bots.js).
+// Its profile (Edit bot) shows its tasks under the instructions, read only (Henry, 2026-10-13: "if i go into their
+// profile i can see what their tasks are"): the open and paused ones, next run soonest first, then how many are done
+// (a click shows them). They follow /state while the form is open, without touching what is typed in its fields.
 //
 // Teams are groups in the list (Henry, 2026-10-13: "if i make a team i can see them in the team ... expand take them
 // out put them in etc dynamically"): a team's row has a chevron that folds it; open, its members show under it, one
 // step in (★ on the lead, each with its role), and a bot in a team is there only, never also a row of its own. A team
 // whose lead reports in a team above shows inside that one, in its lead's place (chats-model.js contactTree). Folded,
 // its row says how many are in it, and a member that needs you or has something new shows on the team's row. Folded
-// or open is kept in this window's storage (fv.chats.folded: the folded ones; open by default). Drag a bot (or the
-// Chief) onto a team's row or its group to put it in (the group lights up; POST /teams/add: one in another team
+// or open is kept in this window's storage (fv.chats.folded: the folded ones; open by default). Drag a bot onto a
+// team's row or its group to put it in (the group lights up; POST /teams/add: one in another team
 // leaves that one), out of its group into the list to take it out (POST /teams/leave), or from one group to another
 // to move it; between rows it is the order, as before. Each goes the way the team menus' do (ui.teamAdd,
 // ui.teamLeave, ui.teamLead in app.js, with their toasts), and asks first when it would end a team (left with one).
@@ -55,9 +58,8 @@
 // the rest and is added (chatOrderAdd), so it stays there.
 //
 // The avatars are alive (mascot.js): a bot wears its own shape and colour when it has one (state.bots; a bot can
-// change its own with fv look; kept with the bot, so a new conversation wears it too; the Chief wears the colour picked
-// on its conversation's right-click: setPickedColors), its face follows what it does (thinking about a fresh message,
-// working, needs you, ...), it hops when you send it a message (the chat box's 'fv-chat-sent', or the box of one not
+// change its own with fv look; kept with the bot, so a new conversation wears it too), its face follows what it does
+// (thinking about a fresh message, working, needs you, ...), it hops when you send it a message (the chat box's 'fv-chat-sent', or the box of one not
 // running), and hovering its avatar in the list or the chat's header says what it is doing now (chats-model.js doingOf).
 // They move whenever this tab shows (mascot.css; a hidden tab draws nothing, so they cost nothing elsewhere), and while
 // a bot works on its reply a small copy of its face bobs at the bottom right of its chat with typing dots (drawTyping).
@@ -86,13 +88,8 @@
 // pin-on-top toggle (setChatsOnTop) and a dock-back button (dockChats); Session and Details there open the
 // conversation in the main window (showMain).
 //
-// The Chief: with none started (settings.chief.id null) its pane is a short card with a Start button (POST
-// /api/chief/start). Once there is one, its pane is a bot's chat with a strip above the thread: the briefing card
-// (GET /chief/briefing when the pane opens and at most every 60 s while it shows; free, it sends the Chief nothing)
-// and the Watch mode switch (POST /settings { chief: { watch } }). With ?fixture=1 nothing is posted: Start fakes
-// a Chief from a fixture conversation and the briefing is built here from the fixture sessions; a bot made with the
-// form is kept in the page, and Start, Edit bot and Remove bot only record their POSTs (a team's member in or out
-// too: app.js's post records them).
+// With ?fixture=1 nothing is posted: a bot made with the form is kept in the page, and Start, Edit bot and Remove bot
+// only record their POSTs (a team's member in or out too: app.js's post records them).
 import { C, esc, setHTML, badge, acctColor, isAcct, repoChip } from './cards.js';
 import { icon } from './icons.js';
 import { renderChatPane } from './chat.js';
@@ -101,13 +98,12 @@ import { openCtxMenu } from './ctxmenu.js';
 import { mascotSVG, mascotState, mascotAck, SHAPES } from './mascot.js';
 import { MODEL_IDS, EFFORTS, modelLabel, setDynamicBots } from './compose.js';
 import { handToChat } from './handto.js';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, setupNote,
+import { buildContacts, sortContacts, teamThread, unread, asksYou, ownColorOf, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, profileTasks, setupNote,
   fullChatOrder, moveInChatOrder, pinInChatOrder, sameChatOrder, contactTree, teamFlags, ROLE_MAX } from './chats-model.js';
 import { mountPicker } from './picker.js';
 // New team's rules (who can be ticked, the lead and team above choices, the small lines), shared with the phone app,
 // and the list's team groups' (a member in or out)
 import { TEAM_MAX, newTeamWhy, teamChoices as teamChoicesOf, memberRow, settleTeam, leadChoices, aboveChoices, countNote, orderHint, joinPlan, leavePlan } from './team-form.js';
-import { ASK_TEXT, WATCH_NOTE, BRIEF_MS, watchOn as watchFrom, watchBody, briefLines, briefSections, briefTime, fixtureBriefing } from './chief-model.js';
 
 export const SOLO = new URLSearchParams(location.search).get('solo') === 'chats';
 const NARROW = 640; // px: under this the view shows the list or the chat, not both
@@ -124,7 +120,6 @@ const HEX = /^#[0-9a-f]{3,8}$/i;
 
 let selKey = store.get(SEL_KEY, null);
 let seen = (() => { const s = store.get(SEEN_KEY, {}); return s && typeof s === 'object' && !Array.isArray(s) ? s : {}; })();
-let chains = null; // the model's chain store, made once
 let query = '';
 let open = false; // narrow layout: the chat is over the list
 let popped = false; // Bots is in its own window (main window only)
@@ -144,14 +139,6 @@ let selLast = null; // the last copy of the picked bot's conversation, kept if i
 let pane = null;
 
 const FIXTURE = new URLSearchParams(location.search).has('fixture');
-const START_WAIT = 30000; // after Start: how long "Starting..." waits for the Chief to be listed
-const chief = {
-  fakeId: null, // ?fixture=1 only: the fixture conversation standing in for a started Chief
-  starting: false, startedAt: 0, err: '',
-  watch: false, // ?fixture=1: the local switch
-  watchSet: null, watchAt: 0, watchErr: '', // the switch as just flipped, until /state agrees
-  brief: null, briefAt: 0, briefBusy: false, briefOn: false, more: false,
-};
 const BOT_WAIT = 90000; // a start with a message: how long the message waits for the bot's session to be up
 const MADE_MS = 15000; // a bot just made shows from POST /bots's answer until /state lists it, at most this long
 const DEF = { account: 'B', model: DYNAMIC, effort: DYNAMIC }; // a new bot's (bots.js NEW_BOT): sized for each message
@@ -169,12 +156,12 @@ const botUi = new Map();
 const bu = (id) => { let u = botUi.get(id); if (!u) botUi.set(id, (u = { starting: false, wait: null, err: '', note: '', draft: '', restore: false })); return u; };
 // the New bot form, a bot's Edit bot panel or the New team form while it shows: { mode: 'new' | 'edit' | 'team',
 // botId (edit), busy, err, fresh, v: { account, model, effort, shape, color } as picked (team: { members: [ids],
-// lead, above }), pk: the pickers }
+// lead, above }), pk: the pickers, doneOpen (edit: its done tasks shown) }
 let form = null;
 const made = new Map(); // bot id -> { bot, at }: made here, until /state lists it (?fixture=1: for good)
 // a bot of this machine's; another machine's (elsewhere: bots.js) has no Start, Edit, menu or Tasks here
 const botOf = (state, id) => (state.bots || []).find((b) => b && b.id === id && !b.elsewhere) || null;
-// a bot's or the Chief's conversations before the one its chat shows, oldest first (chat.js opts.history: they show as
+// a bot's conversations before the one its chat shows, oldest first (chat.js opts.history: they show as
 // one chat): the bot's own list (state.bots ids, another machine's bot's too) and the ones /state tags with it
 function historyOf(state, c) {
   if (!c || !c.id) return [];
@@ -235,9 +222,8 @@ function when(ms, now) {
 let pickedColor = () => null;
 export function setPickedColors(fn) { pickedColor = typeof fn === 'function' ? fn : () => null; }
 const colorOf = (c) => {
-  const own = ownColorOf(c, pickedColor); // a bot's look (state.bots), the Chief's picked one
+  const own = ownColorOf(c); // a bot's look (state.bots)
   if (own) return own;
-  if (c && c.kind === 'chief') return C.gold; // the Chief keeps its own colour whatever folder it runs in
   const r = c && c.repo && c.repo.color;
   if (HEX.test(String(r || ''))) return r;
   if (c && c.kind === 'team' && HEX.test(String(c.statusColor || ''))) return c.statusColor;
@@ -260,10 +246,10 @@ function cluster(state, c, box = 40) {
   return `<span class="ch-cluster n${ms.length}" style="--cb:${box}px;--cs:${sz}px">`
     + ms.map((m, i) => `<span class="ch-cm m${i}">${memberMascot(state, m, Math.round(sz * 0.84))}</span>`).join('') + '</span>';
 }
-const faceOf = (c) => (c.kind === 'chief' && !c.id ? 'new' : mascotState(c));
+const faceOf = (c) => mascotState(c);
 const avatar = (state, c, size = 40) => (c.kind === 'team' ? cluster(state, c, size)
-  : mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: faceOf(c), color: colorOf(c), size, shape: c.shape || undefined }));
-// the hover on a bot's or the Chief's avatar: what it is doing now
+  : mascotSVG(c.key, { state: faceOf(c), color: colorOf(c), size, shape: c.shape || undefined }));
+// the hover on a bot's avatar: what it is doing now
 const doingTip = (c) => {
   if (!c || c.kind === 'team') return '';
   const u = c.botId ? botUi.get(c.botId) : null;
@@ -281,7 +267,6 @@ function ackBot(el, key) {
 }
 const previewOf = (c) => {
   const p = typeof c.preview === 'string' ? c.preview : '';
-  if (c.kind === 'chief') return c.id ? p || 'Ready' : chief.starting || Date.now() - chief.startedAt < START_WAIT ? 'Starting...' : p || 'Not started yet';
   if (c.kind === 'team' && !p) return 'Group chat';
   const u = c.botId ? botUi.get(c.botId) : null;
   if (u && (u.starting || u.wait)) return 'Starting...';
@@ -326,7 +311,7 @@ function rowHtml(state, c, now, node) {
     + `</span></button>`;
 }
 
-// with no bot yet (the Chief aside): what bots are for, and the New bot button
+// with no bot yet: what bots are for, and the New bot button
 const BOTS_FOR = 'Bots are overseers you give standing tasks, away from the map.';
 const newBotBtn = () => `<button type="button" class="btn primary ch-newbot" data-newbot="1">${icon('plus', 14)}<span>New bot</span></button>`;
 // nodes: the rows as drawn (contactTree; a search: the matches, flat)
@@ -415,7 +400,7 @@ const pinItem = (ui, c) => ({ label: c.pinned ? 'Unpin' : 'Pin', icon: 'pin', no
 
 // dragging a row (mouse or pen; a touch scrolls): it starts once the pointer goes DRAG_PX, the list holds still
 // meanwhile (renderChats leaves it alone). Between the rows at the top a line shows where it goes; dropped in the
-// pinned rows it is pinned, in the rest it is not. A bot or the Chief held over a team's row (its middle) or any row
+// pinned rows it is pinned, in the rest it is not. A bot held over a team's row (its middle) or any row
 // of its group lights that group up: dropped there it goes in that team; one under a team dropped between the rows at
 // the top comes out of it, and stays where it was dropped. Esc cancels. The click that ends a drag picks nothing
 const DRAG_PX = 5;
@@ -581,7 +566,7 @@ function build(el, ui) {
     + `<div class="ch-list" role="listbox" aria-label="bots"></div></nav>`
     + `<section class="ch-main"><header class="ch-head" hidden><button type="button" class="ch-ib ch-back" title="Back to the bots (Esc)" aria-label="Back">${icon('chevron', 16)}</button>`
     + `<span class="ch-head-av"></span><div class="ch-head-t"></div><div class="ch-head-b"></div></header>`
-    + `<div class="ch-chief" hidden></div><div class="ch-tasks" hidden></div><div class="ch-chat" hidden></div>`
+    + `<div class="ch-tasks" hidden></div><div class="ch-chat" hidden></div>`
     + `<div class="ch-team" hidden><div class="ch-thread" role="log" aria-live="polite"></div>`
     + `<div class="ch-tcomp"><textarea rows="1" spellcheck="true" placeholder="Message the team"></textarea>`
     + `<button type="button" class="ch-send" title="Send to every member (Enter)" aria-label="Send">${icon('send', 16)}</button><div class="ch-tnote" hidden></div></div></div>`
@@ -595,7 +580,7 @@ function build(el, ui) {
   Object.assign(el, {
     _ch: q('.ch'), _side: q('.ch-side'), _list: q('.ch-list'), _pop: q('.ch-pop'), _new: q('.ch-new'),
     _search: q('.ch-search input'), _head: q('.ch-head'), _headAv: q('.ch-head-av'), _headT: q('.ch-head-t'), _headB: q('.ch-head-b'),
-    _chat: q('.ch-chat'), _chief: q('.ch-chief'), _team: q('.ch-team'), _thread: q('.ch-thread'), _ta: q('.ch-team textarea'), _send: q('.ch-team .ch-send'),
+    _chat: q('.ch-chat'), _team: q('.ch-team'), _thread: q('.ch-thread'), _ta: q('.ch-team textarea'), _send: q('.ch-team .ch-send'),
     _tnote: q('.ch-team .ch-tnote'), _blank: q('.ch-blank'), _popped: q('.ch-popped'), _onTop: q('.ch-ontop'),
     _bot: q('.ch-bot'), _bchat: q('.ch-bot-chat'), _bintro: q('.ch-bot-intro'), _bta: q('.ch-bcomp textarea'), _bsend: q('.ch-bcomp .ch-send'),
     _bnote: q('.ch-bcomp .ch-tnote'), _form: q('.ch-form'), _tasks: q('.ch-tasks'),
@@ -635,10 +620,8 @@ function build(el, ui) {
     const extra = c && top ? [pinItem(ui, c)] : [];
     if (r.dataset.team) { ui.contextMenu({ kind: 'team', id: r.dataset.team, extra }, e.clientX, e.clientY); return; }
     if (r.dataset.bot && botOf(st, r.dataset.bot)) { botMenu(el, ui, r.dataset.bot, e.clientX, e.clientY); return; }
-    // the Chief: the conversation menu, with its team items on top
-    const grp = c && c.kind === 'chief' ? groupItems(el, ui, c) : [];
-    if (r.dataset.id && inState(st, r.dataset.id) && !(r.dataset.bot && elsewhereBot(st, r.dataset.bot))) { ui.contextMenu({ kind: 'session', id: r.dataset.id, extra: [...extra, ...(extra.length && grp.length ? [{ sep: true }] : []), ...grp] }, e.clientX, e.clientY); return; }
-    // another machine's bot (run on its own machine), the Chief stand-in, a gone conversation: Pin / Unpin alone
+    if (r.dataset.id && inState(st, r.dataset.id) && !(r.dataset.bot && elsewhereBot(st, r.dataset.bot))) { ui.contextMenu({ kind: 'session', id: r.dataset.id, extra }, e.clientX, e.clientY); return; }
+    // another machine's bot (run on its own machine), a gone conversation: Pin / Unpin alone
     if (c) openCtxMenu({ x: e.clientX, y: e.clientY, title: c.name, dot: colorOf(c), items: extra });
   });
   // drag a row to move it (see dragOver)
@@ -728,14 +711,15 @@ function build(el, ui) {
     if (e.target.closest('[data-start]')) startBot(ui, el._cur.botId);
     else if (e.target.closest('[data-edit]')) openForm(el, ui, el._cur.botId);
   });
-  el._blank.addEventListener('click', (e) => {
-    if (e.target.closest('[data-newbot]')) openForm(el, ui);
-    else if (e.target.closest('.ch-start-btn')) startChief(el, ui);
-  });
+  el._blank.addEventListener('click', (e) => { if (e.target.closest('[data-newbot]')) openForm(el, ui); });
   // the New bot form, Edit bot and New team: Enter in the name (or Ctrl+Enter anywhere) makes or saves it, Esc or
   // Cancel closes it (a picker's open menu takes Esc first: picker.js)
   el._form.addEventListener('submit', (e) => { e.preventDefault(); submitForm(el, ui); });
-  el._form.addEventListener('click', (e) => { if (e.target.closest('[data-cancel]')) closeForm(ui); });
+  el._form.addEventListener('click', (e) => {
+    if (e.target.closest('[data-cancel]')) closeForm(ui);
+    // the profile's "Done (N)": its done tasks shown or folded
+    else if (e.target.closest('[data-tdone]') && form) { form.doneOpen = !form.doneOpen; ui.refresh(); }
+  });
   // New team: a member ticked or unticked
   el._form.addEventListener('change', (e) => { if (e.target.name === 'tm') tickMember(el, e.target.value, e.target.checked); });
   el._form.addEventListener('keydown', (e) => {
@@ -743,19 +727,6 @@ function build(el, ui) {
     if (e.key === 'Escape') { e.preventDefault(); closeForm(ui); }
     else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitForm(el, ui); }
   });
-  el._chief.addEventListener('click', (e) => {
-    const o = e.target.closest('[data-open]');
-    if (o) {
-      // a bot's row here; a conversation of the map's opens in the side panel (the main window's, from the pop-out)
-      const id = o.dataset.open;
-      const t = (el._contacts || []).find((x) => x.id === id || (x.ids || []).includes(id));
-      if (t) pick(t.key, ui, true);
-      else if (SOLO && typeof desk()?.showMain === 'function') desk().showMain(id);
-      else if (inState(el._state || {}, id)) ui.panel(id, 'chat');
-    } else if (e.target.closest('.ch-more')) { chief.more = !chief.more; ui.refresh(); }
-    else if (e.target.closest('.ch-ask')) askBrief(el);
-  });
-  el._chief.addEventListener('change', (e) => { if (e.target.closest('.ch-watch')) setWatch(el, ui, e.target.checked); });
   // the Tasks strip: its head folds it, a row's buttons act on that task, ⋯ or a right-click opens the task's menu
   el._tasks.addEventListener('click', (e) => {
     const c = el._cur;
@@ -892,6 +863,8 @@ function drawForm(el, state) {
       // what it is for in its teams: its CLAUDE.md and team briefs say it (bots.js)
       + `<label class="ch-f"><span>Role</span><input name="role" maxlength="${ROLE_MAX}" spellcheck="true" placeholder="e.g. Reviewer, Release manager" value="${edit ? esc(bot.role || '') : ''}"></label>`
       + `<label class="ch-f"><span>${edit ? 'Instructions' : 'What it does'}</span><textarea name="brief" maxlength="4000" rows="6" placeholder="Its standing instructions: what it watches, what it does, when it tells you">${edit ? esc(bot.brief || '') : ''}</textarea></label>`
+      // its tasks, read only: drawn on every render (profileTasksHtml), so they follow /state
+      + (edit ? `<div class="ch-f"><span id="ch-nb-tasks">Tasks</span><div class="ch-pt" role="group" aria-labelledby="ch-nb-tasks"></div></div>` : '')
       + `<div class="ch-f-row">${field('account', 'Account')}${field('model', 'Model')}${field('effort', 'Effort')}</div>`
       + `<div class="ch-f-row two">${field('shape', 'Shape')}${field('color', 'Colour')}</div>`
       + `<div class="ch-nb-err" role="alert" hidden></div>`
@@ -909,12 +882,29 @@ function drawForm(el, state) {
     requestAnimationFrame(() => el._form.querySelector('input[name="name"]')?.focus());
   }
   const f = el._form.querySelector('form');
+  // only the Tasks list is drawn again here: the fields keep what is typed in them
+  const pt = edit && bot ? f.querySelector('.ch-pt') : null;
+  if (pt) setHTML(pt, profileTasksHtml(bot, Date.now()));
   const er = f.querySelector('.ch-nb-err');
   er.textContent = form.err;
   er.hidden = !form.err;
   const mk = f.querySelector('[data-make]');
   mk.disabled = form.busy;
   mk.textContent = edit ? (form.busy ? 'Saving...' : 'Save') : form.busy ? 'Making it...' : 'Make it';
+}
+// a bot's tasks in its profile (chats-model.js profileTasks): the open and paused ones, next run soonest first, each
+// as the Tasks strip phrases it (taskSchedule, taskLine), then "Done (N)", whose rows show when it is clicked
+function profileTasksHtml(b, now) {
+  const { live, done } = profileTasks(tasksOf(b));
+  if (!live.length && !done.length) return '<div class="ch-pt-none">No tasks yet.</div>';
+  const row = (t) => `<div class="ch-tk-row ${esc(t.status)}${t.valid === false ? ' bad' : ''}"${t.detail ? ` title="${esc(t.detail)}"` : ''}>`
+    + `<span class="ch-tk-ic" aria-hidden="true">${icon(taskIcon(t), 13)}</span>`
+    + `<div class="ch-tk-m"><div class="ch-tk-l1"><span class="ch-tk-title">${esc(t.title)}</span><span class="ch-tk-sch">${esc(taskSchedule(t))}</span></div>`
+    + `<div class="ch-tk-l2">${esc(taskLine(t, now))}</div></div></div>`;
+  const shut = !(form && form.doneOpen);
+  return (live.length ? live.map(row).join('') : '<div class="ch-pt-none">Nothing open.</div>')
+    + (done.length ? `<button type="button" class="ch-pt-done" data-tdone="1" aria-expanded="${!shut}"><span class="ch-tk-chev">${icon('chevron', 12)}</span><span>Done (${done.length})</span></button>`
+      + (shut ? '' : done.map(row).join('')) : '');
 }
 // a shape, colour or account picked: the shape and colour pickers (drawn in the colour picked) and the header's
 // preview of the bot as picked follow
@@ -979,8 +969,8 @@ async function saveEdit(el, ui, vals) {
 // ---------- New team ----------
 const teamMax = () => Number(curUi().teamMax) || TEAM_MAX;
 // a contact's face at rest (the form's rows stay put while it works)
-const restFace = (c, size) => mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: 'idle', color: colorOf(c), size, shape: c.shape || undefined });
-// who can be in it: the Chief and every bot (team-form.js teamChoices); why not comes from app.js (ui.teamJoinWhy:
+const restFace = (c, size) => mascotSVG(c.key, { state: 'idle', color: colorOf(c), size, shape: c.shape || undefined });
+// who can be in it: every bot (team-form.js teamChoices); why not comes from app.js (ui.teamJoinWhy:
 // the orders' checks)
 function teamChoices(state) {
   const ui = curUi();
@@ -1146,8 +1136,7 @@ function pumpBots(state) {
 }
 
 // the right-click menu of a bot's row: Pin / Unpin (at the top), Start, Profile... (its Edit bot panel: name, role,
-// look and the rest live there only), its team items (groupItems), Team ▸, Remove bot (the Chief keeps the
-// conversation menu)
+// look and the rest live there only), its team items (groupItems), Team ▸, Remove bot
 function botMenu(el, ui, botId, x, y) {
   const b = botOf(el._state || {}, botId);
   if (!b) return;
@@ -1233,7 +1222,7 @@ function back(ui) {
 }
 
 // ---------- the chat side ----------
-// A bot (or the Chief) working on its reply: a small copy of its face at the bottom left of its chat, above the box,
+// A bot working on its reply: a small copy of its face at the bottom left of its chat, above the box,
 // bobbing beside three typing dots, Grok-style (Henry, 2026-10-13: "when they are typing back i should them bottom
 // right in a smaller version like in grokbot"; then "move the bot animation thinking from right to left and remove
 // the regular cooking status"): while it shows, the box's "Cooking…" line hides (chats.css). Gone once it is idle,
@@ -1256,7 +1245,7 @@ function drawTyping(el, c, s) {
   }
   if (t.parentNode !== main) main.appendChild(t); // (a pane built again: put back)
   if (on) {
-    setHTML(t._av, mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: 'working', color: colorOf(c), size: 28, shape: c.shape || undefined }));
+    setHTML(t._av, mascotSVG(c.key, { state: 'working', color: colorOf(c), size: 28, shape: c.shape || undefined }));
     const say = `${c.name || 'It'} is working on a reply`;
     if (t.getAttribute('aria-label') !== say) { t.setAttribute('aria-label', say); t.title = say; }
   }
@@ -1291,7 +1280,7 @@ function drawHead(el, state, c, s) {
   // its role under its name (its Profile's Role)
   const role = c.role ? `<span class="ch-role" title="${esc(`${c.name}'s role`)}">${esc(c.role)}</span>` : '';
   if (!s) {
-    setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || 'Chief')}</span></div><div class="ch-head-m">${role}<span class="ch-goal">${esc(previewOf(c))}</span></div>`);
+    setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name || 'Bot')}</span></div><div class="ch-head-m">${role}<span class="ch-goal">${esc(previewOf(c))}</span></div>`);
     setHTML(el._headB, edit + (start || ''));
     return;
   }
@@ -1358,7 +1347,7 @@ function drawTeam(el, state, c) {
 }
 const curUi = () => pane?._ui || {};
 
-// ---------- the Chief ----------
+// ---------- posting ----------
 async function postJson(url, body) {
   if (FIXTURE) { try { window.__fvPosts?.push({ url, body: JSON.parse(JSON.stringify(body)) }); } catch {} return { ok: true, status: 200, body: null }; }
   try {
@@ -1371,98 +1360,7 @@ const failText = (r, what) => (r.status === 503 ? "The desktop app's session hos
   : r.status === 0 ? 'Could not reach Fleet View'
   : (r.body && (r.body.error || r.body.message)) || `${what} (error ${r.status})`);
 
-async function startChief(el, ui) {
-  if (chief.starting) return;
-  chief.starting = true;
-  chief.err = '';
-  ui.refresh();
-  if (FIXTURE) {
-    // nothing is posted: a fixture conversation stands in for the started Chief
-    const ss = (el._state && el._state.allSessions) || [];
-    const s = ss.find((x) => x.state === 'IDLE') || ss.find((x) => x.state === 'DONE') || ss[ss.length - 1];
-    chief.fakeId = s ? s.id : null;
-    chief.starting = false;
-    ui.refresh();
-    return;
-  }
-  const r = await postJson('/api/chief/start', {});
-  chief.starting = false;
-  if (r.ok) chief.startedAt = Date.now();
-  else chief.err = failText(r, 'Could not start the Chief');
-  ui.refresh();
-}
-
-const watchOn = (state) => (FIXTURE ? chief.watch : watchFrom(state, chief.watchSet === null ? null : { on: chief.watchSet, at: chief.watchAt }));
-async function setWatch(el, ui, on) {
-  chief.watchErr = '';
-  if (FIXTURE) { chief.watch = on; ui.refresh(); return; } // kept local
-  chief.watchSet = on;
-  chief.watchAt = Date.now();
-  ui.refresh();
-  const r = await postJson('/settings', watchBody(on));
-  if (!r.ok) { chief.watchSet = null; chief.watchErr = failText(r, 'Could not change Watch mode'); ui.refresh(); }
-}
-
-// "Ask the Chief": puts ASK_TEXT ("Brief me") in the chat box. Nothing is sent; Enter does that.
-function askBrief(el) {
-  const ta = el._chat.querySelector('.chat-compose textarea');
-  if (!ta) return;
-  if (!ta.value.trim()) { ta.value = ASK_TEXT; ta.dispatchEvent(new Event('input', { bubbles: true })); }
-  ta.focus();
-  try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch {}
-}
-
-async function loadBrief(el, state) {
-  if (chief.briefBusy) return;
-  chief.briefBusy = true;
-  chief.briefAt = Date.now();
-  try {
-    if (FIXTURE) chief.brief = fixtureBriefing(state);
-    else {
-      const r = await fetch('/chief/briefing', { cache: 'no-store' });
-      if (!r.ok) throw new Error(String(r.status));
-      chief.brief = await r.json();
-    }
-    chief.briefErr = '';
-  } catch { chief.briefErr = 'Could not read the briefing.'; }
-  chief.briefBusy = false;
-  if (pane === el) curUi().refresh?.();
-}
-
-function briefRow(r, kind) {
-  const tag = r.id ? 'button type="button"' : 'div';
-  return `<${tag} class="ch-br-row ${kind}"${r.id ? ` data-open="${esc(r.id)}" title="Open ${esc(r.name)}"` : ''}>`
-    + `<span class="ch-br-n">${esc(r.name)}</span>${r.repo ? `<span class="ch-br-r">${esc(r.repo)}</span>` : ''}<span class="ch-br-w">${esc(r.what)}</span><span class="ch-br-s">${esc(r.when)}</span></${r.id ? 'button' : 'div'}>`;
-}
-function briefHtml(b, now) {
-  if (!b) return chief.briefErr ? `<div class="ch-br-lines bad">${esc(chief.briefErr)}</div>` : '<div class="ch-br-lines faint">Reading what is going on...</div>';
-  if (!chief.more) return `<div class="ch-br-lines">${briefLines(b).map((l) => `<div>${esc(l)}</div>`).join('') || '<div class="faint">Nothing is going on.</div>'}</div>`;
-  const body = briefSections(b, now).map((sec) => `<div class="ch-br-sec"><div class="ch-br-st">${sec.title}<span>${sec.rows.length}</span></div>`
-    + `${sec.rows.map((r) => briefRow(r, sec.key === 'dep' ? `dep ${r.state}` : sec.key)).join('')}</div>`).join('');
-  return body || '<div class="ch-br-lines faint">Nothing is going on.</div>';
-}
-function drawChief(el, state) {
-  const now = Date.now(), b = chief.brief, on = watchOn(state);
-  const at = briefTime(b);
-  setHTML(el._chief, `<div class="ch-br"><div class="ch-br-h"><span class="ch-br-t">Briefing</span>${at ? `<span class="ch-br-at">${esc(at)}</span>` : ''}<span class="grow"></span>`
-    + `<button type="button" class="ch-more" aria-expanded="${chief.more}">${chief.more ? 'Less' : 'More'}</button></div>`
-    + `<div class="ch-br-body">${briefHtml(b, now)}</div>`
-    + `<div class="ch-br-f"><button type="button" class="btn ch-ask" title="Types &quot;Brief me&quot; in the chat box. Free: reading the briefing sends the Chief nothing, and nothing is sent until you press Enter">Ask the Chief</button><span class="grow"></span>`
-    + `<label class="ch-wsw"><input type="checkbox" class="ch-watch" role="switch"${on ? ' checked' : ''} aria-label="Watch mode"><span class="ch-track"></span><span class="ch-wl">Watch mode</span></label></div></div>`
-    + `<div class="ch-wnote${chief.watchErr ? ' bad' : ''}">${esc(chief.watchErr || WATCH_NOTE)}</div>`);
-}
-
 function blankHtml(state, c, noBots) {
-  if (c && c.kind === 'chief') {
-    const mas = mascotSVG('chief', { state: 'new', color: C.gold, size: 72 });
-    if (c.id) return `<div class="ch-empty">${mas}<div class="ch-empty-t">The Chief</div><div class="ch-empty-s">Opening its chat...</div></div>`;
-    const wait = chief.starting || Date.now() - chief.startedAt < START_WAIT;
-    return `<div class="ch-empty ch-start">${mas}<div class="ch-empty-t">The Chief</div>`
-      + `<div class="ch-empty-s">Briefs you, answers what's going on, passes your orders on</div>`
-      + `<div class="ch-defaults" title="What it starts with">Sonnet 5.5 · medium</div>`
-      + `<button type="button" class="btn primary ch-start-btn"${wait ? ' disabled' : ''}>${wait ? 'Starting...' : 'Start the Chief'}</button>`
-      + `${chief.err ? `<div class="ch-start-err" role="alert">${esc(chief.err)}</div>` : ''}</div>`;
-  }
   if (c && c.kind === 'bot') {
     return `<div class="ch-empty">${mascotSVG(c.key, { state: 'new', color: colorOf(c), size: 72, shape: c.shape || undefined })}<div class="ch-empty-t">${esc(c.name)}</div>`
       + `<div class="ch-empty-s">Starting: its chat shows once Fleet View lists its conversation.</div></div>`;
@@ -1472,7 +1370,7 @@ function blankHtml(state, c, noBots) {
       + `<div class="ch-empty-s">${esc(BOTS_FOR)}</div>${newBotBtn()}</div>`;
   }
   return `<div class="ch-empty">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 72 })}<div class="ch-empty-t">Pick a bot</div>`
-    + `<div class="ch-empty-s">The Chief, your bots and their teams are on the left.</div></div>`;
+    + `<div class="ch-empty-s">Your bots and their teams are on the left.</div></div>`;
 }
 
 // a bot that is not running: its last chat to read (or, none yet, a card with its instructions and Start), and its box
@@ -1524,13 +1422,14 @@ function tasksOf(b) {
   }
   return out;
 }
+// a task's icon: done, paused, recurring, timed once, or a plain to-do
+const taskIcon = (t) => (t.status === 'done' ? 'check' : t.status === 'paused' ? 'pause' : t.kind === 'recurring' ? 'repeat' : t.schedule ? 'clock' : 'dot');
 function taskRow(b, t, now) {
   const busy = taskBusy.get(`${b.id}:${t.id}`);
   const timed = !!t.schedule && t.status !== 'done';
-  const ic = t.status === 'done' ? 'check' : t.status === 'paused' ? 'pause' : t.kind === 'recurring' ? 'repeat' : t.schedule ? 'clock' : 'dot';
   const dis = busy ? ' disabled' : '';
   return `<div class="ch-tk-row ${esc(t.status)}${t.valid === false ? ' bad' : ''}" role="listitem" data-task="${esc(t.id)}">`
-    + `<span class="ch-tk-ic" aria-hidden="true">${icon(ic, 13)}</span>`
+    + `<span class="ch-tk-ic" aria-hidden="true">${icon(taskIcon(t), 13)}</span>`
     + `<div class="ch-tk-m"${t.detail ? ` title="${esc(t.detail)}"` : ''}><div class="ch-tk-l1"><span class="ch-tk-title">${esc(t.title)}</span>`
     + `<span class="ch-tk-sch">${esc(taskSchedule(t))}</span></div><div class="ch-tk-l2">${esc(busy ? BUSY_TEXT[busy] || '...' : taskLine(t, now))}</div></div>`
     + `<span class="ch-tk-b">`
@@ -1636,17 +1535,17 @@ export function selectChat(key) {
   open = true;
 }
 
-// a bot's or the Chief's look for a note outside this tab (botnote.js): its row's name, colour and mascot, wearing
-// face ('done', 'needs', ...), for the conversation sid (raw /state or the derived one) -> { key, name, color, face,
-// preview } or null when sid is no overseer's
+// a bot's look for a note outside this tab (botnote.js): its row's name, colour and mascot, wearing face ('done',
+// 'needs', ...), for the conversation sid (raw /state or the derived one) -> { key, name, color, face, preview } or
+// null when sid is no bot's
 export function botFace(state, sid, face, size = 34) {
   let list;
-  try { list = buildContacts(state, { chiefId: state.settings?.chief?.id || null, chains: chains || undefined }).map(lookOf); } catch { return null; }
+  try { list = buildContacts(state).map(lookOf); } catch { return null; }
   const c = list.find((x) => x.kind !== 'team' && (x.id === sid || (x.ids || []).includes(sid)));
   if (!c) return null;
   const color = colorOf(c);
-  return { key: c.key, name: c.name || (c.kind === 'chief' ? 'Chief' : 'Bot'), color, preview: c.preview || '',
-    face: mascotSVG(c.kind === 'chief' ? 'chief' : c.key, { state: face, color, size, shape: c.shape || undefined }) };
+  return { key: c.key, name: c.name || 'Bot', color, preview: c.preview || '',
+    face: mascotSVG(c.key, { state: face, color, size, shape: c.shape || undefined }) };
 }
 
 // a bot's look by its id, exactly as its row here draws it (the Map's mascot and the menus' "Add bot ▸" and "Have a
@@ -1657,7 +1556,7 @@ export function botLook(state, botId) {
   if (!state || typeof state !== 'object' || !botId) return null;
   let rows = rowsOf.get(state);
   if (!rows) {
-    try { rows = buildContacts(withMade(state), { chiefId: state.settings?.chief?.id || null, chains: chains || undefined }); } catch { rows = []; }
+    try { rows = buildContacts(withMade(state)); } catch { rows = []; }
     rowsOf.set(state, rows);
   }
   const row = rows.find((x) => x.kind === 'bot' && x.botId === botId);
@@ -1679,10 +1578,9 @@ export function renderChats(el, view, ui) {
   el._ch.hidden = popped && !SOLO;
   if (popped && !SOLO) return;
 
-  if (!chains) { try { chains = createChainStore(); } catch (e) { console.warn(e); chains = undefined; } }
   let contacts = [];
   try {
-    contacts = sortContacts(buildContacts(state, { chiefId: state.settings?.chief?.id || (FIXTURE ? chief.fakeId : null), chiefPlaceholder: true, chains: chains || undefined }), orderNow(state)).map(lookOf);
+    contacts = sortContacts(buildContacts(state), orderNow(state)).map(lookOf);
   } catch (e) { console.error('chats: contacts', e); }
   el._contacts = contacts;
   try { addNew(state, contacts); } catch (e) { console.error('chats: order', e); }
@@ -1716,8 +1614,7 @@ export function renderChats(el, view, ui) {
   // + New bot and Edit bot: the form in place of the chat
   el._form.hidden = !form;
   if (form) {
-    for (const x of [el._head, el._chat, el._chief, el._team, el._bot, el._blank, el._tasks]) x.hidden = true;
-    chief.briefOn = false;
+    for (const x of [el._head, el._chat, el._team, el._bot, el._blank, el._tasks]) x.hidden = true;
     drawForm(el, state);
     return;
   }
@@ -1730,16 +1627,6 @@ export function renderChats(el, view, ui) {
   el._head.hidden = !c;
   el._chat.hidden = !s || off;
   el._bot.hidden = !off;
-  // the Chief's strip (briefing + Watch mode) sits above its thread, scrolling inside itself when it is tall; the briefing reads only while that pane shows
-  const isChief = !!(s && c.kind === 'chief' && c.id);
-  el._chief.hidden = !isChief;
-  if (isChief) {
-    if (!narrow || open) {
-      if (!chief.briefOn) { chief.briefOn = true; chief.briefAt = 0; }
-      if (Date.now() - chief.briefAt >= BRIEF_MS) loadBrief(el, state);
-    } else chief.briefOn = false;
-    drawChief(el, state);
-  } else chief.briefOn = false;
   el._team.hidden = !team;
   drawTasks(el, state, c);
   el._blank.hidden = !!(s || team || off);

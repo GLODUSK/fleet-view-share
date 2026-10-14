@@ -3,7 +3,7 @@
 // both refused ones refused, the relay's seal with the fixed nonces giving the exact z=0 ciphertexts, its own z=1 round
 // trip, the pairing link, the v2 handshake's vector (X25519 keys, the shared secret, K', its direction keys, the hello
 // and its answer under K, a request under K'), and scripts/phone-vectors.js --check. The allowlist (allowed, refused,
-// traversal, id patterns, the Chief's and the bots' routes and their near misses), the marked routes, every route's
+// traversal, id patterns, the bots' routes and their near misses, the Chief's old ones), the marked routes, every route's
 // timeout, the start weights, and slices() (never between the halves of a surrogate pair). Off: sync not set up or
 // not signed in means no socket, no key read and a 409 to pair. Then a relay against a fake WebSocket (frames
 // injected, sends captured) and a fake local HTTP server standing in for Fleet View: the socket URL (apikey,
@@ -15,9 +15,9 @@
 // expired pairing dropped key and all), page POSTs with this PC's Origin, /api/* with the Bearer token and no Origin,
 // the marker (via phone and X-Fleet-View-Relay on the marked routes only, the bots' among them, after every check,
 // the phone's own via dropped everywhere, no header the phone names passed on, a replayed or stale marked request
-// never reaching the server; with no relayKey or a bad one no marker, said once), GET /chief/briefing, POST
-// /api/chief/start (account, model, effort only), POST /api/sessions with a role 403, settings chief ({ watch }
-// alone), the bots' bodies (their keys, no folder), the Claude accounts screen (GET /accounts trimmed to a, email,
+// never reaching the server; with no relayKey or a bad one no marker, said once), the Chief's old routes and a
+// settings chief refused (403), POST /api/sessions with a role 403, the bots' bodies (their keys, no folder), the
+// Claude accounts screen (GET /accounts trimmed to a, email,
 // signedIn and A's and B's sign-ins; a sign-in, a code and a stop only for A or B with no login, only their own body;
 // a signed-in letter, another letter, a bad body or an unreadable list refused before the server), the settings key filter, the known-root checks (/settings,
 // /repos/add, /sessions/move, /push-target, /repo-history), the phone's fence (GET /file, /chat/kind, /chat/files,
@@ -552,7 +552,7 @@ async function main() {
     ['POST', '/api/teams'], ...['add', 'remove', 'lead', 'disband', 'message'].map((v) => ['POST', `/api/teams/t0a1b2c3d/${v}`]), ['POST', '/settings'],
     ['POST', '/rename'], ['POST', '/sessions/move'], ['POST', '/push-target'], ['POST', '/repos/remove'], ['POST', '/repos/add'], ['POST', '/chat/image'],
     ['POST', '/teams'], ['POST', '/teams/add'], ['POST', '/teams/remove'], ['POST', '/teams/leave'], ['POST', '/teams/lead'], ['POST', '/teams/rename'],
-    ['GET', '/chief/briefing'], ['POST', '/api/chief/start'], ['POST', '/api/bots'], ['POST', `/api/bots/${BOT}`], ['POST', '/api/bots/0123456789ab'],
+    ['POST', '/api/bots'], ['POST', `/api/bots/${BOT}`], ['POST', '/api/bots/0123456789ab'],
     ['POST', `/api/bots/${BOT}/start`], ['POST', `/api/bots/${BOT}/remove`],
     // a dynamic bot's switch, and its tasks' actions (page routes)
     ['POST', `/bots/${BOT}/switch`], ['POST', `/bots/${BOT}/tasks/t-deploys`], ['POST', `/bots/${BOT}/tasks/a.b_c-1`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(63)}`],
@@ -573,9 +573,8 @@ async function main() {
     ['GET', '/state/'], ['GET', '/api/sessions/not-an-id'], ['GET', '/api/sessions/NEW-1x'], ['POST', '/api/teams/T0A1B2C3D/message'], ['POST', '/api/teams/t01/add'],
     ['GET', '/../state'], ['GET', '/state/..'], ['GET', '//state'], ['GET', '/api//sessions'], ['GET', '/st%61te'], ['GET', '/state?x=1'], ['GET', '/state#x'],
     ['GET', '/api\\sessions'], ['GET', `/api/sessions/${SID}/../../reveal`], ['GET', 'state'], ['GET', ''], ['GET', '/state\n'], ['GET', null],
-    // near misses of the Chief's and the bots' routes
-    ['POST', '/chief/briefing'], ['GET', '/chief/briefing/'], ['GET', '/chief'], ['GET', '/chief/briefing.json'], ['GET', '/api/chief/briefing'],
-    ['GET', '/api/chief/start'], ['POST', '/api/chief'], ['POST', '/api/chief/start/'], ['POST', '/api/chief/stop'], ['POST', '/chief/start'],
+    // the Chief's routes, gone with it (2026-10-13), and near misses of the bots' routes
+    ['GET', '/chief/briefing'], ['POST', '/api/chief/start'],
     ['GET', '/api/bots'], ['GET', `/api/bots/${BOT}`], ['POST', '/api/bots/'], ['POST', `/api/bots/${BOT}/`], ['POST', `/api/bots/${BOT}/stop`],
     ['POST', `/api/bots/${BOT}/message`], ['POST', `/api/bots/${BOT}/start/x`], ['POST', '/api/bots/b1'], ['POST', '/api/bots/Bot_one-2'],
     ['POST', '/api/bots/A1B2C3D4E5F6'], ['POST', '/api/bots/a1b2c3d4e5f'], ['POST', '/api/bots/a1b2c3d4e5f67'], ['POST', '/api/bots/a1b2c3d4e5fg'],
@@ -605,13 +604,13 @@ async function main() {
   const marked = ['/api/sessions', `/api/sessions/${SID}/message`, `/api/sessions/${SID}/answer`, `/api/sessions/${SID}/open`, '/api/sessions/new-3/message', '/api/teams/t0a1b2c3d/message',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/remove`, `/api/sessions/${SID}/model`];
   const unmarked = [`/api/sessions/${SID}/interrupt`, `/api/sessions/${SID}/stop`, `/api/sessions/${SID}/remove`, '/api/teams', '/api/teams/t0a1b2c3d/add',
-    '/api/chief/start', `/api/bots/${BOT}/start`, '/api/bots/b1', '/settings', '/rename', '/teams', `/api/sessions/${SID}`, `/api/sessions/${SID}/message/`,
+    `/api/bots/${BOT}/start`, '/api/bots/b1', '/settings', '/rename', '/teams', `/api/sessions/${SID}`, `/api/sessions/${SID}/message/`,
     `/api/sessions/${SID}/now`, `/api/sessions/${SID}/unsend`, `/api/sessions/${SID}/activity`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/t1`];
   for (const p of marked) ok(R.MARKED.test(p), `marked: ${p}`);
   for (const p of unmarked) ok(!R.MARKED.test(p), `not marked: ${p}`);
   eq(R.TIMES, { ROUTE_MS: 30e3, WAIT_ROUTE_MS: 60e3, WAIT_CAP_S: 50, START_ROUTE_MS: 95e3, RESUME_ROUTE_MS: 75e3, ACTIVITY_MS: 5e3, NOW_MS: 10e3, MODEL_MS: 20e3 }, 'the timeouts');
   const times = [
-    ['POST', '/api/sessions', 0, 95e3], ['POST', '/api/sessions', 50, 145e3], ['POST', '/api/chief/start', 0, 95e3], ['POST', `/api/bots/${BOT}/start`, 0, 95e3],
+    ['POST', '/api/sessions', 0, 95e3], ['POST', '/api/sessions', 50, 145e3], ['POST', `/api/bots/${BOT}/start`, 0, 95e3],
     ['POST', '/api/bots', 0, 95e3], ['POST', `/api/bots/${BOT}`, 0, 30e3],
     ['GET', `/api/sessions/${SID}/activity`, 0, 5e3], ['POST', `/api/sessions/${SID}/now`, 0, 10e3], ['POST', `/api/sessions/${SID}/model`, 0, 20e3],
     ['POST', `/api/sessions/${SID}/unsend`, 0, 30e3], ['GET', `/api/sessions/${SID}/transcript`, 0, 30e3],
@@ -620,13 +619,13 @@ async function main() {
     ['POST', '/api/teams/t0a1b2c3d/message', 0, 75e3], ['POST', '/teams', 0, 75e3], ['POST', '/teams/add', 0, 75e3], ['POST', '/teams/lead', 0, 75e3],
     ['POST', `/api/sessions/${SID}/answer`, 0, 30e3], ['POST', `/api/sessions/${SID}/answer`, 50, 60e3], ['POST', `/api/sessions/${SID}/stop`, 0, 30e3],
     ['POST', '/api/teams/t0a1b2c3d/remove', 0, 30e3], ['POST', '/teams/remove', 0, 30e3], ['POST', `/api/bots/${BOT}/remove`, 0, 30e3],
-    ['GET', '/api/sessions', 0, 30e3], ['GET', '/chief/briefing', 0, 30e3], ['POST', '/rename', 0, 30e3],
+    ['GET', '/api/sessions', 0, 30e3], ['POST', '/rename', 0, 30e3],
     ['POST', `/bots/${BOT}/switch`, 0, 20e3], ['POST', `/bots/${BOT}/tasks/t1`, 0, 95e3],
   ];
   for (const [m, p, w, want] of times) eq(R.routeTimeout(m, p, w), want, `the timeout of ${m} ${p}${w ? ` with wait ${w}` : ''}`);
   // the start limits' weights: one each, a team one per (distinct) member, a lead only when there is one
   const weights = [
-    ['POST', '/api/sessions', {}, 1], ['POST', `/api/sessions/${SID}/open`, {}, 1], ['POST', '/api/chief/start', {}, 1], ['POST', '/api/bots', {}, 1],
+    ['POST', '/api/sessions', {}, 1], ['POST', `/api/sessions/${SID}/open`, {}, 1], ['POST', '/api/bots', {}, 1],
     ['POST', `/api/bots/${BOT}/start`, {}, 1], ['POST', '/api/teams/t0a1b2c3d/add', { member: SID }, 1], ['POST', '/teams/add', { member: SID }, 1],
     ['POST', '/api/teams', { members: ['a', 'b', 'c', 'a'] }, 3], ['POST', '/teams', { members: [] }, 1], ['POST', '/api/teams', { members: Array.from({ length: 30 }, (_, i) => `m${i}`) }, 12],
     ['POST', '/api/teams/t0a1b2c3d/lead', { member: SID }, 1], ['POST', '/teams/lead', { member: null }, 0], ['POST', `/api/sessions/${SID}/message`, {}, 0],
@@ -803,7 +802,7 @@ async function main() {
   await tick(A.timers, 1001, ws);
   const markCases = [
     // [path, the phone's body, marked?]
-    ['/api/sessions', { repo: KNOWN, account: 'B', prompt: 'p', via: 'chief' }, true],
+    ['/api/sessions', { repo: KNOWN, account: 'B', prompt: 'p', via: 'server' }, true],
     [`/api/sessions/${SID}/message`, { text: 'm', via: 'server' }, true],
     [`/api/sessions/${SID}/answer`, { option: 1, text: 'free text', via: 'phone' }, true],
     [`/api/sessions/${SID}/open`, { prompt: 'go on' }, true],
@@ -813,7 +812,6 @@ async function main() {
     [`/api/sessions/${SID}/stop`, { via: 'phone' }, false],
     ['/api/teams', { members: [SID, SID], order: 'o', via: 'phone' }, false],
     ['/api/teams/t0a1b2c3d/add', { member: SID, via: 'phone' }, false],
-    ['/api/chief/start', { via: 'phone' }, false],
     ['/rename', { id: SID, name: 'n', via: 'phone' }, false],
     ['/teams', { members: [SID], order: 'o', via: 'phone' }, false],
   ];
@@ -841,21 +839,16 @@ async function main() {
   await sleep(60);
   ok(seenFor(`/api/sessions/${SID}/message`).length === nMsg + 1 && (await relay.status()).devices.find((d) => d.id === ph.dev).dropped === dropped0 + 2, 'a replayed or stale marked request never reaches the server');
 
-  // the Chief: its briefing, its start (account, model, effort only) and its watch mode in /settings
-  r = await ph.ask(ws, 'GET', '/chief/briefing');
-  last = seenFor('/chief/briefing').pop();
-  ok(r && r.s === 200 && last && !last.headers.origin && !last.headers.authorization, `GET /chief/briefing: 200, as a page GET (${r && r.s})`);
-  r = await ph.ask(ws, 'POST', '/api/chief/start', { b: { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium', prompt: 'evil', repo: ELSEWHERE, role: 'chief', via: 'phone' } });
-  last = seenFor('/api/chief/start').pop();
-  ok(r && r.s === 200 && last.headers.authorization === `Bearer ${API_TOKEN}` && last.headers.origin === undefined, 'POST /api/chief/start goes as an /api POST');
-  eq(last.body, { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium' }, 'POST /api/chief/start: only account, model and effort go on');
+  // the Chief is gone (2026-10-13): an older phone's briefing, start and watch switch are refused before the server
+  for (const [m, p] of [['GET', '/chief/briefing'], ['POST', '/api/chief/start']]) {
+    const n0 = seenFor(p).length;
+    r = await ph.ask(ws, m, p, m === 'POST' ? { b: {} } : {});
+    ok(r && r.s === 403 && seenFor(p).length === n0, `${m} ${p}: 403, nothing reached the server (${r && r.s})`);
+  }
   await tick(A.timers, 1001, ws);
   const chiefSettings = [
-    [{ chief: { watch: true } }, 200, { chief: { watch: true } }],
-    [{ chief: { id: SID, watch: false, told: [SID], extra: 1 } }, 200, { chief: { watch: false } }],
-    [{ chief: { watch: true }, repo: KNOWN, finishedOpen: false }, 200, { chief: { watch: true }, repo: KNOWN, finishedOpen: false }],
-    [{ chief: { watch: 'yes' } }, 400], [{ chief: { watch: 1 } }, 400], [{ chief: {} }, 400], [{ chief: { id: SID } }, 400], [{ chief: true }, 400],
-    [{ chief: null }, 400], [{ chief: [true] }, 400], [{ chief: { watch: true }, view: 'map' }, 403], [{ chief: { watch: true }, repo: ELSEWHERE }, 403],
+    [{ chief: { watch: true } }, 403], [{ chief: { watch: true }, repo: KNOWN, finishedOpen: false }, 403],
+    [{ repo: KNOWN, finishedOpen: false }, 200, { repo: KNOWN, finishedOpen: false }],
   ];
   for (const [b, want, body] of chiefSettings) {
     const n0 = seenFor('/settings').length;
@@ -865,11 +858,11 @@ async function main() {
     if (body) eq(seenFor('/settings').pop().body, body, `POST /settings ${JSON.stringify(b)}: what went on`);
   }
 
-  // the Chief starts only by its own route
+  // a role is a bot's own start's alone
   for (const b of [{ repo: KNOWN, account: 'B', prompt: 'p', role: 'chief' }, { repo: KNOWN, role: null }, { role: 'bot:a1b2c3d4e5f6' }]) {
     const n0 = seenFor('/api/sessions').length;
     r = await ph.ask(ws, 'POST', '/api/sessions', { b });
-    ok(r && r.s === 403 && /chief\/start/.test(r.b.message) && seenFor('/api/sessions').length === n0, `POST /api/sessions ${JSON.stringify(b)}: 403, nothing reached the server (${r && r.s})`);
+    ok(r && r.s === 403 && /takes no role/.test(r.b.message) && seenFor('/api/sessions').length === n0, `POST /api/sessions ${JSON.stringify(b)}: 403, nothing reached the server (${r && r.s})`);
   }
 
   // the bots, as api.js and bots.js take them: create, update and remove marked (Henry's alone), start not
@@ -1093,8 +1086,8 @@ async function main() {
     ['POST', '/settings', { b: { repoOrder: [KNOWN, LISTED], repoNames: [{ root: KNOWN, name: 'K' }], forgotten: [SID] } }, 200],
     ['POST', '/settings', { b: { repoOrder: [ELSEWHERE] } }, 403],
     ['POST', '/settings', { b: { repoNames: [{ root: ELSEWHERE, name: 'E' }] } }, 403],
-    ['POST', '/settings', { b: { chatOrder: { pinned: ['chief'], keys: ['bot:3f9a1c2e7b4d'] } } }, 200],
-    ['POST', '/settings', { b: { chatOrderAdd: { pinned: ['chief'], keys: [] } } }, 403],
+    ['POST', '/settings', { b: { chatOrder: { pinned: ['team:t0a1b2c3d'], keys: ['bot:3f9a1c2e7b4d'] } } }, 200],
+    ['POST', '/settings', { b: { chatOrderAdd: { pinned: ['team:t0a1b2c3d'], keys: [] } } }, 403],
     ['POST', '/repos/add', { b: { path: HIDDEN } }, 200],
     ['POST', '/repos/add', { b: { path: KNOWN } }, 200],
     ['POST', '/repos/add', { b: { path: ELSEWHERE } }, 403],
@@ -1217,7 +1210,6 @@ async function main() {
   const slow = [
     ['sl-start', '/api/sessions', { repo: KNOWN, account: 'B', prompt: 'p' }, 95e3],
     ['sl-startw', '/api/sessions', { repo: KNOWN, account: 'B', prompt: 'p', wait: 20 }, 115e3],
-    ['sl-chief', '/api/chief/start', {}, 95e3],
     ['sl-bot', `/api/bots/${BOT}/start`, {}, 95e3],
     ['sl-mkbot', '/api/bots', { name: 'Slow' }, 95e3],
     ['sl-now', `/api/sessions/${SID}/now`, {}, 10e3],
@@ -1396,9 +1388,9 @@ async function main() {
   for (const id of ['st1', 'st2']) ph.send(ws, { t: 'req', id, at: clock.t, m: 'POST', p: '/api/sessions', b: { repo: KNOWN, account: 'B', prompt: id } });
   ok(await waitUntil(() => (held.get('/api/sessions') || []).length === 2), 'two starts at once reach the server');
   const nStart = seenFor('/api/sessions').length;
-  const nChief = seenFor('/api/chief/start').length;
-  r = await ph.ask(ws, 'POST', '/api/chief/start', { id: 'st3' });
-  ok(r && r.s === 429 && r.b.retryAfter === 5000 && /2 are starting/.test(r.b.message) && seenFor('/api/chief/start').length === nChief, `a third start while two run: 429, not reaching the server (${r && r.s} ${r && r.b.message})`);
+  const nBot = seenFor(`/api/bots/${BOT}/start`).length;
+  r = await ph.ask(ws, 'POST', `/api/bots/${BOT}/start`, { id: 'st3' });
+  ok(r && r.s === 429 && r.b.retryAfter === 5000 && /2 are starting/.test(r.b.message) && seenFor(`/api/bots/${BOT}/start`).length === nBot, `a third start while two run: 429, not reaching the server (${r && r.s} ${r && r.b.message})`);
   r = await ph.ask(ws, 'POST', `/api/sessions/${SID}/message`, { id: 'st4', b: { text: 'a message is no start' } });
   ok(r && r.s === 200, `a message still goes (${r && r.s})`);
   release('/api/sessions');

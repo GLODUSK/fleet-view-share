@@ -1,6 +1,6 @@
-// Fleet View desktop: a test of the session host's auto-continue, panel auto-close, restart, the roles: the chief
-// (its allowed and blocked fv commands, kept through a re-key, a restore and a handoff; one at a time; dropped when it
-// resumes an older conversation) and a bot's (the usual commands; kept and dropped the same ways), and conversations
+// Fleet View desktop: a test of the session host's auto-continue, panel auto-close, restart, the roles: a bot's (the
+// usual fv commands; kept through a re-key, a /clear, a restore and a handoff; dropped when it resumes an older
+// conversation; the old 'chief' role is no role, also in a restore list that still has it), and conversations
 // on another device (sync/away.json: open, sendTo and a restore refuse them) (host.js), run
 // with the system node:   node desktop/host-test.js
 // It starts a test host (its own pipe \\.\pipe\fleet-view-host-test-<random>, on macOS and Linux the socket
@@ -113,9 +113,7 @@ function deniedFv(args) {
   return a[0].slice('--disallowedTools='.length).split(',').map((t) => (/^Bash\(fv (\w+):\*\)$/.exec(t) || [])[1] || `?${t}`);
 }
 const FV_BASE = ['send', 'status', 'ask', 'read', 'ls', 'teams', 'team', 'transcript'];
-const FV_CHIEF_EXTRA = ['start', 'open', 'hosted', 'wait', 'menu'];
-const FV_CHIEF_DENIED = ['answer', 'stop', 'rm', 'remove', 'interrupt'];
-const BOT1 = `bot:${'a1'.repeat(6)}`, BOT2 = `bot:${'b2'.repeat(6)}`; // two bots' roles (bots.js)
+const BOT1 = `bot:${'a1'.repeat(6)}`, BOT2 = `bot:${'b2'.repeat(6)}`, BOT3 = `bot:${'c3'.repeat(6)}`; // bots' roles (bots.js)
 const sameSet = (a, b) => !!a && a.length === b.length && b.every((x) => a.includes(x));
 const savedList = () => { try { return JSON.parse(fs.readFileSync(path.join(DATA, 'sessions.json'), 'utf8')).sessions || []; } catch { return []; } };
 // the note's words, then Enter (ConPTY may hand a paste to a raw-mode app as plain keys: words, not exact bytes)
@@ -219,7 +217,9 @@ async function main() {
   const AW = otherSession('aw');
   writeAway({ [AW.id]: { device: 'Laptop', why: 'owned' } });
   fs.writeFileSync(path.join(DATA, 'sessions.json'), JSON.stringify({ version: 1, savedAt: Date.now() - 60000, reason: 'change', hostPid: 1,
-    sessions: [A, B, C, AW, D1, D2].map((s) => ({ id: s.id, cwd: s.cwd, account: 'B', startedAt: Date.now() - 60000, busy: s.busy, interrupted: false, cols: 100, rows: 30 })), ui: null }));
+    // d2 saved with the old 'chief' role: it comes back as an ordinary session
+    sessions: [A, B, C, AW, D1, D2].map((s) => ({ id: s.id, cwd: s.cwd, account: 'B', startedAt: Date.now() - 60000, busy: s.busy, interrupted: false, cols: 100, rows: 30,
+      ...(s === D2 ? { role: 'chief' } : {}) })), ui: null }));
 
   startHost();
   if (!await waitFor(() => hostJson(), 15000)) { check('the test host starts', false, hostLog()); return; }
@@ -229,6 +229,9 @@ async function main() {
   check('restore resumes every conversation (each fake claude started)', allUp, [A, B, C, D1, D2].map((s) => starts(s).length));
   check('away. restore skips a conversation away.json says is on another device (a log line, nothing started)',
     starts(AW).length === 0 && hostLog().includes(`restore: ${AW.id} is on Laptop; not resumed`) && hostLog().includes('restore: 5 of 6 resumed'), { starts: starts(AW), log: hostLog().split('\n').filter((l) => l.includes('restore')) });
+  const ld2 = (await cl.req('list')).find((x) => x.id === D2.id);
+  check('restore: one saved with the old "chief" role is resumed as an ordinary session (no role, the usual fv commands, nothing blocked)',
+    ld2 && ld2.alive && ld2.role === null && sameSet(allowedFv(argsOf(D2)[0]), FV_BASE) && sameSet(deniedFv(argsOf(D2)[0]), []), { ld2, args: argsOf(D2) });
 
   // b: a key typed before it is ready cancels its note
   await cl.req('write', B.id, 'x');
@@ -284,49 +287,36 @@ async function main() {
   const la = list.find((x) => x.id === A.id), lb = list.find((x) => x.id === B.id);
   check('list(): autoContinue and waitingFor fields', la && la.autoContinue === false && la.interrupted === false && lb && lb.interrupted === true && 'waitingFor' in la && 'slashPanel' in la, list);
 
-  // ===== g. roles: a chief gets the Chief's fv commands; an ordinary session, or one with an unknown role, does not =====
-  const G = session('g'), O = session('o'), X = session('x');
-  for (const s of [G, O, X]) fs.writeFileSync(path.join(s.cwd, 'want-id.txt'), s.id);
-  const rg = await cl.req('create', { cwd: G.cwd, account: 'B', role: 'chief', cols: 100, rows: 30 });
+  // ===== g. roles: a bot's role is kept; an ordinary session, one with an unknown role and one asking for the old
+  // 'chief' get none. Every one gets the usual fv commands, nothing blocked =====
+  const G = session('g'), O = session('o'), X = session('x'), Q = session('q');
+  for (const s of [G, O, X, Q]) fs.writeFileSync(path.join(s.cwd, 'want-id.txt'), s.id);
+  const rg = await cl.req('create', { cwd: G.cwd, account: 'B', role: BOT3, cols: 100, rows: 30 });
   const ro = await cl.req('create', { cwd: O.cwd, account: 'B', cols: 100, rows: 30 });
   const rx = await cl.req('create', { cwd: X.cwd, account: 'B', role: 'boss', cols: 100, rows: 30 });
-  check('g. role: create echoes role "chief"; none for an ordinary one or an unknown role', rg && rg.ok && rg.role === 'chief' && ro && ro.ok && !('role' in ro) && rx && rx.ok && !('role' in rx), { rg, ro, rx });
-  await waitFor(() => [G, O, X].every((s) => argsOf(s).length), 10000);
-  const ga = allowedFv(argsOf(G)[0]), oa = allowedFv(argsOf(O)[0]), xa = allowedFv(argsOf(X)[0]);
-  check('g. role: a chief may run the usual fv commands plus start, open, hosted, wait and menu (one --allowedTools argument)', sameSet(ga, [...FV_BASE, ...FV_CHIEF_EXTRA]), argsOf(G));
-  check('g. role: an ordinary session, and one with an unknown role, gets the usual fv commands only', sameSet(oa, FV_BASE) && sameSet(xa, FV_BASE), { o: argsOf(O), x: argsOf(X) });
-  check('g. role: none may answer, stop, rm or interrupt without asking', [ga, oa, xa].every((l) => l && !l.some((c) => ['answer', 'stop', 'rm', 'interrupt'].includes(c))), { ga, oa, xa });
-  check('g. role: the chief is blocked from answer, stop, rm, remove and interrupt (one --disallowedTools argument); the others block nothing',
-    sameSet(deniedFv(argsOf(G)[0]), FV_CHIEF_DENIED) && [O, X].every((s) => sameSet(deniedFv(argsOf(s)[0]), [])), { g: argsOf(G), o: argsOf(O) });
+  const rq = await cl.req('create', { cwd: Q.cwd, account: 'B', role: 'chief', cols: 100, rows: 30 });
+  check('g. role: create echoes a bot\'s role; none for an ordinary one, an unknown role or the old "chief"',
+    rg && rg.ok && rg.role === BOT3 && [ro, rx, rq].every((r) => r && r.ok && !('role' in r)), { rg, ro, rx, rq });
+  await waitFor(() => [G, O, X, Q].every((s) => argsOf(s).length), 10000);
+  const roleArgs = [G, O, X, Q].map((s) => allowedFv(argsOf(s)[0]));
+  check('g. role: each gets the usual fv commands only (one --allowedTools argument)', roleArgs.every((l) => sameSet(l, FV_BASE)), [G, O, X, Q].map((s) => argsOf(s)));
+  check('g. role: none may answer, stop, rm or interrupt without asking', roleArgs.every((l) => l && !l.some((c) => ['answer', 'stop', 'rm', 'interrupt'].includes(c))), roleArgs);
+  check('g. role: nothing is blocked outright (no --disallowedTools)', [G, O, X, Q].every((s) => sameSet(deniedFv(argsOf(s)[0]), [])), [G, Q].map((s) => argsOf(s)));
   // each fake wrote its pid file: the host re-keys it to its id, and the role stays with it
-  const keyed = await waitFor(async () => { const l = await cl.req('list'); return [G, O, X].every((s) => l.some((x) => x.id === s.id && !x.pending)) ? l : null; }, 20000);
-  const lg = keyed && keyed.find((x) => x.id === G.id), lo = keyed && keyed.find((x) => x.id === O.id);
-  check('g. role: list() says role "chief" after the re-key, null for an ordinary one', lg && lg.role === 'chief' && lo && lo.role === null, keyed);
-  const saved = await waitFor(() => { const l = savedList(); const g = l.find((x) => x.id === G.id), o = l.find((x) => x.id === O.id); return g && o ? { g, o } : null; }, 5000);
-  check('g. role: sessions.json records role "chief" (and none for an ordinary one)', saved && saved.g.role === 'chief' && !('role' in saved.o), savedList());
+  const keyed = await waitFor(async () => { const l = await cl.req('list'); return [G, O, X, Q].every((s) => l.some((x) => x.id === s.id && !x.pending)) ? l : null; }, 20000);
+  const lg = keyed && keyed.find((x) => x.id === G.id), lo = keyed && keyed.find((x) => x.id === O.id), lq = keyed && keyed.find((x) => x.id === Q.id);
+  check('g. role: list() says the bot\'s role after the re-key, null for an ordinary one and the old "chief"', lg && lg.role === BOT3 && lo && lo.role === null && lq && lq.role === null, keyed);
+  const saved = await waitFor(() => { const l = savedList(); const g = l.find((x) => x.id === G.id), o = l.find((x) => x.id === O.id), q = l.find((x) => x.id === Q.id); return g && o && q ? { g, o, q } : null; }, 5000);
+  check('g. role: sessions.json records the bot\'s role (and none for an ordinary one or the old "chief")', saved && saved.g.role === BOT3 && !('role' in saved.o) && !('role' in saved.q), savedList());
 
-  // g. one Chief at a time: a second create is refused with the running one's id; open as the chief starts without the role
-  const startsO = argsOf(O).length;
-  const rc = await cl.req('create', { cwd: O.cwd, account: 'B', role: 'chief', cols: 100, rows: 30 });
-  await sleep(500);
-  check('g. one chief: a second create as the chief is refused (chiefRunning: the chief\'s id) and starts nothing',
-    rc && rc.ok === false && rc.chiefRunning === G.id && argsOf(O).length === startsO, { rc, starts: argsOf(O).length });
-  const Z = session('z');
-  const rz = await cl.req('open', { id: Z.id, cwd: Z.cwd, account: 'B', role: 'chief', cols: 100, rows: 30 });
-  await waitFor(() => argsOf(Z).length, 10000);
-  const lz = (await cl.req('list')).find((x) => x.id === Z.id);
-  check('g. one chief: open as the chief while one runs starts it without the role (usual fv commands, nothing blocked, a log line)',
-    rz && rz.ok && lz && lz.role === null && sameSet(allowedFv(argsOf(Z)[0]), FV_BASE) && sameSet(deniedFv(argsOf(Z)[0]), [])
-    && hostLog().includes(`chief: open ${Z.id} starts without the role: ${G.id} is the Chief`), { rz, lz, args: argsOf(Z), log: hostLog().split('\n').slice(-5) });
-
-  // g. a bot's role ('bot:<12 lowercase hex>'): the usual fv commands, nothing blocked; several bots at once, while the
-  // Chief runs; a malformed one is no role
+  // g. more bots ('bot:<12 lowercase hex>'): the usual fv commands, nothing blocked; several bots at once, while
+  // another runs; a malformed one is no role
   const Y1 = session('y1'), Y2 = session('y2'), Y3 = session('y3');
   for (const s of [Y1, Y2, Y3]) fs.writeFileSync(path.join(s.cwd, 'want-id.txt'), s.id);
   const ry1 = await cl.req('create', { cwd: Y1.cwd, account: 'B', role: BOT1, cols: 100, rows: 30 });
   const ry2 = await cl.req('create', { cwd: Y2.cwd, account: 'B', role: BOT2, cols: 100, rows: 30 });
   const ry3 = await cl.req('create', { cwd: Y3.cwd, account: 'B', role: 'bot:A1A1A1A1A1A1', cols: 100, rows: 30 });
-  check('g. bot: create echoes each bot\'s role while the Chief runs; a malformed one gets none', ry1 && ry1.ok && ry1.role === BOT1 && ry2 && ry2.ok && ry2.role === BOT2
+  check('g. bot: create echoes each bot\'s role while another bot runs; a malformed one gets none', ry1 && ry1.ok && ry1.role === BOT1 && ry2 && ry2.ok && ry2.role === BOT2
     && ry3 && ry3.ok && !('role' in ry3), { ry1, ry2, ry3 });
   await waitFor(() => [Y1, Y2, Y3].every((s) => argsOf(s).length), 10000);
   check('g. bot: the usual fv commands, nothing blocked', [Y1, Y2, Y3].every((s) => sameSet(allowedFv(argsOf(s)[0]), FV_BASE) && sameSet(deniedFv(argsOf(s)[0]), [])),
@@ -385,20 +375,20 @@ async function main() {
   cl = await connect().catch(() => null);
   if (!cl) { check('connect to the new host', false); return; }
 
-  // g. the restored chief keeps its role and its commands; an ordinary one stays ordinary
+  // g. the restored bot keeps its role and the usual commands; an ordinary one stays ordinary
   const l2 = await waitFor(async () => { const l = await cl.req('list'); const g = l.find((x) => x.id === G.id); return g && g.alive ? l : null; }, 10000);
   const g2 = l2 && l2.find((x) => x.id === G.id), o2 = l2 && l2.find((x) => x.id === O.id);
   const gArgs = argsOf(G).slice(-1)[0] || [];
-  check('g. restore: the resumed chief keeps role "chief" and its commands (an ordinary one stays ordinary)', g2 && g2.role === 'chief' && g2.restored && o2 && o2.role === null
-    && sameSet(allowedFv(gArgs), [...FV_BASE, ...FV_CHIEF_EXTRA]) && gArgs.includes('--resume') && gArgs.includes(G.id) && sameSet(allowedFv(argsOf(O).slice(-1)[0]), FV_BASE), { l2, gArgs });
+  check('g. restore: the resumed bot keeps its role and the usual commands (an ordinary one stays ordinary)', g2 && g2.role === BOT3 && g2.restored && o2 && o2.role === null
+    && sameSet(allowedFv(gArgs), FV_BASE) && gArgs.includes('--resume') && gArgs.includes(G.id) && sameSet(allowedFv(argsOf(O).slice(-1)[0]), FV_BASE), { l2, gArgs });
   check('m. restore: a restored session resumes in its recorded mode too', modeOf(argsOf(M1).slice(-1)[0]) === 'bypassPermissions' && argsOf(M1).length >= 2, argsOf(M1));
-  const gSaved = await waitFor(() => savedList().find((x) => x.id === G.id && x.role === 'chief'), 5000);
-  check('g. restore: the new host\'s sessions.json still records role "chief"', gSaved, savedList());
+  const gSaved = await waitFor(() => savedList().find((x) => x.id === G.id && x.role === BOT3), 5000);
+  check('g. restore: the new host\'s sessions.json still records the bot\'s role', gSaved, savedList());
   const y1Args = argsOf(Y1).slice(-1)[0] || [];
   check('g. restore: a resumed bot keeps its role and the usual commands', roleIn(l2, Y1) === BOT1 && roleIn(l2, Y2) === BOT2 && roleIn(l2, Y3) === null
     && y1Args.includes('--resume') && y1Args.includes(Y1.id) && sameSet(allowedFv(y1Args), FV_BASE), { l2, y1Args });
 
-  // ===== h. handoff: the chief checkpoints itself; the pickup that carries on is the chief too =====
+  // ===== h. handoff: a bot checkpoints itself; the pickup that carries on is that bot too =====
   const [gPid, gKey] = (starts(G).slice(-1)[0] || '').split(' ');
   const hoFile = path.join(ROOT, 'handoffs', `2026-10-10_120000_${G.id.slice(0, 8)}.md`);
   fs.writeFileSync(hoFile, `---\nsession: ${G.id}\ncwd: ${G.cwd}\ncreated: ${new Date().toISOString()}\n---\n# Handoff\n`);
@@ -409,13 +399,13 @@ async function main() {
   P.killTree(Number(gPid), { sync: true }); // claude is killed after it asked, as the Stop hook has it
   const picked = await waitFor(() => argsOf(G).length >= 3, 15000);
   const pArgs = argsOf(G).slice(-1)[0] || [];
-  check('h. handoff: the pickup runs /pickup with the Chief\'s commands', picked && pArgs.includes(`/pickup ${hoFile}`) && sameSet(allowedFv(pArgs), [...FV_BASE, ...FV_CHIEF_EXTRA]), argsOf(G));
+  check('h. handoff: the pickup runs /pickup with the usual commands', picked && pArgs.includes(`/pickup ${hoFile}`) && sameSet(allowedFv(pArgs), FV_BASE), argsOf(G));
   const l3 = await waitFor(async () => { const l = await cl.req('list'); return l.some((x) => x.id === G2) ? l : null; }, 20000);
   const p3 = l3 && l3.find((x) => x.id === G2);
-  check('h. handoff: the picked-up conversation is re-keyed to its id and keeps role "chief"', p3 && p3.role === 'chief' && p3.handoffFrom === G.id, l3 || await cl.req('list'));
+  check('h. handoff: the picked-up conversation is re-keyed to its id and keeps the bot\'s role', p3 && p3.role === BOT3 && p3.handoffFrom === G.id, l3 || await cl.req('list'));
   const s3 = await waitFor(() => savedList().find((x) => x.id === G2), 5000);
-  check('h. handoff: sessions.json records the pickup\'s role', s3 && s3.role === 'chief', savedList());
-  // a bot hands off the same way: its pickup is that bot (bots.js follows it by the role)
+  check('h. handoff: sessions.json records the pickup\'s role', s3 && s3.role === BOT3, savedList());
+  // another bot hands off the same way: its pickup is that bot (bots.js follows it by the role)
   const [y1Pid, y1Key] = (starts(Y1).slice(-1)[0] || '').split(' ');
   const yFile = path.join(ROOT, 'handoffs', `2026-10-10_120001_${Y1.id.slice(0, 8)}.md`);
   fs.writeFileSync(yFile, `---\nsession: ${Y1.id}\ncwd: ${Y1.cwd}\ncreated: ${new Date().toISOString()}\n---\n# Handoff\n`);
@@ -428,7 +418,7 @@ async function main() {
   check('h. handoff: a bot\'s pickup runs /pickup with the usual commands, is re-keyed and keeps the bot\'s role', ly && ly.role === BOT1 && ly.handoffFrom === Y1.id
     && yp.includes(`/pickup ${yFile}`) && sameSet(allowedFv(yp), FV_BASE), { ly, yp });
 
-  // ===== i. the chief's claude moves on: /clear (a new conversation) keeps the role, /resume of an older one drops it =====
+  // ===== i. a bot's claude moves on: /clear (a new conversation) keeps the role, /resume of an older one drops it =====
   // its pid file (the fake's own) names another conversation, as Claude Code's does after /clear or /resume
   const fakePid = Number((starts(G).slice(-1)[0] || '').split(' ')[0]);
   const fakeFile = path.join(PIDS, `${fakePid}.json`);
@@ -437,15 +427,15 @@ async function main() {
   const N1 = crypto.randomUUID();
   moveTo(N1); // no transcript yet: a new conversation
   const ln = await listed(N1);
-  check('i. move: after /clear (a new conversation) the chief keeps its role', ln && ln.role === 'chief', ln || await cl.req('list'));
+  check('i. move: after /clear (a new conversation) the bot keeps its role', ln && ln.role === BOT3, ln || await cl.req('list'));
   const OLD = crypto.randomUUID();
   const oldDir = path.join(PROJECTS, G.cwd.replace(/[^A-Za-z0-9]/g, '-'));
   fs.mkdirSync(oldDir, { recursive: true });
   fs.writeFileSync(path.join(oldDir, `${OLD}.jsonl`), jl({ type: 'user', timestamp: new Date(Date.now() - 3600000).toISOString(), message: { role: 'user', content: 'old work' } }));
   moveTo(OLD);
   const lo2 = await listed(OLD);
-  check('i. move: after /resume of a conversation begun an hour ago it is no longer the chief (a log line)',
-    lo2 && lo2.role === null && hostLog().includes(`went on in an older conversation (${OLD})`), { lo2, log: hostLog().split('\n').slice(-5) });
+  check('i. move: after /resume of a conversation begun an hour ago it is no longer the bot (a log line)',
+    lo2 && lo2.role === null && hostLog().includes(`${BOT3}: ${N1} went on in an older conversation (${OLD})`), { lo2, log: hostLog().split('\n').slice(-5) });
   const oSaved = await waitFor(() => savedList().find((x) => x.id === OLD), 5000);
   check('i. move: sessions.json records the old conversation without the role', oSaved && !('role' in oSaved), savedList());
   // the same for a bot: a /resume of an older conversation drops its role (once the host tied the resumed one to its claude)
@@ -459,14 +449,14 @@ async function main() {
   const ly2 = await listed(OLD2);
   check('i. move: a bot that resumes an older conversation loses its role too (a log line)',
     ly2 && ly2.role === null && hostLog().includes(`${BOT2}: ${Y2.id} went on in an older conversation (${OLD2})`), { ly2, log: hostLog().split('\n').slice(-5) });
-  // with no Chief left, a new one may start
+  // w: a running session for j below
   const W = session('w');
   fs.writeFileSync(path.join(W.cwd, 'want-id.txt'), W.id);
-  const rw = await cl.req('create', { cwd: W.cwd, account: 'B', role: 'chief', cols: 100, rows: 30 });
-  check('i. move: once the old one lost the role, a new Chief starts', rw && rw.ok && rw.role === 'chief', rw);
+  const rw = await cl.req('create', { cwd: W.cwd, account: 'B', cols: 100, rows: 30 });
+  if (!rw || !rw.ok) check('create w', false, rw);
 
   // ===== j. away: open and sendTo of a conversation on another device start and end nothing =====
-  await waitFor(async () => (await cl.req('list')).some((x) => x.id === W.id && x.alive), 20000); // the new Chief, keyed to its id
+  await waitFor(async () => (await cl.req('list')).some((x) => x.id === W.id && x.alive), 20000); // w, keyed to its id
   const ro1 = await cl.req('open', { id: AW.id, cwd: AW.cwd, account: 'B', cols: 100, rows: 30 });
   // an upper-case id is the same conversation
   const rs1 = await cl.req('sendTo', { id: AW.id.toUpperCase(), cwd: AW.cwd, account: 'A', cols: 100, rows: 30 });

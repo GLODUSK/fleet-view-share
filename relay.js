@@ -53,13 +53,13 @@
 //             b + ct, anything else as standard base64 b64 + ct; etag <-> If-None-Match / ETag (304: no body).
 //   time      30 s a route, 60 s when the body asks to wait (wait capped at 50 s). Longer where the server starts or
 //             resumes a Claude before it answers (api.js START_MS, 60 s, then it settles and types): 95 s for POST
-//             /api/sessions, /api/chief/start, /api/bots (it makes the bot and starts it) and /api/bots/:id/start; 75 s for POST /api/sessions/:id/message and
+//             /api/sessions, /api/bots (it makes the bot and starts it) and /api/bots/:id/start; 75 s for POST /api/sessions/:id/message and
 //             /open and the team routes that send a brief or an order (deliverText resumes one not running): POST
 //             /api/teams, /api/teams/:id/add, /lead and /message, the page's /teams, /teams/add and /teams/lead. Those
 //             two get the body's wait (at most 50 s) on top: 145 s and 125 s at most. Shorter for the chat's verbs:
 //             GET /api/sessions/:id/activity 5 s, POST /api/sessions/:id/now 10 s, /model 20 s (/unsend 30 s).
 //   marker    "via": "phone" in the body and X-Fleet-View-Relay: <opts.relayKey()> (api.js viaOf: what Henry sent
-//             from his phone, which a Chief takes as his, and what makes, changes or removes a bot or switches an
+//             from his phone, which a bot takes as his, and what makes, changes or removes a bot or switches an
 //             overseer's model) on the routes api.js reads it on (MARKED): POST /api/sessions,
 //             /api/sessions/:id/message, /answer, /open and /model, /api/teams/:id/message, /api/bots,
 //             /api/bots/:id and /api/bots/:id/remove. Set only once every check
@@ -85,14 +85,12 @@
 // loopback request looks like this PC's own page to the server: a root the phone names must be one Fleet View already
 // lists (/state's repos, its removed workspaces, its added repos), so a phone can't make a new folder "known":
 //   POST /settings      only repo, repos, hidden, hiddenRepos, finishedOpen and the list features' repoNames, repoOrder,
-//                       forgotten, chief and the Bots list's chatOrder (anything else: 403 for the whole request); repo and each repos entry that
-//                       is a path, and each hiddenRepos, repoNames and repoOrder root, must be a known root; chief must
-//                       be { watch: true | false } (400), and only watch goes on (its id and the rest are dropped)
-//   POST /api/sessions  no role (403: the Chief starts by /api/chief/start)
+//                       forgotten and the Bots list's chatOrder (anything else: 403 for the whole request); repo and each repos entry that
+//                       is a path, and each hiddenRepos, repoNames and repoOrder root, must be a known root
+//   POST /api/sessions  no role (403: a bot starts by /api/bots/:id/start)
 //   POST /api/sessions/:id/now  no fields (403);  /unsend  only text (403), as api.js cleanText takes it (400);
 //                       /model  only model and effort (403), one or both, as api.js MODEL_RE and EFFORTS take them
 //                       (400);  /message  now, when there, true or false (400)
-//   POST /api/chief/start  only account, model and effort go on (the rest is dropped)
 //   POST /api/bots, /api/bots/:id   only name, brief, role, account, model, effort, shape and color, as bots.js
 //                       reads (anything else: 403);  POST /api/bots/:id/start and /remove  no fields at all (403). A
 //                       bot id: 12 hex digits
@@ -344,10 +342,10 @@ const TASK = '[A-Za-z0-9][A-Za-z0-9._-]{0,63}';
 const ALLOW = {
   GET: ['/state', '/conversation', '/conversation/image', '/repo-history', '/chat/commands', '/chat/files', '/chat/kind', '/file',
     '/since', '/api/sessions', `/api/sessions/${KEY}`, `/api/sessions/${KEY}/(?:menu|transcript|activity)`, '/api/conversations',
-    '/api/teams', '/api/status', '/chief/briefing', '/accounts', '/sync/move'],
+    '/api/teams', '/api/status', '/accounts', '/sync/move'],
   POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
-    '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)', '/api/chief/start',
+    '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/${TASK}`,
     '/accounts/(?:add|login|code|cancel)', '/sync/move'],
 };
@@ -369,10 +367,9 @@ const routeAllowed = (m, p) => !!ALLOW_RE[m] && pathOk(p) && ALLOW_RE[m].test(p)
 const peerRouteAllowed = (m, p) => !!PEER_RE[m] && pathOk(p) && PEER_RE[m].test(p);
 const isPeerPath = (p) => typeof p === 'string' && p.startsWith('/peer/');
 // what POST /settings may set from the phone (the Chats window's chatsBounds, chatsOpen, chatsOnTop are desktop state)
-const SETTINGS_KEYS = new Set(['repo', 'repos', 'hidden', 'hiddenRepos', 'finishedOpen', 'repoNames', 'repoOrder', 'forgotten', 'chief', 'chatOrder']);
-// what goes on to POST /api/chief/start (chief.js start reads no more), and what a bot may be given from the phone
-// (bots.js create and update read no more: role is its profile's role, text bots.js checks; shape and color are its avatar's look)
-const CHIEF_START_KEYS = new Set(['account', 'model', 'effort']);
+const SETTINGS_KEYS = new Set(['repo', 'repos', 'hidden', 'hiddenRepos', 'finishedOpen', 'repoNames', 'repoOrder', 'forgotten', 'chatOrder']);
+// what a bot may be given from the phone (bots.js create and update read no more: role is its profile's role, text
+// bots.js checks; shape and color are its avatar's look)
 const BOT_KEYS = new Set(['name', 'brief', 'role', 'account', 'model', 'effort', 'shape', 'color']);
 const BOT_ONE = new RegExp(`^/api/bots/${BOT}$`), BOT_ACT = new RegExp(`^/api/bots/${BOT}/(?:start|remove)$`);
 // a dynamic bot's switch before a message (bots.js switchTo: { id, model?, effort? }), and an action on one of its
@@ -397,12 +394,12 @@ const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|o
 // POST routes that start a Claude before they answer (api.js startSession waits up to 60 s for it, settles, types;
 // POST /api/bots makes the bot and starts it), and ones that may resume a stopped conversation first (up to 60 s
 // too) before they type into it
-const START_ROUTES = new RegExp(`^(?:/api/(?:sessions|chief/start|bots|bots/${BOT}/start)|/bots/${BOT}/tasks/${TASK})$`);
+const START_ROUTES = new RegExp(`^(?:/api/(?:sessions|bots|bots/${BOT}/start)|/bots/${BOT}/tasks/${TASK})$`);
 const RESUME_ROUTES = new RegExp(`^(?:/api/sessions/${KEY}/(?:message|open)|/api/teams(?:/${TEAM}/(?:add|lead|message))?|/teams(?:/add|/lead)?)$`);
 // the routes that start or resume a Claude, as the per-device start limits count them: one each, a team one per
 // member (POST /api/teams and the page's /teams), a lead only when there is one (it gets its brief). A message to a
 // conversation or a team weighs what it may resume (resumeWeight), not this
-const STARTS_ONE = new RegExp(`^(?:/api/(?:sessions|sessions/${KEY}/open|chief/start|bots|bots/${BOT}/start|teams/${TEAM}/add)|/teams/add)$`);
+const STARTS_ONE = new RegExp(`^(?:/api/(?:sessions|sessions/${KEY}/open|bots|bots/${BOT}/start|teams/${TEAM}/add)|/teams/add)$`);
 const STARTS_LEAD = new RegExp(`^(?:/api/teams/${TEAM}/lead|/teams/lead)$`);
 function startWeight(m, p, b) {
   if (m !== 'POST') return 0;
@@ -797,17 +794,11 @@ function createRelay(opts = {}) {
       if (Object.keys(b).some((k) => k !== 'id')) return no('these take only id');
       return typeof b.id === 'string' && UUID_RE.test(b.id) ? null : [400, 'id must be a conversation id'];
     }
-    // the Chief is started by its own route, which passes on only what it takes (and only in its own folder)
-    if (p === '/api/sessions' && 'role' in b) return no('start the Chief with /api/chief/start');
+    // a role is a bot's alone, given by its own start
+    if (p === '/api/sessions' && 'role' in b) return no('a session takes no role: a bot starts with /api/bots/:id/start');
     if (p === '/settings') {
       const bad = Object.keys(b).filter((k) => !SETTINGS_KEYS.has(k));
       if (bad.length) return no(`the phone may not change ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
-      // the Chief's watch mode, as fleet-view.js applySettings takes it; its id (in /state's copy) is the server's
-      if ('chief' in b) {
-        const c = b.chief;
-        if (!c || typeof c !== 'object' || Array.isArray(c) || typeof c.watch !== 'boolean') return [400, 'chief must be { watch: true | false }'];
-        b.chief = { watch: c.watch };
-      }
       // a bare name (no slash) only filters by name; a path must be a root Fleet View lists
       const roots = [];
       const sel = (x) => { if (typeof x === 'string' && /[\\/]/.test(x)) roots.push(x); };
@@ -822,7 +813,6 @@ function createRelay(opts = {}) {
     if (p === '/repos/add') return (await rootsKnown([b.path])) ? null : no('only a workspace Fleet View lists or removed can be added from the phone');
     if (p === '/sessions/move') return b.root == null || b.root === '' || (await rootsKnown([b.root])) ? null : no('not a workspace Fleet View lists');
     if (p === '/push-target') return (typeof b.id === 'string' && b.id) || (await rootsKnown([b.root])) ? null : no('not a workspace Fleet View lists');
-    if (p === '/api/chief/start') { for (const k of Object.keys(b)) if (!CHIEF_START_KEYS.has(k)) delete b[k]; return null; }
     if (ACCOUNT_KEYS[p]) return accountRefused(p, b);
     if (p === '/api/bots' || BOT_ONE.test(p)) {
       const bad = Object.keys(b).filter((k) => !BOT_KEYS.has(k));
@@ -918,13 +908,13 @@ function createRelay(opts = {}) {
       return TOKEN_RE.test(t) ? t : null;
     } catch { return null; }
   }
-  // the marker's key (api.js relayKey), or null: without one, what the phone sends reaches a Chief unsigned (said once)
+  // the marker's key (api.js relayKey), or null: without one, what the phone sends reaches a bot unsigned (said once)
   let noKeySaid = false;
   function markKey() {
     let k = null;
     try { k = typeof opts.relayKey === 'function' ? opts.relayKey() : null; } catch { k = null; }
     if (typeof k === 'string' && MARK_KEY_RE.test(k)) return k;
-    if (!noKeySaid) { noKeySaid = true; log('relay: no relay key (opts.relayKey): what the phone sends goes without the marker, so a Chief takes it as unsigned'); }
+    if (!noKeySaid) { noKeySaid = true; log('relay: no relay key (opts.relayKey): what the phone sends goes without the marker, so a bot takes it as unsigned'); }
     return null;
   }
   const fail = (s, message, extra) => ({ s, b: { ok: false, message, ...(extra || {}) } });

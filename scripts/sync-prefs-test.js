@@ -609,7 +609,7 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
   // machine's own: the PC's Panchito is an elsewhere bot on the Mac, bots.js elsewhereId)
   {
     eq(P.cleanChatOrder({ pinned: ['chief', 'bot:aaaaaaaaaaaa', 'bot:nope', 7], keys: ['team:t0123456789', 'chief', 'bot:aaaaaaaaaaaa', 'map:x', 'bot:bbbbbbbbbbbb'] }),
-      { pinned: ['chief', 'bot:aaaaaaaaaaaa'], keys: ['team:t0123456789', 'bot:bbbbbbbbbbbb'] }, 'cleanChatOrder: row keys only, each once (pinned wins)');
+      { pinned: ['bot:aaaaaaaaaaaa'], keys: ['team:t0123456789', 'bot:bbbbbbbbbbbb'] }, 'cleanChatOrder: row keys only, each once (pinned wins); an older file\'s "chief" is dropped');
     eq(P.cleanChatOrder([]), null, 'cleanChatOrder: not an object: null');
     eq(P.cleanChatOrder({}), { pinned: [], keys: [] }, 'cleanChatOrder: empty lists');
     const many = Array.from({ length: 400 }, (_, i) => `bot:${String(i).padStart(12, '0')}`);
@@ -624,21 +624,24 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     eq(P.GROUPS.chatOrder.out({ key: `bot:${PAN}`, pin: true }, trA), { p: { k: 'bots:panchito', pin: true }, known: true }, "chatOrder out: a bot by its folder's name");
     eq(P.GROUPS.chatOrder.out({ key: 'bot:cccccccccccc' }, trA), null, 'chatOrder out: a bot this machine does not know: left out');
     eq(P.GROUPS.chatOrder.in({ k: 'bots:panchito' }, trB), { key: `bot:${elsewhereId('panchito')}` }, "chatOrder in: another machine's bot is its elsewhere bot here");
-    eq(P.GROUPS.chatOrder.in({ k: 'chief', pin: true }, trB), { key: 'chief', pin: true }, 'chatOrder in: the Chief as it is');
+    const T2 = 'team:t0fedcba987';
+    eq(P.GROUPS.chatOrder.in({ k: T2, pin: true }, trB), { key: T2, pin: true }, 'chatOrder in: a team as it is');
+    eq(P.GROUPS.chatOrder.clean({ k: 'chief', pin: true }), null, 'chatOrder: an older machine\'s "chief" in the row is dropped as it is read');
+    eq(P.GROUPS.chatOrder.out({ key: 'chief', pin: true }, trA), null, 'chatOrder out: "chief" is not sent');
     eq(P.GROUPS.chatOrder.in({ k: 'bots:mateo' }, trA), null, "chatOrder in: a bot with no folder here does not translate (it rides along)");
     const X = pair(trA, trB);
-    X.A.chatOrder = [{ key: `bot:${PAN}`, pin: true }, { key: 'chief', pin: true }, { key: 'team:t0123456789' }];
+    X.A.chatOrder = [{ key: `bot:${PAN}`, pin: true }, { key: T2, pin: true }, { key: 'team:t0123456789' }];
     await X.a.tick(); X.step(10e3); await X.b.tick();
-    eq(X.B.chatOrder, [{ key: `bot:${elsewhereId('panchito')}`, pin: true }, { key: 'chief', pin: true }, { key: 'team:t0123456789' }], "chatOrder: the PC's order and pins reach the Mac, its bot under the Mac's id for it");
-    // the Mac puts its own bot in and unpins the Chief: on the PC, the Mac's bot (no chats of it there yet) is not put in
+    eq(X.B.chatOrder, [{ key: `bot:${elsewhereId('panchito')}`, pin: true }, { key: T2, pin: true }, { key: 'team:t0123456789' }], "chatOrder: the PC's order and pins reach the Mac, its bot under the Mac's id for it");
+    // the Mac puts its own bot in and unpins the second team: on the PC, the Mac's bot (no chats of it there yet) is not put in
     // but keeps its place in the row
-    X.B.chatOrder = [{ key: `bot:${elsewhereId('panchito')}`, pin: true }, { key: `bot:${MACBOT}` }, { key: 'chief' }, { key: 'team:t0123456789' }];
+    X.B.chatOrder = [{ key: `bot:${elsewhereId('panchito')}`, pin: true }, { key: `bot:${MACBOT}` }, { key: T2 }, { key: 'team:t0123456789' }];
     X.step(5e3); await X.b.tick(); X.step(10e3); await X.a.tick();
-    eq(X.A.chatOrder, [{ key: `bot:${PAN}`, pin: true }, { key: 'chief' }, { key: 'team:t0123456789' }], "chatOrder: the Mac's change reaches the PC (the Chief unpinned)");
-    eq(rowOf('chatOrder').items.map((x) => x.k), ['bots:panchito', 'bots:mateo', 'chief', 'team:t0123456789'], "chatOrder: the Mac's own bot rides in the row at its place");
-    X.A.chatOrder = [{ key: 'chief', pin: true }, { key: 'team:t0123456789' }, { key: `bot:${PAN}` }];
+    eq(X.A.chatOrder, [{ key: `bot:${PAN}`, pin: true }, { key: T2 }, { key: 'team:t0123456789' }], "chatOrder: the Mac's change reaches the PC (the team unpinned)");
+    eq(rowOf('chatOrder').items.map((x) => x.k), ['bots:panchito', 'bots:mateo', T2, 'team:t0123456789'], "chatOrder: the Mac's own bot rides in the row at its place");
+    X.A.chatOrder = [{ key: T2, pin: true }, { key: 'team:t0123456789' }, { key: `bot:${PAN}` }];
     X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
-    eq(X.B.chatOrder.map((x) => `${x.pin ? '*' : ''}${x.key}`), ['*chief', 'team:t0123456789', `bot:${elsewhereId('panchito')}`, `bot:${MACBOT}`],
+    eq(X.B.chatOrder.map((x) => `${x.pin ? '*' : ''}${x.key}`), [`*${T2}`, 'team:t0123456789', `bot:${elsewhereId('panchito')}`, `bot:${MACBOT}`],
       "chatOrder: a reorder on the PC keeps the Mac's own bot (riding there) after the one it stood after");
   }
 

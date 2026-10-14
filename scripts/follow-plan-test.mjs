@@ -39,7 +39,7 @@ assert.equal(followPlan(chat({ state: 'WORKING' }), { act: idle }).why, 'idle', 
 assert.deepEqual(followPlan(chat(), { act: working, linked: false }), { how: 'link', host, kind: 'portable', why: 'busy' });
 assert.deepEqual(followPlan(chat(), { act: idle, linked: false }), { how: 'link', host, kind: 'portable', why: 'idle' });
 // nothing followPlan says is a move: only an explicit Continue on this machine moves a chat
-for (const k of [chat(), chat({ state: 'WORKING' }), chat({ workspace: { kind: 'bound', host } }), chat({ bot: 'chief' })]) {
+for (const k of [chat(), chat({ state: 'WORKING' }), chat({ workspace: { kind: 'bound', host } }), chat({ bot: 'a1b2c3d4e5f6' })]) {
   for (const o of [{}, { act: idle }, { act: working }, { act: asking }, { linked: false }, { online: true, linked: true }, { online: false }]) assert.notEqual(how(k, o), 'move', JSON.stringify(o));
 }
 // bound: always sent there
@@ -47,10 +47,9 @@ const bound = chat({ workspace: { kind: 'bound', host } });
 assert.deepEqual(followPlan(bound, { act: idle, online: true, linked: true }), { how: 'remote', host, kind: 'bound', why: 'bound' });
 assert.deepEqual(followPlan(bound, { act: working, online: true }), { how: 'remote', host, kind: 'bound', why: 'bound' });
 assert.deepEqual(followPlan(bound, { linked: false }), { how: 'link', host, kind: 'bound', why: 'bound' }, 'bound and not linked: link first');
-// bots and the Chief: sent there too (a move would lose the role)
-const bot = chat({ bot: 'a1b2c3d4e5f6' }), chief = chat({ bot: 'chief' });
+// bots: sent there too (a move would lose the role)
+const bot = chat({ bot: 'a1b2c3d4e5f6' });
 assert.deepEqual(followPlan(bot, { act: idle, online: true, linked: true }), { how: 'remote', host, kind: 'bound', why: 'bot' });
-assert.equal(how(chief, { act: idle, online: true, linked: true }), 'remote');
 assert.equal(how(bot, { linked: false }), 'link');
 // offline: the card, for portable and bound
 assert.deepEqual(followPlan(chat(), { online: false, linked: true }), { how: 'offline', host, kind: 'portable' });
