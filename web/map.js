@@ -249,7 +249,9 @@
 //   `n` / `N`: the next / previous conversation that needs you, picked and glided to the middle.
 //   Overlay: ./map-overlay.js, when present, is mounted on the map's container with mountMapOverlay(el, API)
 //     (see overlayApi) and gets frame(now) every frame, the keys the map doesn't take, and destroy(). It draws
-//     the bots put on the map too (map-bots.js, state.bots map / watches); mapWorldAt gives "Add bot" its spot.
+//     the bots put on the map too (map-bots.js, state.bots map / watches); mapWorldAt gives "Add bot" its spot. Their
+//     names are the map's own labels (overlayApi botSpots: drawLabels draws them as a workspace's, and keeps the
+//     other labels off the mascots).
 //   Replay: setMapReplay(on). While on, the shell feeds the map a state rebuilt from the timeline: nothing
 //     is born or saved (spots, made during replay, are forgotten when it ends), and comets run on state.now.
 
@@ -912,7 +914,7 @@ function overlayApi() {
       for (const n of I.sim || []) { if (!n.p) continue; minX = Math.min(minX, n.p.x); maxX = Math.max(maxX, n.p.x); minY = Math.min(minY, n.p.y); maxY = Math.max(maxY, n.p.y); }
       if (!Number.isFinite(minX)) { minX = minY = -100; maxX = maxY = 100; }
       return {
-        pan: { x: I.pan.x, y: I.pan.y }, zoom: I.zoom, W: I.W, H: I.H, k: K(), cx: I.cam.cx, cy: I.cam.cy,
+        pan: { x: I.pan.x, y: I.pan.y }, zoom: I.zoom, W: I.W, H: I.H, k: K(), sf: I.sf || 1, cx: I.cam.cx, cy: I.cam.cy,
         toScreen: (x, y) => pt(...toScreen(x, y)), toWorld: (sx, sy) => pt(...toWorld(sx, sy)),
         bounds: { minX, minY, maxX, maxY },
       };
@@ -932,8 +934,17 @@ function overlayApi() {
     lenses: () => LENSES.slice(),
     state: () => (I ? I.state : null),
     replay: () => !!(I && I.replay),
-    // the shell's ui (map-bots.js: a bot's menu, placeBot, watchBot, openBotChat)
+    // the shell's ui (map-bots.js: a bot's menu, placeBot, watchBot, openBotChat, pickBot)
     ui: () => (I ? I.ui : null),
+    // where map-bots.js drew each bot's mascot ([{ id, x, y, r, name, color, watching, live, must }], CSS px): their
+    // names are labels of the map's own (drawLabels), and the other labels keep off them. Drawn again only on a change
+    botSpots: (list) => {
+      if (!I) return;
+      const a = Array.isArray(list) ? list : [];
+      const sig = a.map((b) => `${b.id}|${Math.round(b.x)}|${Math.round(b.y)}|${Math.round(b.r)}|${b.name}|${b.color}|${b.watching}|${b.must ? 1 : 0}`).join(';');
+      if (sig === I.botSig) return;
+      I.botSig = sig; I.botSpots = a; I.dirty = true;
+    },
   };
 }
 // a non-conversation node's colour (the overlay's minimap)
@@ -5761,6 +5772,9 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
     }
   }
   for (const gh of I.parGhosts) { const r = gh.r + 1; obstacles.push({ id: 'g:' + gh.n.sid, sid: null, x: gh.x - r, y: gh.y - r, w: 2 * r, h: 2 * r }); }
+  // the bots' mascots (map-bots.js, overlayApi botSpots): no label sits on one
+  const bots = I.replay ? [] : I.botSpots || [];
+  for (const b of bots) { const r = b.r + 1; obstacles.push({ id: 'B:' + b.id, sid: null, x: b.x - r, y: b.y - r, w: 2 * r, h: 2 * r }); }
   // ownSid: a conversation's own agents and PR don't block its name (second try, when nothing else fits)
   const hit = (r, owner, ignoreObs, ownSid) => {
     if (r.x < 2 || r.y < 2 || r.x + r.w > W - 2 || r.y + r.h > H - 2) return true;
@@ -5864,6 +5878,22 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
       jobs.push({ prio: must ? 1600 : 640, must, owner: n.id, lines: [[{ t: String(n.k.label || ''), f, c: conflictColor(n.k) }]], lh: 12, pill: true,
         anchors: [(w, h) => [n.sx + g, n.sy - h / 2], (w, h) => [n.sx - g - w, n.sy - h / 2], (w, h) => [n.sx - w / 2, n.sy + g], (w, h) => [n.sx - w / 2, n.sy - g - h]] });
     }
+  }
+  // a bot's name, as a workspace's: its own colour on the frosted pill, under its mascot (else above, beside, a little
+  // farther out), and "· 2" when it watches two conversations; picked, hovered or held, it shows over anything
+  for (const b of bots) {
+    const f = font(13, 700, DISPLAY), g = b.r + 3, d = g * 0.72;
+    const segs = [{ t: b.name, f, c: b.live ? b.color : rgba(b.color, 0.7) }];
+    if (b.watching) segs.push({ t: ` · ${b.watching}`, f: font(11.5, 600), c: COL.dim });
+    jobs.push({
+      prio: b.must ? 1900 : 990, must: !!b.must, owner: 'B:' + b.id, lines: [segs], lh: 17, pill: true,
+      anchors: [
+        (w, h) => [b.x - w / 2, b.y + g], (w, h) => [b.x - w / 2, b.y - g - h],
+        (w, h) => [b.x + g, b.y - h / 2], (w, h) => [b.x - g - w, b.y - h / 2],
+        (w, h) => [b.x + d, b.y + d], (w, h) => [b.x - d - w, b.y + d],
+        (w, h) => [b.x - w / 2, b.y + g + 12], (w, h) => [b.x - w / 2, b.y - g - 12 - h],
+      ],
+    });
   }
   // team pills: the team's name at its link's middle
   for (const tm of I.teams) {

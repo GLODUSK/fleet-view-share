@@ -589,6 +589,10 @@ html.glass .term-host { background: transparent; }
   color: var(--tc, #a47bff); font: 600 10.5px/1 var(--font-ui); white-space: nowrap;
 }
 
+/* a bot picked on the Map (detail.js renderBotDetail): the panel shows only its chat, as the Bots tab draws it */
+.detail.d-botmode > :not(.d-botbox):not(.d-grip) { display: none !important; }
+.detail:not(.d-botmode) > .d-botbox { display: none; }
+
 /* ---------- the side panel as a floating glass card (rounded, inset from the edges) ---------- */
 .detail, html.glass .detail {
   top: 10px; right: 12px; bottom: 12px; width: calc(var(--detail-w) - 22px);

@@ -26,6 +26,9 @@
 //                          how 'click' counts as a pick (see setSelected); without it, it only redraws.
 //                          ui.setSelected(id) opens it as well, and setSelected(null) closes it.
 //   ui.detailId            read only: the conversation the panel shows, or null
+//   ui.pickBot(id), ui.botPick, ui.closeBotPanel()   a bot clicked on the Map (map-bots.js): the panel shows its chat
+//                          as the Bots tab does (detail.js renderBotDetail, chats.js renderBotPanel) until a
+//                          conversation is picked, the map is clicked, its ✕ or Esc; ui.botPick is that bot's id
 //   ui.reveal({ kind: 'file'|'folder', path, line? })   POST /reveal: a file opens in VS Code, a folder in
 //                          Explorer (the server only allows paths that are in /state); the reply shows as a toast.
 //                          On a page from another computer those open on the PC's screen: the menus and the toast
@@ -180,14 +183,14 @@
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects, followProjectsPick } from './projects.js';
-import { renderChats, botFace, seenNow, setPickedColors, selectChat } from './chats.js';
+import { renderChats, renderBotPanel, botTeams, botFace, seenNow, setPickedColors, selectChat } from './chats.js';
 import { BOT_JOBS, jobLabel, ownBots, onMap, watchesOf, botMascot, botName, watchName } from './map-bots.js';
 import { buildContacts } from './chats-model.js';
 // the New team form's rules (a team's size, its lead, a name cleaned, the checks before Make team sends), shared with
 // web/chats.js and the phone app; leadOf(t): a team's lead (★), its conversation id, or null (a team of peers)
 import { TEAM_MAX, leadOf, cleanName, checkTeam, nestStep, nestFailed } from './team-form.js';
 import { mountBotNotes } from './botnote.js';
-import { renderDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
+import { renderDetail, renderBotDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
 import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote, requestMove, setAccountPicker } from './term.js';
@@ -294,8 +297,11 @@ const intentOf = (how) => (how === 'keys' ? 'keys' : how === 'explicit' ? 'expli
 const ui = {
   selectedId: null,
   detailId: null,
+  // the bot picked on the Map (map-bots.js): the side panel shows its chat as the Bots tab does (drawDetail)
+  botPick: null,
   // how: 'click' (the default: cards, tiles, map nodes), 'keys' (arrow-key moves), 'explicit'
   setSelected(id, how = 'click') {
+    if (id || !pinned) ui.botPick = null;
     ui.selectedId = id || null;
     ui.detailId = id || (pinned ? ui.detailId : null);
     pickIntent = id ? { id, kind: intentOf(how) } : null;
@@ -304,6 +310,7 @@ const ui = {
   },
   // how: none for a redraw of the panel (its own tab buttons), 'click' when a conversation is picked
   showDetail(id, how = null) {
+    if (id || !pinned) ui.botPick = null;
     if (pinned && !id) id = ui.detailId;
     ui.detailId = id || null;
     if (!id) projPanel = false;
@@ -354,6 +361,22 @@ const ui = {
   placeBot: (id, x, y) => placeBot(id, { x, y }),
   watchBot: (id, convId, job) => watchBot(id, convId, job),
   openBotChat: (id) => openBotChat(id),
+  // a bot clicked on the map: its chat in the side panel (a click on it again leaves it there)
+  pickBot(id) {
+    if (!botById(id)) return;
+    if (multi.size) setMulti([], 'shell');
+    ui.selectedId = null;
+    if (ui.botPick !== id) botFocus = true;
+    ui.botPick = id;
+    render();
+  },
+  // the bot chat's ✕ in the side panel (chats.js renderBotPanel), and Esc on the map
+  closeBotPanel() {
+    if (!ui.botPick) return;
+    ui.botPick = null;
+    if (!pinned) ui.detailId = null;
+    render();
+  },
   // the map: a conversation dropped on another repo moves there (as the menu's "Move to workspace")
   moveSession: (id, root) => {
     const s = (view?.allSessions || state?.sessions || []).find((x) => x.id === id);
@@ -1730,7 +1753,7 @@ function restorePanel(v) {
   if (!panelSaved || SOLO) return;
   if (!panelSince) panelSince = Date.now();
   const p = panelSaved;
-  if (ui.detailId || ui.selectedId || multi.size || Date.now() - panelSince > PANEL_RESTORE_MS) { panelSaved = null; return; }
+  if (ui.detailId || ui.selectedId || ui.botPick || multi.size || Date.now() - panelSince > PANEL_RESTORE_MS) { panelSaved = null; return; }
   if (!v.allSessions.some((x) => x.id === p.id)) return;
   panelSaved = null;
   ui.detailId = p.id;
@@ -1748,8 +1771,19 @@ function savePanel(id) {
   panelKey = key;
   try { if (key) localStorage.setItem('fv.panelOpen', key); else localStorage.removeItem('fv.panelOpen'); } catch {}
 }
+let botFocus = false; // a bot just picked on the map: its chat box takes the keyboard once its panel is drawn
 function drawDetail(v) {
   restorePanel(v);
+  // a bot picked on the Map: the panel shows its chat as the Bots tab does (Henry, 2026-10-14), until a conversation
+  // is picked, the map is clicked, its ✕ or Esc; on the other views the panel is as it was
+  if (ui.botPick && !botById(ui.botPick)) ui.botPick = null;
+  if (ui.botPick && local.view === 'map' && !replay) {
+    const id = ui.botPick, focus = botFocus;
+    botFocus = false;
+    try { renderBotDetail($('detail'), ui, `bot:${id}`, (box) => renderBotPanel(box, v, ui, id, focus)); } catch (e) { console.error(e); }
+    $('work').classList.add('detail-open');
+    return;
+  }
   // Projects and Bots show the chat themselves: the panel opens there only when asked, pinned or not
   const shut = (local.view === 'projects' || local.view === 'chats') && !projPanel;
   let s = ui.detailId && !shut ? v.allSessions.find((x) => x.id === ui.detailId) : null;
@@ -2328,6 +2362,7 @@ document.addEventListener('keydown', (e) => {
   // legend (and its own multi-selection), the multi-selection, the panel
   if (k === 'Escape' && since.isOpen()) { e.preventDefault(); since.close(); return; }
   if (k === 'Escape' && local.view === 'map' && ui.keys.map && ui.keys.map(e)) return;
+  if (k === 'Escape' && local.view === 'map' && ui.botPick && !pinned) { e.preventDefault(); ui.closeBotPanel(); return; }
   if (k === 'Escape' && multi.size) { e.preventDefault(); setMulti([], 'keys'); return; }
   if (k === 'Escape' && ui.detailId && !pinned) { e.preventDefault(); ui.showDetail(null); return; }
   // arrows and paging inside the panel scroll it instead of moving the pick
@@ -3882,20 +3917,50 @@ function watchableSessions() {
 // the three jobs for one conversation, a check on the one it has
 const jobItems = (b, convId, cur) => BOT_JOBS.map(([job, label]) => ({ label, icon: cur === job ? 'check' : null, run: () => watchBot(b.id, convId, job) }));
 const stopWatchItem = (b, convId) => ({ label: 'Stop watching', icon: 'close', danger: true, run: () => watchBot(b.id, convId, null) });
-// empty space's "Add bot ▸": x, y where the menu was opened (client px), where the bot goes
+// empty space's "Add bot ▸": x, y where the menu was opened (client px), where the bot goes. Each bot says its role
+// (Henry, 2026-10-14: "can u also show their title in the dropdown"), and under them the teams of bots (the Bots
+// tab's groups): one drops the whole team there, the lead in the middle and the rest round it (those on the map already
+// come over too) ("maybe even let me drop a team")
+const TEAM_RING = 74; // px from the lead to the rest of a dropped team, at the screen factor 1
 function addBotMenuItem(x, y) {
   const bots = ownBots(state), off = bots.filter((b) => !onMap(b));
+  const teams = botTeams(view || state);
   const quiet = (label) => ({ label: 'Add bot', icon: 'bots', children: [{ label, disabled: true }] });
   if (!bots.length) return quiet('No bots yet: make one in the Bots tab');
-  if (!off.length) return quiet('Every bot is on the map');
-  return {
-    label: 'Add bot', icon: 'bots',
-    children: off.map((b) => ({ label: botName(b), art: botArt(b), note: b.live ? null : 'not running', run: () => {
-      const at = mapMod?.mapWorldAt?.(x, y);
-      if (!at) { toast('the map is not showing', C.red); return; }
-      placeBot(b.id, at, `${botName(b)} is on the map: right-click it to give it a job`);
-    } })),
-  };
+  if (!off.length && !teams.length) return quiet('Every bot is on the map');
+  const roleOf = (b) => (typeof b.role === 'string' ? b.role.replace(/\s+/g, ' ').trim() : '');
+  const rows = off.map((b) => ({ label: botName(b), art: botArt(b), note: [roleOf(b), b.live ? '' : 'not running'].filter(Boolean).join(' · ') || null, run: () => {
+    const at = mapMod?.mapWorldAt?.(x, y);
+    if (!at) { toast('the map is not showing', C.red); return; }
+    placeBot(b.id, at, `${botName(b)} is on the map: right-click it to give it a job`);
+  } }));
+  if (!off.length) rows.push({ label: 'Every bot is on the map', disabled: true });
+  if (teams.length) {
+    rows.push({ sep: true });
+    for (const t of teams) {
+      const n = t.members.length, here = t.members.filter((m) => onMap(botById(m.botId))).length;
+      const lead = t.members.find((m) => m.lead);
+      rows.push({ label: t.name, art: t.art(18), note: [`${n} bot${n === 1 ? '' : 's'}`, lead ? `★ ${lead.name}` : '', here ? `${here} on the map` : ''].filter(Boolean).join(' · '),
+        run: () => dropTeam(t, x, y) });
+    }
+  }
+  return { label: 'Add bot', icon: 'bots', scroll: rows.length > 10, children: rows };
+}
+// a team dropped at x, y (client px): the lead there (else the first), the rest evenly round it
+function dropTeam(t, x, y) {
+  if (!mapMod?.mapWorldAt?.(x, y)) { toast('the map is not showing', C.red); return; }
+  const ms = t.members.slice().sort((a, b) => Number(b.lead) - Number(a.lead));
+  const mid = ms[0].lead ? ms.shift() : null;
+  const ring = TEAM_RING * Math.min(1.6, Math.max(1, Math.sqrt(Math.min(innerWidth / 1600, innerHeight / 900))));
+  const spots = [];
+  if (mid) spots.push([mid, x, y]);
+  ms.forEach((m, i) => {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / ms.length;
+    spots.push([m, mid || ms.length > 1 ? x + Math.cos(a) * ring : x, mid || ms.length > 1 ? y + Math.sin(a) * ring : y]);
+  });
+  let last = null;
+  for (const [m, px, py] of spots) { const at = mapMod.mapWorldAt(px, py); if (at && placeBot(m.botId, at)) last = m; }
+  if (last) toast(`${t.name} is on the map: click one for its chat`, C.dim);
 }
 // a bot's own menu (its mascot on the map)
 function botMenu(b, x, y) {

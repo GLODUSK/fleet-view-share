@@ -385,6 +385,16 @@ html.glass .ch-narrow .ch-main { background: #10131d; }
 .ch-narrow .ch-head-b .btn, .ch-mid .ch-head-b .btn { padding: 0 8px; }
 .ch-narrow .ch-bub { max-width: 84%; }
 
+/* ---- the side panel's copy for one bot picked on the Map (chats.js renderBotPanel, detail.js renderBotDetail): the
+   narrow layout with its chat open, the list never shown, on the panel's own glass, and a ✕ in the back arrow's place ---- */
+.ch-panel { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.ch-panel > .ch { flex: 1 1 auto; height: auto; }
+.ch-panel .ch-side { display: none; }
+.ch-panel.ch-narrow .ch-main, html.glass .ch-panel.ch-narrow .ch-main {
+  transform: none; visibility: visible; transition: none;
+  background: transparent; border: 0; border-radius: 0; box-shadow: none;
+}
+
 /* ---- the pop-out window (?solo=chats): only this view, a 36px header that drags the window ---- */
 html.solo .top, html.solo .rule, html.solo #alert, html.solo #finished, html.solo .foot, html.solo .tabs { display: none !important; }
 html.solo .view-chats { display: flex; flex-direction: column; padding: 0; }

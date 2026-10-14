@@ -555,8 +555,37 @@ function startRename(el, ui) {
 
 // el: the panel; s: the session (or null to close); gone: s is the last copy of one that left the list;
 // extras: the other selected conversations, whose chats show under its own (drawSplits)
+// A bot picked on the Map (map-bots.js, app.js ui.pickBot): this panel, at its place and size, shows the bot's chat
+// exactly as the Bots tab does (Henry, 2026-10-14: "if i select them, bots chat is the left panel ... borrow the one
+// i use for the bots ... size/layout it the same on the left so theres 1:1 parity"). draw(box) fills it (chats.js
+// renderBotPanel); the conversation's own parts hide meanwhile (views.css .d-botmode), and its grips still size it.
+// key: the bot's ('bot:<id>'), where the floating card goes beside the click that picked it
+export function renderBotDetail(el, ui, key, draw) {
+  const wasOpen = el.classList.contains('open');
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+  const work = el.closest('.work');
+  docked = !!ui.chatInView?.();
+  float = place === 'float' && !docked;
+  work?.classList.toggle('detail-left', left);
+  work?.classList.toggle('detail-float', float);
+  if (dockW) work?.style.setProperty('--detail-w', `${dockW}px`);
+  if (!el._built) build(el, ui);
+  // the conversation it showed is done with: the next one opens afresh, and its preview session ends
+  if (el._id) { el._id = null; el._shown = null; peek = null; if (el._renaming) { el._renaming = null; el._slots.head._html = null; } endPreviews(null); }
+  if (float && work && el._placed !== key) placeFloat(el, work, key, true, wasOpen, false);
+  if (!el._botBox) {
+    el._botBox = document.createElement('div');
+    el._botBox.className = 'd-botbox ch-panel';
+    el.insertBefore(el._botBox, el.querySelector('.d-grip'));
+  }
+  el.classList.add('d-botmode');
+  draw(el._botBox);
+}
+
 export function renderDetail(el, s, ui, gone = false, extras = []) {
   const open = !!s, wasOpen = el.classList.contains('open');
+  el.classList.remove('d-botmode');
   el.classList.toggle('open', open);
   el.setAttribute('aria-hidden', String(!open));
   const work = el.closest('.work');

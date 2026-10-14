@@ -551,7 +551,9 @@ function groupItems(el, ui, c) {
 
 // ---------- build ----------
 function build(el, ui) {
-  el.innerHTML = `${SOLO ? `<header class="ch-solo-top"><span class="ch-solo-m">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 20 })}</span>`
+  // the side panel's copy for one bot (renderBotPanel): no list, no pop-out, no keys of its own
+  const inPanel = el.classList.contains('ch-panel');
+  el.innerHTML = `${SOLO && !inPanel ? `<header class="ch-solo-top"><span class="ch-solo-m">${mascotSVG('chats', { state: 'idle', color: C.cyan, size: 20 })}</span>`
     + `<span class="ch-solo-t">Bots</span><span class="grow"></span>`
     + `<button type="button" class="ch-ib ch-ontop" aria-pressed="false" title="Keep on top">${icon('pin', 14)}</button>`
     + `<button type="button" class="ch-ib ch-dock" title="Back into the main window">${icon('open', 14)}</button></header>` : ''}`
@@ -588,12 +590,20 @@ function build(el, ui) {
   el._built = true;
   el._ui = ui;
   pane = el;
+  if (inPanel) {
+    // always the narrow layout with its chat open, and a ✕ where the back arrow is: it closes the panel
+    el.classList.add('ch-narrow');
+    const x = q('.ch-back');
+    x.innerHTML = icon('close', 16);
+    x.title = 'Close (Esc)';
+    x.setAttribute('aria-label', 'Close');
+  }
 
   // the narrow layout follows the element's own width
   try {
     new ResizeObserver((es) => {
       const w = es[es.length - 1].contentRect.width;
-      const n = w > 0 && w < NARROW;
+      const n = inPanel || (w > 0 && w < NARROW);
       el.classList.toggle('ch-mid', w >= NARROW && w < 1000); // the chat's buttons drop their words
       if (n !== el.classList.contains('ch-narrow')) { el.classList.toggle('ch-narrow', n); ui.refresh(); }
     }).observe(el);
@@ -669,7 +679,7 @@ function build(el, ui) {
     else if (e.target.closest('[data-show]')) desk()?.popChats?.();
   });
   el._head.addEventListener('click', (e) => {
-    if (e.target.closest('.ch-back')) { back(ui); return; }
+    if (e.target.closest('.ch-back')) { if (inPanel) ui.closeBotPanel?.(); else back(ui); return; }
     if (e.target.closest('[data-start]')) { if (el._cur && el._cur.botId) startBot(ui, el._cur.botId); return; }
     if (e.target.closest('[data-edit]')) { if (el._cur && el._cur.botId) openForm(el, ui, el._cur.botId); return; }
     const b = e.target.closest('[data-pane]');
@@ -745,6 +755,7 @@ function build(el, ui) {
     taskMenu(el, ui, el._cur.botId, row.dataset.task, e.clientX, e.clientY);
   });
 
+  if (inPanel) return;
   if (SOLO) {
     const head = el.querySelector('.ch-solo-top');
     head.addEventListener('click', (e) => {
@@ -1188,9 +1199,11 @@ function sendTeam(el, ui) {
 
 const focusCompose = (el) => requestAnimationFrame(() => {
   const c = el._cur;
-  if (c && c.kind === 'team') el._ta.focus();
-  else if (!el._bot.hidden) el._bta.focus();
-  else el._chat.querySelector('.chat-compose textarea')?.focus();
+  // (no scroll: the side panel's copy may still be sliding in, and a scroll there would push the view sideways)
+  const o = { preventScroll: true };
+  if (c && c.kind === 'team') el._ta.focus(o);
+  else if (!el._bot.hidden) el._bta.focus(o);
+  else el._chat.querySelector('.chat-compose textarea')?.focus(o);
 });
 
 function pick(key, ui, byHand) {
@@ -1565,18 +1578,54 @@ export function botLook(state, botId) {
   return { color, shape: shape || null, face, svg: (size, f = face) => mascotSVG(c.key, { state: f, color, size, shape }) };
 }
 
+// A bot picked on the Map: its chat as this view shows it, drawn into el, the side panel's box (detail.js
+// renderBotDetail gives it the class ch-panel): the narrow layout with the chat open and the list hidden (chats.css), a
+// ✕ in the back arrow's place (ui.closeBotPanel). It is this view's own pick, so the Bots tab shows the same bot after.
+// focus: put the cursor in its chat box (a pick by click)
+export function renderBotPanel(el, view, ui, botId, focus = false) {
+  const key = `bot:${botId}`;
+  if (selKey !== key) {
+    selKey = key;
+    store.set(SEL_KEY, key);
+    if (form && !(form.mode === 'edit' && form.botId === botId)) form = null;
+  }
+  open = true;
+  renderChats(el, view, ui);
+  if (focus) focusCompose(el);
+}
+
+// the teams of bots as this view's list has them (its group rows), for the Map's "Add bot ▸": [{ id, name, color, art(size),
+// members: [{ botId, name, lead, role }] }], the lead first; a member that is no bot of this machine is left out
+export function botTeams(state) {
+  if (!state || typeof state !== 'object') return [];
+  let rows;
+  try { rows = buildContacts(withMade(state)).map(lookOf); } catch { return []; }
+  const byKey = new Map(rows.map((r) => [r.key, r]));
+  return rows.filter((r) => r.kind === 'team').map((t) => ({
+    id: t.teamId, name: t.name || 'team', color: colorOf(t), art: (size) => cluster(state, t, size),
+    members: (t.members || []).map((m) => {
+      const r = byKey.get(m.key);
+      return r && r.botId && botOf(state, r.botId) ? { botId: r.botId, name: m.name, lead: !!m.lead, role: m.role || '' } : null;
+    }).filter(Boolean),
+  })).filter((t) => t.members.length);
+}
+
 export function renderChats(el, view, ui) {
   if (!el._built) build(el, ui);
+  // the Bots tab or the side panel's copy (renderBotPanel), whichever draws now: the one clicks and keys act on
+  pane = el;
+  const inPanel = el.classList.contains('ch-panel');
   const state = withMade(view);
   el._ui = ui;
   el._state = state;
   dynBots = FIXTURE ? [] : state.bots || []; // (?fixture=1 has no server to switch through)
   const now = Date.now();
   const canPop = !SOLO && typeof desk()?.popChats === 'function';
-  el._pop.hidden = !canPop;
-  el._popped.hidden = !popped || SOLO;
-  el._ch.hidden = popped && !SOLO;
-  if (popped && !SOLO) return;
+  const away = popped && !SOLO && !inPanel; // Bots is in its own window (the panel's copy shows here all the same)
+  el._pop.hidden = !canPop || inPanel;
+  el._popped.hidden = !away;
+  el._ch.hidden = away;
+  if (away) return;
 
   let contacts = [];
   try {
@@ -1586,7 +1635,7 @@ export function renderChats(el, view, ui) {
   try { addNew(state, contacts); } catch (e) { console.error('chats: order', e); }
   try { pumpBots(state); } catch (e) { console.error('chats: bots', e); }
   // an overseer's conversation picked from outside (?select=, the mini window) carries over to its row
-  if (ui.selectedId && ui.selectedId !== syncedSel) {
+  if (!inPanel && ui.selectedId && ui.selectedId !== syncedSel) {
     syncedSel = ui.selectedId;
     const c = contacts.find((x) => x.id === ui.selectedId || (x.ids || []).includes(ui.selectedId));
     if (c && c.key !== selKey) { selKey = c.key; store.set(SEL_KEY, selKey); markSeen(c); }

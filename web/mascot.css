@@ -1,6 +1,6 @@
 /* Mascots (mascot.js): alive in every state, gently. The body breathes (bobs while it works), the eyes look around
    now and then (quicker while it works, up at the dots while it thinks), the thinking dots rise in turn, and .m-ack
-   (mascotAck) is a short hop. Nothing blinks: no eye closes and opens, no colour or brightness changes; every motion
+   (mascotAck) is a short hop. Nothing blinks (but a bot on the Map, below): no colour or brightness changes; every motion
    is a transform. Each mascot starts at its own point (m-d0..m-d5) so a list of them never moves in step. With
    prefers-reduced-motion it all holds still. */
 .mascot { display: block; flex: none; overflow: visible; --md: 0s; }
@@ -38,10 +38,15 @@
 /* the Bots tab (chats.js), where the faces live: a little more breathing and more frequent looks around, so a glance
    sees them alive (Henry, 2026-10-13: "their faces should be moving once im in the bots section"). A hidden tab draws
    nothing, so this costs nothing elsewhere. :where keeps these at the rules' own weight, so the hop below still wins */
-:where(.view-chats) .mascot .m-body { animation-name: mascot-breathe-more; }
-:where(.view-chats) .mascot.m-working .m-body { animation-name: mascot-bob-more; }
-:where(.view-chats) .mascot .m-eyes { animation-duration: 7s; }
-:where(.view-chats) .mascot.m-working .m-eyes { animation-duration: 3.6s; }
+:where(.view-chats, .ch-panel, .fvb-bot) .mascot .m-body { animation-name: mascot-breathe-more; }
+:where(.view-chats, .ch-panel, .fvb-bot) .mascot.m-working .m-body { animation-name: mascot-bob-more; }
+:where(.view-chats, .ch-panel, .fvb-bot) .mascot .m-eyes { animation-duration: 7s; }
+:where(.view-chats, .ch-panel, .fvb-bot) .mascot.m-working .m-eyes { animation-duration: 3.6s; }
+/* a bot on the Map (map-bots.js .fvb-bot) blinks now and then, as the map's things are alive (Henry, 2026-10-14: "hes
+   not moving or blinking or doing anything"); only there, and only while its eyes look straight ahead (the inner eye
+   group then has no offset of its own to lose) */
+.fvb-bot .mascot:is(.m-idle, .m-working, .m-new) .m-eyes > g { transform-box: fill-box; transform-origin: 50% 50%; animation: mascot-blink 5.8s ease-in-out var(--md) infinite; }
+@keyframes mascot-blink { 0%, 91%, 97%, 100% { transform: scaleY(1); } 94% { transform: scaleY(0.12); } }
 @keyframes mascot-breathe-more { 0%, 100% { transform: translateY(0) scale(1, 1); } 50% { transform: translateY(-0.4px) scale(0.976, 1.05); } }
 @keyframes mascot-bob-more { 0%, 100% { transform: translateY(0) scale(1, 1); } 50% { transform: translateY(-2.4px) scale(0.99, 1.02); } }
 /* the acknowledge hop: a squash, up, a small landing squash, still */
@@ -55,5 +60,5 @@
 }
 /* (important: the state rules above, .m-working's say, weigh more than a plain .mascot .m-body) */
 @media (prefers-reduced-motion: reduce) {
-  .mascot .m-body, .mascot .m-eyes, .mascot .m-dot { animation: none !important; }
+  .mascot .m-body, .mascot .m-eyes, .mascot .m-eyes > g, .mascot .m-dot { animation: none !important; }
 }
