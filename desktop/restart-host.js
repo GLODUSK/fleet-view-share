@@ -51,7 +51,7 @@ if (!hf || typeof hf.pipe !== 'string' || typeof hf.token !== 'string') {
       if (!v.ok) return finish(`Refused: ${v.message || 'no reason given'}`, 1);
       if (v.message) return finish(`The session host (pid ${hf.pid}) says: ${v.message}.`, 0);
       const w = Array.isArray(v.waiting) ? v.waiting : [];
-      finish(`The session host (pid ${hf.pid}) restarts ${now ? 'now' : w.length ? `once ${w.length} busy session(s) finish (${w.join(', ')}; at most 10 minutes)` : 'now (no other session is busy)'}; its sessions resume in the new host.`, 0);
+      finish(`The session host (pid ${hf.pid}) restarts ${now ? 'now' : w.length ? `once ${w.length} busy session(s) finish (${w.join(', ')}; one working is never cut off, one waiting on an answer gets 10 minutes)` : 'now (no other session is busy)'}; its sessions resume in the new host.`, 0);
     }
   });
 }

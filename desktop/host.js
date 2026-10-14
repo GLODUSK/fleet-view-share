@@ -88,10 +88,12 @@
 //
 // Restart: restart({ now, by }) (desktop/restart-host.js asks for it) runs `host.js --selfcheck` (this file, what
 // it requires and a pty module load in a fresh process) and refuses if that fails; else it replies at once and
-// waits (at most 10 minutes; not with now) until no session but the asking one (by: its CLAUDE_LAUNCH_KEY) is
-// busy, checks again, saves the restore list (reason 'restart', the asker marked restartBy), ends every session
-// and starts the next host (FV_HOST_SUCCESSOR=<pid>: it waits up to 15 s for the pipe instead of exiting), which
-// resumes them. "Quit everything" while it waits cancels it.
+// waits (not with now) until no session but the asking one (by: its CLAUDE_LAUNCH_KEY) is busy: one working is
+// never cut off, however long it takes; one waiting on an answer (a permission, a question) gets 10 minutes, then
+// is ended, resumed and told to carry on, so its question comes back. It checks again, saves the restore list
+// (reason 'restart', the asker marked restartBy), ends every session and starts the next host
+// (FV_HOST_SUCCESSOR=<pid>: it waits up to 15 s for the pipe instead of exiting), which resumes them. "Quit
+// everything" while it waits cancels it.
 //
 // Handoffs (../handoff.js): every claude started here gets its own CLAUDE_LAUNCH_KEY. A session that checkpoints
 // itself (its Stop hook, at ~200k context tokens) writes ~/.claude-handoffs/.restart/<that key>.json and is
@@ -1277,6 +1279,8 @@ function createPtys(opts = {}) {
 
   // for the restart: the running sessions that are mid-turn, but the one with this CLAUDE_LAUNCH_KEY (the asker)
   const busyBut = (launchKey) => [...terms.values()].filter((t) => t.alive && isBusy(t) && !(launchKey && t.launchKey === launchKey)).map((t) => t.id);
+  // of those, the ones working (or running a shell command), not waiting on an answer
+  const workingBut = (launchKey) => [...terms.values()].filter((t) => t.alive && (t.status === 'busy' || t.status === 'shell') && !(launchKey && t.launchKey === launchKey)).map((t) => t.id);
   // marks the asker, so the next host tells it the restart is done; its id, or null when none is hosted here
   function markRestartBy(launchKey) {
     const t = launchKey ? [...terms.values()].find((x) => x.alive && x.launchKey === launchKey) : null;
@@ -1293,7 +1297,7 @@ function createPtys(opts = {}) {
     return t.chunks.join('');
   }
 
-  return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, markRestartBy, snapshot, aliveCount, dirs,
+  return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, workingBut, markRestartBy, snapshot, aliveCount, dirs,
     hold, heldOf, take, parked };
 }
 
@@ -1309,6 +1313,8 @@ function runHost() {
   const startedAt = Date.now();
   const token = crypto.randomBytes(32).toString('hex');
   const IDLE_MS = TEST && Number(process.env.FV_HOST_IDLE_MS) > 0 ? Number(process.env.FV_HOST_IDLE_MS) : 10 * 60 * 1000;
+  // a restart waits this long for a session waiting on an answer (a permission, a question); one working, for ever
+  const ASK_WAIT_MS = TEST && Number(process.env.FV_HOST_ASK_WAIT_MS) > 0 ? Number(process.env.FV_HOST_ASK_WAIT_MS) : 10 * 60 * 1000;
   const TEST_CMD = TEST && process.env.FV_TERM_CMD ? process.env.FV_TERM_CMD : null;
   const EXTRA_DIRS = TEST && process.env.FV_HOST_SESSIONS_DIR ? [process.env.FV_HOST_SESSIONS_DIR] : [];
   const testMs = (name) => (TEST && process.env[name] !== undefined && Number(process.env[name]) >= 0 ? Number(process.env[name]) : undefined);
@@ -1515,8 +1521,9 @@ function runHost() {
   }
 
   // restart({ now, by }): replies once the self-check passed, waits until no session but the asker (by, its
-  // CLAUDE_LAUNCH_KEY) is mid-turn (now: not at all; at most 10 minutes), checks again, then saves the restore
-  // list, ends every session and hands over to a new host, which resumes them.
+  // CLAUDE_LAUNCH_KEY) is mid-turn (now: not at all; one working as long as it takes, one waiting on an answer
+  // ASK_WAIT_MS at most), checks again, then saves the restore list, ends every session and hands over to a new
+  // host, which resumes them.
   let restarting = null; // { by, now, timer, going }
   function restart(arg, reply) {
     if (quitting) return reply({ ok: false, message: 'the host is quitting' });
@@ -1528,17 +1535,23 @@ function runHost() {
       if (err) { restarting = null; log(`restart: refused, the self-check failed (${err})`); return reply({ ok: false, message: `The new host.js failed its self-check: ${err}` }); }
       const waiting = r.now ? [] : ptys.busyBut(r.by);
       reply({ ok: true, waiting });
-      const since = Date.now();
-      let loggedAt = since;
+      let loggedAt = Date.now();
+      const askingSince = new Map(); // id -> when it was first seen waiting on an answer, while still waiting
       const tick = () => {
         if (restarting !== r) return;
-        const busy = r.now ? [] : ptys.busyBut(r.by);
-        if (busy.length && Date.now() - since < 10 * 60 * 1000) {
-          if (Date.now() - loggedAt >= 60000) { loggedAt = Date.now(); log(`restart: still waiting on ${busy.join(', ')}`); }
+        const busy = r.now ? [] : ptys.busyBut(r.by), working = r.now ? [] : ptys.workingBut(r.by);
+        const asking = busy.filter((id) => !working.includes(id)), now = Date.now();
+        for (const id of [...askingSince.keys()]) if (!asking.includes(id)) askingSince.delete(id);
+        for (const id of asking) if (!askingSince.has(id)) askingSince.set(id, now);
+        // a working one is never cut off; one waiting on an answer is given ASK_WAIT_MS (its question comes back:
+        // it is resumed and told to carry on)
+        const asked = asking.filter((id) => now - askingSince.get(id) >= ASK_WAIT_MS);
+        if (working.length || asked.length < asking.length) {
+          if (now - loggedAt >= 10 * 60000) { loggedAt = now; log(`restart: still waiting on ${busy.join(', ')}`); }
           r.timer = setTimeout(tick, 2000);
           return;
         }
-        if (busy.length) log(`restart: waited 10 minutes; restarting anyway (still busy: ${busy.join(', ')})`);
+        if (asked.length) log(`restart: ${asked.join(', ')} waited ${ASK_WAIT_MS >= 60000 ? `${Math.round(ASK_WAIT_MS / 60000)} min` : `${Math.round(ASK_WAIT_MS / 1000)} s`} for an answer; restarting (they are told to carry on)`);
         // host.js may have changed again while it waited
         selfCheck((err2) => {
           if (restarting !== r) return;

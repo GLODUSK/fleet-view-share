@@ -7,7 +7,8 @@
 // idle ones with background tasks still running); other idle ones are parked (never started, kept in sessions.json and
 // across a host restart) until opened, then resumed in their saved folder, account and size; open of one still queued
 // starts it once, not twice; kill of a parked one forgets it; a quit mid-restore keeps the ones not started; restoreIdle
-// starts them all. Also runningTasks() on its own. Every process it started is killed at the end. Exit code 0 when
+// starts them all; a restart waits for a working one however long it takes, and for one waiting on an answer only
+// FV_HOST_ASK_WAIT_MS. Also runningTasks() on its own. Every process it started is killed at the end. Exit code 0 when
 // every case passes. FV_HOST_TEST_KEEP=1 keeps the temp folder (host.log) after a pass.
 'use strict';
 const fs = require('fs');
@@ -27,7 +28,7 @@ const PIPE = P.isWin ? `\\\\.\\pipe\\${TEST_TAG}` : path.join(os.tmpdir(), `${TE
 const DATA = path.join(ROOT, 'data'), PIDS = path.join(ROOT, 'sessions'), PROJECTS = path.join(ROOT, 'projects');
 const SETTINGS = path.join(ROOT, 'fleet-view.json'), FAKE = path.join(ROOT, 'fake-claude.js');
 for (const d of [DATA, PIDS, PROJECTS, path.join(ROOT, 'handoffs')]) fs.mkdirSync(d, { recursive: true });
-const GAP = 1000;
+const GAP = 1000, ASK_WAIT = 3000;
 
 function nodePath() {
   if (fs.existsSync(path.join(__dirname, 'node_modules', 'node-pty'))) return path.join(__dirname, 'node_modules');
@@ -49,7 +50,7 @@ process.stdin.resume();
 const NODE_PATH = nodePath();
 const ENV = {
   ...process.env, FV_HOST_PIPE: PIPE, FV_HOST_DIR: DATA, FV_HOST_SESSIONS_DIR: PIDS, FV_HOST_SETTINGS: SETTINGS,
-  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_RESTORE_GAP_MS: String(GAP), FV_HOST_NUDGE_GIVEUP_MS: '30000',
+  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_RESTORE_GAP_MS: String(GAP), FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_ASK_WAIT_MS: String(ASK_WAIT),
   FV_TERM_CMD: `"${process.execPath}" "${FAKE}"`, FV_HANDOFF_DIR: path.join(ROOT, 'handoffs'),
   ...(NODE_PATH ? { NODE_PATH } : {}),
 };
@@ -86,6 +87,14 @@ const notice = (task, status) => ({ type: 'user', timestamp: iso(), message: { r
 const started = new Set();
 const hostJson = () => { try { return JSON.parse(fs.readFileSync(path.join(DATA, 'host.json'), 'utf8')); } catch { return null; } };
 const hostLog = () => { try { return fs.readFileSync(path.join(DATA, 'host.log'), 'utf8'); } catch { return ''; } };
+// c's pid file, as its claude writes one: the host reads a resumed one's status by the conversation's id
+let pidN = 0;
+function pidFile(c, status, waitingFor) {
+  const now = Date.now();
+  if (!c.pidFile) { c.pidFile = path.join(PIDS, `${9000 + ++pidN}.json`); c.pidAt = now; }
+  fs.writeFileSync(c.pidFile, JSON.stringify({ pid: process.pid, sessionId: c.id, cwd: c.cwd, startedAt: c.pidAt, kind: 'interactive',
+    status, ...(waitingFor ? { waitingFor } : {}), statusUpdatedAt: now, updatedAt: now }));
+}
 function startHost() {
   try { fs.unlinkSync(path.join(DATA, 'host.json')); } catch {}
   const c = spawn(process.execPath, [path.join(__dirname, 'host.js')], { env: ENV, stdio: 'ignore', windowsHide: true });
@@ -296,7 +305,43 @@ async function main() {
   check('4. restoreIdle: every idle one is resumed, staggered, none parked', iUp && iAt[1] - iAt[0] >= GAP * 0.6 && iAt[2] - iAt[1] >= GAP * 0.6
     && (await cl.req('parked')).length === 0 && hostLog().includes('restore: 3 of 3 resumed'), { iAt, parked: await cl.req('parked') });
   await cl.req('killAll').catch(() => {});
+  const hp4 = cl.pid;
+  await cl.req('quitAll', {}).catch(() => null);
   cl.close();
+  await waitFor(() => !pidAlive(hp4), 15000);
+
+  // ===== 5. a restart waits for a working one however long it takes; one waiting on an answer gets ASK_WAIT =====
+  settings({});
+  const W = conv('w', { busy: true }), A = conv('a', { busy: true });
+  writeList([W, A]);
+  startHost();
+  if (!await waitFor(() => hostJson(), 15000)) { check('5. the host starts', false, hostLog()); return; }
+  cl = await waitFor(() => connect().catch(() => null), 10000);
+  await waitFor(() => starts(W).length && starts(A).length, 15000);
+  pidFile(W, 'busy');
+  pidFile(A, 'waiting', 'approve Bash(npm test)');
+  const st5 = await waitFor(async () => {
+    const l = await cl.req('list'), w = l.find((x) => x.id === W.id), a = l.find((x) => x.id === A.id);
+    return w && a && w.status === 'busy' && a.status === 'waiting' ? l : null;
+  }, 10000);
+  const hp5 = hostJson().pid;
+  const r5 = await cl.req('restart', {});
+  check('5. restart asked: it waits on the working one and the one waiting on an answer', st5 && r5 && r5.ok && [W.id, A.id].every((id) => (r5.waiting || []).includes(id)), { r5, st5 });
+  await sleep(ASK_WAIT * 2 + 2000);
+  check('5. the working one is not cut off: past the answer wait nothing is saved or ended', pidAlive(hp5) && !hostLog().includes(`[host ${hp5}] restart: saved`) && starts(W).length === 1, hostLog().split('\n').slice(-5));
+  const idleAt = Date.now();
+  pidFile(W, 'idle');
+  const saved5 = await waitFor(() => hostLog().split('\n').find((l) => l.includes(`[host ${hp5}] restart: saved`)), 15000);
+  check('5. once it is idle the restart goes on; the one waiting on an answer past its wait is logged', saved5 && Date.parse(saved5.slice(0, 24)) >= idleAt - 500
+    && hostLog().includes(`restart: ${A.id} waited ${ASK_WAIT / 1000} s for an answer`), hostLog().split('\n').slice(-6));
+  for (const c of [W, A]) try { fs.unlinkSync(c.pidFile); } catch {}
+  cl.close();
+  const succ5 = await waitFor(() => { const h = hostJson(); return h && h.pid !== hp5 ? h : null; }, 30000);
+  if (succ5) {
+    started.add(succ5.pid);
+    const c5 = await waitFor(() => connect().catch(() => null), 10000);
+    if (c5) { await c5.req('quitAll', {}).catch(() => null); c5.close(); }
+  }
 }
 
 main().catch((e) => check('the test ran to its end', false, e && e.stack ? e.stack : String(e))).finally(() => {
