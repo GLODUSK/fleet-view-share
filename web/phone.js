@@ -2,21 +2,16 @@
 // button opens it under the header at the right, like the Sync card; Esc, its × or a click outside closes it. The
 // routes answer on this PC only, so a remote browser never shows the button.
 //
-// A phone reaches this PC one of two ways, picked here before the code is made (the phone's start screen asks the same):
-//   On this Wi-Fi      (mode 'local') the phone on the same network, straight to this PC (relay-lan.js, port 4779);
-//                      no sync and no sign-in, so it is there on every install. The card says the phone must be on
-//                      this Wi-Fi, and that Windows may ask once to let Fleet View (node.exe) on the network: allow it
-//                      on Private networks
-//   Through Blackbox   (mode 'relay') through the sync's Supabase project, from anywhere; offered only while sync is
-//                      set up and signed in (the phone signs in with the same Google account). Sync set up but signed
-//                      out: a line pointing to the Sync card instead
+// A phone reaches this PC through Blackbox (mode 'relay'): the sync's Supabase project, from anywhere, while sync is
+// set up and signed in (the phone signs in with the same Google account). Signed out or not set up: a line pointing to
+// the Sync card instead, and no code. The Wi-Fi way (mode 'local') is no longer offered (Henry, 2026-10-14); a phone
+// paired that way before is still listed, as Wi-Fi.
 //
 // It shows:
 //   GET /relay/status    read once when the card opens, after every action, and every 3 seconds while a pairing code
 //                        is on screen (never while the card is closed): the sync sign-in, the Wi-Fi addresses, and the
 //                        paired phones (name, Wi-Fi or Blackbox, the phone and app, last seen, connected or not)
-// Laid out as the Sync card (sync.css): the two ways as selectable cards with an icon tile and a radio mark, what the
-// picked way needs in a soft panel, the name field and Pair as one row, the QR in a framed panel with the countdown as
+// Laid out as the Sync card (sync.css): what pairing needs in a soft panel, the name field and Pair as one row, the QR in a framed panel with the countdown as
 // a pill under it, "Paired" as a success state, and the phones as rows (a phone icon, the name with a dot for its
 // connection, the details on a second line, Remove at the right).
 //
@@ -39,10 +34,7 @@ const ago = (t) => {
 };
 const left = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const CHANNEL = { joined: 'connected', joining: 'connecting…', closed: 'not connected', refused: 'refused' };
-const MODE = {
-  local: { label: 'On this Wi-Fi', short: 'Wi-Fi', icon: 'wifi', sub: 'Same network as this PC. No sign-in, nothing goes through the internet.' },
-  relay: { label: 'Through Blackbox', short: 'Blackbox', icon: 'cloud', sub: 'Works away from home, through sync. The phone signs in with the same Google account.' },
-};
+const MODE = { local: { short: 'Wi-Fi' }, relay: { short: 'Blackbox' } }; // how a listed phone was paired
 
 export function mountPhone({ post, isRemote = () => false, fixture = false, openSync = null } = {}) {
   let card = null, timer = null, tick = null, gen = 0;
@@ -50,7 +42,6 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
   // the code on screen: { id, name, svg, exp, mode }; step says what the pairing section shows
   let code = null, step = 'form', pairedName = '';
   let lastName = ''; // the name field's last value, for "Make a new code"
-  let mode = null; // the way picked in the card (null: not yet; the default follows the status)
   let confirmId = null, busy = false;
   let note = null; // { text, bad }
 
@@ -89,36 +80,18 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
 
   // ---------- what the card says ----------
   const canRelay = () => !!(status && status.enabled && status.signedIn);
-  // the way a new code is made: what was picked, else Blackbox while sync allows it (it works away from home), else Wi-Fi
-  const modeNow = () => (mode === 'relay' && canRelay() ? 'relay' : mode === 'local' ? 'local' : canRelay() ? 'relay' : 'local');
-  const lanAddrs = () => (status && status.lan && Array.isArray(status.lan.addresses) ? status.lan.addresses : []);
-  function modesHtml() {
-    const m = modeNow(), ways = canRelay() ? ['local', 'relay'] : ['local'];
-    const btn = (k) => `<button type="button" data-c="mode" data-m="${k}" class="ph-mode${k === m ? ' on' : ''}" role="radio" aria-checked="${k === m}">`
-      + `<span class="ph-mic">${icon(MODE[k].icon, 17)}</span><span class="ph-mt"><b>${MODE[k].label}</b><span class="sy-dim">${esc(MODE[k].sub)}</span></span>`
-      + '<span class="ph-radio" aria-hidden="true"></span></button>';
-    return `<div class="ph-modes" role="radiogroup" aria-label="How the phone reaches this PC">${ways.map(btn).join('')}</div>`;
-  }
-  // what the picked way needs, in a line or two
+  // what pairing needs, in a line or two: sync signed in on this PC
   function needsHtml() {
     if (!answered) return '<div class="sy-line sy-dim">Reading…</div>';
     if (!status) return '<div class="sy-line sy-bad">Fleet View did not answer.</div>';
-    const m = modeNow();
-    if (m === 'relay') {
+    if (canRelay()) {
       const email = status.email || 'your Google account';
       return `<div class="sy-acct"><span class="sy-av" aria-hidden="true">${esc(email.trim()[0].toUpperCase())}</span>`
         + `<span class="sy-acct-t"><span class="sy-email" title="${esc(status.email || '')}"><span class="sy-vh">Signed in to sync as </span>${esc(email)}</span>`
         + `<span class="uw-chip ${status.connected ? 'here' : ''}">${status.connected ? 'relay connected' : 'relay not connected'}</span></span></div>`;
     }
-    const lines = [`<div class="sy-line ph-say-wifi">${icon('wifi', 13)}<span>The phone has to be on the same Wi-Fi as this PC.</span></div>`,
-      '<div class="sy-line sy-dim">Windows may ask once whether Fleet View (node.exe) may use the network: allow it on <b>Private networks</b>.</div>'];
-    if (!lanAddrs().length) lines.push('<div class="sy-line sy-bad">This PC is not on a home network right now (Wi-Fi or a cable). Connect it, then make the code.</div>');
-    // sync set up but signed out: the other way is one sign-in away
-    if (status.enabled && !status.signedIn) {
-      lines.push('<div class="sy-line sy-dim">To reach this PC away from home too, sign in to sync: the phone can then pair through Blackbox.</div>'
-        + (openSync ? '<div class="sy-btns"><button type="button" data-c="sync">Open Sync</button></div>' : ''));
-    }
-    return lines.join('');
+    return `<div class="sy-line sy-bad">${status.enabled ? 'Sync is not signed in on this PC' : 'Sync is not set up on this PC'}: the phone reaches it through Blackbox sync.</div>`
+      + (openSync ? '<div class="sy-btns"><button type="button" data-c="sync">Open Sync</button></div>' : '');
   }
   function pairHtml() {
     if (step === 'paired') {
@@ -127,23 +100,21 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
         + '<div class="sy-btns"><button type="button" data-c="again">Pair another</button></div></div>';
     }
     if (step === 'code' && code) {
-      const how = code.mode === 'local' ? 'Scan with the Fleet View app on a phone on this Wi-Fi.' : 'Scan with the Fleet View app.';
       return `<div class="ph-qrbox"><div class="ph-qr">${code.svg}</div>`
         + `<span class="ph-left">${icon('clock', 12)}Runs out in <b class="ph-clock">${left(code.exp - Date.now())}</b></span>`
         + '<div class="sy-line ph-prog"></div></div>'
-        + `<div class="sy-line ph-say">${how} The code works once, for 10 minutes.</div>`
-        + (code.mode === 'local' ? '<div class="sy-line sy-dim">If Windows asks whether Fleet View (node.exe) may use the network, allow it on Private networks, or the phone can\'t reach this PC.</div>' : '');
+        + '<div class="sy-line ph-say">Scan with the Fleet View app. The code works once, for 10 minutes.</div>';
     }
     if (step === 'expired') {
       return `<div class="ph-done ph-gone"><span class="ph-done-ic">${icon('clock', 20)}</span><span class="ph-done-t">The code ran out</span>`
         + '<span class="ph-done-n">Codes work for 10 minutes. Make a new one and scan it.</span>'
         + `<div class="sy-btns"><button type="button" data-c="new" class="sy-go">${icon('phone', 12)}Make a new code</button></div></div>`;
     }
-    const blocked = !status || (modeNow() === 'local' && !lanAddrs().length);
+    const blocked = !canRelay();
     return '<form class="sy-form ph-form" autocomplete="off">'
       + '<input type="text" class="ph-name" maxlength="60" placeholder="iPhone" autocomplete="off" spellcheck="false" aria-label="The phone\'s name">'
       + `<button type="submit" class="sy-go"${blocked ? ' disabled' : ''}>${icon('phone', 12)}Pair</button></form>`
-      + '<div class="sy-line sy-dim">The name is only for this list. A QR code shows next, for the Fleet View app to scan; pick the same way on the phone.</div>';
+      + '<div class="sy-line sy-dim">The name is only for this list. A QR code shows next, for the Fleet View app to scan.</div>';
   }
   function listHtml() {
     if (!status) return '';
@@ -190,13 +161,13 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
     if (!card) return;
     const pair = card.querySelector('.ph-pair');
     // the way, what it needs, and the form (or the code): drawn again only when one of them changes, so typing stays
-    const key = JSON.stringify([step, modeNow(), canRelay(), answered, !!status, lanAddrs().length, status && status.enabled && !status.signedIn, status && status.connected, status && status.email, busy && step !== 'code']);
+    const key = JSON.stringify([step, canRelay(), answered, !!status, status && status.enabled, status && status.connected, status && status.email, busy && step !== 'code']);
     if (pair._key !== key) {
       const name = pair.querySelector('.ph-name');
       const typed = name ? name.value : lastName;
       pair._key = key;
       pair.innerHTML = `<div class="sy-h">${icon('phone', 13)}<b>Pair an iPhone</b></div>`
-        + (step === 'form' ? modesHtml() + `<div class="ph-needs">${needsHtml()}</div>` : '')
+        + (step === 'form' ? `<div class="ph-needs">${needsHtml()}</div>` : '')
         + pairHtml();
       const n2 = pair.querySelector('.ph-name');
       if (n2) n2.value = typed;
@@ -225,11 +196,11 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
   async function pair(name) {
     if (busy || !card) return;
     note = null;
-    const my = gen, m = modeNow();
-    const r = await act('/relay/pair', { ...(name ? { name } : {}), mode: m });
+    const my = gen;
+    const r = await act('/relay/pair', { ...(name ? { name } : {}), mode: 'relay' });
     if (my !== gen || !card) return;
     if (r && r.ok && r.svg && r.exp) {
-      code = { id: r.id, name: name || 'iPhone', svg: r.svg, exp: r.exp, mode: r.mode || m };
+      code = { id: r.id, name: name || 'iPhone', svg: r.svg, exp: r.exp };
       step = 'code';
       clearInterval(tick);
       tick = setInterval(drawLive, 1000);
@@ -246,8 +217,7 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
     const c = b.dataset.c;
     if (c === 'sync') { close(); openSync?.(); return; }
     if (c === 'new') { await pair(lastName); return; }
-    if (c === 'mode') { mode = b.dataset.m === 'relay' ? 'relay' : 'local'; note = null; }
-    else if (c === 'again') { step = 'form'; note = null; }
+    if (c === 'again') { step = 'form'; note = null; }
     else if (c === 'remove') { confirmId = b.dataset.id; note = null; }
     else if (c === 'keep') confirmId = null;
     else if (c === 'do-remove') {
@@ -273,7 +243,7 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
   function open() {
     if (card) return;
     gen++;
-    answered = false; status = null; code = null; step = 'form'; pairedName = ''; confirmId = null; busy = false; note = null; mode = null;
+    answered = false; status = null; code = null; step = 'form'; pairedName = ''; confirmId = null; busy = false; note = null;
     card = document.createElement('div');
     card.className = 'uw-pop sy-pop ph-pop';
     card.setAttribute('role', 'dialog');
@@ -308,8 +278,8 @@ export function mountPhone({ post, isRemote = () => false, fixture = false, open
   const outside = (ev) => { if (card && !card.contains(ev.target) && !ev.target.closest('.count.phone')) close(); };
   const escKey = (ev) => { if (ev.key === 'Escape' && card) { ev.stopPropagation(); ev.preventDefault(); close(); } };
 
-  // the header button shows only on this PC (the routes answer nowhere else), with or without sync: a phone can always
-  // pair on this Wi-Fi. Asked once
+  // the header button shows only on this PC (the routes answer nowhere else), with or without sync (the card then
+  // points to the Sync card). Asked once
   if (!fixture && !isRemote()) get('/relay/status').then((st) => { if (st && Array.isArray(st.devices)) document.body.classList.add('phone-on'); });
 
   return { open, close, isOpen: () => !!card, toggle: () => (card ? close() : open()) };
