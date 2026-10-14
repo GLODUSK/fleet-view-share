@@ -363,6 +363,9 @@ export function parseMode(lines) {
 // check: a multiple-choice option's box (true ticked); free: the option that takes typed text; submit: { on } for
 // a multiple-choice question's Submit row, else null; unnumbered: drawn without numbers (numbered 1..k here), so a
 // digit picks nothing: ↑/↓ to the option, then Enter
+// a menu that is Claude Code's question before a model or effort switch ("Yes, switch to High" / "No, go back") -> its
+// Yes option, else null
+export const switchYes = (m) => (m && m.options.some((o) => /^no, go back\b/i.test(o.label)) && m.options.find((o) => /^yes, switch to\b/i.test(o.label))) || null;
 export function parseMenu(lines) {
   const raw = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
   const L = raw.map(unbox);
@@ -1409,6 +1412,16 @@ export function mountCompose(slot, s) {
   // the host says Claude waits on a menu (its pid file's waitingFor: a question, "approve …"), whatever the screen
   // here shows; not a panel ("dialog open": closePanel and closeHostPanel close those)
   const hostAsks = (id) => { const h = hosts.get(id); return !!h?.alive && h.status === 'waiting' && !!h.waitingFor && h.waitingFor !== 'dialog open'; };
+  // Claude Code's "Switch model?" / "Change effort level?" before a switch mid-conversation: Henry wants the switch,
+  // so its Yes is picked without asking (Henry, 2026-10-14). -> true when it was up and is gone now
+  async function sayYes(id) {
+    const m = menuNow(id), yes = switchYes(m), t = termApi();
+    if (!yes || !t) return false;
+    try { t.write(id, String(yes.n)); } catch { return false; }
+    if (id === st.id) answered(m.sig, yes.n);
+    for (const end = Date.now() + 2000; Date.now() < end; await sleep(80)) if (switchYes(menuNow(id)) === null) return true;
+    return false;
+  }
   // a command's panel on the live screen now, and closing it: Esc until it is gone (one with a search box takes
   // two: the first clears the search). -> true when none is up
   const panelNow = (id) => (hosts.get(id)?.alive ? parsePanel(screenMarked(id, PANEL_LINES)) : null);
@@ -1717,9 +1730,13 @@ export function mountCompose(slot, s) {
       // Also when the host says one waits (its pid file's waitingFor) though the screen here shows no menu: a backstop
       // for a screen read wrong (term.js followSizes), so the chat box never answers a question it didn't show
       const blocked = () => !!menuNow(id) || hostAsks(id);
+      // a model or effort switch's question gets its Yes, then the host's list a moment to say it no longer waits
+      const yesFirst = async () => { if (await sayYes(id)) for (const end = Date.now() + 2500; Date.now() < end && blocked(); await sleep(200)) await refreshHosts(); };
       await refreshHosts();
       id = keyNow(id);
-      if (blocked()) { err('Claude is asking something: answer it first, then send'); return; }
+      await yesFirst();
+      // any other question: its card is up above the box, and the draft stays for after it
+      if (blocked()) return;
       // a command's panel is up: the text would land in it, so it closes first. Read from the screen; while the
       // screen can't be read yet, from the host's list (then only a panel a "/" command opened). Never both: two
       // quick Escs at Claude Code's prompt open its rewind menu.
@@ -1732,7 +1749,8 @@ export function mountCompose(slot, s) {
       // a dynamic bot: its model and effort sized for this message, switched first when they need to be
       const pick = shell || /^\/[^\s/]/.test(msg) ? null : await dynamicPick(id, text);
       if (st.id === id && st.step) { st.step = ''; drawNotes(); }
-      if (pick && blocked()) { err('Claude is asking something: answer it first, then send'); return; }
+      if (pick) await yesFirst();
+      if (pick && blocked()) return;
       id = keyNow(id);
       let before = screenReady(id) ? boxNow(id) : null; // (before bash mode's "!")
       // a message sent from here left in Claude Code's prompt (a Stop or Rewind's Esc put it back there): cleared
@@ -2778,6 +2796,12 @@ export function mountCompose(slot, s) {
     lines = lines.slice(-40);
     const spin = parseSpinner(lines);
     let menu = alive && lines.length ? parseMenu(screenText(st.id, 40, { rows: true })) : null;
+    // a model or effort switch's question (the picker's /effort, a Launch's): answered Yes as it comes up, no card
+    // (a Yes that didn't take shows the card after 3 s, for a click)
+    if (switchYes(menu)) {
+      if (st.yes?.sig !== menu.sig) { st.yes = { sig: menu.sig, at: Date.now() }; sayYes(st.id); }
+      if (Date.now() - st.yes.at < 3000) menu = null;
+    }
     // the one a "/command" sent from here opened is that command's, numbered list or not (/model); else a numbered
     // menu is a question Claude asks (a permission prompt), which the menu card answers
     const owned = !!panel && (st.panelOwned || Date.now() - st.cmdAt < PANEL_OWN_MS);

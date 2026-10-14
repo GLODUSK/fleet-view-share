@@ -1788,7 +1788,7 @@ async function unsendMessage(key, b, ctx) {
 // and one switch at a time (settingsTurn), so a second can't take the first's value for the one to put back.
 // An overseer's (a bot's) model is Henry's to change (as his phone changes a bot's: bots.js), so for one
 // of them only the phone relay may (viaOf).
-// Mid-conversation, /model may first ask "Switch model?" (the history is re-read on the new model): the caller asked
+// Mid-conversation, /model may first ask "Switch model?" and /effort "Change effort level?" (the history is re-read): the caller asked
 // for the switch, so its Yes is picked (answerMenu, by its sig). Any other menu that comes up after the typing is
 // closed with Esc (409), so nothing is left up. Once anything was typed the default goes back on every way out, after
 // Claude Code's save has landed (it may write after a menu closes), and is looked at once more a moment later.
@@ -1796,7 +1796,7 @@ const SAVE_MS = 5000; // how long Claude Code may take to save a switch
 const LATE_SAVE_MS = 3000; // a command whose save was not seen: how long its late save is waited for
 const SETTLE_SAVE_MS = 1500; // after the default is put back: when it is looked at again and the screen read for the effort
 const YES_SWITCH = /^Yes, switch\b/;
-const isSwitchConfirm = (m) => !!m && /^Switch model\?/.test(m.title) && m.options.some((o) => YES_SWITCH.test(o.label));
+const isSwitchConfirm = (m) => !!m && /^(Switch model|Change effort level)\?/.test(m.title) && m.options.some((o) => YES_SWITCH.test(o.label));
 const SAVED_KEYS = ['model', 'modelSettings', 'effortLevel'];
 // the home the session host starts claude under (host.js acctDir), and the account's folder in it (accounts.js)
 const settingsFileOf = (account) => path.join(ACCOUNTS.configDir(account, process.env.USERPROFILE || os.homedir()), 'settings.json');
@@ -1883,7 +1883,7 @@ async function switchModel(key, b, ctx, via = null) {
           for (let end = Date.now() + SAVE_MS; Date.now() < end;) {
             await sleep(POLL_MS / 2);
             const q = await menuNow(host, p);
-            if (q && cmd.startsWith('/model ') && isSwitchConfirm(q)) {
+            if (q && isSwitchConfirm(q)) {
               const yes = q.options.find((o) => YES_SWITCH.test(o.label));
               const [code, a] = await answerMenu(p.id, { option: yes.n, sig: q.sig, allowPermission: true }, ctx, null, via);
               if (code !== 200 || !a.changed) {
