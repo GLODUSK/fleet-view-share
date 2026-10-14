@@ -93,15 +93,6 @@
 // on one side. A couple of far galaxies (LENS_SRC), too faint to see by themselves, slide behind it as it passes and are
 // pulled into arcs that wander round the ring, closing to a full one as one lines up. Brightness is constant: it comes in
 // off the window and leaves off it, and a galaxy's arcs only fade by where it lies. The canvas fallback shows none.
-// The passing planet (event 'planet', PLANET_*): a far-off world takes a few minutes to cross the sky at the far star layer's
-// depth, small and dim, lit from one side like the moon (its terminator soft, a whisper of cool earthshine on the night side).
-// One of a few looks (PLANET_LOOKS) is picked each time: a banded gas giant (bands bent by soft noise and sheared by a slow
-// spin, fine streaks along them, sometimes a storm spot that turns with the planet), with or without a tilted ring, or a
-// rocky world (mottled, lit with a little relief, a thin atmosphere glowing along its lit rim and just beyond the limb). Its
-// limb is smooth (no hard edge). The ring is a ring plane in the planet's own space: banded and ribbed, thin and see-through
-// at its inner and outer edges, with one thin gap; it passes in front of the disc on the near side and behind it on the far
-// side, the planet's shadow falls on it and its shadow falls across the planet. Brightness is constant: it comes in off the
-// window and leaves off it. The canvas fallback shows none.
 // The distant capital ship (event 'ship', SHIP_*): a huge, dim silhouette takes three to five minutes to cross the sky between
 // the far and the middle star layer's depth, level but for a slight tilt, either way, seen mostly as a dark shape against the
 // stars (it hides them). Its hull is a signed distance field in the shader (SHIP_HULL, SHIP_BOXES, SHIP_NOTCH): a long
@@ -191,7 +182,7 @@
 // (not held back by SHOWER_GAP) (stats().meteor: how many streaks show or are about to; meteorIn: ms to the next shooting
 // star, null when none is due; showers: how many showers started). rocket(hubId) sends a deploy's rocket up now under
 // that hub (null: anywhere) (event(name) starts that space event now, ignoring EVENT_GAP; no name lists the registered ones, null stops
-// the one running, skipSeconds: begins that far into an event that has a clock; stats().event: { running, last, nextIn } as name / name / ms, null when none; stats().nebula: the cloud's middle and size in CSS px, its alpha and palette, null when none; stats().asteroids: the field's light direction and the rocks in view, far to near, { x, y, r, blur, a } in CSS px, null when none; stats().lens: the lens's middle and Einstein radius in CSS px, its size share a and its galaxies' light, null when none; planet(look, skipSeconds) starts the passing planet now, look: an index into PLANET_LOOKS (null: a pick); stats().planet: its middle and radius in CSS px, its look's name, whether it has a ring, the light's direction and its alpha, null when none; ship(escort, skipSeconds) starts the capital ship now, escort: true or false to force the escort (null: a pick); stats().ship: its middle and half-length in CSS px, its alpha, its heading as a unit vector and whether an escort follows, null when none; warp(skipSeconds) starts the warp drift now; stats().warp: its stretch share, point and direction, null when none) (stats().rockets: { flying, launched, shown: [{ x, y, head, trail, puff }] }, the head in CSS px). moon(date) sets the clock the moon and the sky tint go by (null: the real one);
+// the one running, skipSeconds: begins that far into an event that has a clock; stats().event: { running, last, nextIn } as name / name / ms, null when none; stats().nebula: the cloud's middle and size in CSS px, its alpha and palette, null when none; stats().asteroids: the field's light direction and the rocks in view, far to near, { x, y, r, blur, a } in CSS px, null when none; stats().lens: the lens's middle and Einstein radius in CSS px, its size share a and its galaxies' light, null when none; ship(escort, skipSeconds) starts the capital ship now, escort: true or false to force the escort (null: a pick); stats().ship: its middle and half-length in CSS px, its alpha, its heading as a unit vector and whether an escort follows, null when none; warp(skipSeconds) starts the warp drift now; stats().warp: its stretch share, point and direction, null when none) (stats().rockets: { flying, launched, shown: [{ x, y, head, trail, puff }] }, the head in CSS px). moon(date) sets the clock the moon and the sky tint go by (null: the real one);
 // stats().moon is its phase (0 new, 0.5 full), lit share, waxing, alpha and place (CSS px), shown when visible.
 // nodes() lists each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label
 // rectangles; merge('s:<id>') launches that conversation's merge now; stats().heads is where each comet's head is (CSS px); stats().sky says what draws the sky ('webgl2'
@@ -548,38 +539,6 @@ const LENS_SRC = [
   { rgb: [1, 0.78, 0.58], sig: 0.09, asp: 0.65, amp: 0.4, miss: [0.12, 0.3], at: [0.15, 0.35], w: 0.4 },
 ];
 const LENS_SRC_A = 0.55, LENS_SWEEP = 2.6;
-// the passing planet (see "Look"): it crosses the window in PLANET_MS ms (a pick) along STAR_DIR turned by up to PLANET_TURN radians
-// (either way round), off the window's middle by up to PLANET_OFF of its height, at PLANET_DEPTH (the far star layer's). PLANET_R:
-// its radius (CSS px, a pick). It starts and ends PLANET_PAD radii off the window and fades in and out over PLANET_FADE ms at the
-// ends of its life (unseen). PLANET_TILT: the ring plane's ratio of short axis over long (a pick; the planet's axis leans with it),
-// PLANET_ROT: how far the ring's long axis turns off level (radians, either way, the planet half the time upside down),
-// PLANET_LIGHT_Z: how much the light comes from the viewer's side (a pick; low: a crescent, high: nearly full), PLANET_LIGHT_ANG:
-// how far the light's direction in the sky turns off level (radians, from the right or the left). PLANET_RING_IN and PLANET_RING_W:
-// the ring's inner radius and width in planet radii (picks), PLANET_GAP: the thin gap's place (0-1 across the ring) and half width
-// (as much of the ring's width). PLANET_SPIN: the planet's turn (radians per second at its equator, slower at the poles),
-// PLANET_NIGHT: the night side's earthshine, PLANET_DIM: the whole thing's brightness (it is meant to be dim), PLANET_SUN: the
-// light's tint. Each look in PLANET_LOOKS: name, kind (0 a banded gas giant, 1 a rocky world), ring (the ring's opacity, 0: none),
-// bands (how many it has, as a rate over latitude), contrast, spot (a storm's size, or a rocky world's polar caps), a (light bands
-// or ground), b (dark), c (accent), atm (the atmosphere's rim colour), atmA (its strength), rr (the ring's colour); all 0-1
-const PLANET_DEPTH = EVENT_DEPTH.far;
-const PLANET_MS = [200e3, 290e3], PLANET_R = [34, 48], PLANET_TURN = 0.4, PLANET_OFF = 0.28, PLANET_PAD = 3, PLANET_FADE = 8000;
-const PLANET_TILT = [0.24, 0.38], PLANET_ROT = 0.4, PLANET_LIGHT_Z = [-0.15, 0.5], PLANET_LIGHT_ANG = 0.8;
-const PLANET_RING_IN = [1.3, 1.45], PLANET_RING_W = [0.62, 0.85], PLANET_GAP = [0.62, 0.03];
-const PLANET_SPIN = 0.012, PLANET_NIGHT = 0.1, PLANET_DIM = 0.72, PLANET_SUN = [1, 0.965, 0.9];
-const PLANET_LOOKS = [
-  { name: 'amber ringed', kind: 0, ring: 0.62, bands: 15, contrast: 0.85, spot: 0, a: [0.93, 0.84, 0.66], b: [0.6, 0.45, 0.32], c: [0.82, 0.62, 0.42],
-    atm: [1, 0.84, 0.58], atmA: 0.4, rr: [0.88, 0.8, 0.66] },
-  { name: 'ice ringed', kind: 0, ring: 0.42, bands: 9, contrast: 0.5, spot: 0, a: [0.74, 0.91, 0.96], b: [0.36, 0.58, 0.72], c: [0.56, 0.8, 0.9],
-    atm: [0.6, 0.86, 1], atmA: 0.5, rr: [0.72, 0.86, 0.93] },
-  { name: 'storm giant', kind: 0, ring: 0, bands: 21, contrast: 1, spot: 1, a: [0.93, 0.8, 0.62], b: [0.56, 0.3, 0.2], c: [0.8, 0.42, 0.28],
-    atm: [1, 0.72, 0.5], atmA: 0.35, rr: [0.8, 0.7, 0.6] },
-  { name: 'dusk ringed', kind: 0, ring: 0.55, bands: 13, contrast: 0.75, spot: 0, a: [0.82, 0.74, 0.95], b: [0.4, 0.3, 0.62], c: [0.66, 0.52, 0.86],
-    atm: [0.82, 0.66, 1], atmA: 0.45, rr: [0.84, 0.76, 0.95] },
-  { name: 'rust world', kind: 1, ring: 0, bands: 0, contrast: 1, spot: 0.5, a: [0.8, 0.54, 0.38], b: [0.32, 0.19, 0.16], c: [0.62, 0.4, 0.3],
-    atm: [0.55, 0.76, 1], atmA: 0.85, rr: [0.8, 0.7, 0.6] },
-  { name: 'frost world', kind: 1, ring: 0, bands: 0, contrast: 1, spot: 0.8, a: [0.86, 0.91, 0.96], b: [0.4, 0.48, 0.6], c: [0.62, 0.7, 0.82],
-    atm: [0.62, 0.84, 1], atmA: 0.9, rr: [0.8, 0.7, 0.6] },
-];
 // the distant capital ship (see "Look"): it crosses the window in SHIP_MS ms (a pick) at SHIP_DEPTH (halfway between the far and the middle
 // star layer's), bow first, level but for up to SHIP_TILT radians off (either way, and it may go either way round), off the window's
 // middle by up to SHIP_OFF of its height. SHIP_R: its half-length (CSS px, a pick; its whole length is twice that). It starts and ends
@@ -1005,7 +964,6 @@ export function mapStats() {
     asteroids: (() => { const e = I.event; if (!e || e.name !== 'asteroids') return null;
       return { light: e.ev.light.map((v) => Math.round(v * 100) / 100), shown: asteroidsNow().map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.r * 10) / 10, blur: Math.round(r.blur), a: Math.round(r.a * 1e3) / 1e3 })) }; })(),
     lens: (() => { const l = lensNow(); return l ? { x: Math.round(l.x), y: Math.round(l.y), r: Math.round(l.r * 10) / 10, a: Math.round(l.a * 1e3) / 1e3, src: l.srcs.map((o) => Math.round(o.amp * 1e3) / 1e3) } : null; })(),
-    planet: (() => { const q = planetNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, look: q.look.name, ring: q.look.ring > 0, light: q.L.map((v) => Math.round(v * 100) / 100), a: Math.round(q.a * 1e3) / 1e3 } : null; })(),
     ship: (() => { const q = shipNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3, dir: [Math.round(q.cs * 1e3) / 1e3, Math.round(q.sn * 1e3) / 1e3], escort: !!q.eo } : null; })(),
     warp: (() => { const q = warpNow(); return q ? { a: Math.round(q.a * 1e3) / 1e3, x: Math.round(q.x), y: Math.round(q.y), dir: [Math.round(q.dx * 1e3) / 1e3, Math.round(q.dy * 1e3) / 1e3] } : null; })(),
     nebula: (() => { const n = nebulaNow(); return n ? { x: Math.round(n.x), y: Math.round(n.y), r: Math.round(n.r), a: Math.round(n.a * 1e3) / 1e3, pal: n.pal } : null; })(),
@@ -1171,8 +1129,6 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     // a space event now by name (ignoring EVENT_GAP); no name: the registered ones; null: stop the one running
     event: (n, skip) => { if (n === undefined) return [...EVENTS.keys()]; if (!I) return false; if (n === null) { eventEnd(); return true; }
       const ok = eventStart(performance.now(), n); if (ok && skip > 0 && I.event.ev && I.event.ev.at != null) I.event.ev.at -= skip * 1000; return ok; },
-    // the passing planet now, with that look (an index into PLANET_LOOKS; null: a pick), skip seconds into its crossing
-    planet: (look, skip) => { if (!I) return false; planetForce = look == null ? null : clamp(Math.floor(look), 0, PLANET_LOOKS.length - 1); const ok = eventStart(performance.now(), 'planet'); planetForce = null; if (ok && skip > 0) I.event.ev.at -= skip * 1000; return ok; },
     // the capital ship now, with the escort (true), without (false) or as a pick (null), skip seconds into its crossing
     ship: (escort, skip) => { if (!I) return false; shipForce = escort == null ? null : !!escort; const ok = eventStart(performance.now(), 'ship'); shipForce = null; if (ok && skip > 0) I.event.ev.at -= skip * 1000; return ok; },
     // the warp drift now, skip seconds into it
@@ -3230,42 +3186,6 @@ function lensNow() {
   });
   return { x, y, r, a: sm, phi: ev.phi, srcs };
 }
-// ---------- the passing planet (see "Look", PLANET_*) ----------
-// start: the look (a pick, or planetForce), the planet's size, its straight path across the window at PLANET_DEPTH (eventCam), from
-// PLANET_PAD radii off one side to as far off the other, as the camera is now, the ring plane's tilt and turn, the ring's inner
-// radius and width, and the light's direction in the planet's own frame (x along the ring's long axis, y across, z towards the
-// viewer): from the side, turned off level, with the ring's lit face kept towards the viewer most of the time
-let planetForce = null; // tests (__map.planet): the look the planet starts with
-registerEvent('planet', {
-  start(t) {
-    const W = I.W || 1, H = I.H || 1, rnd = Math.random, cam = eventCam(PLANET_DEPTH), ms = pickIn(PLANET_MS), R = pickIn(PLANET_R);
-    const li = planetForce != null ? planetForce : Math.floor(rnd() * PLANET_LOOKS.length), ringIn = pickIn(PLANET_RING_IN), rw = pickIn(PLANET_RING_W);
-    const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (rnd() * 2 - 1) * PLANET_TURN, sg = rnd() < 0.5 ? -1 : 1;
-    const dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg, pad = PLANET_PAD + ringIn + rw;
-    const len = 2 * (0.575 * (Math.abs(W * dx) + Math.abs(H * dy)) + pad * R), off = (rnd() * 2 - 1) * PLANET_OFF * H;
-    const k = pickIn(PLANET_TILT), lz = pickIn(PLANET_LIGHT_Z), sl = Math.sqrt(1 - lz * lz);
-    const psi = (rnd() * 2 - 1) * PLANET_LIGHT_ANG + (rnd() < 0.5 ? 0 : Math.PI);
-    let ly = Math.sin(psi) * sl;
-    if (ly * Math.sqrt(1 - k * k) + lz * k < 0.12 && rnd() < 0.85) ly = -ly;
-    return { at: t, ms, cam, R, look: li, x0: cam.mx - dx * len / 2 - dy * off, y0: cam.my - dy * len / 2 + dx * off, vx: dx * len / (ms / 1000), vy: dy * len / (ms / 1000),
-      k, rot: (rnd() * 2 - 1) * PLANET_ROT + (rnd() < 0.5 ? 0 : Math.PI), L: [Math.cos(psi) * sl, ly, lz], ringIn, ringOut: ringIn + rw,
-      seed: rnd() };
-  },
-  step(ev, t) { return t - ev.at < ev.ms; },
-});
-// the planet as it is now, in CSS px of the map (null when none runs): its middle (x, y), radius r (with the camera's zoom at its
-// depth), alpha a (it fades in and out over PLANET_FADE at the ends of its life), look (the PLANET_LOOKS entry), age (s), and the
-// rest of its state (k, rot, L, ringIn, ringOut, seed) as laid
-function planetNow() {
-  const e = I.event;
-  if (!e || e.name !== 'planet') return null;
-  const ev = e.ev, age = Math.max(0, performance.now() - ev.at), s = age / 1000;
-  const fade = Math.min(1, age / PLANET_FADE, (ev.ms - age) / PLANET_FADE);
-  if (fade <= 0) return null;
-  const [x, y] = eventAt(ev.cam, ev.x0 + ev.vx * s, ev.y0 + ev.vy * s);
-  const r = ev.R * Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), PLANET_DEPTH * STAR_ZOOM) / ev.cam.sc;
-  return { x, y, r, a: fade * fade * (3 - 2 * fade), look: PLANET_LOOKS[ev.look], age: s, k: ev.k, rot: ev.rot, L: ev.L, ringIn: ev.ringIn, ringOut: ev.ringOut, seed: ev.seed };
-}
 // ---------- the distant capital ship (see "Look", SHIP_*) ----------
 // start: the ship's size, its straight, nearly level path across the window at SHIP_DEPTH (eventCam), from just clear of one side
 // to just clear of the other (with room for the escort behind it, if it has one), as the camera is now, and the escort's place
@@ -3728,13 +3648,13 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // empty slot), then ASTEROID_N more, its spin's cos and sin, aspect, and in w the edge blur (device px, whole; 0: a sharp
 // rock) plus its seed (0-1) in the fraction, then one with the light's direction (x, y); then the gravity lens's uLn (from SKY_LN): its
 // middle (device px; x, y), Einstein radius (device px) and alpha (w; 0: none), then per far galaxy two: its place from the lens's middle
-// (device px; x, y), size (device px) and light (w; 0: none), and its turn's cos and sin and aspect (the first one's w: the ring's bright side); then the passing planet's uPl (from SKY_PL), nine: its middle (device px; x, y), radius (device px) and alpha (w; 0: none), its ring's cos and sin of turn, tilt (short axis over long) and seed, the light's direction in its own frame (x, y, z) and its age (s), the ring's inner and outer radius (planet radii), opacity (0: none) and kind (w: 0 gas, 1 rock), then its light colour (rgb) with the bands' rate (w), its dark colour with the contrast, its accent with the spot's size, its atmosphere's colour with its strength, and its ring's colour; then the capital ship's uSh (from SKY_SH), three: its middle (device px; x, y), half-length (device px) and alpha (w; 0: none), its heading's cos and sin, flip (-1: it goes left, its top still up) and seed (0-1), then its escort's place from the ship's middle (in half-lengths along its heading, x, and across it, y), size (z, in the ship's; 0: no escort) and seed. then the warp drift's uWp (from SKY_WP), two: its point (device px; x, y) and the squeeze's direction (z, w), then its stretch (x; 0: none), the direction's radial share (y) and the deep sky's share (z). Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
+// (device px; x, y), size (device px) and light (w; 0: none), and its turn's cos and sin and aspect (the first one's w: the ring's bright side); then the capital ship's uSh (from SKY_SH), three: its middle (device px; x, y), half-length (device px) and alpha (w; 0: none), its heading's cos and sin, flip (-1: it goes left, its top still up) and seed (0-1), then its escort's place from the ship's middle (in half-lengths along its heading, x, and across it, y), size (z, in the ship's; 0: no escort) and seed. then the warp drift's uWp (from SKY_WP), two: its point (device px; x, y) and the squeeze's direction (z, w), then its stretch (x; 0: none), the direction's radial share (y) and the deep sky's share (z). Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
 // without a cell), the deep sky, its star dust, the glows' noise and their field, and the moon's picture (moonImage).
 // uTint (STAR_TINT) is set once.
 const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo'];
 const SKY_M = SKY_U.length * 4;
 const SKY_NB = SKY_M + METEOR_N * 8 + SAT_N * 8 + ROCKET_N * 12; // the nebula drift's five vec4s, after the rockets
-const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_PL = SKY_LN + 20, SKY_SH = SKY_PL + 36, SKY_WP = SKY_SH + 12, SKY_END = SKY_WP + 8; // the asteroid field's vec4s, after the nebula; the lens's five, then the planet's nine, then the ship's three, then the warp's two, after them
+const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_SH = SKY_LN + 20, SKY_WP = SKY_SH + 12, SKY_END = SKY_WP + 8; // the asteroid field's vec4s, after the nebula; the lens's five, then the ship's three, then the warp's two, after them
 const STAR_TILES = STAR_LAYERS.filter((L) => !L.cell);
 const SKY_TEX = [...STAR_TILES.map((L, t) => 'uS' + t), 'uDeep', 'uDust', 'uNoise', 'uField', 'uMoon'];
 const TEX_DEEP = SKY_TEX.indexOf('uDeep'), TEX_DUST = TEX_DEEP + 1, TEX_NOISE = TEX_DEEP + 2, TEX_FIELD = TEX_DEEP + 3;
@@ -4029,145 +3949,6 @@ vec4 lensHole(vec2 p) {
   float m = ${glf(LENS_RING_A)} * side * (exp(-e * e) + 0.2 * exp(-e * e / 14.0));
   return over(vec4(vec3(${LENS_RING_RGB.map(glf).join(', ')}) * m, m * 0.5), o);
 }`;
-// the passing planet (see "Look", PLANET_*), premultiplied, at device px p; uPl (see SKY_U's comment). The planet lives in its own
-// frame (middle, ring's long axis along x, radius = 1). Its ring plane holds the axis (0, aa, k) (aa: the rest of a unit vector)
-// as its normal, so a screen point u is at ring radius rho = |(u.x, u.y / k)| and at depth u.y * aa / k in front of or behind the
-// middle: every pixel meets the ring once, in front of the disc on the near side, behind it on the far. ringDens: the ring's
-// density across it (x: 0 inner edge, 1 outer; wx: a pixel's share of it, so the ribs too fine to resolve fade out and nothing
-// crawls): broad bands from a noise, ribs, a faint inner part, thinner outwards and a thin gap. The planet's surface point n gives its
-// latitude (n . axis) and longitude (from the middle meridian, spun with the age, slower at the poles); a gas giant's bands are sines
-// of the latitude bent by noise, with streaks along them and perhaps a storm; a rocky world is a warped 3D noise of the point on the sphere (turned with the
-// spin, so no pole stretches it) lit with its own relief (the gradient of the noise bends the normal). Lit by L with a soft terminator (softer on a gas giant), a cool trace on the
-// night side, the ring's shadow falling across it (the ray from the surface point to the light meets the ring plane in the ring) and
-// a thin atmosphere's glow along the lit rim and a little beyond the limb. The ring is lit on its face towards the light (dim from
-// behind), and the planet's shadow falls on it (the ray from the ring point to the light passes the sphere's middle within 1)
-const PLANET_GLSL = `float nb3(vec3 x) {
-  vec3 i = floor(x), f = x - i;
-  f = f * f * (3.0 - 2.0 * f);
-  uvec3 u = uvec3(ivec3(i) + 8192);
-  float c[8];
-  for (int j = 0; j < 8; j++) {
-    uvec3 q = u + uvec3(uint(j & 1), uint((j >> 1) & 1), uint(j >> 2));
-    c[j] = hash(uvec2(q.x ^ (q.z * 7919u), q.y + q.z * 104729u));
-  }
-  return mix(mix(mix(c[0], c[1], f.x), mix(c[2], c[3], f.x), f.y), mix(mix(c[4], c[5], f.x), mix(c[6], c[7], f.x), f.y), f.z);
-}
-float nb3F(vec3 x, int n) {
-  float s = 0.0, a = 0.5, t = 0.0;
-  for (int i = 0; i < 4; i++) {
-    if (i >= n) break;
-    s += a * nb3(x); t += a;
-    x = x * 2.03 + 11.7;
-    a *= 0.5;
-  }
-  return s / t;
-}
-float ringDens(float x, float wx, float sd) {
-  float span = ${glf(PLANET_GAP[1])};
-  float f = mix(0.5, nbF(vec2(x * 9.0, sd * 13.0 + 3.0), 3), smoothstep(1.0, 4.0, 0.11 / max(wx, 1e-4)));
-  float rib = mix(0.5, 0.5 + 0.5 * sin(x * 70.0 + 6.0 * nbF(vec2(x * 7.0, sd * 5.0), 2)), smoothstep(2.0, 6.0, 0.09 / max(wx, 1e-4)));
-  float d = (0.3 + 0.95 * smoothstep(0.2, 0.8, f)) * (0.78 + 0.22 * rib);
-  d *= mix(0.4, 1.0, smoothstep(0.0, 0.22, x));
-  d *= 1.0 - 0.4 * smoothstep(0.8, 1.0, x);
-  float gw = max(span, 1.3 * wx);
-  return d * (1.0 - 0.94 * exp(-pow((x - ${glf(PLANET_GAP[0])}) / gw, 2.0)));
-}
-vec4 planet(vec2 p) {
-  vec4 a = uPl[0], b = uPl[1], l = uPl[2], g = uPl[3];
-  if (a.w <= 0.0) return vec4(0.0);
-  float R = a.z, dp = uSize.z, k = b.z, aa = sqrt(1.0 - k * k), sd = b.w;
-  bool ring = g.z > 0.0, stone = g.w > 0.5;
-  vec2 d = p - a.xy;
-  float reach = (ring ? g.y : 1.0) + 0.5;
-  if (dot(d, d) > reach * reach * R * R) return vec4(0.0);
-  vec2 u = vec2(dot(d, b.xy), dot(d, vec2(-b.y, b.x))) / R;
-  vec3 L = l.xyz, P = vec3(0.0, aa, k);
-  vec3 sun = vec3(${PLANET_SUN.map(glf).join(', ')});
-  float r = length(u);
-  // the ring
-  vec4 rg = vec4(0.0);
-  float zr = 0.0;
-  if (ring) {
-    zr = -u.y * aa / k;
-    float rho = sqrt(u.x * u.x + u.y * u.y / (k * k));
-    float wr = max(0.9 * dp * sqrt(u.x * u.x + u.y * u.y / (k * k * k * k)) / max(rho, 0.001) / R, 0.0015);
-    float x = (rho - g.x) / (g.y - g.x), wx = wr / (g.y - g.x), e = wx + 0.012;
-    float env = smoothstep(-e, e, x) * (1.0 - smoothstep(1.0 - e, 1.0 + e, x));
-    if (env > 0.0) {
-      float dens = ringDens(clamp(x, 0.0, 1.0), wx, sd);
-      float lf = mix(0.2, 1.0, smoothstep(-0.05, 0.3, dot(L, P)));
-      vec3 rp = vec3(u, zr);
-      float s = -dot(rp, L);
-      if (s > 0.0) lf *= mix(0.04, 1.0, smoothstep(0.93, 1.07, sqrt(max(dot(rp, rp) - s * s, 0.0))));
-      vec3 rc = uPl[8].rgb * (0.88 + 0.24 * nbF(vec2(x * 5.0, sd * 3.0), 2));
-      float ra = g.z * dens * env;
-      rg = vec4(rc * sun * lf * ra, ra);
-    }
-  }
-  // the disc and the glow round it
-  vec4 body = vec4(0.0);
-  float cov = smoothstep(-0.7 * dp, 0.9 * dp, (1.0 - r) * R);
-  vec2 uu = r > 1.0 ? u / r : u;
-  float z = sqrt(max(1.0 - dot(uu, uu), 0.0));
-  vec3 n = vec3(uu, z), S = n;
-  vec4 atm = uPl[7];
-  float lit = 0.0;
-  if (cov > 0.0) {
-    float sl = clamp(dot(n, P), -1.0, 1.0), cl = max(sqrt(1.0 - sl * sl), 0.2);
-    float lon = asin(clamp(n.x / cl, -1.0, 1.0)) + l.w * ${glf(PLANET_SPIN)} * (1.0 - 0.3 * sl * sl);
-    vec3 col;
-    if (!stone) {
-      float wv = nbF(vec2(lon * 1.2, sl * 5.0) + sd * 31.0, 3) - 0.5;
-      float s = sl + 0.07 * wv;
-      float F = uPl[4].w;
-      float bd = 0.65 * (0.5 + 0.5 * sin(s * F + sd * 6.283)) + 0.35 * (0.5 + 0.5 * sin(s * F * 2.37 + 1.9 + sd * 11.0));
-      float st = nbF(vec2(lon * 0.9, s * F * 0.55) + sd * 17.0 + 4.0, 3);
-      col = mix(uPl[5].rgb, uPl[4].rgb, smoothstep(0.15, 0.85, bd));
-      col = mix(col, uPl[6].rgb, clamp((st - 0.35) * 1.6, 0.0, 1.0) * 0.5);
-      col = mix(mix(uPl[4].rgb, uPl[5].rgb, 0.4), col, uPl[5].w);
-      if (uPl[6].w > 0.0) {
-        float dl = mod(lon - sd * 6.283 + 3.1416, 6.2832) - 3.1416;
-        float e = pow(dl * cl / 0.5, 2.0) + pow((sl + 0.34) / 0.12, 2.0);
-        col += 0.08 * exp(-e / 5.0) * (1.0 - exp(-e));
-        col = mix(col, uPl[6].rgb * 0.85, 0.85 * exp(-e));
-      }
-    } else {
-      // a rock's ground is a noise of the point on the sphere, turned with the spin (no pole to stretch it)
-      float sa = l.w * ${glf(PLANET_SPIN)}, cs = cos(sa), sn = sin(sa);
-      vec3 m = (n * cs + cross(P, n) * sn + P * dot(P, n) * (1.0 - cs)) * 2.2 + sd * 29.0;
-      vec3 w = vec3(nb3F(m + 3.1, 2), nb3F(m + 7.7, 2), nb3F(m + 1.3, 2)) - 0.5;
-      m += 1.3 * w;
-      float h = nb3F(m, 3), h2 = nb3F(m * 2.1 + 5.0, 2);
-      vec3 gr = vec3(nb3F(m + vec3(0.07, 0.0, 0.0), 3), nb3F(m + vec3(0.0, 0.07, 0.0), 3), nb3F(m + vec3(0.0, 0.0, 0.07), 3)) - h;
-      gr = gr * cs - cross(P, gr) * sn + P * dot(P, gr) * (1.0 - cs);
-      gr -= n * dot(gr, n);
-      col = mix(uPl[5].rgb, uPl[4].rgb, smoothstep(0.4, 0.6, h));
-      col = mix(col, uPl[6].rgb, smoothstep(0.45, 0.8, h2) * 0.4);
-      col = mix(col, mix(uPl[4].rgb, vec3(1.0), 0.5), smoothstep(0.8, 0.94, abs(sl) + 0.05 * (h2 - 0.5)) * uPl[6].w);
-      n = normalize(n - gr * 5.0);
-    }
-    lit = smoothstep(stone ? -0.1 : -0.25, stone ? 0.5 : 0.75, dot(n, L)) * (0.55 + 0.45 * clamp(dot(n, L), 0.0, 1.0));
-    if (ring) {
-      float lp = dot(L, P), t = -dot(S, P) / (abs(lp) < 0.03 ? 0.03 : lp);
-      if (t > 0.0) {
-        vec3 H = S + t * L;
-        float xx = (sqrt(H.x * H.x + pow(H.y * k - H.z * aa, 2.0)) - g.x) / (g.y - g.x);
-        float rs = g.z * ringDens(clamp(xx, 0.0, 1.0), 0.07, sd) * smoothstep(-0.02, 0.02, xx) * (1.0 - smoothstep(0.98, 1.02, xx));
-        lit *= 1.0 - 0.85 * rs;
-      }
-    }
-    vec3 sc = col * (sun * lit + vec3(0.55, 0.66, 1.0) * ${glf(PLANET_NIGHT)});
-    sc += atm.rgb * atm.w * 0.9 * pow(1.0 - z, 2.6) * smoothstep(-0.3, 0.55, dot(S, L));
-    body = vec4(min(sc, 1.0) * cov, cov);
-  }
-  // the atmosphere beyond the limb, brightest on the lit side
-  float ex = max(r - 1.0, 0.0) * R / dp, hw = max(2.5, 0.07 * R / dp);
-  float ha = atm.w * 0.5 * exp(-ex / hw) * (1.0 - cov) * smoothstep(-0.35, 0.6, dot(u / max(r, 0.001), L.xy) / max(length(L.xy), 0.25));
-  body += vec4(atm.rgb * ha, 0.6 * ha);
-  body.rgb *= ${glf(PLANET_DIM)};
-  rg.rgb *= ${glf(PLANET_DIM)};
-  return (zr > 0.0 ? rg + body * (1.0 - rg.a) : body + rg * (1.0 - body.a)) * a.w;
-}`;
 // the distant capital ship (see "Look", SHIP_*), premultiplied, at device px p; uSh (see SKY_U's comment). shipOne draws one hull in
 // its own frame (half-length = 1, x along its heading, y across with the top at negative y: the ship's lit side stays up on the
 // screen when it goes left), shSD its signed distance (SHIP_HULL's polygons and SHIP_BOXES' boxes joined, SHIP_NOTCH's cut out; one
@@ -4284,7 +4065,7 @@ precision highp float;
 #define ROCKET_N ${ROCKET_N}
 #define ASTEROID_N ${ASTEROID_N}
 uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uGlow, uN0, uN1;
-uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[5], uPl[9], uSh[3], uWp[2];
+uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[5], uSh[3], uWp[2];
 uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
 uniform int uGN;
 uniform sampler2D ${SKY_TEX.join(', ')};
@@ -4300,7 +4081,6 @@ float hash(uvec2 v) {
 ${NEBULA_GLSL}
 ${ASTEROID_GLSL}
 ${LENS_GLSL}
-${PLANET_GLSL}
 ${SHIP_GLSL}
 ${WARP_GLSL}
 void main() {
@@ -4320,9 +4100,7 @@ void main() {
   ${STAR_GLSL}
   // the lens's dark core and accretion ring, over the bent stars
   c = over(lensHole(p), c);
-  // the passing planet, ring and all, over the stars and under the asteroids, satellites and streaks
-  c = over(planet(p), c);
-  // the distant capital ship (and its escort), over the planet and the stars and under the asteroids, satellites and streaks
+  // the distant capital ship (and its escort), over the stars and under the asteroids, satellites and streaks
   c = over(ship(p), c);
   // the asteroids' sharp rocks, over the stars and under the satellites and streaks; an empty slot is skipped
   for (int i = 0; i < ASTEROID_N; i++) {
@@ -4476,7 +4254,6 @@ function skyGLInit(G) {
   G.nbloc = gl.getUniformLocation(p, 'uNb');
   G.asloc = gl.getUniformLocation(p, 'uAs');
   G.lnloc = gl.getUniformLocation(p, 'uLn');
-  G.plloc = gl.getUniformLocation(p, 'uPl');
   G.shloc = gl.getUniformLocation(p, 'uSh');
   G.wploc = gl.getUniformLocation(p, 'uWp');
   G.gloc = ['uGlow', 'uN0', 'uN1', 'uGB', 'uGE', 'uGC', 'uGL', 'uGN'].map((name) => gl.getUniformLocation(p, name));
@@ -4760,17 +4537,7 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     });
     u[o + 11] = ln.phi;
   }
-  // the passing planet, after the lens (all 0 when none)
-  const pl = planetNow();
-  if (pl) {
-    const o = SKY_PL, lk = pl.look, vec = (b, c, w) => { u[o + b] = c[0]; u[o + b + 1] = c[1]; u[o + b + 2] = c[2]; u[o + b + 3] = w; };
-    u[o] = pl.x * dpr; u[o + 1] = pl.y * dpr; u[o + 2] = pl.r * dpr; u[o + 3] = pl.a;
-    u[o + 4] = Math.cos(pl.rot); u[o + 5] = Math.sin(pl.rot); u[o + 6] = pl.k; u[o + 7] = pl.seed;
-    vec(8, pl.L, pl.age);
-    u[o + 12] = pl.ringIn; u[o + 13] = pl.ringOut; u[o + 14] = lk.ring; u[o + 15] = lk.kind;
-    vec(16, lk.a, lk.bands); vec(20, lk.b, lk.contrast); vec(24, lk.c, lk.spot); vec(28, lk.atm, lk.atmA); vec(32, lk.rr, 0);
-  }
-  // the capital ship, after the planet (all 0 when none)
+  // the capital ship, after the lens (all 0 when none)
   const sh = shipNow();
   if (sh) {
     const o = SKY_SH;
@@ -4804,7 +4571,6 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   gl.uniform4fv(G.nbloc, u, SKY_NB, 20);
   gl.uniform4fv(G.asloc, u, SKY_AS, ASTEROID_N * 8 + 4);
   gl.uniform4fv(G.lnloc, u, SKY_LN, 20);
-  gl.uniform4fv(G.plloc, u, SKY_PL, 36);
   gl.uniform4fv(G.shloc, u, SKY_SH, 12);
   gl.uniform4fv(G.wploc, u, SKY_WP, 8);
   if (G.glow) {
