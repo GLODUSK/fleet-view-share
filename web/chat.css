@@ -147,18 +147,19 @@ html:not(.glass) .cu-bubble.expanded .cu-more { background: #232a3d; }
 .chat-md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.3em; }
 .chat-md input[type="checkbox"] { margin: 0 6px 0 0; vertical-align: -2px; accent-color: var(--mint); }
 /* options to pick from (chat.js pickList): live boxes, and Launch under them */
+.chat-md.picking input[type="checkbox"] { accent-color: var(--cyan); } /* picking is the next move: the Send blue, not done-green */
 .chat-md.picking input[type="checkbox"]:not(:disabled) { cursor: pointer; }
 .chat-md.picking input[type="checkbox"]:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .chat-md.picking li:has(> input:checked) { color: var(--text); }
 /* a recommended option: a lit row and a badge after its name */
 .chat-md.picking li.rec {
   margin: 3px 0 3px calc(-1.3em - 4px); padding: 4px 8px 5px 6px; border-radius: 8px; /* its box in line with the others */
-  background: rgba(61, 255, 168, 0.06); box-shadow: inset 2px 0 0 rgba(61, 255, 168, 0.55);
+  background: rgba(63, 216, 255, 0.06); box-shadow: inset 2px 0 0 rgba(63, 216, 255, 0.55);
 }
 .cpk-rec {
   display: inline-block; margin: 0 2px 0 6px; padding: 0 7px; border-radius: 999px; vertical-align: 1px;
-  background: rgba(61, 255, 168, 0.12); border: 1px solid rgba(61, 255, 168, 0.32);
-  color: var(--mint); font: 600 10.5px/1.6 var(--font-ui); letter-spacing: 0.02em;
+  background: rgba(63, 216, 255, 0.12); border: 1px solid rgba(63, 216, 255, 0.32);
+  color: var(--cyan); font: 600 10.5px/1.6 var(--font-ui); letter-spacing: 0.02em;
 }
 /* an option already launched (chat.js drawPick): greyed, its box off, a Launched tag where the badge was */
 .chat-md.picking li.done, .chat-md.picking li.done strong, .chat-md.picking li.done b, .chat-md.picking li.done code { color: var(--faint); }
