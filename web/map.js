@@ -300,6 +300,12 @@
 // rectangles; merge('s:<id>') launches that conversation's merge now; stats().heads is where each comet's head is (CSS px); stats().sky says what draws the sky ('webgl2'
 // or '2d'), stats().glow what drew the repo nebulae last, stats().fps the draws in the last second, and skyGL() is the sky's WebGL2 context (to lose it). rest(true)
 // rests the map as if nobody were there (null: as the desktop says), battery(true) paces it as on battery.
+// GPU cost (Henry, 2026-10-15: the sky's sights stay under 5% of the GPU): gpuMeter(true) times each pass of the sky's shader
+// on the GPU (EXT_disjoint_timer_query_webgl2; off by default, zero cost); stats().gpu: { on, ext, ms (the sky's pass),
+// glowMs, frames, passes (a second), msPerS (GPU ms a second: /10 is its share in %), cpuMs (skyPaint), lost }, see gpuStats.
+// hold(true) keeps the director from starting anything by itself; stats().event.life: { name: [ms since it began, its ms] },
+// stats().scene.ms its length. scripts/sky-gpu-bench.js runs each event alone against an empty sky with these (headless
+// Edge on the real GPU, Windows' GPU % beside the timer; --live: the running app's GPU %, PC or Mac).
 // ?skyHour=<0-24> forces the sky's hour; ?sky2d=1 has the canvas draw the sky, as without WebGL2; ?glow2d=1 has it
 // draw only the repo nebulae (to compare the two).
 //
@@ -1273,7 +1279,9 @@ export function mapStats() {
   return { avgMs: s.n ? s.sum / s.n : 0, maxMs: s.max, frames: s.frames, comets: I.comets.length, queued: I.cometQ.length,
     heads: cometHeads(), big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length, sky: I.skyGL && I.skyGL.ok ? 'webgl2' : '2d',
     meteor: I.meteors.length, showers: I.showers, meteorIn: I.meteorAt ? Math.round(I.meteorAt - performance.now()) : null,
-    event: { running: [...I.events.keys()], last: I.eventLast, nextIn: I.eventAt ? Math.round(I.eventAt - performance.now()) : null },
+    event: { running: [...I.events.keys()], last: I.eventLast, nextIn: I.eventAt ? Math.round(I.eventAt - performance.now()) : null,
+      life: Object.fromEntries([...I.events.values()].map((e) => [e.name, [Math.round(performance.now() - e.at), e.ev && e.ev.ms ? Math.round(e.ev.ms) : null]])) },
+    gpu: gpuStats(),
     asteroids: (() => { const e = evOf('asteroids'); if (!e) return null;
       return { light: e.ev.light.map((v) => Math.round(v * 100) / 100), shown: asteroidsNow().map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.r * 10) / 10, blur: Math.round(r.blur), a: Math.round(r.a * 1e3) / 1e3 })) }; })(),
     lens: (() => { const l = lensNow(); return l ? { x: Math.round(l.x), y: Math.round(l.y), r: Math.round(l.r * 10) / 10, a: Math.round(l.a * 1e3) / 1e3, src: l.srcs.map((o) => Math.round(o.amp * 1e3) / 1e3),
@@ -1286,7 +1294,7 @@ export function mapStats() {
     system: (() => { const q = systemNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), R: Math.round(q.R), a: Math.round(q.a * 1e3) / 1e3, stars: q.stars.length,
       planets: q.planets.length, belt: !!q.belt, disc: !!q.disc, arrived: !!evOf('system').ev.arr, far: Math.round(q.far * 100) / 100,
       looks: q.stars.map((o) => o.look), classes: q.stars.map((o) => o.cls), feed: q.feed, neb: q.neb ? { kind: q.neb.kind, a: Math.round(q.neb.a * 100) / 100 } : null } : null; })(),
-    scene: I.scene ? { name: I.scene.name, stage: I.scene.stage, s: Math.round((performance.now() - I.scene.at) / 100) / 10 } : null,
+    scene: I.scene ? { name: I.scene.name, stage: I.scene.stage, s: Math.round((performance.now() - I.scene.at) / 100) / 10, ms: I.scene.ms || null } : null,
     voyage: (() => { const q = voyageNow(); return q ? { f: Math.round(q.f * 1e3) / 1e3, dim: Math.round(q.dim * 1e3) / 1e3, st: Math.round(q.st * 1e3) / 1e3, x: Math.round(q.x), y: Math.round(q.y), swapped: q.swapped } : null; })(),
     place: placeNow().seed,
     ship: (() => { const q = shipNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3, dir: [Math.round(q.cs * 1e3) / 1e3, Math.round(q.sn * 1e3) / 1e3], escort: !!q.eo, jump: q.j ? { x: Math.round(q.j.x), y: Math.round(q.j.y), h: Math.round(q.j.h), a: Math.round(q.j.a * 1e3) / 1e3, flash: Math.round(q.j.fl * 1e3) / 1e3, smear: Math.round(q.j.sm * 1e3) / 1e3 } : null } : null; })(),
@@ -1453,6 +1461,10 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     skyGL: () => (I && I.skyGL ? I.skyGL.gl : null), // the sky's WebGL2 context, for a context-loss test
     // rest as if away (true), never (false) or as the desktop says (null); battery(on) as if on battery or not
     rest: (on) => { restForce = on == null ? null : !!on; wake(); return resting(); }, battery: (on) => { away.battery = !!on; wake(); },
+    // the GPU meter on (true) or off (false, its queries let go); see stats().gpu (gpuStats) and scripts/sky-gpu-bench.js
+    gpuMeter: (on) => { gpuOn = !!on; if (I && I.skyGL && !gpuOn) gpuMeterDrop(I.skyGL); if (I) I.dirty = true; return gpuOn; },
+    // the director holds (true: no event, scene or far event starts by itself; the hooks still start them) or goes on (false)
+    hold: (on) => { skyHold = !!on; return skyHold; },
     meteor: () => { if (!I) return false; I.meteors.push(meteorMake(performance.now())); I.dirty = true; return true; }, // a shooting star now
     shower: () => !!I && shower(performance.now(), null, true), // a meteor shower now
     // a space event now by name (ignoring EVENT_GAP and EVENT_MAX, beside any running), skip seconds into it; no name: the
@@ -3612,6 +3624,9 @@ function eventPick() {
   for (const k of pool) if ((w -= wt(k)) < 0) return k;
   return pool[pool.length - 1];
 }
+// tests (__map.hold): the director starts nothing by itself (no space event, scene or far event; what runs goes on, and the
+// tests' hooks still start any), so a bench sees only what it started
+let skyHold = false;
 // each frame: none while resting or under reduced motion (the running ones end, the scene with them, none planned); otherwise
 // every one running steps until it says it is over, then the black hole's pull (devourStep) and the scene (sceneStep); the next
 // comes EVENT_GAP after the last started (or after the map woke): a scene now and then (SCENE_P, when none runs), else one
@@ -3627,7 +3642,7 @@ function eventStep(t, rest) {
   devourStep(t);
   sceneStep(t);
   if (!I.eventAt) I.eventAt = t + pickIn(EVENT_GAP);
-  else if (t >= I.eventAt && EVENTS.size) {
+  else if (t >= I.eventAt && EVENTS.size && !skyHold) {
     if (!(!I.scene && Math.random() < SCENE_P && sceneStart(t))) {
       const busy = new Set([...I.events.keys(), ...(I.scene ? I.scene.hold : [])]).size;
       const k = busy < EVENT_MAX ? eventPick() : null;
@@ -4873,7 +4888,7 @@ function farStep(t, rest) {
     return;
   }
   if (!I.farAt) I.farAt = t + pickIn(FAR_GAP);
-  else if (t >= I.farAt) { const k = farPick(); if (!k || !farStart(t, k)) I.farAt = t + pickIn(FAR_GAP); }
+  else if (t >= I.farAt && !skyHold) { const k = farPick(); if (!k || !farStart(t, k)) I.farAt = t + pickIn(FAR_GAP); }
 }
 // a part's light over its life (f 0-1 through its own t0..t1; age: ms since the event began): a 0-1, and how far it has
 // come in (en) and gone out (ex), 0-1 each, which the shader turns into the shape's own way in and out (farPart: it
@@ -7264,7 +7279,7 @@ function skyGLMake(cv) {
     inst: new Float32Array(64 * GLOW_INST), ni: 0, lastInst: new Float32Array(64 * GLOW_INST), lastNi: -1,
     gu: new Float32Array((3 + 4 * GLOW_MAX) * 4), lastGu: new Float32Array((3 + 4 * GLOW_MAX) * 4), gn: 0, lastGn: -1, cols: new Map() };
   // a lost context: the map's canvas draws the sky from the next frame on, until the context is back
-  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; G.pend = null; I.dirty = true; });
+  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; G.pend = null; G.tq = null; I.dirty = true; });
   cv.addEventListener('webglcontextrestored', () => { skyGLInit(G); I.dirty = true; });
   skyGLInit(G);
   return G;
@@ -7511,11 +7526,86 @@ function glowField(G) {
   G.lastInst = G.lastInst.length < G.inst.length ? new Float32Array(G.inst.length) : G.lastInst;
   G.lastInst.set(A); G.lastNi = G.ni; G.fieldOk = true;
 }
+// ---------- the GPU meter (tests: __map.gpuMeter, scripts/sky-gpu-bench.js) ----------
+// Henry (2026-10-15): the sky's sights may look better only while Fleet View stays under 5% of the GPU, so each one's cost
+// is measured, not guessed. With the meter on, each pass the sky's shader draws (the sky's, the glows' field) is timed on
+// the GPU (EXT_disjoint_timer_query_webgl2), and skyPaint's CPU ms is kept. Off (the default) it costs nothing: no queries,
+// no extension asked for. A pass takes a query from a small pool (GPU_POOL in flight; with all of them out it goes
+// untimed); results are read a few frames later, when the GPU has them, never waited for; a GPU_DISJOINT (the clock
+// jumped: power state, another app) throws away the ones in flight. GPU_KEEP results are kept (~4 s at 60 passes a
+// second), GPU_AVG of them averaged. Not timed: the copy of the sky's picture onto the backdrop (a 2D canvas) and the
+// map's own canvas; Windows' GPU % (the bench) sees those too
+const GPU_KEEP = 240, GPU_AVG = 60, GPU_POOL = 8;
+let gpuOn = false;
+// the meter's state on the sky's GL state, made when first needed: { ext (null: no timer here), free (queries to reuse),
+// pend (in flight, oldest first: { q, kind, t }), open, sky / glow / cpu ([{ t, ms }], t: when it was drawn), lost }
+function gpuMeter(G) {
+  if (!gpuOn || !G) return null;
+  if (!G.tq) {
+    let ext = null;
+    try { ext = G.gl.getExtension('EXT_disjoint_timer_query_webgl2'); } catch { ext = null; }
+    G.tq = { ext, free: [], pend: [], open: null, sky: [], glow: [], cpu: [], lost: 0 };
+  }
+  return G.tq;
+}
+// the meter off: its queries let go
+function gpuMeterDrop(G) {
+  const M = G && G.tq;
+  if (!M) return;
+  if (!G.gl.isContextLost()) for (const q of [...M.free, ...M.pend.map((p) => p.q)]) G.gl.deleteQuery(q);
+  G.tq = null;
+}
+const gpuKeep = (list, v) => { list.push(v); if (list.length > GPU_KEEP) list.shift(); };
+// a pass of `kind` ('sky' or 'glow') starts: timed when the meter is on, the timer is there and a query is free
+function gpuBegin(G, kind) {
+  const M = gpuMeter(G);
+  if (!M || !M.ext || M.open || M.pend.length >= GPU_POOL) return;
+  const q = M.free.pop() || G.gl.createQuery();
+  G.gl.beginQuery(M.ext.TIME_ELAPSED_EXT, q);
+  M.open = { q, kind, t: performance.now() };
+}
+function gpuEnd(G) {
+  const M = G.tq;
+  if (!M || !M.open) return;
+  G.gl.endQuery(M.ext.TIME_ELAPSED_EXT);
+  M.pend.push(M.open); M.open = null;
+}
+// the results that are in (they come in order), never waiting for one
+function gpuRead(G) {
+  const M = gpuMeter(G);
+  if (!M || !M.ext || !M.pend.length) return;
+  const gl = G.gl;
+  if (gl.getParameter(M.ext.GPU_DISJOINT_EXT)) {
+    M.lost += M.pend.length;
+    for (const p of M.pend) M.free.push(p.q);
+    M.pend.length = 0;
+    return;
+  }
+  while (M.pend.length && gl.getQueryParameter(M.pend[0].q, gl.QUERY_RESULT_AVAILABLE)) {
+    const p = M.pend.shift();
+    gpuKeep(M[p.kind], { t: p.t, ms: gl.getQueryParameter(p.q, gl.QUERY_RESULT) / 1e6 });
+    M.free.push(p.q);
+  }
+}
+// for stats().gpu: { on, ext, ms (the sky's pass, average of the last GPU_AVG), glowMs (the glows' field, when it was
+// drawn again), frames (results kept), passes (sky passes a second), msPerS (GPU ms a second, both passes: /10 is the
+// sky's share of the GPU in %), cpuMs (skyPaint's CPU ms a frame), lost (results thrown away for GPU_DISJOINT) }; the
+// rates over the last 2 s
+function gpuStats() {
+  const M = I && I.skyGL && I.skyGL.tq;
+  if (!gpuOn || !M) return { on: gpuOn, ext: null };
+  const now = performance.now(), r3 = (v) => Math.round(v * 1e3) / 1e3;
+  const avg = (l) => { const s = l.slice(-GPU_AVG); return s.length ? r3(s.reduce((a, o) => a + o.ms, 0) / s.length) : null; };
+  const last2 = (l) => l.filter((o) => o.t > now - 2000);
+  return { on: true, ext: !!M.ext, ms: avg(M.sky), glowMs: avg(M.glow), frames: M.sky.length, passes: last2(M.sky).length / 2,
+    msPerS: r3(last2(M.sky).concat(last2(M.glow)).reduce((a, o) => a + o.ms, 0) / 2), cpuMs: avg(M.cpu), lost: M.lost };
+}
 // the sky (and the repo glows, when it can: I.glowGL) on its canvas, drawn only when its uniforms or the glows'
 // quads changed; false when the map's canvas must draw the sky itself
 function drawSkyGL(glass, glows, k, ox, oy) {
   const G = I.skyGL;
   if (!G || G.gl.isContextLost() || !skyGLPoll(G)) return false;
+  gpuRead(G);
   const gl = G.gl, dpr = I.dpr || 1, cv = I.skyCanvas, u = G.u;
   if (G.dpr !== dpr) {
     // each tiled star layer's tile at this dpr into its texture; the tile's canvas is let go at once
@@ -7759,7 +7849,7 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   for (let j = 0, n = 12 + G.gn * 4; same && j < n; j++) same = G.gu[j] === G.lastGu[j];
   for (let j = 1; same && j < 4; j++) for (let i = 0; same && i < G.gn * 4; i++) same = G.gu[12 + j * GLOW_MAX * 4 + i] === G.lastGu[12 + j * GLOW_MAX * 4 + i];
   if (same) return true;
-  if (G.gn && !fresh) glowField(G);
+  if (G.gn && !fresh) { gpuBegin(G, 'glow'); glowField(G); gpuEnd(G); }
   G.last.set(u); G.lastGu.set(G.gu); G.lastGn = G.gn; G.drawn = true; G.draws = (G.draws || 0) + 1;
   gl.viewport(0, 0, cv.width, cv.height);
   for (let j = 0; j < SKY_U.length; j++) gl.uniform4fv(G.loc[j], u, j * 4, 4);
@@ -7782,15 +7872,25 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     for (let j = 0; j < 4; j++) gl.uniform4fv(L[3 + j], gu, 12 + j * M, M);
     gl.uniform1i(L[7], G.gn);
   }
+  gpuBegin(G, 'sky');
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gpuEnd(G);
   G.painted = true; // a new picture for the backdrop (skyPaint)
   return true;
 }
 
 // the sky on the page's backdrop (I.skyEl): the sky's shader's picture, copied only when it drew a new one (it carries
 // the page's colour when not in glass), or, without it, the canvas's own sky drawn there each time. glows: the repo
-// glows of the Map (null with the Map hidden), in the map's CSS px, for the shader (I.glowGL says it took them)
+// glows of the Map (null with the Map hidden), in the map's CSS px, for the shader (I.glowGL says it took them). With
+// the GPU meter on, its CPU ms are kept (the shader's uniforms and the copy included)
 function skyPaint(glass, glows, k, ox, oy) {
+  if (!gpuOn) { skyPaintNow(glass, glows, k, ox, oy); return; }
+  const c0 = performance.now();
+  skyPaintNow(glass, glows, k, ox, oy);
+  const M = gpuMeter(I.skyGL);
+  if (M) gpuKeep(M.cpu, { t: c0, ms: performance.now() - c0 });
+}
+function skyPaintNow(glass, glows, k, ox, oy) {
   I.glowGL = false;
   const g = I.skyCtx;
   if (!g) return;
