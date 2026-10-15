@@ -32,6 +32,8 @@ fv transcript <id> [--since n] [--limit m]
 fv menu <id>                             the question or prompt on its screen, numbered
 fv answer <id> <n|submit|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
 fv interrupt <id>                        Esc mid-turn
+fv effort [<id>] <level>                 switch its effort (low|medium|high|xhigh|max); no id: your own
+fv model [<id>] <model> [--effort E]     switch its model
 fv open <id> [--account A|B|C…] [--prompt P] [--wait [s]]   resume an old conversation
 fv stop <id> [--remove]
 fv rm <id>                               take a conversation off the map
@@ -108,8 +110,9 @@ Don't `--remove` a conversation you didn't start; just stop it if you opened it 
 - **Never `--allow-permission` unless the user asked for it.** Every menu but a question (permission and trust prompts, the plan approval) is refused without it on purpose: approving another session's tool use is the user's call. Report the prompt (`fv menu`) and let them decide.
 - Only stop, remove, interrupt or message sessions you started, or ones the user named.
 - Sessions run on the user's own Claude logins, the accounts `fv ls` shows: `B` is the default `~/.claude`, and each `~/.claude-<letter>` is that letter (`~/.claude-a` is `A`). `fv start` uses `B` unless `--account` says otherwise.
-- They run with the permission settings of their account, as a terminal would: one may stop on a permission prompt (`fv menu` shows it) unless the user set it to skip them. Either way, tell each exactly what to touch and what not to (a worktree, no pushes, no merges), as you would brief a subagent. Every session Fleet View starts may run `fv send`, `status`, `ask`, `read`, `ls`, `teams`, `team` and `transcript` without asking, and nothing else.
+- They run with the permission settings of their account, as a terminal would: one may stop on a permission prompt (`fv menu` shows it) unless the user set it to skip them. Either way, tell each exactly what to touch and what not to (a worktree, no pushes, no merges), as you would brief a subagent. Every session Fleet View starts may run `fv send`, `status`, `ask`, `read`, `ls`, `teams`, `team`, `transcript` and `effort` without asking, and nothing else.
 - Give each child a complete prompt: the goal, the files, what "done" means, and what to report back. It knows nothing of your conversation.
+- **Changing effort or model:** `fv effort high` raises your own (it takes effect from your next turn: Fleet View switches it as soon as this turn ends), `fv effort <id> high` another session's (one that is working switches when it finishes its step). Typing `/effort high` into your reply does nothing. With `fv send --from`, a message whose first line is `/effort <level>` or `/model <name>` switches the receiver and sends the rest. The default for new sessions stays as it was. A bot's is only Henry's to change.
 - A plain `fv send` to a session that shows a menu is refused (an Enter would answer it): answer the menu first. With `--from` it waits instead and goes in once the menu is answered ("queued").
 
 ## Teammates

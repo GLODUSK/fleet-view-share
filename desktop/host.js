@@ -444,10 +444,11 @@ const DROP_PREFIX = ['FLEET_VIEW_', 'FV_'];
 const FV_DIR = path.resolve(__dirname, '..');
 // Teammates talk through fv: every claude started here may run these fv commands without asking, so a message
 // between conversations, a lead's status check or question, or a change to its team never waits on an approval
-// click. Only these, nothing broader: send, status, ask, read, ls, teams, team, transcript. It is one argument,
+// click, and a session can raise or lower its own effort (fv effort). Only these, nothing broader: send, status, ask,
+// read, ls, teams, team, transcript, effort. It is one argument,
 // "--allowedTools=a,b,…" in quotes (the commas split the list; a comma inside parentheses would be kept): as two
 // words the flag would take every word after it as one more tool, a prompt after it too.
-const FV_ALLOWED = ['send', 'status', 'ask', 'read', 'ls', 'teams', 'team', 'transcript'];
+const FV_ALLOWED = ['send', 'status', 'ask', 'read', 'ls', 'teams', 'team', 'transcript', 'effort'];
 const ALLOW_FV = `"--allowedTools=${FV_ALLOWED.map((c) => `Bash(fv ${c}:*)`).join(',')}"`;
 // a session with a role whose claude goes on in a conversation begun longer ago than this resumed an old one: it
 // loses the role

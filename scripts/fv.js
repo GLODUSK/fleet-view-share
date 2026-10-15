@@ -31,6 +31,10 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   fv menu <id>                              the select menu it shows, if any
   fv answer <id> <n|submit|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
   fv interrupt <id>                         Esc: stop Claude mid-turn
+  fv effort [<id>] <level>                  switch its effort (low, medium, high, xhigh, max); no id: your
+                                            own. One working switches when it finishes this step (you:
+                                            from your next turn). New sessions keep their default
+  fv model [<id>] <model> [--effort E]      the same for the model
   fv open <id> [--account A|B|C…] [--prompt P] [--wait [s]]   resume a conversation in the desktop app
   fv transcript <id> [--since n] [--limit m]
   fv stop <id> [--remove]
@@ -505,6 +509,20 @@ async function run(argv, env) {
       if (j.next && !j.done) lines.push('', 'next menu:', ...menuLines(j.next, me));
       lines.push(...waitLines(j, me));
       return { j, lines };
+    }
+    // fv effort [<id>] <level>, fv model [<id>] <model> [--effort E]: without an id, your own conversation (Claude
+    // Code's CLAUDE_CODE_SESSION_ID); one that is working (you, mid-turn) switches as soon as it finishes this step
+    case 'effort': case 'model': {
+      if (!pos.length || pos.length > 2) throw new Usage(cmd === 'effort' ? 'fv effort [<id>] <low|medium|high|xhigh|max>' : 'fv model [<id>] <model> [--effort E]');
+      const own = pos.length === 1;
+      if (own && !env.CLAUDE_CODE_SESSION_ID) throw new Usage(`give the conversation: fv ${cmd} <id> <${cmd}> (your own is known only inside a Claude Code session)`);
+      const sid = await resolveId(call, own ? env.CLAUDE_CODE_SESSION_ID : pos[0]);
+      const body = { [cmd]: pos[pos.length - 1], queue: true };
+      if (cmd === 'model' && flags.effort !== undefined) body.effort = flags.effort;
+      const j = await need('POST', `/sessions/${encodeURIComponent(sid)}/model`, body, 60000);
+      const what = [body.model && `model ${body.model}`, body.effort && `effort ${body.effort}`].filter(Boolean).join(', ');
+      if (j.queued) return { j, lines: [own ? `${what} from your next turn: Fleet View switches it as soon as this turn ends` : `${short(sid)}: ${what} ${j.message}`] };
+      return { j, lines: [`${short(sid)}: ${what}: ${j.message || 'switched'}`, ...(j.said || []).map((s) => `  ${s}`)] };
     }
     case 'interrupt': {
       const sid = await id();

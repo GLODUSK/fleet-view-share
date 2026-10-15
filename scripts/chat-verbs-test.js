@@ -635,6 +635,53 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     ok('model with queue: 202 while busy, parts merged, applied once idle; dropped when old or ended; a failure kept as error; refusals logged once');
   }
 
+  // ---------- a message from another conversation: its leading /effort and /model lines switch the receiver ----------
+  {
+    const FROM = '0000000b-0000-4000-8000-000000000000';
+    ctx.whereIs = (id) => ({ known: id === FROM });
+    reset(); live({ status: 'busy' }); fake.screen = screenOf(['earlier output', '', ...box()]);
+    // just the command: queued as a switch, nothing typed (under the header line Claude would read it as text)
+    const [c1, o1] = await call('POST', `${S}/message`, { text: '/effort high', from: FROM });
+    assert.equal(c1, 202, o1.message);
+    assert.deepEqual(o1.switch, { ok: true, queued: true, effort: 'high', message: 'applies when Claude finishes this step' });
+    assert.equal(o1.message, 'effort high: applies when Claude finishes this step');
+    assert.equal(API.switchPending(ID).effort, 'high');
+    assert.deepEqual(fake.writes, []);
+    API.switchParts.pending.clear();
+    // commands, a blank line, then the message: switched, and only the rest sent under the header
+    reset();
+    const [c2, o2] = await call('POST', `${S}/message`, { text: '/model sonnet\n/effort xhigh\n\nGo with these:\n1. a', from: FROM });
+    assert.ok(c2 === 200 || c2 === 202, o2.message);
+    assert.deepEqual(API.switchPending(ID), { model: 'sonnet', effort: 'xhigh', at: API.switchPending(ID).at });
+    assert.equal(o2.switch.queued, true);
+    // (each line is its own paste)
+    assert.match(pasted(), /^\[Message from .*\]Go with these:1\. a$/);
+    API.switchParts.pending.clear();
+    // a value switchModel refuses, or a command further down: sent as text, nothing switched
+    reset();
+    await call('POST', `${S}/message`, { text: '/effort huge', from: FROM });
+    assert.match(pasted(), /\]\/effort huge$/);
+    reset();
+    await call('POST', `${S}/message`, { text: 'please\n/effort high', from: FROM });
+    assert.match(pasted(), /\]please\/effort high$/);
+    assert.equal(API.switchPending(ID), null);
+    // an overseer's: only Henry switches it; the rest still goes in
+    reset(); live({ status: 'busy', role: 'bot:a1b2c3d4e5f6' });
+    const [c3, o3] = await call('POST', `${S}/message`, { text: '/effort high\nhello', from: FROM });
+    assert.ok(c3 === 200 || c3 === 202, o3.message);
+    assert.equal(o3.switch.ok, false);
+    assert.match(o3.message, /^effort high: not switched \(only Henry/);
+    assert.match(pasted(), /hello$/);
+    assert.equal(API.switchPending(ID), null);
+    // without from (Henry's own, the phone's): typed as it is, as before
+    reset(); live({ status: 'busy' });
+    await call('POST', `${S}/message`, { text: '/effort high' });
+    assert.equal(pasted(), '/effort high');
+    assert.equal(API.switchPending(ID), null);
+    delete ctx.whereIs;
+    ok('message from another conversation: leading /effort and /model switch the receiver (queued while busy), the rest sent; bad values, later lines and Henry\'s own typed');
+  }
+
   // ---------- model: the question answered elsewhere (an open page) before its Yes went in ----------
   {
     const file = path.join(home, '.claude', 'settings.json');

@@ -846,7 +846,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/bots/look', body: '{ from: your conversation id, shape?: "hex"|"drop"|"round"|"pill"|"tri"|"square"|"star"|"clover"|"flower"|"heart", color?: "#rrggbb" }', does: 'a bot changes its own avatar (null: picked for it); only from a bot\'s own conversation, and only its look (fv look)' },
   { method: 'POST', path: '/api/bots/:id/remove', does: 'Henry only, as POST /api/bots: end a bot\'s session and take it off the list (its folder and conversations are kept)' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, role, its turn; tail: the last characters of its screen' },
-  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now?, shell? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow). shell (not with from or now): text is a shell command, run in bash mode ("!" typed as a key of its own into an empty prompt, then the command; a leading "!" in text is dropped); 409 when its prompt is not empty or a menu is up, never queued' },
+  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now?, shell? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. With from, leading /effort <level> and /model <name> lines switch the receiver (as POST .../model with queue: true; a bare command typed under the from line would be read as text) and the rest is sent: switch { ok, queued?, model?, effort?, message }. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow). shell (not with from or now): text is a shell command, run in bash mode ("!" typed as a key of its own into an empty prompt, then the command; a leading "!" in text is dropped); 409 when its prompt is not empty or a menu is up, never queued' },
   { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
   { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
   { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort?, queue? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. Not idle: 409 notReady, or with queue: true 202 { queued, model?, effort? }: applied once Claude finishes this step (GET /state\'s switchPending until then; dropped after 30 min). An overseer\'s: Henry only (his phone)' },
@@ -1048,6 +1048,7 @@ function endHosted(key) {
 // scripts/fleet-msg.js). It must be a conversation Fleet View knows; one that handed off counts as the one that
 // carries on. The text then goes in after a line saying who it is from ("teammate" when the two share a team) and
 // how to reply, and the server records it (its team's messages, the feed, an alert when they share no team).
+// Its leading "/effort <level>" and "/model <name>" lines are not sent: they switch the receiver (leadingSwitch).
 // queue and open (both true by default with from, false without) go to deliverText: with queue, a receiver showing
 // a menu gets it later (202 queued); with open, one not running here is resumed first. Without either it must be
 // running here, and a menu turns it down (409), as before.
@@ -1080,6 +1081,20 @@ async function sendMessage(key, b, ctx, gone, via = null) {
   const queue = 'queue' in b ? b.queue : !!from, open = 'open' in b ? b.open : !!from;
   if (from && b.now === true) return [400, { ok: false, message: 'now goes only with a message of your own (no from)' }];
   if (!from) return deliverText(key, text, { kind: 'message', wait: ms, queue, open, via, now: b.now === true }, ctx, gone);
+  // "/effort <level>" or "/model <name>" on the first lines: under the header line below Claude reads it as text, never
+  // as the command, so it is taken off and made the receiver's switch (switchModel with queue: one working switches
+  // when it finishes this step). The rest, if any, goes on as the message
+  const sw = leadingSwitch(text);
+  if (sw) {
+    const [sc, so] = await switchModel(key, { ...sw.want, queue: true }, ctx, via);
+    const done = sc === 200 || sc === 202;
+    if (ctx.log) ctx.log(`api: ${from} switched ${key} (${Object.values(sw.want).join(', ')}): ${sc} ${so.message || ''}`);
+    const said = `${Object.entries(sw.want).map(([k, v]) => `${k} ${v}`).join(', ')}: ${done ? so.message : `not switched (${so.message})`}`;
+    const sent = { switch: { ok: !!(done && so.ok), ...(so.queued ? { queued: true } : {}), ...sw.want, message: so.message } };
+    if (!sw.rest) return [sc, { ...so, ...sent, message: said }];
+    const [c, o] = await sendMessage(key, { ...b, text: sw.rest }, ctx, gone, via);
+    return [c, { ...o, ...sent, message: `${said}; ${o.message || 'the rest sent'}` }];
+  }
   const name = headName(from, ctx);
   // "your lead" when from leads a team the receiver is in, "teammate" when they share one without that (either of a
   // mid-level lead's two teams: the one it leads, the one above where it reports)
@@ -1089,6 +1104,21 @@ async function sendMessage(key, b, ctx, gone, via = null) {
     return `[Message from ${who}"${name}" (${from}). Reply with: fv send ${from} "message" --from ${convId(to) || to}]\n${text}`;
   };
   return deliverText(key, head, { kind: 'message', from, original: text, wait: ms, queue, open }, ctx, gone);
+}
+// a message's leading "/model <name>" and "/effort <level>" lines (blank lines between them and after them skipped)
+// -> { want: { model?, effort? }, rest } or null: none there, or a value switchModel would refuse (sent as text then)
+function leadingSwitch(text) {
+  const lines = text.split('\n'), want = {};
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const l = lines[i].trim();
+    if (!l) continue;
+    if (!SWITCH_CMD_RE.test(l)) break;
+    const [cmd, v] = l.split(/[ \t]+/);
+    want[cmd.slice(1)] = v;
+  }
+  if (!Object.keys(want).length || switchBad(want)) return null;
+  return { want, rest: lines.slice(i).join('\n').trim() };
 }
 // a sender's name for the first line of what it sends: no control characters (an ESC in a title could end the
 // paste early and type the rest as keys), quotes, brackets or line breaks, so the line stays one line of plain text
