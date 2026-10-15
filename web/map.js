@@ -69,10 +69,15 @@
 // and faint down it and wavering; at the top it flares and burns out in a tiny puff of sparks, and the trail fades.
 // Up, warm and slowing, so never taken for a meteor. Once per deploy (not for ones already live when the page opens);
 // fixed to the window like the moon; none at rest, hidden or under reduced motion.
-// Space events (EVENT_*): every few minutes (EVENT_GAP, a pick) the director starts one ambient sight from the registry
-// (EVENTS, by weight, never the kind it showed last, never two at once), far rarer than a shooting star and slow; like
-// the meteors it is tied to no app state, moves with the sky's camera at the depth that suits it (eventCam), and none
-// starts while the map rests, is hidden or under reduced motion (one running ends, as the meteors do).
+// Space events (EVENT_*): every minute or two (EVENT_GAP, a pick) the director starts one more ambient sight from the
+// registry (EVENTS, by weight, never a kind already up, never the kind it started last), beside the ones still running, up to
+// EVENT_MAX at once (Henry, 2026-10-14: "make sure events can happen at the same time"), so a capital ship can cross while
+// a battle burns and a planet turns; far rarer than a shooting star and slow; like the meteors they are tied to no app
+// state, move with the sky's camera at the depth that suits them (eventCam), and none starts while the map rests, is
+// hidden or under reduced motion (the running ones end, as the meteors do). It is one sky: the far ones (the ship, the
+// battle, the planet) are drawn where the gravity lens bends the light, so a black hole passing in front warps them, and a
+// black hole that comes near the capital ship or a planet pulls it in (see the devouring below); a kind that can meet one
+// already up is picked EVENT_PAIR times as often, and its path is often aimed to cross it (DEVOUR_AIM_P).
 // The nebula drift (event 'nebula', NEBULA_*): a huge, dim cloud of coloured dust takes a minute or two to drift across the
 // far sky, the stars showing through it (the shader lays it under them). Warped, layered noise gives it wispy
 // filaments and soft dark dust lanes, not a blob, in a body tint, a lighter wisp tint and a faint contrasting edge, a
@@ -119,6 +124,34 @@
 // Every star layer stretches, the near ones more (WARP_LAYER), the deep sky only a little (WARP_DEEP). It sits under the lens
 // and the twinkle and the tile wrap as they are (it only moves the lookup point), and its point follows the middle star
 // layer's pan and zoom. The canvas fallback shows none.
+// The planet (event 'planet', PLANET_*; Henry, 2026-10-14: "planets with a lot of atmosphere like we did with the ships so they
+// seem far"): a big world takes two or three minutes to drift across the far sky, coming in off the window and leaving
+// off it, lit by one far star from a side (now and then from behind it: a thin crescent inside a whole ring of lit air).
+// One of a few kinds (PLANET_KINDS): a banded gas giant whose belts turn at their own speeds round a churning storm oval,
+// an ocean world of clouds over continents with a glint on its seas and city lights on its night side, an ice giant, a
+// world drowned in orange haze, a rust desert with white poles. Every one turns all the while (its clouds faster than its
+// ground), its day side fades through a reddened band of dusk into the night, its limb darkens on a gas giant, and its air
+// shows: a soft rim of the air's colour on the disc and a glow round it that thins outwards, brightest towards its star,
+// and lit right round when the star is behind it. Some have rings (banded, with gaps, the planet's shadow across them, the
+// near side over the planet and the far side behind it) and some a small moon going round them, in front and then behind.
+// It is far: its colours take a share of the sky's haze (PLANET_HAZE), and it hides the stars behind it (its night side too).
+// The space battle (event 'battle', BATTLE_*; Henry, 2026-10-14: "add ship battles in the background or them interacting with
+// each other...make it interesting"): two small fleets, far off and hazed like the capital ship (the same hull, smaller), one
+// with a cool blue light and one with a warm red, drop out of hyperspace one ship after another (the rift and flash of the
+// capital ship) and pass each other on opposite courses, slowly, broadside to broadside. Their turrets fire volleys of
+// short bolts in their side's colour that strike the other's hull in small flashes or splash on its shield in a faint
+// ripple (the shields fail as the fight goes on, and then the hits start fires); torpedoes curve across with long faint
+// trails and burst, or are shot down halfway by point defence; fighters launch from the hangars and dogfight between the
+// lines, each chased by one of the other side's on its own looping path, firing tracers, and now and then one bursts.
+// Then one ship loses: explosions run along its hull, fires take, it breaks in two with a big flash, a shock ring and a
+// spray of debris, and its halves tumble apart, burning, until each goes up in a last burst of debris. The fighters
+// fly home and the survivors jump away into rifts of their own. Nothing in it is ever still. The canvas fallback shows none.
+// The devouring (DEVOUR_*): while the gravity lens is up, the capital ship or a planet that comes within DEVOUR_REACH of it is
+// caught (once there is time left for it): it is drawn off its path into a spiral round the hole, faster and faster,
+// stretched along the way it falls (spaghettified), heating red then white, its air (or for the ship, its burning hull)
+// torn off in a glowing stream that winds in ahead of it to the ring, until it shrinks into the ring and is gone; the ring
+// then flares and the hole fires two thin jets, knots racing out along them, that fade over a few seconds. The black hole
+// keeps on its way. Logged as 'devour' (switch it off to keep them apart).
 // Far events (FAR_*; Henry 2026-10-14: everything in his list of space events beyond our galaxy, "more like BG happening",
 // logged so he can ask what one was): a second, quieter director with its own clock (FAR_GAP, about once a minute, one
 // at a time, beside the space events above) shows every kind in web/sky-far.js's catalog once, in a shuffled order,
@@ -522,7 +555,10 @@ const SAT_BLINK = [1500, 2000], SAT_FLASH = 160, SAT_RED = [1, 0.32, 0.26], SAT_
 // space events (see "Look"): the next one comes EVENT_GAP ms (a random pick in the range) after the last ended, or after
 // the map is active and awake again (never at once); EVENT_DEPTH: the star layers' depths (far, middle, near) an event
 // picks through eventCam(depth), the fraction of the zoom it follows (it slides with the pan as the sky does)
-const EVENT_GAP = [150e3, 330e3];
+// EVENT_MAX: how many run at once; EVENT_PAIR: the weight a kind gets when it can meet one up (prey for the lens, the lens
+// for prey); PREY: the kinds the lens can swallow
+const EVENT_GAP = [70e3, 160e3], EVENT_MAX = 3, EVENT_PAIR = 3;
+const PREY = ['ship', 'planet'];
 // the far events (see "Look", FAR_*; web/sky-far.js is the catalog): the next comes FAR_GAP ms (a pick) after the last
 // ended; FAR_N parts drawn at most (the shader has a slot for each); a new one's middle keeps FAR_CLEAR CSS px plus its
 // own reach from every orb and hub on screen and FAR_EDGE from the window's edge, the best of FAR_TRIES places;
@@ -652,6 +688,61 @@ const SHIP_ROWS = [-0.218, -0.03, 0.035, 0.092], SHIP_ENGINES = [[-1.047, -0.043
 const WARP_DEPTH = EVENT_DEPTH.mid;
 const WARP_MS = [1500, 2200], WARP_IN = 0.4, WARP_OUT = 0.45, WARP_STRETCH = 90, WARP_LAYER = [0.3, 0.65, 1], WARP_DEEP = 0.1;
 const WARP_TURN = 0.3, WARP_AT = [0.3, 0.7], WARP_RADIAL = 0.3;
+// the planet (see "Look"): it crosses the window in PLANET_MS ms (a pick) at PLANET_DEPTH, radius PLANET_R CSS px (a pick),
+// along a straight path turned up to PLANET_TURN radians off level (either way, and either way round), off the window's middle
+// by up to PLANET_OFF of its height; it spins PLANET_SPIN radians a second (a pick; its clouds PLANET_CLOUD times that), its
+// axis tilted up to PLANET_TILT. Its star: PLANET_LIT [low, high] of the light's share towards us (the z of its direction;
+// PLANET_BACK_P of the time it is behind, PLANET_BACK). PLANET_RING_P: the chance of rings (a gas or ice giant only),
+// PLANET_RING: their inner and outer radius (in the planet's) and how open they are seen (the sine of the view's height over
+// them, a pick); PLANET_MOON_P: the chance of a moon, PLANET_MOON: its radius (in the planet's), its orbit's (in the
+// planet's) and its period (s), picks. PLANET_HAZE: the share of its colour the far haze takes (SHIP_HAZE), PLANET_A: how
+// much of the sky behind it hides, PLANET_GLOW: its air's glow's alpha, PLANET_LIGHT: its day side's brightness. PLANET_KINDS: per kind, [its first colour, its
+// second, its air's colour (rgb 0-1), the air's thickness (share of the radius)]: 0 a gas giant, 1 an ocean world, 2 an
+// ice giant, 3 a haze world, 4 a rust desert (the shader's planetSurf by number)
+const PLANET_DEPTH = EVENT_DEPTH.far;
+const PLANET_MS = [130e3, 190e3], PLANET_R = [48, 118], PLANET_TURN = 0.5, PLANET_OFF = 0.3;
+const PLANET_SPIN = [0.03, 0.065], PLANET_CLOUD = 1.6, PLANET_TILT = 0.45, PLANET_LIT = [-0.2, 0.62], PLANET_BACK_P = 0.25, PLANET_BACK = [-0.88, -0.55];
+const PLANET_RING_P = 0.5, PLANET_RING = { in: [1.25, 1.45], out: [1.9, 2.4], open: [0.14, 0.36] };
+const PLANET_MOON_P = 0.55, PLANET_MOON = { r: [0.1, 0.17], d: [1.7, 2.5], per: [45, 80] };
+const PLANET_HAZE = 0.34, PLANET_A = 0.95, PLANET_GLOW = 0.55, PLANET_LIGHT = 0.55;
+const PLANET_KINDS = [
+  [[0.93, 0.83, 0.66], [0.72, 0.46, 0.3], [1, 0.84, 0.62], 0.05], // a gas giant: cream zones, rust belts
+  [[0.06, 0.2, 0.46], [0.34, 0.4, 0.22], [0.42, 0.66, 1], 0.085], // an ocean world: deep sea, green-brown land, blue air
+  [[0.5, 0.82, 0.92], [0.24, 0.48, 0.82], [0.56, 0.88, 1], 0.075], // an ice giant: cyan, deep blue belts
+  [[0.9, 0.62, 0.3], [0.64, 0.4, 0.18], [1, 0.7, 0.36], 0.16], // a haze world: thick orange air
+  [[0.74, 0.4, 0.23], [0.46, 0.25, 0.17], [1, 0.64, 0.5], 0.04], // a rust desert: thin pink dust
+];
+// the space battle (see "Look"): it lasts BATTLE_MS ms (a pick) at BATTLE_DEPTH; its middle within BATTLE_AT of the window's
+// width and height (a pick each), its lines along a course turned up to BATTLE_TILT radians off level, BATTLE_GAP half-lengths
+// apart (a pick), each ship cruising BATTLE_V CSS px a second (a pick) the opposite way to the other side, the two sides
+// starting BATTLE_X half-lengths before their broadside (along the course). A capital's half-length BATTLE_R CSS px (a pick),
+// an escort's BATTLE_ESCORT of it, BATTLE_ESCORT_P the chance each side has one (at least one does). The ships come out of
+// hyperspace BATTLE_ARRIVE ms apart (a pick each, the second side after the first), then fire: a volley (BATTLE_VOLLEY bolts, a
+// pick) every BATTLE_FIRE ms per capital (a pick), its bolts BATTLE_BOLT [length CSS px, speed CSS px/s]; a torpedo every
+// BATTLE_TORP ms per side (a pick), BATTLE_TORP_V CSS px/s, BATTLE_PD the chance point defence stops it; BATTLE_FIGHTERS pairs
+// (a pick) dogfight, each pair one path, the chaser BATTLE_CHASE s behind, firing a tracer every BATTLE_TRACER ms (a pick),
+// BATTLE_DOWN the chance a pair's quarry is shot down. At BATTLE_KILL of its life (a pick) the loser's hull starts to blow up,
+// breaking in two BATTLE_BREAK ms later; the survivors leave BATTLE_LEAVE ms after that. BATTLE_SIDES: each side's colour
+// (rgb 0-1). At most BATTLE_HULLS hulls (a broken one counts two), BATTLE_STREAKS streaks (bolts, tracers, torpedoes, fighters)
+// and BATTLE_BLASTS blasts drawn (the shader has a slot for each)
+const BATTLE_DEPTH = EVENT_DEPTH.far;
+const BATTLE_MS = [80e3, 110e3], BATTLE_AT = [0.22, 0.78], BATTLE_TILT = 0.22, BATTLE_GAP = [2.6, 3.4], BATTLE_V = [2.2, 3.6], BATTLE_X = [2.4, 3.4];
+const BATTLE_R = [32, 46], BATTLE_ESCORT = [0.42, 0.55], BATTLE_ESCORT_P = 0.6, BATTLE_ARRIVE = [900, 1800];
+const BATTLE_VOLLEY = [3, 6], BATTLE_FIRE = [1600, 3400], BATTLE_BOLT = [11, 260];
+const BATTLE_TORP = [7000, 13000], BATTLE_TORP_V = 70, BATTLE_PD = 0.4;
+const BATTLE_FIGHTERS = [2, 4], BATTLE_CHASE = 0.55, BATTLE_TRACER = [500, 1100], BATTLE_DOWN = 0.5;
+const BATTLE_KILL = [0.55, 0.66], BATTLE_BREAK = 4200, BATTLE_LEAVE = 7000;
+const BATTLE_SIDES = [[0.5, 0.78, 1], [1, 0.46, 0.32]];
+const BATTLE_HULLS = 4, BATTLE_STREAKS = 16, BATTLE_BLASTS = 10;
+// the devouring (see "Look"): the lens catches the ship or a planet whose middle comes within DEVOUR_REACH of its Einstein
+// radii (plus half the prey's size), once DEVOUR_MS (its fall, a pick) and the lens's fade still fit in its life. The prey
+// eases off its path over the first DEVOUR_EASE of its fall, winds DEVOUR_TURNS times round as it falls (faster and faster),
+// stretches to 1 + DEVOUR_STRETCH times its length and shrinks into the ring; DEVOUR_WIND: how far its stream winds (radians
+// per e-fold of its radius), DEVOUR_STREAM its alpha. When it is gone the ring flares to 1 + DEVOUR_RING times its light
+// and jets DEVOUR_JET Einstein radii long fire, DEVOUR_JET_A bright, over DEVOUR_FLARE ms. DEVOUR_AIM_P: the chance one
+// starting while the other is up is aimed to cross it
+const DEVOUR_REACH = 3.4, DEVOUR_MS = [12e3, 16e3], DEVOUR_EASE = 0.22, DEVOUR_TURNS = 1.35, DEVOUR_STRETCH = 2.4;
+const DEVOUR_WIND = 1.15, DEVOUR_STREAM = 0.55, DEVOUR_RING = 3, DEVOUR_JET = 4.5, DEVOUR_JET_A = 0.4, DEVOUR_FLARE = 8000, DEVOUR_AIM_P = 0.75;
 // a deploy's rocket (see "Look"): at most ROCKET_N at once (the sky's shader has a slot for each). It rises from just
 // below the window's bottom edge, under the hub (kept within ROCKET_X of the window's width), for ROCKET_MS (a pick),
 // slowing all the way (ease-out, ROCKET_EASE), to ROCKET_TOP of the window's height (a pick); its path leans ROCKET_TILT
@@ -1069,10 +1160,15 @@ export function mapStats() {
   return { avgMs: s.n ? s.sum / s.n : 0, maxMs: s.max, frames: s.frames, comets: I.comets.length, queued: I.cometQ.length,
     heads: cometHeads(), big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length, sky: I.skyGL && I.skyGL.ok ? 'webgl2' : '2d',
     meteor: I.meteors.length, showers: I.showers, meteorIn: I.meteorAt ? Math.round(I.meteorAt - performance.now()) : null,
-    event: { running: I.event ? I.event.name : null, last: I.eventLast, nextIn: I.eventAt ? Math.round(I.eventAt - performance.now()) : null },
-    asteroids: (() => { const e = I.event; if (!e || e.name !== 'asteroids') return null;
+    event: { running: [...I.events.keys()], last: I.eventLast, nextIn: I.eventAt ? Math.round(I.eventAt - performance.now()) : null },
+    asteroids: (() => { const e = evOf('asteroids'); if (!e) return null;
       return { light: e.ev.light.map((v) => Math.round(v * 100) / 100), shown: asteroidsNow().map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.r * 10) / 10, blur: Math.round(r.blur), a: Math.round(r.a * 1e3) / 1e3 })) }; })(),
-    lens: (() => { const l = lensNow(); return l ? { x: Math.round(l.x), y: Math.round(l.y), r: Math.round(l.r * 10) / 10, a: Math.round(l.a * 1e3) / 1e3, src: l.srcs.map((o) => Math.round(o.amp * 1e3) / 1e3) } : null; })(),
+    lens: (() => { const l = lensNow(); return l ? { x: Math.round(l.x), y: Math.round(l.y), r: Math.round(l.r * 10) / 10, a: Math.round(l.a * 1e3) / 1e3, src: l.srcs.map((o) => Math.round(o.amp * 1e3) / 1e3),
+      feed: l.feed ? { rho: Math.round(l.feed.rho), a: Math.round(l.feed.a * 1e3) / 1e3 } : null, flare: Math.round(l.flare * 1e3) / 1e3, jets: Math.round(l.jl), fed: evOf('lens').ev.fed.map((m) => m.k) } : null; })(),
+    planet: (() => { const q = planetNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, kind: q.kind, ring: !!q.ring, moon: !!q.moon,
+      falling: q.fall ? Math.round(q.fall.f * 1e3) / 1e3 : null } : null; })(),
+    battle: (() => { const q = battleNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), reach: Math.round(q.reach), s: Math.round(q.s * 10) / 10, hulls: q.hulls.length,
+      streaks: q.streaks.length, blasts: q.blasts.map((b) => b.kind), kill: Math.round(evOf('battle').ev.sKill * 10) / 10, brk: Math.round(evOf('battle').ev.sBreak * 10) / 10 } : null; })(),
     ship: (() => { const q = shipNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3, dir: [Math.round(q.cs * 1e3) / 1e3, Math.round(q.sn * 1e3) / 1e3], escort: !!q.eo, jump: q.j ? { x: Math.round(q.j.x), y: Math.round(q.j.y), h: Math.round(q.j.h), a: Math.round(q.j.a * 1e3) / 1e3, flash: Math.round(q.j.fl * 1e3) / 1e3, smear: Math.round(q.j.sm * 1e3) / 1e3 } : null } : null; })(),
     warp: (() => { const q = warpNow(); return q ? { a: Math.round(q.a * 1e3) / 1e3, x: Math.round(q.x), y: Math.round(q.y), dir: [Math.round(q.dx * 1e3) / 1e3, Math.round(q.dy * 1e3) / 1e3] } : null; })(),
     far: { running: I.far ? I.far.name : null, label: I.far ? FAR_KINDS.get(I.far.name).label : null, ms: I.far ? I.far.ms : null, nextIn: I.farAt ? Math.round(I.farAt - performance.now()) : null,
@@ -1239,16 +1335,53 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     rest: (on) => { restForce = on == null ? null : !!on; wake(); return resting(); }, battery: (on) => { away.battery = !!on; wake(); },
     meteor: () => { if (!I) return false; I.meteors.push(meteorMake(performance.now())); I.dirty = true; return true; }, // a shooting star now
     shower: () => !!I && shower(performance.now(), null, true), // a meteor shower now
-    // a space event now by name (ignoring EVENT_GAP); no name: the registered ones; null: stop the one running
+    // a space event now by name (ignoring EVENT_GAP and EVENT_MAX, beside any running), skip seconds into it; no name: the
+    // registered ones; null: stop every one running; a name and skip null: stop that one
     event: (n, skip) => { if (n === undefined) return [...EVENTS.keys()]; if (!I) return false; if (n === null) { eventEnd(); return true; }
-      const ok = eventStart(performance.now(), n); if (ok && skip > 0 && I.event.ev && I.event.ev.at != null) I.event.ev.at -= skip * 1000; return ok; },
+      if (skip === null) { eventEnd(n); return true; }
+      const ok = eventStart(performance.now(), n); if (ok && skip > 0) eventSkip(n, skip); return ok; },
     // a far event now by name (web/sky-far.js), skip seconds into it; no name: the kinds; null: stop the one running
     far: (n, skip) => { if (n === undefined) return [...FAR_KINDS.keys()]; if (!I) return false; if (n === null) { farEnd(); return true; }
       const ok = farStart(performance.now(), n); if (ok && skip > 0) I.far.at -= skip * 1000; return ok; },
     // the capital ship now, with the escort (true), without (false) or as a pick (null), skip seconds into its crossing
-    ship: (escort, skip) => { if (!I) return false; shipForce = escort == null ? null : !!escort; const ok = eventStart(performance.now(), 'ship'); shipForce = null; if (ok && skip > 0) I.event.ev.at -= skip * 1000; return ok; },
+    ship: (escort, skip) => { if (!I) return false; shipForce = escort == null ? null : !!escort; const ok = eventStart(performance.now(), 'ship'); shipForce = null; if (ok && skip > 0) eventSkip('ship', skip); return ok; },
+    // a planet now of that kind (PLANET_KINDS' index; null: a pick), skip seconds into its crossing
+    planet: (kind, skip) => { if (!I) return false; planetForce = kind == null ? null : Number(kind); const ok = eventStart(performance.now(), 'planet'); planetForce = null; if (ok && skip > 0) eventSkip('planet', skip); return ok; },
+    // a space battle now, skip seconds into it
+    battle: (skip) => { if (!I) return false; const ok = eventStart(performance.now(), 'battle'); if (ok && skip > 0) eventSkip('battle', skip); return ok; },
+    // a black hole and its prey ('ship' or 'planet') laid to meet in view, both skipped on to lead seconds (default 5) before
+    // it is caught (lead < 0: caught, and that far into its fall); the seconds skipped, or null when they don't meet
+    devour: (kind = 'ship', lead = 5) => {
+      if (!I || !PREY.includes(kind)) return null;
+      // the lens aimed at the prey, or the prey at the lens
+      for (const order of [['lens', kind], [kind, 'lens']]) {
+        eventEnd('lens'); eventEnd(kind);
+        aimForce = true;
+        try { for (const n of order) eventStart(performance.now(), n); } finally { aimForce = false; }
+        const L = evOf('lens'), e = evOf(kind), now = performance.now();
+        if (!L || !e) return null;
+        for (let s = 0; s * 1000 < e.ev.ms; s += 0.25) {
+          const lp = lensPose(L.ev, now + s * 1000), q = e.ev.free(now + s * 1000);
+          if (!lp || !q || lp.sm < 0.98) continue;
+          if (Math.hypot(q.x - lp.x, q.y - lp.y) > DEVOUR_REACH * lp.r + 0.5 * q.r) continue;
+          if (lp.x < 0 || lp.x > I.skyW || lp.y < 0 || lp.y > I.skyH) break;
+          const k = Math.max(0, s - Math.max(0, lead));
+          eventSkip('lens', k); eventSkip(kind, k);
+          if (lead < 0) {
+            devourStep();
+            const F = e.ev.fall;
+            if (!F) return null;
+            eventSkip('lens', -lead); eventSkip(kind, -lead); F.at += lead * 1000;
+            devourStep();
+          }
+          return k - Math.min(0, lead);
+        }
+      }
+      eventEnd('lens'); eventEnd(kind);
+      return null;
+    },
     // the warp drift now, skip seconds into it
-    warp: (skip) => { if (!I) return false; const ok = eventStart(performance.now(), 'warp'); if (ok && skip > 0) I.event.ev.at -= skip * 1000; return ok; },
+    warp:(skip) => { if (!I) return false; const ok = eventStart(performance.now(), 'warp'); if (ok && skip > 0) eventSkip('warp', skip); return ok; },
     // the clock the moon and the sky tint go by (a Date, ms or a date string; null: the real one)
     moon: (d) => { moonForce = d == null ? null : new Date(d); if (I) { I.moon = null; I.sky = null; I.dirty = true; } return I ? moonNow() : null; },
     // the moon's clock at that time (as moon) with the sky's hour at midnight, so a full moon is up: a real eclipse
@@ -1336,8 +1469,8 @@ function createInstance(state) {
     // the streaks showing or about to (meteorMake: the shooting star, a shower's), when the next shooting star is due
     // (0: not yet planned), when the last shower started and how many have
     meteors: [], meteorAt: 0, showerAt: -Infinity, showers: 0,
-    // the space event running ({ name, at, ev }: eventStep; ev is its own state), the last one's name, when the next is due (0: not yet planned)
-    event: null, eventLast: null, eventAt: 0,
+    // the space events running (name -> { name, at, ev }: eventStep; ev is its own state), the last one's name, when the next is due (0: not yet planned)
+    events: new Map(), eventLast: null, eventAt: 0,
     // the far event running ({ name, at, ms, cam, x, y, parts, quick }: farStart), when the next is due (0: not yet
     // planned), the kinds still to show before any repeats (farPick), the kinds switched off (/sky-events) and when to read them again
     far: null, farAt: 0, farBag: [], skyOff: new Set(), skyOffAt: 0,
@@ -1470,7 +1603,7 @@ function stop() {
   cancelAnimationFrame(I.raf); I.raf = 0;
   clearTimeout(I.pace.timer); I.pace.timer = 0;
   I.meteors.length = 0; I.meteorAt = 0; // the next shooting star is planned when the map shows again
-  I.event = null; I.eventAt = 0; // likewise the next space event
+  I.events.clear(); I.eventAt = 0; // likewise the next space event
   I.far = null; I.farAt = 0; // and the next far event
   I.rockets.length = 0;
   if (I.tip) I.tip.style.display = 'none';
@@ -1510,7 +1643,7 @@ if (typeof window !== 'undefined') {
 // a shooting star, a fading ghost, merge sparks, a camera glide, a drag or band, a re-arrange, or what the last draw
 // saw (I.quick: a morph, birth, bump, kick, whirl, relay ring, or a size or level still gliding)
 function quickNow() {
-  const sky = I._dirty || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || !!(I.far && I.far.quick);
+  const sky = I._dirty || I.meteors.length > 0 || I.rockets.length > 0 || I.events.size > 0 || !!(I.far && I.far.quick);
   // with the Map hidden only the sky goes on: the map's own motion waits for it to show again
   if (sky || !I.mapOn) return sky;
   return I.quick || I.alpha > 0.01 || I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 ||
@@ -2497,7 +2630,7 @@ function frame(ts) {
   rocketStep(t0, rest);
   // continuous motion while anything moves (the stars' drift too, even on an empty map), at the pace paceNext
   // sets; otherwise only on change (and a slow tick for age fades)
-  const moving = (!I.still && !tick) || I.meteors.length > 0 || I.rockets.length > 0 || !!I.event || !!I.far ||
+  const moving = (!I.still && !tick) || I.meteors.length > 0 || I.rockets.length > 0 || I.events.size > 0 || !!I.far ||
     (I.mapOn && (I.comets.length > 0 || I.cometQ.length > 0 || I.ghosts.length > 0 || I.bursts.length > 0));
   const hot = I._dirty;
   if (hot || moving || t0 - I.lastDraw > (tick ? REST_TICK_MS - 50 : 250)) {
@@ -3218,50 +3351,71 @@ function eventAt(cam, x, y) {
   const c = skyCam(), sc = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), cam.depth * STAR_ZOOM), k = sc / (cam.sc || sc);
   return [c.mx + (x - cam.mx) * k - (c.cx - cam.cx) * sc, c.my + (y - cam.my) * k - (c.cy - cam.cy) * sc];
 }
-// stop the one running (one more draw clears it)
-function eventEnd() {
-  const e = I.event;
+// the running event of that kind ({ name, at, ev }), or null
+const evOf = (name) => (I && I.events.get(name)) || null;
+// stop the one of that kind (no name: every one running; one more draw clears it)
+function eventEnd(name) {
+  if (name === undefined) { for (const k of [...I.events.keys()]) eventEnd(k); return; }
+  const e = I.events.get(name);
   if (!e) return;
-  const d = EVENTS.get(e.name);
+  const d = EVENTS.get(name);
   if (d && d.end) d.end(e.ev);
-  I.event = null; I.dirty = true;
-  I.eventAt = performance.now() + pickIn(EVENT_GAP);
+  I.events.delete(name); I.dirty = true;
 }
-// start `name` at t (ms), replacing any running; false when it is not registered or the map is under reduced motion
+// start `name` at t (ms) beside the others running (replacing one of its own kind); false when it is not registered or
+// the map is under reduced motion
 function eventStart(t, name) {
   const d = EVENTS.get(name);
   if (!d || I.still) return false;
-  if (I.event) eventEnd();
-  I.event = { name, at: t, ev: d.start(t) }; I.eventLast = name; I.dirty = true;
-  skyLog(name, EVENT_LABELS[name] || name, null, d.ms || I.event.ev.ms);
+  if (I.events.has(name)) eventEnd(name);
+  const e = { name, at: t, ev: null };
+  e.ev = d.start(t);
+  I.events.set(name, e); I.eventLast = name; I.dirty = true;
+  skyLog(name, EVENT_LABELS[name] || name, null, d.ms || e.ev.ms);
   return true;
 }
+// tests: move the running `name` s seconds on (as if it started that much earlier)
+function eventSkip(name, s) {
+  const e = evOf(name);
+  if (!e || !e.ev) return;
+  e.at -= s * 1000;
+  if (e.ev.at != null) e.ev.at -= s * 1000;
+  if (EVENTS.get(name).skip) EVENTS.get(name).skip(e.ev, s * 1000);
+}
 // what the log calls each space event
-const EVENT_LABELS = { nebula: 'Nebula drift', asteroids: 'Asteroid field', lens: 'Gravity lens (a black hole)', ship: 'Capital ship (out of hyperspace)', warp: 'Warp drift' };
-// the next kind by weight, never the one shown last (unless it is the only one), never one switched off (null: none left)
+const EVENT_LABELS = { nebula: 'Nebula drift', asteroids: 'Asteroid field', lens: 'Gravity lens (a black hole)', ship: 'Capital ship (out of hyperspace)', warp: 'Warp drift',
+  planet: 'Planet (far, with its air)', battle: 'Space battle' };
+// the next kind by weight, never one running, never the one shown last (unless it is the only one), never one switched
+// off (null: none left); a kind that plays with one running weighs EVENT_PAIR times more (prey for a black hole, a
+// black hole for prey), so the sky's sights meet
 function eventPick() {
-  const on = [...EVENTS.keys()].filter((k) => !I.skyOff.has(k));
+  const on = [...EVENTS.keys()].filter((k) => !I.skyOff.has(k) && !I.events.has(k));
   const ks = on.filter((k) => k !== I.eventLast);
   const pool = ks.length ? ks : on;
   if (!pool.length) return null;
-  let w = Math.random() * pool.reduce((a, k) => a + EVENTS.get(k).weight, 0);
-  for (const k of pool) if ((w -= EVENTS.get(k).weight) < 0) return k;
+  const lens = I.events.has('lens'), prey = PREY.some((k) => I.events.has(k));
+  const wt = (k) => EVENTS.get(k).weight * ((lens && PREY.includes(k)) || (prey && k === 'lens') ? EVENT_PAIR : 1);
+  let w = Math.random() * pool.reduce((a, k) => a + wt(k), 0);
+  for (const k of pool) if ((w -= wt(k)) < 0) return k;
   return pool[pool.length - 1];
 }
-// each frame: none while resting or under reduced motion (a running one ends, none planned); otherwise the running one
-// steps until it says it is over, and the next comes EVENT_GAP after (or after the map woke), once none runs
+// each frame: none while resting or under reduced motion (the running ones end, none planned); otherwise every one running
+// steps until it says it is over, then the black hole's pull (devourStep); the next comes EVENT_GAP after the last
+// started (or after the map woke) while fewer than EVENT_MAX run
 function eventStep(t, rest) {
   if (I.still || rest) {
-    if (I.event) { eventEnd(); }
+    if (I.events.size) eventEnd();
     I.eventAt = 0;
     return;
   }
-  if (I.event) {
-    if (EVENTS.get(I.event.name).step(I.event.ev, t) === false) eventEnd();
-    return;
-  }
+  for (const e of [...I.events.values()]) if (EVENTS.get(e.name).step(e.ev, t) === false) eventEnd(e.name);
+  devourStep(t);
   if (!I.eventAt) I.eventAt = t + pickIn(EVENT_GAP);
-  else if (t >= I.eventAt && EVENTS.size) { const k = eventPick(); if (k) eventStart(t, k); else I.eventAt = t + pickIn(EVENT_GAP); }
+  else if (t >= I.eventAt && EVENTS.size) {
+    const k = I.events.size < EVENT_MAX ? eventPick() : null;
+    if (k) eventStart(t, k);
+    I.eventAt = t + pickIn(EVENT_GAP);
+  }
 }
 // ---------- the nebula drift (see "Look", NEBULA_*) ----------
 // start: the cloud's palette, size and straight path across the window at the far layer's depth, laid in CSS px of the
@@ -3282,8 +3436,8 @@ registerEvent('nebula', {
 // the cloud as it is now, in CSS px of the window (null when none runs): its middle (x, y), long half-axis r, turn and
 // aspect, seed, palette (index, colours), age (s) and alpha a (the fade at the ends of its life); the shader draws it
 function nebulaNow() {
-  const e = I.event;
-  if (!e || e.name !== 'nebula') return null;
+  const e = evOf('nebula');
+  if (!e) return null;
   const ev = e.ev, age = Math.max(0, performance.now() - ev.at), s = age / 1000;
   const [x, y] = eventAt(ev.cam, ev.x + ev.vx * s, ev.y + ev.vy * s);
   const k = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), EVENT_DEPTH.far * STAR_ZOOM) / ev.cam.sc;
@@ -3329,8 +3483,8 @@ registerEvent('asteroids', {
 // the rocks in view now, far to near, at most ASTEROID_N, in CSS px of the window: middle (x, y), long radius r, edge blur,
 // alpha a (its age's fade-in), spin rot, aspect asp and seed; the shader draws them, the sharp ones before the close one
 function asteroidsNow() {
-  const e = I.event;
-  if (!e || e.name !== 'asteroids') return [];
+  const e = evOf('asteroids');
+  if (!e) return [];
   const ev = e.ev, age = Math.max(0, performance.now() - ev.at) / 1000, W = I.skyW || 1, H = I.skyH || 1, out = [];
   const fin = Math.min(1, age / ASTEROID_FADE), fade = fin * fin * (3 - 2 * fin);
   for (const o of ev.rocks) {
@@ -3352,28 +3506,65 @@ registerEvent('lens', {
     const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(LENS_DEPTH), ms = pickIn(LENS_MS), R = pickIn(LENS_R);
     const ang = Math.atan2(STAR_DIR[1], STAR_DIR[0]) + (rnd() * 2 - 1) * LENS_TURN, sg = rnd() < 0.5 ? -1 : 1;
     const dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg;
-    const len = 2 * (0.575 * (Math.abs(W * dx) + Math.abs(H * dy)) + LENS_PAD * R), off = (rnd() * 2 - 1) * LENS_OFF * H;
+    const len = 2 * (0.575 * (Math.abs(W * dx) + Math.abs(H * dy)) + LENS_PAD * R);
+    let off = (rnd() * 2 - 1) * LENS_OFF * H;
+    const phi = rnd() * TAU, srcs = LENS_SRC.map((o) => ({ dir: rnd() * TAU, miss: pickIn(o.miss) * (rnd() < 0.5 ? -1 : 1), at: pickIn(o.at), rot: rnd() * TAU }));
+    // prey already up: often its path is laid to cross the prey's
+    const prey = PREY.map(evOf).filter((q) => q && q.ev && !q.ev.fall);
+    if (prey.length && (aimForce || rnd() < DEVOUR_AIM_P)) {
+      const q = prey[Math.floor(rnd() * prey.length)].ev;
+      const o = aimAt(cam.mx, cam.my, dx, dy, -len / 2, len / (ms / 1000), (s) => q.free(t + s * 1000), (ms - DEVOUR_MS[1] - LENS_FADE) / 1000 - 3);
+      if (o != null && Math.abs(o) < 0.5 * H) off = o;
+    }
     return { at: t, ms, cam, R, x0: cam.mx - dx * len / 2 - dy * off, y0: cam.my - dy * len / 2 + dx * off, vx: dx * len / (ms / 1000), vy: dy * len / (ms / 1000),
-      phi: rnd() * TAU, srcs: LENS_SRC.map((o) => ({ dir: rnd() * TAU, miss: pickIn(o.miss) * (rnd() < 0.5 ? -1 : 1), at: pickIn(o.at), rot: rnd() * TAU })) };
+      phi, srcs, jet: rnd() * TAU, fed: [] };
   },
   step(ev, t) { return t - ev.at < ev.ms; },
 });
+// the lens's place and size at `now` (ms), in CSS px of the window as the camera is now (null outside its life)
+function lensPose(ev, now) {
+  const age = Math.max(0, now - ev.at), fade = Math.min(1, age / LENS_FADE, (ev.ms - age) / LENS_FADE);
+  if (fade <= 0) return null;
+  const sm = fade * fade * (3 - 2 * fade), s = age / 1000, [x, y] = eventAt(ev.cam, ev.x0 + ev.vx * s, ev.y0 + ev.vy * s);
+  return { x, y, sm, r: ev.R * sm * Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), LENS_DEPTH * STAR_ZOOM) / ev.cam.sc };
+}
 // the lens as it is now, in CSS px of the window (null when none runs): its middle (x, y), Einstein radius r, size share a (it
 // grows from nothing over LENS_FADE at the ends of its life), its ring's bright side phi, and its galaxies: each one's place
-// in the lens's plane from the lens's middle (bx, by), size sig, light amp, turn rot and aspect asp
+// in the lens's plane from the lens's middle (bx, by), size sig, light amp, turn rot and aspect asp; then what it is eating:
+// feed, the stream torn off the prey falling in (its distance rho and angle th from the middle, the way it winds w, its width,
+// alpha a and colour), or null; and after a meal the flare (0-1: the ring's extra light and the jets'), the jets' axis jet,
+// length jl and dark base jb (CSS px), and the clock t (s)
 function lensNow() {
-  const e = I.event;
-  if (!e || e.name !== 'lens') return null;
-  const ev = e.ev, age = Math.max(0, performance.now() - ev.at), s = age / 1000, f = age / ev.ms;
-  const fade = Math.min(1, age / LENS_FADE, (ev.ms - age) / LENS_FADE);
-  if (fade <= 0) return null;
-  const sm = fade * fade * (3 - 2 * fade), [x, y] = eventAt(ev.cam, ev.x0 + ev.vx * s, ev.y0 + ev.vy * s);
-  const r = ev.R * sm * Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), LENS_DEPTH * STAR_ZOOM) / ev.cam.sc;
+  const e = evOf('lens');
+  if (!e) return null;
+  const ev = e.ev, now = performance.now(), age = Math.max(0, now - ev.at), f = age / ev.ms, L = lensPose(ev, now);
+  if (!L) return null;
+  const { x, y, r, sm } = L;
   const srcs = LENS_SRC.map((o, i) => {
     const q = ev.srcs[i], u = LENS_SWEEP * (f - q.at), c = Math.cos(q.dir), n = Math.sin(q.dir);
     return { bx: (q.miss * -n + u * c) * r, by: (q.miss * c + u * n) * r, sig: o.sig * r, amp: o.amp * Math.exp(-((u / o.w) ** 2)), rot: q.rot, asp: o.asp };
   });
-  return { x, y, r, a: sm, phi: ev.phi, srcs };
+  // the stream: from the prey falling in (the last one caught), widening as it is torn up
+  let feed = null;
+  for (const k of PREY) {
+    const pe = evOf(k);
+    if (!pe || !pe.ev.fall) continue;
+    const q = k === 'ship' ? shipNow() : planetNow();
+    if (!q || !q.fall) continue;
+    const ff = q.fall.f, size = k === 'ship' ? q.r * 0.32 : q.r * 0.55;
+    feed = { rho: Math.hypot(q.x - x, q.y - y), th: Math.atan2(q.y - y, q.x - x), w: pe.ev.fall.w, width: Math.max(2, size),
+      a: DEVOUR_STREAM * clamp((ff - 0.05) / 0.3, 0, 1), rgb: k === 'ship' ? [1, 0.58, 0.32] : PLANET_KINDS[pe.ev.kind][2] };
+  }
+  // the flare after each meal: a quick rise and a slow fall; the jets run out, then go dark from their base
+  let flare = 0, jl = 0, jb = 0;
+  for (const m of ev.fed) {
+    const s = (now - m.at) / 1000;
+    if (s < 0 || s * 1000 > DEVOUR_FLARE) continue;
+    flare = Math.max(flare, clamp(s / 0.35, 0, 1) * Math.exp(-s / 2.8));
+    jl = Math.max(jl, DEVOUR_JET * r * (1 - Math.exp(-s / 0.9)));
+    jb = Math.max(jb, DEVOUR_JET * r * clamp((s - 3.2) / 4.5, 0, 1) ** 1.5);
+  }
+  return { x, y, r, a: sm, phi: ev.phi, srcs, feed, flare, jet: ev.jet, jl, jb, t: age / 1000 };
 }
 // ---------- the distant capital ship (see "Look", SHIP_*) ----------
 // start: the ship's size, its straight, nearly level path across the window at SHIP_DEPTH (eventCam), as the camera is now, from
@@ -3389,11 +3580,23 @@ registerEvent('ship', {
     const escort = shipForce != null ? shipForce : rnd() < SHIP_ESCORT_P;
     const eo = escort ? [-pickIn(SHIP_ESCORT_BACK), (rnd() < 0.5 ? -1 : 1) * pickIn(SHIP_ESCORT_SIDE), pickIn(SHIP_ESCORT_SCALE), rnd()] : null;
     const proj = 0.575 * (Math.abs(W * dx) + Math.abs(H * dy)), rear = (escort ? 2.6 : 1.3) * R, len = 2 * proj + rear + 1.2 * R;
-    const off = (rnd() * 2 - 1) * SHIP_OFF * H, edge = 0.5 * (Math.abs(W * dx) + Math.abs(H * dy)), aj = edge * (2 * pickIn(SHIP_JUMP_AT) - 1);
+    let off = (rnd() * 2 - 1) * SHIP_OFF * H;
+    const edge = 0.5 * (Math.abs(W * dx) + Math.abs(H * dy)), aj = edge * (2 * pickIn(SHIP_JUMP_AT) - 1);
     const v = len / (ms / 1000), a1 = proj + 1.2 * R, run = Math.max(10, (a1 - (aj - SHIP_BOW * R) - SHIP_JUMP_B * R) / v);
-    return { at: t, ms: SHIP_JUMP_OPEN + run * 1000, cam, R, dx, dy, x0: cam.mx - dy * off, y0: cam.my + dx * off, aj, v, eo, seed: rnd() };
+    const seed = rnd();
+    // a black hole up: often its course is laid to cross the hole's
+    const L = evOf('lens');
+    if (L && L.ev && (aimForce || rnd() < DEVOUR_AIM_P)) {
+      const o = aimAt(cam.mx, cam.my, dx, dy, aj + (SHIP_JUMP_B - SHIP_BOW) * R - (v * SHIP_JUMP_OPEN) / 1000, v, (s) => lensPose(L.ev, t + s * 1000),
+        (L.ev.ms - (t - L.ev.at) - DEVOUR_MS[1] - LENS_FADE) / 1000 - 3);
+      if (o != null && Math.abs(o) < 0.48 * H) off = o;
+    }
+    const ev = { at: t, ms: SHIP_JUMP_OPEN + run * 1000, cam, R, dx, dy, x0: cam.mx - dy * off, y0: cam.my + dx * off, aj, v, eo, seed, fall: null };
+    // where it would be at `now` on its own course, for the black hole (null while it comes out of the rift)
+    ev.free = (now) => { const q = shipPose(ev, now); return q && (!q.j || now - ev.at > SHIP_JUMP_OPEN + 1500) ? q : null; };
+    return ev;
   },
-  step(ev, t) { return t - ev.at < ev.ms; },
+  step(ev, t) { return !!ev.fall || t - ev.at < ev.ms; },
 });
 // the ship as it is now, in CSS px of the window (null when none runs): its middle (x, y), half-length r (with the camera's zoom at its
 // depth), alpha a (it fades out over SHIP_FADE at the end of its life; it comes in out of the rift), its heading (cs, sn; unit),
@@ -3402,10 +3605,19 @@ registerEvent('ship', {
 // and the clock (t, s since it began opening). Before the bow breaks out its middle sits SHIP_BOW half-lengths behind the rift
 // (all of it is still behind, unseen); after, the lead it came out with (SHIP_JUMP_B half-lengths) runs down to its cruise
 const SHIP_BOW = 1.05; // the bow's tip, in half-lengths ahead of the middle
+// (all at `now`, ms; shipPose is its own course, shipNow with the black hole's pull: fall, heat 0-1 and the smear sm)
 function shipNow() {
-  const e = I.event;
-  if (!e || e.name !== 'ship') return null;
-  const ev = e.ev, age = Math.max(0, performance.now() - ev.at), out = (age - SHIP_JUMP_OPEN) / 1000, s = Math.max(0, out);
+  const e = evOf('ship');
+  if (!e) return null;
+  const ev = e.ev, now = performance.now(), q = shipPose(ev, now);
+  if (!ev.fall) return q;
+  // caught: off its course into the spiral, its heading turning the way it falls, stretched along it and heating
+  const F = ev.fall, b = F.q0, p = fallPose(F, q, now), p1 = fallPose(F, null, now), p2 = fallPose(F, null, now + 80);
+  const h0 = Math.atan2(b.sn, b.cs), h = h0 + angDiff(Math.atan2(p2.y - p1.y, p2.x - p1.x), h0) * p.ease;
+  return { ...b, x: p.x, y: p.y, r: b.r * p.sc, cs: Math.cos(h), sn: Math.sin(h), j: null, sm: p.st - 1, heat: p.heat, fall: p };
+}
+function shipPose(ev, now) {
+  const age = Math.max(0, now - ev.at), out = (age - SHIP_JUMP_OPEN) / 1000, s = Math.max(0, out);
   const fade = Math.min(1, (ev.ms - age) / SHIP_FADE);
   if (fade <= 0) return null;
   const lead = Math.exp((-s * 1000) / SHIP_JUMP_TAU), al = ev.aj - SHIP_BOW * ev.R + ev.v * s + SHIP_JUMP_B * ev.R * (1 - lead);
@@ -3436,13 +3648,446 @@ registerEvent('warp', {
 // the warp as it is now (null when none runs): the stretch share a (0-1, eased in and out), its point (x, y, CSS px of the window,
 // with the camera) and direction (dx, dy; unit)
 function warpNow() {
-  const e = I.event;
-  if (!e || e.name !== 'warp') return null;
+  const e = evOf('warp');
+  if (!e) return null;
   const ev = e.ev, f = clamp((performance.now() - ev.at) / ev.ms, 0, 1);
   const a = clamp(f / WARP_IN, 0, 1) * clamp((1 - f) / WARP_OUT, 0, 1);
   if (a <= 0) return null;
   const [x, y] = eventAt(ev.cam, ev.x, ev.y);
   return { a: a * a * (3 - 2 * a), x, y, dx: ev.dx, dy: ev.dy };
+}
+// ---------- one sky: aiming one event at another, and the black hole's pull (see "Look", DEVOUR_*) ----------
+const sm01 = (v) => { const q = clamp(v, 0, 1); return q * q * (3 - 2 * q); };
+const angDiff = (a, b) => ((((a - b) % TAU) + 3 * Math.PI) % TAU) - Math.PI; // a - b, within -pi..pi
+let aimForce = false; // tests (__map.devour): always aim
+// the offset across a straight path (through the window's middle mx, my along the unit dx, dy; its mover at a0 + v s along it,
+// s seconds from now) that meets a target whose place s seconds from now is at(s) ({ x, y } or null), within sMax s; null: none
+// (the meeting in view: AIM_IN of the window's width and height in from its edges; tried from a few first guesses)
+const AIM_IN = [0.14, 0.18], AIM_TRY = [0.4, 0.25, 0.55, 0.7, 0.15, 0.85];
+function aimAt(mx, my, dx, dy, a0, v, at, sMax) {
+  if (!(sMax > 4) || !(v > 0)) return null;
+  const W = I.skyW || 1, H = I.skyH || 1;
+  next: for (const s0 of AIM_TRY) {
+    let s = sMax * s0, off = null, P = null;
+    for (let i = 0; i < 6; i++) {
+      P = at(s);
+      if (!P) continue next;
+      const rx = P.x - mx, ry = P.y - my;
+      off = -rx * dy + ry * dx;
+      s = (rx * dx + ry * dy - a0) / v;
+      if (!(s > 3) || s > sMax) continue next;
+    }
+    P = at(s);
+    if (P && P.x > AIM_IN[0] * W && P.x < (1 - AIM_IN[0]) * W && P.y > AIM_IN[1] * H && P.y < (1 - AIM_IN[1]) * H) return off;
+  }
+  return null;
+}
+// where prey caught at F (devourStep) is at `now` (ms): spiralling in round the hole (F.hx, hy, hr: the hole's last place and
+// Einstein radius, or where it is now), off its own place q (null: none) over the first DEVOUR_EASE of its fall; f its share
+// of the fall, ease how far off its course it is, th and rho its angle and distance from the hole, sc its size share, st
+// its stretch and heat (0-1)
+function fallPose(F, q, now) {
+  const L = evOf('lens'), lp = L ? lensPose(L.ev, now) : null;
+  const hx = lp ? lp.x : F.hx, hy = lp ? lp.y : F.hy, hr = lp ? lp.r : F.hr;
+  const f = clamp((now - F.at) / F.ms, 0, 1), g = Math.pow(f, 1.6);
+  const rho = F.d0 + (hr * LENS_RING_R - F.d0) * g, th = F.a0 + F.w * TAU * DEVOUR_TURNS * Math.pow(f, 1.35);
+  let x = hx + rho * Math.cos(th), y = hy + rho * Math.sin(th);
+  const ease = sm01(f / DEVOUR_EASE);
+  if (q) { x = q.x + (x - q.x) * ease; y = q.y + (y - q.y) * ease; }
+  return { x, y, f, ease, th, rho, hx, hy, sc: 1 - 0.94 * Math.pow(f, 1.7), st: 1 + DEVOUR_STRETCH * f * f, heat: sm01((f - 0.12) / 0.75) };
+}
+// each frame: the lens (when it is up, whole, and has time left for a fall) catches the prey that comes within DEVOUR_REACH;
+// a prey falling follows the hole and, at the end of its fall, is gone into it (the lens remembers the meal: its flare)
+function devourStep() {
+  const L = evOf('lens'), now = performance.now(), lp = L ? lensPose(L.ev, now) : null;
+  for (const k of PREY) {
+    const e = evOf(k);
+    if (!e || !e.ev) continue;
+    const F = e.ev.fall;
+    if (F) {
+      if (lp) { F.hx = lp.x; F.hy = lp.y; F.hr = lp.r; }
+      if (now - F.at >= F.ms) {
+        if (L) L.ev.fed.push({ at: F.at + F.ms, k });
+        eventEnd(k);
+      }
+      continue;
+    }
+    if (!lp || lp.sm < 0.98 || I.skyOff.has('devour') || L.ev.ms - (now - L.ev.at) < DEVOUR_MS[1] + LENS_FADE + 1500) continue;
+    const q = e.ev.free(now);
+    if (!q) continue;
+    const dx = q.x - lp.x, dy = q.y - lp.y, d = Math.hypot(dx, dy);
+    if (d > DEVOUR_REACH * lp.r + 0.5 * q.r) continue;
+    // it winds round the way its own motion carries it past the hole
+    const q2 = e.ev.free(now + 1000) || q, cr = dx * (q2.y - q.y) - dy * (q2.x - q.x);
+    e.ev.fall = { at: now, ms: pickIn(DEVOUR_MS), d0: d, a0: Math.atan2(dy, dx), w: cr >= 0 ? 1 : -1, hx: lp.x, hy: lp.y, hr: lp.r, q0: q };
+    I.dirty = true;
+    skyLog('devour', k === 'ship' ? 'Black hole swallows the capital ship' : 'Black hole swallows a planet', null, e.ev.fall.ms, q.x, q.y);
+  }
+}
+// ---------- the planet (see "Look", PLANET_*) ----------
+// start: its kind, size, rings and moon, its star's direction, its axis and spin, and its straight path across the window at
+// PLANET_DEPTH (eventCam), from just off one side to just off the other, as the camera is now (often aimed at a black hole up)
+let planetForce = null; // tests (__map.planet): its kind (null: a pick)
+registerEvent('planet', {
+  start(t) {
+    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(PLANET_DEPTH), ms = pickIn(PLANET_MS);
+    const pk = Math.floor(rnd() * PLANET_KINDS.length), kind = planetForce != null ? planetForce : pk;
+    const R = pickIn(PLANET_R) * [1.12, 0.9, 1, 0.95, 0.74][kind];
+    const ang = (rnd() * 2 - 1) * PLANET_TURN, sg = rnd() < 0.5 ? -1 : 1, dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg;
+    const ring = (kind === 0 || kind === 2) && rnd() < PLANET_RING_P ? { in: pickIn(PLANET_RING.in), out: pickIn(PLANET_RING.out) } : null;
+    const open = pickIn(PLANET_RING.open) * (rnd() < 0.5 ? -1 : 1);
+    const moon = rnd() < PLANET_MOON_P ? { r: pickIn(PLANET_MOON.r), d: pickIn(PLANET_MOON.d) * (ring ? 1.2 : 1),
+      w: (TAU / pickIn(PLANET_MOON.per)) * (rnd() < 0.5 ? -1 : 1), ph: rnd() * TAU } : null;
+    const reach = R * Math.max(1 + 4 * PLANET_KINDS[kind][3], ring ? ring.out : 1, moon ? moon.d + moon.r : 1) + 6;
+    const len = 2 * (0.575 * (Math.abs(W * dx) + Math.abs(H * dy)) + reach), v = len / (ms / 1000);
+    const back = rnd() < PLANET_BACK_P, lz = back ? pickIn(PLANET_BACK) : pickIn(PLANET_LIT);
+    const la = -Math.PI / 2 + (rnd() * 2 - 1) * 1.9, lc = Math.sqrt(1 - lz * lz);
+    const ev = { at: t, ms, cam, R, dx, dy, off: (rnd() * 2 - 1) * PLANET_OFF * H, len, v, kind, reach, ring, open, moon,
+      tilt: (rnd() * 2 - 1) * PLANET_TILT, spin: pickIn(PLANET_SPIN) * (rnd() < 0.5 ? -1 : 1), ph: rnd() * TAU, seed: rnd(),
+      light: [Math.cos(la) * lc, Math.sin(la) * lc, lz], fall: null };
+    const L = evOf('lens');
+    if (L && L.ev && (aimForce || rnd() < DEVOUR_AIM_P)) {
+      const o = aimAt(cam.mx, cam.my, dx, dy, -len / 2, v, (s) => lensPose(L.ev, t + s * 1000), (L.ev.ms - (t - L.ev.at) - DEVOUR_MS[1] - LENS_FADE) / 1000 - 3);
+      if (o != null && Math.abs(o) < 0.48 * H) ev.off = o;
+    }
+    ev.free = (now) => planetPose(ev, now);
+    return ev;
+  },
+  step(ev, t) { return !!ev.fall || t - ev.at < ev.ms; },
+});
+// the planet on its own path at `now` (ms), in CSS px of the window (null outside its life, unless any): its middle (x, y),
+// radius r, its turn (spin, radians) and its moon's place round it (x, y across and up its axis's roll, in its radii; z > 0
+// in front of it) and size, or null
+function planetPose(ev, now, any) {
+  const age = now - ev.at;
+  if (!any && (age < 0 || age > ev.ms)) return null;
+  const s = age / 1000, al = -ev.len / 2 + ev.v * s;
+  const [x, y] = eventAt(ev.cam, ev.cam.mx + ev.dx * al - ev.dy * ev.off, ev.cam.my + ev.dy * al + ev.dx * ev.off);
+  const k = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), PLANET_DEPTH * STAR_ZOOM) / ev.cam.sc;
+  let moon = null;
+  if (ev.moon) {
+    // its orbit lies in the planet's equator, seen from `open` over it
+    const m = ev.moon, ph = m.ph + m.w * s, c = Math.cos(ph), sn = Math.sin(ph);
+    moon = { x: m.d * c, y: m.d * sn * ev.open, z: m.d * sn, r: m.r };
+  }
+  return { x, y, r: ev.R * k, spin: ev.ph + ev.spin * s, moon };
+}
+// the planet as it is now (null when none runs): planetPose's, its kind, rings, view over its equator (open), axis's roll
+// (tilt), star (light: x, y on the screen, z towards us) and seed; caught by the black hole, its place on the fall, size
+// shrinking, tide (the unit way to the hole), stretch st and heat (0-1), and fall (fallPose's)
+function planetNow() {
+  const e = evOf('planet');
+  if (!e) return null;
+  const ev = e.ev, now = performance.now();
+  let q = planetPose(ev, now);
+  if (ev.fall) {
+    const p = fallPose(ev.fall, q, now), b = planetPose(ev, now, true), tx = p.hx - p.x, ty = p.hy - p.y, tl = Math.hypot(tx, ty) || 1;
+    q = { ...b, x: p.x, y: p.y, r: b.r * p.sc, tide: [tx / tl, ty / tl], st: p.st, heat: p.heat, fall: p };
+  }
+  return q && { ...q, kind: ev.kind, ring: ev.ring, open: ev.open, tilt: ev.tilt, light: ev.light, seed: ev.seed };
+}
+// ---------- the space battle (see "Look", BATTLE_*) ----------
+// a hull's turrets (where its bolts leave) and its hangar (where its fighters come and go), in its half-lengths (SHIP_BOXES)
+const BT_TURRETS = [[0.25, -0.112], [0.33, -0.098], [-0.2, -0.157], [0.06, -0.16], [-0.56, -0.165]], BT_HANGAR = [-0.12, 0.15];
+// start: where it happens (farPlace: clear of the orbs and hubs), its line, the two sides' ships (when each comes out of its
+// rift, its course and lane), who loses and when (it starts to blow up at sKill, breaks at sBreak, its halves' last bursts at
+// ends), when the rest leave, and the fighters' pairs; everything after is battleStep's, by the battle's clock (s)
+registerEvent('battle', {
+  start(t) {
+    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(BATTLE_DEPTH);
+    const R = pickIn(BATTLE_R), gap = pickIn(BATTLE_GAP) * R, X = pickIn(BATTLE_X) * R;
+    const at = farPlace(Math.min(X + gap, Math.min(W, H) / 4)) || [W * pickIn(BATTLE_AT), H * pickIn(BATTLE_AT)];
+    const ang = (rnd() * 2 - 1) * BATTLE_TILT, dx = Math.cos(ang), dy = Math.sin(ang);
+    const life = pickIn(BATTLE_MS) / 1000, sKill = life * pickIn(BATTLE_KILL), sBreak = sKill + BATTLE_BREAK / 1000;
+    const loser = rnd() < 0.5 ? 0 : 1, escSide = rnd() < 0.8 ? (rnd() < 0.5 ? 0 : 1) : -1, first = rnd() < 0.5 ? 0 : 1;
+    const ships = [];
+    let s = 0.3;
+    for (const side of [first, 1 - first]) {
+      // side 0 goes along the line, side 1 back; each in its lane, its middle at along a(s) = aOut + sg v (s - sOut)
+      const sg = side === 0 ? 1 : -1, v = pickIn(BATTLE_V), lane = (side === 0 ? -1 : 1) * gap / 2;
+      const add = (scale, back, across) => {
+        ships.push({ side, sg, v, R: R * scale, aOut: -sg * (X + back * R), c: lane + Math.sign(lane) * across * R, sOut: s + SHIP_JUMP_OPEN / 1000,
+          seed: rnd(), esc: scale < 1, sLeave: Infinity, halves: null, next: 0 });
+        s += pickIn(BATTLE_ARRIVE) / 1000;
+      };
+      add(1, 0, 0);
+      if (escSide === side) add(pickIn(BATTLE_ESCORT), 1.9, 0.45);
+      s += (pickIn(BATTLE_ARRIVE) / 1000) * 0.8;
+    }
+    const lose = ships.findIndex((q) => q.side === loser && !q.esc);
+    let k = 0;
+    // the loser's escort flees soon after; the winners leave once it is over
+    ships.forEach((q, i) => { if (i !== lose) q.sLeave = q.side === loser ? sBreak + 2.6 : sBreak + BATTLE_LEAVE / 1000 + 1.3 * k++; });
+    const ends = [sBreak + pickIn([10, 14]), sBreak + pickIn([14, 18])];
+    const end = Math.max(...ships.map((q) => (q.sLeave === Infinity ? 0 : q.sLeave + 4.6)), ends[1] + 6.6);
+    const fire0 = Math.max(...ships.map((q) => q.sOut)) + 2.2, pairs = [];
+    for (let i = Math.floor(pickIn([BATTLE_FIGHTERS[0], BATTLE_FIGHTERS[1] + 1])); i > 0; i--) {
+      pairs.push({ q: rnd() < 0.5 ? 0 : 1, ax: pickIn([1.4, 2.6]) * R, ay: pickIn([0.25, 0.42]) * gap, ox: pickIn([-0.6, 0.6]) * R,
+        w1: pickIn([0.32, 0.5]) * (rnd() < 0.5 ? -1 : 1), k2: rnd() < 0.5 ? 2 : 1.5, p1: rnd() * TAU, p2: rnd() * TAU,
+        launch: [fire0 - 1 + rnd() * 3, fire0 + rnd() * 3], down: [rnd() < BATTLE_DOWN ? pickIn([fire0 + 8, sKill]) : null, null], popped: [false, false],
+        next: fire0 + rnd() * 2 });
+    }
+    return { at: t, ms: end * 1000, cam, x: at[0], y: at[1], dx, dy, R, gap, ships, lose, loser, sKill, sBreak, ends, fire0, pairs,
+      shots: [], blasts: [], torpAt: [fire0 + pickIn([2, 6]), fire0 + pickIn([4, 9])], killed: false };
+  },
+  step(ev, t) { battleStep(ev, (t - ev.at) / 1000); return t - ev.at < ev.ms; },
+});
+// ship i of the battle at s (its clock, s): the hulls to draw (none before its rift opens or once gone, two once broken), laid
+// in CSS px of the window as the camera was at the start; each { x, y, r, a, cs, sn, flip, seed, j (its rift: x, y, h, a, fl,
+// cut (1: the hull shows ahead of it, -1: behind), t; or null), sm (its smear), side, half (0 whole, 1 the bow's, -1 the
+// stern's), cut (where it broke, in its half-lengths) and heat (0-1) }
+function btHull(ev, i, s) {
+  const q = ev.ships[i], hx = q.sg * ev.dx, hy = q.sg * ev.dy, nx = -ev.dy, ny = ev.dx;
+  const at = (a) => [ev.x + ev.dx * a + nx * q.c, ev.y + ev.dy * a + ny * q.c];
+  const base = { r: q.R, a: 1, cs: hx, sn: hy, flip: hx < 0 ? -1 : 1, seed: q.seed, j: null, sm: 0, side: q.side, half: 0, cut: 0, heat: 0 };
+  const open = s - (q.sOut - SHIP_JUMP_OPEN / 1000);
+  if (open < 0) return [];
+  // broken: two halves tumbling apart about the break, each until its last burst
+  if (q.halves) {
+    return q.halves.filter((h) => s < h.end).map((h) => {
+      const u = s - ev.sBreak, th = h.w * u, c = Math.cos(th), sn = Math.sin(th);
+      const ox = h.ox * c - h.oy * sn, oy = h.ox * sn + h.oy * c;
+      return { ...base, x: h.px + h.vx * u + ox, y: h.py + h.vy * u + oy, cs: hx * c - hy * sn, sn: hx * sn + hy * c, half: h.h, cut: h.cut,
+        heat: 0.9 * Math.max(0.35, 1 - u / 9) };
+    });
+  }
+  // out of its rift as the capital ship comes (shipPose): from behind it, ahead of its cruise, slowing to it
+  const ms = open * 1000, out = (ms - SHIP_JUMP_OPEN) / 1000, ss = Math.max(0, out), lead = Math.exp((-ss * 1000) / SHIP_JUMP_TAU);
+  const cruise = q.aOut + q.sg * q.v * (s - q.sOut);
+  let al = q.aOut + q.sg * q.v * ss - q.sg * SHIP_JUMP_B * q.R * lead, j = null, sm = 0;
+  const shut = sm01((ms - SHIP_JUMP_OPEN - SHIP_JUMP_HOLD) / SHIP_JUMP_CLOSE), op = sm01(ms / SHIP_JUMP_OPEN);
+  if (shut < 1) {
+    const [jx, jy] = at(q.aOut + q.sg * (SHIP_BOW - SHIP_JUMP_B) * q.R), grow = 1 - Math.pow(1 - op, 3);
+    j = { x: jx, y: jy, h: SHIP_JUMP_R * q.R * (0.2 + 0.8 * grow) * (1 - 0.8 * shut), a: op * (1 - shut), cut: 1,
+      fl: SHIP_JUMP_FLASH * (out < 0 ? sm01((out + 0.3) / 0.3) : Math.exp(-out / 0.32)), t: open };
+    sm = out < 0 ? SHIP_JUMP_STREAK : SHIP_JUMP_STREAK * lead;
+  }
+  // leaving: a rift opens ahead, it leaps in, smeared back, and is gone past it as the rift folds shut
+  if (s >= q.sLeave) {
+    const go = q.sLeave + SHIP_JUMP_OPEN / 1000, u = s - go, aGo = q.aOut + q.sg * q.v * (go - q.sOut);
+    const op2 = sm01(((s - q.sLeave) * 1000) / SHIP_JUMP_OPEN), shut2 = sm01(((u - 0.8) * 1000) / SHIP_JUMP_CLOSE);
+    if (shut2 >= 1) return [];
+    al = u > 0 ? aGo + q.sg * (q.v * u + 7 * q.R * (u / 0.55) ** 2) : cruise;
+    sm = SHIP_JUMP_STREAK * sm01(u / 0.3);
+    const [jx, jy] = at(aGo + q.sg * (SHIP_BOW + 0.35) * q.R);
+    j = { x: jx, y: jy, h: SHIP_JUMP_R * q.R * (0.2 + 0.8 * (1 - Math.pow(1 - op2, 3))) * (1 - 0.8 * shut2), a: op2 * (1 - shut2), cut: -1,
+      fl: SHIP_JUMP_FLASH * (u < 0 ? sm01((u + 0.3) / 0.3) : Math.exp(-u / 0.32)), t: s - q.sLeave };
+  }
+  const [x, y] = at(al);
+  return [{ ...base, x, y, j, sm, heat: i === ev.lose ? 0.85 * sm01((s - ev.sKill) / (BATTLE_BREAK / 1000)) : 0 }];
+}
+// the point (ux along, uy across, in its half-lengths) on ship i's hull at s, laid as btHull's; null when that part of it is
+// not there (not out yet, gone, or a half already burst)
+function btPoint(ev, i, ux, uy, s) {
+  const hs = btHull(ev, i, s);
+  const h = hs.find((q) => !q.half || q.half * (ux - q.cut) > 0);
+  if (!h) return null;
+  return [h.x + h.r * (ux * h.cs - uy * h.flip * h.sn), h.y + h.r * (ux * h.sn + uy * h.flip * h.cs)];
+}
+// how much of a bolt ship i's shield turns away at s (0-1): the loser's fails as the fight goes on
+function btShield(ev, i, s) {
+  const q = ev.ships[i];
+  if (i === ev.lose) return 0.85 * clamp(1 - (s - ev.fire0) / Math.max(4, ev.sKill - ev.fire0 - 4), 0, 1);
+  return q.esc ? 0.45 : 0.7;
+}
+// fighter who (0 the quarry, 1 its chaser) of pair p at s, laid: { x, y, f (how far out of its hangar, 0-1), side }, or null
+// while it is docked, before it launches or once it is shot down
+function btFighter(ev, p, who, s) {
+  const side = who ? 1 - p.q : p.q, home = ev.ships.findIndex((q) => q.side === side && !q.esc), t0 = p.launch[who], dn = p.down[who];
+  if (s < t0 || (dn != null && s >= dn)) return null;
+  const ts = s - (who ? BATTLE_CHASE : 0), px = p.ox + p.ax * Math.sin(p.w1 * ts + p.p1), py = p.ay * Math.sin(p.k2 * p.w1 * ts + p.p2);
+  let x = ev.x + ev.dx * px - ev.dy * py, y = ev.y + ev.dy * px + ev.dx * py, f = 1;
+  const hg = home >= 0 ? btPoint(ev, home, BT_HANGAR[0], BT_HANGAR[1], s) : null;
+  if (hg) {
+    // out of its hangar over 3 s, and home again before its ship jumps away
+    const fr = sm01((s - (ev.ships[home].sLeave - 5.5)) / 3);
+    if (fr >= 1) return null;
+    f = Math.min(sm01((s - t0) / 3), 1 - fr);
+    x = hg[0] + (x - hg[0]) * f; y = hg[1] + (y - hg[1]) * f;
+  } else if (s < t0 + 3) return null;
+  return { x, y, f, side };
+}
+// each frame of the battle (s: its clock, s): the volleys, torpedoes and tracers fired, what they hit, the loser's end, the
+// fighters shot down; shots and blasts are kept with their own clocks (t0, s) and laid on the hulls (att) where they hit
+function battleStep(ev, s) {
+  const rnd = Math.random, R = ev.R;
+  const alive = (i) => { const q = ev.ships[i]; return s >= q.sOut + 0.6 && s < q.sLeave && !q.halves; };
+  const foes = (side) => ev.ships.map((q, i) => i).filter((i) => ev.ships[i].side !== side && alive(i));
+  const blast = (o) => ev.blasts.push({ t0: s, seed: rnd(), side: 0, ...o });
+  if (s > ev.fire0 && s < ev.sBreak + 1.5) {
+    // volleys: each ship every BATTLE_FIRE, at the other side's capital (now and then its escort)
+    ev.ships.forEach((q, i) => {
+      if (!alive(i) || s < q.next) return;
+      const first = !q.next;
+      q.next = s + ((pickIn(BATTLE_FIRE) / 1000) * (q.esc ? 1.4 : 1)) * (first ? rnd() : 1);
+      const fs = foes(q.side);
+      if (first || !fs.length || ev.shots.filter((o) => o.type === 0).length > 9) return;
+      const cap = fs.find((k) => !ev.ships[k].esc), esc = fs.find((k) => ev.ships[k].esc);
+      const to = esc != null && (cap == null || rnd() < 0.3) ? esc : cap;
+      const tu = BT_TURRETS[Math.floor(rnd() * BT_TURRETS.length)];
+      for (let k = 0, n = Math.round(pickIn(BATTLE_VOLLEY) * (q.esc ? 0.6 : 1)); k < n; k++) {
+        ev.shots.push({ type: 0, side: q.side, from: i, fu: k % 2 ? BT_TURRETS[Math.floor(rnd() * BT_TURRETS.length)] : tu, t0: s + k * pickIn([0.08, 0.16]),
+          to, tu: [pickIn([-0.75, 0.8]), pickIn([-0.09, 0.1])], src: null, T: 0 });
+      }
+    });
+    // torpedoes: one side's capital at a ship of the other's, curving across; point defence may stop it halfway
+    for (const side of [0, 1]) {
+      if (s < ev.torpAt[side]) continue;
+      ev.torpAt[side] = s + pickIn(BATTLE_TORP) / 1000;
+      const from = ev.ships.findIndex((q, i) => q.side === side && !q.esc && alive(i)), fs = foes(side);
+      if (from < 0 || !fs.length) continue;
+      ev.shots.push({ type: 2, side, from, fu: [0.85, 0.05], t0: s, to: fs[Math.floor(rnd() * fs.length)], tu: [pickIn([-0.5, 0.5]), 0], src: null, T: 0,
+        bend: (rnd() < 0.5 ? -1 : 1) * pickIn([0.8, 1.6]) * R, stop: rnd() < BATTLE_PD ? pickIn([0.45, 0.72]) : null });
+    }
+  }
+  // tracers: each chaser at its quarry, where it will be
+  for (const p of ev.pairs) {
+    if (s < p.next) continue;
+    p.next = s + pickIn(BATTLE_TRACER) / 1000;
+    const a = btFighter(ev, p, 1, s), b = btFighter(ev, p, 0, s + 0.12);
+    if (a && b && a.f >= 1 && b.f >= 1) ev.shots.push({ type: 3, side: a.side, t0: s, src: [a.x, a.y], dst: [b.x, b.y], T: Math.hypot(b.x - a.x, b.y - a.y) / 300, fix: true });
+  }
+  // the shots in flight: laid from where they left, at where they are going, landing on a shield or the hull
+  for (const o of ev.shots) {
+    if (s < o.t0 || o.done) continue;
+    if (!o.src) {
+      o.src = btPoint(ev, o.from, o.fu[0], o.fu[1], o.t0);
+      const d = o.src && btPoint(ev, o.to, o.tu[0], o.tu[1], s);
+      if (!d) { o.done = true; continue; }
+      o.T = Math.hypot(d[0] - o.src[0], d[1] - o.src[1]) / (o.type === 2 ? BATTLE_TORP_V : BATTLE_BOLT[1]);
+    }
+    const f = (s - o.t0) / Math.max(o.T, 0.05);
+    if (o.type === 2 && o.stop != null && f >= o.stop) {
+      o.done = true;
+      const pt = btShotAt(ev, o, s);
+      if (pt) blast({ kind: 5, life: 0.6, x: pt[0], y: pt[1], r: 0.16 * R, side: 1 - o.side });
+      continue;
+    }
+    if (f < 1) continue;
+    o.done = true;
+    if (o.fix) continue;
+    const tq = ev.ships[o.to], d = btPoint(ev, o.to, o.tu[0], o.tu[1], s);
+    if (!d) continue;
+    if (rnd() < btShield(ev, o.to, s)) {
+      // on the shield: a ripple a little off the hull, towards the shot
+      const ux = o.src[0] - d[0], uy = o.src[1] - d[1], ul = Math.hypot(ux, uy) || 1;
+      blast({ kind: 1, life: 0.7, x: d[0] + (ux / ul) * 0.2 * tq.R, y: d[1] + (uy / ul) * 0.2 * tq.R, r: (o.type === 2 ? 1.7 : 1) * 0.3 * tq.R, side: tq.side });
+    } else {
+      blast({ kind: o.type === 2 ? 2 : 0, life: o.type === 2 ? 1.8 : 0.45, att: [o.to, ...o.tu], r: (o.type === 2 ? 0.26 : 0.14) * tq.R, side: o.side });
+      if (o.to === ev.lose && ev.blasts.filter((b) => b.kind === 4).length < 4 && rnd() < 0.3) blast({ kind: 4, life: Infinity, att: [o.to, ...o.tu], r: 0.1 * tq.R });
+    }
+  }
+  ev.shots = ev.shots.filter((o) => !o.done);
+  // the loser's end: explosions run along its hull, fires take, then it breaks in two
+  if (!ev.killed && s >= ev.sKill) {
+    ev.killed = true;
+    for (let k = 0; k < 6; k++) {
+      ev.blasts.push({ kind: 2, t0: ev.sKill + (k / 6) * (BATTLE_BREAK / 1000) * pickIn([0.85, 1.1]), life: 1.8, att: [ev.lose, pickIn([-0.8, 0.85]), pickIn([-0.1, 0.1])],
+        r: pickIn([0.2, 0.34]) * R, seed: rnd(), side: 1 - ev.loser });
+    }
+    for (let k = 0; k < 2; k++) blast({ kind: 4, life: Infinity, att: [ev.lose, pickIn([-0.7, 0.7]), pickIn([-0.08, 0.08])], r: 0.12 * R });
+  }
+  const lq = ev.ships[ev.lose];
+  if (!lq.halves && s >= ev.sBreak) {
+    const [h] = btHull(ev, ev.lose, ev.sBreak);
+    if (h) {
+      const cut = pickIn([-0.25, 0.25]), px = h.x + h.cs * cut * h.r, py = h.y + h.sn * cut * h.r;
+      lq.halves = [1, -1].map((hh, k) => {
+        const sp = pickIn([0.05, 0.09]) * R, sd = (rnd() < 0.5 ? -1 : 1) * 0.4 * sp;
+        return { h: hh, cut, end: ev.ends[k], px, py, ox: h.x - px, oy: h.y - py, w: hh * pickIn([0.02, 0.05]) * (rnd() < 0.5 ? -1 : 1),
+          vx: lq.sg * lq.v * ev.dx + hh * sp * h.cs - sd * h.sn, vy: lq.sg * lq.v * ev.dy + hh * sp * h.sn + sd * h.cs };
+      });
+      blast({ kind: 3, life: 6.5, x: h.x, y: h.y, r: 0.9 * h.r, side: 1 - ev.loser, t0: ev.sBreak });
+      // its fighters are lost with it
+      for (const p of ev.pairs) {
+        const w = p.q === ev.loser ? 0 : 1;
+        p.down[w] = Math.min(p.down[w] == null ? Infinity : p.down[w], s + pickIn([0.6, 5]));
+      }
+    } else lq.halves = [];
+  }
+  // each half's last burst
+  for (const h of lq.halves || []) {
+    if (h.burst || s < h.end - 0.05) continue;
+    h.burst = true;
+    const pt = btHull(ev, ev.lose, h.end - 0.06).find((q) => q.half === h.h);
+    if (pt) blast({ kind: 7, life: 6, x: pt.x, y: pt.y, r: 0.6 * R, side: 1 - ev.loser, t0: h.end });
+  }
+  // fighters shot down: a small burst where it was
+  for (const p of ev.pairs) {
+    for (const w of [0, 1]) {
+      if (p.popped[w] || p.down[w] == null || s < p.down[w]) continue;
+      p.popped[w] = true;
+      const f = btFighter(ev, { ...p, down: [null, null] }, w, p.down[w]);
+      if (f) blast({ kind: 6, life: 0.9, x: f.x, y: f.y, r: 0.12 * R, side: 1 - f.side });
+    }
+  }
+  ev.blasts = ev.blasts.filter((b) => s < b.t0 + b.life && !(b.att && b.t0 < s - 0.5 && !btPoint(ev, b.att[0], b.att[1], b.att[2], s)));
+}
+// where shot o is at s, laid (null before it leaves): a bolt or tracer straight on, a torpedo on its curve
+function btShotAt(ev, o, s, back = 0) {
+  if (!o.src) return null;
+  const dst = o.fix ? o.dst : btPoint(ev, o.to, o.tu[0], o.tu[1], s);
+  if (!dst) return null;
+  const f = clamp((s - o.t0) / Math.max(o.T, 0.05) - back, 0, 1), [ax, ay] = o.src, [bx, by] = dst;
+  if (o.type !== 2) return [ax + (bx - ax) * f, ay + (by - ay) * f];
+  const l = Math.hypot(bx - ax, by - ay) || 1, cx = (ax + bx) / 2 - ((by - ay) / l) * o.bend, cy = (ay + by) / 2 + ((bx - ax) / l) * o.bend, g = 1 - f;
+  return [g * g * ax + 2 * g * f * cx + f * f * bx, g * g * ay + 2 * g * f * cy + f * f * by];
+}
+// the battle as it is now, in CSS px of the window (null when none runs): its middle (x, y) and reach (CSS px: all of it lies
+// within), and what the shader draws: hulls (btHull's, at most BATTLE_HULLS), streaks (fighters first, then torpedoes, bolts
+// and tracers: head hx, hy, tail tx, ty, rgb, a, type: 0 a bolt, 1 a fighter, 2 a torpedo, 3 a tracer; at most
+// BATTLE_STREAKS) and blasts (the big ones first: x, y, r, a, age (s), seed, kind, side; at most BATTLE_BLASTS)
+function battleNow() {
+  const e = evOf('battle');
+  if (!e) return null;
+  const ev = e.ev, s = Math.max(0, performance.now() - ev.at) / 1000, k = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), BATTLE_DEPTH * STAR_ZOOM) / ev.cam.sc;
+  const P = (x, y) => eventAt(ev.cam, x, y), white = (c, w) => c.map((v) => v + (1 - v) * w);
+  const [cx, cy] = P(ev.x, ev.y);
+  let reach = 0;
+  const grow = (x, y, r) => { reach = Math.max(reach, Math.hypot(x - cx, y - cy) + r); };
+  const hulls = [];
+  ev.ships.forEach((q, i) => {
+    for (const h of btHull(ev, i, s)) {
+      const [x, y] = P(h.x, h.y), j = h.j ? { ...h.j, ...(([jx, jy]) => ({ x: jx, y: jy, h: h.j.h * k }))(P(h.j.x, h.j.y)) } : null;
+      hulls.push({ ...h, x, y, r: h.r * k, j });
+      grow(x, y, h.r * k * 1.8 * (1 + h.sm));
+      if (j) grow(j.x, j.y, 4 * j.h);
+    }
+  });
+  const streaks = [];
+  for (const p of ev.pairs) {
+    for (const w of [0, 1]) {
+      const a = btFighter(ev, p, w, s);
+      if (!a) continue;
+      const b = btFighter(ev, p, w, s - 0.3) || a, [hx, hy] = P(a.x, a.y), [tx, ty] = P(b.x, b.y);
+      streaks.push({ hx, hy, tx, ty, rgb: white(BATTLE_SIDES[a.side], 0.15), a: 0.75 * (0.35 + 0.65 * a.f), type: 1 });
+    }
+  }
+  for (const type of [2, 0, 3]) {
+    for (const o of ev.shots) {
+      if (o.type !== type || s < o.t0 || !o.src) continue;
+      const len = type === 2 ? 0.22 : (type === 3 ? 6 : BATTLE_BOLT[0]) / Math.max(1, (o.T || 0.05) * (type === 3 ? 300 : BATTLE_BOLT[1]));
+      const h = btShotAt(ev, o, s), t = btShotAt(ev, o, s, len);
+      if (!h || !t) continue;
+      const [hx, hy] = P(h[0], h[1]), [tx, ty] = P(t[0], t[1]);
+      streaks.push({ hx, hy, tx, ty, rgb: type === 2 ? [1, 0.86, 0.62] : white(BATTLE_SIDES[o.side], 0.2), a: type === 0 ? 0.8 : type === 2 ? 0.8 : 0.5, type });
+    }
+  }
+  const order = { 3: 0, 7: 0, 2: 1, 6: 2, 4: 3, 0: 4, 1: 4, 5: 4 }, blasts = [];
+  for (const b of ev.blasts) {
+    const age = s - b.t0;
+    if (age < 0 || age > b.life) continue;
+    const pt = b.att ? btPoint(ev, b.att[0], b.att[1], b.att[2], s) : [b.x, b.y];
+    if (!pt) continue;
+    const [x, y] = P(pt[0], pt[1]);
+    blasts.push({ x, y, r: b.r * k, a: b.kind === 4 ? Math.min(1, age / 0.6) : 1, age, seed: b.seed, kind: b.kind, side: b.side });
+  }
+  blasts.sort((a, b) => order[a.kind] - order[b.kind]);
+  const out = { x: cx, y: cy, hulls: hulls.slice(0, BATTLE_HULLS), streaks: streaks.slice(0, BATTLE_STREAKS), blasts: blasts.slice(0, BATTLE_BLASTS), s };
+  for (const q of out.streaks) { grow(q.hx, q.hy, 8); grow(q.tx, q.ty, 8); }
+  for (const b of out.blasts) grow(b.x, b.y, b.r * (b.kind === 3 ? 7 : 4.5) + 8);
+  out.reach = reach;
+  return out;
 }
 // ---------- the far events (see "Look", FAR_*; the catalog is web/sky-far.js) ----------
 // the log (POST /sky-events, sky-events.js on the server): one line per event that starts, so "what was that at 3:42?"
@@ -3460,6 +4105,7 @@ function skyOffRead(t) {
     fetch('/sky-events').then((r) => (r.ok ? r.json() : null)).then((j) => {
       if (I && j && Array.isArray(j.off)) I.skyOff = new Set(j.off.filter((k) => typeof k === 'string'));
       if (I && I.far && I.skyOff.has(I.far.name)) farEnd();
+      if (I) for (const k of [...I.events.keys()]) if (I.skyOff.has(k)) eventEnd(k);
     }).catch(() => {});
   } catch { /* no server */ }
 }
@@ -4055,13 +4701,15 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // empty slot), then ASTEROID_N more, its spin's cos and sin, aspect, and in w the edge blur (device px, whole; 0: a sharp
 // rock) plus its seed (0-1) in the fraction, then one with the light's direction (x, y); then the gravity lens's uLn (from SKY_LN): its
 // middle (device px; x, y), Einstein radius (device px) and alpha (w; 0: none), then per far galaxy two: its place from the lens's middle
-// (device px; x, y), size (device px) and light (w; 0: none), and its turn's cos and sin and aspect (the first one's w: the ring's bright side); then the capital ship's uSh (from SKY_SH), five: its middle (device px; x, y), half-length (device px) and alpha (w; 0: none), its heading's cos and sin, flip (-1: it goes left, its top still up) and seed (0-1), then its escort's place from the ship's middle (in half-lengths along its heading, x, and across it, y), size (z, in the ship's; 0: no escort) and seed, then its jump's rift: its middle (device px; x, y), half-height (device px) and alpha (w; 0: shut), and the flash's alpha, the hull's smear (in its lengths), whether the hull is cut at the rift (z: 1 while it is open) and the clock (s). then the warp drift's uWp (from SKY_WP), two: its point (device px; x, y) and the squeeze's direction (z, w), then its stretch (x; 0: none), the direction's radial share (y) and the deep sky's share (z). Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
+// (device px; x, y), size (device px) and light (w; 0: none), and its turn's cos and sin and aspect (the first one's w: the ring's bright side); then the capital ship's uSh (from SKY_SH), five: its middle (device px; x, y), half-length (device px) and alpha (w; 0: none), its heading's cos and sin, flip (-1: it goes left, its top still up) and seed (0-1), then its escort's place from the ship's middle (in half-lengths along its heading, x, and across it, y), size (z, in the ship's; 0: no escort) and seed, then its jump's rift: its middle (device px; x, y), half-height (device px) and alpha (w; 0: shut), and the flash's alpha, the hull's smear (in its lengths), whether the hull is cut at the rift (z: 1 while it is open) and the clock (s). then the warp drift's uWp (from SKY_WP), two: its point (device px; x, y) and the squeeze's direction (z, w), then its stretch (x; 0: none), the direction's radial share (y) and the deep sky's share (z). The lens has four more after its galaxies: the stream it is eating (its distance (device px) and angle from the middle where it leaves the prey, its wind (radians per e-fold) and width (device px)), the stream's colour and alpha, then the flare (0-1), the jets' axis (radians), length and dark base (device px), then the clock (s); the ship one more: its heat (0-1) and how far it is off its course into a black hole (y). Then the planet's uPl (from SKY_PL) and the battle's uBt (from SKY_BT): see PLANET_GLSL's and BATTLE_GLSL's comments. Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
 // without a cell), the deep sky, its star dust, the glows' noise and their field, and the moon's picture (moonImage).
 // uTint (STAR_TINT) is set once.
 const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo', 'uOrg'];
 const SKY_M = SKY_U.length * 4;
 const SKY_NB = SKY_M + METEOR_N * 8 + SAT_N * 8 + ROCKET_N * 12; // the nebula drift's five vec4s, after the rockets
-const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_SH = SKY_LN + 20, SKY_WP = SKY_SH + 20, SKY_FR = SKY_WP + 8, SKY_END = SKY_FR + FAR_N * 16; // the asteroid field's vec4s, after the nebula; the lens's five, then the ship's five, then the warp's two, then the far event's four per part (FAR_GLSL), after them
+const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_SH = SKY_LN + 36, SKY_WP = SKY_SH + 24, SKY_FR = SKY_WP + 8; // the asteroid field's vec4s, after the nebula; the lens's nine, then the ship's six, then the warp's two, then the far event's four per part (FAR_GLSL), after them
+const SKY_BT_N = 2 + BATTLE_HULLS * 5 + BATTLE_STREAKS * 2 + BATTLE_BLASTS * 2;
+const SKY_PL = SKY_FR + FAR_N * 16, SKY_BT = SKY_PL + 36, SKY_END = SKY_BT + SKY_BT_N * 4; // then the planet's nine and the battle's SKY_BT_N
 const STAR_TILES = STAR_LAYERS.filter((L) => !L.cell);
 const SKY_TEX = [...STAR_TILES.map((L, t) => 'uS' + t), 'uDeep', 'uDust', 'uNoise', 'uField', 'uMoon'];
 const TEX_DEEP = SKY_TEX.indexOf('uDeep'), TEX_DUST = TEX_DEEP + 1, TEX_NOISE = TEX_DEEP + 2, TEX_FIELD = TEX_DEEP + 3;
@@ -5018,7 +5666,46 @@ vec4 lensHole(vec2 p) {
   float e = (r - ${glf(LENS_RING_R)} * R) / max(${glf(LENS_RING_W)} * dp, 0.02 * R);
   float side = 1.0 - ${glf(LENS_RING_SIDE)} + ${glf(LENS_RING_SIDE)} * (0.5 + 0.5 * cos(atan(d.y, d.x) - uLn[2].w));
   float m = ${glf(LENS_RING_A)} * side * (exp(-e * e) + 0.2 * exp(-e * e / 14.0));
-  return over(vec4(vec3(${LENS_RING_RGB.map(glf).join(', ')}) * m, m * 0.5), o);
+  // after a meal it flares, whiter, and its skirt swells
+  float fl = uLn[7].x;
+  m *= 1.0 + ${glf(DEVOUR_RING)} * fl * (1.0 + 0.6 * exp(-e * e / 30.0));
+  vec3 rc = mix(vec3(${LENS_RING_RGB.map(glf).join(', ')}), vec3(1.0, 0.97, 0.9), 0.5 * fl);
+  return over(vec4(rc * min(m, 1.6), min(m, 1.6) * 0.5), o);
+}
+// the stream torn off the prey falling in (uLn[5], uLn[6]): a log spiral from the prey (rho, th) round to the ring, its angle at
+// radius r th + w ln(rho / r), narrowing and hotter (whiter) inwards, its clumps flowing in along it; light, at p itself
+vec4 lensFeed(vec2 p) {
+  vec4 a = uLn[0], f = uLn[5], g = uLn[6];
+  if (a.w <= 0.0 || g.w <= 0.0) return vec4(0.0);
+  vec2 d = p - a.xy;
+  float r = length(d), R = a.z, dp = uSize.z, r0 = ${glf(LENS_RING_R)} * R;
+  if (r > f.x + 2.0 * f.w || r < 0.6 * r0) return vec4(0.0);
+  float ts = f.y + f.z * log(f.x / max(r, 1.0));
+  float da = atan(d.y, d.x) - ts;
+  da = da - 6.2831853 * floor((da + 3.14159265) / 6.2831853);
+  float u = clamp((r - r0) / max(f.x - r0, 1.0), 0.0, 1.0); // 1 at the prey, 0 at the ring
+  float wd = max(f.w * (0.18 + 0.82 * u), 1.2 * dp), x = r * da / wd;
+  if (abs(x) > 4.0) return vec4(0.0);
+  float flow = nbF(vec2(log(max(r, 1.0)) * 14.0 + uLn[8].x * 2.5, x * 0.8 + 7.0), 3);
+  float m = g.w * exp(-x * x) * (0.35 + 1.3 * flow * flow) * smoothstep(0.0, 0.08, u) * (1.0 - smoothstep(0.9, 1.05, u + 0.04 * abs(x)));
+  m += 0.25 * g.w * exp(-x * x / 6.0) * (1.0 - u);
+  vec3 col = mix(g.rgb, vec3(1.0, 0.95, 0.86), 0.75 * (1.0 - u));
+  return vec4(col * m * (1.0 + 0.8 * (1.0 - u)), 0.5 * m);
+}
+// the jets after a meal (uLn[7]): two thin beams along the axis (y), out to jl, gone dark from the base out to jb, knots
+// racing out along them; light, at p itself
+vec4 lensJets(vec2 p) {
+  vec4 a = uLn[0], j = uLn[7];
+  if (a.w <= 0.0 || j.z <= 0.0) return vec4(0.0);
+  vec2 d = p - a.xy, ax = vec2(cos(j.y), sin(j.y));
+  float al = abs(dot(d, ax)), ac = dot(d, vec2(-ax.y, ax.x)), R = a.z, dp = uSize.z;
+  if (al > j.z + R || al < j.w) return vec4(0.0);
+  float wj = 0.05 * R + 0.07 * al + dp, x = ac / wj;
+  if (abs(x) > 4.0) return vec4(0.0);
+  float knots = 0.55 + 0.45 * sin(al / (0.35 * R) - uLn[8].x * 9.0) + 0.3 * nbF(vec2(al / (0.5 * R) - uLn[8].x * 3.0, x), 2);
+  float m = ${glf(DEVOUR_JET_A)} * exp(-x * x) * knots * smoothstep(j.w, j.w + 0.3 * R, al) * (1.0 - smoothstep(0.7 * j.z, j.z, al)) * smoothstep(0.5 * R, 1.2 * R, al);
+  vec3 col = mix(vec3(0.55, 0.72, 1.0), vec3(0.95, 0.97, 1.0), exp(-x * x * 3.0));
+  return vec4(col * m, 0.5 * m);
 }`;
 // the distant capital ship (see "Look", SHIP_*), premultiplied, at device px p; uSh (see SKY_U's comment). shipOne draws one hull in
 // its own frame (half-length = 1, x along its heading, y across with the top at negative y: the ship's lit side stays up on the
@@ -5062,17 +5749,26 @@ ${SHIP_NOTCH.map((b) => `  n = min(n, shB(q, ${f4(b)}));`).join('\n')}
 }
 const float SH_ROWS[${SHIP_ROWS.length}] = float[${SHIP_ROWS.length}](${SHIP_ROWS.map(glf).join(', ')});
 const vec2 SH_ENG[${SHIP_ENGINES.length}] = vec2[${SHIP_ENGINES.length}](${SHIP_ENGINES.map(f2).join(', ')});
-vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A, vec4 jp, float sm) {
+vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A, vec4 jp, float sm, vec4 xt) {
   vec2 d = p - c, e1 = fr.xy, e2 = vec2(-fr.y, fr.x);
   vec2 u = vec2(dot(d, e1), fr.z * dot(d, e2)) / R;
   // coming out of hyperspace: smeared back from the bow along its heading (sm: by that many of its lengths)
   u.x = ${glf(SHIP_BOW)} - (${glf(SHIP_BOW)} - u.x) / (1.0 + sm);
   if (u.x < -1.7 || u.x > 1.35 || abs(u.y) > 0.62) return vec4(0.0);
   float dp = uSize.z, w = (0.7 + (0.3 + ${glf(SHIP_SOFT)}) * dp) / R;
-  // what is still behind the rift (jp: its middle, and z 1 while it is open) is still in hyperspace: not drawn
-  if (jp.z > 0.0) A *= smoothstep(-dp, dp, dot(p - jp.xy, e1));
+  // what is on the far side of the rift (jp: its middle, z 1: the hull shows ahead of it, -1: behind) is in hyperspace: not drawn
+  if (jp.z != 0.0) A *= smoothstep(-dp, dp, jp.z * dot(p - jp.xy, e1));
+  // xt: its side's tint (x, 1: the red side's), which half of a broken hull (y: 1 the bow's, -1 the stern's; 0 whole) and
+  // where it broke (z, along it), and its heat (w, 0-1: burning, or falling into a black hole)
+  float tear = 0.0;
+  if (xt.y != 0.0) {
+    float s = xt.y * (u.x - xt.z - 0.07 * (nbN(vec2(u.y * 26.0, fr.w * 40.0)) - 0.5) - 0.03 * (nbN(vec2(u.y * 90.0, 3.0)) - 0.5));
+    A *= smoothstep(-w, w, s);
+    tear = exp(-max(s, 0.0) / 0.035);
+  }
   if (A <= 0.0) return vec4(0.0);
-  float hot = sm / ${glf(SHIP_JUMP_STREAK)};
+  float hot = xt.w > 0.0 ? 0.0 : sm / ${glf(SHIP_JUMP_STREAK)};
+  vec3 tn = vec3(1.0, 0.5, 0.35);
   float sd = shSD(u), dd = sd * R;
   float cov = 1.0 - smoothstep(-w, w, sd);
   float plate = nbF(vec2(u.x * 36.0, u.y * 120.0) + fr.w * 71.0, 2);
@@ -5098,7 +5794,7 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A, vec4 jp, float
     vec2 L = normalize(vec2(dot(${Ls}, e1), fr.z * dot(${Ls}, e2)));
     float fc = max(dot(n, L), 0.0), fb = max(-dot(n, L), 0.0);
     float vr = clamp(0.55 + 0.9 * nbF(u * 4.0 + fr.w * 30.0, 2), 0.4, 1.3);
-    vec3 rc = mix(${col(SHIP_RIM)}, ${col(SHIP_RIM_WARM)}, 0.6 * smoothstep(0.1, 1.0, u.x));
+    vec3 rc = mix(mix(${col(SHIP_RIM)}, ${col(SHIP_RIM_WARM)}, 0.6 * smoothstep(0.1, 1.0, u.x)), tn, 0.45 * xt.x);
     float edge = exp(min(dd, 0.0) / (1.1 * dp)) * exp(-pow(max(dd, 0.0) / (1.2 * dp), 2.0));
     float m = (${glf(SHIP_RIM_A)} * pow(fc, 1.3) * vr * edge + (dd < 0.0 ? 0.1 * fc * vr * exp(dd / (6.0 * dp)) : 0.0)) * lit;
     o = over(vec4(rc * m, m), o);
@@ -5116,7 +5812,7 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A, vec4 jp, float
     vec2 q = (u - wc) * R;
     float rw = 0.62 * dp, q2 = dot(q, q);
     float m = ${glf(SHIP_WINDOW_A)} * (exp(-q2 / (rw * rw)) + 0.12 * exp(-q2 / (6.0 * rw * rw))) * lit;
-    o = over(vec4(${col(SHIP_WINDOW)} * m, m), o);
+    o = over(vec4(mix(${col(SHIP_WINDOW)}, tn, 0.5 * xt.x) * m, m), o);
   }
   // the engines
   for (int k = 0; k < ${SHIP_ENGINES.length}; k++) {
@@ -5124,7 +5820,15 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A, vec4 jp, float
     float q2 = dot(q, q), rc = max(1.1 * dp, 0.011 * R), rh = 0.035 * R;
     float pl = q.x < 0.0 ? exp(q.x / (0.1 * R)) * exp(-pow(q.y / (0.012 * R + 0.5 * dp), 2.0)) : 0.0;
     float m = ${glf(SHIP_ENGINE_A)} * (exp(-q2 / (rc * rc)) + 0.28 * exp(-q2 / (rh * rh)) + 0.34 * pl) * lit;
-    o = over(vec4(${col(SHIP_ENGINE)} * m, m), o);
+    o = over(vec4(mix(${col(SHIP_ENGINE)}, tn, 0.7 * xt.x) * m, m), o);
+  }
+  // burning: ember patches that flicker over the hull, and the torn edge of a broken one glowing
+  if (xt.w > 0.0 || tear > 0.0) {
+    float fk = nbF(vec2(u.x * 9.0, u.y * 30.0) + fr.w * 40.0 + vec2(uSize.w * 0.7, -uSize.w * 0.4), 3);
+    float em = (xt.w * smoothstep(0.62 - 0.3 * xt.w, 0.85, fk) + 0.9 * tear * (0.6 + 0.6 * fk)) * cov * A;
+    vec3 ec = mix(vec3(1.0, 0.36, 0.08), vec3(1.0, 0.82, 0.5), smoothstep(0.7, 0.95, fk));
+    o.rgb += ec * em * 0.9;
+    o.a = min(1.0, o.a + 0.2 * em);
   }
   return o;
 }
@@ -5145,21 +5849,300 @@ vec4 shipJump(vec2 p, vec4 j, vec4 k, vec2 h) {
   vec3 L = (${col(SHIP_JUMP_RGB)} * cl * 1.1 + ${col(SHIP_JUMP_CORE)} * co) * j.w * ${glf(SHIP_JUMP_A)} + ${col(SHIP_JUMP_CORE)} * fl;
   return vec4(L, 0.5 * max(L.r, max(L.g, L.b)));
 }
-vec4 ship(vec2 p) {
-  vec4 a = uSh[0], f = uSh[1], e = uSh[2], j = uSh[3], k = uSh[4];
+// the ship and its escort far off, so bent by a black hole between (drawn at pl, where the sky is looked up), unless it is
+// falling into one (uSh[5].y: how far off its course, so drawn where it is); uSh[5].x its heat
+vec4 ship(vec2 p0, vec2 pl) {
+  vec4 a = uSh[0], f = uSh[1], e = uSh[2], j = uSh[3], k = uSh[4], h = uSh[5];
   if (a.w <= 0.0) return vec4(0.0);
-  vec2 d = p - a.xy;
-  vec4 o = vec4(0.0);
+  vec2 p = mix(pl, p0, h.y), d = p - a.xy;
+  vec4 o = vec4(0.0), xt = vec4(0.0, 0.0, 0.0, h.x);
   float reach = a.z * (e.z > 0.0 ? 2.9 : 1.7) * (1.0 + k.y);
   if (dot(d, d) <= reach * reach) {
     vec4 jp = vec4(j.xy, k.z, 0.0);
-    o = shipOne(p, a.xy, a.z, f, 1.0, a.w, jp, k.y);
+    o = shipOne(p, a.xy, a.z, f, 1.0, a.w, jp, k.y, xt);
     if (e.z > 0.0) {
       vec2 c2 = a.xy + a.z * (e.x * f.xy + e.y * f.z * vec2(-f.y, f.x));
-      o = over(o, shipOne(p, c2, a.z * e.z, vec4(f.xyz, e.w), 0.34, a.w, jp, k.y));
+      o = over(o, shipOne(p, c2, a.z * e.z, vec4(f.xyz, e.w), 0.34, a.w, jp, k.y, xt));
     }
   }
   if (j.w > 0.0 || k.x > 0.0) o = over(shipJump(p, j, k, f.xy), o);
+  return o;
+}`;
+})();
+// the planet (see "Look", PLANET_*), premultiplied; uPl: [0] its middle (device px; x, y), radius (device px) and alpha (w; 0:
+// none), [1] its star's direction turned into its axis's roll (x, y; z towards us) and kind (w), [2] the roll's cos and sin, its
+// turn (radians) and seed, [3] its air's colour and thickness (w, in its radius), [4] its first colour and how open we see its
+// equator (w: the sine of our height over it), [5] its second colour and its clouds' turn (w), [6] the tide (x, y: the unit way
+// to a black hole eating it), its stretch (z, 1: none) and heat (w), [7] its moon's place round it (x, y, in its radii, rolled)
+// and radius (z; 0: none), in front (w 1) or behind (-1), [8] its rings' inner and outer radius (0: none) and how far it is
+// off its course into a black hole (z: drawn at p then, not bent). The surface: a point on the sphere (N, rolled; z towards us)
+// taken into its own frame (round its axis, x and y; up it, z) and turned by its spin, then a 3D value noise (pnF) there, so
+// nothing seams: gas giants in bands warped by the noise with a storm oval, ocean worlds with land, ice caps, clouds turning on
+// their own, the sea's glint and cities on the night side, ice giants in soft bands with a dark spot, haze worlds nearly
+// featureless, rust deserts with white poles. Lit by its star with a soft, reddened terminator (softer for thick air), a rim of
+// its air on the disc and a halo off it (brighter towards the star; all round when the star is behind), its rings (a gap, the
+// planet's shadow on them; their far half under the disc, the near one over), then the far haze over all (PLANET_HAZE)
+const PLANET_GLSL = (() => {
+  const col = (v) => `vec3(${v.map(glf).join(', ')})`;
+  return `float pnH(uvec3 u) { return hash(uvec2(u.x * 7919u + u.z * 104729u, u.y)); }
+float pnN(vec3 x) {
+  vec3 i = floor(x), f = x - i;
+  f = f * f * (3.0 - 2.0 * f);
+  uvec3 u = uvec3(ivec3(i) + 4096);
+  float a = mix(pnH(u), pnH(u + uvec3(1u, 0u, 0u)), f.x), b = mix(pnH(u + uvec3(0u, 1u, 0u)), pnH(u + uvec3(1u, 1u, 0u)), f.x);
+  float c = mix(pnH(u + uvec3(0u, 0u, 1u)), pnH(u + uvec3(1u, 0u, 1u)), f.x), e = mix(pnH(u + uvec3(0u, 1u, 1u)), pnH(u + uvec3(1u, 1u, 1u)), f.x);
+  return mix(mix(a, b, f.y), mix(c, e, f.y), f.z);
+}
+// n octaves of pnN (at most 5), each about twice as fine, half as strong; 0-1, around 0.5
+float pnF(vec3 x, int n) {
+  float s = 0.0, a = 0.5, t = 0.0;
+  for (int i = 0; i < n; i++) {
+    s += a * pnN(x); t += a;
+    x = x * 2.07 + vec3(5.3, 1.7, 9.1);
+    a *= 0.5;
+  }
+  return s / max(t, 1e-3);
+}
+float wrapA(float a) { return a - 6.2831853 * floor((a + 3.14159265) / 6.2831853); }
+vec4 planetMoon(vec2 v, vec4 mo, vec3 L, float aa) {
+  vec2 q = (v - mo.xy) / mo.z;
+  float r2 = dot(q, q);
+  if (r2 > 1.3) return vec4(0.0);
+  vec3 N = vec3(q / max(1.0, sqrt(r2)), sqrt(max(1.0 - r2, 0.0)));
+  float cov = 1.0 - smoothstep(1.0 - aa / mo.z, 1.0 + aa / mo.z, sqrt(r2));
+  float sp = pnF(N * 3.0 + 11.0, 3);
+  vec3 c = vec3(0.62, 0.6, 0.58) * (0.7 + 0.5 * sp) * (0.03 + max(dot(N, L), 0.0)) * ${glf(PLANET_LIGHT * 1.4)};
+  c = mix(c, ${col(SHIP_HAZE)}, ${glf(PLANET_HAZE)});
+  return vec4(c * cov, cov);
+}
+// its rings at v (rolled, in its radii), the half towards us (side 1) or away (-1)
+vec4 planetRing(vec2 v, vec2 rg, float op, float co, vec3 L, vec3 tint, float aa, float seed, float side) {
+  if (rg.y <= 0.0 || abs(op) < 1e-3) return vec4(0.0);
+  float yy = v.y / op, rr = length(vec2(v.x, yy));
+  if (rr < rg.x - 0.05 || rr > rg.y + 0.05 || yy * side < 0.0) return vec4(0.0);
+  float u = (rr - rg.x) / (rg.y - rg.x), ea = aa / max(abs(op), 0.08);
+  float dens = smoothstep(0.0, ea + 0.01, u) * (1.0 - smoothstep(1.0 - ea - 0.02, 1.0, u));
+  dens *= (0.4 + 0.6 * pnN(vec3(rr * 55.0, seed * 37.0, 0.5))) * (0.75 + 0.25 * sin(rr * 23.0 + seed * 9.0));
+  dens *= (1.0 - 0.92 * exp(-pow((u - 0.62) / 0.025, 2.0))) * (0.7 + 0.3 * smoothstep(0.0, 0.5, u));
+  // the planet's shadow across them: the way to the star from the ring's point passes through the sphere
+  vec3 X = vec3(v.x, v.y, co * yy);
+  float b = dot(X, L), c = dot(X, X) - 1.0;
+  float sh = b < 0.0 ? smoothstep(-0.04, 0.04, c - b * b) : 1.0;
+  float face = dot(L, vec3(0.0, -co, op)) * sign(op);
+  float lit = (face > 0.0 ? 0.3 + 0.9 * face : 0.3 * (1.0 - face)) * (0.2 + 0.8 * sh);
+  float A = (1.0 - exp(-dens * 0.35 / max(abs(op), 0.05))) * 0.9;
+  vec3 col = mix(mix(tint, vec3(0.95, 0.9, 0.82), 0.4) * lit * ${glf(PLANET_LIGHT * 1.3)} + 0.02, ${col(SHIP_HAZE)}, ${glf(PLANET_HAZE)});
+  return vec4(col * A, A);
+}
+vec4 planet(vec2 p0, vec2 pl) {
+  vec4 a = uPl[0];
+  if (a.w <= 0.0 || a.z <= 0.0) return vec4(0.0);
+  vec4 Lk = uPl[1], tr = uPl[2], air = uPl[3], cA = uPl[4], cB = uPl[5], td = uPl[6], mo = uPl[7], rg = uPl[8];
+  vec2 p = mix(pl, p0, rg.z), d = (p - a.xy) / a.z;
+  // the tide: stretched along the way to the hole, squeezed across it
+  if (td.z > 1.0) { vec2 t = td.xy, n = vec2(-t.y, t.x); d = t * (dot(d, t) / td.z) + n * (dot(d, n) * sqrt(td.z)); }
+  float th = air.w, reach = max(1.0 + 5.0 * th + 0.25, max(rg.y + 0.1, mo.z > 0.0 ? length(mo.xy) + mo.z + 0.1 : 0.0));
+  if (dot(d, d) > reach * reach) return vec4(0.0);
+  vec2 v = vec2(d.x * tr.x + d.y * tr.y, -d.x * tr.y + d.y * tr.x); // rolled to its axis
+  vec3 L = normalize(Lk.xyz + vec3(0.0, 0.0, 1e-4));
+  float aa = 1.2 * uSize.z / a.z, r = length(v), kind = Lk.w;
+  float op = cA.w, co = sqrt(max(1.0 - op * op, 0.0));
+  vec3 Ax = vec3(0.0, -co, op), E2 = vec3(0.0, op, co);
+  vec4 o = vec4(0.0);
+  if (mo.z > 0.0 && mo.w < 0.0) o = planetMoon(v, mo, L, aa);
+  vec3 tint = mix(cA.rgb, cB.rgb, 0.3);
+  o = over(planetRing(v, rg.xy, op, co, L, tint, aa, tr.w, -1.0), o);
+  // the halo: its air lit off the disc, towards the star, and all round when the star is behind it
+  if (r > 1.0 - aa) {
+    float tw = dot(v / max(r, 1e-4), L.xy);
+    float hl = smoothstep(-0.7, 0.7, tw + 0.6 * L.z) * (0.35 + 0.65 * length(L.xy)) + 1.2 * max(-L.z, 0.0) * (0.6 + 0.4 * smoothstep(-0.5, 0.5, tw));
+    float h = ${glf(PLANET_GLOW)} * hl * exp(-max(r - 1.0, 0.0) / (max(th, 0.03) * 1.15)) * min(1.0, th * 12.0 + 0.3) * smoothstep(1.0 - aa, 1.0 + aa, r);
+    o = over(vec4(mix(air.rgb, vec3(1.0), 0.15 * max(-L.z, 0.0)) * h, 0.35 * h), o);
+  }
+  if (r < 1.0 + aa) {
+    vec2 vv = v / max(r, 1.0);
+    float z = sqrt(max(1.0 - dot(vv, vv), 0.0)), cov = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, r);
+    vec3 N = vec3(vv, z);
+    float lam = dot(N, L), sl = dot(N, Ax), lat = asin(clamp(sl, -1.0, 1.0));
+    vec3 P = vec3(N.x, dot(N, E2), sl); // round its equator (x, y), up its axis (z)
+    // its spin (a gas or ice giant's equator turns a little faster), and its clouds' own
+    float sp = tr.z * (kind < 0.5 || (kind > 1.5 && kind < 2.5) ? 1.0 + 0.12 * cos(2.0 * lat) : 1.0), cs = cB.w;
+    vec3 Ps = vec3(P.x * cos(sp) - P.y * sin(sp), P.x * sin(sp) + P.y * cos(sp), P.z);
+    vec3 Pc = vec3(P.x * cos(cs) - P.y * sin(cs), P.x * sin(cs) + P.y * cos(cs), P.z);
+    vec3 sd = vec3(53.0, 17.0, 31.0) * tr.w;
+    float lon = atan(Ps.y, Ps.x), gloss = 0.0;
+    vec3 col, night = vec3(0.0);
+    if (kind < 0.5) {
+      // a gas giant: zones and belts, warped and streaked, and its great storm
+      float w = pnF(Ps * 2.5 + sd, 4), fine = pnF(vec3(Ps.xy * 1.5, sl * 40.0) + sd, 3);
+      float bands = 0.5 + 0.5 * sin(sl * 15.0 + (w - 0.5) * 4.5 + tr.w * 6.0);
+      col = mix(cA.rgb, cB.rgb, clamp(smoothstep(0.25, 0.75, bands) * (0.7 + 0.8 * (fine - 0.5)), 0.0, 1.0));
+      vec2 so = vec2(wrapA(lon - 0.6 - tr.w * 6.0) * cos(lat) / 0.2, (lat + 0.36) / 0.085);
+      float st = exp(-dot(so, so));
+      col = mix(col, vec3(0.8, 0.38, 0.24), 0.8 * st * (0.75 + 0.5 * (fine - 0.5)));
+    } else if (kind < 1.5) {
+      // an ocean world: seas, land, ice caps, clouds, the sea's glint and cities at night
+      float h = pnF(Ps * 2.2 + sd, 5), land = smoothstep(0.53, 0.57, h);
+      col = mix(cA.rgb * (0.8 + 0.4 * pnF(Ps * 6.0 + sd, 2)), mix(cB.rgb, vec3(0.55, 0.45, 0.3), smoothstep(0.6, 0.72, h)), land);
+      float ice = smoothstep(0.8, 0.87, abs(sl) + 0.1 * (h - 0.5));
+      col = mix(col, vec3(0.92, 0.95, 1.0), ice);
+      float cl = smoothstep(0.5, 0.72, pnF(Pc * 3.0 + sd + 4.0, 4));
+      col = mix(col, vec3(0.96), 0.85 * cl);
+      gloss = (1.0 - land) * (1.0 - ice) * (1.0 - cl);
+      night = vec3(1.0, 0.68, 0.32) * 0.55 * smoothstep(0.7, 0.8, pnN(Ps * 70.0 + sd)) * land * (1.0 - ice) * (1.0 - 0.85 * cl);
+    } else if (kind < 2.5) {
+      // an ice giant: soft bands, a dark spot and bright streaks of cloud
+      float w = pnF(Ps * 2.0 + sd, 3);
+      col = mix(cA.rgb, cB.rgb, 0.55 * (0.5 + 0.5 * sin(sl * 9.0 + (w - 0.5) * 2.0)));
+      vec2 so = vec2(wrapA(lon + 1.1 - tr.w * 6.0) * cos(lat) / 0.17, (lat - 0.32) / 0.08);
+      col = mix(col, cB.rgb * 0.4, 0.75 * exp(-dot(so, so)));
+      col = mix(col, vec3(0.9, 0.97, 1.0), 0.6 * smoothstep(0.64, 0.8, pnF(vec3(Pc.xy * 3.0, sl * 30.0) + sd, 3)) * exp(-pow((sl - 0.42) / 0.06, 2.0)));
+    } else if (kind < 3.5) {
+      // a haze world: all but featureless, faint bands in its smog
+      float w = pnF(Pc * 1.6 + sd, 4);
+      col = mix(cA.rgb, cB.rgb, 0.35 * (0.5 + 0.5 * sin(sl * 6.0 + w * 3.0)) + 0.25 * w);
+    } else {
+      // a rust desert: dunes and craters, white poles
+      float h = pnF(Ps * 3.0 + sd, 5), cr = pnF(Ps * 9.0 + sd + 2.0, 3);
+      col = mix(cB.rgb, cA.rgb, smoothstep(0.35, 0.65, h)) * (0.85 + 0.3 * cr);
+      col = mix(col, vec3(0.95, 0.93, 0.9), smoothstep(0.86, 0.92, abs(sl) + 0.1 * (h - 0.5)));
+    }
+    // its star: a terminator as soft as its air is thick, reddened at dusk; its limb darker; the sea's glint
+    float day = smoothstep(-0.05 - 1.5 * th, 0.1 + th, lam), dusk = exp(-pow(lam / (0.12 + th), 2.0));
+    vec3 lc = col * day * mix(vec3(1.0), vec3(1.0, 0.52, 0.3), 0.6 * dusk) * mix(0.55, 1.0, sqrt(z));
+    lc += gloss * pow(max(dot(N, normalize(L + vec3(0.0, 0.0, 1.0))), 0.0), 60.0) * vec3(1.0, 0.92, 0.8) * step(0.0, lam);
+    lc = lc * ${glf(PLANET_LIGHT)} + col * 0.02 + night * (1.0 - smoothstep(-0.15, 0.05, lam));
+    // its air at the rim of the disc, brighter on the lit side
+    lc += air.rgb * pow(1.0 - z, 2.5) * (0.9 * smoothstep(-0.35, 0.4, lam) + 0.3 * max(-L.z, 0.0)) * min(1.0, th * 14.0) * ${glf(PLANET_LIGHT * 1.6)};
+    // falling into a black hole: the side towards it glows, flickering
+    if (td.w > 0.0) {
+      vec2 tv = vec2(td.x * tr.x + td.y * tr.y, -td.x * tr.y + td.y * tr.x);
+      float fk = pnF(Ps * 5.0 + vec3(uSize.w * 0.5, 0.0, 0.0), 3);
+      lc += vec3(1.0, 0.4, 0.12) * td.w * (0.25 + 0.9 * smoothstep(-0.3, 0.9, dot(vv, tv))) * (0.4 + 0.9 * fk);
+    }
+    lc = mix(lc, ${col(SHIP_HAZE)}, ${glf(PLANET_HAZE)});
+    float A = cov * ${glf(PLANET_A)};
+    o = over(vec4(lc * A, A), o);
+  }
+  o = over(planetRing(v, rg.xy, op, co, L, tint, aa, tr.w, 1.0), o);
+  if (mo.z > 0.0 && mo.w > 0.0) o = over(planetMoon(v, mo, L, aa), o);
+  return o * a.w;
+}`;
+})();
+// the space battle (see "Look", BATTLE_*), premultiplied; uBt: [0] its middle (device px; x, y) and reach (z, device px; 0:
+// none), [1] how many hulls, streaks and blasts (x, y, z) and its clock (w, s); then BATTLE_HULLS hulls, five each: middle,
+// half-length (device px) and alpha, heading's cos and sin, flip and seed, its rift (middle, half-height, alpha), the flash, its
+// smear, which side of the rift it shows on (1 ahead, -1 behind, 0 none) and the rift's clock, then its side, half, cut and heat
+// (shipOne's xt); then BATTLE_STREAKS streaks, two each: head and tail (device px), colour and alpha + 2 x its type (0 a bolt, 1
+// a fighter, 2 a torpedo, 3 a tracer); then BATTLE_BLASTS blasts, two each: middle, size (device px) and alpha, age (s), seed,
+// kind (0 a hit, 1 a shield's ripple, 2 an explosion, 3 a capital ship blowing apart, 4 a fire, 5 flak, 6 a fighter lost, 7 a
+// wreck's last burst) and side. The loops run to counts the compiler can't know, so it keeps one copy of each (not unrolled)
+const BATTLE_GLSL = (() => {
+  const col = (v) => `vec3(${v.map(glf).join(', ')})`;
+  const S = 2 + BATTLE_HULLS * 5, B = S + BATTLE_STREAKS * 2;
+  return `vec3 btSide(float s) { return s < 0.5 ? ${col(BATTLE_SIDES[0])} : ${col(BATTLE_SIDES[1])}; }
+// the squared distance from p to the segment a-b, and t: how far along it (0 at a, 1 at b)
+float btSeg(vec2 p, vec2 a, vec2 b, out float t) {
+  vec2 e = b - a;
+  t = clamp(dot(p - a, e) / max(dot(e, e), 1e-4), 0.0, 1.0);
+  vec2 q = p - a - e * t;
+  return dot(q, q);
+}
+vec4 btStreak(vec2 p, vec4 s, vec4 c, float dp) {
+  float ty = floor(c.w * 0.5), al = c.w - 2.0 * ty, t;
+  float d2 = btSeg(p, s.zw, s.xy, t) / (dp * dp);
+  if (d2 > 200.0) return vec4(0.0);
+  vec2 qh = (p - s.xy) / dp;
+  float h2 = dot(qh, qh), m;
+  vec3 col = c.rgb;
+  if (ty < 0.5) {
+    // a bolt: a hot core, brightest at its head, in a glow of its side's colour
+    m = al * t * (exp(-d2 / 0.45) + 0.22 * exp(-d2 / 6.0));
+    col = mix(c.rgb, vec3(1.0), 0.55 * exp(-d2 / 0.3));
+  } else if (ty < 1.5) {
+    // a fighter: a speck, its engine's short trail
+    m = al * (0.9 * exp(-h2 / 0.6) + 0.35 * t * t * exp(-d2 / 0.35));
+    col = mix(vec3(0.85), c.rgb, 0.7);
+  } else if (ty < 2.5) {
+    // a torpedo: a bright head, pulsing, and a soft trail
+    float pu = 0.75 + 0.25 * sin(uBt[1].w * 31.0 + s.x * 0.37);
+    m = al * (pu * (exp(-h2 / 1.4) + 0.3 * exp(-h2 / 14.0)) + 0.4 * t * exp(-d2 / 1.1));
+    col = mix(c.rgb, vec3(1.0), 0.5 * exp(-h2 / 0.8));
+  } else {
+    // a tracer
+    m = al * t * exp(-d2 / 0.3);
+  }
+  return vec4(col * m, 0.5 * m);
+}
+vec4 btBlast(vec2 p, vec4 b, vec4 c) {
+  float R = max(b.z, 0.5), dp = uSize.z, age = c.x, kind = c.z;
+  vec2 d = p - b.xy;
+  float r = length(d);
+  if (r > R * (kind > 2.5 && kind < 3.5 ? 8.6 : 5.6) + 6.0 * dp) return vec4(0.0);
+  float fbR = 0.0, T = 0.0, fbA = 0.0, ringR = 0.0, ringA = 0.0, flash = 0.0, sv = 0.0, g = 1.0 - exp(-age / 0.12);
+  int sn = 0;
+  if (kind < 0.5) { fbR = 0.5 + 0.5 * g; T = exp(-age / 0.15); fbA = pow(max(1.0 - age / 0.45, 0.0), 2.0); flash = exp(-age / 0.06); sn = 5; sv = 2.2; }
+  else if (kind < 1.5) { ringR = 0.35 + 1.3 * age / 0.7; ringA = 0.9 * pow(max(1.0 - age / 0.7, 0.0), 2.0); flash = 0.5 * exp(-age / 0.08); }
+  else if (kind < 2.5) { fbR = 0.5 + 1.1 * (1.0 - exp(-age / 0.35)); T = exp(-age / 0.55); fbA = pow(max(1.0 - age / 1.8, 0.0), 1.5); flash = 1.4 * exp(-age / 0.1); sn = 10; sv = 3.0; }
+  else if (kind < 3.5) { fbR = 0.6 + 1.8 * (1.0 - exp(-age / 1.2)); T = exp(-age / 1.6); fbA = pow(max(1.0 - age / 6.5, 0.0), 1.5);
+    ringR = 0.8 + 7.0 * (1.0 - exp(-age / 1.5)); ringA = 0.8 * exp(-age / 1.8); flash = 1.1 * exp(-age / 0.2); sn = 24; sv = 6.0; }
+  else if (kind < 4.5) { float fk = nbN(vec2(age * 9.0, c.y * 50.0)); fbR = 0.55 + 0.15 * fk; T = 0.5 + 0.3 * fk; fbA = b.w * (0.55 + 0.45 * fk); }
+  else if (kind < 5.5) { fbR = 0.4 + 0.6 * g; T = exp(-age / 0.15); fbA = pow(max(1.0 - age / 0.6, 0.0), 2.0); flash = 0.8 * exp(-age / 0.06); sn = 6; sv = 1.8; }
+  else if (kind < 6.5) { fbR = 0.5 + 0.9 * g; T = exp(-age / 0.25); fbA = pow(max(1.0 - age / 0.9, 0.0), 2.0); flash = exp(-age / 0.07); sn = 8; sv = 2.5; }
+  else { fbR = 0.6 + 1.4 * (1.0 - exp(-age / 0.6)); T = exp(-age / 0.9); fbA = pow(max(1.0 - age / 6.0, 0.0), 1.5);
+    ringR = 0.6 + 3.5 * (1.0 - exp(-age / 0.8)); ringA = 0.5 * exp(-age / 0.9); flash = 1.5 * exp(-age / 0.12); sn = 16; sv = 4.0; }
+  vec3 sc = btSide(c.w);
+  vec4 o = vec4(0.0);
+  // the fireball: churning, white-hot to deep red as it cools, and the smoke it leaves
+  if (fbA > 0.0 && r < 1.6 * R * fbR) {
+    float q = r / (R * fbR), tu = nbF(d / (0.35 * R * fbR) + c.y * 40.0 + vec2(age * 0.9, -age * 0.6), 3), edge = 0.75 + 0.5 * tu;
+    float dens = 1.0 - smoothstep(edge - 0.35, edge, q), heat = T * (1.0 - 0.6 * q) * (0.6 + 0.8 * tu);
+    vec3 fc = mix(vec3(0.45, 0.07, 0.02), vec3(1.0, 0.5, 0.12), smoothstep(0.1, 0.45, heat));
+    fc = mix(fc, vec3(1.0, 0.93, 0.78), smoothstep(0.5, 0.9, heat));
+    float e = dens * fbA * smoothstep(0.02, 0.2, heat), sa = 0.55 * dens * fbA * (1.0 - T);
+    o = over(vec4(fc * e * 1.3, 0.6 * e), vec4(vec3(0.04) * sa, sa));
+  }
+  // the shock ring (a shield's ripple in its side's colour)
+  if (ringA > 0.0) {
+    float x = (r - ringR * R) / (0.12 * R + 1.5 * dp);
+    float m = ringA * exp(-x * x) * (0.65 + 0.5 * nbF(d / (0.4 * R) + c.y * 20.0, 2));
+    vec3 rc = kind > 0.5 && kind < 1.5 ? mix(sc, vec3(1.0), 0.25) : vec3(1.0, 0.82, 0.62);
+    o = over(vec4(rc * m, 0.5 * m), o);
+  }
+  if (flash > 0.0) {
+    float fr = R * (kind > 2.5 && kind < 3.5 ? 1.6 : 1.0), m = flash * exp(-r * r / (fr * fr));
+    o = over(vec4((kind > 0.5 && kind < 1.5 ? sc : vec3(1.0, 0.95, 0.85)) * m, 0.5 * min(m, 1.0)), o);
+  }
+  // sparks flung out, each a short streak, cooling as it flies
+  uint sd = uint(c.y * 65535.0);
+  for (int k = 0; k < sn; k++) {
+    float h1 = hash(uvec2(uint(k) + 101u, sd)), h2 = hash(uvec2(uint(k) + 7u, sd + 3u));
+    float an = h1 * 6.2831853, spd = sv * (0.4 + 0.8 * h2), t;
+    vec2 dir = vec2(cos(an), sin(an)), hd = b.xy + dir * R * spd * (1.0 - exp(-age / 0.7));
+    float d2 = btSeg(p, hd - dir * (R * 0.25 * spd * exp(-age / 0.5) + dp), hd, t) / (dp * dp);
+    if (d2 > 30.0) continue;
+    float m = exp(-age / (0.5 + 1.2 * h2 * (kind > 2.5 ? 2.0 : 1.0))) * t * exp(-d2 / 0.5);
+    o = over(vec4(mix(vec3(1.0, 0.55, 0.2), vec3(1.0, 0.95, 0.8), exp(-age / 0.3)) * m, 0.5 * m), o);
+  }
+  return o * 0.88; // far off: a little dimmed by the haze
+}
+vec4 battle(vec2 p) {
+  vec4 a = uBt[0], n = uBt[1];
+  vec2 d = p - a.xy;
+  if (a.z <= 0.0 || dot(d, d) > a.z * a.z) return vec4(0.0);
+  vec4 o = vec4(0.0);
+  float dp = uSize.z;
+  int nh = int(n.x), ns = int(n.y), nb = int(n.z);
+  for (int i = 0; i < nh; i++) {
+    int b = 2 + 5 * i;
+    vec4 h0 = uBt[b], h1 = uBt[b + 1], h2 = uBt[b + 2], h3 = uBt[b + 3], h4 = uBt[b + 4];
+    vec2 dh = p - h0.xy;
+    float rr = h0.z * 1.8 * (1.0 + h3.y);
+    if (dot(dh, dh) < rr * rr) o = over(shipOne(p, h0.xy, h0.z, h1, 1.0, h0.w, vec4(h2.xy, h3.z, 0.0), h3.y, h4), o);
+    if (h2.w > 0.0 || h3.x > 0.0) o = over(shipJump(p, h2, h3, h1.xy), o);
+  }
+  for (int i = 0; i < nb; i++) o = over(btBlast(p, uBt[${B} + 2 * i], uBt[${B + 1} + 2 * i]), o);
+  for (int i = 0; i < ns; i++) o = over(btStreak(p, uBt[${S} + 2 * i], uBt[${S + 1} + 2 * i], dp), o);
   return o;
 }`;
 })();
@@ -5178,7 +6161,7 @@ precision highp float;
 #define ASTEROID_N ${ASTEROID_N}
 #define FAR_N ${FAR_N}
 uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uOrg, uGlow, uN0, uN1;
-uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[5], uSh[5], uWp[2], uFr[FAR_N * 4];
+uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[9], uSh[6], uWp[2], uFr[FAR_N * 4], uPl[9], uBt[${SKY_BT_N}];
 uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
 uniform int uGN, uFrN;
 uniform sampler2D ${SKY_TEX.join(', ')};
@@ -5195,6 +6178,8 @@ ${NEBULA_GLSL}
 ${ASTEROID_GLSL}
 ${LENS_GLSL}
 ${SHIP_GLSL}
+${PLANET_GLSL}
+${BATTLE_GLSL}
 ${WARP_GLSL}
 ${FAR_GLSL}
 void main() {
@@ -5215,10 +6200,15 @@ void main() {
   // the lens's far galaxies, bent into arcs, over those and under the stars
   c = over(lensLight(pl - uLn[0].xy), c);
   ${STAR_GLSL}
-  // the lens's dark core and accretion ring, over the bent stars
+  // the far sights, over the stars and bent by a black hole between like them: a planet, a battle, the capital ship (and its
+  // escort); then the black hole's stream, its dark core and ring over them, and its jets; all under the asteroids,
+  // satellites and streaks
+  c = over(planet(p, pl), c);
+  c = over(battle(pl), c);
+  c = over(ship(p, pl), c);
+  c = over(lensFeed(p), c);
   c = over(lensHole(p), c);
-  // the distant capital ship (and its escort), over the stars and under the asteroids, satellites and streaks
-  c = over(ship(p), c);
+  c = over(lensJets(p), c);
   // the asteroids' sharp rocks, over the stars and under the satellites and streaks; an empty slot is skipped
   for (int i = 0; i < ASTEROID_N; i++) {
     vec4 a = uAs[i], b = uAs[ASTEROID_N + i];
@@ -5425,6 +6415,7 @@ function skyGLFinish(G) {
   G.shloc = gl.getUniformLocation(p, 'uSh');
   G.wploc = gl.getUniformLocation(p, 'uWp');
   G.frloc = gl.getUniformLocation(p, 'uFr'); G.frnloc = gl.getUniformLocation(p, 'uFrN');
+  G.plloc = gl.getUniformLocation(p, 'uPl'); G.btloc = gl.getUniformLocation(p, 'uBt');
   G.gloc = ['uGlow', 'uN0', 'uN1', 'uGB', 'uGE', 'uGC', 'uGL', 'uGN'].map((name) => gl.getUniformLocation(p, name));
   SKY_TEX.forEach((name, i) => {
     gl.activeTexture(gl.TEXTURE0 + i);
@@ -5694,7 +6685,7 @@ function drawSkyGL(glass, glows, k, ox, oy) {
       u[o] = r.x * dpr; u[o + 1] = r.y * dpr; u[o + 2] = r.r * dpr; u[o + 3] = r.a;
       u[ob] = Math.cos(r.rot); u[ob + 1] = Math.sin(r.rot); u[ob + 2] = r.asp; u[ob + 3] = Math.floor(r.blur * dpr) + r.seed;
     });
-    const l = I.event.ev.light, ol = SKY_AS + ASTEROID_N * 8;
+    const l = evOf('asteroids').ev.light, ol = SKY_AS + ASTEROID_N * 8;
     u[ol] = l[0]; u[ol + 1] = l[1];
   }
   // the gravity lens, after the asteroids (all 0 when none)
@@ -5708,12 +6699,22 @@ function drawSkyGL(glass, glows, k, ox, oy) {
       u[b + 4] = Math.cos(q.rot); u[b + 5] = Math.sin(q.rot); u[b + 6] = q.asp;
     });
     u[o + 11] = ln.phi;
+    // what it is eating, and the flare and jets after a meal
+    if (ln.feed) {
+      const f = ln.feed;
+      u[o + 20] = f.rho * dpr; u[o + 21] = f.th; u[o + 22] = f.w * DEVOUR_WIND; u[o + 23] = f.width * dpr;
+      u[o + 24] = f.rgb[0]; u[o + 25] = f.rgb[1]; u[o + 26] = f.rgb[2]; u[o + 27] = f.a;
+    }
+    u[o + 28] = ln.flare; u[o + 29] = ln.jet; u[o + 30] = ln.jl * dpr; u[o + 31] = ln.jb * dpr; u[o + 32] = ln.t;
   }
-  // the capital ship, after the lens (all 0 when none)
+  // the capital ship, after the lens (all 0 when none); falling into the black hole: drawn where it is, not bent by it, and
+  // gone into the dark as it reaches the ring
   const sh = shipNow();
   if (sh) {
-    const o = SKY_SH;
-    u[o] = sh.x * dpr; u[o + 1] = sh.y * dpr; u[o + 2] = sh.r * dpr; u[o + 3] = sh.a;
+    const o = SKY_SH, ff = sh.fall ? sh.fall.f : 0;
+    u[o] = sh.x * dpr; u[o + 1] = sh.y * dpr; u[o + 2] = sh.r * dpr; u[o + 3] = sh.a * (1 - sm01((ff - 0.86) / 0.14));
+    if (!sh.j && sh.sm) u[o + 17] = sh.sm;
+    u[o + 20] = sh.heat || 0; u[o + 21] = sh.fall ? sh.fall.ease : 0;
     u[o + 4] = sh.cs; u[o + 5] = sh.sn; u[o + 6] = sh.flip; u[o + 7] = sh.seed;
     if (sh.eo) for (let j = 0; j < 4; j++) u[o + 8 + j] = sh.eo[j];
     if (sh.j) {
@@ -5738,6 +6739,48 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     u[o + 8] = q.rgb[0]; u[o + 9] = q.rgb[1]; u[o + 10] = q.rgb[2]; u[o + 11] = q.p;
     u[o + 12] = q.t; u[o + 13] = q.en; u[o + 14] = q.ex;
   });
+  // the planet, after the far event (all 0 when none): its star turned into its axis's roll, as the shader turns the pixel
+  const pl = planetNow();
+  if (pl) {
+    const o = SKY_PL, K = PLANET_KINDS[pl.kind], c = Math.cos(pl.tilt), s = Math.sin(pl.tilt), L = pl.light, ff = pl.fall ? pl.fall.f : 0;
+    u[o] = pl.x * dpr; u[o + 1] = pl.y * dpr; u[o + 2] = pl.r * dpr; u[o + 3] = 1 - sm01((ff - 0.86) / 0.14);
+    u[o + 4] = L[0] * c + L[1] * s; u[o + 5] = -L[0] * s + L[1] * c; u[o + 6] = L[2]; u[o + 7] = pl.kind;
+    u[o + 8] = c; u[o + 9] = s; u[o + 10] = pl.spin; u[o + 11] = pl.seed;
+    for (let j = 0; j < 3; j++) { u[o + 12 + j] = K[2][j]; u[o + 16 + j] = K[0][j]; u[o + 20 + j] = K[1][j]; }
+    u[o + 15] = K[3]; u[o + 19] = pl.open; u[o + 23] = pl.spin * PLANET_CLOUD;
+    u[o + 24] = pl.tide ? pl.tide[0] : 1; u[o + 25] = pl.tide ? pl.tide[1] : 0; u[o + 26] = pl.st || 1; u[o + 27] = pl.heat || 0;
+    if (pl.moon) { u[o + 28] = pl.moon.x; u[o + 29] = pl.moon.y; u[o + 30] = pl.moon.r; u[o + 31] = pl.moon.z >= 0 ? 1 : -1; }
+    if (pl.ring) { u[o + 32] = pl.ring.in; u[o + 33] = pl.ring.out; }
+    u[o + 34] = pl.fall ? pl.fall.ease : 0;
+  }
+  // the battle, after the planet (all 0 when none): its middle and reach, how many of each, then the hulls, streaks and blasts
+  const bt = battleNow();
+  if (bt) {
+    const o = SKY_BT;
+    u[o] = bt.x * dpr; u[o + 1] = bt.y * dpr; u[o + 2] = bt.reach * dpr;
+    u[o + 4] = bt.hulls.length; u[o + 5] = bt.streaks.length; u[o + 6] = bt.blasts.length; u[o + 7] = bt.s;
+    bt.hulls.forEach((h, i) => {
+      const b = o + 8 + i * 20, j = h.j;
+      u[b] = h.x * dpr; u[b + 1] = h.y * dpr; u[b + 2] = h.r * dpr; u[b + 3] = h.a;
+      u[b + 4] = h.cs; u[b + 5] = h.sn; u[b + 6] = h.flip; u[b + 7] = h.seed;
+      if (j) {
+        u[b + 8] = j.x * dpr; u[b + 9] = j.y * dpr; u[b + 10] = j.h * dpr; u[b + 11] = j.a;
+        u[b + 12] = j.fl; u[b + 14] = j.cut; u[b + 15] = j.t;
+      }
+      u[b + 13] = h.sm;
+      u[b + 16] = h.side; u[b + 17] = h.half; u[b + 18] = h.cut; u[b + 19] = h.heat;
+    });
+    bt.streaks.forEach((q, i) => {
+      const b = o + 8 + BATTLE_HULLS * 20 + i * 8;
+      u[b] = q.hx * dpr; u[b + 1] = q.hy * dpr; u[b + 2] = q.tx * dpr; u[b + 3] = q.ty * dpr;
+      u[b + 4] = q.rgb[0]; u[b + 5] = q.rgb[1]; u[b + 6] = q.rgb[2]; u[b + 7] = Math.min(1, q.a) + q.type * 2;
+    });
+    bt.blasts.forEach((q, i) => {
+      const b = o + 8 + BATTLE_HULLS * 20 + BATTLE_STREAKS * 8 + i * 8;
+      u[b] = q.x * dpr; u[b + 1] = q.y * dpr; u[b + 2] = q.r * dpr; u[b + 3] = q.a;
+      u[b + 4] = q.age; u[b + 5] = q.seed || 0; u[b + 6] = q.kind; u[b + 7] = q.side || 0;
+    });
+  }
   I.glowGL = glowPrep(G, glows, k, ox, oy, dpr);
   // the field again when its quads changed; the sky's pass when anything it shows did
   let fresh = !G.gn || (G.fieldOk && G.ni === G.lastNi);
@@ -5756,10 +6799,12 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   for (let j = 0; j < 3; j++) gl.uniform4fv(G.rloc[j], u, SKY_M + METEOR_N * 8 + SAT_N * 8 + j * ROCKET_N * 4, ROCKET_N * 4);
   gl.uniform4fv(G.nbloc, u, SKY_NB, 20);
   gl.uniform4fv(G.asloc, u, SKY_AS, ASTEROID_N * 8 + 4);
-  gl.uniform4fv(G.lnloc, u, SKY_LN, 20);
-  gl.uniform4fv(G.shloc, u, SKY_SH, 20);
+  gl.uniform4fv(G.lnloc, u, SKY_LN, 36);
+  gl.uniform4fv(G.shloc, u, SKY_SH, 24);
   gl.uniform4fv(G.wploc, u, SKY_WP, 8);
   gl.uniform4fv(G.frloc, u, SKY_FR, FAR_N * 16); gl.uniform1i(G.frnloc, G.frn);
+  gl.uniform4fv(G.plloc, u, SKY_PL, 36);
+  gl.uniform4fv(G.btloc, u, SKY_BT, SKY_BT_N * 4);
   if (G.glow) {
     const L = G.gloc, gu = G.gu, M = GLOW_MAX * 4;
     for (let j = 0; j < 3; j++) gl.uniform4fv(L[j], gu, j * 4, 4);
