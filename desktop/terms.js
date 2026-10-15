@@ -19,19 +19,39 @@
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const H = require('./host');
 const P = require('../platform');
 
 const REQ_TIMEOUT = 15000;
 const CONNECT_MS = 25000; // a first start on a slow PC (an antivirus scanning electron.exe) can take a while
-const STUCK_MS = 4000; // a host on the pipe that won't let this window in this long is stuck: it is replaced
+const HELLO_MS = 3000; // one hello unanswered this long: the attempt failed
+// A host on the pipe that won't let this window in for STUCK_MS is looked at (its process and what runs under it).
+// One with live sessions under it (claudes) is never ended: it is busy (a long synchronous step, an antivirus scan),
+// and ending it would cut every session off mid-turn (2026-10-13: five hosts killed this way in 71 s). It is waited
+// on, the process table read again every CHECK_MS, and after BUSY_MS it is reported and left running. One with no
+// session under it whose command line is this host.js is stuck: it is ended and replaced
+const STUCK_MS = 4000;
+const BUSY_MS = 120000;
+const CHECK_MS = 10000;
+// a command line of a session host: <electron or node> <...>/desktop/host.js (not its --selfcheck)
+const isHostCmd = (c) => /desktop[\\/]host\.js\b/i.test(String(c || '')) && !/--selfcheck/.test(String(c));
+const isClaudeCmd = (c) => /claude/i.test(String(c || ''));
 
+// opts.sys (tests only): { spawnHost(env, out, cwd) -> child, processTable(cb), kill(pid) } in place of the real ones, and
+// opts.times: { hello, stuck, busy, check } in place of the times above
 function createHost(opts = {}) {
   const send = opts.send || (() => {});
   const onChange = opts.onChange || (() => {});
   const log = opts.log || (() => {});
   const PIPE = H.pipeName();
+  const sys = {
+    spawnHost: (env, out, cwd) => spawn(process.execPath, [H.HOST_JS], { detached: true, windowsHide: true, stdio: ['ignore', out, out], env, cwd }),
+    processTable: (cb) => P.processTable(cb),
+    kill: (pid) => process.kill(pid),
+    ...(opts.sys || {}),
+  };
+  const times = { hello: HELLO_MS, stuck: STUCK_MS, busy: BUSY_MS, check: CHECK_MS, ...(opts.times || {}) };
   let sock = null, ready = false, buf = '', seq = 0, closed = false, quitting = false;
   let info = null; // the host's hello: { pid, version, onDisk, startedAt, ui }
   let cache = []; // the host's last list()
@@ -53,6 +73,11 @@ function createHost(opts = {}) {
     return (lines.find((l) => /^\w*Error\b/.test(l)) || lines.pop() || '').slice(0, 300);
   };
   let exited = false; // the host this window started has exited before it was reached
+  let raced = false; // ... because another host already served the pipe: connect to that one
+  // since when the host on the pipe has not let this window in (across connect() calls: a busy host is waited on
+  // for BUSY_MS in all), and when its process table is read next
+  let stuckSince = 0, nextCheck = 0, busyPid = 0, busyTold = false;
+  const unstuck = () => { stuckSince = 0; nextCheck = 0; busyPid = 0; busyTold = false; };
 
   // ---------- the connection ----------
   function startHost() {
@@ -63,12 +88,15 @@ function createHost(opts = {}) {
       // what it prints before its own log is open (a file that does not load) lands in host-start.log
       let out = 'ignore';
       try { out = fs.openSync(path.join(dir, 'host-start.log'), 'w'); } catch {}
-      const child = spawn(process.execPath, [H.HOST_JS], { detached: true, windowsHide: true, stdio: ['ignore', out, out], env, cwd: dir });
+      const child = sys.spawnHost(env, out, dir);
       if (typeof out === 'number') try { fs.closeSync(out); } catch {}
       child.on('error', (e) => { why = `it could not be started: ${e.message}`; wlog(`could not start the session host: ${e.message}`); });
       exited = false;
       child.on('exit', (code) => {
         if (ready) return;
+        // 0 before this window reached it: it found the pipe taken ("another host already serves this pipe"), a host
+        // started meanwhile (a restart's successor, another window's): not a failure, that one is connected to
+        if (code === 0) { raced = true; wlog(`the session host this window started (pid ${child.pid}) found another one serving the pipe; connecting to that one`); return; }
         exited = true;
         const said = lastLine(path.join(dir, 'host-start.log')) || lastLine(H.logFile());
         why = `it stopped right after starting (exit ${code})${said ? `: ${said}` : ''}`;
@@ -80,28 +108,34 @@ function createHost(opts = {}) {
     } catch (e) { why = `it could not be started: ${e.message}`; wlog(`could not start the session host: ${e.message}`); return false; }
   }
 
-  // a host holds the pipe but won't let this window in (host.json gone or another host's, or it hangs): end
-  // it, so a new one can start; the new one resumes its sessions from the restore list
-  function endStuckHost() {
+  // a host holds the pipe but won't let this window in (host.json gone or another host's, or it hangs): what is it?
+  // -> { act: 'end', pid } (a host.js with no session under it: end it, so a new one can start and resume the
+  // sessions from the restore list), { act: 'wait', pid, sessions } (live claudes under it: never ended), or
+  // { act: 'leave', why } (its pid is unknown, the pid in host.json runs something else now, or the process table
+  // can't be read: nothing is ended blind). Through the process table (Win32_Process / ps), never blocking the window
+  async function judgeStuck() {
+    const list = await new Promise((resolve) => { try { sys.processTable((l) => resolve(Array.isArray(l) ? l : null)); } catch { resolve(null); } });
+    if (!list) return { act: 'leave', why: 'the process list could not be read' };
     const hf = H.readJson(H.hostFile());
     let pid = hf && Number.isInteger(hf.pid) ? hf.pid : 0;
-    if (!pid && !process.env.FV_HOST_PIPE && !P.isWin) {
-      // no host.json: look for a process running this host.js (ps; the Electron binary or node)
-      const pids = (P.processesSync() || []).filter((x) => /desktop[\\/]host\.js(\s|$)/.test(x.command) && !/--selfcheck|restart-host/.test(x.command)
-        && x.pid !== process.pid).map((x) => x.pid);
-      if (pids.length === 1) pid = pids[0];
-    } else if (!pid && !process.env.FV_HOST_PIPE) {
-      // no host.json: look for electron.exe / Fleet View.exe (desktop/brand-exe.js) / node.exe running this host.js
-      try {
-        const ps = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-          "Get-CimInstance Win32_Process -Filter \"Name='electron.exe' or Name='Fleet View.exe' or Name='node.exe'\" | Where-Object { $_.CommandLine -like '*desktop*host.js*' -and $_.CommandLine -notlike '*--selfcheck*' -and $_.CommandLine -notlike '*restart-host*' } | ForEach-Object { $_.ProcessId }"],
-        { encoding: 'utf8', windowsHide: true, timeout: 8000 });
-        const pids = String(ps.stdout || '').split(/\s+/).map(Number).filter((n) => n > 0 && n !== process.pid);
-        if (pids.length === 1) pid = pids[0];
-      } catch {}
+    const row = pid ? list.find((x) => x.pid === pid) : null;
+    if (pid && !(row && isHostCmd(row.command))) {
+      wlog(`host.json names pid ${pid}, but ${row ? `that runs something else now (${String(row.command).slice(0, 120)})` : 'no such process runs'}`);
+      pid = 0;
     }
-    if (!pid || pid === process.pid) { wlog('a session host holds the pipe but will not answer, and its pid is unknown'); return false; }
-    try { process.kill(pid); wlog(`ended a stuck session host (pid ${pid}) that held the pipe but would not let this window in`); return true; } catch (e) {
+    if (!pid && !process.env.FV_HOST_PIPE) {
+      // look for the one process running a host.js (Electron, Fleet View.exe (desktop/brand-exe.js) or node)
+      const pids = list.filter((x) => isHostCmd(x.command) && x.pid !== process.pid).map((x) => x.pid);
+      if (pids.length === 1) pid = pids[0];
+    }
+    if (!pid || pid === process.pid) return { act: 'leave', why: 'its pid is unknown' };
+    // its sessions: each child that is a claude or has one under it (cmd /c or sh -c, then claude)
+    const claude = (p) => isClaudeCmd((list.find((x) => x.pid === p) || {}).command);
+    const sessions = list.filter((x) => x.ppid === pid && (claude(x.pid) || P.descendants(x.pid, list).some(claude))).length;
+    return sessions ? { act: 'wait', pid, sessions } : { act: 'end', pid };
+  }
+  function endHost(pid) {
+    try { sys.kill(pid); wlog(`ended a stuck session host (pid ${pid}) that held the pipe, would not let this window in and ran no session`); return true; } catch (e) {
       wlog(`could not end the stuck session host (pid ${pid}): ${e.message}`); return false;
     }
   }
@@ -114,7 +148,7 @@ function createHost(opts = {}) {
       const s = net.connect(PIPE);
       let done = false, b = '';
       const finish = (v) => { if (done) return; done = true; clearTimeout(timer); if (v !== true) s.destroy(); resolve(v); };
-      const timer = setTimeout(() => finish('timeout'), 3000);
+      const timer = setTimeout(() => finish('timeout'), times.hello);
       s.setEncoding('utf8');
       // macOS and Linux: a socket file left by a host that crashed refuses the connection; nothing listens there
       s.on('error', (e) => finish(e && (e.code === 'ENOENT' || (!P.isWin && e.code === 'ECONNREFUSED')) ? 'nopipe' : 'error'));
@@ -144,27 +178,48 @@ function createHost(opts = {}) {
     if (connecting) return connecting;
     connecting = (async () => {
       const end = Date.now() + ms;
-      let started = false, replaced = false, stuckSince = 0;
+      let started = false, replaced = false;
       why = '';
+      const sleep = (n) => new Promise((res) => setTimeout(res, n));
+      const quitHint = 'one is running but will not let this window in; choose "Quit everything" from the tray icon and open Fleet View again';
       while (!closed && Date.now() < end) {
         const r = await attempt();
-        if (r === true) { why = ''; return true; }
+        if (r === true) { why = ''; unstuck(); return true; }
+        // the host it started found another serving the pipe: that one gets a grace of its own, and should the pipe
+        // be free again a host is started again
+        if (raced) { raced = false; started = false; unstuck(); }
         let listening = r !== 'nopipe';
         if (r === 'nofile') listening = await new Promise((res) => { const p = net.connect(PIPE); p.on('connect', () => { p.destroy(); res(true); }); p.on('error', () => res(false)); });
         // nothing listens on the pipe: start a host (once per connect; it may take a moment to come up)
-        if (!listening) { stuckSince = 0; if (!started) started = startHost(); else if (exited) break; }
+        if (!listening) { unstuck(); if (!started) started = startHost(); else if (exited) break; }
         else if (!replaced) {
-          // something listens but won't let this window in: give a host that is just starting a moment, then end
-          // it and start a new one (once per connect)
-          if (!stuckSince) stuckSince = Date.now();
-          else if (Date.now() - stuckSince >= STUCK_MS) {
-            replaced = true;
-            wlog(`the session host on the pipe does not let this window in (${r}); replacing it`);
-            if (endStuckHost()) { await new Promise((res) => setTimeout(res, 800)); started = startHost(); stuckSince = 0; }
-            else why = 'one is running but will not let this window in; choose "Quit everything" from the tray icon and open Fleet View again';
+          // something listens but won't let this window in: give a host that is just starting a moment, then look
+          // at it (judgeStuck): end and replace it (once per connect) only when no session runs under it
+          const now = Date.now();
+          if (!stuckSince) stuckSince = now;
+          else if (now - stuckSince >= times.stuck && now >= nextCheck) {
+            const v = await judgeStuck();
+            const secs = Math.round((Date.now() - stuckSince) / 1000);
+            if (v.act === 'end') {
+              replaced = true;
+              wlog(`the session host on the pipe does not let this window in (${r}) and runs no session; replacing it`);
+              if (endHost(v.pid)) { await sleep(800); started = startHost(); unstuck(); } else why = quitHint;
+            } else if (v.act === 'wait') {
+              nextCheck = Date.now() + times.check;
+              if (busyPid !== v.pid) { busyPid = v.pid; wlog(`the session host (pid ${v.pid}) does not let this window in (${r}) but runs ${v.sessions} session(s): it is busy; waiting for it, never ending it`); }
+              if (Date.now() - stuckSince < times.busy) why = `it is busy (${v.sessions} session(s) run under it) and has not answered for ${secs} s; waiting for it`;
+              else {
+                if (!busyTold) { busyTold = true; wlog(`the session host (pid ${v.pid}) has not answered for ${secs} s; it is left running with its ${v.sessions} session(s)`); }
+                why = `it runs ${v.sessions} session(s) but has not answered for ${secs} s; it is left running. If it stays so, choose "Quit everything" from the tray icon and open Fleet View again`;
+              }
+            } else {
+              replaced = true;
+              wlog(`the session host on the pipe does not let this window in (${r}), and ${v.why}; it is left running`);
+              why = quitHint;
+            }
           }
         }
-        await new Promise((res) => setTimeout(res, 200));
+        await sleep(200);
       }
       if (!why) why = started ? 'it was started but did not answer in time' : 'it could not be reached';
       wlog(`could not reach the session host: ${why}`);

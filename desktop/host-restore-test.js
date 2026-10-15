@@ -8,8 +8,12 @@
 // across a host restart) until opened, then resumed in their saved folder, account and size; open of one still queued
 // starts it once, not twice; kill of a parked one forgets it; a quit mid-restore keeps the ones not started; restoreIdle
 // starts them all; a restart waits for a working one however long it takes, and for one waiting on an answer only
-// FV_HOST_ASK_WAIT_MS. Also runningTasks() on its own. Every process it started is killed at the end. Exit code 0 when
-// every case passes. FV_HOST_TEST_KEEP=1 keeps the temp folder (host.log) after a pass.
+// FV_HOST_ASK_WAIT_MS; one a live claude elsewhere has open is not dropped but tried again FV_HOST_RESTORE_RETRY_MS
+// later, then parked (keeping its restore state) when still open; a restart checks again right before it ends anything
+// (one that started work meanwhile is waited for); a quit ends one mid-turn without Ctrl+C and saves it busy; a restart
+// whose end phase hangs (FV_HOST_TEST_END_HANG) still hands over after its watchdog. Also runningTasks() on its own. Every process it
+// started is killed at the end. Exit code 0 when every case passes. FV_HOST_TEST_KEEP=1 keeps the temp folder (host.log)
+// after a pass.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -28,7 +32,7 @@ const PIPE = P.isWin ? `\\\\.\\pipe\\${TEST_TAG}` : path.join(os.tmpdir(), `${TE
 const DATA = path.join(ROOT, 'data'), PIDS = path.join(ROOT, 'sessions'), PROJECTS = path.join(ROOT, 'projects');
 const SETTINGS = path.join(ROOT, 'fleet-view.json'), FAKE = path.join(ROOT, 'fake-claude.js');
 for (const d of [DATA, PIDS, PROJECTS, path.join(ROOT, 'handoffs')]) fs.mkdirSync(d, { recursive: true });
-const GAP = 1000, ASK_WAIT = 3000;
+const GAP = 1000, ASK_WAIT = 3000, RETRY = 3000;
 
 function nodePath() {
   if (fs.existsSync(path.join(__dirname, 'node_modules', 'node-pty'))) return path.join(__dirname, 'node_modules');
@@ -37,20 +41,21 @@ function nodePath() {
   return main && fs.existsSync(path.join(main, 'node-pty')) ? main : null;
 }
 
-// the fake claude: one line per start in starts.txt (pid, time, arguments, account folder), in the folder it runs in
+// the fake claude: one line per start in starts.txt (pid, time, arguments, account folder), in the folder it runs in;
+// every byte it receives in received.txt
 fs.writeFileSync(FAKE, `'use strict';
 const fs = require('fs'), path = require('path');
 fs.appendFileSync(path.join(process.cwd(), 'starts.txt'), JSON.stringify({ pid: process.pid, at: Date.now(), args: process.argv.slice(2), config: process.env.CLAUDE_CONFIG_DIR || '-' }) + '\\n');
 process.stdout.write('fake claude ready\\r\\n');
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
-process.stdin.on('data', (d) => { if (d.includes(3)) process.exit(0); });
+process.stdin.on('data', (d) => { fs.appendFileSync(path.join(process.cwd(), 'received.txt'), d); if (d.includes(3)) process.exit(0); });
 process.stdin.resume();
 `);
 
 const NODE_PATH = nodePath();
 const ENV = {
   ...process.env, FV_HOST_PIPE: PIPE, FV_HOST_DIR: DATA, FV_HOST_SESSIONS_DIR: PIDS, FV_HOST_SETTINGS: SETTINGS,
-  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_RESTORE_GAP_MS: String(GAP), FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_ASK_WAIT_MS: String(ASK_WAIT),
+  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_RESTORE_GAP_MS: String(GAP), FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_ASK_WAIT_MS: String(ASK_WAIT), FV_HOST_RESTORE_RETRY_MS: String(RETRY),
   FV_TERM_CMD: `"${process.execPath}" "${FAKE}"`, FV_HANDOFF_DIR: path.join(ROOT, 'handoffs'),
   ...(NODE_PATH ? { NODE_PATH } : {}),
 };
@@ -67,6 +72,7 @@ function conv(name, extra) {
   return c;
 }
 const starts = (c) => { try { return fs.readFileSync(path.join(c.cwd, 'starts.txt'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+const received = (c) => { try { return fs.readFileSync(path.join(c.cwd, 'received.txt'), 'latin1'); } catch { return ''; } };
 const entry = (c) => ({ id: c.id, cwd: c.cwd, account: c.account || 'B', startedAt: Date.now() - 60000, busy: !!c.busy, interrupted: false, cols: c.cols || 100, rows: 30,
   ...(c.role ? { role: c.role } : {}), ...(c.restartBy ? { restartBy: true } : {}) });
 const writeList = (cs, ui = null) => fs.writeFileSync(path.join(DATA, 'sessions.json'), JSON.stringify({ version: 1, savedAt: Date.now(), reason: 'change', hostPid: 1, sessions: cs.map(entry), ui }));
@@ -95,9 +101,9 @@ function pidFile(c, status, waitingFor) {
   fs.writeFileSync(c.pidFile, JSON.stringify({ pid: process.pid, sessionId: c.id, cwd: c.cwd, startedAt: c.pidAt, kind: 'interactive',
     status, ...(waitingFor ? { waitingFor } : {}), statusUpdatedAt: now, updatedAt: now }));
 }
-function startHost() {
+function startHost(extra) {
   try { fs.unlinkSync(path.join(DATA, 'host.json')); } catch {}
-  const c = spawn(process.execPath, [path.join(__dirname, 'host.js')], { env: ENV, stdio: 'ignore', windowsHide: true });
+  const c = spawn(process.execPath, [path.join(__dirname, 'host.js')], { env: { ...ENV, ...extra }, stdio: 'ignore', windowsHide: true });
   started.add(c.pid);
   return c;
 }
@@ -341,14 +347,102 @@ async function main() {
     started.add(succ5.pid);
     const c5 = await waitFor(() => connect().catch(() => null), 10000);
     if (c5) { await c5.req('quitAll', {}).catch(() => null); c5.close(); }
+    await waitFor(() => !pidAlive(succ5.pid), 15000);
   }
+
+  // ===== 6. one a live claude elsewhere has open (a killed host's claude not dead yet) is tried again RETRY later; =====
+  // one still open then is parked, keeping its restore state, not dropped
+  settings({});
+  const O0 = conv('o0', { busy: true }), O1 = conv('o1', { busy: true }), O2 = conv('o2', { busy: true });
+  writeList([O0, O1, O2]);
+  pidFile(O1, 'idle');
+  pidFile(O2, 'idle');
+  startHost();
+  if (!await waitFor(() => hostJson(), 15000)) { check('6. the host starts', false, hostLog()); return; }
+  cl = await waitFor(() => connect().catch(() => null), 10000);
+  const held6 = await waitFor(() => [O1, O2].every((c) => hostLog().includes(`restore: ${c.id} is open in another claude; tried again in ${RETRY / 1000} s`)), 10000);
+  const parked6 = cl ? await cl.req('parked') : [];
+  check('6. one open in another claude is held for a retry, not dropped (a log line, parked() lists it as waiting)', held6 && starts(O0).length === 1
+    && [O1, O2].every((c) => starts(c).length === 0 && parked6.some((x) => x.id === c.id && !x.parked)), { parked6, log: hostLog().split('\n').filter((l) => l.includes('restore')).slice(-6) });
+  // O1's other claude ends before the retry; O2's does not
+  fs.unlinkSync(O1.pidFile);
+  const retried = await waitFor(() => hostLog().includes('restore: tried again: 1 of 2 resumed'), RETRY + 10000);
+  check('6. at the retry the one no longer open elsewhere is resumed, once', retried && starts(O1).length === 1 && hostLog().includes(`restore: ${O1.id} resumed`),
+    { o1: starts(O1).length, log: hostLog().split('\n').filter((l) => l.includes('restore')).slice(-4) });
+  const parked6b = await cl.req('parked');
+  check('6. the one still open elsewhere is parked until opened (a log line, parked()), never started', starts(O2).length === 0
+    && hostLog().includes(`restore: ${O2.id} is open in another claude; parked until opened`) && parked6b.some((x) => x.id === O2.id && x.parked), parked6b);
+  const s6 = await waitFor(() => (savedOf(O2) || {}).parked === true && savedOf(O1) ? savedList() : null, 5000);
+  check('6. sessions.json keeps it, parked, with its restore state (busy)', s6 && savedOf(O2).busy === true, savedList());
+  const ro6 = await cl.req('open', { id: O2.id, cwd: ROOT, cols: 90, rows: 30 });
+  await waitFor(() => starts(O2).length, 5000);
+  const l6 = await cl.req('list'), o2l = l6.find((x) => x.id === O2.id);
+  check('6. open of it resumes it as the restore would have (interrupted)', ro6 && ro6.ok && starts(O2).length === 1 && o2l && o2l.interrupted && o2l.restored, { ro6, o2l });
+  try { fs.unlinkSync(O2.pidFile); } catch {}
+  const hp6 = cl.pid;
+  await cl.req('quitAll', {}).catch(() => null);
+  cl.close();
+  await waitFor(() => !pidAlive(hp6), 15000);
+
+  // ===== 7. one that starts work between the restart's check and its end: the restart waits again (nothing saved or =====
+  // ended); a quit then ends the one mid-turn without Ctrl+C (Claude Code would record it as the user rejecting its
+  // tool call), saved busy, and the idle one with Ctrl+C
+  settings({ autoContinue: false });
+  const X = conv('x', { busy: true }), Y = conv('y', { busy: true });
+  writeList([X, Y]);
+  startHost();
+  if (!await waitFor(() => hostJson(), 15000)) { check('7. the host starts', false, hostLog()); return; }
+  cl = await waitFor(() => connect().catch(() => null), 10000);
+  await waitFor(() => starts(X).length && starts(Y).length, 15000);
+  pidFile(X, 'idle');
+  pidFile(Y, 'idle');
+  await waitFor(async () => (await cl.req('list')).filter((x) => x.status === 'idle').length === 2, 10000);
+  const hp7 = hostJson().pid;
+  const r7 = await cl.req('restart', {});
+  pidFile(Y, 'busy'); // it answered after its first check, and runs the self-check again now
+  const waited7 = await waitFor(() => hostLog().includes(`[host ${hp7}] restart: ${Y.id} started work meanwhile; waiting again`), 15000);
+  await sleep(2500);
+  check('7. one that starts work between the restart\'s check and its end: the restart waits again, nothing is saved or ended', r7 && r7.ok && !(r7.waiting || []).length && waited7
+    && pidAlive(hp7) && !hostLog().includes(`[host ${hp7}] restart: saved`) && !received(X).includes('\x03') && !received(Y).includes('\x03'), { r7, log: hostLog().split('\n').filter((l) => l.includes(`[host ${hp7}] restart`)) });
+  const yPid = (starts(Y)[0] || {}).pid;
+  const q7 = await cl.req('quitAll', {}).catch((e) => ({ err: e.message }));
+  cl.close();
+  await waitFor(() => !pidAlive(hp7), 15000);
+  check('7. quit: the one mid-turn gets no Ctrl+C (its tree ends; a log line), the idle one does', q7 && q7.ok && !received(Y).includes('\x03') && received(X).includes('\x03')
+    && !pidAlive(yPid) && hostLog().includes(`[host ${hp7}] ending: ${Y.id} mid-turn, so no Ctrl+C`), { q7, x: received(X), y: received(Y), yAlive: pidAlive(yPid) });
+  check('7. quit: sessions.json has the one mid-turn busy (resumed and told to carry on), the idle one not', (savedOf(Y) || {}).busy === true && (savedOf(X) || {}).busy === false, savedList());
+  for (const c of [X, Y]) try { fs.unlinkSync(c.pidFile); } catch {}
+
+  // ===== 8. a restart whose end phase never finishes still hands over: the watchdog moves on after 8 s =====
+  settings({ autoContinue: false });
+  const Z = conv('z', { busy: true });
+  writeList([Z]);
+  startHost({ FV_HOST_TEST_END_HANG: '1' });
+  if (!await waitFor(() => hostJson(), 15000)) { check('8. the host starts', false, hostLog()); return; }
+  cl = await waitFor(() => connect().catch(() => null), 10000);
+  await waitFor(() => starts(Z).length, 15000);
+  const hp8 = hostJson().pid, t8 = Date.now();
+  const r8 = await cl.req('restart', { now: true });
+  cl.close();
+  const succ8 = await waitFor(() => { const h = hostJson(); return h && h.pid !== hp8 ? h : null; }, 30000);
+  if (succ8) started.add(succ8.pid);
+  const back8 = succ8 ? await waitFor(() => starts(Z).length === 2, 15000) : null;
+  check('8. a restart whose end phase hangs moves on after 8 s (a log line), and the next host takes over and resumes the session',
+    r8 && r8.ok && succ8 && back8 && hostLog().includes(`[host ${hp8}] restart: the sessions had not all ended after 8 s; this one exits`)
+    && hostLog().includes(`successor of ${hp8}`) && Date.now() - t8 >= 8000, { r8, succ8, back8, log: hostLog().split('\n').filter((l) => l.includes(`${hp8}`)).slice(-6) });
+  const c8 = succ8 ? await waitFor(() => connect().catch(() => null), 10000) : null;
+  if (c8) { await c8.req('quitAll', {}).catch(() => null); c8.close(); }
+  if (succ8) await waitFor(() => !pidAlive(succ8.pid), 15000);
 }
 
-main().catch((e) => check('the test ran to its end', false, e && e.stack ? e.stack : String(e))).finally(() => {
+// a host that died mid-request leaves an answer that never comes: the event loop drains with main() still waiting
+process.on('beforeExit', () => { check('the test ran to its end', false, 'a request got no answer (did the host die?)'); finish(); });
+main().catch((e) => check('the test ran to its end', false, e && e.stack ? e.stack : String(e))).finally(finish);
+function finish() {
   cleanup();
   const failed = results.filter((r) => !r.pass).length;
   const keep = failed || process.env.FV_HOST_TEST_KEEP;
   process.stdout.write(`${results.length - failed} passed, ${failed} failed${keep ? ` (files kept in ${ROOT})` : ''}\n`);
   if (!keep) { try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch {} }
   process.exit(failed ? 1 : 0);
-});
+}

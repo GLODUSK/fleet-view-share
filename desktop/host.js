@@ -60,7 +60,7 @@
 // exit, stays in it; one closed from the page, or that exited cleanly, leaves it). When a host starts, it brings the
 // listed conversations back (claude --resume) and marks the ones that were busy as interrupted (list() says interrupted
 // until Claude starts work again or Enter is typed); new sessions that never got an id are dropped, and so is a
-// conversation a live claude elsewhere already has open, or another device has (see Away).
+// conversation another device has (see Away); one a live claude elsewhere has open waits (see below).
 // The restore runs after the pipe listens and never blocks it: one start, then RESTORE_GAP_MS before the next
 // (FV_HOST_RESTORE_GAP_MS in tests), so a client is let in and answered throughout and 40 sessions never start at once
 // (2026-10-13: a 12 s synchronous restore made the window take the host for stuck, kill it and start another, five
@@ -73,6 +73,10 @@
 // restart mid-restore stops the queue and saves the rest as they were. parked() lists the waiting ones; list() only
 // running ones, so a parked conversation is, to every client, one not running here that opens on a click.
 // "restoreIdle": true in ~/.fleet-view.json starts the idle ones too (after the others, still one at a time).
+// One a live claude elsewhere still has open (at the start or in its turn), or whose start fails, is not dropped: it
+// stays held and is tried once more RESTORE_RETRY_MS later (FV_HOST_RESTORE_RETRY_MS in tests), as a claude of a host
+// that was killed dies a few seconds after it; if that fails too it is parked until opened. One on another device
+// (Away) is still dropped.
 //
 // Auto-continue: `claude --resume` starts no turn, so a conversation cut off mid-turn, or whose background tasks
 // died with the host, would sit idle for good. Each resumed one gets a one-line "[Fleet View] …" note typed into
@@ -93,10 +97,12 @@
 // it requires and a pty module load in a fresh process) and refuses if that fails; else it replies at once and
 // waits (not with now) until no session but the asking one (by: its CLAUDE_LAUNCH_KEY) is busy: one working is
 // never cut off, however long it takes; one waiting on an answer (a permission, a question) gets 10 minutes, then
-// is ended, resumed and told to carry on, so its question comes back. It checks again, saves the restore list
-// (reason 'restart', the asker marked restartBy), ends every session and starts the next host
-// (FV_HOST_SUCCESSOR=<pid>: it waits up to 15 s for the pipe instead of exiting), which resumes them. "Quit
-// everything" while it waits cancels it.
+// is ended, resumed and told to carry on, so its question comes back. It checks again (the self-check again, then the
+// pid files as they are then: one that started work meanwhile is waited for), starts the next host
+// (FV_HOST_SUCCESSOR=<pid>: it waits up to 60 s for the pipe instead of exiting, and ends a predecessor still holding it
+// after 30 s), saves the restore list (reason 'restart', the asker marked restartBy), ends every session and exits; the
+// next host then takes the pipe and resumes them. Ending never blocks the host, never takes it over END_WATCHDOG_MS,
+// and a session mid-turn gets no Ctrl+C (see endAll). "Quit everything" while it waits cancels it.
 //
 // Handoffs (../handoff.js): every claude started here gets its own CLAUDE_LAUNCH_KEY. A session that checkpoints
 // itself (its Stop hook, at ~200k context tokens) writes ~/.claude-handoffs/.restart/<that key>.json and is
@@ -130,7 +136,8 @@
 // %LOCALAPPDATA%\fleet-view\test-<name> (or FV_HOST_DIR); only with such a pipe does it honour FV_TERM_CMD (a
 // harmless command in place of `claude`, given the same arguments), FV_HOST_SESSIONS_DIR (one more folder of pid files),
 // FV_HOST_IDLE_MS, FV_HOST_SETTINGS (another settings file), FV_HOST_PROJECTS_DIR (where transcripts are, instead
-// of ~/.claude*/projects), FV_HOST_NUDGE_GIVEUP_MS, FV_HOST_PANEL_CLOSE_MS and FV_HOST_RESTORE_GAP_MS.
+// of ~/.claude*/projects), FV_HOST_NUDGE_GIVEUP_MS, FV_HOST_PANEL_CLOSE_MS, FV_HOST_RESTORE_GAP_MS, FV_HOST_RESTORE_RETRY_MS
+// and FV_HOST_TEST_END_HANG (a restart's end phase never finishes, see handOver).
 // desktop/host-test.js and desktop/host-restore-test.js use them.
 'use strict';
 const fs = require('fs');
@@ -159,6 +166,12 @@ const ESC_GAP_MS = 3000; // two Escs closer than this at Claude Code's prompt op
 const NUDGE_GIVEUP_MS = 3 * 60 * 1000; // a resumed session not ready this long after its start gets no note
 const NUDGE_IDLE_MS = 2500, NUDGE_QUIET_MS = 1500, NUDGE_TASKS_MS = 20000;
 const RESTORE_GAP_MS = 1800; // between two starts of a restore (see Restore list)
+const RESTORE_RETRY_MS = 15000; // a restore tries one it could not start once more this much later (see Restore list)
+const END_GAP_MS = P.isWin ? 40 : 0; // between two Ctrl+Cs when every session ends at once (see endAll)
+const OUT_BUSY_MS = 3000; // a session with no status known that wrote output this recently is working (see midTurn)
+const END_WATCHDOG_MS = 8000; // a restart or a quit moves on this long after it began ending the sessions, whatever happens
+const SUCCESSOR_WAIT_MS = 60000; // a successor waits this long for the pipe (see Restart)
+const PREDECESSOR_STUCK_MS = 30000; // and ends a predecessor that still holds it after this long
 
 // ---------- where things live ----------
 const userTag = () => { let u = ''; try { u = os.userInfo().username; } catch {} return (u || process.env.USERNAME || 'user').replace(/[^\w.-]/g, '_').slice(0, 60); };
@@ -490,9 +503,10 @@ function dirOr(cwd) {
 const intIn = (v, lo, hi, dflt) => (Number.isInteger(v) && v >= lo && v <= hi ? v : dflt);
 
 // the whole process tree: claude and whatever it started (shells, MCP servers). Windows: taskkill /T /F; macOS
-// and Linux: the pty's process group and every descendant, SIGTERM then SIGKILL (platform.js killTree)
-function treeKill(pid, sync) {
-  P.killTree(pid, { sync: !!sync });
+// and Linux: the pty's process group and every descendant, SIGTERM then SIGKILL (platform.js killTree). pid may be a
+// list (one taskkill, or one ps, for them all); done() once it has run. Only sync waits for it (see killAll)
+function treeKill(pid, sync, done) {
+  P.killTree(pid, { sync: !!sync, done });
 }
 
 // the folders Claude Code writes its sessions/<pid>.json into, one per real folder
@@ -637,7 +651,7 @@ function createPtys(opts = {}) {
   //          outAt (its last output), inputAt (its last key), line / inPaste (what is typed into the prompt since
   //          the last Enter), slash (a "/" command sent with Enter, until its panel closes: see panelTick),
   //          nudge (the note due after a restore: see nudgeTick), restartBy (it asked for the host restart),
-  //          role ('bot:<id>' or null: see Roles) }
+  //          cutOff (a restart or a quit found it mid-turn: see markCutOff), role ('bot:<id>' or null: see Roles) }
   const terms = new Map();
   let newSeq = 0;
   let screenLib = null;
@@ -649,7 +663,8 @@ function createPtys(opts = {}) {
   const heldOf = (key) => held.get(String(key).toLowerCase()) || null;
   // the restore's turn for one: it leaves the map (null when a client opened or closed it meanwhile)
   function take(key) { const h = held.get(key) || null; held.delete(key); return h; }
-  const parked = () => [...held.values()].map(({ s, extra }) => ({ id: s.id, cwd: s.cwd, account: s.account, role: roleOf(s.role), pickup: !!s.pickup, parked: !extra }));
+  // (s.parked: parked by a restore that could not start it, keeping what open() gets for it)
+  const parked = () => [...held.values()].map(({ s, extra }) => ({ id: s.id, cwd: s.cwd, account: s.account, role: roleOf(s.role), pickup: !!s.pickup, parked: !extra || !!s.parked }));
 
   function flush(t) {
     clearTimeout(t.timer);
@@ -1210,7 +1225,8 @@ function createPtys(opts = {}) {
     setTimeout(() => {
       if (!t.alive) return finish();
       treeKill(t.pid, false);
-      setTimeout(() => { if (t.alive) { try { t.pty.kill(); } catch {} } finish(); }, 1500); // whatever taskkill missed
+      // whatever taskkill missed; not a pty whose root is gone already (its exit is on the way, see gone)
+      setTimeout(() => { if (t.alive && pidAlive(t.pid)) { try { t.pty.kill(); } catch {} } finish(); }, 1500);
     }, graceMs);
   }
 
@@ -1228,28 +1244,101 @@ function createPtys(opts = {}) {
     end(t, 2500);
   }
 
-  // all of them at once, the same way; resolves when they are gone
-  function endAll(graceMs = 2500) {
-    const live = [...terms.values()].filter((t) => t.alive);
-    for (const t of live) t.dismissed = true;
-    return Promise.all(live.map((t) => new Promise((r) => end(t, graceMs, r)))).then(() => killAll());
+  // Several trees to end, never blocking this process. Windows: one taskkill at a time, each once the one before has
+  // exited, so their ptys never exit at the same moment: node-pty's ConPTY exit threads each take their pty off one
+  // shared list with no lock, and ptys that exit together can crash this process (0xC0000005; #452: a restarting host
+  // that died at "ending them" and never started the next one, and one taskkill for several trees did the same).
+  // macOS and Linux: all in one go (one ps).
+  const killQueue = [];
+  let killing = false;
+  function killTrees(list) {
+    if (!P.isWin) { if (list.length) treeKill(list.map((t) => t.pid)); return; }
+    for (const t of list) if (!killQueue.includes(t)) killQueue.push(t);
+    if (killing) return;
+    killing = true;
+    const step = () => {
+      let t;
+      while ((t = killQueue.shift()) && !(t.alive && pidAlive(t.pid)));
+      if (!t) { killing = false; return; }
+      treeKill(t.pid, false, step);
+    };
+    step();
   }
 
-  // the backstop: every tree that is left, synchronously. Once the ConPTY is closed here its exit event may
-  // never come, so each one is marked ended and forgotten right away.
-  function killAll() {
-    for (const t of [...terms.values()]) {
-      if (!t.alive) continue;
-      t.dismissed = true;
-      HO.takeRestart(t.launchKey); // a handoff it asked for is dropped: it never restarts after this
-      treeKill(t.pid, true);
-      try { t.pty.kill(); } catch {}
-      if (!t.alive) continue; // its exit came in the meantime
-      t.alive = false;
-      flush(t);
-      send('exit', t.id, null);
-      terms.delete(t.id);
+  // All of them at once, the same way, without ever blocking this process: the ones still running after graceMs lose
+  // their trees (killTrees). Resolves once they are gone or given up on (marked ended: gone). Windows: the Ctrl+Cs go
+  // END_GAP_MS apart, for the same reason killTrees goes one at a time.
+  // o.resume (a restart, or a quit whose next host resumes them): one marked cutOff (mid-turn, see markCutOff) gets no
+  // Ctrl+C, its tree goes at once. Claude Code takes a Ctrl+C at a tool call for the user rejecting it ("The user doesn't
+  // want to proceed with this tool use ... STOP") and the model stops (#402); killed, its resume shows the tool call
+  // interrupted, and the note after the restore (Auto-continue) tells it to carry on.
+  function endAll(graceMs = 2500, o = {}) {
+    const live = [...terms.values()].filter((t) => t.alive);
+    for (const t of live) t.dismissed = true;
+    const hard = o.resume ? live.filter((t) => t.cutOff) : [];
+    const soft = live.filter((t) => !hard.includes(t));
+    if (hard.length) {
+      log(`ending: ${hard.map((t) => t.id).join(', ')} mid-turn, so no Ctrl+C: ${hard.length === 1 ? 'its tree ends' : 'their trees end'} now`);
+      killTrees(hard);
     }
+    const spread = Math.max(0, soft.length - 1) * END_GAP_MS;
+    return new Promise((resolve) => {
+      let over = false;
+      const left = () => live.filter((t) => t.alive);
+      const finish = () => {
+        if (over) return;
+        over = true;
+        clearInterval(poll); clearTimeout(grace); clearTimeout(cap);
+        const l = left();
+        if (l.length) log(`ending: no exit came from ${l.map((t) => t.id).join(', ')}; marked ended`);
+        for (const t of l) gone(t);
+        if (l.length) changed();
+        resolve();
+      };
+      const poll = setInterval(() => { if (!left().length) finish(); }, 50);
+      // given up on after this: a taskkill takes a few tenths of a second, and node-pty's exit comes about a second
+      // after the root process ended
+      const cap = setTimeout(finish, graceMs + spread + 3000 + 500 * live.length);
+      soft.forEach((t, i) => setTimeout(() => {
+        if (over || !t.alive) return;
+        try { t.pty.write('\x03'); } catch {}
+        setTimeout(() => { if (!over && t.alive) { try { t.pty.write('\x03'); } catch {} } }, 250);
+      }, i * END_GAP_MS));
+      const grace = setTimeout(() => {
+        const l = left();
+        if (!l.length) return;
+        log(`ending: ${l.length} still running ${graceMs} ms after Ctrl+C; ending their trees`);
+        killTrees(l);
+      }, graceMs + spread);
+    });
+  }
+
+  // One that is ending and whose exit has not come: marked ended and forgotten now (once its ConPTY is closed here the
+  // exit may never come). pty.kill() only while its root process still runs: for one already gone node-pty would start
+  // its console-list agent (a whole process) for nothing, which then fails ("AttachConsole failed").
+  function gone(t) {
+    if (!t.alive) return;
+    t.dismissed = true;
+    HO.takeRestart(t.launchKey); // a handoff it asked for is dropped: it never restarts after this
+    if (pidAlive(t.pid)) { try { t.pty.kill(); } catch {} }
+    if (!t.alive) return; // its exit came in the meantime
+    t.alive = false;
+    flush(t);
+    send('exit', t.id, null);
+    terms.delete(t.id);
+  }
+
+  // the backstop: every tree that is left, waited for (Windows: one taskkill after the other, as killTrees; macOS and
+  // Linux: one ps). It runs as this process exits (shutdown), where waiting is right: once it has exited, the ConPTYs
+  // close and each tree loses its root before an async taskkill could walk it, leaving claude's children running. By
+  // then endAll has normally ended them all, so it costs nothing. Then each one is marked ended and forgotten (gone).
+  function killAll() {
+    const live = [...terms.values()].filter((t) => t.alive);
+    killQueue.length = 0;
+    for (const t of live) t.dismissed = true;
+    if (!P.isWin) { if (live.length) treeKill(live.map((t) => t.pid), true); }
+    else for (const t of live) if (pidAlive(t.pid)) treeKill(t.pid, true);
+    for (const t of live) gone(t);
     changed();
   }
 
@@ -1272,6 +1361,16 @@ function createPtys(opts = {}) {
   // mid-turn: working (or running a shell command), or waiting on a prompt inside a turn (a permission, a
   // question, the plan); an open "/" panel is not a turn
   const isBusy = (t) => t.status === 'busy' || t.status === 'shell' || (t.status === 'waiting' && t.waitingFor !== 'dialog open');
+  // working as a restart or a quit sees it: by its pid file, or with no status known (no pid file yet, or one that
+  // lags) while it still writes output (Claude Code's spinner redraws while it works); mid-turn: that or waiting on a prompt
+  const working = (t, now) => t.status === 'busy' || t.status === 'shell' || (t.status === null && now - (t.outAt || 0) < OUT_BUSY_MS);
+  const midTurn = (t, now) => isBusy(t) || working(t, now);
+  // a restart or a quit, just before it saves the restore list: the running ones mid-turn now are marked cutOff. They are
+  // saved busy (the next host resumes them and tells them to carry on) and endAll({ resume }) ends them without Ctrl+C
+  function markCutOff() {
+    const now = Date.now();
+    for (const t of terms.values()) t.cutOff = t.alive && midTurn(t, now);
+  }
 
   // the ones to bring back after a restart: every running one, and one that ended without a clean exit (code
   // 0, e.g. /exit) and was not closed from the page. At a shutdown or reboot claude may die before this
@@ -1279,7 +1378,7 @@ function createPtys(opts = {}) {
   // holds: parked, or not started yet
   function restoreList() {
     return [...terms.values()].filter((t) => !t.dismissed && (t.alive || (!t.isNew && t.exitCode !== 0))).map((t) => ({
-      id: t.isNew ? null : t.id, cwd: t.cwd, account: t.account, startedAt: t.startedAt, busy: isBusy(t),
+      id: t.isNew ? null : t.id, cwd: t.cwd, account: t.account, startedAt: t.startedAt, busy: isBusy(t) || !!t.cutOff,
       interrupted: !!t.interrupted, cols: t.cols, rows: t.rows, ...(t.isNew ? { pendingKey: t.id } : {}),
       ...(t.isNew && t.pickup ? { pickup: t.pickup, handoffFrom: t.handoffFrom || null } : {}),
       ...(t.restartBy ? { restartBy: true } : {}),
@@ -1288,9 +1387,10 @@ function createPtys(opts = {}) {
   }
 
   // for the restart: the running sessions that are mid-turn, but the one with this CLAUDE_LAUNCH_KEY (the asker)
-  const busyBut = (launchKey) => [...terms.values()].filter((t) => t.alive && isBusy(t) && !(launchKey && t.launchKey === launchKey)).map((t) => t.id);
+  const others = (launchKey, is) => { const now = Date.now(); return [...terms.values()].filter((t) => t.alive && is(t, now) && !(launchKey && t.launchKey === launchKey)).map((t) => t.id); };
+  const busyBut = (launchKey) => others(launchKey, midTurn);
   // of those, the ones working (or running a shell command), not waiting on an answer
-  const workingBut = (launchKey) => [...terms.values()].filter((t) => t.alive && (t.status === 'busy' || t.status === 'shell') && !(launchKey && t.launchKey === launchKey)).map((t) => t.id);
+  const workingBut = (launchKey) => others(launchKey, working);
   // marks the asker, so the next host tells it the restart is done; its id, or null when none is hosted here
   function markRestartBy(launchKey) {
     const t = launchKey ? [...terms.values()].find((x) => x.alive && x.launchKey === launchKey) : null;
@@ -1307,8 +1407,8 @@ function createPtys(opts = {}) {
     return kept(t);
   }
 
-  return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, workingBut, markRestartBy, snapshot, aliveCount, dirs,
-    hold, heldOf, take, parked };
+  return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, workingBut, markRestartBy, markCutOff, snapshot, aliveCount, dirs,
+    hold, heldOf, take, parked, rescan: scan };
 }
 
 // ---------- the host process ----------
@@ -1383,6 +1483,7 @@ function runHost() {
   // Sorting them reads no transcript; the idle ones it would park are each checked for running background tasks in
   // a turn of their own, then the starts go RESTORE_GAP apart. A client is let in and answered in between throughout.
   const RESTORE_GAP = testMs('FV_HOST_RESTORE_GAP_MS') ?? RESTORE_GAP_MS;
+  const RESTORE_RETRY = testMs('FV_HOST_RESTORE_RETRY_MS') ?? RESTORE_RETRY_MS;
   const restoreStopped = () => quitting || frozen || down;
   function restore() {
     const saved = readJson(sessionsFile());
@@ -1393,11 +1494,11 @@ function runHost() {
     if (saved.ui && typeof saved.ui === 'object') ui = saved.ui;
     const list = Array.isArray(saved.sessions) ? saved.sessions : [];
     if (!list.length) return;
-    // a conversation some live claude already has open (a terminal resumed it meanwhile) is left alone; asked again
-    // at each start. Pid files from before this boot are stale whatever their pid says now
+    // a conversation some live claude already has open (a terminal resumed it meanwhile, or the claude of a host that
+    // was killed has not died yet) is not started: asked at its turn, and again at the retry. Pid files from before
+    // this boot are stale whatever their pid says now
     const bootAt = Date.now() - os.uptime() * 1000;
     const openNow = () => new Set(readPidFiles(ptys.dirs()).filter((f) => f.startedAt >= bootAt - 60000).map((f) => f.sessionId));
-    const open0 = openNow();
     // each resumed one is told to carry on once it has loaded (see Auto-continue), unless that is turned off
     const set = settings(true);
     const autoContinue = set.autoContinue !== false, restoreIdle = set.restoreIdle === true;
@@ -1445,7 +1546,6 @@ function runHost() {
       if (!s.id) { log(`restore: dropped a new session that never got an id (${s0.pendingKey || '?'})`); continue; }
       const id = s.id;
       if (ptys.heldOf(id)) continue; // listed twice
-      if (open0.has(id)) { log(`restore: ${id} is open in another claude; not resumed`); continue; }
       // another device has it now (sync, away.json): resuming it here would run it in two places
       const away = awayOf(id);
       if (away) { log(`restore: ${id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); continue; }
@@ -1471,6 +1571,34 @@ function runHost() {
         log(`restore: ${c.id} had ${k} background task(s) running; it is resumed`);
       }
       queue.sort((a, b) => a.tier - b.tier); // (stable: the list's order within a tier)
+      // one start: 'ok', 'failed' (it was tried) or 'skipped' (open in another claude, or away). One that could not
+      // start is held again: for the retry the first time, parked until opened (keeping what open() gets) the second
+      const again = []; // [{ key, at }]: the ones to try once more
+      const startOne = (key, h, retry) => {
+        const s = h.s;
+        const keep = (why) => {
+          ptys.hold(key, retry ? { ...s, parked: true } : s, h.extra);
+          if (!retry) again.push({ key, at: Date.now() });
+          else changed(); // (saved marked parked)
+          log(`restore: ${s.id || `pickup of ${s.pickup}`} ${why}; ${retry ? 'parked until opened' : `tried again in ${Math.round(RESTORE_RETRY / 1000)} s`}`);
+        };
+        let r;
+        if (!s.id) {
+          try { r = ptys.startPickup(s.handoffFrom, HO.safeFile(s.pickup), { cwd: s.cwd, account: s.account, cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: s.handoffFrom, role: s.role }); } catch (e) { r = { ok: false, message: e.message }; }
+          if (!r.ok) { keep(`failed: ${r.message}`); return 'failed'; }
+          log(`restore: pickup of ${s.pickup} started again (pid ${r.pid})`);
+          return 'ok';
+        }
+        if (openNow().has(s.id)) { keep('is open in another claude'); return 'skipped'; }
+        const away = awayOf(s.id);
+        if (away) { log(`restore: ${s.id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); changed(); return 'skipped'; }
+        const x = h.extra();
+        try { r = ptys.open({ id: s.id, cwd: s.cwd, account: s.account, cols: s.cols, rows: s.rows }, x); } catch (e) { r = { ok: false, message: e.message }; }
+        if (!r.ok) { keep(`failed: ${r.message}`); return 'failed'; }
+        log(`restore: ${s.id} resumed (pid ${r.pid})${x.role ? `, as the ${x.role}` : ''}${x.interrupted ? ', was interrupted' : ''}${x.nudge ? `, note due (${x.nudge.kind})` : ''}`);
+        return 'ok';
+      };
+      const stopped = (left) => log(`restore: stopped (${quitting ? 'quitting' : 'the host is ending'}) with ${left} not started; they stay in the restore list`);
       let n = 0, last = 0, left = queue.length;
       for (const q of queue) {
         if (restoreStopped()) break;
@@ -1479,25 +1607,26 @@ function runHost() {
         left--;
         const h = ptys.take(q.key);
         if (!h) { log(`restore: ${q.key} was opened or closed meanwhile`); continue; }
-        const s = h.s;
-        let r;
-        if (!s.id) {
-          try { r = ptys.startPickup(s.handoffFrom, HO.safeFile(s.pickup), { cwd: s.cwd, account: s.account, cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: s.handoffFrom, role: s.role }); } catch (e) { r = { ok: false, message: e.message }; }
-          log(`restore: pickup of ${s.pickup} ${r.ok ? `started again (pid ${r.pid})` : `failed: ${r.message}`}`);
-        } else {
-          if (openNow().has(s.id)) { log(`restore: ${s.id} is open in another claude; not resumed`); changed(); continue; }
-          const away = awayOf(s.id);
-          if (away) { log(`restore: ${s.id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); changed(); continue; }
-          const x = h.extra();
-          try { r = ptys.open({ id: s.id, cwd: s.cwd, account: s.account, cols: s.cols, rows: s.rows }, x); } catch (e) { r = { ok: false, message: e.message }; }
-          log(`restore: ${s.id} ${r.ok ? `resumed (pid ${r.pid})${x.role ? `, as the ${x.role}` : ''}${x.interrupted ? ', was interrupted' : ''}${x.nudge ? `, note due (${x.nudge.kind})` : ''}` : `failed: ${r.message}`}`);
-        }
-        last = Date.now();
-        if (r.ok) n++;
+        const r = startOne(q.key, h, false);
+        if (r !== 'skipped') last = Date.now();
+        if (r === 'ok') n++;
       }
-      if (restoreStopped()) { log(`restore: stopped (${quitting ? 'quitting' : 'the host is ending'}) with ${left} not started; they stay in the restore list`); return; }
+      if (restoreStopped()) return stopped(left + again.length);
       const p = ptys.parked().filter((x) => x.parked).length;
-      log(`restore: ${n} of ${list.length} resumed${p ? `, ${p} parked until opened` : ''}`);
+      log(`restore: ${n} of ${list.length} resumed${p ? `, ${p} parked until opened` : ''}${again.length ? `, ${again.length} to try again` : ''}`);
+      if (!again.length) return;
+      let n2 = 0;
+      for (const [i, a] of again.entries()) {
+        const wait = Math.max(a.at + RESTORE_RETRY, last + RESTORE_GAP) - Date.now();
+        if (wait > 0) await sleep(wait);
+        if (restoreStopped()) return stopped(again.length - i);
+        const h = ptys.take(a.key);
+        if (!h) { log(`restore: ${a.key} was opened or closed meanwhile`); continue; }
+        const r = startOne(a.key, h, true);
+        if (r !== 'skipped') last = Date.now();
+        if (r === 'ok') n2++;
+      }
+      log(`restore: tried again: ${n2} of ${again.length} resumed`);
     })().catch((e) => log(`restore failed: ${e && e.stack ? e.stack : e}`));
   }
 
@@ -1509,15 +1638,23 @@ function runHost() {
     if (restarting) { clearTimeout(restarting.timer); restarting = null; log('restart: cancelled by "quit everything"'); }
     quitting = true;
     if (arg && typeof arg.ui === 'object') ui = arg.ui;
+    ptys.markCutOff(); // the ones mid-turn: saved busy, and ended without Ctrl+C (see endAll)
     saveNow('quit'); // every running session, with whether it was busy, before they end
     frozen = true;
     const n = ptys.aliveCount();
     log(`quit everything: saved ${n} session(s) to the restore list, ending them`);
-    ptys.endAll(2500).then(() => {
-      reply({ ok: true, saved: n });
-      log('quit everything: all ended; host exits');
+    // it moves on after END_WATCHDOG_MS whatever happens; shutdown ends what is left
+    let over = false;
+    const next = (why, note) => {
+      if (over) return;
+      over = true;
+      clearTimeout(watchdog);
+      reply({ ok: true, saved: n, ...(note ? { note } : {}) });
+      log(`quit everything: ${why}; host exits`);
       setTimeout(() => shutdown(0), 300);
-    }, (e) => { ptys.killAll(); reply({ ok: true, saved: n, note: String(e) }); setTimeout(() => shutdown(0), 300); });
+    };
+    const watchdog = setTimeout(() => next(`not all ended after ${END_WATCHDOG_MS / 1000} s`), END_WATCHDOG_MS);
+    ptys.endAll(2500, { resume: true }).then(() => next('all ended'), (e) => next('ending them failed', String(e)));
   }
 
   // `host.js --selfcheck` in a fresh process, as the next host would start: cb(null) when this file, what it
@@ -1547,17 +1684,21 @@ function runHost() {
       reply({ ok: true, waiting });
       let loggedAt = Date.now();
       const askingSince = new Map(); // id -> when it was first seen waiting on an answer, while still waiting
-      const tick = () => {
-        if (restarting !== r) return;
+      // what still holds it back: { held, asked }. A working one is never cut off; one waiting on an answer is given
+      // ASK_WAIT_MS (its question comes back: it is resumed and told to carry on); asked: the ones past that wait
+      const holding = () => {
         const busy = r.now ? [] : ptys.busyBut(r.by), working = r.now ? [] : ptys.workingBut(r.by);
         const asking = busy.filter((id) => !working.includes(id)), now = Date.now();
         for (const id of [...askingSince.keys()]) if (!asking.includes(id)) askingSince.delete(id);
         for (const id of asking) if (!askingSince.has(id)) askingSince.set(id, now);
-        // a working one is never cut off; one waiting on an answer is given ASK_WAIT_MS (its question comes back:
-        // it is resumed and told to carry on)
         const asked = asking.filter((id) => now - askingSince.get(id) >= ASK_WAIT_MS);
-        if (working.length || asked.length < asking.length) {
-          if (now - loggedAt >= 10 * 60000) { loggedAt = now; log(`restart: still waiting on ${busy.join(', ')}`); }
+        return { held: busy.filter((id) => !asked.includes(id)), asked };
+      };
+      const tick = () => {
+        if (restarting !== r) return;
+        const { held, asked } = holding(), now = Date.now();
+        if (held.length) {
+          if (now - loggedAt >= 10 * 60000) { loggedAt = now; log(`restart: still waiting on ${held.join(', ')}`); }
           r.timer = setTimeout(tick, 2000);
           return;
         }
@@ -1566,6 +1707,15 @@ function runHost() {
         selfCheck((err2) => {
           if (restarting !== r) return;
           if (err2) { restarting = null; log(`restart: cancelled, the self-check failed (${err2})`); return; }
+          // checked again right before anything is saved or ended, from the pid files as they are now (the scan reads
+          // them every 0.8 s, and the self-check took a while): one that started work meanwhile is waited for (#402)
+          ptys.rescan();
+          const again = holding().held;
+          if (again.length) {
+            log(`restart: ${again.join(', ')} started work meanwhile; waiting again`);
+            r.timer = setTimeout(tick, 2000);
+            return;
+          }
           handOver(r);
         });
       };
@@ -1573,25 +1723,45 @@ function runHost() {
       tick();
     });
   }
+  // The next host starts first (FV_HOST_SUCCESSOR: it waits for this one to let go of the pipe, then resumes the
+  // restore list), so there is one whatever becomes of this one while it ends the sessions (#452: this process died at
+  // "ending them" and none came after it). One that could not start cancels the restart: nothing is saved or ended.
+  // Then the restore list is saved, every session ended (the ones mid-turn without Ctrl+C: see endAll) and this one
+  // exits, END_WATCHDOG_MS after it began at most (shutdown ends what is left).
   function handOver(r) {
     r.going = true;
-    const asker = ptys.markRestartBy(r.by);
-    saveNow('restart');
-    frozen = true;
-    log(`restart: saved ${ptys.aliveCount()} session(s) to the restore list${asker ? ` (asked from ${asker})` : ''}; ending them`);
-    const next = () => {
-      try {
-        // the same electron.exe (or node) and file, or "Fleet View.exe" once desktop/brand-exe.js has made it;
-        // FV_HOST_* test settings carry over (claude never sees FV_*)
-        const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', FV_HOST_SUCCESSOR: String(process.pid) };
-        const c = spawn(P.brandedElectron(process.execPath), [HOST_JS], { detached: true, windowsHide: true, stdio: 'ignore', env, cwd: DIR });
-        c.on('error', (e) => log(`restart: the next host failed: ${e.message}`));
-        c.unref();
-        log(`restart: started the next host (pid ${c.pid}); this one exits`);
-      } catch (e) { log(`restart: could not start the next host: ${e.message}`); }
-      shutdown(0);
-    };
-    ptys.endAll(2500).then(next, next);
+    const cancel = (why) => { if (restarting === r) restarting = null; log(`restart: could not start the next host (${why}); cancelled, the sessions go on here`); };
+    let c;
+    try {
+      // the same electron.exe (or node) and file, or "Fleet View.exe" once desktop/brand-exe.js has made it;
+      // FV_HOST_* test settings carry over (claude never sees FV_*)
+      const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', FV_HOST_SUCCESSOR: String(process.pid) };
+      c = spawn(P.brandedElectron(process.execPath), [HOST_JS], { detached: true, windowsHide: true, stdio: 'ignore', env, cwd: DIR });
+    } catch (e) { return cancel(e.message); }
+    let begun = false;
+    c.once('error', (e) => { if (begun) log(`restart: the next host failed: ${e.message}`); else cancel(e.message); });
+    c.once('spawn', () => {
+      begun = true;
+      c.unref();
+      log(`restart: started the next host (pid ${c.pid}); it takes over once this one exits`);
+      const asker = ptys.markRestartBy(r.by);
+      ptys.markCutOff();
+      saveNow('restart');
+      frozen = true;
+      log(`restart: saved ${ptys.aliveCount()} session(s) to the restore list${asker ? ` (asked from ${asker})` : ''}; ending them`);
+      let over = false;
+      const next = (why) => {
+        if (over) return;
+        over = true;
+        clearTimeout(watchdog);
+        log(`restart: ${why}; this one exits`);
+        shutdown(0);
+      };
+      const watchdog = setTimeout(() => next(`the sessions had not all ended after ${END_WATCHDOG_MS / 1000} s`), END_WATCHDOG_MS);
+      // (tests: FV_HOST_TEST_END_HANG=1 makes the first host's end phase never finish, for the watchdog)
+      const ending = TEST && !SUCCESSOR && process.env.FV_HOST_TEST_END_HANG === '1' ? new Promise(() => {}) : ptys.endAll(2500, { resume: true });
+      ending.then(() => next('the sessions ended'), (e) => next(`ending the sessions failed (${e && e.message ? e.message : e})`));
+    });
   }
 
   function handle(c, msg) {
@@ -1706,6 +1876,8 @@ function runHost() {
     if (down) return;
     down = true;
     clearInterval(idleTimer);
+    const left = ptys.aliveCount();
+    if (left) log(`exiting: ending the trees of the ${left} session(s) still running`);
     try { ptys.killAll(); } catch {}
     try { const h = readJson(hostFile()); if (h && h.pid === process.pid) fs.unlinkSync(hostFile()); } catch {}
     for (const c of clients) { try { c.sock.destroy(); } catch {} }
@@ -1714,9 +1886,20 @@ function runHost() {
   }
 
   server = net.createServer(onConnection);
-  // a successor waits for the host before it to let go of the pipe (it is ending its sessions); if the window
-  // started a host of its own meanwhile, that one keeps it and this one exits, as usual
-  const retryUntil = SUCCESSOR ? Date.now() + 15000 : 0;
+  // a successor waits for the host before it to let go of the pipe (it is ending its sessions, END_WATCHDOG_MS and
+  // its last taskkill at most); if the window started a host of its own meanwhile, that one keeps it and this one
+  // exits, as usual. A predecessor that still holds it PREDECESSOR_STUCK_MS on (host.json still names it) is stuck: it
+  // is ended, once, and this one takes over
+  const retryUntil = SUCCESSOR ? Date.now() + SUCCESSOR_WAIT_MS : 0;
+  let stuckAt = SUCCESSOR ? Date.now() + PREDECESSOR_STUCK_MS : 0;
+  const endStuck = () => {
+    if (!stuckAt || Date.now() < stuckAt) return;
+    stuckAt = 0;
+    const h = readJson(hostFile());
+    if (!h || h.pid !== SUCCESSOR || !pidAlive(SUCCESSOR)) return;
+    log(`the host before this one (pid ${SUCCESSOR}) still holds the pipe after ${PREDECESSOR_STUCK_MS / 1000} s; ending it`);
+    try { process.kill(SUCCESSOR, 'SIGKILL'); } catch (e) { log(`could not end it: ${e.message}`); }
+  };
   // macOS and Linux: a socket file outlives a host that crashed, and listen then says EADDRINUSE too. Only a
   // socket that answers is another host; one that doesn't is removed and listen tries again (twice at most)
   let staleTries = 0;
@@ -1737,7 +1920,7 @@ function runHost() {
     if (e && e.code === 'EADDRINUSE') {
       return staleSocket((alive, removed) => {
         if (removed) { try { server.close(); } catch {} server.listen(PIPE); return; }
-        if (Date.now() < retryUntil) { setTimeout(() => { try { server.close(); } catch {} server.listen(PIPE); }, 250); return; }
+        if (Date.now() < retryUntil) { endStuck(); setTimeout(() => { try { server.close(); } catch {} server.listen(PIPE); }, 250); return; }
         log('another host already serves this pipe; exiting');
         process.exit(0);
       });

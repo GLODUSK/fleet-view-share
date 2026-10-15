@@ -6,7 +6,8 @@
 //   hostSocketPath(tag)     where the session host listens: the named pipe \\.\pipe\fleet-view-host-<tag> on Windows,
 //                           else the Unix socket <dataDir>/host-<tag>.sock (in the temp folder when that path is too long)
 //   foldCase(p)             p lowercased where paths ignore case (Windows, macOS), as it is on Linux
-//   killTree(pid, o)        ends a process and everything it started (o.sync: wait for taskkill on Windows)
+//   killTree(pid, o)        ends a process (or a list of them) and everything it started; nothing waits for it
+//                           (o.sync: wait for taskkill on Windows, ps on macOS and Linux; o.done(): called when done)
 //   detachGroup             spawn option: on macOS and Linux a child started with it leads its own process group,
 //                           so killTree can end the group; Windows keeps its old spawn options
 //   processes(cb), processesSync()   [{ pid, ppid, command }] of every process (macOS and Linux only, through ps)
@@ -128,28 +129,39 @@ function descendants(pid, list) {
 // Windows: taskkill /T /F, as before. macOS and Linux: SIGTERM to the process's group (a pty's child and anything
 // started with detachGroup leads one) and to every descendant ps finds (one that left the group too), then SIGKILL
 // to the same after 3 s, from a small detached sh so it happens even when this process exits first.
+// pid may be a list: one taskkill (one ps and one sh on macOS and Linux) for them all. Nothing waits for it but with
+// o.sync, for a process about to exit (taskkill, or ps, runs to its end first: a few seconds at most); o.done() is
+// called once it has done what it can (taskkill exited, the signals are sent).
 function killTree(pid, o = {}) {
-  if (!Number.isInteger(pid) || pid <= 0) return;
+  const pids = [...new Set((Array.isArray(pid) ? pid : [pid]).filter((p) => Number.isInteger(p) && p > 0 && p !== process.pid))];
+  let called = false;
+  const done = () => { if (!called) { called = true; if (typeof o.done === 'function') o.done(); } };
+  if (!pids.length) return done();
   if (isWin) {
-    const args = ['/T', '/F', '/PID', String(pid)];
+    const args = ['/T', '/F', ...pids.flatMap((p) => ['/PID', String(p)])];
     try {
-      if (o.sync) spawnSync('taskkill', args, { windowsHide: true, stdio: 'ignore', timeout: 5000 });
-      else spawn('taskkill', args, { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
-    } catch {}
+      if (o.sync) { spawnSync('taskkill', args, { windowsHide: true, stdio: 'ignore', timeout: Math.min(15000, 4800 + 200 * pids.length) }); return done(); }
+      const c = spawn('taskkill', args, { windowsHide: true, stdio: 'ignore', timeout: 30000 });
+      c.on('error', done);
+      c.on('exit', done);
+    } catch { done(); }
     return;
   }
-  if (pid === process.pid) return;
-  const kids = descendants(pid, processesSync()).filter((k) => k !== process.pid);
-  let group = true;
-  try { process.kill(-pid, 'SIGTERM'); } catch { group = false; }
-  try { process.kill(pid, 'SIGTERM'); } catch {}
-  for (const k of kids) { try { process.kill(k, 'SIGTERM'); } catch {} }
-  const targets = [...(group ? [`-${pid}`] : []), String(pid), ...kids.map(String)];
-  try {
-    const c = spawn('/bin/sh', ['-c', `sleep 3; kill -9 ${targets.join(' ')} 2>/dev/null`], { detached: true, stdio: 'ignore' });
-    c.on('error', () => {});
-    c.unref();
-  } catch {}
+  // the snapshot first: once a group is gone, a descendant that left it hangs from init (ppid 1) and is not found
+  const go = (list) => {
+    const kids = [...new Set(pids.flatMap((p) => descendants(p, list)))].filter((k) => k !== process.pid && !pids.includes(k));
+    const groups = pids.filter((p) => { try { process.kill(-p, 'SIGTERM'); return true; } catch { return false; } });
+    for (const p of [...pids, ...kids]) { try { process.kill(p, 'SIGTERM'); } catch {} }
+    const targets = [...groups.map((p) => `-${p}`), ...pids.map(String), ...kids.map(String)];
+    try {
+      const c = spawn('/bin/sh', ['-c', `sleep 3; kill -9 ${targets.join(' ')} 2>/dev/null`], { detached: true, stdio: 'ignore' });
+      c.on('error', () => {});
+      c.unref();
+    } catch {}
+    done();
+  };
+  if (o.sync) go(processesSync());
+  else processes(go);
 }
 
 // ---------- PATH and commands ----------

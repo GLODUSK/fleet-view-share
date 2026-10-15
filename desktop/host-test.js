@@ -126,7 +126,8 @@ function deniedFv(args) {
   if (a.length !== 1 || !a[0].startsWith('--disallowedTools=')) return null;
   return a[0].slice('--disallowedTools='.length).split(',').map((t) => (/^Bash\(fv (\w+):\*\)$/.exec(t) || [])[1] || `?${t}`);
 }
-const FV_BASE = ['send', 'status', 'ask', 'read', 'ls', 'teams', 'team', 'transcript'];
+// the usual fv commands, as host.js gives them (a copy here went stale whenever one was added)
+const FV_BASE = require(path.join(__dirname, 'host.js')).FV_ALLOWED;
 const BOT1 = `bot:${'a1'.repeat(6)}`, BOT2 = `bot:${'b2'.repeat(6)}`, BOT3 = `bot:${'c3'.repeat(6)}`; // bots' roles (bots.js)
 const sameSet = (a, b) => !!a && a.length === b.length && b.every((x) => a.includes(x));
 const savedList = () => { try { return JSON.parse(fs.readFileSync(path.join(DATA, 'sessions.json'), 'utf8')).sessions || []; } catch { return []; } };
@@ -576,11 +577,14 @@ async function main() {
   cl.close();
 }
 
-main().catch((e) => check('the test ran to its end', false, e && e.stack ? e.stack : String(e))).finally(() => {
+// a host that died mid-request leaves an answer that never comes: the event loop drains with main() still waiting
+process.on('beforeExit', () => { check('the test ran to its end', false, 'a request got no answer (did the host die?)'); finish(); });
+main().catch((e) => check('the test ran to its end', false, e && e.stack ? e.stack : String(e))).finally(finish);
+function finish() {
   cleanup();
   const failed = results.filter((r) => !r.pass).length;
   const keep = failed || process.env.FV_HOST_TEST_KEEP;
   process.stdout.write(`${results.length - failed} passed, ${failed} failed${keep ? ` (files kept in ${ROOT})` : ''}\n`);
   if (!keep) { try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch {} }
   process.exit(failed ? 1 : 0);
-});
+}
