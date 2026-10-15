@@ -78,6 +78,7 @@ import { handToChat } from './handto.js';
 import { onRekey, termApi } from './term.js';
 import { openViewer, openInCode } from './viewer.js';
 import { botFeed } from './chats-model.js';
+import { recommendationsOf } from './recommend.js';
 
 const params = (() => { try { return new URLSearchParams(location.search); } catch { return new URLSearchParams(); } })();
 const FIXTURE = params.has('fixture');
@@ -597,7 +598,7 @@ function renderItem(it, c) {
       md.appendChild(mdFragment(L, it.text, c));
       el.appendChild(md);
       // (an earlier conversation's options in a normal chat are history: nothing to launch from there)
-      if (!c.readOnly && !(it.past && !c.bubbles)) pickList(el, md, it, c);
+      if (!c.readOnly && !(it.past && !c.bubbles) && !pickList(el, md, it, c)) recPick(el, it, c);
       el.insertAdjacentHTML('beforeend', `<div class="ci-acts">${copyBtn('msg', 'Copy message (markdown)')}</div>`);
       el._text = String(it.text || '');
       break;
@@ -721,11 +722,18 @@ function showSummary(c, el, open) {
 // It is read from the transcript, so it holds after a reload too. An option is known by its name (the words before
 // its first ": "), so a launch that words the rest differently still counts.
 // The launch line is one line: it opens with the old words, then says how to run, check and ship the picks.
+// A reply with no such list that gives a recommendation another way (recommend.js: "My recommendation: …", "I'd
+// recommend …", "(recommended)" on a plain item or heading; Henry 2026-10-15: however it is written) gets a Launch
+// button for it (recPick): it sends the recommendation as a launch sends options, with REC_LINE, which has the session
+// work out each one's model and effort, and greys to Launched the same way.
 const LAUNCH_LINE = 'Launch subagents accordingly with model and effort: first check which items touch the same files and run those one after another (the rest in parallel), one subagent per item at its stated model and effort, each in its own worktree; then review every diff yourself, run the checks, and ship.';
+// launch.js REC_LINE, word for word
+const REC_LINE = 'Launch subagents accordingly: one subagent per item, at the model and effort it names, else the ones the work calls for (say which you picked: code edits keep this session\'s model, lookups and research go to Haiku or Sonnet; effort low for lookups and mechanical edits, medium for routine code on a clear spec, high for a feature across several files or anything touching money, permissions or migrations, xhigh for design calls, hard bugs and security); an item that needs no work, say so and skip it; items that touch the same files one after another (the rest in parallel), each in its own worktree; then review every diff yourself, run the checks, and ship.';
 const LAUNCH_HEAD = 'Go with these:';
+// -> whether the reply offers a task list (and got its boxes and button)
 function pickList(el, md, it, c) {
   const boxes = [...md.querySelectorAll('li > input[type="checkbox"]')];
-  if (!boxes.length || boxes.some((b) => b.checked)) return;
+  if (!boxes.length || boxes.some((b) => b.checked)) return false;
   const key = String(it.key);
   const rec = boxes.map((b) => markRecommended(b.parentElement));
   let p = c.picks.get(key);
@@ -740,6 +748,19 @@ function pickList(el, md, it, c) {
   md.classList.add('picking');
   el.insertAdjacentHTML('beforeend', '<div class="cpk"><button type="button" class="btn primary cpk-go" data-launch></button><span class="cpk-n"></span></div>');
   drawPick(el, p, launchedOptions(c));
+  return true;
+}
+// a recommendation outside a task list: one button that launches every recommended thing not launched yet; the hint
+// shows what it sends
+function recPick(el, it, c) {
+  const recs = recommendationsOf(it.text);
+  if (!recs.length) return;
+  const key = String(it.key);
+  if (!c.picks.has(key)) c.picks.set(key, { on: new Set(), mine: new Set() });
+  el._opts = recs;
+  el._rec = true;
+  el.insertAdjacentHTML('beforeend', '<div class="cpk"><button type="button" class="btn primary cpk-go" data-launch></button><span class="cpk-n"></span></div>');
+  drawPick(el, c.picks.get(key), launchedOptions(c));
 }
 // what an option is known by in a launch: its name before the first ": " (else all of it), case and spaces folded
 function launchKey(t) {
@@ -804,6 +825,7 @@ function markRecommended(li) {
 function drawPick(el, p, launched) {
   const go = el.querySelector('[data-launch]');
   if (!go) return;
+  if (el._rec) { drawRec(el, p, launched, go); return; }
   let left = 0;
   for (const b of el.querySelectorAll('.chat-md li > input[data-pick]')) {
     const i = +b.dataset.pick;
@@ -828,10 +850,22 @@ function drawPick(el, p, launched) {
   n.textContent = !left ? '' : k ? 'Sends them with the launch instructions' : 'Tick the options you want';
   n.title = k ? LAUNCH_LINE : '';
 }
+// a recommendation's button: every one not launched yet is picked (there are no boxes)
+function drawRec(el, p, launched, go) {
+  p.on.clear();
+  el._opts.forEach((t, i) => { if (!p.mine.has(i) && !launched.has(launchKey(t))) p.on.add(i); });
+  const k = p.on.size;
+  go.disabled = !k;
+  go.textContent = !k ? 'Launched' : k > 1 ? `Launch ${k} recommendations` : 'Launch recommendation';
+  const left = [...p.on].map((i) => el._opts[i]);
+  const n = el.querySelector('.cpk-n');
+  n.textContent = !k ? '' : `${left[0].length > 90 ? `${left[0].slice(0, 89)}…` : left[0]}${k > 1 ? ` +${k - 1} more` : ''}`;
+  n.title = k ? `${left.join('\n')}\n\n${REC_LINE}` : '';
+}
 // the ticked options, numbered as they stand in the list, then the launch line
 function pickText(el, p) {
   const lines = [...p.on].sort((a, b) => a - b).map((n) => `${n + 1}. ${el._opts?.[n] || ''}`);
-  return `${LAUNCH_HEAD}\n${lines.join('\n')}\n\n${LAUNCH_LINE}`;
+  return `${LAUNCH_HEAD}\n${lines.join('\n')}\n\n${el._rec ? REC_LINE : LAUNCH_LINE}`;
 }
 function launchPicks(c, el) {
   const p = c.picks.get(el?.dataset.key);

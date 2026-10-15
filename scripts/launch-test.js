@@ -103,6 +103,76 @@ const REPLY = [
   ok('latestChoice: the newest reply offering options (a progress list after it skipped), launches marked done');
 }
 
+// ---------- a recommendation outside a task list (web/recommend.js, run by launch.js as it stands) ----------
+// the reply Henry asked about 2026-10-15: a bold label after a progress list and a sentence saying "I recommended"
+const REC_REPLY = [
+  'No. The change wouldn\'t touch anything Cris uses.',
+  '',
+  '**What I checked on production:**',
+  '',
+  '- All five of Cris\'s services use the line-based pricing.',
+  '- The code skips lines like his (`lineHoursAreTimeOnly` in `lib/configurator/pricing.ts`).',
+  '',
+  '**What that means:** your current pricing already works the way I recommended.',
+  '',
+  '**My recommendation:** leave it for now. It\'s leftover code, not a bug anyone can hit. If you want it gone, it\'s a small one-PR cleanup.',
+].join('\n');
+{
+  const R = L.recommendationsOf;
+  assert.deepEqual(R(REC_REPLY), ['leave it for now. It\'s leftover code, not a bug anyone can hit. If you want it gone, it\'s a small one-PR cleanup.']);
+  assert.deepEqual(R('Recommendation — ship **it** today'), ['ship it today']);
+  assert.deepEqual(R('Recommended fix: guard the null'), ['guard the null']);
+  assert.deepEqual(R('**My recommendation:**\n\n1. **Fix the parser** first\n   - a detail under it\n2. Then ship\n\nAnything else?'), ['Fix the parser first', 'Then ship']);
+  assert.deepEqual(R('## Recommendation\n\nGo with B.\n\n## Other notes\n\nnone'), ['Go with B.']);
+  assert.deepEqual(R('## What I\'d do\n\n- Drop the cache'), ['Drop the cache']);
+  ok('recommendationsOf: a label (bold, a dash, a word after it), or a label or heading alone takes the list or paragraph under it');
+
+  assert.deepEqual(R('Two ways:\n\n- **A**: fast\n- **B** (recommended): safe'), ['B: safe']);
+  assert.deepEqual(R('### Option two (Recommended)\n\nmore'), ['Option two']);
+  assert.deepEqual(R('| Plan | Cost |\n|---|---|\n| Plan A (recommended) | low |\n| Plan B | high |'), ['Plan A · low']);
+  assert.deepEqual(R('> **Recommendation:** wait a day'), ['wait a day']);
+  // a mark beats a label and a sentence
+  assert.deepEqual(R('I recommend A.\n\nRecommendation: B\n\n- C (recommended)'), ['C']);
+  ok('recommendationsOf: "(recommended)" on a plain item, a heading or a table row; a quote counts; the most explicit kind wins');
+
+  assert.deepEqual(R('It works. I\'d strongly recommend adding a test for it. Otherwise fine.\n\nDone.'), ['I\'d strongly recommend adding a test for it. Otherwise fine.']);
+  assert.deepEqual(R('My recommendation is to wait.'), ['My recommendation is to wait.']);
+  assert.deepEqual(R('We would recommend B over A.'), ['We would recommend B over A.']);
+  assert.deepEqual(R('I wouldn\'t recommend that. I don\'t recommend this. I would not recommend it. I recommended it before. It\'s the recommended way. Recommendations vary.'), []);
+  assert.deepEqual(R('```\nI recommend nothing\nRecommendation: none\n```\nok'), []);
+  assert.deepEqual(R('no options here'), []);
+  assert.equal(R(`Recommendation: ${'w'.repeat(500)}`)[0].length, 400);
+  assert.equal(R(Array.from({ length: 8 }, (_, i) => `- item ${i} (recommended)`).join('\n')).length, 5);
+  assert.deepEqual(R('- Same (recommended)\n- same (recommended)'), ['Same']);
+  ok('recommendationsOf: a sentence from its start to its paragraph\'s end; negatives, past tense and code are not one; 400 characters, 5 at most, each once');
+
+  // as options: every one recommended; latestChoice falls back to it; the message has REC_LINE
+  assert.equal(L.optionsOf(REC_REPLY), null);
+  const items = [
+    { i: 0, type: 'assistant', text: REPLY },
+    { i: 1, type: 'user', text: 'will this affect Cris?' },
+    { i: 2, type: 'assistant', text: REC_REPLY },
+  ];
+  const c = L.latestChoice(items);
+  assert.equal(c.item.i, 2);
+  assert.equal(c.rec, true);
+  assert.deepEqual(c.options.map((o) => [o.n, o.rec, o.done]), [[1, true, false]]);
+  assert.deepEqual(L.choose(c.options, 'recommended'), { ns: [1] });
+  const text = L.launchText(c.options, [1], true);
+  assert.equal(text, `Go with these:\n1. ${c.options[0].text}\n\n${L.REC_LINE}`);
+  assert.equal(L.latestChoice([...items, { i: 3, type: 'user', text }]).options[0].done, true);
+  assert.equal(L.latestChoice(items.slice(0, 1)).rec, false);
+  ok('a recommendation as options: latestChoice falls back to it (rec), launched with REC_LINE, and its launch marks it done');
+
+  // the page reads it with the same file, and says REC_LINE word for word (the phone too)
+  const web = fs.readFileSync(path.join(ROOT, 'web', 'chat.js'), 'utf8');
+  const phone = fs.readFileSync(path.join(ROOT, 'phone', 'src', 'lib', 'chat', 'compose.ts'), 'utf8');
+  assert.match(web, /import \{ recommendationsOf \} from '\.\/recommend\.js';/);
+  assert.equal(/const REC_LINE = '((?:[^'\\]|\\.)+)';/.exec(web)[1].replace(/\\'/g, '\''), L.REC_LINE);
+  assert.equal(/REC_LINE =\s*'((?:[^'\\]|\\.)+)';/.exec(phone)[1].replace(/\\'/g, '\''), L.REC_LINE);
+  ok('REC_LINE: web/chat.js, phone compose.ts and launch.js agree word for word; the page imports recommend.js');
+}
+
 // ---------- the endpoint (dry runs and refusals: nothing is sent) ----------
 const ID = '0000000b-0000-4000-8000-000000000000';
 async function endpoint() {
@@ -133,6 +203,10 @@ async function endpoint() {
   [code, j] = await API.launchPicks(ID, {}, ctx, () => false);
   assert.equal(code, 409);
   assert.match(j.message, /offering options/);
+  items[0] = { i: 7, type: 'assistant', text: REC_REPLY };
+  [code, j] = await API.launchPicks(ID, { dry: true }, ctx, () => false);
+  assert.deepEqual([code, j.picked, j.recommendation], [200, [1], true]);
+  assert.ok(j.text.endsWith(L.REC_LINE));
   assert.ok(API.ENDPOINTS.some((e) => e.method === 'POST' && e.path === '/api/sessions/:id/launch'));
   // the server routes every session endpoint GET /api lists (1.0.324 listed launch but answered 404 to it)
   for (const e of API.ENDPOINTS.filter((x) => x.path.startsWith('/api/sessions'))) {

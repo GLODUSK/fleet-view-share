@@ -36,7 +36,7 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   fv answer <id> <n|submit|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
   fv launch <id> [<n>…|--recommended] [--from <your id>] [--list] [--wait [s]]
                                             the chat's Launch button on its newest reply that offers
-                                            options (a task list): the recommended ones by default, or
+                                            options (a task list, else a recommendation): the recommended ones by default, or
                                             these numbers; the page and phone show them Launched.
                                             --list: show the options, send nothing
   fv interrupt <id>                         Esc: stop Claude mid-turn

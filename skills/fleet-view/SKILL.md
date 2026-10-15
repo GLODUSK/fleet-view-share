@@ -108,6 +108,8 @@ fv launch 3f2a9c1e 1 3 --from <my id>        # launch options 1 and 3
 
 Options launched already are left out. With `--from` the message says who launched them, like `fv send --from`.
 
+A reply with no task list that still gives a recommendation ("**My recommendation:** …", "I'd recommend …", "(recommended)" on a plain item) has a **Launch recommendation** button, and `fv launch` presses it the same way: its options are the recommended things, and the launch line has that session work out each one's model and effort.
+
 **Resume an old conversation with a follow-up**
 
 ```

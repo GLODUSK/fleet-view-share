@@ -871,7 +871,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/bots/:id/remove', does: 'Henry only, as POST /api/bots: end a bot\'s session and take it off the list (its folder and conversations are kept)' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, role, its turn; tail: the last characters of its screen' },
   { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now?, shell? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. With from, leading /effort <level> and /model <name> lines switch the receiver (as POST .../model with queue: true; a bare command typed under the from line would be read as text) and the rest is sent: switch { ok, queued?, model?, effort?, message }. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow). shell (not with from or now): text is a shell command, run in bash mode ("!" typed as a key of its own into an empty prompt, then the command; a leading "!" in text is dropped); 409 when its prompt is not empty or a menu is up, never queued' },
-  { method: 'POST', path: '/api/sessions/:id/launch', body: '{ picks?: "recommended" | [n…], from?, wait?, dry? }', does: 'the chat\'s Launch button from outside the page: the conversation\'s newest reply offering options (a task list, every box unticked) gives them; picks (default the ones marked "(recommended)"; numbers from 1 as the list stands) are sent as the button sends them ("Go with these:", the numbered options, the launch line), so the page and the phone show them Launched; ones launched already are left out (skipped). A session below high effort, or not known, is switched to high first, as the button does. from, wait: as .../message. dry: nothing sent: { options: [{ n, text, rec, done }], picked, text }. 409 when there is no such reply or nothing left to launch' },
+  { method: 'POST', path: '/api/sessions/:id/launch', body: '{ picks?: "recommended" | [n…], from?, wait?, dry? }', does: 'the chat\'s Launch button from outside the page: the conversation\'s newest reply offering options (a task list, every box unticked; else a recommendation however it is written, "My recommendation: …", "I\'d recommend …", "(recommended)" on a plain item, each one an option marked recommended and sent with a launch line that has the session work out model and effort: recommendation: true) gives them; picks (default the ones marked "(recommended)"; numbers from 1 as the list stands) are sent as the button sends them ("Go with these:", the numbered options, the launch line), so the page and the phone show them Launched; ones launched already are left out (skipped). A session below high effort, or not known, is switched to high first, as the button does. from, wait: as .../message. dry: nothing sent: { options: [{ n, text, rec, done }], picked, text }. 409 when there is no such reply or nothing left to launch' },
   { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
   { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
   { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort?, queue? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. Not idle: 409 notReady, or with queue: true 202 { queued, model?, effort? }: applied once Claude finishes this step (GET /state\'s switchPending until then; dropped after 30 min). An overseer\'s: Henry only (his phone)' },
@@ -1135,7 +1135,7 @@ async function sendMessage(key, b, ctx, gone, via = null) {
 }
 // POST /api/sessions/:id/launch { picks?: "recommended" | [n…], from?, wait?, dry? }: the chat's Launch button, from
 // outside the page (launch.js). The conversation's newest reply that offers a choice (a task list, every box
-// unticked) gives the options; picks says which (default the ones marked "(recommended)"; numbers as the list stands,
+// unticked; else a recommendation given another way, each one an option marked recommended) gives the options; picks says which (default the ones marked "(recommended)"; numbers as the list stands,
 // from 1); ones launched already are left out. It sends what the button sends, word for word, so the page and the
 // phone grey them as Launched: "Go with these:", the numbered options, the launch line. Like the button it runs the
 // launch at high effort or above: a session known to be below high, or not known, is switched to high first (queued
@@ -1155,13 +1155,13 @@ async function launchPicks(key, b, ctx, gone, via = null) {
   try { t = await ctx.transcript(id, { limit: LAUNCH_ITEMS, textMax: LAUNCH_TEXT_MAX }); } catch { t = null; }
   if (!t) return [404, { ok: false, id, message: 'no such conversation (its log is not on disk)' }];
   const choice = LAUNCH.latestChoice(t.items || []);
-  if (!choice) return [409, { ok: false, id, message: `none of its last ${LAUNCH_ITEMS} transcript items is a reply offering options (a task list with every box unticked)` }];
+  if (!choice) return [409, { ok: false, id, message: `none of its last ${LAUNCH_ITEMS} transcript items is a reply offering options (a task list with every box unticked) or giving a recommendation` }];
   const options = choice.options;
   const reply = { i: choice.item.i, t: choice.item.t || null };
   const c = LAUNCH.choose(options, picks);
   if (c.error) return [409, { ok: false, id, reply, options, message: c.error }];
-  const text = LAUNCH.launchText(options, c.ns);
-  const out = { id, reply, options, picked: c.ns, ...(c.skipped && c.skipped.length ? { skipped: c.skipped } : {}), text };
+  const text = LAUNCH.launchText(options, c.ns, choice.rec);
+  const out = { id, reply, options, ...(choice.rec ? { recommendation: true } : {}), picked: c.ns, ...(c.skipped && c.skipped.length ? { skipped: c.skipped } : {}), text };
   if (b.dry === true) return [200, { ok: true, ...out, dry: true, message: `would launch ${c.ns.join(', ')}` }];
   // the button's effort: high or above for the session coordinating the launch (handto.js)
   const info = ctx.sessionInfo ? ctx.sessionInfo(id) : null;

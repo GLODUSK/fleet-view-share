@@ -7,14 +7,22 @@
 // them. "(recommended)" in an option's own line marks it (the page's badge); it is not part of the option's text. An
 // option is launched once a user message of the conversation has a "Go with these:" list naming it (the words before
 // its first ": ", case and spaces folded), sent from the page, the phone or here.
+// A reply with no such list that gives a recommendation another way ("My recommendation: …", "I'd recommend …",
+// "(recommended)" on a plain item: web/recommend.js) offers that, every one recommended, launched with REC_LINE: the
+// session picks each one's model and effort.
 //
 // LAUNCH_HEAD and LAUNCH_LINE are the page's (web/chat.js) and the phone's (phone/src/lib/chat/compose.ts), word for
 // word: scripts/launch-test.js checks the three agree.
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 const LAUNCH_HEAD = 'Go with these:';
 const LAUNCH_LINE = 'Launch subagents accordingly with model and effort: first check which items touch the same files and run those one after another (the rest in parallel), one subagent per item at its stated model and effort, each in its own worktree; then review every diff yourself, run the checks, and ship.';
-const REC = /\s*\(recommended\)/i;
+// a recommendation's launch line: it seldom names a model or effort, so the session works them out (CLAUDE.md "Plans")
+const REC_LINE = 'Launch subagents accordingly: one subagent per item, at the model and effort it names, else the ones the work calls for (say which you picked: code edits keep this session\'s model, lookups and research go to Haiku or Sonnet; effort low for lookups and mechanical edits, medium for routine code on a clear spec, high for a feature across several files or anything touching money, permissions or migrations, xhigh for design calls, hard bugs and security); an item that needs no work, say so and skip it; items that touch the same files one after another (the rest in parallel), each in its own worktree; then review every diff yourself, run the checks, and ship.';
+const REC =/\s*\(recommended\)/i;
 const TASK = /^(\s*)(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s+(.*)$/;
 const ITEM = /^\s*(?:[-*+]|\d+[.)])\s+/;
 const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
@@ -64,6 +72,15 @@ function optionsOf(md) {
   return found.map((o, i) => ({ n: i + 1, text: optionText(o.own), rec: REC.test(o.own) }));
 }
 
+// the page's recommendation reader (web/recommend.js: an ES module with no imports), run as it stands, so the page and
+// fv launch read a recommendation the same way
+const { recommendationsOf } = new Function(`${fs.readFileSync(path.join(__dirname, 'web', 'recommend.js'), 'utf8').replace(/^export /gm, '')}\nreturn { recommendationsOf };`)();
+// a reply's recommendation as options -> [{ n, text, rec: true }], or null when it gives none
+function recOptionsOf(md) {
+  const recs = recommendationsOf(md);
+  return recs.length ? recs.map((text, i) => ({ n: i + 1, text, rec: true })) : null;
+}
+
 // what an option is known by in a launch: its name before the first ": " (else all of it), case and spaces folded
 // (web/chat.js launchKey)
 function launchKey(t) {
@@ -88,23 +105,25 @@ function launchedKeys(texts) {
   return out;
 }
 
-// the message a Launch sends: the picked options numbered as they stand in the list, then the launch line
-function launchText(options, ns) {
+// the message a Launch sends: the picked options numbered as they stand in the list, then the launch line (for a
+// recommendation's, rec, REC_LINE)
+function launchText(options, ns, rec = false) {
   const byN = new Map(options.map((o) => [o.n, o]));
   const lines = [...new Set(ns)].sort((a, b) => a - b).filter((n) => byN.has(n)).map((n) => `${n}. ${byN.get(n).text}`);
-  return `${LAUNCH_HEAD}\n${lines.join('\n')}\n\n${LAUNCH_LINE}`;
+  return `${LAUNCH_HEAD}\n${lines.join('\n')}\n\n${rec ? REC_LINE : LAUNCH_LINE}`;
 }
 
 // The newest reply in a transcript (items as conversation.js transcriptOf gives them: { i, type, text, t }) that
-// offers a choice, with what is launched already (every user message's launch, before it or after) ->
-// { item, options: [{ n, text, rec, done }] } or null
+// offers a choice (a task list, else a recommendation), with what is launched already (every user message's launch,
+// before it or after) -> { item, options: [{ n, text, rec, done }], rec } (rec: it is a recommendation's) or null
 function latestChoice(items) {
   const launched = launchedKeys((items || []).filter((it) => it && it.type === 'user').map((it) => it.text));
   for (let k = (items || []).length - 1; k >= 0; k--) {
     const it = items[k];
     if (!it || it.type !== 'assistant') continue;
-    const options = optionsOf(it.text);
-    if (options) return { item: it, options: options.map((o) => ({ ...o, done: launched.has(launchKey(o.text)) })) };
+    const list = optionsOf(it.text);
+    const options = list || recOptionsOf(it.text);
+    if (options) return { item: it, options: options.map((o) => ({ ...o, done: launched.has(launchKey(o.text)) })), rec: !list };
   }
   return null;
 }
@@ -128,4 +147,4 @@ function choose(options, picks) {
   return { ns, skipped: asked.filter((n) => done(n)) };
 }
 
-module.exports = { LAUNCH_HEAD, LAUNCH_LINE, plain, optionText, optionsOf, launchKey, launchedKeys, launchText, latestChoice, choose };
+module.exports = { LAUNCH_HEAD, LAUNCH_LINE, REC_LINE, recommendationsOf, recOptionsOf, plain, optionText, optionsOf, launchKey, launchedKeys, launchText, latestChoice, choose };
