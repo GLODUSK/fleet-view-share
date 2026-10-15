@@ -355,7 +355,9 @@ async function main() {
   // inTemp: the uploader's throwaway folders
   ok(C.inTemp(path.join(wkTemp, 'x'), { home: wh, temp: [wkTemp] }) && !C.inTemp(path.join(T, 'far'), { home: wh, temp: [wkTemp] }), 'inTemp: a folder in the temp folder, and one outside it');
   ok(!C.inTemp(path.join(wh, 'x'), { home: wh, temp: [T] }), 'inTemp: a temp folder that holds the home folder does not count');
-  ok(C.inTemp(path.join(os.tmpdir(), 'x'), { home: wh }), 'inTemp: the system\'s temp folder by default');
+  // a home outside the temp folder: wh is in it (T is made there), and a temp folder holding the home does not count
+  const farHome = path.join(path.parse(os.tmpdir()).root, 'sync-common-test-home');
+  ok(C.inTemp(path.join(os.tmpdir(), 'x'), { home: farHome }) && C.inTemp(path.join(fs.realpathSync.native(os.tmpdir()), 'x'), { home: farHome }), 'inTemp: the system\'s temp folder by default, as given and its real path');
   // the placeholder: <home>/.fleet-view/bound/<host>/<hash>/<name>
   ok(same(path.dirname(path.dirname(path.dirname(ph))), C.boundBase(wh)) && path.basename(ph) === 'ws' && path.basename(path.dirname(path.dirname(ph))) === 'BlackBox', `boundPlaceholder: under .fleet-view/bound, the host, a hash, the folder's name (${ph})`);
   ok(C.boundPlaceholder(wh, 'BlackBox', 'D:/Perforce/ws') !== ph && path.basename(C.boundPlaceholder(wh, 'BlackBox', 'D:/Perforce/ws')) === 'ws', 'boundPlaceholder: another folder of the same name gets another hash');

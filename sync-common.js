@@ -273,7 +273,14 @@ function checkoutAt(folder) {
 const tempDirs = () => {
   const list = [os.tmpdir()];
   if (process.platform === 'darwin') list.push('/tmp', '/private/tmp', '/var/folders', '/private/var/folders');
-  return list.filter(Boolean).map((d) => path.resolve(d));
+  // each as given and as its real path too: TEMP can be an 8.3 short name (C:\Users\HENRY~1\...) or a link, while a
+  // chat's cwd comes in its long, real form
+  const out = [];
+  for (const d of list.filter(Boolean).map((x) => path.resolve(x))) {
+    out.push(d);
+    try { const r = fs.realpathSync.native(d); if (r !== d) out.push(r); } catch {}
+  }
+  return out;
 };
 function inTemp(cwd, o = {}) {
   if (!nativeAbs(cwd)) return false;

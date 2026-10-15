@@ -34,6 +34,8 @@ const C = require(path.join(ROOT, 'sync-common.js'));
 const M = require(path.join(ROOT, 'sync-move.js'));
 const CARRY = require(path.join(ROOT, 'sync-carry.js'));
 const cp = require('child_process');
+// Windows has no POSIX file modes (a 0600 file reads back 0666), so the 0600 checks run on the Mac and Linux only
+const POSIX_MODES = process.platform !== 'win32';
 
 let pass = 0, fail = 0;
 const ok = (c, name) => { if (c) pass++; else { fail++; console.log(`FAIL ${name}`); } };
@@ -958,11 +960,11 @@ const done = (m, id) => ['ready', 'failed', 'cancelled'].includes(phaseOf(m, id)
       ok(fs.existsSync(path.join(MAC.proj, C.slugOf(wt), `${id}.jsonl`)) && !fs.existsSync(path.join(MAC.slugDir, `${id}.jsonl`)), 'carried: the log is in the worktree\'s slug folder, nowhere else');
       eq(MAC.movedTo && MAC.movedTo.dir, path.join(MAC.proj, C.slugOf(wt)), 'carried: the materializer was told where the log is');
       eq(read(path.join(wt, '.env.local')), 'SECRET=CARRY_ENV_SECRET_99\n', 'carried: the ignored env file came over the link');
-      eq(fs.statSync(path.join(wt, '.env.local')).mode & 0o777, 0o600, 'carried: the env file is 0600');
+      if (POSIX_MODES) eq(fs.statSync(path.join(wt, '.env.local')).mode & 0o777, 0o600, 'carried: the env file is 0600');
       ok(MAC.peerCalls.includes('/peer/env') && MAC.peerCalls.includes('/peer/logins'), 'carried: both peer routes were asked');
       eq(MAC.gh, 'gho_PCTOKEN_0123456789', 'carried: gh logged in with the token, on stdin');
       const vercelHere = path.join(MAC.home, '.local', 'share', 'com.vercel.cli', 'auth.json');
-      ok(JSON.parse(read(vercelHere)).token === 'vcl_PCTOKEN_abcdef123' && (fs.statSync(vercelHere).mode & 0o777) === 0o600, 'carried: the Vercel sign-in (auth.json, 0600)');
+      ok(JSON.parse(read(vercelHere)).token === 'vcl_PCTOKEN_abcdef123' && (!POSIX_MODES || (fs.statSync(vercelHere).mode & 0o777) === 0o600), 'carried: the Vercel sign-in (auth.json, 0600)');
       eq(read(path.join(MAC.home, '.supabase', 'access-token')), 'sbp_PCTOKEN_0011223344', 'carried: the Supabase sign-in');
       ok(read(path.join(MAC.home, '.npmrc')).includes('//registry.npmjs.org/:_authToken=npm_PCTOKEN_778899') && !read(path.join(MAC.home, '.npmrc')).includes('color'), 'carried: only npm\'s auth line');
       eq(MAC.mcpAdds.map((a) => `${a.scope}:${a.name}`).sort(), ['local:proj1', 'user:remote1'], 'carried: the remote MCP servers, the user\'s and the project\'s');

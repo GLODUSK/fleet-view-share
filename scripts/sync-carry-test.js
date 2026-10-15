@@ -68,6 +68,8 @@ const LINKS = (() => { try { fs.writeFileSync(path.join(T, 'l-target'), ''); fs.
 const EXEC = !P.isWin;
 if (LINKS) fs.appendFileSync(GCFG, '[core]\n\tsymlinks = true\n');
 const link = (target, at) => { if (LINKS) fs.symlinkSync(target, at); };
+// a link's target on disk with '/': Windows (Node and git alike) stores 'src/app.js' as 'src\app.js'
+const target = (at) => { const t = fs.readlinkSync(at); return P.isWin ? t.replace(/\\/g, '/') : t; };
 const chmodX = (f) => { if (EXEC) fs.chmodSync(f, 0o755); };
 const X = EXEC ? '100755' : '100644';
 
@@ -145,7 +147,7 @@ async function roundTrip(crlf) {
   write(path.join(pc, 'notes', 'new', 'todo.md'), `- carry this${eol}`);
   write(path.join(pc, 'tools', 'go.sh'), '#!/bin/sh\necho go\n');
   chmodX(path.join(pc, 'tools', 'go.sh'));
-  link('README.md', path.join(pc, 'shortcut'));
+  link('src/lib/util.js', path.join(pc, 'shortcut'));
   write(path.join(pc, 'data.bin'), bin(3000, 'data'));
   write(path.join(pc, '.env.local'), 'SECRET=1\n');
   write(path.join(pc, 'build', 'out.log'), 'ignored\n');
@@ -162,6 +164,7 @@ async function roundTrip(crlf) {
   eq(entries(m1).map((e) => e.split(':').slice(0, 2).join(':')), ['data.bin:100644', 'notes/new/todo.md:100644', ...(LINKS ? ['shortcut:120000'] : []), `tools/go.sh:${X}`], `pack: the untracked files and their modes${tag}`);
   eq(m1.env, ['.env.local'], `pack: .env.local listed, not carried${tag}`);
   ok(m1.untracked.every((e) => b1.has(e.sha256)), `pack: every untracked blob is there${tag}`);
+  if (LINKS) { const sc = m1.untracked.find((e) => e.path === 'shortcut'); eq(sc && b1.get(sc.sha256).toString('utf8'), 'src/lib/util.js', `pack: the untracked symlink's target with '/', git's form${tag}`); }
   eq(m1.summary.files, 8 + (EXEC ? 1 : 0) + (LINKS ? 2 : 0), `pack: files changed (README, the rename, del, app, run.sh, logo, link, and 4 untracked)${tag}`);
   ok((await W.verify(cwd, m1)).ok, `verify: the source against its own manifest${tag}`);
   // a pack while a git command of the chat holds index.lock (a snapshot mid-turn): it never takes the lock itself
@@ -188,8 +191,8 @@ async function roundTrip(crlf) {
   ok((await W.verify(u1.cwd, m1)).ok, `verify: mac's worktree${tag}`);
   ok(!exists(path.join(macWt, '.env.local')) && !exists(path.join(macWt, 'build', 'out.log')), `unpack: no .env.local, no ignored file${tag}`);
   if (LINKS) {
-    eq(fs.readlinkSync(path.join(macWt, 'shortcut')), 'README.md', `unpack: the untracked symlink${tag}`);
-    eq(fs.readlinkSync(path.join(macWt, 'link.txt')), 'src/app.js', `unpack: the tracked symlink's new target${tag}`);
+    eq(target(path.join(macWt, 'shortcut')), 'src/lib/util.js', `unpack: the untracked symlink${tag}`);
+    eq(target(path.join(macWt, 'link.txt')), 'src/app.js', `unpack: the tracked symlink's new target${tag}`);
   }
   if (EXEC) ok((fs.statSync(path.join(macWt, 'bin', 'run.sh')).mode & 0o111) !== 0, `unpack: the executable bit${tag}`);
   eq(read(path.join(macWt, 'assets', 'logo.bin')).equals(bin(5000, 'logo changed')), true, `unpack: the binary change${tag}`);

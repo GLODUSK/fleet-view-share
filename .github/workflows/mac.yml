@@ -295,9 +295,8 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    # (not the windows job: a few tests still fail on Windows on main (a symlink's slashes, 0600 modes, the temp
-    # folder), and a red there must not hold back the release friends update from)
-    needs: smoke
+    # both platforms green: a red on the Mac or on Windows holds back the release friends update from
+    needs: [smoke, windows]
     if: github.repository == 'GLODUSK/fleet-view-share' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

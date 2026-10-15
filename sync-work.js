@@ -111,6 +111,9 @@ const short = (h) => String(h || '').slice(0, 8);
 const realOr = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const lst = (p) => { try { return fs.lstatSync(p); } catch { return null; } };
+// a symlink's target in git's form: Windows stores 'src/app.js' as 'src\app.js', so read it back with '/' (as git does),
+// else a link carried from the PC would point nowhere on the Mac
+const linkTarget = (p) => { const t = fs.readlinkSync(p); return P.isWin ? t.replace(/\\/g, '/') : t; };
 const sameDir = (a, b) => !!a && !!b && P.foldCase(path.resolve(realOr(a))) === P.foldCase(path.resolve(realOr(b)));
 const isEnvName = (seg) => ENV_RE.test(seg);
 const envPath = (rel) => rel.split('/').some(isEnvName);
@@ -226,7 +229,7 @@ function fileEntry(bag, abs, rel) {
   const st = lst(abs);
   if (!st) return null;
   let buf, mode;
-  if (st.isSymbolicLink()) { buf = Buffer.from(fs.readlinkSync(abs), 'utf8'); mode = '120000'; } else if (st.isFile()) {
+  if (st.isSymbolicLink()) { buf = Buffer.from(linkTarget(abs), 'utf8'); mode = '120000'; } else if (st.isFile()) {
     bag.room(st.size, rel);
     buf = fs.readFileSync(abs);
     mode = !P.isWin && (st.mode & 0o111) ? '100755' : '100644';
@@ -510,7 +513,7 @@ function writeUntracked(into, m, blobs, notes) {
     if (throughLink(into, dest)) throw new WorkError(`${e.path} would be written through a symlink: refused`, 'conflict');
     const st = lst(dest);
     if (st) {
-      const same = st.isSymbolicLink() ? e.mode === '120000' && fs.readlinkSync(dest) === b.toString('utf8') : st.isFile() && sha(fs.readFileSync(dest)) === e.sha256;
+      const same = st.isSymbolicLink() ? e.mode === '120000' && linkTarget(dest) === b.toString('utf8') : st.isFile() && sha(fs.readFileSync(dest)) === e.sha256;
       if (same) continue;
       throw new WorkError(`${e.path} is there already and differs`, 'conflict');
     }
@@ -662,7 +665,7 @@ function unpackPlain(m, blobs, o) {
     if (throughLink(into, fromRel(into, e.path))) throw new WorkError(`${e.path} would be written through a symlink in ${into}: nothing was written`, 'conflict');
     const st = lst(fromRel(into, e.path));
     if (!st) continue;
-    const same = st.isSymbolicLink() ? e.mode === '120000' && fs.readlinkSync(fromRel(into, e.path)) === blobOf(blobs, e.sha256).toString('utf8')
+    const same = st.isSymbolicLink() ? e.mode === '120000' && linkTarget(fromRel(into, e.path)) === blobOf(blobs, e.sha256).toString('utf8')
       : st.isFile() && sha(fs.readFileSync(fromRel(into, e.path))) === e.sha256;
     if (!same) throw new WorkError(`${e.path} is in ${into} already and differs: nothing was written`, 'conflict');
   }
@@ -676,7 +679,7 @@ function checkFile(abs, e, diffs) {
   const st = lst(abs);
   if (!st) { diffs.push(`${e.path}: missing`); return; }
   if (e.mode === '120000') {
-    const got = st.isSymbolicLink() ? Buffer.from(fs.readlinkSync(abs), 'utf8') : st.isFile() && P.isWin ? fs.readFileSync(abs) : null;
+    const got = st.isSymbolicLink() ? Buffer.from(linkTarget(abs), 'utf8') : st.isFile() && P.isWin ? fs.readFileSync(abs) : null;
     if (!got || sha(got) !== e.sha256) diffs.push(`${e.path}: not the symlink packed`);
     return;
   }
