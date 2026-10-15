@@ -2977,7 +2977,7 @@ async function listConversations(query, ctx) {
 //        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,
 //        bots: { list(), create(b), start(id), update(id, b), remove(id), look(b) } each -> [code, json] or a Promise of one
 //        (/api/bots, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
-const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode|rewind|fork|panel';
+const VERBS = 'message|launch|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode|rewind|fork|panel';
 const GET_VERBS = new Set(['menu', 'transcript', 'activity']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
 const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|lead|disband|message))?\/?$/;
@@ -3102,7 +3102,7 @@ function handle(req, res, pathname, ctx) {
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
 // relayKey: the phone relay's key (see viaOf), for fleet-view.js to hand the relay
 module.exports = { ensureToken, handle, startBot, openBot, endHosted, hostList, hostKill, hostSwitch, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
-  startQueue, queuedIds, switchModel, switchPending, launchPicks, isSwitchConfirm, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
+  startQueue, queuedIds, switchModel, switchPending, launchPicks, isSwitchConfirm, TOKEN_FILE, ENDPOINTS, ROUTE, MODEL_RE, EFFORTS,
   askParts: { asks, summaryText, laterText, overseerAnswers, answerLines, flushAsk, settleAnswer, askJson },
   // the queued switches and their tick, for a test to age one or run a tick at once
   switchParts: { pending: pendingSwitch, tick: tickSwitches, refusals: refusalLog } };

@@ -134,7 +134,11 @@ async function endpoint() {
   assert.equal(code, 409);
   assert.match(j.message, /offering options/);
   assert.ok(API.ENDPOINTS.some((e) => e.method === 'POST' && e.path === '/api/sessions/:id/launch'));
-  ok('POST .../launch: dry run gives the picks and the exact text; bad picks 400; no such reply or option 409; listed in GET /api');
+  // the server routes every session endpoint GET /api lists (1.0.324 listed launch but answered 404 to it)
+  for (const e of API.ENDPOINTS.filter((x) => x.path.startsWith('/api/sessions'))) {
+    assert.ok(API.ROUTE.test(e.path.replace(':id', ID)), `${e.method} ${e.path} is listed but not routed`);
+  }
+  ok('POST .../launch: dry run gives the picks and the exact text; bad picks 400; no such reply or option 409; listed in GET /api and routed');
 }
 
 // ---------- fv launch ----------
