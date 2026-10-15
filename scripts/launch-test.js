@@ -144,6 +144,19 @@ const REC_REPLY = [
   assert.equal(R(`Recommendation: ${'w'.repeat(500)}`)[0].length, 400);
   assert.equal(R(Array.from({ length: 8 }, (_, i) => `- item ${i} (recommended)`).join('\n')).length, 5);
   assert.deepEqual(R('- Same (recommended)\n- same (recommended)'), ['Same']);
+  // talk about the rules is not a recommendation: the summary that got the button 2026-10-15 (its items were launched)
+  assert.deepEqual(R([
+    '**What gets the button:** any reply without a `- [ ]` option list that gives a recommendation:',
+    '- `(recommended)` on any line, plain list item, heading or table row',
+    '- a label: `**My recommendation:** …`, `Recommendation — …`, `Recommended fix: …`',
+    '- a sentence: "I recommend …", "I\'d strongly recommend …", "My recommendation is …"',
+    '',
+    'It skips "I wouldn\'t recommend", “I recommended” and code blocks.',
+  ].join('\n')), []);
+  // a real one keeps its code's words, and one outside the quotes still counts
+  assert.deepEqual(R('I\'d recommend running `npm ci` first.'), ['I\'d recommend running npm ci first.']);
+  assert.deepEqual(R('- `fast` mode\n- `safe` mode (recommended)'), ['safe mode']);
+  assert.deepEqual(R('You asked "which one?". I recommend the second.'), ['I recommend the second.']);
   ok('recommendationsOf: a sentence from its start to its paragraph\'s end; negatives, past tense and code are not one; 400 characters, 5 at most, each once');
 
   // as options: every one recommended; latestChoice falls back to it; the message has REC_LINE

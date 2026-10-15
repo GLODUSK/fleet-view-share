@@ -10,14 +10,16 @@
 //     it (the items of the list there, else the paragraph)
 //  3. a sentence: "I recommend …", "I'd recommend …", "We'd strongly recommend …", "My recommendation is …": from that
 //     sentence to the end of its paragraph. "I wouldn't recommend", "I don't recommend" and "I recommended" are not one
+// A mark or a sentence inside inline code or quotes is talk about one, not one (2026-10-15: a summary of these rules
+// got the button from its `(recommended)`)
 // -> [text…]: each one line of plain words (markdown marks out), at most 400 characters, at most 5, each once
 
 const MAX = 5;
 const CUT = 400;
-const MARK = /\s*\(recommended\)/i;
+const MARK = /\s*\(recommended\)/gi;
 const LABEL = /^(?:(?:my|our|the)\s+)?(?:(?:top|final|main|overall|short|quick)\s+)?(?:recommendations?|recommended(?:\s+[a-z]+){0,2}|recommend)\s*(?:[:—–]|\s-\s)\s*/i;
 const HEAD = /^(?:(?:my|our)\s+)?(?:recommendations?|recommended(?:\s+[a-z]+){0,2}|what\s+i(?:['’]d|\s+would)\s+do)\s*:?$/i;
-const SENT = /\b(?:i|we)(?:['’]d|\s+would)?\s+(?:(?:still|strongly|really|also|definitely)\s+)?recommend\b|\bmy\s+recommendation\s+(?:is|would\s+be|stays|remains)\b/i;
+const SENT = /\b(?:i|we)(?:['’]d|\s+would)?\s+(?:(?:still|strongly|really|also|definitely)\s+)?recommend\b|\bmy\s+recommendation\s+(?:is|would\s+be|stays|remains)\b/gi;
 const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
 
 // markdown inline marks out, as the page shows the words (launch.js plain)
@@ -32,8 +34,23 @@ export function plain(s) {
     .trim();
 }
 
-// the reply in blocks, code left out: { kind: 'p' | 'li' | 'h' | 'row', indent, text } (text in plain words). A
-// paragraph's or an item's lines join until a blank line, a heading, a rule, a table row or the next item
+// inline code's words stay in a block's text between these two, so a match inside it is known (out again at the end)
+const CODE_IN = '\u0001', CODE_OUT = '\u0002';
+const count = (s, c) => s.split(c).length - 1;
+// whether text[i] is inside inline code or quotes ("…" or “…”)
+function quoted(text, i) {
+  const s = text.slice(0, i);
+  return count(s, CODE_IN) > count(s, CODE_OUT) || count(s, '"') % 2 === 1 || count(s, '“') > count(s, '”');
+}
+// the first match of re (global) in text not inside code or quotes, else null
+function said(re, text) {
+  re.lastIndex = 0;
+  for (let m; (m = re.exec(text));) if (!quoted(text, m.index + m[0].length - m[0].trimStart().length)) return m;
+  return null;
+}
+
+// the reply in blocks, code left out: { kind: 'p' | 'li' | 'h' | 'row', indent, text } (text in plain words, inline
+// code marked). A paragraph's or an item's lines join until a blank line, a heading, a rule, a table row or the next item
 function blocksOf(md) {
   const out = [];
   let cur = null, fence = null;
@@ -54,7 +71,7 @@ function blocksOf(md) {
     if (cur) { cur.text += ` ${line.trim()}`; continue; }
     out.push(cur = { kind: 'p', indent: 0, text: line.trim() });
   }
-  return out.map((b) => ({ ...b, text: plain(b.text) }));
+  return out.map((b) => ({ ...b, text: plain(b.text.replace(/`+([^`]*)`+/g, `${CODE_IN}$1${CODE_OUT}`)) }));
 }
 
 // what is under a label or a heading: the items of the list right after it (at its first item's depth), else the
@@ -72,7 +89,11 @@ function under(bs, i) {
 
 export function recommendationsOf(md) {
   const bs = blocksOf(md);
-  let found = bs.filter((b) => MARK.test(b.text)).map((b) => b.text.replace(MARK, ''));
+  let found = [];
+  for (const b of bs) {
+    const m = said(MARK, b.text);
+    if (m) found.push(b.text.slice(0, m.index) + b.text.slice(m.index + m[0].length));
+  }
   if (!found.length) {
     bs.forEach((b, i) => {
       const m = LABEL.exec(b.text);
@@ -84,7 +105,7 @@ export function recommendationsOf(md) {
   if (!found.length) {
     for (const b of bs) {
       if (b.kind === 'h') continue;
-      const m = SENT.exec(b.text);
+      const m = said(SENT, b.text);
       if (!m) continue;
       // from the start of its sentence: just past the last ". ", "! " or "? " before it
       const before = b.text.slice(0, m.index);
@@ -95,7 +116,7 @@ export function recommendationsOf(md) {
   const seen = new Set();
   const out = [];
   for (const raw of found) {
-    const t = raw.replace(/\s+/g, ' ').trim();
+    const t = raw.replace(/[\u0001\u0002]/g, '').replace(/\s+/g, ' ').trim();
     const k = t.toLowerCase();
     if (!t || seen.has(k)) continue;
     seen.add(k);
