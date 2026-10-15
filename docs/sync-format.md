@@ -24,7 +24,9 @@ new conversation's log, which does, so the chain and its Summary show on both ma
 ## Rows (schema `fleet_sync`, migration 0375; every row is the signed-in user's, RLS checks membership)
 
 - **devices** `{ id, name, platform, last_seen_at }`: one per machine. The id is kept in `<dataDir>/sync/device.json`
-  (`{ id }`), made on first start by inserting a row (name = hostname, platform = `process.platform`). Each side
+  (`{ id }`), made on first start by inserting a row (name = hostname, platform = `process.platform`); with no
+  device.json, an existing row with this machine's name and platform is adopted instead (the newest seen), and a
+  device.json that cannot be read never leads to a new row (`sync-common.js` `ensureDevice`). Each side
   updates `last_seen_at` at most every 5 minutes, and S4's mover every 30 s (see [Moving a conversation](#moving-a-conversation-s4)).
 - **repos** `{ id, origin }`: one per GitHub repo, `origin` normalized: `https://github.com/<owner>/<repo>` in lower
   case, from `git remote get-url origin` (ssh `git@github.com:o/r.git`, `https://user@github.com/o/r.git` and

@@ -5,7 +5,7 @@ description: Drive other Claude Code sessions through Fleet View's `fv` command.
 
 # Fleet View: running other Claude sessions
 
-`fv` (on PATH: `fv.cmd` in cmd and PowerShell, `fv` in Git Bash, both in the Fleet View folder) talks to Fleet View's automation API. Every session it starts is a real interactive `claude` in the Fleet View desktop app: the user can watch it and type into it in the panel. It needs the desktop app running (else every call says so, `503`).
+`fv` (on PATH: `fv.ps1` in PowerShell, `fv.cmd` in cmd, `fv` in Git Bash, all in the Fleet View folder) talks to Fleet View's automation API. Every session it starts is a real interactive `claude` in the Fleet View desktop app: the user can watch it and type into it in the panel. It needs the desktop app running (else every call says so, `503`).
 
 ## When to use it
 
@@ -25,7 +25,7 @@ fv ls [--all] [--state S] [--repo R]     every conversation: id, name, state, re
 fv hosted                                sessions the desktop app runs
 fv start <repo> <prompt> [--account A|B|C…] [--name N] [--model M] [--effort E]
          [--fork <id>] [--temp] [--chrome|--no-chrome] [--wait [s]]
-fv send <id> <text> [--wait [s]] [--from <id>] [--no-open]
+fv send <id> <text>|--file F|--stdin [--wait [s]] [--from <id>] [--no-open]
 fv wait <id> [--timeout s]               until its turn ends, it asks something, or it ends
 fv read <id> [--tail n]                  status and latest reply (--tail: its screen)
 fv transcript <id> [--since n] [--limit m]
@@ -54,6 +54,7 @@ fv version                               Fleet View's version (1.0.12), here and
 - Ids: the first 8+ characters are enough when they are unique. `<team>` is a team's id, a unique start of it, or its unique name.
 - `<repo>` must be a folder Fleet View lists (a repo root or a conversation's checkout).
 - Text arguments may be `-` to read stdin: use it for long or multi-line prompts.
+- **Multi-line or long messages: `fv send <id> --file <path>` (UTF-8, or what PowerShell's `>` writes) or `--stdin`** (`$m | fv send <id> --stdin` in PowerShell, a heredoc in Bash). They arrive whole from any shell. A quoted argument is fine for one line; in cmd (`fv.cmd`) one with a newline is cut at it and `%VAR%` is expanded, and in PowerShell one is capped at about 20,000 characters.
 - `--wait` with no number waits up to 30 minutes. A wait that ends on a question or a menu prints it with the exact `fv answer` command to run.
 - `--json` prints the raw reply. Exit code 0 ok, 1 refused or failed, 2 bad usage.
 
@@ -124,7 +125,7 @@ fv send <their id> "message" --from <my id>
 fv team say <team> "message" --from <my id>      # every member but you
 ```
 
-Your own id is in `fv ls` (the conversation you are in) and in the order that made the team, with the others' ids. Quote the message (`"…"`), or pass `-` and the text on stdin. A teammate's message comes into your conversation starting with `[Message from teammate "<name>" (<their id>). Reply with: …]` (`your lead` from your team's lead): answer it with `fv send <their id> "…" --from <my id>`.
+Your own id is in `fv ls` (the conversation you are in) and in the order that made the team, with the others' ids. Quote a one-line message (`"…"`); for more than one line use `--file <path>` or `--stdin` (the text on stdin). A teammate's message comes into your conversation starting with `[Message from teammate "<name>" (<their id>). Reply with: …]` (`your lead` from your team's lead): answer it with `fv send <their id> "…" --from <my id>`.
 
 - A teammate that handed off (or ran `/clear`) is followed: the message goes to the conversation that carries on, and `fv` says so ("sent to <new> (it picked up <old>)"). Use that id from then on; the team is told it too.
 - A teammate showing a question or a prompt gets the message once that is answered ("queued").

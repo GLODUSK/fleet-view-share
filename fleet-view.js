@@ -170,9 +170,14 @@ const WEB_ONLY_VIEWS = ['projects', 'chats']; // views only the page has (web/pr
 // settings that survive a restart; flags on the command line win, and the demo never saves
 const SETTINGS_FILE = path.join(os.homedir(), '.fleet-view.json');
 const OLD_SETTINGS_FILE = path.join(os.homedir(), '.agent-pulse.json'); // from when this was Agent Pulse
-let saved = {};
-try { saved = JSON.parse(fs.readFileSync(fs.existsSync(SETTINGS_FILE) ? SETTINGS_FILE : OLD_SETTINGS_FILE, 'utf8')) || {}; } catch {}
-if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+// settings-file.js: a BOM is stripped, a file that does not parse is kept aside and .bak used instead (said in
+// server.log, which is set up further down, hence the setImmediate); saves go through a tmp file and a rename
+const SETTINGS_IO = require(path.join(__dirname, 'settings-file.js'));
+let saved = SETTINGS_IO.read(SETTINGS_FILE, { fallback: OLD_SETTINGS_FILE, readOnly: DEMO || !!opt('snapshot', false),
+  log: (t) => setImmediate(() => logLine(`settings: ${t}`)) });
+// the file as loaded, then as last saved: a save keeps what is on disk for every key this server has not changed
+// since, so a hand edit (restoreIdle, usageAlertPct...) made while it runs is not put back
+let savedBase = SETTINGS_IO.snapshot(saved);
 // the bots' part of the server (bots.js), made once the API's ctx is there (below apiCtx)
 let BOTS = null;
 // ~/Bots and the bots' folders in it are never a workspace
@@ -843,7 +848,7 @@ function flushSettings() {
   clearTimeout(saveTimer);
   saveTimer = null;
   // keys this version doesn't know (written by a newer page or the desktop window) are kept as they were
-  const out = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, chatOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
+  const ours = { ...saved, view, zoom: map.zoom, query, repo: repoSel, repos: repoSels, repoNames, repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], repoOrder, chatOrder, hostRules, compact, finishedOpen, steady, miniOpen, chatsOpen, chatsOnTop, hidden, forgotten, hiddenRepos, addedRepos, mapSpots,
     mapLens, mapViews, mapCamera, notify, autoSwitchAccount: autoSwitch, offAccounts, teams, apiTemp, pinOverrides: [...pinOverrides.values()],
     dynamicChats: [...dynamicChats.values()], botLooks,
     chief: undefined, // the Chief is gone (2026-10-13): an older file's chief key is dropped
@@ -853,10 +858,12 @@ function flushSettings() {
     names: Object.fromEntries(names),
     pushTargets: { sessions: [...pushTargets.sessions.values()], repos: [...pushTargets.repos.values()] },
     remembered: { sessions: [...remembered.sessions].map(([id, at]) => ({ id, at })), repos: [...remembered.repos].map(([root, at]) => ({ root, at })) } };
-  if (webBounds) out.webBounds = webBounds; else delete out.webBounds;
-  if (miniBounds) out.miniBounds = miniBounds; else delete out.miniBounds;
-  if (chatsBounds) out.chatsBounds = chatsBounds; else delete out.chatsBounds;
-  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(out, null, 2)); } catch (e) { logOnce('settings', `could not save ${SETTINGS_FILE}: ${e.message}`); }
+  if (webBounds) ours.webBounds = webBounds; else delete ours.webBounds;
+  if (miniBounds) ours.miniBounds = miniBounds; else delete ours.miniBounds;
+  if (chatsBounds) ours.chatsBounds = chatsBounds; else delete ours.chatsBounds;
+  // a key changed on disk since the last save (by hand) and not here wins; one changed here wins over the disk's
+  const { out, base } = SETTINGS_IO.merge(ours, savedBase, SETTINGS_IO.peek(SETTINGS_FILE));
+  try { SETTINGS_IO.write(SETTINGS_FILE, out, { log: (t) => logLine(`settings: ${t}`) }); savedBase = base; } catch (e) { logOnce('settings', `could not save ${SETTINGS_FILE}: ${e.message}`); }
   // the shared settings (sync-prefs.js) go up soon when one of their groups changed (SYNC_RUNNER is made further down)
   try { SYNC_RUNNER.prefsChanged(); } catch {}
 }
@@ -1006,7 +1013,7 @@ function launchDefaults() {
     const m = ((readJson(path.join(acctDir(a), 'settings.json')) || {}).permissions || {}).defaultMode;
     accounts[a] = { mode: m == null ? 'default' : MODE_NAMES[m] || null, model: defaultModelOf(path.join(acctDir(a), 'projects')) };
   }
-  const e = (readJson(SETTINGS_FILE) || {}).newSessionEffort;
+  const e = (SETTINGS_IO.peek(SETTINGS_FILE) || {}).newSessionEffort;
   const v = { effort: e === 'last' ? null : ['low', 'medium', 'high', 'xhigh', 'max'].includes(e) ? e : 'medium', accounts };
   launchCache = { at: Date.now(), v };
   return v;

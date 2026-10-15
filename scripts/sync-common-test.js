@@ -208,6 +208,10 @@ async function main() {
       calls.push({ method, table, ...o });
       if (down) throw new S.SyncError('Supabase could not be reached', 0, 'network');
       if (table !== 'devices') throw new Error('wrong table');
+      if (method === 'GET' && o.query.name) {
+        const val = (v) => String(v).replace(/^eq\./, '').replace(/^"(.*)"$/s, '$1');
+        return [...rows.values()].filter((r) => r.name === val(o.query.name) && r.platform === val(o.query.platform)).map((r) => ({ ...r }));
+      }
       if (method === 'GET') { const id = String(o.query.id).replace(/^eq\./, ''); return rows.has(id) ? [{ id }] : []; }
       if (method === 'POST') {
         const id = `aaaaaaaa-0000-4000-8000-${String(++n).padStart(12, '0')}`;
@@ -237,16 +241,56 @@ async function main() {
   await rejects(C.ensureDevice(api, dataDir3), 'ensureDevice: Supabase down throws');
   eq(C.readState(path.join(dataDir3, 'sync', 'device.json')).id, 'bbbbbbbb-0000-4000-8000-000000000000', 'ensureDevice: nothing changed on a failure');
   down = false;
+  const rename = () => { for (const r of rows.values()) r.name = 'another-pc'; }; // no row has this machine's name
+  rename();
   const d3 = await C.ensureDevice(api, dataDir3);
   ok(d3 !== 'bbbbbbbb-0000-4000-8000-000000000000' && rows.has(d3), 'ensureDevice: a row that is gone gets a new one');
   eq(C.readState(path.join(dataDir3, 'sync', 'device.json')), { id: d3 }, 'ensureDevice: the new id saved');
   // the uploader, the materializer and the mover ask at once on a first start: one row, one id for all three
   calls.length = 0;
+  rename();
   const dataDir4 = path.join(T, 'data4');
   const at4 = await Promise.all([C.ensureDevice(api, dataDir4), C.ensureDevice(api, dataDir4), C.ensureDevice(api, dataDir4)]);
   ok(at4.every((d) => d === at4[0]) && rows.has(at4[0]), 'ensureDevice: three at once share one id');
   eq(calls.filter((c) => c.method === 'POST').length, 1, 'ensureDevice: three at once make one row');
   eq(C.readState(path.join(dataDir4, 'sync', 'device.json')), { id: at4[0] }, 'ensureDevice: that id saved');
+  // once known, the id stays in memory: a device.json gone or unreadable later changes nothing
+  calls.length = 0;
+  fs.rmSync(path.join(dataDir, 'sync', 'device.json'));
+  eq(await C.ensureDevice(api, dataDir), d1, 'ensureDevice: kept in memory once known (device.json gone since)');
+  eq(calls.length, 0, 'ensureDevice: kept in memory, nothing asked');
+  C.writeState(path.join(dataDir, 'sync', 'device.json'), { id: d1 });
+  // a device.json that could not be read (here a folder in its place: EISDIR) throws and makes no row
+  const dataDir5 = path.join(T, 'data5');
+  fs.mkdirSync(path.join(dataDir5, 'sync', 'device.json'), { recursive: true });
+  let e5 = null;
+  try { await C.ensureDevice(api, dataDir5); } catch (e) { e5 = e; }
+  ok(e5 && e5.code === 'device_unreadable' && !calls.length, `ensureDevice: an unreadable device.json throws, nothing asked or made (${e5 && e5.message})`);
+  // gone: this machine's row by name and platform is adopted, the newest seen; saved
+  rename();
+  const old = 'aaaaaaaa-0000-4000-8000-0000000000a1', newer = 'aaaaaaaa-0000-4000-8000-0000000000a2', mac = 'aaaaaaaa-0000-4000-8000-0000000000a3';
+  rows.set(old, { id: old, name: os.hostname(), platform: process.platform, last_seen_at: '2026-10-01T00:00:00Z', created_at: '2026-09-01T00:00:00Z' });
+  rows.set(newer, { id: newer, name: os.hostname(), platform: process.platform, last_seen_at: '2026-10-12T00:00:00Z', created_at: '2026-09-02T00:00:00Z' });
+  rows.set(mac, { id: mac, name: os.hostname(), platform: process.platform === 'darwin' ? 'win32' : 'darwin', last_seen_at: '2026-10-13T00:00:00Z' });
+  const dataDir6 = path.join(T, 'data6');
+  eq(await C.ensureDevice(api, dataDir6), newer, 'ensureDevice: no device.json: this machine\'s row by name and platform (the newest seen) is adopted');
+  ok(!calls.some((c) => c.method === 'POST'), 'ensureDevice: adopted, no row made');
+  eq(C.readState(path.join(dataDir6, 'sync', 'device.json')), { id: newer }, 'ensureDevice: the adopted id saved');
+  // damaged (cut short by a crash): adopted the same way, never a new row
+  calls.length = 0;
+  const dataDir7 = path.join(T, 'data7');
+  write(path.join(dataDir7, 'sync', 'device.json'), '{"id": "aaaa');
+  eq(await C.ensureDevice(api, dataDir7), newer, 'ensureDevice: a damaged device.json adopts this machine\'s row');
+  ok(!calls.some((c) => c.method === 'POST'), 'ensureDevice: damaged, no row made');
+  // damaged and no row with this machine's name: throws, makes nothing, leaves the file
+  rename();
+  calls.length = 0;
+  const dataDir8 = path.join(T, 'data8');
+  write(path.join(dataDir8, 'sync', 'device.json'), '');
+  let e8 = null;
+  try { await C.ensureDevice(api, dataDir8); } catch (e) { e8 = e; }
+  ok(e8 && e8.code === 'device_unreadable' && !calls.some((c) => c.method === 'POST'), `ensureDevice: damaged with nothing to adopt throws, no row made (${e8 && e8.message})`);
+  eq(fs.readFileSync(path.join(dataDir8, 'sync', 'device.json'), 'utf8'), '', 'ensureDevice: the damaged file is left as it was');
   calls.length = 0;
   const t0 = Date.parse('2026-10-10T12:00:00Z');
   eq(await C.touchDevice(api, d1, { now: t0 }), true, 'touchDevice: first time sent');

@@ -164,6 +164,11 @@ if ($changed.Count -and (Get-DesktopProcesses).Count) {
 if (Add-UserPath $dir) { Say 'Added to your PATH: type fleet-view (or fv) in any new console window' } else { Say 'Already on your PATH' }
 # and on this console's own PATH, which Fleet View started below inherits: its sessions find fv at once
 if (-not (($env:Path -split ';') | Where-Object { $_.TrimEnd('\') -ieq $dir.TrimEnd('\') })) { $env:Path = "$dir;$env:Path" }
+# PowerShell runs fv.ps1 there (it keeps a multi-line message whole, which fv.cmd can't), but only where scripts may
+# run: Claude's PowerShell tool runs with Bypass; a PowerShell window follows the policy (none set: Restricted)
+$policy = 'Restricted'
+foreach ($s in 'MachinePolicy', 'UserPolicy', 'CurrentUser', 'LocalMachine') { $p = [string](Get-ExecutionPolicy -Scope $s); if ($p -ne 'Undefined') { $policy = $p; break } }
+if ($policy -in 'Restricted', 'AllSigned') { Warn "PowerShell windows here don't run scripts (policy $policy), so fv fails in them; to allow it: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned (or type fv.cmd there)" }
 
 # ---------- the fleet-view skill, so Claude Code sessions know the fv command ----------
 # into each Claude login there is (~/.claude and every ~/.claude-<letter>); replaced on every run, and refreshed by

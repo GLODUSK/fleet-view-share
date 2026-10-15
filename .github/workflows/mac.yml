@@ -1,5 +1,6 @@
-# Fleet View on a Mac: install.sh from this checkout on a macOS runner, then the server, the session host, the window
-# and Fleet View.app. It runs in the public share repo only (GLODUSK/fleet-view-share, where Actions minutes are
+# Fleet View on a Mac: install.sh from this checkout on a macOS runner, then the server, every test
+# (scripts/test-gate.js --all), the window and Fleet View.app; and every test on Windows too (the windows job).
+# It runs in the public share repo only (GLODUSK/fleet-view-share, where Actions minutes are
 # free); in the private main repo every job is skipped (a macOS minute there costs ten).
 # Runs on: every publish (main, and its tag v1.0.N, which also makes the GitHub release), the pre-merge test branches
 # mac-test/<name> that `node scripts/publish-share.js --test <name>` pushes, and by hand (workflow_dispatch).
@@ -113,17 +114,12 @@ jobs:
           kill "$(cat "$RUNNER_TEMP/real.pid")"
           cp "$EMPTY/Library/Application Support/fleet-view/server.log" "$LOGS/real-server.log" 2>/dev/null || true
 
-      - name: Session host (unix socket, pty)
-        run: node desktop/host-test.js 2>&1 | tee "$LOGS/host-test.txt"
-
-      - name: Work carried between machines (real git, two clones)
-        run: node scripts/sync-carry-test.js 2>&1 | tee "$LOGS/sync-carry-test.txt"
-
-      - name: Typing into a chat the other machine runs (routes, and what Send does)
+      - name: Every test (scripts/test-gate.js --all; the session host's on a unix socket and a pty)
         run: |
-          set -o pipefail
-          node scripts/link-send-test.js 2>&1 | tee "$LOGS/link-send-test.txt"
-          node scripts/follow-plan-test.mjs 2>&1 | tee "$LOGS/follow-plan-test.txt"
+          # some tests commit in throwaway repos
+          git config --global user.name 'Fleet View CI'
+          git config --global user.email 'ci@fleet-view.invalid'
+          node scripts/test-gate.js --all --logs "$LOGS/tests"
 
       - name: Window, hidden (the bundle's Electron, page DOM over CDP)
         env:
@@ -262,7 +258,45 @@ jobs:
           path: /Users/runner/fv-logs
           if-no-files-found: ignore
 
+  # every test on Windows (scripts/test-gate.js --all): the session host's on a named pipe and ConPTY. No install.ps1
+  # (it makes shortcuts and starts Fleet View): just desktop/'s packages, for node-pty, without Electron's download.
+  windows:
+    if: github.repository == 'GLODUSK/fleet-view-share'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      # the files as they are in the repo (LF): phone-vectors.js --check and some tests compare them byte for byte
+      - name: Line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: desktop/ packages
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund --loglevel=error
+
+      - name: Every test (scripts/test-gate.js --all)
+        run: |
+          git config --global user.name 'Fleet View CI'
+          git config --global user.email 'ci@fleet-view.invalid'
+          node scripts/test-gate.js --all --logs "${{ runner.temp }}/fv-logs"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fleet-view-windows-logs
+          path: ${{ runner.temp }}/fv-logs
+          if-no-files-found: ignore
+
   release:
+    # (not the windows job: a few tests still fail on Windows on main (a symlink's slashes, 0600 modes, the temp
+    # folder), and a red there must not hold back the release friends update from)
     needs: smoke
     if: github.repository == 'GLODUSK/fleet-view-share' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest

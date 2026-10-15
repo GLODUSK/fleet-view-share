@@ -288,6 +288,13 @@ function fakeMover(args, made) {
       answer = { ok: false, error: true, reason: 'offline' };
       await r6.check();
       ok(!r6.status().running && made6.length === 2, 'a list that could not be read keeps a stopped sync stopped');
+      // away.json stays through the accounts gate: not matching, or not readable at a start (run is null)
+      SC.writeState(M.awayPath(dir6), { v: 1, at: 'x', ids: { c1: { device: 'mac', why: 'owned' } } });
+      await r6.check();
+      ok(!r6.status().running && fs.existsSync(M.awayPath(dir6)), 'accounts not readable with sync stopped: away.json stays');
+      answer = { ok: false, reason: 'sign in Claude B to match Blackbox\'s accounts' };
+      await r6.check();
+      ok(!r6.status().running && fs.existsSync(M.awayPath(dir6)), 'accounts not matching: away.json stays');
       answer = { ok: true };
       mode = 'sync';
       await r6.check();

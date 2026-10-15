@@ -82,7 +82,8 @@
 // pill's title. A loop in the middle of a long scan with no error is not stale.
 // <dataDir>/sync/away.json (what the session host refuses to open, sync-move.js) is deleted when sync is turned off
 // here (not set up, or Work locally chosen), and kept when it stops for any other reason: signed out (a lost sign-in
-// too), not a member, no key, or the server stopping. The other devices' chats stay theirs until sync runs again.
+// too), not a member, no key, Claude accounts that do not match or could not be checked (offline at a start), or the
+// server stopping. The other devices' chats stay theirs until sync runs again.
 'use strict';
 const path = require('path');
 const S = require(path.join(__dirname, 'sync-api.js'));
@@ -250,8 +251,9 @@ function createSyncRunner(o = {}) {
     const kid = keyId(key);
     if (accounts) {
       const r = await accounts.reconcile({ api: sync, key });
-      // a list that could not be read leaves a running sync alone, and keeps a stopped one stopped
-      if (!r || (!r.ok && !(r.error && run))) return halt((r && r.reason) || 'the Claude accounts could not be checked', true, false);
+      // a list that could not be read leaves a running sync alone, and keeps a stopped one stopped. Either way away.json
+      // stays (no gate): offline at a start, the host must still refuse the chats another machine has
+      if (!r || (!r.ok && !(r.error && run))) return halt((r && r.reason) || 'the Claude accounts could not be checked', false, false);
     }
     if (run && run.uid === uid && run.keyId === kid) return;
     if (run) await halt(run.uid !== uid ? 'another account signed in' : 'the sync key changed', false, true);

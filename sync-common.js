@@ -610,13 +610,18 @@ function readState(file, fallback = null) {
 }
 // Written whole or not at all: a temp file beside it (mode 0600), then a rename over it. On Windows a rename can
 // fail for a moment while something else has the file open (an antivirus scan, a reader); it is tried again a few
-// times before giving up. compact: no indentation (the big state files: up-state.json, down-state.json).
+// times before giving up. compact: no indentation (the big state files: up-state.json, down-state.json). sync: the
+// temp file is flushed to the disk before the rename (a power loss right after leaves the old file or the new one,
+// never an empty one).
 function writeState(file, obj, o = {}) {
   const data = `${o.compact ? JSON.stringify(obj) : JSON.stringify(obj, null, 2)}\n`;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try {
-    fs.writeFileSync(tmp, data, { mode: 0o600 });
+    if (o.sync) {
+      const fd = fs.openSync(tmp, 'w', 0o600);
+      try { fs.writeFileSync(fd, data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    } else fs.writeFileSync(tmp, data, { mode: 0o600 });
     for (let i = 0; ; i++) {
       try { fs.renameSync(tmp, file); break; } catch (e) {
         if (i >= 5 || !e || !['EPERM', 'EACCES', 'EBUSY'].includes(e.code)) throw e;
@@ -630,13 +635,17 @@ function writeState(file, obj, o = {}) {
 
 // ---------- this machine's devices row ----------
 const devicePath = (dataDir) => path.join(S.syncDir(dataDir), 'device.json');
-const deviceChecked = new Map(); // device.json path -> id already checked against Supabase by this process
-// This machine's device id. <dataDir>/sync/device.json { id } when its row is still there (asked once per process);
-// else a new fleet_sync.devices row { name: hostname, platform: process.platform } (the server fills in the user and
-// the id) whose id is saved. api: sync-api.js createSync()'s object (only api.rest is used). A failure to reach
-// Supabase throws (a SyncError) and changes nothing on disk; the caller tries again later. Calls for one device.json
-// at the same time share one answer: the uploader, the materializer and the mover all start at once, and each making
-// its own row would leave them with different ids for this machine.
+const deviceChecked = new Map(); // device.json path -> id already checked against Supabase by this process (kept)
+// This machine's device id. <dataDir>/sync/device.json { id } when its row is still there (asked once per process,
+// then kept in memory: a later failed read of the file changes nothing); else this machine's row by name and platform
+// when there is one (the newest seen), adopted; else a new fleet_sync.devices row { name: hostname, platform:
+// process.platform } (the server fills in the user and the id). The id found is saved, flushed to the disk. A new row
+// is made only when device.json is not there at all, or names a row that is gone: one that could not be read (busy,
+// too many files open) throws and is read again next time, and a damaged one is never replaced by a new row (that
+// would leave every conversation this machine owns to "another device"). api: sync-api.js createSync()'s object (only
+// api.rest is used). A failure to reach Supabase throws (a SyncError) and changes nothing on disk; the caller tries
+// again later. Calls for one device.json at the same time share one answer: the uploader, the materializer and the
+// mover all start at once, and each making its own row would leave them with different ids for this machine.
 const deviceFlight = new Map(); // device.json path -> the ensureDevice under way for it
 function ensureDevice(api, dataDir) {
   const file = devicePath(dataDir);
@@ -648,18 +657,33 @@ function ensureDevice(api, dataDir) {
 }
 async function ensureDeviceOnce(api, dataDir) {
   const file = devicePath(dataDir);
-  const saved = readState(file, null);
+  const known = deviceChecked.get(file);
+  if (known) return known;
+  let saved = null, absent = false;
+  try { saved = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')); } catch (e) {
+    if (e && e.code === 'ENOENT') absent = true;
+    else if (!(e instanceof SyntaxError)) throw new S.SyncError(`device.json could not be read (${(e && (e.code || e.message)) || e}): it is read again next time`, 0, 'device_unreadable');
+  }
   const id = saved && typeof saved.id === 'string' && UUID_RE.test(saved.id) ? saved.id.toLowerCase() : null;
-  if (id && deviceChecked.get(file) === id) return id;
   if (id) {
     const rows = await api.rest('GET', 'devices', { query: { select: 'id', id: `eq.${id}` } });
     if (Array.isArray(rows) && rows.some((r) => r && String(r.id).toLowerCase() === id)) { deviceChecked.set(file, id); return id; }
   }
-  const made = await api.rest('POST', 'devices', { body: { name: os.hostname().slice(0, 200), platform: process.platform }, prefer: 'return=representation' });
-  const row = Array.isArray(made) ? made[0] : made;
-  const nid = row && typeof row.id === 'string' && UUID_RE.test(row.id) ? row.id.toLowerCase() : null;
-  if (!nid) throw new S.SyncError('Supabase made no device row', 0, 'bad_reply');
-  writeState(file, { id: nid });
+  // this machine's row by name and platform (the newest seen), when device.json is gone or names a row that is gone
+  const name = os.hostname().slice(0, 200), platform = process.platform;
+  const same = await api.rest('GET', 'devices', { query: { select: 'id,name,platform,last_seen_at', name: `eq."${name}"`, platform: `eq.${platform}` } });
+  const seen = (r) => Date.parse(r.last_seen_at || '') || 0;
+  const mine = (Array.isArray(same) ? same : []).filter((r) => r && r.name === name && r.platform === platform && typeof r.id === 'string' && UUID_RE.test(r.id));
+  mine.sort((a, b) => seen(b) - seen(a));
+  let nid = mine[0] ? mine[0].id.toLowerCase() : null;
+  if (!nid) {
+    if (!absent && !id) throw new S.SyncError('device.json is damaged and no device row has this machine\'s name: delete it to register this machine again', 0, 'device_unreadable');
+    const made = await api.rest('POST', 'devices', { body: { name, platform }, prefer: 'return=representation' });
+    const row = Array.isArray(made) ? made[0] : made;
+    nid = row && typeof row.id === 'string' && UUID_RE.test(row.id) ? row.id.toLowerCase() : null;
+    if (!nid) throw new S.SyncError('Supabase made no device row', 0, 'bad_reply');
+  }
+  writeState(file, { id: nid }, { sync: true });
   deviceChecked.set(file, nid);
   return nid;
 }

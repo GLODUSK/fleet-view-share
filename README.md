@@ -642,7 +642,7 @@ A script on this machine can drive the live sessions the desktop app hosts: star
 
 **`chrome` and the session host.** The flag lives in `desktop/host.js`, and a changed `host.js` takes effect only when the session host restarts: `node desktop\restart-host.js`, or tray **Quit everything** (either saves and ends the sessions, and the next host resumes them). Until then `chromeApplied` says `false` and sessions start with the account's own setting.
 
-**The `fv` command line.** `fv` (`fv.cmd`, and `fv` for Git Bash, at the repo root; `scripts/fv.js` does the work, Node with no dependencies) is the API from a terminal, the easy way for a Claude session to drive other sessions. It reads the token itself; `--port` or `FLEET_VIEW_PORT` picks another server (default 4777). It prints short readable lines; `--json` prints the raw reply. Exit code `0` is ok, `1` refused or failed, `2` bad usage. A text argument of `-` is read from stdin. An id can be its first 8 or more characters, as long as only one conversation starts with them.
+**The `fv` command line.** `fv` (`fv.ps1` for PowerShell, `fv.cmd` for cmd, and `fv` for Git Bash, at the repo root; `scripts/fv.js` does the work, Node with no dependencies; `fv.ps1` hands the arguments over as base64 JSON in `FV_ARGS_B64`, so a message with newlines, `%VAR%`, quotes or `& | < >` arrives whole, which cmd.exe would cut or change) is the API from a terminal, the easy way for a Claude session to drive other sessions. It reads the token itself; `--port` or `FLEET_VIEW_PORT` picks another server (default 4777). It prints short readable lines; `--json` prints the raw reply. Exit code `0` is ok, `1` refused or failed, `2` bad usage. A text argument of `-` is read from stdin. An id can be its first 8 or more characters, as long as only one conversation starts with them.
 
 | command | |
 |---|---|
@@ -651,7 +651,7 @@ A script on this machine can drive the live sessions the desktop app hosts: star
 | `fv ls [--all] [--state S] [--repo R]` | every conversation: id, name, state, repo, the hosted ones marked |
 | `fv hosted` | the hosted sessions |
 | `fv start <repo> <prompt> [--account A\|B\|C…] [--name N] [--model M] [--effort E] [--fork <id>] [--temp] [--chrome\|--no-chrome] [--wait [s]]` | starts a session (account B unless told) |
-| `fv send <id> <text> [--wait [s]] [--from <id>] [--no-open]` | a follow-up; with `--from`, a message from that conversation (queued behind a menu; one not running here is resumed first, unless `--no-open`). Its leading `/effort <level>` and `/model <name>` lines switch the receiver as `fv effort` does (under the `[Message from …]` line Claude would read them as text) and the rest is sent |
+| `fv send <id> <text>\|--file F\|--stdin [--wait [s]] [--from <id>] [--no-open]` | a follow-up (`--file`: the text from a UTF-8 or UTF-16 file, `--stdin`: from stdin; both keep a multi-line text whole in any shell); with `--from`, a message from that conversation (queued behind a menu; one not running here is resumed first, unless `--no-open`). Its leading `/effort <level>` and `/model <name>` lines switch the receiver as `fv effort` does (under the `[Message from …]` line Claude would read them as text) and the rest is sent |
 | `fv wait <id> [--timeout s]` | waits until it is ready for you |
 | `fv read <id> [--tail n]` | its status and latest reply |
 | `fv menu <id>` | the menu on its screen: title, numbered options with descriptions, kind, sig |

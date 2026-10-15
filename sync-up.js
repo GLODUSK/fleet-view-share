@@ -685,11 +685,23 @@ function createUploader(opts = {}) {
       if (h) { if (!(await C.gitUnreadAt(where, h.mainRoot))) repo = h; }
       else if (!C.inTemp(where, { home: userHome, temp: tempOpt }) && !toolFolder(where) && !(await C.gitUnreadAt(where))) repo = boundFor(where, device);
     }
-    if (!repo || (repo.bound && (!repo.relCwd || repo.relCwd.length > 1024))) { pendingOf.delete(id); return skip(c, mem, 'noRepo', SKIP_RECHECK_MS, tally); }
-    const rid = await repoId(repo.origin);
+    if (repo && repo.bound && (!repo.relCwd || repo.relCwd.length > 1024)) repo = null;
+    // none, and its last cwd is another machine's path (a log laid down here by a move and not prompted here yet: its
+    // lines still name that machine's folders), or a flush asks: a row this device owns goes up under its own repo_id
+    // and rel_cwd, so a chat moved here can always be handed back
+    let row = null;
+    if (!repo && (!ownPath(where) || how.urgent)) {
+      row = await getRow(id, `${ROW_COLS},repo_id,rel_cwd`);
+      mem.ownerAt = now();
+      if (row && ownerOf(row) && ownerOf(row) !== device) { pendingOf.delete(id); return skip(c, mem, 'foreign', FOREIGN_RECHECK_MS, tally); }
+      if (row && ownerOf(row) === device && row.repo_id && typeof row.rel_cwd === 'string') repo = { rid: String(row.repo_id).toLowerCase(), mainRoot: null, relCwd: row.rel_cwd, fromRow: true };
+      else row = null;
+    }
+    if (!repo) { pendingOf.delete(id); return skip(c, mem, 'noRepo', SKIP_RECHECK_MS, tally); }
+    const rid = repo.fromRow ? repo.rid : await repoId(repo.origin);
 
     // its row
-    let row = await getRow(id);
+    if (!row) row = await getRow(id);
     mem.ownerAt = now();
     const lose = () => { pendingOf.delete(id); return skip(c, mem, 'foreign', FOREIGN_RECHECK_MS, tally); };
     // forgotten or held while the row was fetched: nothing written yet, nothing will be
@@ -733,7 +745,7 @@ function createUploader(opts = {}) {
 
     // this device's checkout of the repo, only once the conversation is this device's: a copy laid down here from
     // another device names that device's folders, which must not become this device's repo_paths row
-    if (!repo.bound) await repoPath(device, rid, repo.mainRoot);
+    if (!repo.bound && !repo.fromRow) await repoPath(device, rid, repo.mainRoot);
     const w = { id, st, rowExisted, listing: null, maxGen: {}, changed: false, device, mem, epoch, urgent: !!how.urgent };
     // a row on the server but no state here (a lost up-state.json, or one that disagreed): one look at the server's
     // chunk rows, so what is already there is taken over and not sent again

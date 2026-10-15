@@ -10,6 +10,8 @@
 // history, for fv version) or written. Output is short and
 // human readable; --json prints the server's raw reply instead. Exit code 0 ok, 1 refused or failed, 2 bad usage.
 // A text argument given as "-" is read from stdin. Ids may be shortened to their first 8+ hex characters.
+// fv.ps1 (PowerShell) hands the arguments over as base64 of UTF-8 JSON in FV_ARGS_B64, not on the command line,
+// which cmd.exe would cut at a newline; FV_DRY_RUN=1 prints the calls fv would make and makes none (for tests).
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -24,8 +26,10 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   fv hosted                                 sessions the desktop app hosts
   fv start <repo> <prompt> [--account A|B|C…] [--name N] [--model M] [--effort E]
            [--fork <id>] [--temp] [--chrome|--no-chrome] [--wait [s]]
-  fv send <id> <text> [--wait [s]] [--from <your id>] [--no-open]
-                                            with --from: waits behind a menu, resumes one not running
+  fv send <id> <text>|--file F|--stdin [--wait [s]] [--from <your id>] [--no-open]
+                                            with --from: waits behind a menu, resumes one not running.
+                                            --file/--stdin: the text from a file (UTF-8 or UTF-16) or
+                                            stdin, whole whatever the shell: use them for multi-line text
   fv wait <id> [--timeout s]                until it is ready for you (reply, question, menu, exit)
   fv read <id> [--tail n]                   status and latest reply (and the screen's last n chars)
   fv menu <id>                              the select menu it shows, if any
@@ -69,6 +73,8 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   --json         the raw JSON reply          --port <n>   Fleet View's port (default 4777)
   --wait         without a number: the API's default (30 minutes); with one: 1..3600 seconds
   A text argument "-" is read from stdin. Ids may be their first 8+ characters.
+  On Windows, cmd.exe (fv.cmd) cuts a text at its first newline and expands %VARS%: from PowerShell
+  fv.ps1 passes it whole; from cmd, send multi-line text with --file or --stdin.
   Exit code 0 ok, 1 refused or failed, 2 bad usage.`;
 
 class Usage extends Error {}
@@ -76,8 +82,19 @@ class Refused extends Error {}
 
 // ---------- arguments ----------
 const VALUE_FLAGS = new Set(['account', 'name', 'model', 'effort', 'fork', 'from', 'timeout', 'tail', 'text', 'sig',
-  'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order', 'within', 'shape', 'color']);
-const BOOL_FLAGS = new Set(['temp', 'chrome', 'no-chrome', 'all', 'remove', 'allow-permission', 'json', 'help', 'version', 'no-open']);
+  'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order', 'within', 'shape', 'color', 'file']);
+const BOOL_FLAGS = new Set(['temp', 'chrome', 'no-chrome', 'all', 'remove', 'allow-permission', 'json', 'help', 'version', 'no-open', 'stdin']);
+// The arguments fv.ps1 handed over in FV_ARGS_B64 (base64 of a UTF-8 JSON array of strings), taken out of env so
+// nothing fv starts sees them; null when there are none (fv.cmd, the sh fv, node scripts/fv.js: process.argv)
+function shimArgs(env) {
+  const b = env.FV_ARGS_B64;
+  if (b === undefined) return null;
+  delete env.FV_ARGS_B64;
+  let a = null;
+  try { a = JSON.parse(Buffer.from(b, 'base64').toString('utf8')); } catch {}
+  if (!Array.isArray(a)) throw new Usage('FV_ARGS_B64 is not base64 of a JSON list of arguments');
+  return a.map((x) => (x == null ? '' : String(x)));
+}
 // -> { pos: [...], flags: { name: value | true } }; --wait takes the next argument only when it is a number, --lead
 // only when it is not an option (fv team new … --lead <id>; fv team add … --lead stands alone)
 function parseArgs(argv) {
@@ -158,6 +175,21 @@ function makeClient(port, token) {
   };
 }
 
+// FV_DRY_RUN: each call printed as one line of JSON (non-ASCII as \u escapes, so any console reads it back) and
+// answered ok, so a test can see what would be sent without sending anything
+function dryClient() {
+  return async function call(method, p, body) {
+    process.stdout.write(`fv dry run: ${asciiJson({ method, path: '/api' + p, body: body || null })}\n`);
+    return { code: 200, j: { ok: true, message: 'dry run: nothing sent' } };
+  };
+}
+const asciiJson = (v) => JSON.stringify(v).replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+function client(env, port) {
+  if (env.call) return env.call;
+  if (env.FV_DRY_RUN) return dryClient();
+  return makeClient(port, env.token !== undefined ? env.token : readToken());
+}
+
 function readToken() {
   // (macOS: ~/Library/Application Support/fleet-view/api-token)
   const file = path.join(require(path.join(__dirname, '..', 'platform.js')).dataDir(), 'api-token');
@@ -175,10 +207,23 @@ function readStdin() {
 }
 async function textArg(v, what) {
   if (v === undefined) throw new Usage(`give the ${what}`);
-  let t = v === '-' ? await readStdin() : v;
+  return cleanText(v === '-' ? await readStdin() : v, what);
+}
+function cleanText(t, what) {
   t = t.replace(/\r\n/g, '\n').replace(/\s+$/, '');
   if (!t.trim()) throw new Usage(`the ${what} is empty`);
   return t;
+}
+// fv send's text: the argument, or --file <path> (UTF-8, or UTF-16 with its BOM as PowerShell 5.1's > writes it), or
+// --stdin (the same as "-"); the last two keep a multi-line text whole whatever the shell does to arguments
+async function messageArg(v, flags, what) {
+  if ([v !== undefined, flags.file !== undefined, !!flags.stdin].filter(Boolean).length > 1) throw new Usage(`give the ${what} once: as an argument, with --file or with --stdin`);
+  if (flags.stdin) return textArg('-', what);
+  if (flags.file === undefined) return textArg(v, what);
+  let b;
+  try { b = fs.readFileSync(path.resolve(String(flags.file))); } catch (e) { throw new Usage(`can't read --file ${flags.file}: ${e.code || e.message}`); }
+  const t = b[0] === 0xff && b[1] === 0xfe ? b.subarray(2).toString('utf16le') : b.toString('utf8').replace(/^﻿/, '');
+  return cleanText(t, what);
 }
 
 // ---------- ids ----------
@@ -351,7 +396,7 @@ async function versionReply(env, port) {
   try { here = require(path.join(root, 'version.js')).versionAt(root); } catch {}
   let running = '';
   try {
-    const call = env.call || makeClient(port, env.token !== undefined ? env.token : readToken());
+    const call = client(env, port);
     const r = await call('GET', '', null, 1500);
     if (r.code === 200 && r.j && typeof r.j.fleetView === 'string') running = r.j.fleetView;
   } catch {}
@@ -372,7 +417,7 @@ async function run(argv, env) {
     if (pos.length) throw new Usage(`unexpected argument "${pos[0]}"`);
     return versionReply(env, Number(port));
   }
-  const call = env.call || makeClient(Number(port), env.token !== undefined ? env.token : readToken());
+  const call = client(env, Number(port));
   const need = async (method, p, body, ms) => {
     const r = await call(method, p, body, ms);
     // 202: queued behind a menu
@@ -443,7 +488,7 @@ async function run(argv, env) {
     }
     case 'send': {
       const sid = await id();
-      const text = await textArg(pos[1], 'text');
+      const text = await messageArg(pos[1], flags, 'text');
       noMore(2);
       const body = { text };
       // from another conversation: it waits behind a menu and resumes one not running (the server's default)
@@ -711,5 +756,11 @@ async function main(argv, env = process.env, out = console.log, err = console.er
   }
 }
 
-if (require.main === module) main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
-module.exports = { main, parseArgs, resolveId, resolveTeam, menuLines, waitLines, transcriptLines };
+if (require.main === module) {
+  let argv;
+  const via = process.env.FV_ARGS_B64 !== undefined ? 'FV_ARGS_B64' : 'argv';
+  try { argv = shimArgs(process.env) || process.argv.slice(2); } catch (e) { console.error(`fv: ${e.message}`); process.exit(2); }
+  if (process.env.FV_DRY_RUN) process.stdout.write(`fv dry run: ${asciiJson({ argv, via })}\n`);
+  main(argv).then((code) => { process.exitCode = code; });
+}
+module.exports = { main, parseArgs, shimArgs, resolveId, resolveTeam, menuLines, waitLines, transcriptLines };

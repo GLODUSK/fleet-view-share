@@ -515,7 +515,6 @@ let usageUi = null; // usage.js: the plan-usage card and the "used somewhere els
 // /state comes with an ETag; the next poll sends it back and gets 304 with no body while nothing changed (nothing to
 // read or draw then). A browser on another device that is no longer approved gets 401: back to the pairing page.
 let stateTag = null;
-const UNCHANGED = {};
 // new page code: the reload waits for a pause in typing (TYPING_PAUSE_MS with no key or input in a text field), so
 // no keystroke lands in the blink; the box saves its text on the way out and takes the cursor back after
 const TYPING_PAUSE_MS = 1500;
@@ -533,38 +532,109 @@ function reloadForUpdate() {
   };
   go();
 }
+// ---------- the /state loop ----------
+// One loop reads /state, with at most one request in flight. pollSoon(ms) asks for a read within ms (the earlier
+// time wins); asked while one is in flight, another runs right after it. The loop always books its next turn, also
+// when the fetch or the drawing throws, and backs off while the server is away (1 s, 2 s, 4 s, then every 5 s).
+// window.fvHealth says how it goes, for a look from the console or a test.
+const fvHealth = window.fvHealth = { polls: 0, lastPollAt: 0, lastPollOk: 0, fails: 0, lastFail: null, errors: 0, lastError: null, steps: {} };
+const loggedErr = new Map(); // step -> the last message logged for it, so an error that repeats every second logs once
+function noteError(where, e) {
+  const message = String((e && (e.stack || e.message)) || e);
+  fvHealth.errors++;
+  fvHealth.steps[where] = (fvHealth.steps[where] || 0) + 1;
+  fvHealth.lastError = { where, message, at: Date.now() };
+  if (loggedErr.get(where) !== message) { loggedErr.set(where, message); console.error(`[fv] ${where}:`, e); }
+}
+// one step of reading or drawing the state: a throw is logged and counted, and the steps after it still run
+function step(where, fn) {
+  try { return fn(); } catch (e) { noteError(where, e); }
+}
+let pollTimer = null, pollAt = 0, polling = false, pollAgain = false, pollStopped = false;
+function pollSoon(ms = 0) {
+  if (pollStopped) return;
+  if (polling) { pollAgain = true; return; }
+  const at = Date.now() + ms;
+  if (pollTimer && pollAt <= at) return;
+  clearTimeout(pollTimer);
+  pollAt = at;
+  pollTimer = setTimeout(runPoll, ms);
+}
+async function runPoll() {
+  pollTimer = null;
+  polling = true;
+  pollAgain = false;
+  let wait = 1000;
+  try {
+    const ok = await poll();
+    fvHealth.polls++;
+    fvHealth.lastPollAt = Date.now();
+    if (ok === 'stop') pollStopped = true;
+    else if (ok) { fvHealth.fails = 0; fvHealth.lastPollOk = Date.now(); }
+    else wait = Math.min(5000, 1000 * 2 ** fvHealth.fails++);
+  } catch (e) {
+    noteError('poll', e);
+  } finally {
+    polling = false;
+    pollSoon(pollAgain ? 100 : wait);
+  }
+}
+// one read of /state: true when it was read (and drawn), false when the server could not be reached, 'stop' when the
+// page is leaving (new page code, or this browser is no longer approved)
 async function poll() {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 4000);
-  let same = false;
+  let r, st = null;
   try {
-    const r = await fetch(FIXTURE ? './fixtures/state-sample.json' : '/state', { cache: 'no-store', signal: ctl.signal, headers: stateTag && state && !FIXTURE ? { 'If-None-Match': stateTag } : {} });
-    if (r.status === 304 && state) throw UNCHANGED;
-    if (r.status === 401 && !FIXTURE) { location.replace('/pair'); return; }
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    let st = await r.json();
-    stateTag = r.headers.get('ETag');
-    if (FIXTURE) st = rebase(st);
-    applyBotEdits(st);
-    // new page code on the server (a merge changed web/ or fleet-view.js): load it, settings saved first
-    if (st.build) {
-      if (!pageBuild) pageBuild = st.build;
-      else if (st.build !== pageBuild) { reloadForUpdate(); return; }
+    r = await fetch(FIXTURE ? './fixtures/state-sample.json' : '/state', { cache: 'no-store', signal: ctl.signal, headers: stateTag && state && !FIXTURE ? { 'If-None-Match': stateTag } : {} });
+    if (r.status === 401 && !FIXTURE) { location.replace('/pair'); return 'stop'; }
+    if (!(r.status === 304 && state)) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      st = await r.json();
     }
-    applyRenames(st);
-    state = st;
-    setAccounts(st.accounts);
-    setLaunchDefaults(st.launch);
-    setServerQueued(st.queuedText);
+  } catch (e) {
+    fvHealth.lastFail = { message: String((e && e.message) || e), at: Date.now() };
+    online = false;
+    render();
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+  // unchanged: drawn already, unless the page was showing "reconnecting…"
+  if (!st) {
+    const was = online;
     online = true;
+    if (!was) render();
+    return true;
+  }
+  if (FIXTURE) st = rebase(st);
+  // new page code on the server (a merge changed web/ or fleet-view.js): load it, settings saved first. Checked before
+  // anything reads the state, so a state the old code chokes on can't keep the new code from loading
+  if (st.build) {
+    if (!pageBuild) pageBuild = st.build;
+    else if (st.build !== pageBuild) { reloadForUpdate(); return 'stop'; }
+  }
+  online = true;
+  const errors = fvHealth.errors;
+  step('bot edits', () => applyBotEdits(st));
+  step('renames', () => applyRenames(st));
+  state = st;
+  step('accounts', () => setAccounts(st.accounts));
+  step('launch defaults', () => setLaunchDefaults(st.launch));
+  step('queued text', () => setServerQueued(st.queuedText));
+  step('settings', () => {
     if (st.settings) syncHiddenRepos(st.settings.hiddenRepos);
     if (st.settings) syncRepoPrefs(st.settings);
     if (st.settings) setRules(st.settings.hostRules);
-    applyRepoNames(st);
+  });
+  step('repo names', () => applyRepoNames(st));
+  step('hidden', () => {
     if (st.settings && Array.isArray(st.settings.offAccounts) && !('offAccounts' in pendingSave) && Date.now() - offSentAt > 3000) offAccts = st.settings.offAccounts.filter(isAcct);
     if (st.settings) adoptSyncedHidden(st.settings);
     if (settingsLoaded && st.settings) mergeServerHidden(st.settings.hidden);
     if (st.settings) syncForgotten(st.settings.forgotten);
+  });
+  step('first settings', () => {
     if (!settingsLoaded && st.settings) {
       settingsLoaded = true;
       const s = st.settings;
@@ -585,18 +655,15 @@ async function poll() {
       if (ps) { if (ps.state === 'DONE') ui.detailId = ps.id; else { ui.selectedId = ps.id; ui.detailId = ps.id; } }
       else if (!pick) restorePickAfterReload();
     }
-    if (pendingSelect) { const id = pendingSelect; pendingSelect = null; queueMicrotask(() => fvSelect(id)); }
-    try { notifyAlerts(st); } catch (e) { console.warn(e); }
-    try { noteBots(st); } catch (e) { console.warn(e); }
-    try { usageUi?.update(st); } catch (e) { console.warn(e); }
-  } catch (e) {
-    // unchanged: drawn already, unless the page was showing "reconnecting…"
-    if (e === UNCHANGED) { same = online; online = true; } else online = false;
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!same) render();
-  setTimeout(poll, 1000);
+  });
+  if (pendingSelect) { const id = pendingSelect; pendingSelect = null; queueMicrotask(() => fvSelect(id)); }
+  step('notify', () => notifyAlerts(st));
+  step('bot notes', () => noteBots(st));
+  step('usage', () => usageUi?.update(st));
+  // its ETag only once all of it went in: after a step threw, the next read gets the whole state again, not a 304
+  stateTag = fvHealth.errors === errors ? r.headers.get('ETag') : null;
+  render();
+  return true;
 }
 
 // ---------- filtering ----------
@@ -1476,50 +1543,53 @@ setChatLookup((id) => (view?.allSessions || []).find((x) => x.id === id)
   || (state?.sessions || []).find((x) => x.id === id) || (state?.finished || []).find((x) => x && x.id === id) || null);
 const viewEls = { cards: $('view-cards'), map: $('view-map'), wall: $('view-wall'), projects: $('view-projects'), chats: $('view-chats') };
 
+// every part is its own step(): one that throws (a card, the map, a panel) is logged and the others still draw
 function render() {
-  for (const v of VIEWS) if (viewEls[v]) viewEls[v].hidden = v !== local.view;
-  for (const b of document.querySelectorAll('.tabs button')) {
-    b.classList.toggle('on', b.dataset.view === local.view);
-    b.setAttribute('aria-selected', String(b.dataset.view === local.view));
-  }
-  placeTabInd();
-  $('view-map').classList.toggle('active', local.view === 'map');
-  $('reconnecting').hidden = online || FIXTURE;
-  $('reconnecting').textContent = state ? 'reconnecting…' : 'connecting…';
-  drawClock();
-  drawFooter();
+  step('tabs', () => {
+    for (const v of VIEWS) if (viewEls[v]) viewEls[v].hidden = v !== local.view;
+    for (const b of document.querySelectorAll('.tabs button')) {
+      b.classList.toggle('on', b.dataset.view === local.view);
+      b.setAttribute('aria-selected', String(b.dataset.view === local.view));
+    }
+    placeTabInd();
+    $('view-map').classList.toggle('active', local.view === 'map');
+  });
+  step('reconnecting', () => {
+    $('reconnecting').hidden = online || FIXTURE;
+    $('reconnecting').textContent = state ? 'reconnecting…' : 'connecting…';
+  });
+  step('clock', drawClock);
+  step('footer', drawFooter);
   if (!state) return;
-  view = derive(state);
-  if (view.tookOver.length) followPickups(view.tookOver);
+  const next = step('derive', () => derive(state));
+  if (!next) return;
+  view = next;
+  step('pickups', () => { if (view.tookOver.length) followPickups(view.tookOver); });
   if (ui.selectedId && !view.allSessions.some((s) => s.id === ui.selectedId)) ui.selectedId = null;
   // a new session that ended before it ever spoke has nothing left to show
   if (ui.detailId && isNewKey(ui.detailId) && !view.allSessions.some((s) => s.id === ui.detailId)) ui.detailId = null;
-  drawHeader(view);
-  placeMiniButton();
-  fitHeader();
-  drawAlert(view);
-  drawFinished(view);
-  drawDetail(view);
-  try { dropOpenNotes(); } catch (e) { console.warn(e); }
-  if (!SOLO) drawRemote();
+  step('header', () => { drawHeader(view); placeMiniButton(); fitHeader(); });
+  step('alert', () => drawAlert(view));
+  step('finished', () => drawFinished(view));
+  step('detail', () => drawDetail(view));
+  step('open notes', dropOpenNotes);
+  if (!SOLO) step('remote', drawRemote);
   const el = viewEls[local.view];
   if (!el) return;
-  try {
+  step(local.view, () => {
     if (local.view === 'cards') renderCards(el, view, ui);
     else if (local.view === 'wall') renderWall(el, view, ui);
     else if (local.view === 'projects') renderProjects(el, view, ui);
     else if (local.view === 'chats') renderChats(el, view, ui);
     else if (renderMap) { el.classList.remove('map-missing'); renderMap(el, replay ? replayView(replay) : view, ui); }
     else if (mapMissing) { el.classList.add('map-missing'); el.textContent = 'The map view (map.js) is not available yet.'; }
-  } catch (e) {
-    console.error(e);
-  }
+  });
   // the map's sky is the page's backdrop behind every view (map.js renderSky); the Map draws it itself. Not in the
   // Bots pop-out window
-  try { if (!SOLO && local.view !== 'map' && mapMod && typeof mapMod.renderSky === 'function') mapMod.renderSky(view, ui); } catch (e) { console.error(e); }
-  markMulti(el);
-  drawReplayPill();
-  drawNotifyBtn();
+  step('sky', () => { if (!SOLO && local.view !== 'map' && mapMod && typeof mapMod.renderSky === 'function') mapMod.renderSky(view, ui); });
+  step('multi', () => markMulti(el));
+  step('replay pill', drawReplayPill);
+  step('notify button', drawNotifyBtn);
 }
 
 function drawClock() {
@@ -2274,7 +2344,7 @@ onRekey((oldKey, id) => {
     if (id === pn.from) pasteNames.set(id, pn);
     else {
       renamesNow.set(id, { name: pn.name, until: Date.now() + RENAME_SHOW_MS });
-      post('/rename', { id, name: pn.name }).then((r) => { if (!(r && r.ok) && !FIXTURE) renamesNow.delete(id); poll(); });
+      post('/rename', { id, name: pn.name }).then((r) => { if (!(r && r.ok) && !FIXTURE) renamesNow.delete(id); pollSoon(); });
     }
   }
   const m = pasteMoves.get(oldKey);
@@ -2283,7 +2353,7 @@ onRekey((oldKey, id) => {
   post('/sessions/move', { id, root: m.root }).then((r) => {
     if (!r || !r.ok) { if (!FIXTURE) toast(r?.message || 'could not move the copy', C.red); return; }
     mapMod?.mapPlaceSession?.(id, m.root, m.x, m.y);
-    poll();
+    pollSoon();
   });
 });
 function pickKeys(e) {
@@ -2599,7 +2669,7 @@ function setPushTarget(who, target, done) {
     if (FIXTURE) return;
     if (!r || !r.ok) { toast(r?.message || 'could not set where it pushes', C.red); return; }
     toast(done, C.mint);
-    poll();
+    pollSoon();
   });
 }
 // "Move to workspace": a submenu of the other listed repos; a moved one also offers going back to the repo its own
@@ -2642,9 +2712,9 @@ function moveConversation(s, root) {
   return post('/sessions/move', { id: s.id, root }).then((r) => {
     if (FIXTURE) return false;
     if (!r || !r.ok) { toast(r?.message || 'could not move it', C.red); return false; }
-    const undo = () => post('/sessions/move', { id: s.id, root: before }).then(() => poll());
+    const undo = () => post('/sessions/move', { id: s.id, root: before }).then(() => pollSoon());
     toast(root ? `Moved ${s.name} to ${r.name}` : `${s.name} is back in the workspace it started in`, C.mint, { label: 'Undo', run: undo });
-    poll();
+    pollSoon();
     return true;
   });
 }
@@ -3146,7 +3216,7 @@ async function runDynamic(list, kind, on) {
     .then((r) => r.ok, () => false)));
   const ok = res.filter(Boolean).length, who = list.length === 1 ? list[0].name : `${list.length} conversations`;
   toast(ok === list.length ? `Dynamic ${kind} ${on ? 'on' : 'off'} · ${who}` : `Dynamic ${kind}: ${ok} of ${list.length} changed`, ok === list.length ? C.mint : C.red);
-  poll();
+  pollSoon();
 }
 // kind: a fixed model or effort, which turns Dynamic off for that part first where it was on
 async function runSet(list, cmd, kind = null) {
@@ -3242,12 +3312,12 @@ async function moveMany(list, root) {
   if (FIXTURE) return;
   const done = list.filter((s, i) => rs[i] && rs[i].ok), bad = rs.filter((r) => !r || !r.ok);
   if (!done.length) { toast(bad[0]?.message || 'could not move them', C.red); return; }
-  const undo = () => Promise.all(done.map((s) => post('/sessions/move', { id: s.id, root: before.get(s.id) }))).then(() => poll());
+  const undo = () => Promise.all(done.map((s) => post('/sessions/move', { id: s.id, root: before.get(s.id) }))).then(() => pollSoon());
   const to = rs.find((r) => r && r.ok)?.name;
   const one = done.length === 1;
   toast((root ? `Moved ${whoOf(done)} to ${to}` : `${whoOf(done)} ${one ? 'is' : 'are'} back in the workspace ${one ? 'it' : 'each'} started in`)
     + (bad.length ? ` · ${bad.length} could not move: ${bad[0]?.message || 'failed'}` : ''), bad.length ? C.red : C.mint, { label: 'Undo', run: undo });
-  poll();
+  pollSoon();
 }
 // "Send elsewhere ▸": the accounts that are on, less those out of their limit, as the single one's; each row sends
 // the ones not on that account already ("2 of 3"), less one open in another window (it has to be ended there)
@@ -3294,11 +3364,11 @@ async function pushMany(list, target) {
   if (FIXTURE) return;
   const done = list.filter((s, i) => rs[i] && rs[i].ok), bad = rs.filter((r) => !r || !r.ok);
   if (!done.length) { toast(bad[0]?.message || 'could not set where they push', C.red); return; }
-  const undo = () => Promise.all(done.map((s) => post('/push-target', { id: s.id, target: before.get(s.id) }))).then(() => poll());
+  const undo = () => Promise.all(done.map((s) => post('/push-target', { id: s.id, target: before.get(s.id) }))).then(() => pollSoon());
   const one = done.length === 1;
   toast((target ? `${whoOf(done)} push${one ? 'es' : ''} to ${PUSH_NAME[target]}` : `${whoOf(done)} follow${one ? 's its' : ' their'} workspace again`)
     + (bad.length ? ` · ${bad.length} could not be set` : ''), bad.length ? C.red : C.mint, { label: 'Undo', run: undo });
-  poll();
+  pollSoon();
 }
 // "Cancel N waiting orders": every order waiting for one of them (new sessions' first messages too)
 function cancelManyItem(list) {
@@ -3755,7 +3825,7 @@ $('since-btn')?.addEventListener('click', (e) => { e.stopPropagation(); since.to
 if (!SOLO) usageUi = mountUsage({
   post, notifyOn: () => local.notify !== false, focusWindow: () => window.fleetDesktop?.focus?.(),
   // the Accounts list: read /state again soon after a change, and end this window's sessions on an account it removes
-  refreshSoon: () => { setTimeout(poll, 400); setTimeout(poll, 2500); }, isHosted,
+  refreshSoon: () => { pollSoon(400); setTimeout(() => pollSoon(), 2500); }, isHosted,
   endSessions: (ids) => { for (const id of ids) if (isHosted(id)) endSession(id); },
 });
 if (state) usageUi?.update(state);
@@ -3863,7 +3933,7 @@ function editBot(b, change, url, body, done) {
     botEdits.delete(b.id);
     if (r && r.ok) { if (done) toast(done, C.dim); }
     else toast((r && (r.message || r.error)) || 'Fleet View did not answer: it was not saved', C.red);
-    poll();
+    pollSoon();
   });
 }
 // at: world units, or null to take it off the map (its watches go with it)
@@ -3903,7 +3973,7 @@ function startBotFromMenu(b) {
   post(`/bots/${encodeURIComponent(b.id)}/start`, {}).then((r) => {
     if (FIXTURE) return;
     if (!r || r.ok === false) toast((r && (r.message || r.error)) || `could not start ${botName(b)}`, C.red);
-    poll();
+    pollSoon();
   });
 }
 // a conversation a bot can watch: started, no new one or demo, no overseer, not removed (nor its workspace)
@@ -4096,7 +4166,7 @@ function setAccountOn(a, on) {
   saveSettings({ offAccounts: next });
   flushSettings();
   toast(on ? `Account ${a} is on: its conversations show again` : `Account ${a} is off: its conversations are hidden and get no new sessions`, C.dim);
-  setTimeout(poll, 500);
+  pollSoon(500);
 }
 function accountsMenuItem() {
   const all = allAccounts();
@@ -4168,7 +4238,7 @@ async function remoteAct(url, body, done) {
   if (!r) toast('could not reach Fleet View', C.red);
   else if (!r.ok) toast(r.message || 'that did not work', C.red);
   else if (done) toast(done, C.mint);
-  setTimeout(poll, 150);
+  pollSoon(150);
 }
 function drawRemote() {
   const r = state?.remote;
@@ -4213,6 +4283,8 @@ if (DEBUG) {
 // the clock keeps going while the server is away
 setInterval(() => { drawClock(); }, 1000);
 render();
-poll();
+pollSoon();
 // conversations that run live in this window (desktop only): the panel, cards and map follow them
 watchHosts(() => render());
+// tell boot.js the page's code loaded and ran (else it loads the page again)
+window.fvBootOk?.();

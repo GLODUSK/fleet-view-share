@@ -58,7 +58,8 @@ const HOME_ID = crypto.randomUUID();
 
 // ---------- the fake Supabase (sync-down-test.js's, the parts the materializer uses) ----------
 const fake = {
-  tables: { devices: [{ id: OTHER, name: 'BlackBox', platform: 'win32' }], repos: [{ id: HOME_ID, origin: C.HOME_ORIGIN }], repo_paths: [], conversations: [], chunks: [] },
+  // never this machine's name: ensureDevice adopts a row with this machine's name and platform
+  tables: { devices: [{ id: OTHER, name: `not-${os.hostname()}`, platform: 'win32' }], repos: [{ id: HOME_ID, origin: C.HOME_ORIGIN }], repo_paths: [], conversations: [], chunks: [] },
   objects: new Map(), down: false,
 };
 const json = (res, code, o) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };

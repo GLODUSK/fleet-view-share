@@ -685,6 +685,37 @@ async function main() {
   eq(U.boundFor(P.isWin ? '/Users/henry/x' : 'C:\\x', dev), null, 'boundFor: another platform\'s path: none');
   await upB.stop();
 
+  // ---------- moved here and not prompted here yet: its last cwd is the other machine's path ----------
+  // A row this device owns goes up under the row's own repo_id and rel_cwd (a flush, and a scan), with no repo_paths
+  // row; one with no row is still noRepo, and another device's still foreign.
+  {
+    const projM = path.join(T, 'moved');
+    const away = P.isWin ? '/Users/henry/code/app' : 'C:\\Users\\henry\\app';
+    const mRepo = crypto.randomUUID();
+    db.repos.push({ id: mRepo, user_id: UID, origin: 'github.com/test/moved' });
+    const M1 = newId('M1'), M2 = newId('M2'), M3 = newId('M3'), M4 = newId('M4');
+    for (const id of [M1, M2, M3, M4]) write(mainOf(projM, away, id), lines(away, 4) + titleLine(id, 'moved'));
+    for (const [id, owner] of [[M1, dev], [M2, dev], [M3, otherDev]]) {
+      db.conversations.push({ ...DEFAULTS.conversations(), id, user_id: UID, account: 'b', repo_id: mRepo, rel_cwd: 'pkg/app', branch: 'feat/x', owner_device: owner });
+    }
+    const upM = U.createUploader({ api, dataDir, key: SYNC_KEY, home, projects: [{ account: 'b', dir: projM }], chunkBytes: 4096, rateBytesPerSec: 50 * 1024 * 1024 });
+    const mThrew = async (p) => { try { await p; return {}; } catch (e) { return e; } };
+    const m1 = await upM.flush(M1);
+    eq(m1 && m1.owner_device, dev, 'moved here: flush of a row this device owns goes up');
+    ok(conv(M1).repo_id === mRepo && conv(M1).rel_cwd === 'pkg/app' && conv(M1).size > 0, `moved here: the row keeps its repo_id and rel_cwd (${conv(M1).rel_cwd})`);
+    sameAsLocal(M1, 'main', mainOf(projM, away, M1), true, 'moved here: the flushed log');
+    await upM.scanOnce();
+    const mst = upM.status();
+    eq([mst.skipped.noRepo, mst.skipped.foreign], [1, 1], 'moved here: a scan skips the one with no row (noRepo) and another device\'s (foreign)');
+    ok(conv(M2).repo_id === mRepo && conv(M2).rel_cwd === 'pkg/app' && conv(M2).size > 0, 'moved here: a scan sends one this device owns too, under the row\'s repo');
+    sameAsLocal(M2, 'main', mainOf(projM, away, M2), true, 'moved here: the scanned log');
+    ok(!conv(M4) && conv(M3).size === 0, 'moved here: no row made for the one with none, another device\'s untouched');
+    ok(!db.repo_paths.some((r) => r.repo_id === mRepo), 'moved here: no repo_paths row (this device has no folder for it)');
+    eq((await mThrew(upM.flush(M4))).code, 'noRepo', 'moved here: flush of one with no row still throws noRepo');
+    eq((await mThrew(upM.flush(M3))).code, 'foreign', 'moved here: flush of another device\'s throws foreign');
+    await upM.stop();
+  }
+
   // ---------- a crash between chunk rows and up-state.json: the rows past the saved seq go, no gap ----------
   // Two appends went up in two scans (seq 1 and 2 of main and of a subagent log) but the conversation row never caught
   // up (its PATCH failed), and up-state.json is the one from before them (the crash). The next process sends seq 1
