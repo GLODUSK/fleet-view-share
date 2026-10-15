@@ -459,7 +459,8 @@ async function conversation(req, res, ctx) {
 // The same items, compact, for a script or another Claude to read: { total, from, items: [{ i, type, t, text?,
 // tool? }] }, type 'user' | 'assistant' | 'tool' | 'note' | 'thinking'. Text is cut to 4000 characters; a tool
 // gives its name, its input as one line (300) and its result (2000, null while it runs). Default the last 50
-// items; since=n gives the items from n on; limit at most 500.
+// items; since=n gives the items from n on; limit at most 500. textMax (the server's own callers, never a query: api.js
+// launchPicks reads a whole reply's options) cuts text there instead, up to 200000.
 const T_TEXT = 4000, T_INPUT = 300, T_RESULT = 2000, T_DEFAULT = 50, T_MAX = 500;
 const cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -479,6 +480,7 @@ async function transcriptOf(file, o = {}) {
   const limit = intArg(o.limit, 1, T_MAX, T_DEFAULT);
   const from = o.since != null && o.since !== '' ? intArg(o.since, 0, total, total) : Math.max(0, total - limit);
   const to = Math.min(total, from + limit);
+  const textMax = intArg(o.textMax, T_TEXT, 200000, T_TEXT);
   const rd = lineReader(L.file);
   const items = [];
   try {
@@ -490,7 +492,7 @@ async function transcriptOf(file, o = {}) {
       } else {
         let text = b.text || '';
         if (b.images && b.images.length) text = `${text}${text ? ' ' : ''}[${b.images.length} image${b.images.length > 1 ? 's' : ''}]`;
-        it.text = cut(text, T_TEXT);
+        it.text = cut(text, textMax);
       }
       items.push(it);
     }

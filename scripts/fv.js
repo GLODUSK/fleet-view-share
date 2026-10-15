@@ -34,6 +34,11 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
   fv read <id> [--tail n]                   status and latest reply (and the screen's last n chars)
   fv menu <id>                              the select menu it shows, if any
   fv answer <id> <n|submit|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
+  fv launch <id> [<n>…|--recommended] [--from <your id>] [--list] [--wait [s]]
+                                            the chat's Launch button on its newest reply that offers
+                                            options (a task list): the recommended ones by default, or
+                                            these numbers; the page and phone show them Launched.
+                                            --list: show the options, send nothing
   fv interrupt <id>                         Esc: stop Claude mid-turn
   fv effort [<id>] <level>                  switch its effort (low, medium, high, xhigh, max); no id: your
                                             own. One working switches when it finishes this step (you:
@@ -83,7 +88,8 @@ class Refused extends Error {}
 // ---------- arguments ----------
 const VALUE_FLAGS = new Set(['account', 'name', 'model', 'effort', 'fork', 'from', 'timeout', 'tail', 'text', 'sig',
   'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order', 'within', 'shape', 'color', 'file']);
-const BOOL_FLAGS = new Set(['temp', 'chrome', 'no-chrome', 'all', 'remove', 'allow-permission', 'json', 'help', 'version', 'no-open', 'stdin']);
+const BOOL_FLAGS = new Set(['temp', 'chrome', 'no-chrome', 'all', 'remove', 'allow-permission', 'json', 'help', 'version', 'no-open', 'stdin',
+  'recommended', 'list']);
 // The arguments fv.ps1 handed over in FV_ARGS_B64 (base64 of a UTF-8 JSON array of strings), taken out of env so
 // nothing fv starts sees them; null when there are none (fv.cmd, the sh fv, node scripts/fv.js: process.argv)
 function shimArgs(env) {
@@ -374,6 +380,15 @@ function leftLines(left) {
   return (left || []).map((x) => `${x.disbanded ? `team "${x.name}" is disbanded` : `team "${x.name}" lost a member`}; told ${x.told.filter((y) => y.ok).length}`);
 }
 
+// fv launch: the options of the reply it read, marked (> picked, ✓ launched already, ★ recommended), then what it did
+function launchLines(j, dry) {
+  const out = [];
+  const picked = new Set(j.picked || []);
+  for (const o of j.options || []) out.push(`${picked.has(o.n) && !dry ? '>' : ' '} ${o.done ? '✓' : o.rec ? '★' : ' '} ${o.n}. ${clip(o.text, 150)}`);
+  out.push('  (★ recommended, ✓ launched already)');
+  return out;
+}
+
 function transcriptLines(j) {
   const out = [`${j.id}: items ${j.from}..${j.from + (j.items || []).length - 1} of ${j.total}`];
   for (const it of j.items || []) {
@@ -568,6 +583,32 @@ async function run(argv, env) {
       const what = [body.model && `model ${body.model}`, body.effort && `effort ${body.effort}`].filter(Boolean).join(', ');
       if (j.queued) return { j, lines: [own ? `${what} from your next turn: Fleet View switches it as soon as this turn ends` : `${short(sid)}: ${what} ${j.message}`] };
       return { j, lines: [`${short(sid)}: ${what}: ${j.message || 'switched'}`, ...(j.said || []).map((s) => `  ${s}`)] };
+    }
+    // fv launch <id> [<n>…|--recommended] [--from <id>] [--list]: what the chat's Launch button sends, so the page and
+    // the phone grey those options as Launched (api.js launchPicks)
+    case 'launch': {
+      const sid = await id();
+      const nums = pos.slice(1);
+      if (nums.length && flags.recommended) throw new Usage('give option numbers or --recommended, not both');
+      if (nums.some((x) => !/^\d{1,3}$/.test(x) || Number(x) < 1)) throw new Usage('the options are numbers from 1, as the list shows them (fv launch <id> --list)');
+      const body = { picks: nums.length ? nums.map(Number) : 'recommended' };
+      if (flags.list) body.dry = true;
+      if (flags.from !== undefined) body.from = await resolveId(call, flags.from);
+      const w = waitValue(flags);
+      if (w !== undefined) body.wait = w;
+      const r = await call('POST', `/sessions/${sid}/launch`, body, callMs(w, 180000));
+      const me = decodeURIComponent(sid);
+      if ((r.code !== 200 && r.code !== 202) || r.j.ok === false) {
+        const e = new Refused(r.j.message || `HTTP ${r.code}`);
+        e.reply = r.j;
+        // the list it read, so the caller can pick from it
+        if (r.j.options) e.lines = launchLines(r.j, true);
+        else if (r.j.menu === true) e.lines = ['it shows a select menu: see it with fv menu <id>, answer it with fv answer'];
+        throw e;
+      }
+      const j = r.j;
+      if (flags.list) return { j, lines: [...launchLines(j, true), `fv launch ${me}${(j.picked || []).length ? ` would send ${j.picked.join(', ')}` : ''}`] };
+      return { j, lines: [...launchLines(j, false), j.message || 'launched', ...waitLines(j, j.id || me)] };
     }
     case 'interrupt': {
       const sid = await id();

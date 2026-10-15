@@ -42,6 +42,7 @@ const VERSION = require(path.join(__dirname, 'version.js'));
 const OVERSEER = require(path.join(__dirname, 'overseer.js'));
 const ACCOUNTS = require(path.join(__dirname, 'accounts.js'));
 const TT = require(path.join(__dirname, 'team-tree.js'));
+const LAUNCH = require(path.join(__dirname, 'launch.js'));
 
 const P = require(path.join(__dirname, 'platform.js'));
 const DATA_DIR = P.dataDir();
@@ -870,6 +871,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/bots/:id/remove', does: 'Henry only, as POST /api/bots: end a bot\'s session and take it off the list (its folder and conversations are kept)' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, role, its turn; tail: the last characters of its screen' },
   { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now?, shell? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. With from, leading /effort <level> and /model <name> lines switch the receiver (as POST .../model with queue: true; a bare command typed under the from line would be read as text) and the rest is sent: switch { ok, queued?, model?, effort?, message }. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow). shell (not with from or now): text is a shell command, run in bash mode ("!" typed as a key of its own into an empty prompt, then the command; a leading "!" in text is dropped); 409 when its prompt is not empty or a menu is up, never queued' },
+  { method: 'POST', path: '/api/sessions/:id/launch', body: '{ picks?: "recommended" | [n…], from?, wait?, dry? }', does: 'the chat\'s Launch button from outside the page: the conversation\'s newest reply offering options (a task list, every box unticked) gives them; picks (default the ones marked "(recommended)"; numbers from 1 as the list stands) are sent as the button sends them ("Go with these:", the numbered options, the launch line), so the page and the phone show them Launched; ones launched already are left out (skipped). A session below high effort, or not known, is switched to high first, as the button does. from, wait: as .../message. dry: nothing sent: { options: [{ n, text, rec, done }], picked, text }. 409 when there is no such reply or nothing left to launch' },
   { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
   { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
   { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort?, queue? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. Not idle: 409 notReady, or with queue: true 202 { queued, model?, effort? }: applied once Claude finishes this step (GET /state\'s switchPending until then; dropped after 30 min). An overseer\'s: Henry only (his phone)' },
@@ -1131,6 +1133,51 @@ async function sendMessage(key, b, ctx, gone, via = null) {
   };
   return deliverText(key, head, { kind: 'message', from, original: text, wait: ms, queue, open }, ctx, gone);
 }
+// POST /api/sessions/:id/launch { picks?: "recommended" | [n…], from?, wait?, dry? }: the chat's Launch button, from
+// outside the page (launch.js). The conversation's newest reply that offers a choice (a task list, every box
+// unticked) gives the options; picks says which (default the ones marked "(recommended)"; numbers as the list stands,
+// from 1); ones launched already are left out. It sends what the button sends, word for word, so the page and the
+// phone grey them as Launched: "Go with these:", the numbered options, the launch line. Like the button it runs the
+// launch at high effort or above: a session known to be below high, or not known, is switched to high first (queued
+// while it works; an overseer's is Henry's to change, so it is left). from, wait: as POST .../message (with from the
+// line saying who it is from goes above it). dry: send nothing; the options and the text that would go.
+const LAUNCH_ITEMS = 500, LAUNCH_TEXT_MAX = 100000;
+async function launchPicks(key, b, ctx, gone, via = null) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  const id = convId(resolveKey(key));
+  if (!id) return [400, { ok: false, message: 'give a conversation id' }];
+  const picks = b.picks === undefined ? 'recommended' : b.picks;
+  if (picks !== 'recommended' && !(Array.isArray(picks) && picks.length && picks.every((n) => Number.isInteger(n) && n >= 1 && n <= 999))) {
+    return [400, { ok: false, message: 'picks must be "recommended" or a list of option numbers (from 1)' }];
+  }
+  if ('dry' in b && typeof b.dry !== 'boolean') return [400, { ok: false, message: 'dry must be true or false' }];
+  let t;
+  try { t = await ctx.transcript(id, { limit: LAUNCH_ITEMS, textMax: LAUNCH_TEXT_MAX }); } catch { t = null; }
+  if (!t) return [404, { ok: false, id, message: 'no such conversation (its log is not on disk)' }];
+  const choice = LAUNCH.latestChoice(t.items || []);
+  if (!choice) return [409, { ok: false, id, message: `none of its last ${LAUNCH_ITEMS} transcript items is a reply offering options (a task list with every box unticked)` }];
+  const options = choice.options;
+  const reply = { i: choice.item.i, t: choice.item.t || null };
+  const c = LAUNCH.choose(options, picks);
+  if (c.error) return [409, { ok: false, id, reply, options, message: c.error }];
+  const text = LAUNCH.launchText(options, c.ns);
+  const out = { id, reply, options, picked: c.ns, ...(c.skipped && c.skipped.length ? { skipped: c.skipped } : {}), text };
+  if (b.dry === true) return [200, { ok: true, ...out, dry: true, message: `would launch ${c.ns.join(', ')}` }];
+  // the button's effort: high or above for the session coordinating the launch (handto.js)
+  const info = ctx.sessionInfo ? ctx.sessionInfo(id) : null;
+  const was = info && EFFORTS.includes(info.effort) ? info.effort : null;
+  let effort = null;
+  if (!was || EFFORTS.indexOf(was) < EFFORTS.indexOf('high')) {
+    const [sc, so] = await switchModel(key, { effort: 'high', queue: true }, ctx, via);
+    effort = sc === 200 || sc === 202 ? { ok: true, from: was, to: 'high', ...(so.queued ? { queued: true } : {}) } : { ok: false, from: was, message: so.message || `HTTP ${sc}` };
+  }
+  const [code, sent] = await sendMessage(key, { text, ...(b.from != null ? { from: b.from } : {}), ...(b.wait !== undefined ? { wait: b.wait } : {}) }, ctx, gone, via);
+  const said = `launched ${c.ns.join(', ')}${c.skipped && c.skipped.length ? ` (${c.skipped.join(', ')} launched already)` : ''}`;
+  const eff = !effort ? '' : effort.ok ? `; effort ${effort.from || 'unknown'} -> high${effort.queued ? ' once this step ends' : ''}` : `; effort left at ${effort.from || 'what it is'} (${effort.message})`;
+  if (!sent.ok) return [code, { ...sent, ...out, ...(effort ? { effort } : {}), message: `not launched: ${sent.message || `HTTP ${code}`}` }];
+  return [code, { ...sent, ...out, ...(effort ? { effort } : {}), message: `${said}${eff}; ${sent.message || 'sent'}` }];
+}
+
 // a message's leading "/model <name>" and "/effort <level>" lines (blank lines between them and after them skipped)
 // -> { want: { model?, effort? }, rest } or null: none there, or a value switchModel would refuse (sent as text then)
 function leadingSwitch(text) {
@@ -3030,6 +3077,7 @@ function handle(req, res, pathname, ctx) {
     if (!key) return body((b) => startSession(b, ctx, gone, via(b)));
     switch (verb) {
       case 'message': return body((b) => sendMessage(k, b, ctx, gone, via(b)));
+      case 'launch': return body((b) => launchPicks(k, b, ctx, gone, via(b)));
       case 'stop': return body((b) => stopSession(k, b, ctx));
       case 'remove': return run(removeConversation(k, ctx));
       case 'answer': return body((b) => answerMenu(k, b, ctx, gone, via(b)));
@@ -3054,7 +3102,7 @@ function handle(req, res, pathname, ctx) {
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
 // relayKey: the phone relay's key (see viaOf), for fleet-view.js to hand the relay
 module.exports = { ensureToken, handle, startBot, openBot, endHosted, hostList, hostKill, hostSwitch, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
-  startQueue, queuedIds, switchModel, switchPending, isSwitchConfirm, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
+  startQueue, queuedIds, switchModel, switchPending, launchPicks, isSwitchConfirm, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
   askParts: { asks, summaryText, laterText, overseerAnswers, answerLines, flushAsk, settleAnswer, askJson },
   // the queued switches and their tick, for a test to age one or run a tick at once
   switchParts: { pending: pendingSwitch, tick: tickSwitches, refusals: refusalLog } };

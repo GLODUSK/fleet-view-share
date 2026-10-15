@@ -31,6 +31,7 @@ fv read <id> [--tail n]                  status and latest reply (--tail: its sc
 fv transcript <id> [--since n] [--limit m]
 fv menu <id>                             the question or prompt on its screen, numbered
 fv answer <id> <n|submit|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]
+fv launch <id> [<n>…] [--from <id>] [--list] [--wait [s]]   Launch options from its newest option list
 fv interrupt <id>                        Esc mid-turn
 fv effort [<id>] <level>                 switch its effort (low|medium|high|xhigh|max); no id: your own
 fv model [<id>] <model> [--effort E]     switch its model
@@ -95,6 +96,18 @@ fv answer 3f2a9c1e 1; fv answer 3f2a9c1e 3; fv answer 3f2a9c1e submit   # multip
 
 Pass `--sig <sig>` from `fv menu` so the answer is refused if the menu changed meanwhile.
 
+**Pick from a conversation's option list (its checkbox list)**
+
+When a reply offers options as a task list (`- [ ] **Name** (recommended): … · Opus, high`) and you are told to pick some ("apply the recommended ones"), launch them with `fv launch`, never by typing "Go with these: …" yourself. It sends exactly what the chat's **Launch selected** button sends, so the page and the phone grey those options as Launched, as if Henry had clicked; it also raises that session to high effort first, as the button does.
+
+```
+fv launch 3f2a9c1e --list                    # the options of its newest list: ★ recommended, ✓ launched already
+fv launch 3f2a9c1e --from <my id>            # launch the recommended ones
+fv launch 3f2a9c1e 1 3 --from <my id>        # launch options 1 and 3
+```
+
+Options launched already are left out. With `--from` the message says who launched them, like `fv send --from`.
+
 **Resume an old conversation with a follow-up**
 
 ```
@@ -111,7 +124,7 @@ Don't `--remove` a conversation you didn't start; just stop it if you opened it 
 - **Never `--allow-permission` unless the user asked for it.** Every menu but a question (permission and trust prompts, the plan approval) is refused without it on purpose: approving another session's tool use is the user's call. Report the prompt (`fv menu`) and let them decide.
 - Only stop, remove, interrupt or message sessions you started, or ones the user named.
 - Sessions run on the user's own Claude logins, the accounts `fv ls` shows: `B` is the default `~/.claude`, and each `~/.claude-<letter>` is that letter (`~/.claude-a` is `A`). `fv start` uses `B` unless `--account` says otherwise.
-- They run with the permission settings of their account, as a terminal would: one may stop on a permission prompt (`fv menu` shows it) unless the user set it to skip them. Either way, tell each exactly what to touch and what not to (a worktree, no pushes, no merges), as you would brief a subagent. Every session Fleet View starts may run `fv send`, `status`, `ask`, `read`, `ls`, `teams`, `team`, `transcript` and `effort` without asking, and nothing else.
+- They run with the permission settings of their account, as a terminal would: one may stop on a permission prompt (`fv menu` shows it) unless the user set it to skip them. Either way, tell each exactly what to touch and what not to (a worktree, no pushes, no merges), as you would brief a subagent. Every session Fleet View starts may run `fv send`, `launch`, `status`, `ask`, `read`, `ls`, `teams`, `team`, `transcript` and `effort` without asking, and nothing else.
 - Give each child a complete prompt: the goal, the files, what "done" means, and what to report back. It knows nothing of your conversation.
 - **Changing effort or model:** `fv effort high` raises your own (it takes effect from your next turn: Fleet View switches it as soon as this turn ends), `fv effort <id> high` another session's (one that is working switches when it finishes its step). Typing `/effort high` into your reply does nothing. With `fv send --from`, a message whose first line is `/effort <level>` or `/model <name>` switches the receiver and sends the rest. The default for new sessions stays as it was. A bot's is only Henry's to change.
 - A plain `fv send` to a session that shows a menu is refused (an Enter would answer it): answer the menu first. With `--from` it waits instead and goes in once the menu is answered ("queued").
