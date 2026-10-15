@@ -262,7 +262,7 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
 
   | Route | Relay | With `wait` | The phone waits |
   |---|---|---|---|
-  | `POST /api/sessions`, `/api/bots`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it); the page's `/bots/:id/tasks/:taskId` (Run now starts the bot first when it is not running) | 95 s | 95 s + the wait | 100 s (+ the wait) |
+  | `POST /api/sessions`, `/api/bots`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it); the page's `/bots/:id/tasks/:taskId` (Run now starts the bot first when it is not running) and `/bots/:id/watch` (a new watch or job starts the bot first, then tells it) | 95 s | 95 s + the wait | 100 s (+ the wait) |
   | `POST /api/sessions/:id/message` and `/open`; `POST /api/teams`, `/api/teams/:id/add`, `/lead` and `/message`; the page's `/teams`, `/teams/add` and `/teams/lead` (each may resume a stopped conversation first, up to 60 s, before it types) | 75 s | 75 s + the wait | 80 s (+ the wait) |
   | any other `/api/*` POST with `wait` (e.g. `/answer`) | 60 s | | the wait + 15 s |
   | `GET /api/sessions/:id/activity` (the chat's activity line, polled) | 5 s | | 20 s |
@@ -302,7 +302,7 @@ Per device, on the relay:
   and hellos. Over that, a `req` or `hello` gets 429 with `retryAfter`, and a part is dropped.
 - **The routes that start or resume a Claude: 2 at once, and 12 in 10 minutes.** Each counts one (`POST
   /api/sessions`, `/api/sessions/:id/open`, `/api/bots`, `/api/bots/:id/start`,
-  `/api/teams/:id/add`, the page's `/teams/add`, and the page's `/bots/:id/tasks/:taskId` with `action: "run"`), a team one per distinct member (`POST /api/teams`, the page's
+  `/api/teams/:id/add`, the page's `/teams/add`, the page's `/bots/:id/tasks/:taskId` with `action: "run"`, and the page's `/bots/:id/watch` with a `job`), a team one per distinct member (`POST /api/teams`, the page's
   `/teams`; 12 at most), and a lead only when there is one (`/api/teams/:id/lead`, `/teams/lead`). A message counts
   what it may resume, as `/state` says it (read again when over 15 s old): `POST /api/sessions/:id/message` that
   opens one (`open: true`, or a `from` without `open`) counts one unless a claude process has that conversation
@@ -334,7 +334,7 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 `/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
 `/chat/image`, and the page's `/teams` (the phone's New team sends it as the page's New team does: `{ members, order, name,
 lead, send: true }`, then `/teams/add` for a team above and `/teams/leave` with `quiet` for a member its order missed),
-`/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`, `/teams/rename`, `/bots/:id/switch` and `/bots/:id/tasks/:taskId`,
+`/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`, `/teams/rename`, `/bots/:id/switch`, `/bots/:id/map`, `/bots/:id/watch` and `/bots/:id/tasks/:taskId`,
 `/chat/dynamic` (Dynamic on or off for any chat, below), and `/accounts/add`, `/accounts/login`,
 `/accounts/code` and `/accounts/cancel` (only to sign in a missing Claude A or B, below).
 
@@ -393,6 +393,20 @@ The bots:
   (`tasksError` when it can't be read), and the page's `POST /bots/:id/tasks/:taskId { action }` acts on one:
   `pause`, `resume`, `run` (send it to the bot now, started first if it is not running) or `delete`. A task id is
   1 to 64 of `A-Z a-z 0-9 . _ -`, starting with a letter or digit. A page route too: this PC's Origin, not marked.
+- **A bot watching conversations** (bots.js `setWatch`, `setMap`; the page's map mascot menu and a conversation's "Have a
+  bot watch it"): `/state`'s `bots[]` carry `map` (its spot on the PC's map, or null) and `watches` (`[{ id, job, since,
+  name, last }]`, at most 8 a bot). The page's `POST /bots/:id/watch { id, job }` watches a conversation with a job
+  (`report`: tell me when it needs me, `answer`: answer its questions, `review`: review its work when it's done) or
+  changes it, and `job: null` stops it; a new watch or job starts the bot first, then tells it (the answer is ok even
+  when it could not be told, and says so). `POST /bots/:id/map { at: null }` takes a bot off the map and stops all its
+  watches. The phone has no map, so it never puts one there. On the Bots tab a bot's long-press has Watch a
+  conversation (a sheet: each conversation ▸ the three jobs, the current one ticked; off when no conversation can be
+  watched, or for another machine's bot), Watching (n) (each watch ▸ the jobs and Stop watching) and, only while it
+  is on the map, Take off the map (asked first when its watches stop too). A conversation's menu (the Cards and
+  Projects tabs, and a conversation row's) has Have a bot watch it ▸ each own bot ▸ the jobs (Stop watching where it
+  watches it already): a bot that watches 8 is off ("watches 8 already"), and the item is off with the reason for a
+  conversation no bot can watch (not started yet, removed). A watch answers in the PC's own words. Page routes: this
+  PC's Origin, not marked.
 
 Narrower rules:
 
@@ -409,7 +423,9 @@ Narrower rules:
 - `POST /bots/:id/switch` takes only `id`, `model` and `effort` (403 otherwise): `id` a conversation id, and at
   least one of `model` (a name api.js `MODEL_RE` takes) and `effort` (`low` to `max`), else 400.
   `POST /bots/:id/tasks/:taskId` takes only `action` (403 otherwise), one of `pause`, `resume`, `run`, `delete`
-  (400 otherwise). The page's other bot routes (`/bots`, `/bots/:id`, `/start`, `/remove`) stay off: the phone uses
+  (400 otherwise). `POST /bots/:id/map` takes only `at` (403 otherwise): null, or `{ x, y }` finite numbers and
+  nothing else (400). `POST /bots/:id/watch` takes only `id` and `job` (403 otherwise): `id` a conversation id, `job`
+  one of `report`, `answer`, `review`, or null (400). The page's other bot routes (`/bots`, `/bots/:id`, `/start`, `/remove`) stay off: the phone uses
   the `/api/bots` ones.
 - **The chat's verbs** (api.js): `POST /api/sessions/:id/now` (the page's Interrupt on a queued message: Claude
   takes what is queued now) takes no fields (403 otherwise) and counts toward no start limit.

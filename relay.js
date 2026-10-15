@@ -49,7 +49,8 @@
 //             b + ct, anything else as standard base64 b64 + ct; etag <-> If-None-Match / ETag (304: no body).
 //   time      30 s a route, 60 s when the body asks to wait (wait capped at 50 s). Longer where the server starts or
 //             resumes a Claude before it answers (api.js START_MS, 60 s, then it settles and types): 95 s for POST
-//             /api/sessions, /api/bots (it makes the bot and starts it) and /api/bots/:id/start; 75 s for POST /api/sessions/:id/message and
+//             /api/sessions, /api/bots (it makes the bot and starts it), /api/bots/:id/start and the page's /bots/:id/watch (a
+//             new watch or job starts the bot first, then tells it); 75 s for POST /api/sessions/:id/message and
 //             /open and the team routes that send a brief or an order (deliverText resumes one not running): POST
 //             /api/teams, /api/teams/:id/add, /lead and /message, the page's /teams, /teams/add and /teams/lead. Those
 //             two get the body's wait (at most 50 s) on top: 145 s and 125 s at most. Shorter for the chat's verbs:
@@ -94,6 +95,9 @@
 //   POST /api/bots, /api/bots/:id   only name, brief, role, account, model, effort, shape and color, as bots.js
 //                       reads (anything else: 403);  POST /api/bots/:id/start and /remove  no fields at all (403). A
 //                       bot id: 12 hex digits
+//   POST /bots/:id/map  (the page's map) only at, null (off the map: its watches stop) or { x, y } finite numbers
+//                       (403 for any other field, 400 for a bad at);  POST /bots/:id/watch  only id, a conversation
+//                       id, and job, one of report, answer, review or null (stop watching) (403, 400)
 //   POST /repos/add     path a known root;  POST /sessions/move  root null or a known root
 //   POST /push-target   { id } or root a known root;  GET /repo-history  root a known root
 //   POST /sync/move     only id (a conversation id) and force (true or false): Continue here for a chat whose host is
@@ -343,7 +347,7 @@ const ALLOW = {
   POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model|enter|background|mode|rewind)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
     '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)',
-    '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/${TASK}`,
+    '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/(?:switch|map|watch)`, `/bots/${BOT}/tasks/${TASK}`,
     '/accounts/(?:add|login|code|cancel)', '/sync/move', '/chat/dynamic'],
 };
 const ALLOW_RE = Object.fromEntries(Object.entries(ALLOW).map(([m, list]) => [m, new RegExp(`^(?:${list.join('|')})$`)]));
@@ -373,6 +377,10 @@ const BOT_ONE = new RegExp(`^/api/bots/${BOT}$`), BOT_ACT = new RegExp(`^/api/bo
 // tasks (bots.js taskAction: { action }; run sends it to the bot now, starting the bot first when it is not running)
 const BOT_SWITCH = new RegExp(`^/bots/${BOT}/switch$`), BOT_TASK = new RegExp(`^/bots/${BOT}/tasks/${TASK}$`);
 const TASK_ACTIONS = ['pause', 'resume', 'run', 'delete'];
+// the map and watching (bots.js setMap: { at: { x, y } | null }; setWatch: { id, job }, a job of WATCH_JOBS or null to
+// stop): a new watch or job starts the bot first, then tells it
+const BOT_MAP = new RegExp(`^/bots/${BOT}/map$`), BOT_WATCH = new RegExp(`^/bots/${BOT}/watch$`);
+const WATCH_JOBS = ['report', 'answer', 'review'];
 // the Claude accounts screen: only the letters a synced conversation knows (sync-accounts.js SYNC_LETTERS, Blackbox's),
 // and on each route only the body accounts.js route() reads for it: add { letter }, the others { account } (code also
 // { code }). Every one only for a letter with no login (accountRefused); accountsAnswer: what GET /accounts passes on
@@ -392,9 +400,9 @@ const textOk = (v) => typeof v === 'string' && !!v.trim() && !/[\x00-\x08\x0b-\x
 // rewinding it (Henry's alone for an overseer)
 const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|open|model|mode|rewind)|teams/${TEAM}/message|bots|bots/${BOT}|bots/${BOT}/remove)$`);
 // POST routes that start a Claude before they answer (api.js startSession waits up to 60 s for it, settles, types;
-// POST /api/bots makes the bot and starts it), and ones that may resume a stopped conversation first (up to 60 s
+// POST /api/bots makes the bot and starts it; a bot's watch starts it before it tells it), and ones that may resume a stopped conversation first (up to 60 s
 // too) before they type into it
-const START_ROUTES = new RegExp(`^(?:/api/(?:sessions|bots|bots/${BOT}/start)|/bots/${BOT}/tasks/${TASK})$`);
+const START_ROUTES = new RegExp(`^(?:/api/(?:sessions|bots|bots/${BOT}/start)|/bots/${BOT}/(?:tasks/${TASK}|watch))$`);
 const RESUME_ROUTES = new RegExp(`^(?:/api/sessions/${KEY}/(?:message|open)|/api/teams(?:/${TEAM}/(?:add|lead|message))?|/teams(?:/add|/lead)?)$`);
 // the routes that start or resume a Claude, as the per-device start limits count them: one each, a team one per
 // member (POST /api/teams and the page's /teams), a lead only when there is one (it gets its brief). A message to a
@@ -408,6 +416,8 @@ function startWeight(m, p, b) {
   if (STARTS_LEAD.test(p)) return o.member == null ? 0 : 1;
   // a task's Run now starts its bot when it is not running
   if (BOT_TASK.test(p)) return o.action === 'run' ? 1 : 0;
+  // a new watch or job starts its bot when it is not running; a stop starts nothing
+  if (BOT_WATCH.test(p)) return o.job == null ? 0 : 1;
   return STARTS_ONE.test(p) ? 1 : 0;
 }
 // a message that may resume a stopped conversation first (api.js deliverText): POST /api/sessions/:id/message when
@@ -832,6 +842,22 @@ function createRelay(opts = {}) {
       if (b.model == null && b.effort == null) return [400, 'give model, effort or both'];
       if (b.model != null && !(typeof b.model === 'string' && MODEL_RE.test(b.model))) return [400, 'model must be a model name like claude-opus-5-5'];
       return b.effort == null || EFFORTS.includes(b.effort) ? null : [400, `effort must be one of ${EFFORTS.join(', ')}`];
+    }
+    // the map (a page route, as the switch): the phone only takes a bot off it, but a spot is checked as bots.js checkAt takes one
+    if (BOT_MAP.test(p)) {
+      const bad = Object.keys(b).filter((k) => k !== 'at');
+      if (bad.length) return no(`a bot's map spot takes only at, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      const a = b.at;
+      if (a === null) return null;
+      const spot = a && typeof a === 'object' && !Array.isArray(a) && Object.keys(a).every((k) => k === 'x' || k === 'y') && Number.isFinite(a.x) && Number.isFinite(a.y);
+      return spot ? null : [400, 'at must be { x, y } (numbers), or null: off the map'];
+    }
+    // a watch: the conversation and its job, or null to stop
+    if (BOT_WATCH.test(p)) {
+      const bad = Object.keys(b).filter((k) => k !== 'id' && k !== 'job');
+      if (bad.length) return no(`a bot's watch takes only id and job, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      if (!(typeof b.id === 'string' && UUID_RE.test(b.id))) return [400, 'id must be a conversation id'];
+      return b.job === null || WATCH_JOBS.includes(b.job) ? null : [400, `job must be one of ${WATCH_JOBS.join(', ')}, or null to stop watching`];
     }
     // Dynamic for any chat (fleet-view.js setDynamicChat): a page route, so this PC's Origin, not marked
     if (p === '/chat/dynamic') {

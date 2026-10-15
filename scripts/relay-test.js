@@ -456,8 +456,8 @@ async function main() {
     ['POST', '/teams'], ['POST', '/teams/add'], ['POST', '/teams/remove'], ['POST', '/teams/leave'], ['POST', '/teams/lead'], ['POST', '/teams/rename'],
     ['POST', '/api/bots'], ['POST', `/api/bots/${BOT}`], ['POST', '/api/bots/0123456789ab'],
     ['POST', `/api/bots/${BOT}/start`], ['POST', `/api/bots/${BOT}/remove`],
-    // a dynamic bot's switch, and its tasks' actions (page routes)
-    ['POST', `/bots/${BOT}/switch`], ['POST', `/bots/${BOT}/tasks/t-deploys`], ['POST', `/bots/${BOT}/tasks/a.b_c-1`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(63)}`],
+    // a dynamic bot's switch, its map spot, its watches and its tasks' actions (page routes)
+    ['POST', `/bots/${BOT}/switch`], ['POST', `/bots/${BOT}/map`], ['POST', `/bots/${BOT}/watch`], ['POST', `/bots/${BOT}/tasks/t-deploys`], ['POST', `/bots/${BOT}/tasks/a.b_c-1`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(63)}`],
     // the chat's verbs
     ['GET', `/api/sessions/${SID}/activity`], ['GET', '/api/sessions/new-3/activity'], ...['now', 'unsend', 'model', 'enter', 'background', 'mode', 'rewind'].map((v) => ['POST', `/api/sessions/${SID}/${v}`]),
     // the Claude accounts screen
@@ -488,6 +488,8 @@ async function main() {
     ['GET', `/bots/${BOT}/tasks/t1`], ['POST', `/bots/${BOT}/tasks/-t1`], ['POST', `/bots/${BOT}/tasks/.t1`], ['POST', `/bots/${BOT}/tasks/t..1`],
     ['POST', `/bots/${BOT}/tasks/t1/run`], ['POST', `/bots/${BOT}/tasks/t 1`], ['POST', `/bots/${BOT}/tasks/t%31`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(64)}`],
     ['POST', `/api/bots/${BOT}/tasks/t1`], ['POST', `/api/bots/${BOT}/switch`], ['POST', '/api/bots/look'], ['POST', '/bots/look'],
+    ['GET', `/bots/${BOT}/map`], ['GET', `/bots/${BOT}/watch`], ['POST', `/bots/${BOT}/watch/`], ['POST', `/bots/${BOT}/watches`], ['POST', `/bots/${BOT}/map/x`],
+    ['POST', '/bots/b1/watch'], ['POST', '/bots/map'], ['POST', '/bots/watch'], ['POST', `/api/bots/${BOT}/watch`], ['POST', `/api/bots/${BOT}/map`],
     // near misses of the chat's verbs
     ['POST', `/api/sessions/${SID}/activity`], ['GET', `/api/sessions/${SID}/now`], ['GET', `/api/sessions/${SID}/model`], ['GET', `/api/sessions/${SID}/unsend`],
     ['POST', `/api/sessions/${SID}/now/x`], ['POST', `/api/sessions/${SID}/models`], ['GET', '/api/sessions/activity'], ['POST', '/api/sessions/now'],
@@ -511,7 +513,7 @@ async function main() {
   const unmarked = [`/api/sessions/${SID}/interrupt`, `/api/sessions/${SID}/stop`, `/api/sessions/${SID}/remove`, '/api/teams', '/api/teams/t0a1b2c3d/add',
     `/api/bots/${BOT}/start`, '/api/bots/b1', '/settings', '/rename', '/teams', `/api/sessions/${SID}`, `/api/sessions/${SID}/message/`,
     `/api/sessions/${SID}/now`, `/api/sessions/${SID}/unsend`, `/api/sessions/${SID}/activity`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/t1`,
-    `/api/sessions/${SID}/enter`, `/api/sessions/${SID}/background`];
+    `/bots/${BOT}/map`, `/bots/${BOT}/watch`, `/api/sessions/${SID}/enter`, `/api/sessions/${SID}/background`];
   for (const p of marked) ok(R.MARKED.test(p), `marked: ${p}`);
   for (const p of unmarked) ok(!R.MARKED.test(p), `not marked: ${p}`);
   eq(R.TIMES, { ROUTE_MS: 30e3, WAIT_ROUTE_MS: 60e3, WAIT_CAP_S: 50, START_ROUTE_MS: 95e3, RESUME_ROUTE_MS: 75e3, ACTIVITY_MS: 5e3, NOW_MS: 10e3, MODEL_MS: 20e3, REWIND_MS: 60e3 }, 'the timeouts');
@@ -527,7 +529,7 @@ async function main() {
     ['POST', `/api/sessions/${SID}/answer`, 0, 30e3], ['POST', `/api/sessions/${SID}/answer`, 50, 60e3], ['POST', `/api/sessions/${SID}/stop`, 0, 30e3],
     ['POST', '/api/teams/t0a1b2c3d/remove', 0, 30e3], ['POST', '/teams/remove', 0, 30e3], ['POST', `/api/bots/${BOT}/remove`, 0, 30e3],
     ['GET', '/api/sessions', 0, 30e3], ['POST', '/rename', 0, 30e3],
-    ['POST', `/bots/${BOT}/switch`, 0, 20e3], ['POST', `/bots/${BOT}/tasks/t1`, 0, 95e3],
+    ['POST', `/bots/${BOT}/switch`, 0, 20e3], ['POST', `/bots/${BOT}/tasks/t1`, 0, 95e3], ['POST', `/bots/${BOT}/watch`, 0, 95e3], ['POST', `/bots/${BOT}/map`, 0, 30e3],
   ];
   for (const [m, p, w, want] of times) eq(R.routeTimeout(m, p, w), want, `the timeout of ${m} ${p}${w ? ` with wait ${w}` : ''}`);
   // the start limits' weights: one each, a team one per (distinct) member, a lead only when there is one
@@ -541,6 +543,8 @@ async function main() {
     // a task's Run now starts its bot when it is not running; its other actions and a switch start nothing
     ['POST', `/bots/${BOT}/tasks/t1`, { action: 'run' }, 1], ['POST', `/bots/${BOT}/tasks/t1`, { action: 'pause' }, 0], ['POST', `/bots/${BOT}/tasks/t1`, {}, 0],
     ['POST', `/bots/${BOT}/switch`, { id: SID, model: 'sonnet' }, 0],
+    // a new watch or job starts its bot when it is not running; a stop and the map start nothing
+    ['POST', `/bots/${BOT}/watch`, { id: SID, job: 'report' }, 1], ['POST', `/bots/${BOT}/watch`, { id: SID, job: null }, 0], ['POST', `/bots/${BOT}/map`, { at: null }, 0],
   ];
   for (const [m, p, b, w] of weights) eq(R.startWeight(m, p, b), w, `the start weight of ${m} ${p} ${JSON.stringify(b)}`);
   // a message weighs what it may resume: what /state says is not running (openElsewhere), when it opens one
@@ -818,9 +822,10 @@ async function main() {
     ok(r && r.s === 200 && via === 'phone', `POST ${p} with a look: 200, marked (${r && r.s})`);
     eq(rest, b, `POST ${p} with a look: the body that went on`);
   }
-  // a dynamic bot's switch and its tasks' actions: page routes (fleet-view.js lets in only this PC's Origin), never marked
+  // a dynamic bot's switch, its map spot, its watches and its tasks' actions: page routes (fleet-view.js lets in only this
+  // PC's Origin), never marked
   await tick(A.timers, 1001, ws);
-  const TK = `/bots/${BOT}/tasks/t-deploys`, SW = `/bots/${BOT}/switch`;
+  const TK = `/bots/${BOT}/tasks/t-deploys`, SW = `/bots/${BOT}/switch`, MP = `/bots/${BOT}/map`, WA = `/bots/${BOT}/watch`;
   const pageBotCases = [
     // [path, the phone's body, want, the body that goes on (default: as sent, less via)]
     [TK, { action: 'pause' }, 200], [TK, { action: 'resume' }, 200], [TK, { action: 'run', via: 'phone' }, 200, { action: 'run' }], [TK, { action: 'delete' }, 200],
@@ -828,6 +833,12 @@ async function main() {
     [SW, { id: SID, model: 'claude-opus-5-5', effort: 'high' }, 200], [SW, { id: SID, effort: 'low', via: 'server' }, 200, { id: SID, effort: 'low' }],
     [SW, { id: SID }, 400], [SW, { model: 'sonnet' }, 400], [SW, { id: 'new-3', model: 'sonnet' }, 400], [SW, { id: SID, model: 'bad model!' }, 400],
     [SW, { id: SID, effort: 'ultra' }, 400], [SW, { id: SID, model: 'sonnet', text: 'x' }, 403], [SW, { id: SID, model: 'sonnet', account: 'A' }, 403],
+    [MP, { at: null }, 200], [MP, { at: { x: 12.5, y: -40 }, via: 'phone' }, 200, { at: { x: 12.5, y: -40 } }],
+    [MP, {}, 400], [MP, { at: { x: 1 } }, 400], [MP, { at: { x: '1', y: 2 } }, 400], [MP, { at: [1, 2] }, 400], [MP, { at: { x: 1, y: 2, z: 3 } }, 400],
+    [MP, { at: 'off' }, 400], [MP, { at: null, id: SID }, 403], [MP, { at: null, watches: [] }, 403],
+    [WA, { id: SID, job: 'report' }, 200], [WA, { id: SID, job: null, via: 'phone' }, 200, { id: SID, job: null }],
+    [WA, { id: SID }, 400], [WA, { job: 'answer' }, 400], [WA, { id: 'new-3', job: 'review' }, 400], [WA, { id: SID, job: 'boss' }, 400], [WA, { id: SID, job: ['report'] }, 400],
+    [WA, { id: SID, job: 'report', note: 'x' }, 403], [WA, { id: SID, job: 'report', at: null }, 403],
   ];
   for (const [p, b, want, body] of pageBotCases) {
     const sent = JSON.parse(JSON.stringify(b));
