@@ -135,6 +135,24 @@ try {
   ok(HO.summaryFromFile(path.join(L, 'log1.jsonl')) === null && HO.summaryFromFile(path.join(L, FILE)) === null, 'summaryFromFile: nothing outside the handoff folder');
   ok(HO.summaryFromFile(path.join(T, 'missing.md')) === null, 'summaryFromFile: no such file');
   fs.unlinkSync(path.join(T, FILE));
+
+  // ---------- the restart request (.restart/<key>.json): peek leaves it, take deletes it ----------
+  eq([...HO.restartKeys()], [], 'restartKeys: no .restart folder, none');
+  const RF = path.join(T, FILE), RQ = path.join(T, '.restart', 'k-1.json');
+  fs.writeFileSync(RF, `---\nsession: ${OLD}\n---\n# H\n`);
+  fs.mkdirSync(path.dirname(RQ), { recursive: true });
+  fs.writeFileSync(RQ, JSON.stringify({ file: RF, cwd: 'Z:\\x', session: OLD.toUpperCase() }));
+  fs.writeFileSync(path.join(T, '.restart', 'notes.txt'), 'x');
+  eq([...HO.restartKeys()], ['k-1'], 'restartKeys: the keys with a .json request');
+  const want = { file: path.resolve(RF), cwd: 'Z:\\x', session: OLD };
+  eq(HO.peekRestart('k-1'), want, 'peekRestart: the request');
+  ok(fs.existsSync(RQ), 'peekRestart: the request stays');
+  eq(HO.takeRestart('k-1'), want, 'takeRestart: the same request');
+  ok(!fs.existsSync(RQ) && HO.peekRestart('k-1') === null && HO.takeRestart('k-1') === null, 'takeRestart: deleted, gone for both');
+  fs.writeFileSync(RQ, JSON.stringify({ file: path.join(T, 'missing.md'), session: OLD }));
+  ok(HO.peekRestart('k-1') === null, 'peekRestart: a handoff file that is not there: null');
+  ok(HO.peekRestart('../k') === null && HO.peekRestart(null) === null, 'peekRestart: a key that is not one: null');
+  fs.unlinkSync(RF);
 } finally {
   fs.rmSync(T, { recursive: true, force: true });
 }

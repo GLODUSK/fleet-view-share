@@ -41,11 +41,11 @@ function nodePath() {
   return main && fs.existsSync(path.join(main, 'node-pty')) ? main : null;
 }
 
-// the fake claude: one line per start in starts.txt (pid, time, arguments, account folder), in the folder it runs in;
-// every byte it receives in received.txt
+// the fake claude: one line per start in starts.txt (pid, time, arguments, account folder, launch key), in the folder it
+// runs in; every byte it receives in received.txt
 fs.writeFileSync(FAKE, `'use strict';
 const fs = require('fs'), path = require('path');
-fs.appendFileSync(path.join(process.cwd(), 'starts.txt'), JSON.stringify({ pid: process.pid, at: Date.now(), args: process.argv.slice(2), config: process.env.CLAUDE_CONFIG_DIR || '-' }) + '\\n');
+fs.appendFileSync(path.join(process.cwd(), 'starts.txt'), JSON.stringify({ pid: process.pid, at: Date.now(), args: process.argv.slice(2), config: process.env.CLAUDE_CONFIG_DIR || '-', key: process.env.CLAUDE_LAUNCH_KEY || null }) + '\\n');
 process.stdout.write('fake claude ready\\r\\n');
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.on('data', (d) => { fs.appendFileSync(path.join(process.cwd(), 'received.txt'), d); if (d.includes(3)) process.exit(0); });
@@ -458,6 +458,53 @@ async function main() {
   const c8 = succ8 ? await waitFor(() => connect().catch(() => null), 10000) : null;
   if (c8) { await c8.req('quitAll', {}).catch(() => null); c8.close(); }
   if (succ8) await waitFor(() => !pidAlive(succ8.pid), 15000);
+
+  // ===== 9. handoffs a restart or a shutdown would lose: the next host starts the pickup, never parks the old one =====
+  // HP: listed idle, its log stops right after a handoff nothing picked up (the list was saved before its request);
+  // HQ: listed idle, a handoff nothing picked up, but its log went on 10 minutes after it (opened and typed into);
+  // HL: running when it asks for its restart (the request is there, its kill still to come) and a restart ends it
+  settings({ autoContinue: false });
+  const HP = conv('hp'), HQ = conv('hq'), HL = conv('hl', { busy: true });
+  const handoffOf = (c, n) => {
+    const f = path.join(ROOT, 'handoffs', `2026-10-15_12394${n}_${c.id.slice(0, 8)}.md`);
+    fs.writeFileSync(f, `---\nsession: ${c.id}\ncwd: ${c.cwd}\ncreated: ${new Date().toISOString()}\n---\n# Handoff\n`);
+    return f;
+  };
+  const hpFile = handoffOf(HP, 1), hqFile = handoffOf(HQ, 2);
+  transcript(HP, [ended()]);
+  transcript(HQ, [ended()]);
+  const tenAgo = new Date(Date.now() - 10 * 60e3);
+  fs.utimesSync(hqFile, tenAgo, tenAgo);
+  writeList([HP, HQ, HL]);
+  startHost();
+  if (!await waitFor(() => hostJson(), 15000)) { check('9. the host starts', false, hostLog()); return; }
+  cl = await waitFor(() => connect().catch(() => null), 10000);
+  const up9 = await waitFor(() => starts(HP).length && starts(HL).length, 15000);
+  await sleep(GAP + 500);
+  const hpArgs = (starts(HP)[0] || {}).args || [];
+  check('9. one whose log stops right after a handoff nothing picked up: its pickup starts (a log line), not a resume of it',
+    up9 && starts(HP).length === 1 && hpArgs.includes(`/pickup ${hpFile}`) && !hpArgs.includes('--resume')
+    && hostLog().includes(`restore: ${HP.id} handed off to ${path.basename(hpFile)} and nothing picked it up; the pickup starts`), { hpArgs, log: hostLog().split('\n').filter((l) => l.includes('restore')).slice(-6) });
+  check('9. one that went on after its handoff stays parked', starts(HQ).length === 0 && (await cl.req('parked')).some((x) => x.id === HQ.id && x.parked), starts(HQ));
+  const hlKey = (starts(HL)[0] || {}).key, hlFile = handoffOf(HL, 3);
+  const hlReq = path.join(ROOT, 'handoffs', '.restart', `${hlKey}.json`);
+  fs.mkdirSync(path.dirname(hlReq), { recursive: true });
+  fs.writeFileSync(hlReq, JSON.stringify({ file: hlFile, cwd: HL.cwd, session: HL.id }));
+  const hp9 = hostJson().pid;
+  const r9 = await cl.req('restart', { now: true });
+  cl.close();
+  const succ9 = await waitFor(() => { const h = hostJson(); return h && h.pid !== hp9 ? h : null; }, 30000);
+  if (succ9) started.add(succ9.pid);
+  const back9 = succ9 ? await waitFor(() => starts(HL).length >= 2, 15000) : null;
+  await sleep(GAP + 500);
+  const hlArgs = (starts(HL)[1] || {}).args || [];
+  check('9. one that asked for its restart when a restart ended it: the next host starts its pickup (a log line), not the old conversation',
+    hlKey && r9 && r9.ok && back9 && starts(HL).length === 2 && hlArgs.includes(`/pickup ${hlFile}`) && !hlArgs.includes('--resume')
+    && hostLog().includes(`[host ${succ9.pid}] restore: pickup of ${hlFile} started`), { hlKey, hlArgs, log: hostLog().split('\n').filter((l) => l.includes('restore') || l.includes('restart')).slice(-8) });
+  check('9. the old host took the request (none left over)', !fs.existsSync(hlReq), fs.readdirSync(path.dirname(hlReq)));
+  const c9 = succ9 ? await waitFor(() => connect().catch(() => null), 10000) : null;
+  if (c9) { await c9.req('quitAll', {}).catch(() => null); c9.close(); }
+  if (succ9) await waitFor(() => !pidAlive(succ9.pid), 15000);
 }
 
 // a host that died mid-request leaves an answer that never comes: the event loop drains with main() still waiting

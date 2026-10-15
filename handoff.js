@@ -266,18 +266,29 @@ function safeFile(file) {
   return abs;
 }
 
-// The restart request a session left for its launcher, if any: reads and deletes .restart/<key>.json.
-// Returns { file, cwd, session } (file checked by safeFile, cwd a string or null) or null.
-function takeRestart(key) {
-  if (typeof key !== 'string' || !KEY_RE.test(key)) return null;
-  const f = path.join(dir(), '.restart', `${key}.json`);
-  if (!fs.existsSync(f)) return null;
-  const j = readJson(f);
-  try { fs.unlinkSync(f); } catch {}
+// The restart request a session left for its launcher, if any, from .restart/<key>.json: { file, cwd, session } (file
+// checked by safeFile, cwd a string or null) or null. takeRestart deletes it; peekRestart leaves it (the host's restore
+// list, saved while the session is still to be killed). restartKeys: the keys that have one now (one readdir)
+const restartFile = (key) => (typeof key === 'string' && KEY_RE.test(key) ? path.join(dir(), '.restart', `${key}.json`) : null);
+function restartOf(j) {
   if (!j || typeof j !== 'object') return null;
   const file = safeFile(j.file);
   if (!file) return null;
   return { file, cwd: typeof j.cwd === 'string' && j.cwd ? j.cwd : null, session: lowId(j.session) };
+}
+function takeRestart(key) {
+  const f = restartFile(key);
+  if (!f || !fs.existsSync(f)) return null;
+  const j = readJson(f);
+  try { fs.unlinkSync(f); } catch {}
+  return restartOf(j);
+}
+function peekRestart(key) {
+  const f = restartFile(key);
+  return f && fs.existsSync(f) ? restartOf(readJson(f)) : null;
+}
+function restartKeys() {
+  try { return new Set(fs.readdirSync(path.join(dir(), '.restart')).filter((n) => /\.json$/i.test(n)).map((n) => n.slice(0, -5))); } catch { return new Set(); }
 }
 
 // the interactive pickup command for a checked handoff file. It starts at the effort the old session had (the
@@ -289,4 +300,4 @@ function pickupCommand(file) {
   return `claude ${EFFORTS.has(effort) ? `--effort ${effort} ` : ''}"/pickup ${file}"`;
 }
 
-module.exports = { dir, limit, parseFront, readAll, pickupOf, pickupIn, successorsFromLogs, linksOf, localFile, summaryFromFile, summaryBody, summaryFromLog, newLaunchKey, safeFile, takeRestart, pickupCommand, DEFAULT_LIMIT };
+module.exports = { dir, limit, parseFront, readAll, pickupOf, pickupIn, successorsFromLogs, linksOf, localFile, summaryFromFile, summaryBody, summaryFromLog, newLaunchKey, safeFile, takeRestart, peekRestart, restartKeys, pickupCommand, DEFAULT_LIMIT };

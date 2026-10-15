@@ -115,7 +115,11 @@
 // terminal and the selection follow it to the new conversation. A session ended from here (kill, endAll,
 // "Quit everything") never restarts; its request is dropped. One still waiting for its id is saved in the
 // restore list with the handoff file, and a host that restores it resumes the picked-up conversation when the
-// handoff names it (next_session), else runs the pickup again.
+// handoff names it (next_session), else runs the pickup again. So is one whose request is there when the list is
+// saved (a restart or "Quit everything" in the seconds before its kill: it looks idle then): the next host starts
+// its pickup, never the old conversation (2026-10-15: a restart went ahead 6 s after a handoff and parked it). A
+// restore also starts the pickup of a listed conversation whose log stops right after a handoff nothing picked up
+// (leftHandoff: the same loss when the list was saved before the request, e.g. the PC went down).
 //
 // Roles: create({ role: 'bot:<id>' }) (id: 12 lowercase hex, which the server makes) starts one of the user's bots
 // (../bots.js), the sessions that oversee the others for the user. Any other value is ignored, the old 'chief' too
@@ -425,6 +429,24 @@ function runningTasks(file, now = Date.now()) {
 // Code's own filler ('<synthetic>', "No response requested.") and entries that are not user or assistant are passed
 // over. A user prompt that never got an answer does not count: a /command's output looks just like one.
 const recentLog = (file, now = Date.now()) => { try { return now - fs.statSync(file).mtimeMs < 24 * 3600e3; } catch { return false; } };
+
+// The handoff a conversation left that nothing picked up, when it was the last thing it did: its newest handoff file
+// (all: HO.readAll()) has no next session, was written in the last day, and the conversation's log stops within
+// HANDOFF_TAIL_MS after it (the handoff's tool result and last words). Its restart was lost: a restart or a shutdown
+// ended it in the seconds between the handoff and the kill that starts the pickup. A conversation that went on after
+// its handoff (opened and typed into) is left alone. Returns the handoff file (checked by HO.safeFile) or null
+const HANDOFF_TAIL_MS = 2 * 60e3;
+function leftHandoff(id, cwd, all, now = Date.now()) {
+  const rec = all.bySession.get(id);
+  const file = rec && !rec.next ? HO.safeFile(rec.file) : null;
+  if (!file) return null;
+  try {
+    const at = fs.statSync(file).mtimeMs;
+    if (now - at >= 24 * 3600e3) return null;
+    const tr = findTranscript(id, cwd);
+    return tr && fs.statSync(tr.file).mtimeMs - at <= HANDOFF_TAIL_MS ? file : null;
+  } catch { return null; }
+}
 function openTurn(file) {
   let text = '';
   try {
@@ -1447,15 +1469,27 @@ function createPtys(opts = {}) {
   // the ones to bring back after a restart: every running one, and one that ended without a clean exit (code
   // 0, e.g. /exit) and was not closed from the page. At a shutdown or reboot claude may die before this
   // process does, and its exit must not drop it from the list. Then, as they were saved, the ones the restore
-  // holds: parked, or not started yet
+  // holds: parked, or not started yet.
+  // One that has asked for its handoff's restart and is still to be killed (the few seconds after its Stop hook wrote
+  // the request, while it already looks idle) is saved as that pickup: the restart or quit that ends it here drops
+  // the request (see Handoffs), and the next host starts the pickup in its place.
   function restoreList() {
-    return [...terms.values()].filter((t) => !t.dismissed && (t.alive || (!t.isNew && t.exitCode !== 0))).map((t) => ({
-      id: t.isNew ? null : t.id, cwd: t.cwd, account: t.account, startedAt: t.startedAt, busy: isBusy(t) || !!t.cutOff,
-      interrupted: !!t.interrupted, cols: t.cols, rows: t.rows, ...(t.isNew ? { pendingKey: t.id } : {}),
-      ...(t.isNew && t.pickup ? { pickup: t.pickup, handoffFrom: t.handoffFrom || null } : {}),
-      ...(t.restartBy ? { restartBy: true } : {}),
-      ...(t.role ? { role: t.role } : {}),
-    })).concat([...held.values()].filter((h) => !(h.s.id && terms.has(h.s.id))).map((h) => h.s));
+    const asked = HO.restartKeys();
+    return [...terms.values()].filter((t) => !t.dismissed && (t.alive || (!t.isNew && t.exitCode !== 0))).map((t) => {
+      const ho = t.alive && asked.has(t.launchKey) ? HO.peekRestart(t.launchKey) : null;
+      if (ho) {
+        return { id: null, cwd: ho.cwd || t.cwd, account: t.moveTo ? t.moveTo.account : t.account, startedAt: t.startedAt, busy: false, interrupted: false,
+          cols: t.cols, rows: t.rows, pendingKey: t.id, pickup: ho.file, handoffFrom: ho.session || (ID_RE.test(t.id) ? t.id.toLowerCase() : t.handoffFrom || null),
+          ...(t.role ? { role: t.role } : {}) };
+      }
+      return {
+        id: t.isNew ? null : t.id, cwd: t.cwd, account: t.account, startedAt: t.startedAt, busy: isBusy(t) || !!t.cutOff,
+        interrupted: !!t.interrupted, cols: t.cols, rows: t.rows, ...(t.isNew ? { pendingKey: t.id } : {}),
+        ...(t.isNew && t.pickup ? { pickup: t.pickup, handoffFrom: t.handoffFrom || null } : {}),
+        ...(t.restartBy ? { restartBy: true } : {}),
+        ...(t.role ? { role: t.role } : {}),
+      };
+    }).concat([...held.values()].filter((h) => !(h.s.id && terms.has(h.s.id))).map((h) => h.s));
   }
 
   // for the restart: the running sessions that are mid-turn, but the one with this CLAUDE_LAUNCH_KEY (the asker)
@@ -1594,7 +1628,8 @@ function runHost() {
       return { interrupted, restored: true, nudge, role };
     };
     const queue = [], checks = []; // queue: [{ key, tier }], started by tier, in the list's order within one
-    let pickups = 0;
+    let pickups = 0, hos = null;
+    const handoffs = () => hos || (hos = HO.readAll()); // read once, when the first one needs it
     for (const s0 of list) {
       if (!s0 || typeof s0 !== 'object') continue;
       const role = roleOf(s0.role);
@@ -1607,7 +1642,7 @@ function runHost() {
       // a pickup that had no id yet: the conversation it started when the handoff names it, else the pickup again
       if (typeof s0.pickup === 'string' && !s.id) {
         const from = typeof s0.handoffFrom === 'string' && ID_RE.test(s0.handoffFrom) ? s0.handoffFrom.toLowerCase() : null;
-        const rec = from ? HO.readAll().bySession.get(from) : null;
+        const rec = from ? handoffs().bySession.get(from) : null;
         if (rec && rec.next && ID_RE.test(rec.next)) { s.id = rec.next.toLowerCase(); pickup = true; log(`restore: the handoff of ${from} was picked up as ${rec.next}`); }
         else if (!HO.safeFile(s0.pickup)) { log(`restore: pickup of ${s0.pickup} failed: the handoff file is gone`); continue; }
         else {
@@ -1623,6 +1658,16 @@ function runHost() {
       // another device has it now (sync, away.json): resuming it here would run it in two places
       const away = awayOf(id);
       if (away) { log(`restore: ${id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); continue; }
+      // its handoff was the last thing it did and nothing picked it up (its restart was lost): the pickup starts in
+      // its place, as for one saved while it waited for its id
+      const left = s.restartBy || pickup ? null : leftHandoff(id, s.cwd, handoffs());
+      if (left) {
+        const key = `pickup:${++pickups}`;
+        ptys.hold(key, { ...s, id: null, busy: false, interrupted: false, pickup: left, handoffFrom: id }, null);
+        queue.push({ key, tier: 2 });
+        log(`restore: ${id} handed off to ${path.basename(left)} and nothing picked it up; the pickup starts`);
+        continue;
+      }
       const interrupted = !!(s.busy || s.interrupted);
       const tier = s.restartBy || id === shown ? 0 : interrupted ? 1 : role || pickup ? 2 : restoreIdle ? 4 : -1;
       const extra = extraFor(id, s, interrupted, role);
@@ -1670,7 +1715,7 @@ function runHost() {
         if (!s.id) {
           try { r = ptys.startPickup(s.handoffFrom, HO.safeFile(s.pickup), { cwd: s.cwd, account: s.account, cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: s.handoffFrom, role: s.role }); } catch (e) { r = { ok: false, message: e.message }; }
           if (!r.ok) { keep(`failed: ${r.message}`); return 'failed'; }
-          log(`restore: pickup of ${s.pickup} started again (pid ${r.pid})`);
+          log(`restore: pickup of ${s.pickup} started (pid ${r.pid})`);
           return 'ok';
         }
         if (openNow().has(s.id)) { keep('is open in another claude'); return 'skipped'; }
