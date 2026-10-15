@@ -2559,10 +2559,11 @@ function openContextMenu(target, x, y) {
     if (desk) {
       // every account that is on, however little of its weekly or 5-hour limit is left (Henry, 2026-10-10),
       // less those with none left at all (Henry, 2026-10-10); all of them out: one greyed line saying so. One line,
-      // "New session ▸ Claude A / B ...", the account picked in its submenu (Henry, 2026-10-13)
+      // "New session ▸ Claude A / B ...", the account picked in its submenu (Henry, 2026-10-13); only one usable (the
+      // rest off or out): a plain "New session" on it, its tag showing which (Henry, 2026-10-15)
       const all = allAccounts(), ok = onAccounts().filter((a) => !acctOut(a));
       if (!ok.length) items.push({ label: 'New session', icon: 'plus', disabled: true, note: 'every account is out of its limit' });
-      else if (all.length === 1) items.push({ label: 'New session', icon: 'plus', run: () => newSession(folder, ok[0]) });
+      else if (ok.length === 1) items.push({ label: 'New session', icon: 'plus', ...(all.length > 1 ? { tag: ok[0] } : {}), run: () => newSession(folder, ok[0]) });
       else items.push({ label: 'New session', icon: 'plus', children: ok.map((a) => ({ label: `Claude ${a}`, tag: a, run: () => newSession(folder, a) })) });
     }
     const rIt = { root: repoRootOf({ root: folder }), name: target.name || repo.name || repoName(folder) };
