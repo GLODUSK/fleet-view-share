@@ -5,38 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Fleet View</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1l7 7-7 7-7-7z' fill='%23ff6a2b'/%3E%3C/svg%3E">
+<script src="head.js"></script>
 <link rel="stylesheet" href="app.css">
-<link rel="stylesheet" href="views.css" onerror="this.remove()">
-<link rel="stylesheet" href="chat.css" onerror="this.remove()">
-<link rel="stylesheet" href="compose.css" onerror="this.remove()">
-<link rel="stylesheet" href="changes.css" onerror="this.remove()">
-<link rel="stylesheet" href="preview.css" onerror="this.remove()">
-<link rel="stylesheet" href="viewer.css" onerror="this.remove()">
-<link rel="stylesheet" href="usage.css" onerror="this.remove()">
-<link rel="stylesheet" href="sync.css" onerror="this.remove()">
-<link rel="stylesheet" href="clone.css" onerror="this.remove()">
-<link rel="stylesheet" href="setup.css" onerror="this.remove()">
-<link rel="stylesheet" href="phone.css" onerror="this.remove()">
-<link rel="stylesheet" href="housekeeping.css" onerror="this.remove()">
-<link rel="stylesheet" href="mascot.css" onerror="this.remove()">
-<link rel="stylesheet" href="chats.css" onerror="this.remove()">
-<link rel="stylesheet" href="botnote.css" onerror="this.remove()">
+<link rel="stylesheet" href="views.css">
+<link rel="stylesheet" href="chat.css">
+<link rel="stylesheet" href="compose.css">
+<link rel="stylesheet" href="changes.css">
+<link rel="stylesheet" href="preview.css">
+<link rel="stylesheet" href="viewer.css">
+<link rel="stylesheet" href="usage.css">
+<link rel="stylesheet" href="sync.css">
+<link rel="stylesheet" href="clone.css">
+<link rel="stylesheet" href="setup.css">
+<link rel="stylesheet" href="phone.css">
+<link rel="stylesheet" href="housekeeping.css">
+<link rel="stylesheet" href="mascot.css">
+<link rel="stylesheet" href="chats.css">
+<link rel="stylesheet" href="botnote.css">
 <script src="boot.js"></script>
-<script>
-  // glass: the desktop window (Electron, ?glass=1) has acrylic behind the page, so the page goes see-through.
-  // titlebar: that window has no title bar of its own (titlebar=overlay from desktop/main.js); the header is
-  // the drag region and leaves room on the right for the native min / max / close buttons.
-  // solo: the Bots pop-out window (?solo=chats): only the Bots view, under its own small header (chats.css).
-  // mac: the desktop window on a Mac (or ?mac=1): its vibrancy is darker than Windows acrylic, so the glass tints are lighter.
-  (function () {
-    var q = location.search, h = document.documentElement, electron = navigator.userAgent.indexOf('Electron') >= 0;
-    if (/[?&]glass=1(&|$)/.test(q) || electron) h.classList.add('glass');
-    var wco = navigator.windowControlsOverlay;
-    if (electron && (/[?&]titlebar=overlay(&|$)/.test(q) || (wco && wco.visible))) h.classList.add('titlebar');
-    if (/[?&]solo=chats(&|$)/.test(q)) h.classList.add('solo');
-    if (/[?&]mac=1(&|$)/.test(q) || (electron && /Mac/.test(navigator.platform || navigator.userAgent))) h.classList.add('mac');
-  })();
-</script>
 </head>
 <body>
 <header class="top">

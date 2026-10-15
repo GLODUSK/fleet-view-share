@@ -188,7 +188,7 @@ export function planSteps(steps, tight = false) {
 export function prTag(s) {
   const pr = s.ship?.pr;
   if (!pr) return '';
-  return urlLink(linksOf(s).pr, `<span class="pr${s.ship.fresh ? ' dim' : ''}">${icon('pr', 13)}${s.ship.fresh ? 'last ' : ''}#${pr}</span>`, `open PR #${pr} on GitHub`);
+  return urlLink(linksOf(s).pr, `<span class="pr${s.ship.fresh ? ' dim' : ''}">${icon('pr', 13)}${s.ship.fresh ? 'last ' : ''}#${esc(pr)}</span>`, `open PR #${pr} on GitHub`);
 }
 
 // the track: plan or ship progress, gradient ember -> gold -> mint, mint once done

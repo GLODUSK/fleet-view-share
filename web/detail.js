@@ -455,7 +455,7 @@ function shipHtml(s) {
   const pr = s.ship?.pr;
   let h = head('push', 'Ship') + `<div class="d-line">${shipTrack(s.ship, false, l)}</div>`;
   const bits = [];
-  if (pr) bits.push(urlLink(l.pr, `<span class="d-link${s.ship.fresh ? ' dim' : ''}">${icon('pr', 13)}${s.ship.fresh ? 'last ' : ''}PR #${pr}${l.pr ? icon('external', 11) : ''}</span>`, `open PR #${pr} on GitHub`));
+  if (pr) bits.push(urlLink(l.pr, `<span class="d-link${s.ship.fresh ? ' dim' : ''}">${icon('pr', 13)}${s.ship.fresh ? 'last ' : ''}PR #${esc(pr)}${l.pr ? icon('external', 11) : ''}</span>`, `open PR #${pr} on GitHub`));
   const checks = steps.find(([k]) => k === 'checks');
   if (pr && checks && CHECKS[checks[1]]) {
     const [word, col, ic] = CHECKS[checks[1]];

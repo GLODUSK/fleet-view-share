@@ -302,7 +302,7 @@ function rowHtml(state, c, now, node) {
   return `<button type="button" class="ch-row${on ? ' on' : ''}${ask ? ' needs' : ''}${un ? ' unread' : ''}${!team && !c.id ? ' ghost' : ''}${depth ? ' nest' : ''}${team ? ' grp' : ''}${shut ? ' shut' : ''}" role="option" aria-selected="${on}"`
     + ` data-key="${esc(c.key)}"${pinned ? ' data-pin="1"' : ''}${c.id ? ` data-id="${esc(c.id)}"` : ''}${c.teamId ? ` data-team="${esc(c.teamId)}"` : ''}${c.botId ? ` data-bot="${esc(c.botId)}"` : ''}`
     + ` data-depth="${depth}"${node && node.parent ? ` data-parent="${esc(node.parent)}" data-path="${esc(node.path.join(' '))}"` : ''}${mem ? ` data-member="${esc(mem.memberId)}"` : ''}`
-    + ` style="--rc:${esc(colorOf(c))};--dep:${depth}" title="${esc(c.name || '')}${mem && mem.lead ? ` leads ${par.name}` : ''}${team ? ` · ${n} member${n === 1 ? '' : 's'}` : ''}">`
+    + ` style="--rc:${esc(colorOf(c))};--dep:${depth}" title="${esc(c.name || '')}${mem && mem.lead ? ` leads ${esc(par.name)}` : ''}${team ? ` · ${n} member${n === 1 ? '' : 's'}` : ''}">`
     + fold
     + `<span class="ch-av"${team ? '' : ` title="${esc(doingTip(c))}"`}>${avatar(state, c, depth ? 32 : 40)}</span>`
     + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${mem && mem.lead ? '<span class="ch-star" aria-label="lead">★</span>' : ''}${esc(c.name || 'bot')}</span>${depth ? role : ''}`

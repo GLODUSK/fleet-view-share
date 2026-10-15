@@ -165,19 +165,8 @@ function segmenter(token) {
   return me;
 }
 
-// collects the mic's samples into 30 ms frames, off the page's thread
-const TAP = `registerProcessor('fv-tap', class extends AudioWorkletProcessor {
-  constructor() { super(); this.buf = new Float32Array(${FRAME}); this.n = 0; }
-  process(inputs) {
-    const ch = inputs[0] && inputs[0][0];
-    if (ch) for (let i = 0; i < ch.length; i++) {
-      this.buf[this.n++] = ch[i];
-      if (this.n === ${FRAME}) { this.port.postMessage(this.buf); this.buf = new Float32Array(${FRAME}); this.n = 0; }
-    }
-    return true;
-  }
-});`;
-let tapUrl = null;
+// collects the mic's samples into 30 ms frames, off the page's thread (voice-tap.js)
+const TAP_URL = new URL('./voice-tap.js', import.meta.url).href;
 
 // ----- one dictation at a time -----
 let cur = null; // { token, stream, ctx, seg }
@@ -208,11 +197,10 @@ export async function startVoice() {
     });
     if (cur !== me) { for (const t of me.stream.getTracks()) t.stop(); return { ok: false, message: 'stopped' }; }
     me.ctx = new AudioContext({ sampleRate: SR });
-    if (!tapUrl) tapUrl = URL.createObjectURL(new Blob([TAP], { type: 'text/javascript' }));
-    await me.ctx.audioWorklet.addModule(tapUrl);
+    await me.ctx.audioWorklet.addModule(TAP_URL);
     if (cur !== me) { try { me.ctx.close(); } catch {} for (const t of me.stream.getTracks()) t.stop(); return { ok: false, message: 'stopped' }; }
     const src = me.ctx.createMediaStreamSource(me.stream);
-    const tap = new AudioWorkletNode(me.ctx, 'fv-tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
+    const tap = new AudioWorkletNode(me.ctx, 'fv-tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, processorOptions: { frame: FRAME } });
     const mute = me.ctx.createGain();
     mute.gain.value = 0; // the graph has to reach the speakers to run; it does so silently
     tap.port.onmessage = (e) => { if (cur === me) me.seg.push(e.data); };

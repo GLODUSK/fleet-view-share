@@ -6,15 +6,7 @@
 <title>Fleet View mini</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1l7 7-7 7-7-7z' fill='%23ff6a2b'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="mini.css">
-<script>
-  // glass: the desktop mini window (Electron, ?glass=1) has acrylic behind the page, so the page goes see-through
-  (function () {
-    var h = document.documentElement;
-    if (/[?&]glass=1(&|$)/.test(location.search) || navigator.userAgent.indexOf('Electron') >= 0) h.classList.add('glass');
-    if (/[?&]mac=1(&|$)/.test(location.search) || (navigator.userAgent.indexOf('Electron') >= 0 && /Mac/.test(navigator.platform || navigator.userAgent))) h.classList.add('mac');
-    if (window.fleetDesktop && window.fleetDesktop.isDesktop) h.classList.add('desktop');
-  })();
-</script>
+<script src="mini-head.js"></script>
 </head>
 <body>
 <header id="bar" class="bar">

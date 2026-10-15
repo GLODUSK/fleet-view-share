@@ -1,6 +1,8 @@
 // The chat box's mic, part 2: Whisper speech-to-text running on this PC, in a worker so the page never stalls.
 // voice.js sends it what was said, one stretch of speech at a time; nothing leaves the machine except the one-time
-// download of the library and the model (then both come from the browser's cache).
+// download of the model (then it comes from the browser's cache). The library (transformers.js and the onnxruntime
+// files it loads) comes from Fleet View's own server, which downloads it once and checks it against pinned hashes
+// (vendor-cache.js): it never runs code straight from a CDN.
 //   in:  { t: 'load' }                                  get the model ready (voice.js sends it on the first mic click)
 //        { t: 'run', id, audio: Float32Array (16 kHz mono), interim? }
 //                                interim: a preview of a stretch still being said. It is skipped (answered '') when
@@ -10,7 +12,8 @@
 //        { t: 'ready', device, model }
 //        { t: 'text', id, text, interim }  for each run, in order ('' when nothing was said)
 //        { t: 'error', text }     the model could not load (every later run answers '' and repeats it)
-const LIB = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/transformers.min.js';
+// the pinned set vendor-cache.js serves: GET it first (it is downloaded and checked then, or says why not), then the files
+const LIB_DIR = new URL('/vendor-cache/transformers-3.8.1/', self.location.href).href;
 // on the graphics card (WebGPU) the small English model, which hears better; on the CPU the base one, which keeps up
 const GPU = { model: 'onnx-community/whisper-small.en', dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' } };
 const GPU_F16 = { model: GPU.model, dtype: { encoder_model: 'fp16', decoder_model_merged: 'q4' } };
@@ -44,8 +47,12 @@ async function gpuPlan() {
 function load() {
   if (!loading) {
     loading = (async () => {
-      const { pipeline, env } = await import(LIB);
+      const lib = await fetch(LIB_DIR, { cache: 'no-store' }).then((r) => r.json()).catch(() => null);
+      if (!lib || !lib.ok) throw new Error((lib && lib.message) || 'Fleet View did not answer for the speech library');
+      const { pipeline, env } = await import(LIB_DIR + 'transformers.min.js');
       env.allowLocalModels = false;
+      // its onnxruntime files from there too (by default it takes them from the CDN)
+      if (env.backends && env.backends.onnx && env.backends.onnx.wasm) env.backends.onnx.wasm.wasmPaths = LIB_DIR;
       const gpu = await gpuPlan();
       if (gpu) {
         try {

@@ -81,6 +81,7 @@ const COVERS = [
   [/^scripts\/merge-lane\.js$/, ['scripts/merge-lane-test.js']],
   [/^bot\//, ['scripts/bot-tasks-test.mjs', 'scripts/bots-test.mjs']],
   [/^mod\/fleet-view-feed\//, ['scripts/feed-mod-update-test.js']],
+  [/^web\/[^/]+\.js$/, ['scripts/html-escape-test.js']], // it reads every web/*.js, naming none
 ];
 
 // ---------- the checkout's files and who loads what ----------
