@@ -193,7 +193,7 @@ button { font: inherit; color: inherit; }
 .link-btn { flex: none; background: none; border: 0; padding: 4px 6px 0; margin: 0; font: 11.5px/1.45 var(--font-ui); color: var(--dim); cursor: pointer; text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 2px; }
 .link-btn:hover { color: var(--text); text-decoration-color: var(--dim); }
 .ctx-in-foot .link-btn { padding-top: 6px; }
-/* a one-line path box (the right-click menu's "Paste path") */
+/* a one-line path box (the right-click menu's "Path") */
 .path-input {
   display: block; width: 100%; box-sizing: border-box; height: 30px; padding: 0 10px;
   background: rgba(255, 255, 255, 0.045); border: 1px solid var(--glass-edge); border-radius: var(--radius-sm);

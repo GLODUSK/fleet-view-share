@@ -148,7 +148,7 @@
 // Renaming a workspace: "Rename" on its right-click (map hub, repo chip) names it in Fleet View only
 // (settings.repoNames, [{ root, name }]; the folder stays as it is); the name shows wherever its folder's name would
 // (repoName, applyRepoNames on /state's names); an empty name goes back to the folder's. One Undo.
-// Adding a repo ("Add workspace ▸" on empty space's right-click) offers three ways: "Paste path" (a path box; quotes
+// Adding a repo ("Add workspace ▸" on empty space's right-click) offers three ways: "Path" (a path box; quotes
 // around a pasted path are dropped, forward slashes are fine), "New scratchpad" (POST /repos/scratch: the server makes
 // an empty scratch-YYYY-MM-DD folder under ~/Scratchpads and adds it) and "Browse" (the Windows folder dialog in the
 // desktop window, elsewhere pcfiles.js's in-page one over GET /folders: the PC's folders, the same on this PC's Edge
@@ -1173,7 +1173,7 @@ function addRepoMenuItem(at = null) {
   return {
     label: 'Add workspace', icon: 'plus',
     children: [
-      { label: 'Paste path', icon: 'plus', input: { placeholder: ADD_HINT, hint: 'Enter adds · Esc closes', submit: (text) => addRepoPath(text, at) } },
+      { label: 'Path', icon: 'plus', input: { placeholder: ADD_HINT, hint: 'Enter adds · Esc closes', submit: (text) => addRepoPath(text, at) } },
       { label: 'New scratchpad', icon: 'plus', note: 'an empty folder', run: () => addScratchRepo(at) },
       canPickFolder() ? { label: 'Browse', icon: 'folder', run: () => pickAndAddRepo(at) } : { label: 'Browse', icon: 'folder', disabled: true, note: 'not with fixture data' },
     ],
