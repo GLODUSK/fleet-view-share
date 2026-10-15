@@ -55,8 +55,8 @@
 // A small soft moon (MOON_*) shows tonight's real phase (lit from the right while waxing, the left while waning, a
 // faint earthshine on its dark side, a halo as bright as it is full) and crosses the top of the screen with the local
 // clock, east (left) to west: it lags the sun by its phase (full rises at dusk, last quarter is high at dawn), sets
-// below the horizon and fades out by day. It slides with the pan as the stars do (a long pan takes it off one side and
-// back in from the other); worked out once a minute, painted once per phase.
+// below the horizon and fades out by day. It holds still on pan as the stars do (it slides STAR_PAN of the pan, wrapping
+// off one side and back in from the other); worked out once a minute, painted once per phase.
 // Satellites (SAT_*; Henry asked for them): one small steady point, a little warm, for each background agent or
 // workflow agent running on the map (at most SAT_N), drifting slowly across the upper sky on a straight, slightly
 // tilted path (a minute or two to cross the window) with a faint red or white beacon blink every couple of seconds, so
@@ -224,7 +224,7 @@
 // The faint back layer is a tile repeated; the two front ones, sparse and bright enough that a repeat would show,
 // never repeat when the graphics card draws them: it places their stars itself, at most one per cell of a grid,
 // each cell's star (or none) from a hash of the cell (STAR_FIELD_GLSL). The canvas repeats a tile for all three.
-// Deeper still (DEEP_*), following even less of the pan: a faint Milky Way band (a soft glow cut by dark dust lanes,
+// Deeper still (DEEP_*), holding still on pan like the stars: a faint Milky Way band (a soft glow cut by dark dust lanes,
 // with fine star dust where it is dense), a few big dim gas clouds and three tiny far galaxies (DEEP_GALAXIES: a
 // tilted two-armed spiral, an edge-on one and a fuzzy elliptical), painted once, at fixed brightness.
 // Under the stars a faint sky tint follows the local clock (SKY_KEYS: indigo night, rose dawn, clear day, amber dusk);
@@ -495,8 +495,8 @@ const WT_MAX = 16;                  // worktree satellites drawn per hub
 // drift in px/s.
 // A layer's scale is zoom^(depth * STAR_ZOOM); STAR_ZOOM is 0 (Henry 2026-10-14: the sky is far away, so zooming leaves the
 // stars, the deep sky's galaxies and the space events exactly where they are; zoomAt keeps them from sliding too).
-// Every layer, the deep sky and the space events slide STAR_PAN of the px the pan moves the map, all alike (Henry
-// 2026-10-14: "if im moving the camera i should just see more space ... without ... feeling parallax-y"); what only
+// Every layer, the deep sky and the space events slide STAR_PAN of the px the pan moves the map, all alike; STAR_PAN
+// is 0 (Henry 2026-10-15: the sky holds still on pan, the map slides over it, as on zoom); what only
 // makes up for a panel or a resize (holdPan, keepIn's glide) never moves them ("nothing that is happening in the bg
 // should be affected by this chat box"). A layer's and an event's depth only tells how it drifts.
 // cl: [loose clusters per tile, their share of the stars, spread in px]; sparkle: how many are tiny 4-point sparkles.
@@ -504,7 +504,7 @@ const WT_MAX = 16;                  // worktree satellites drawn per hub
 // per square of cell px, at the tile's density and mix; its stars repeat only every STAR_WRAP px, and its clusters
 // become a gentle unevenness (cl's share of the stars gathers in some squares of STAR_SUPER px). STAR_EDGE: how far
 // (px) a made star keeps from its cell's edges, so its glow and sparkle are never cut. The canvas repeats all three tiles.
-const STAR_TILE = 512, STAR_ZOOM = 0, STAR_PAN = 1, STAR_DIR = [0.83, 0.56], STAR_WRAP = 32768, STAR_SUPER = 256, STAR_EDGE = 5;
+const STAR_TILE = 512, STAR_ZOOM = 0, STAR_PAN = 0, STAR_DIR = [0.83, 0.56], STAR_WRAP = 32768, STAR_SUPER = 256, STAR_EDGE = 5;
 const STAR_LAYERS = [
   { depth: 0.15, n: 46, r: [0.45, 0.8], a: [0.12, 0.3], drift: 0.8, seed: 11, cl: [3, 0.45, 34] },
   { depth: 0.35, n: 20, r: [0.6, 1.0], a: [0.16, 0.38], drift: 1.8, seed: 23, cl: [2, 0.35, 46], sparkle: 1, cell: 32, twinkle: 0.15 },
@@ -577,7 +577,7 @@ const LUNAR_ECLIPSES = [['2026-03-03T11:34:52', 1.151, 207, 58], ['2026-08-28T04
   ['2033-10-08T10:56:23', 1.35, 202, 79], ['2034-09-28T02:47:37', 0.014, 27, 0], ['2035-08-19T01:12:15', 0.104, 77, 0]];
 const ECL_DT = 72, ECL_RU = 2.7, ECL_RED = [178, 74, 38], ECL_TOT = 0.5, ECL_PART = 0.1, ECL_PEN = 0.3;
 // the deep sky (see "Look"), the sky's deepest layer, under the stars: a texture of DEEP_W x DEEP_H painted once,
-// each texel DEEP_PX CSS px, sliding with the pan as the stars do and drifting DEEP_DRIFT px/s; DEEP_A is its brightest
+// each texel DEEP_PX CSS px, holding still on pan as the stars do and drifting DEEP_DRIFT px/s; DEEP_A is its brightest
 // light. Its star dust is a DUST_T device px tile of DUST_N specks, as bright as DUST_A where the band is densest.
 const DEEP_W = 512, DEEP_H = 256, DEEP_PX = 8, DEEP_DEPTH = 0.06, DEEP_DRIFT = 0.3, DEEP_A = 0.07;
 const DUST_T = 512, DUST_N = 2600, DUST_A = 0.3;
@@ -3315,8 +3315,8 @@ function starTile(L, dpr) {
 const starPos = new Float64Array(STAR_LAYERS.length * 3), starWide = new Float64Array(STAR_LAYERS.length * 2);
 // the sky's camera this frame: how far (cx, cy, CSS px) the sky has slid, and the field's middle (mx, my, CSS px of
 // the window), which it scales about. Each change of the camera's middle (the pan, less what holdPan took back out)
-// slides the sky STAR_PAN of the px it moves the map at the zoom then, so a drag carries the stars with the orbs and a
-// zoom leaves them where they are. Before the Map ever showed (no camera yet) the sky has not slid; on the other views
+// slides the sky STAR_PAN of the px it moves the map at the zoom then; with STAR_PAN 0 a drag and a zoom both leave
+// the stars where they are while the orbs slide over them. Before the Map ever showed (no camera yet) the sky has not slid; on the other views
 // it stays where the map's pan last left it
 function skyCam() {
   let sp = I.skyPan;
