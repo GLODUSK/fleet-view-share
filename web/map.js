@@ -134,7 +134,9 @@
 // shows: a soft rim of the air's colour on the disc and a glow round it that thins outwards, brightest towards its star,
 // and lit right round when the star is behind it. Some have rings (banded, with gaps, the planet's shadow across them, the
 // near side over the planet and the far side behind it) and some a small moon going round them, in front and then behind.
-// It is far: its colours take a share of the sky's haze (PLANET_HAZE), and it hides the stars behind it (its night side too).
+// It is far (Henry, 2026-10-15: "too close and not pushed back enough"): a small world (PLANET_R), its colours taking a share
+// of the sky's haze (PLANET_HAZE), its edge soft, seen through the far veil (below); it hides most of the stars behind it
+// (its night side too).
 // The space battle (event 'battle', BATTLE_*; Henry, 2026-10-14: "add ship battles in the background or them interacting with
 // each other...make it interesting"): two small fleets, far off and hazed like the capital ship (the same hull, smaller), one
 // with a cool blue light and one with a warm red, drop out of hyperspace one ship after another (the rift and flash of the
@@ -145,13 +147,35 @@
 // lines, each chased by one of the other side's on its own looping path, firing tracers, and now and then one bursts.
 // Then one ship loses: explosions run along its hull, fires take, it breaks in two with a big flash, a shock ring and a
 // spray of debris, and its halves tumble apart, burning, until each goes up in a last burst of debris. The fighters
-// fly home and the survivors jump away into rifts of their own. Nothing in it is ever still. The canvas fallback shows none.
+// fly home and the survivors jump away into rifts of their own. Nothing in it is ever still. Small (BATTLE_R) and seen through the
+// far veil, its flashes muted. The canvas fallback shows none.
 // The devouring (DEVOUR_*): while the gravity lens is up, the capital ship or a planet that comes within DEVOUR_REACH of it is
 // caught (once there is time left for it): it is drawn off its path into a spiral round the hole, faster and faster,
 // stretched along the way it falls (spaghettified), heating red then white, its air (or for the ship, its burning hull)
 // torn off in a glowing stream that winds in ahead of it to the ring, until it shrinks into the ring and is gone; the ring
 // then flares and the hole fires two thin jets, knots racing out along them, that fade over a few seconds. The black hole
 // keeps on its way. Logged as 'devour' (switch it off to keep them apart).
+// The far veil (VEIL_*; Henry, 2026-10-15: make it all sit back "like the haze effect we did for the ships"): the planet, the
+// battle and the star system are each drawn through it (VEIL_GLSL farVeil), as the capital ship is through its own haze: the
+// colours greyed and pulled towards the sky's haze, a little of the sky behind showing through, and drifting patches of
+// mist thinning them more, so they read as a long way off, behind the map, never competing with the orbs and hubs.
+// The star system (event 'system', SYSTEM_*; Henry, 2026-10-15: "systems that have multiple stars and planets that dont
+// necessarily need to have atmosphere but should still be in the distance"): a whole far system takes a few minutes to drift
+// across the sky at the far star layer's depth, its orbits' plane seen at a slant. One star, a close pair going round each
+// other, or a pair with a third far out, each of a class (blue, white, yellow, orange, red dwarf, white dwarf) with a soft
+// glow; two to seven small planets on its orbits, rock and rust worlds inside, oceans and ice further out, gas and ice giants
+// outermost (some with rings), each going round at its Kepler pace (the inner ones fast), lit on the side towards its
+// brightest star, passing in front of and behind the stars, each with a faint arc trailing behind it along its orbit; maybe
+// an asteroid belt between two orbits, or a young system's dusty disc with a gap. It is all small, dim and through the far
+// veil. One a voyage brings (below) grows in at the voyage's point and drifts out from there.
+// The voyage (event 'voyage', VOYAGE_*, and places, PLACE_*; Henry: "maybe to go to these places we can do an animation of
+// transition, the galaxy in the bg can change"): rare. The stars stretch into streaks radiating from a point (the star system
+// up, if it is on the window, which swells as we fly to it, else a spot near the middle), each along its own ray, longer
+// further out, while the deep sky zooms in a little, the other sights and the deep sky dimming and a soft glow growing at the point; at the dimmest moment the sky becomes another place: a deep sky of
+// its own (deepPaint: the band turned and tinted, its width, light and dust lanes picked, a few coloured clouds and far
+// galaxies) and its stars laid out afresh, every event up then ends, hidden in the dimming; then the light comes back, and a
+// star system arrives at the point with a faint flash and drifts away. The place is kept (fv.skyPlace) until the next
+// voyage; home (0) is the Milky Way. The next place is painted a slice a frame while the voyage runs, so it never stalls.
 // Far events (FAR_*; Henry 2026-10-14: everything in his list of space events beyond our galaxy, "more like BG happening",
 // logged so he can ask what one was): a second, quieter director with its own clock (FAR_GAP, about once a minute, one
 // at a time, beside the space events above) shows every kind in web/sky-far.js's catalog once, in a shuffled order,
@@ -696,15 +720,15 @@ const WARP_TURN = 0.3, WARP_AT = [0.3, 0.7], WARP_RADIAL = 0.3;
 // PLANET_RING: their inner and outer radius (in the planet's) and how open they are seen (the sine of the view's height over
 // them, a pick); PLANET_MOON_P: the chance of a moon, PLANET_MOON: its radius (in the planet's), its orbit's (in the
 // planet's) and its period (s), picks. PLANET_HAZE: the share of its colour the far haze takes (SHIP_HAZE), PLANET_A: how
-// much of the sky behind it hides, PLANET_GLOW: its air's glow's alpha, PLANET_LIGHT: its day side's brightness. PLANET_KINDS: per kind, [its first colour, its
+// much of the sky behind it hides, PLANET_GLOW: its air's glow's alpha, PLANET_LIGHT: its day side's brightness, PLANET_SOFT: how many device px softer its edge is (far off). PLANET_KINDS: per kind, [its first colour, its
 // second, its air's colour (rgb 0-1), the air's thickness (share of the radius)]: 0 a gas giant, 1 an ocean world, 2 an
 // ice giant, 3 a haze world, 4 a rust desert (the shader's planetSurf by number)
 const PLANET_DEPTH = EVENT_DEPTH.far;
-const PLANET_MS = [130e3, 190e3], PLANET_R = [48, 118], PLANET_TURN = 0.5, PLANET_OFF = 0.3;
+const PLANET_MS = [130e3, 190e3], PLANET_R = [30, 68], PLANET_TURN = 0.5, PLANET_OFF = 0.3;
 const PLANET_SPIN = [0.03, 0.065], PLANET_CLOUD = 1.6, PLANET_TILT = 0.45, PLANET_LIT = [-0.2, 0.62], PLANET_BACK_P = 0.25, PLANET_BACK = [-0.88, -0.55];
 const PLANET_RING_P = 0.5, PLANET_RING = { in: [1.25, 1.45], out: [1.9, 2.4], open: [0.14, 0.36] };
 const PLANET_MOON_P = 0.55, PLANET_MOON = { r: [0.1, 0.17], d: [1.7, 2.5], per: [45, 80] };
-const PLANET_HAZE = 0.34, PLANET_A = 0.95, PLANET_GLOW = 0.55, PLANET_LIGHT = 0.55;
+const PLANET_HAZE = 0.42, PLANET_A = 0.95, PLANET_GLOW = 0.45, PLANET_LIGHT = 0.48, PLANET_SOFT = 1.6;
 const PLANET_KINDS = [
   [[0.93, 0.83, 0.66], [0.72, 0.46, 0.3], [1, 0.84, 0.62], 0.05], // a gas giant: cream zones, rust belts
   [[0.06, 0.2, 0.46], [0.34, 0.4, 0.22], [0.42, 0.66, 1], 0.085], // an ocean world: deep sea, green-brown land, blue air
@@ -727,7 +751,7 @@ const PLANET_KINDS = [
 // and BATTLE_BLASTS blasts drawn (the shader has a slot for each)
 const BATTLE_DEPTH = EVENT_DEPTH.far;
 const BATTLE_MS = [80e3, 110e3], BATTLE_AT = [0.22, 0.78], BATTLE_TILT = 0.22, BATTLE_GAP = [2.6, 3.4], BATTLE_V = [2.2, 3.6], BATTLE_X = [2.4, 3.4];
-const BATTLE_R = [32, 46], BATTLE_ESCORT = [0.42, 0.55], BATTLE_ESCORT_P = 0.6, BATTLE_ARRIVE = [900, 1800];
+const BATTLE_R = [24, 34], BATTLE_ESCORT = [0.42, 0.55], BATTLE_ESCORT_P = 0.6, BATTLE_ARRIVE = [900, 1800];
 const BATTLE_VOLLEY = [3, 6], BATTLE_FIRE = [1600, 3400], BATTLE_BOLT = [11, 260];
 const BATTLE_TORP = [7000, 13000], BATTLE_TORP_V = 70, BATTLE_PD = 0.4;
 const BATTLE_FIGHTERS = [2, 4], BATTLE_CHASE = 0.55, BATTLE_TRACER = [500, 1100], BATTLE_DOWN = 0.5;
@@ -743,6 +767,53 @@ const BATTLE_HULLS = 4, BATTLE_STREAKS = 16, BATTLE_BLASTS = 10;
 // starting while the other is up is aimed to cross it
 const DEVOUR_REACH = 3.4, DEVOUR_MS = [12e3, 16e3], DEVOUR_EASE = 0.22, DEVOUR_TURNS = 1.35, DEVOUR_STRETCH = 2.4;
 const DEVOUR_WIND = 1.15, DEVOUR_STREAM = 0.55, DEVOUR_RING = 3, DEVOUR_JET = 4.5, DEVOUR_JET_A = 0.4, DEVOUR_FLARE = 8000, DEVOUR_AIM_P = 0.75;
+// the far veil (see "Look"): what the far sights (planet, battle, star system) look through. Per sight [hz, cov]: hz how
+// much its colour is greyed and pulled into the haze (SHIP_HAZE, VEIL_LIFT times as light), cov how much of the sky behind it
+// still hides; drifting patches of mist VEIL_MIST CSS px across thin it by up to VEIL_THIN
+const VEIL_LIFT = 1.5, VEIL_MIST = 110, VEIL_THIN = 0.3;
+const VEIL_PLANET = [0.3, 0.8], VEIL_BATTLE = [0.35, 0.8], VEIL_SYSTEM = [0.42, 0.78];
+// the star system (see "Look"): it crosses the window in SYSTEM_MS ms (a pick) at SYSTEM_DEPTH, its outermost orbit SYSTEM_R CSS
+// px across its long axis (a pick), along a straight path turned up to SYSTEM_TURN radians off level, off the window's middle
+// by up to SYSTEM_OFF of its height; one arriving after a voyage drifts out from where it arrived at SYSTEM_SLOW of that speed,
+// growing in over SYSTEM_ARRIVE ms. Its orbits' plane is seen SYSTEM_OPEN open (the sine of our height over it, a pick, either
+// way), rolled up to SYSTEM_ROLL radians. SYSTEM_STARS: the chance of one, two or three stars; SYSTEM_CLASS: per star class
+// [rgb, radius (CSS px), light, weight] (blue, white, yellow, orange, red dwarf, white dwarf); a pair orbits at SYSTEM_SEP of the
+// outer orbit (a pick) every SYSTEM_PAIR s (a pick), a third star far out at SYSTEM_THIRD of it. SYSTEM_PLANETS: how many (a
+// pick, fewer round a dusty disc), from SYSTEM_IN of the outer orbit out (and past a pair's reach), each orbit SYSTEM_STEP times
+// the last (a pick); the innermost goes round in SYSTEM_T0 s (a pick) and the rest by Kepler (period ~ radius^1.5).
+// SYSTEM_KINDS: per kind [rgb, radius CSS px, chance of rings, where it lives (0 inside, 1 outside)]: rock, rust, ocean, ice,
+// gas giant, ice giant. SYSTEM_BELT_P: the chance of an asteroid belt between two orbits, SYSTEM_DISC_P of a young system's
+// dusty disc; SYSTEM_TRAIL: the alpha of the faint arc each planet leaves behind it along its orbit
+const SYSTEM_DEPTH = EVENT_DEPTH.far;
+const SYSTEM_MS = [150e3, 220e3], SYSTEM_R = [62, 118], SYSTEM_TURN = 0.5, SYSTEM_OFF = 0.3, SYSTEM_SLOW = 0.45, SYSTEM_ARRIVE = 5000;
+const SYSTEM_OPEN = [0.2, 0.5], SYSTEM_ROLL = 0.5, SYSTEM_STARS = [0.5, 0.38, 0.12];
+const SYSTEM_CLASS = [
+  [[0.66, 0.76, 1], 1.9, 1.25, 0.8], [[0.9, 0.93, 1], 1.6, 1.05, 1.2], [[1, 0.93, 0.78], 1.5, 0.95, 1.6],
+  [[1, 0.76, 0.5], 1.35, 0.85, 1.4], [[1, 0.52, 0.34], 1.15, 0.7, 1.2], [[0.86, 0.9, 1], 0.8, 0.8, 0.35],
+];
+const SYSTEM_SEP = [0.07, 0.13], SYSTEM_PAIR = [9, 18], SYSTEM_THIRD = [0.9, 1.15];
+const SYSTEM_PLANETS = [3, 7], SYSTEM_IN = 0.16, SYSTEM_STEP = [1.32, 1.6], SYSTEM_T0 = [16, 26];
+const SYSTEM_KINDS = [
+  [[0.62, 0.6, 0.58], 1.3, 0, 0], [[0.78, 0.46, 0.3], 1.5, 0, 0], [[0.36, 0.56, 0.86], 1.8, 0, 0.3],
+  [[0.78, 0.88, 0.95], 1.6, 0, 0.8], [[0.9, 0.78, 0.6], 3.4, 0.45, 1], [[0.56, 0.8, 0.92], 2.7, 0.25, 1],
+];
+const SYSTEM_BELT_P = 0.4, SYSTEM_DISC_P = 0.18, SYSTEM_TRAIL = 0.11, SYSTEM_PL_N = 8;
+// the voyage (see "Look"): it lasts VOYAGE_MS ms (a pick); the stars stretch radially from its point (a star system's middle
+// when one is up within VOYAGE_AIM of the window's edges, else a pick within VOYAGE_AT of it) up to VOYAGE_STRETCH times their
+// length, each along its own ray, in streaks up to VOYAGE_SEG of their distance out (in log, see warpP), while the deep sky
+// zooms in to 1 + VOYAGE_PUSH times its size, the
+// sights (all but the stars) and the deep sky dimming to VOYAGE_SIGHTS and VOYAGE_DEEP of their light between VOYAGE_DIM (shares of its life) and a
+// glow up to VOYAGE_GLOW at the point; at VOYAGE_SWAP the sky becomes the next place, and at VOYAGE_ARRIVE a star system
+// arrives at the point with a VOYAGE_FLASH flash. A star system it flies to grows VOYAGE_ZOOM times bigger as it nears. It
+// weighs VOYAGE_W against the other events (rare), and paints the next place's deep sky in slices of VOYAGE_PAINT ms a frame
+const VOYAGE_MS = [10e3, 13e3], VOYAGE_AT = [0.3, 0.7], VOYAGE_AIM = 0.12, VOYAGE_STRETCH = 26, VOYAGE_SEG = 0.3, VOYAGE_PUSH = 0.35, VOYAGE_SIGHTS = 0.12, VOYAGE_DEEP = 0.22;
+const VOYAGE_DIM = [0.14, 0.42, 0.58, 0.86], VOYAGE_GLOW = 0.16, VOYAGE_SWAP = 0.5, VOYAGE_ARRIVE = 0.66, VOYAGE_FLASH = 0.22;
+const VOYAGE_ZOOM = 2.2, VOYAGE_W = 0.45, VOYAGE_PAINT = 4;
+// places (see "Look"): the sky after a voyage. PLACE_KEY: where the place's seed is kept (localStorage; 0 or none: home, the
+// Milky Way of DEEP_*); a place's band is turned PLACE_ROT, PLACE_BAND [width, light, warmth, dust lanes] picks, its clouds
+// PLACE_CLOUDS (how many) from PLACE_TINTS, its far galaxies PLACE_GALS (how many)
+const PLACE_KEY = 'fv.skyPlace', PLACE_BAND = [[0.7, 1.45], [0.65, 1.25], [-1, 1], [0.35, 1.25]], PLACE_CLOUDS = [1, 4], PLACE_GALS = [2, 5];
+const PLACE_TINTS = [[0.62, 0.48, 1], [0.36, 0.7, 0.78], [0.86, 0.48, 0.66], [1, 0.56, 0.4], [0.5, 0.8, 0.6], [0.4, 0.52, 1], [0.95, 0.75, 0.5]];
 // a deploy's rocket (see "Look"): at most ROCKET_N at once (the sky's shader has a slot for each). It rises from just
 // below the window's bottom edge, under the hub (kept within ROCKET_X of the window's width), for ROCKET_MS (a pick),
 // slowing all the way (ease-out, ROCKET_EASE), to ROCKET_TOP of the window's height (a pick); its path leans ROCKET_TILT
@@ -1169,6 +1240,10 @@ export function mapStats() {
       falling: q.fall ? Math.round(q.fall.f * 1e3) / 1e3 : null } : null; })(),
     battle: (() => { const q = battleNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), reach: Math.round(q.reach), s: Math.round(q.s * 10) / 10, hulls: q.hulls.length,
       streaks: q.streaks.length, blasts: q.blasts.map((b) => b.kind), kill: Math.round(evOf('battle').ev.sKill * 10) / 10, brk: Math.round(evOf('battle').ev.sBreak * 10) / 10 } : null; })(),
+    system: (() => { const q = systemNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), R: Math.round(q.R), a: Math.round(q.a * 1e3) / 1e3, stars: q.stars.length,
+      planets: q.planets.length, belt: !!q.belt, disc: !!q.disc, arrived: !!evOf('system').ev.arr } : null; })(),
+    voyage: (() => { const q = voyageNow(); return q ? { f: Math.round(q.f * 1e3) / 1e3, dim: Math.round(q.dim * 1e3) / 1e3, st: Math.round(q.st * 1e3) / 1e3, x: Math.round(q.x), y: Math.round(q.y), swapped: q.swapped } : null; })(),
+    place: placeNow().seed,
     ship: (() => { const q = shipNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3, dir: [Math.round(q.cs * 1e3) / 1e3, Math.round(q.sn * 1e3) / 1e3], escort: !!q.eo, jump: q.j ? { x: Math.round(q.j.x), y: Math.round(q.j.y), h: Math.round(q.j.h), a: Math.round(q.j.a * 1e3) / 1e3, flash: Math.round(q.j.fl * 1e3) / 1e3, smear: Math.round(q.j.sm * 1e3) / 1e3 } : null } : null; })(),
     warp: (() => { const q = warpNow(); return q ? { a: Math.round(q.a * 1e3) / 1e3, x: Math.round(q.x), y: Math.round(q.y), dir: [Math.round(q.dx * 1e3) / 1e3, Math.round(q.dy * 1e3) / 1e3] } : null; })(),
     far: { running: I.far ? I.far.name : null, label: I.far ? FAR_KINDS.get(I.far.name).label : null, ms: I.far ? I.far.ms : null, nextIn: I.farAt ? Math.round(I.farAt - performance.now()) : null,
@@ -1347,6 +1422,22 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     ship: (escort, skip) => { if (!I) return false; shipForce = escort == null ? null : !!escort; const ok = eventStart(performance.now(), 'ship'); shipForce = null; if (ok && skip > 0) eventSkip('ship', skip); return ok; },
     // a planet now of that kind (PLANET_KINDS' index; null: a pick), skip seconds into its crossing
     planet: (kind, skip) => { if (!I) return false; planetForce = kind == null ? null : Number(kind); const ok = eventStart(performance.now(), 'planet'); planetForce = null; if (ok && skip > 0) eventSkip('planet', skip); return ok; },
+    // a star system now, skip seconds into its crossing
+    system: (skip) => { if (!I) return false; const ok = eventStart(performance.now(), 'system'); if (ok && skip > 0) eventSkip('system', skip); return ok; },
+    // a voyage now (to the star system up, if any; first one, with sys true, or sys seconds into its crossing), skip seconds into it
+    voyage: (skip, sys) => {
+      if (!I) return false;
+      if (sys && eventStart(performance.now(), 'system') && sys > 0 && sys !== true) eventSkip('system', sys);
+      const ok = eventStart(performance.now(), 'voyage');
+      if (ok && skip > 0) eventSkip('voyage', skip);
+      return ok;
+    },
+    // the sky's place: go to the one of that seed now (0: home), painted at once; the seed it is in
+    place: (seed) => {
+      if (!I) return null;
+      if (seed != null) { const pl = placeOf(Math.max(0, Math.floor(seed))), g = deepPaint(pl); let r; while (!(r = g.next()).done); placeSet(pl, r.value); }
+      return placeNow().seed;
+    },
     // a space battle now, skip seconds into it
     battle: (skip) => { if (!I) return false; const ok = eventStart(performance.now(), 'battle'); if (ok && skip > 0) eventSkip('battle', skip); return ok; },
     // a black hole and its prey ('ship' or 'planet') laid to meet in view, both skipped on to lead seconds (default 5) before
@@ -3172,12 +3263,13 @@ function skyCam() {
 // the map's box in the window (CSS px): where a point on the map's canvas (a node's sx, sy) is in the sky
 const mapX = () => (I.mapOn ? I.left || 0 : 0), mapY = () => (I.mapOn ? I.top || 0 : 0);
 function starsAt() {
-  const { cx, cy, mx, my } = skyCam(), ts = I.still ? 0 : I.time / 1000;
+  const { cx, cy, mx, my } = skyCam(), ts = I.still ? 0 : I.time / 1000, pl = placeNow();
   for (let i = 0; i < STAR_LAYERS.length; i++) {
     const L = STAR_LAYERS[i], s = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), L.depth * STAR_ZOOM), P = STAR_TILE * s;
-    // the field scales about the screen's middle and slides with the sky (every layer alike: no parallax), plus its drift
-    let ex = mx - (cx - ts * L.drift * STAR_DIR[0]) * s;
-    let ey = my - (cy - ts * L.drift * STAR_DIR[1]) * s;
+    // the field scales about the screen's middle and slides with the sky (every layer alike: no parallax), plus its drift;
+    // each place shows its own patch of it (pl.ox, oy)
+    let ex = mx - (cx + pl.ox - ts * L.drift * STAR_DIR[0]) * s;
+    let ey = my - (cy + pl.oy - ts * L.drift * STAR_DIR[1]) * s;
     const wx = -ex / s, wy = -ey / s;
     starWide[i * 2] = wx - Math.floor(wx / STAR_WRAP) * STAR_WRAP; starWide[i * 2 + 1] = wy - Math.floor(wy / STAR_WRAP) * STAR_WRAP;
     ex -= Math.floor(ex / P) * P; ey -= Math.floor(ey / P) * P;
@@ -3191,14 +3283,44 @@ function starsAt() {
   return starPos;
 }
 const deepPos = new Float64Array(3);
-// the deep sky's pixels, painted once: the band and the clouds (rgb: their light, scaled to the full range, as
-// DEEP_A dims it in the shader; a: how dense the band's star dust is there) and the star dust tile (one byte a
-// device px). Every noise repeats with the texture, and the band runs along its (2, 1) diagonal, which closes on
-// itself, so the texture tiles without a seam.
+// ---------- places (see "Look", PLACE_*): the sky the voyages go between ----------
+// a place from its seed (0: home, the Milky Way of DEEP_*): its band's turn (rot, radians) and look (width, light, warmth,
+// lanes), its clouds and far galaxies (as DEEP_CLOUDS, DEEP_GALAXIES), the noise's seed and where its stars are (ox, oy, CSS px
+// added to the sky's slide: another patch of the same endless field)
+function placeOf(seed) {
+  if (!seed) return { seed: 0, rot: 0, band: [1, 1, 0, 1], clouds: DEEP_CLOUDS, gals: DEEP_GALAXIES, nseed: 71, ox: 0, oy: 0 };
+  const rnd = seeded(seed), pick = (r) => r[0] + rnd() * (r[1] - r[0]), ri = (r) => r[0] + Math.floor(rnd() * (r[1] - r[0] + 1));
+  const band = PLACE_BAND.map(pick), clouds = [], gals = [];
+  for (let i = 0, n = ri(PLACE_CLOUDS); i < n; i++) clouds.push([PLACE_TINTS[Math.floor(rnd() * PLACE_TINTS.length)], rnd() * DEEP_W, rnd() * DEEP_H, pick([34, 84]), pick([0.25, 0.62])]);
+  for (let i = 0, n = ri(PLACE_GALS); i < n; i++) {
+    const sp = rnd() < 0.65, warm = rnd();
+    gals.push([rnd() * DEEP_W, rnd() * DEEP_H, pick([6, 15]), pick([0.18, 0.8]), rnd() * TAU, sp ? 'spiral' : 'elliptical',
+      sp ? [0.4 + 0.12 * warm, 0.46, 0.62 - 0.14 * warm] : [0.5, 0.45, 0.38], pick([0.3, 0.6])]);
+  }
+  return { seed, rot: rnd() * TAU, band, clouds, gals, nseed: 71 + (seed % 100000) * 7, ox: rnd() * STAR_WRAP, oy: rnd() * STAR_WRAP };
+}
+// the place the sky is in: kept across reloads (PLACE_KEY), home when none is kept or the storage can't be read
+let placeCur = null;
+function placeNow() {
+  if (placeCur) return placeCur;
+  let seed = 0;
+  try { seed = Math.max(0, Math.floor(Number(localStorage.getItem(PLACE_KEY)) || 0)); } catch {}
+  return (placeCur = placeOf(seed));
+}
+// the sky goes to place `pl`, its deep sky's pixels `pix` (deepPaint's, painted for it): the shader takes them on its next draw
+function placeSet(pl, pix) {
+  placeCur = pl; deepPix = pix;
+  try { localStorage.setItem(PLACE_KEY, String(pl.seed)); } catch {}
+  if (I) I.dirty = true;
+}
+// the deep sky's pixels for place `pl`, painted a few rows at a time (a generator: each next() paints some, the last
+// returns them; deepSky runs it through at once, a voyage over several frames): the band and the clouds (rgb: their light,
+// scaled to the full range, as DEEP_A dims it in the shader; a: how dense the band's star dust is there) and the star dust
+// tile (one byte a device px). Every noise repeats with the texture, and the band runs along its (2, 1) diagonal, which closes
+// on itself, so the texture tiles without a seam (the shader turns it by the place's rot)
 let deepPix = null;
-function deepSky() {
-  if (deepPix) return deepPix;
-  const W = DEEP_W, H = DEEP_H, rnd = seeded(71);
+function* deepPaint(pl) {
+  const W = DEEP_W, H = DEEP_H, rnd = seeded(pl.nseed), [bw, bl, warm, lanes] = pl.band;
   const smooth = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
   // value noise on a lattice of cell px that wraps with the texture, summed over octaves
   const octave = (cell) => { const gw = W / cell, gh = H / cell, v = new Float32Array(gw * gh); for (let i = 0; i < v.length; i++) v[i] = rnd(); return { cell, gw, gh, v }; };
@@ -3211,30 +3333,34 @@ function deepSky() {
   const glowN = [64, 32, 16, 8].map(octave), laneN = [32, 16, 8, 4].map(octave), cloudN = [64, 32, 16, 8].map(octave);
   const deep = new Uint8Array(W * H * 4), f = new Float32Array(W * H * 4);
   let top = 0;
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    // across the band (texels), which sways a little along its length
-    const wv = 9 * Math.sin((TAU * x) / W) + 5 * Math.sin((TAU * 2 * x) / W + 1.3);
-    const d = ((((y - 0.5 * x - wv) % H) + H * 1.5) % H - H / 2) * 0.894;
-    const n1 = fbm(glowN, x, y), n2 = fbm(laneN, x, y), n3 = fbm(cloudN, x, y);
-    const band = Math.exp(-((d / 30) ** 2)), core = Math.exp(-((d / 11) ** 2));
-    // dark dust lanes: thin ridges of a noise, near the band's middle
-    const lane = (1 - Math.abs(2 * n2 - 1)) ** 5 * Math.exp(-(((d + 4) / 16) ** 2));
-    const g = (band * (0.4 + 1.1 * smooth(0.3, 0.75, n1)) + 0.6 * core * n1) * (1 - 0.85 * lane);
-    // blue-white at its edges, warmer in its core
-    let r = g * (0.78 + 0.22 * core), gr = g * (0.84 + 0.09 * core), b = g * (1 - 0.18 * core);
-    for (const [col, cx, cy, R, str] of DEEP_CLOUDS) {
-      let dx = Math.abs(x - cx) % W, dy = Math.abs(y - cy) % H;
-      dx = Math.min(dx, W - dx); dy = Math.min(dy, H - dy);
-      const q = (dx * dx + dy * dy) / (R * R), v = str * Math.exp(-1.8 * q) * (0.3 + smooth(0.35, 0.7, n3 + 0.15 * (1 - q)));
-      r += col[0] * v; gr += col[1] * v; b += col[2] * v;
+  for (let y = 0; y < H; y++) {
+    if (y % 8 === 7) yield;
+    for (let x = 0; x < W; x++) {
+      // across the band (texels), which sways a little along its length
+      const wv = 9 * Math.sin((TAU * x) / W) + 5 * Math.sin((TAU * 2 * x) / W + 1.3);
+      const d = ((((y - 0.5 * x - wv) % H) + H * 1.5) % H - H / 2) * 0.894;
+      const n1 = fbm(glowN, x, y), n2 = fbm(laneN, x, y), n3 = fbm(cloudN, x, y);
+      const band = Math.exp(-((d / (30 * bw)) ** 2)), core = Math.exp(-((d / (11 * bw)) ** 2));
+      // dark dust lanes: thin ridges of a noise, near the band's middle
+      const lane = Math.min(1, lanes * (1 - Math.abs(2 * n2 - 1)) ** 5 * Math.exp(-(((d + 4) / (16 * bw)) ** 2)));
+      const g = bl * (band * (0.4 + 1.1 * smooth(0.3, 0.75, n1)) + 0.6 * core * n1) * (1 - 0.85 * lane);
+      // blue-white at its edges, warmer in its core (a warm place's core warmer still, a cool one's bluer)
+      let r = g * (0.78 + 0.22 * core * (1 + warm)), gr = g * (0.84 + 0.09 * core), b = g * (1 - 0.18 * core * (1 + warm) + 0.12 * Math.max(0, -warm));
+      for (const [col, cx, cy, R, str] of pl.clouds) {
+        let dx = Math.abs(x - cx) % W, dy = Math.abs(y - cy) % H;
+        dx = Math.min(dx, W - dx); dy = Math.min(dy, H - dy);
+        const q = (dx * dx + dy * dy) / (R * R), v = str * Math.exp(-1.8 * q) * (0.3 + smooth(0.35, 0.7, n3 + 0.15 * (1 - q)));
+        r += col[0] * v; gr += col[1] * v; b += col[2] * v;
+      }
+      const i = (y * W + x) * 4;
+      f[i] = r; f[i + 1] = gr; f[i + 2] = b;
+      f[i + 3] = clamp(0.06 + band * (1 - 0.9 * lane) * (0.5 + 0.8 * n1), 0, 1);
+      top = Math.max(top, r, gr, b);
     }
-    const i = (y * W + x) * 4;
-    f[i] = r; f[i + 1] = gr; f[i + 2] = b;
-    f[i + 3] = clamp(0.06 + band * (1 - 0.9 * lane) * (0.5 + 0.8 * n1), 0, 1);
-    top = Math.max(top, r, gr, b);
   }
   // the far galaxies, in each texel the mean of 4 x 4 samples, as a share of the band's brightest light
-  for (const [gx, gy, R, tilt, rot, kind, tint, hot] of DEEP_GALAXIES) {
+  for (const [gx, gy, R, tilt, rot, kind, tint, hot] of pl.gals) {
+    yield;
     const co = Math.cos(rot), si = Math.sin(rot), ext = Math.ceil(R * 2.2);
     for (let oy = -ext; oy <= ext; oy++) for (let ox = -ext; ox <= ext; ox++) {
       let lr = 0, lg = 0, lb = 0;
@@ -3256,15 +3382,24 @@ function deepSky() {
         // the arms take the tint, the core is warmer
         lr += tint[0] * arm + core * hot; lg += tint[1] * arm + core * hot * 0.86; lb += tint[2] * arm + core * hot * 0.68;
       }
-      const x = (((gx + ox) % W) + W) % W, y = (((gy + oy) % H) + H) % H, i = (y * W + x) * 4, k = top / 16;
+      const x = ((((gx + ox) | 0) % W) + W) % W, y = ((((gy + oy) | 0) % H) + H) % H, i = (y * W + x) * 4, k = top / 16;
       f[i] += lr * k; f[i + 1] += lg * k; f[i + 2] += lb * k;
     }
   }
+  yield;
   for (let i = 0; i < f.length; i++) deep[i] = Math.round(Math.min(i % 4 === 3 ? f[i] : f[i] / top, 1) * 255);
   // the star dust: tiny specks, most of them very faint
   const dust = new Uint8Array(DUST_T * DUST_T);
   for (let i = 0; i < DUST_N; i++) { const j = Math.floor(rnd() * dust.length); dust[j] = Math.max(dust[j], Math.round(50 + 205 * rnd() * rnd())); }
-  return (deepPix = { deep, dust });
+  return { deep, dust };
+}
+// the deep sky's pixels for the place the sky is in, painted at once the first time
+function deepSky() {
+  if (deepPix) return deepPix;
+  const g = deepPaint(placeNow());
+  let r;
+  while (!(r = g.next()).done);
+  return (deepPix = r.value);
 }
 // the canvas draws the stars (no WebGL2): one fillRect per layer; its tiles are painted once, so no star twinkles here
 function drawStars(ctx) {
@@ -3384,12 +3519,13 @@ function eventSkip(name, s) {
 }
 // what the log calls each space event
 const EVENT_LABELS = { nebula: 'Nebula drift', asteroids: 'Asteroid field', lens: 'Gravity lens (a black hole)', ship: 'Capital ship (out of hyperspace)', warp: 'Warp drift',
-  planet: 'Planet (far, with its air)', battle: 'Space battle' };
+  planet: 'Planet (far, with its air)', battle: 'Space battle', system: 'Star system (far)', voyage: 'Voyage (the sky moves to another place)' };
 // the next kind by weight, never one running, never the one shown last (unless it is the only one), never one switched
 // off (null: none left); a kind that plays with one running weighs EVENT_PAIR times more (prey for a black hole, a
 // black hole for prey), so the sky's sights meet
 function eventPick() {
-  const on = [...EVENTS.keys()].filter((k) => !I.skyOff.has(k) && !I.events.has(k));
+  // (the warp drift and a voyage share the squeeze: never both)
+  const on = [...EVENTS.keys()].filter((k) => !I.skyOff.has(k) && !I.events.has(k) && !(k === 'warp' && I.events.has('voyage')) && !(k === 'voyage' && I.events.has('warp')));
   const ks = on.filter((k) => k !== I.eventLast);
   const pool = ks.length ? ks : on;
   if (!pool.length) return null;
@@ -3655,6 +3791,159 @@ function warpNow() {
   if (a <= 0) return null;
   const [x, y] = eventAt(ev.cam, ev.x, ev.y);
   return { a: a * a * (3 - 2 * a), x, y, dx: ev.dx, dy: ev.dy };
+}
+// ---------- the star system (see "Look", SYSTEM_*) ----------
+// a voyage's arrival: where (CSS px of the window) the next star system starts, growing in, and drifts out from (null: none)
+let systemArrive = null;
+// a row picked by its weight (each row's last entry)
+function pickW(rows, rnd) {
+  let w = rnd() * rows.reduce((a, r) => a + r[r.length - 1], 0);
+  for (const r of rows) if ((w -= r[r.length - 1]) < 0) return r;
+  return rows[rows.length - 1];
+}
+// start: its straight path across the window at SYSTEM_DEPTH (or out from where it arrived), the size of its outer orbit, how
+// its plane is seen, its stars (a pair's orbit, a third far out) and its planets (each orbit's radius in the outer one's,
+// period and phase, kind, size and rings), and maybe an asteroid belt between two orbits or a young system's dusty disc
+registerEvent('system', {
+  start(t) {
+    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(SYSTEM_DEPTH), R = pickIn(SYSTEM_R);
+    const ang = (rnd() * 2 - 1) * SYSTEM_TURN, sg = rnd() < 0.5 ? -1 : 1, dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg;
+    const reach = 1.25 * R + 30, len = 2 * (0.575 * (Math.abs(W * dx) + Math.abs(H * dy)) + reach);
+    let ms = pickIn(SYSTEM_MS), v = len / (ms / 1000), x0, y0;
+    const arr = !!systemArrive;
+    if (arr) {
+      // out from where it arrived, slower, until it is clear of the window
+      v *= SYSTEM_SLOW; x0 = systemArrive.x; y0 = systemArrive.y;
+      const tx = dx > 0 ? (W + reach - x0) / dx : (-reach - x0) / dx, ty = dy > 1e-6 ? (H + reach - y0) / dy : dy < -1e-6 ? (-reach - y0) / dy : Infinity;
+      ms = (Math.max(1, Math.min(tx, ty)) / v) * 1000;
+    } else {
+      const off = (rnd() * 2 - 1) * SYSTEM_OFF * H;
+      x0 = cam.mx - (dx * len) / 2 - dy * off; y0 = cam.my - (dy * len) / 2 + dx * off;
+    }
+    const u = rnd(), nS = u < SYSTEM_STARS[0] ? 1 : u < SYSTEM_STARS[0] + SYSTEM_STARS[1] ? 2 : 3;
+    const stars = [];
+    for (let i = 0; i < nS; i++) { const c = pickW(SYSTEM_CLASS, rnd); stars.push({ rgb: c[0], r: c[1] * pickIn([0.85, 1.15]), L: c[2] }); }
+    // the brighter first: the pair goes round its middle of mass (the bigger star the heavier), the third far out
+    stars.sort((a, b) => b.r * b.L - a.r * a.L);
+    const pair = nS >= 2 ? { sep: pickIn(SYSTEM_SEP), w: (TAU / pickIn(SYSTEM_PAIR)) * (rnd() < 0.5 ? -1 : 1), ph: rnd() * TAU, q: stars[1].r / (stars[0].r + stars[1].r) } : null;
+    const third = nS === 3 ? { d: pickIn(SYSTEM_THIRD), w: (TAU / pickIn([220, 360])) * (rnd() < 0.5 ? -1 : 1), ph: rnd() * TAU } : null;
+    const disc = rnd() < SYSTEM_DISC_P ? { r: pickIn([0.75, 1]), gap: pickIn([0.45, 0.65]) } : null;
+    const nP = Math.min(SYSTEM_PL_N, disc ? 2 + Math.floor(rnd() * 2) : Math.round(pickIn(SYSTEM_PLANETS)));
+    const radii = [];
+    for (let i = 0, a = 1; i < nP; i++, a *= pickIn(SYSTEM_STEP)) radii.push(a);
+    const top = radii[radii.length - 1], inner = Math.max(SYSTEM_IN, radii[0] / top);
+    for (let i = 0; i < nP; i++) radii[i] = inner + (1 - inner) * ((radii[i] - 1) / Math.max(top - 1, 1e-6));
+    if (pair) pair.sep = Math.min(pair.sep, radii[0] / 2.6);
+    const dir = rnd() < 0.5 ? -1 : 1, T0 = pickIn(SYSTEM_T0);
+    const planets = radii.map((ar, i) => {
+      const out = nP > 1 ? i / (nP - 1) : 0.5;
+      const K = pickW(SYSTEM_KINDS.map((k, j) => [j, Math.exp(-(((k[3] - out) / 0.35) ** 2)) + 0.02]), rnd)[0], k = SYSTEM_KINDS[K];
+      const tint = k[0].map((c) => clamp(c * pickIn([0.85, 1.12]), 0, 1));
+      return { ar, w: (dir * TAU) / (T0 * (ar / radii[0]) ** 1.5), ph: rnd() * TAU, kind: K, rgb: tint, r: k[1] * pickIn([0.8, 1.2]), ring: rnd() < k[2] };
+    });
+    let belt = null;
+    if (!disc && nP >= 2 && rnd() < SYSTEM_BELT_P) {
+      const j = Math.floor(rnd() * (nP - 1)), a = radii[j], b = radii[j + 1];
+      if (b - a > 0.12) belt = [a + 0.3 * (b - a), b - 0.3 * (b - a)];
+    }
+    const open = pickIn(SYSTEM_OPEN) * (rnd() < 0.5 ? -1 : 1);
+    return { at: t, ms, cam, R, x0, y0, vx: dx * v, vy: dy * v, arr, stars, pair, third, planets, belt, disc, open, roll: (rnd() * 2 - 1) * SYSTEM_ROLL, seed: rnd() };
+  },
+  step(ev, t) { return t - ev.at < ev.ms; },
+});
+// the star system as it is now, in CSS px of the window (null when none runs): its middle (x, y), outer orbit R, alpha a (an
+// arriving one grows in; one a voyage flies to grows as it nears and is lost in the voyage's light), its plane's roll (co, sn)
+// and openness, its clock t (s); each star's place (x, y, and z towards us, in R), radius (CSS px), colour and light; each
+// planet's place, z, radius, colour, kind and rings, the way to its star (L: x, y on the window, z towards us; unit), its orbit
+// (ar, in R), angle th and way round (dir); the belt (inner, outer, in R), the disc and the seed
+function systemNow() {
+  const e = evOf('system');
+  if (!e) return null;
+  const ev = e.ev, now = performance.now(), age = Math.max(0, now - ev.at), s = age / 1000;
+  const [x, y] = eventAt(ev.cam, ev.x0 + ev.vx * s, ev.y0 + ev.vy * s);
+  let k = Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), SYSTEM_DEPTH * STAR_ZOOM) / ev.cam.sc, a = 1;
+  if (ev.arr) { const g = sm01(age / SYSTEM_ARRIVE); k *= 0.3 + 0.7 * g; a = g; }
+  const vy = evOf('voyage');
+  if (vy && vy.ev.to === ev) {
+    const f = (now - vy.ev.at) / vy.ev.ms;
+    k *= 1 + (VOYAGE_ZOOM - 1) * sm01(f / VOYAGE_SWAP) ** 2;
+    a *= 1 - sm01((f - 0.28) / (VOYAGE_SWAP - 0.3));
+  }
+  if (a <= 0) return null;
+  const R = ev.R * k, sz = R / ev.R, co = Math.cos(ev.roll), sn = Math.sin(ev.roll), op = ev.open, cz = Math.sqrt(1 - op * op);
+  // a point of its plane (u, v, in R) on the window (CSS px) and how far towards us (in R)
+  const at = (u, v) => { const X = u, Y = v * op; return [x + R * (X * co - Y * sn), y + R * (X * sn + Y * co), -v * cz]; };
+  const sp = [[0, 0]];
+  if (ev.pair) {
+    const th = ev.pair.ph + ev.pair.w * s, c = Math.cos(th) * ev.pair.sep, d = Math.sin(th) * ev.pair.sep;
+    sp[0] = [-ev.pair.q * c, -ev.pair.q * d]; sp.push([(1 - ev.pair.q) * c, (1 - ev.pair.q) * d]);
+  }
+  if (ev.third) { const th = ev.third.ph + ev.third.w * s; sp.push([ev.third.d * Math.cos(th), ev.third.d * Math.sin(th)]); }
+  const stars = ev.stars.map((q, i) => { const [sx, sy, sz2] = at(sp[i][0], sp[i][1]); return { x: sx, y: sy, z: sz2, r: q.r * sz, rgb: q.rgb, L: q.L }; });
+  const planets = ev.planets.map((q) => {
+    const th = q.ph + q.w * s, [px, py, pz] = at(q.ar * Math.cos(th), q.ar * Math.sin(th));
+    // lit by the star whose light is the most there
+    let best = null, bw = -1;
+    for (const st of stars) { const d2 = ((st.x - px) / R) ** 2 + ((st.y - py) / R) ** 2 + (st.z - pz) ** 2 + 1e-4, w = st.L / d2; if (w > bw) { bw = w; best = st; } }
+    const lx = (best.x - px) / R, ly = (best.y - py) / R, lz = best.z - pz, ll = Math.hypot(lx, ly, lz) || 1;
+    return { x: px, y: py, z: pz, r: q.r * sz, rgb: q.rgb, kind: q.kind, ring: q.ring, L: [lx / ll, ly / ll, lz / ll], ar: q.ar, th, dir: Math.sign(q.w) };
+  });
+  return { x, y, R, a, co, sn, open: op, t: s, stars, planets, belt: ev.belt, disc: ev.disc, seed: ev.seed };
+}
+// ---------- the voyage (see "Look", VOYAGE_*, PLACE_*) ----------
+// start: its point (the star system up, if any and on the window: we fly to it; else a pick), the next place (never the one the sky is in) and
+// its deep sky's painter; the warp drift stops (the voyage takes its squeeze)
+registerEvent('voyage', {
+  weight: VOYAGE_W,
+  start(t) {
+    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(EVENT_DEPTH.mid), se = evOf('system');
+    let sy = systemNow();
+    if (sy && !(sy.x > VOYAGE_AIM * W && sy.x < (1 - VOYAGE_AIM) * W && sy.y > VOYAGE_AIM * H && sy.y < (1 - VOYAGE_AIM) * H)) sy = null;
+    const x = sy ? sy.x : cam.mx + (pickIn(VOYAGE_AT) - 0.5) * W, y = sy ? sy.y : cam.my + (pickIn(VOYAGE_AT) - 0.5) * H;
+    let seed;
+    do seed = 1 + Math.floor(rnd() * 2147483646); while (seed === placeNow().seed);
+    const pl = placeOf(seed);
+    eventEnd('warp');
+    return { at: t, ms: pickIn(VOYAGE_MS), cam, x, y, pl, paint: deepPaint(pl), pix: null, swapped: false, arrived: false, to: sy && se ? se.ev : null };
+  },
+  // each frame: a slice of the next place's painting (all that is left once it is time to go); at VOYAGE_SWAP the sky becomes
+  // it and what we left ends, lost in the voyage's light; at VOYAGE_ARRIVE a star system arrives at the point
+  step(ev, t) {
+    const f = (t - ev.at) / ev.ms;
+    if (!ev.pix) {
+      const t0 = performance.now();
+      let r;
+      do r = ev.paint.next(); while (!r.done && (f >= VOYAGE_SWAP || performance.now() - t0 < VOYAGE_PAINT));
+      if (r.done) ev.pix = r.value;
+    }
+    if (!ev.swapped && ev.pix && f >= VOYAGE_SWAP) {
+      for (const k of [...I.events.keys()]) if (k !== 'voyage') eventEnd(k);
+      placeSet(ev.pl, ev.pix);
+      ev.swapped = true;
+    }
+    if (ev.swapped && !ev.arrived && f >= VOYAGE_ARRIVE) {
+      ev.arrived = true;
+      if (!I.skyOff.has('system')) {
+        const [x, y] = eventAt(ev.cam, ev.x, ev.y);
+        systemArrive = { x, y };
+        try { eventStart(t, 'system'); } finally { systemArrive = null; }
+        const late = (t - ev.at - VOYAGE_ARRIVE * ev.ms) / 1000;
+        if (late > 0.05) eventSkip('system', late);
+      }
+    }
+    return t - ev.at < ev.ms;
+  },
+});
+// the voyage as it is now (null when none runs): its share of its life f, its point (x, y, CSS px of the window), the
+// stretch's share st (0-1), the dimming's dim (0-1), the glow's and the arrival flash's alpha, its clock t (s) and whether
+// the sky is in the next place yet
+function voyageNow() {
+  const e = evOf('voyage');
+  if (!e) return null;
+  const ev = e.ev, age = performance.now() - ev.at, f = clamp(age / ev.ms, 0, 1), [x, y] = eventAt(ev.cam, ev.x, ev.y);
+  const [d0, d1, d2, d3] = VOYAGE_DIM, dim = sm01((f - d0) / (d1 - d0)) * sm01((d3 - f) / (d3 - d2));
+  const st = sm01(f / 0.42) * sm01((1 - f) / 0.4);
+  return { f, x, y, st: st * st, dim, glow: VOYAGE_GLOW * dim, flash: VOYAGE_FLASH * Math.exp(-(((f - VOYAGE_ARRIVE) / 0.03) ** 2)), t: age / 1000, swapped: ev.swapped };
 }
 // ---------- one sky: aiming one event at another, and the black hole's pull (see "Look", DEVOUR_*) ----------
 const sm01 = (v) => { const q = clamp(v, 0, 1); return q * q * (3 - 2 * q); };
@@ -4704,12 +4993,13 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // (device px; x, y), size (device px) and light (w; 0: none), and its turn's cos and sin and aspect (the first one's w: the ring's bright side); then the capital ship's uSh (from SKY_SH), five: its middle (device px; x, y), half-length (device px) and alpha (w; 0: none), its heading's cos and sin, flip (-1: it goes left, its top still up) and seed (0-1), then its escort's place from the ship's middle (in half-lengths along its heading, x, and across it, y), size (z, in the ship's; 0: no escort) and seed, then its jump's rift: its middle (device px; x, y), half-height (device px) and alpha (w; 0: shut), and the flash's alpha, the hull's smear (in its lengths), whether the hull is cut at the rift (z: 1 while it is open) and the clock (s). then the warp drift's uWp (from SKY_WP), two: its point (device px; x, y) and the squeeze's direction (z, w), then its stretch (x; 0: none), the direction's radial share (y) and the deep sky's share (z). The lens has four more after its galaxies: the stream it is eating (its distance (device px) and angle from the middle where it leaves the prey, its wind (radians per e-fold) and width (device px)), the stream's colour and alpha, then the flare (0-1), the jets' axis (radians), length and dark base (device px), then the clock (s); the ship one more: its heat (0-1) and how far it is off its course into a black hole (y). Then the planet's uPl (from SKY_PL) and the battle's uBt (from SKY_BT): see PLANET_GLSL's and BATTLE_GLSL's comments. Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
 // without a cell), the deep sky, its star dust, the glows' noise and their field, and the moon's picture (moonImage).
 // uTint (STAR_TINT) is set once.
-const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo', 'uOrg'];
+const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo', 'uOrg', 'uPc'];
 const SKY_M = SKY_U.length * 4;
 const SKY_NB = SKY_M + METEOR_N * 8 + SAT_N * 8 + ROCKET_N * 12; // the nebula drift's five vec4s, after the rockets
 const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_SH = SKY_LN + 36, SKY_WP = SKY_SH + 24, SKY_FR = SKY_WP + 8; // the asteroid field's vec4s, after the nebula; the lens's nine, then the ship's six, then the warp's two, then the far event's four per part (FAR_GLSL), after them
 const SKY_BT_N = 2 + BATTLE_HULLS * 5 + BATTLE_STREAKS * 2 + BATTLE_BLASTS * 2;
-const SKY_PL = SKY_FR + FAR_N * 16, SKY_BT = SKY_PL + 36, SKY_END = SKY_BT + SKY_BT_N * 4; // then the planet's nine and the battle's SKY_BT_N
+const SKY_SY_N = 10 + SYSTEM_PL_N * 4; // the star system's vec4s: four, two per star (three), four per planet
+const SKY_PL = SKY_FR + FAR_N * 16, SKY_BT = SKY_PL + 36, SKY_SY = SKY_BT + SKY_BT_N * 4, SKY_VY = SKY_SY + SKY_SY_N * 4, SKY_END = SKY_VY + 8; // then the planet's nine, the battle's SKY_BT_N, the star system's SKY_SY_N and the voyage's two
 const STAR_TILES = STAR_LAYERS.filter((L) => !L.cell);
 const SKY_TEX = [...STAR_TILES.map((L, t) => 'uS' + t), 'uDeep', 'uDust', 'uNoise', 'uField', 'uMoon'];
 const TEX_DEEP = SKY_TEX.indexOf('uDeep'), TEX_DUST = TEX_DEEP + 1, TEX_NOISE = TEX_DEEP + 2, TEX_FIELD = TEX_DEEP + 3;
@@ -4839,12 +5129,128 @@ vec4 starField(vec2 p, vec4 l, float k, float dens, float spark, float share, ve
 // the warp drift (see "Look", WARP_*), uWp (see SKY_U's comment): where the sky is looked up for the pixel at p when its stars
 // are stretched by up to k of the warp's stretch: the distance from the point along the direction (turned towards pointing
 // away from the point by the radial share) is squeezed by 1 / (1 + stretch), so what is drawn there is that much longer
-// along it and nothing else about it changes (its light, its width); p itself when there is no warp
+// along it and nothing else about it changes (its light, its width); p itself when there is no warp. In a voyage (uWp[1].y 2)
+// a squeeze about the point would only zoom, so each ray out from it is cut into lengths VOYAGE_SEG long in log distance
+// (their ends wavering by angle, so they make no rings) and each length shows only its first 1 / (1 + stretch) drawn all
+// along it: a star there becomes a streak running out from the point, longer the further out, the rest go dark between.
+// warpZ: the deep sky's and the far sights' lookup: the warp's squeeze, or in a voyage a plain zoom in about its point
 const WARP_GLSL = `vec2 warpP(vec2 p, float k) {
   float s = uWp[1].x * k;
   if (s <= 0.0) return p;
-  vec2 d = p - uWp[0].xy, dir = normalize(mix(uWp[0].zw, d / max(length(d), 1.0), uWp[1].y));
+  vec2 d = p - uWp[0].xy;
+  if (uWp[1].y > 1.5) {
+    float r = max(length(d), 1.0), ph = nbN(d / r * 40.0), q = log(r) / ${glf(VOYAGE_SEG)} + ph;
+    return uWp[0].xy + d / r * exp((floor(q) + fract(q) / (1.0 + s) - ph) * ${glf(VOYAGE_SEG)});
+  }
+  vec2 dir = normalize(mix(uWp[0].zw, d / max(length(d), 1.0), uWp[1].y));
   return p - dir * (dot(d, dir) * s / (1.0 + s));
+}
+vec2 warpZ(vec2 p, float k) {
+  if (uWp[1].y < 1.5) return warpP(p, k);
+  return uWp[0].xy + (p - uWp[0].xy) / (1.0 + uWp[1].x * k);
+}`;
+// the star system (see "Look", SYSTEM_*), premultiplied, at device px p; uSy: [0] its middle (device px; x, y), outer orbit's
+// radius (device px) and alpha (w; 0: none), [1] its plane's roll (cos, sin), openness (z: the sine of our height over it,
+// signed) and clock (w, s), [2] how many stars and planets, the belt's inner and outer radius (in the outer orbit's; 0: none),
+// [3] the disc's radius and its cleared lane's (0: none) and the seed; then three stars, two each: middle (device px), radius
+// (device px) and light, colour and z; then SYSTEM_PL_N planets, four each: middle, radius (device px) and in front (w 1) or
+// behind (-1), colour and kind, the way to its star (unit; z towards us) and rings (w 1), its orbit's radius (in the outer
+// one's), angle and way round and its trail's alpha. The pixel is taken back into the plane of the orbits (unrolled, its
+// short axis stretched back out): the plane's faint dust glow, a disc that winds as it goes round (faster inside) with a lane
+// a planet cleared, a grainy belt going round, each planet's fading arc along its orbit behind it; then the planets behind,
+// the stars (a soft core, a halo and a faint cross of spikes, shimmering a little), the planets in front, and the veil over all.
+// The loops run to counts the compiler can't know, so it keeps one copy of each
+const SYSTEM_GLSL = `float sysWrap(float a) { return a - 6.2831853 * floor(a / 6.2831853); }
+vec4 sysStar(vec2 p, vec4 s0, vec4 s1, float dp, float t, float i) {
+  vec2 d = (p - s0.xy) / dp;
+  float d2 = dot(d, d), r = max(s0.z / dp, 0.6);
+  if (d2 > 3600.0) return vec4(0.0);
+  float l = sqrt(d2), tw = 0.9 + 0.1 * sin(t * (1.7 + 0.6 * i) + i * 2.1);
+  float core = exp(-d2 / (r * r)), halo = 0.24 * exp(-l / (2.2 * r)), wide = 0.05 * exp(-l / (10.0 * r));
+  float sp = 0.16 * (exp(-abs(d.x) * 1.4) * exp(-abs(d.y) / (8.0 * r)) + exp(-abs(d.y) * 1.4) * exp(-abs(d.x) / (8.0 * r)));
+  float m = s0.w * tw * (1.5 * core + halo + wide + sp);
+  return vec4(mix(s1.rgb, vec3(1.0), 0.6 * core) * m, 0.6 * min(m, 1.0));
+}
+vec4 sysPlanet(vec2 p, vec4 a, vec4 b, vec4 c, float dp, vec4 pl) {
+  vec2 d = p - a.xy;
+  float r = max(a.z, 0.7 * dp), ext = r * (c.w > 0.0 ? 2.6 : 1.0) + 2.0 * dp;
+  if (dot(d, d) > ext * ext) return vec4(0.0);
+  vec2 v = vec2(d.x * pl.x + d.y * pl.y, -d.x * pl.y + d.y * pl.x) / r; // rolled to the plane, in its radii
+  float q = length(d) / r, aa = 1.2 * dp / r, yy = v.y / pl.z;
+  vec4 o = vec4(0.0), rg = vec4(0.0);
+  // its rings, a thin ellipse in the plane, the far half under the disc and the near half over it
+  if (c.w > 0.0) {
+    float rr = length(vec2(v.x, yy)), m = 0.5 * exp(-pow((rr - 2.0) / 0.3, 2.0)) * (1.0 - 0.7 * exp(-pow((rr - 2.05) / 0.07, 2.0)));
+    rg = vec4(mix(b.rgb, vec3(0.92, 0.88, 0.8), 0.5) * 0.75 * m, m);
+    if (yy > 0.0) o = rg;
+  }
+  if (q < 1.0 + aa) {
+    vec2 n2 = d / r / max(1.0, q);
+    vec3 N = vec3(n2, sqrt(max(1.0 - dot(n2, n2), 0.0)));
+    float lam = dot(N, normalize(c.xyz + vec3(0.0, 0.0, 1e-4)));
+    vec3 col = b.rgb;
+    // a giant's bands, along the plane
+    if (b.w > 3.5) col *= 0.84 + 0.16 * sin(v.y * 7.0 + b.w * 3.0);
+    vec3 lc = col * (0.02 + 0.95 * smoothstep(-0.05, 0.6, lam) * max(lam, 0.0) + 0.06 * smoothstep(-0.1, 0.2, lam)) * mix(0.6, 1.0, sqrt(N.z));
+    float cov = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, q);
+    o = over(vec4(lc * cov, cov), o);
+  }
+  if (c.w > 0.0 && yy <= 0.0) o = over(rg, o);
+  return o;
+}
+vec4 system(vec2 p) {
+  vec4 a = uSy[0];
+  if (a.w <= 0.0) return vec4(0.0);
+  vec2 d = p - a.xy;
+  float R = a.z, dp = uSize.z, ext = 1.4 * R + 40.0 * dp;
+  if (dot(d, d) > ext * ext) return vec4(0.0);
+  vec4 b = uSy[1], n = uSy[2], ds = uSy[3];
+  vec2 v = vec2(d.x * b.x + d.y * b.y, -d.x * b.y + d.y * b.x) / R, w = vec2(v.x, v.y / b.z);
+  float rho = length(w), phi = atan(w.y, w.x), t = b.w, sq = length(vec2(cos(phi), sin(phi) * b.z));
+  vec4 o = vec4(0.0);
+  // the plane's faint dust, lit by its stars
+  float zg = 0.045 * exp(-pow(rho / 0.6, 2.0)) + 0.05 * exp(-rho / 0.1);
+  o = over(vec4(vec3(0.95, 0.86, 0.72) * zg, 0.5 * zg), o);
+  // a young system's dusty disc, winding round (faster inside), a lane cleared through it
+  if (ds.x > 0.0 && rho < ds.x * 1.1) {
+    float an = phi - t * 0.12 * pow(max(rho, 0.08) / 0.3, -1.5);
+    float dn = nbF(vec2(cos(an), sin(an)) * rho * 7.0 + ds.z * 31.0, 3);
+    float dens = (1.0 - smoothstep(0.6 * ds.x, ds.x, rho)) * smoothstep(0.03, 0.14, rho) * (1.0 - 0.85 * exp(-pow((rho - ds.y) / 0.035, 2.0)));
+    float m = dens * (0.35 + 0.9 * dn * dn) * 0.2 * exp(-rho / 0.55);
+    o = over(vec4(vec3(1.0, 0.7, 0.45) * m, 0.6 * m), o);
+  }
+  // an asteroid belt: grains going round, slower outside
+  if (n.w > 0.0 && rho > n.z - 0.03 && rho < n.w + 0.03) {
+    float an = phi - t * 0.06 * pow(rho / 0.5, -1.5);
+    vec2 gp = vec2(cos(an), sin(an)) * rho * 70.0 + ds.z * 57.0;
+    float gr = smoothstep(0.6, 0.85, nbN(gp)) + 0.3 * nbN(gp * 0.12);
+    float m = smoothstep(n.z - 0.03, n.z + 0.03, rho) * (1.0 - smoothstep(n.w - 0.03, n.w + 0.03, rho)) * gr * 0.13;
+    o = over(vec4(vec3(0.86, 0.8, 0.72) * m, 0.6 * m), o);
+  }
+  int ns = int(n.x), np = int(n.y);
+  // each planet's arc behind it along its orbit, fading
+  for (int i = 0; i < np; i++) {
+    vec4 tr = uSy[13 + 4 * i];
+    float dd = abs(rho - tr.x) * R * sq / dp;
+    if (dd > 3.0) continue;
+    float back = sysWrap((tr.y - phi) * tr.z), m = tr.w * exp(-dd * dd / 0.6) * exp(-back / 1.2) * smoothstep(0.0, 0.1, back);
+    o = over(vec4(mix(uSy[11 + 4 * i].rgb, vec3(1.0), 0.5) * m, 0.5 * m), o);
+  }
+  for (int i = 0; i < np; i++) if (uSy[10 + 4 * i].w < 0.0) o = over(sysPlanet(p, uSy[10 + 4 * i], uSy[11 + 4 * i], uSy[12 + 4 * i], dp, b), o);
+  for (int i = 0; i < ns; i++) o = over(sysStar(p, uSy[4 + 2 * i], uSy[5 + 2 * i], dp, t, float(i)), o);
+  for (int i = 0; i < np; i++) if (uSy[10 + 4 * i].w >= 0.0) o = over(sysPlanet(p, uSy[10 + 4 * i], uSy[11 + 4 * i], uSy[12 + 4 * i], dp, b), o);
+  return farVeil(o, p, vec2(${VEIL_SYSTEM.map(glf).join(', ')})) * a.w;
+}`;
+// the voyage's light (see "Look", VOYAGE_*), premultiplied, at device px p; uVy: [0] its point (device px; x, y) and the glow's
+// alpha (z; 0: none), [1] the arrival's flash (x) and the clock (y, s): a soft blue-white light at the tunnel's heart and faint
+// rings racing out round it, and the flash, small and white, as the star system arrives
+const VOYAGE_GLSL = `vec4 voyageGlow(vec2 p) {
+  vec4 a = uVy[0], b = uVy[1];
+  if (a.z <= 0.0 && b.x <= 0.0) return vec4(0.0);
+  float r = length(p - a.xy) / uSize.z;
+  float core = exp(-r / 30.0), wide = exp(-r / 180.0), rings = 0.5 + 0.5 * sin(log(r + 10.0) * 9.0 - b.y * 6.0);
+  float m = a.z * (0.5 * core + 0.4 * wide * (0.85 + 0.15 * rings)) + b.x * exp(-r / 12.0);
+  return vec4(mix(vec3(0.55, 0.7, 1.0), vec3(1.0), 0.5 * core + 0.5 * exp(-r / 12.0)) * m, 0.5 * m);
 }`;
 // a far event's part (see "Look", FAR_*; web/sky-far.js FORM), premultiplied, at device px p. uFr, four per part: A its
 // middle (device px; x, y), size r (device px) and alpha (w), B its shape (x), progress u (y), seed (z; +1: a trail that
@@ -5869,6 +6275,17 @@ vec4 ship(vec2 p0, vec2 pl) {
   return o;
 }`;
 })();
+// the far veil (see "Look", VEIL_*): a far sight (premultiplied o, at device px p) seen through the sky's haze: its colour greyed
+// and pulled towards the haze (v.x), only v.y of what is behind it hidden, thinner still where drifting patches of mist are
+const VEIL_GLSL = `vec4 farVeil(vec4 o, vec2 p, vec2 v) {
+  if (o.a <= 1e-4) return o;
+  vec3 c = o.rgb / o.a;
+  c = mix(c, vec3(dot(c, vec3(0.3, 0.55, 0.15))), 0.4 * v.x);
+  c = mix(c, vec3(${SHIP_HAZE.map((h) => glf(Math.min(1, h * VEIL_LIFT))).join(', ')}), v.x);
+  float mist = nbF(p / (${glf(VEIL_MIST)} * uSize.z) + vec2(max(uSize.w, 0.0) * 0.004, 0.0), 3);
+  float k = v.y * (1.0 - ${glf(VEIL_THIN)} * smoothstep(0.4, 0.75, mist));
+  return vec4(c * o.a * k, o.a * k);
+}`;
 // the planet (see "Look", PLANET_*), premultiplied; uPl: [0] its middle (device px; x, y), radius (device px) and alpha (w; 0:
 // none), [1] its star's direction turned into its axis's roll (x, y; z towards us) and kind (w), [2] the roll's cos and sin, its
 // turn (radians) and seed, [3] its air's colour and thickness (w, in its radius), [4] its first colour and how open we see its
@@ -5945,7 +6362,7 @@ vec4 planet(vec2 p0, vec2 pl) {
   if (dot(d, d) > reach * reach) return vec4(0.0);
   vec2 v = vec2(d.x * tr.x + d.y * tr.y, -d.x * tr.y + d.y * tr.x); // rolled to its axis
   vec3 L = normalize(Lk.xyz + vec3(0.0, 0.0, 1e-4));
-  float aa = 1.2 * uSize.z / a.z, r = length(v), kind = Lk.w;
+  float aa = ${glf(1.2 + PLANET_SOFT)} * uSize.z / a.z, r = length(v), kind = Lk.w;
   float op = cA.w, co = sqrt(max(1.0 - op * op, 0.0));
   vec3 Ax = vec3(0.0, -co, op), E2 = vec3(0.0, op, co);
   vec4 o = vec4(0.0);
@@ -6026,7 +6443,7 @@ vec4 planet(vec2 p0, vec2 pl) {
   }
   o = over(planetRing(v, rg.xy, op, co, L, tint, aa, tr.w, 1.0), o);
   if (mo.z > 0.0 && mo.w > 0.0) o = over(planetMoon(v, mo, L, aa), o);
-  return o * a.w;
+  return farVeil(o * a.w, p, vec2(${VEIL_PLANET.map(glf).join(', ')}));
 }`;
 })();
 // the space battle (see "Look", BATTLE_*), premultiplied; uBt: [0] its middle (device px; x, y) and reach (z, device px; 0:
@@ -6084,13 +6501,13 @@ vec4 btBlast(vec2 p, vec4 b, vec4 c) {
   if (kind < 0.5) { fbR = 0.5 + 0.5 * g; T = exp(-age / 0.15); fbA = pow(max(1.0 - age / 0.45, 0.0), 2.0); flash = exp(-age / 0.06); sn = 5; sv = 2.2; }
   else if (kind < 1.5) { ringR = 0.35 + 1.3 * age / 0.7; ringA = 0.9 * pow(max(1.0 - age / 0.7, 0.0), 2.0); flash = 0.5 * exp(-age / 0.08); }
   else if (kind < 2.5) { fbR = 0.5 + 1.1 * (1.0 - exp(-age / 0.35)); T = exp(-age / 0.55); fbA = pow(max(1.0 - age / 1.8, 0.0), 1.5); flash = 1.4 * exp(-age / 0.1); sn = 10; sv = 3.0; }
-  else if (kind < 3.5) { fbR = 0.6 + 1.8 * (1.0 - exp(-age / 1.2)); T = exp(-age / 1.6); fbA = pow(max(1.0 - age / 6.5, 0.0), 1.5);
-    ringR = 0.8 + 7.0 * (1.0 - exp(-age / 1.5)); ringA = 0.8 * exp(-age / 1.8); flash = 1.1 * exp(-age / 0.2); sn = 24; sv = 6.0; }
+  else if (kind < 3.5) { fbR = 0.6 + 1.5 * (1.0 - exp(-age / 1.2)); T = exp(-age / 1.6); fbA = pow(max(1.0 - age / 6.5, 0.0), 1.5);
+    ringR = 0.8 + 3.2 * (1.0 - exp(-age / 1.5)); ringA = 0.42 * exp(-age / 1.8); flash = 0.55 * exp(-age / 0.2); sn = 24; sv = 6.0; }
   else if (kind < 4.5) { float fk = nbN(vec2(age * 9.0, c.y * 50.0)); fbR = 0.55 + 0.15 * fk; T = 0.5 + 0.3 * fk; fbA = b.w * (0.55 + 0.45 * fk); }
   else if (kind < 5.5) { fbR = 0.4 + 0.6 * g; T = exp(-age / 0.15); fbA = pow(max(1.0 - age / 0.6, 0.0), 2.0); flash = 0.8 * exp(-age / 0.06); sn = 6; sv = 1.8; }
   else if (kind < 6.5) { fbR = 0.5 + 0.9 * g; T = exp(-age / 0.25); fbA = pow(max(1.0 - age / 0.9, 0.0), 2.0); flash = exp(-age / 0.07); sn = 8; sv = 2.5; }
   else { fbR = 0.6 + 1.4 * (1.0 - exp(-age / 0.6)); T = exp(-age / 0.9); fbA = pow(max(1.0 - age / 6.0, 0.0), 1.5);
-    ringR = 0.6 + 3.5 * (1.0 - exp(-age / 0.8)); ringA = 0.5 * exp(-age / 0.9); flash = 1.5 * exp(-age / 0.12); sn = 16; sv = 4.0; }
+    ringR = 0.6 + 3.0 * (1.0 - exp(-age / 0.8)); ringA = 0.35 * exp(-age / 0.9); flash = 1.0 * exp(-age / 0.12); sn = 16; sv = 4.0; }
   vec3 sc = btSide(c.w);
   vec4 o = vec4(0.0);
   // the fireball: churning, white-hot to deep red as it cools, and the smoke it leaves
@@ -6124,7 +6541,7 @@ vec4 btBlast(vec2 p, vec4 b, vec4 c) {
     float m = exp(-age / (0.5 + 1.2 * h2 * (kind > 2.5 ? 2.0 : 1.0))) * t * exp(-d2 / 0.5);
     o = over(vec4(mix(vec3(1.0, 0.55, 0.2), vec3(1.0, 0.95, 0.8), exp(-age / 0.3)) * m, 0.5 * m), o);
   }
-  return o * 0.88; // far off: a little dimmed by the haze
+  return o * 0.72; // far off: dimmed by the haze
 }
 vec4 battle(vec2 p) {
   vec4 a = uBt[0], n = uBt[1];
@@ -6143,7 +6560,7 @@ vec4 battle(vec2 p) {
   }
   for (int i = 0; i < nb; i++) o = over(btBlast(p, uBt[${B} + 2 * i], uBt[${B + 1} + 2 * i]), o);
   for (int i = 0; i < ns; i++) o = over(btStreak(p, uBt[${S} + 2 * i], uBt[${S + 1} + 2 * i], dp), o);
-  return o;
+  return farVeil(o, p, vec2(${VEIL_BATTLE.map(glf).join(', ')}));
 }`;
 })();
 // per device pixel, premultiplied: the tint (mixed top to bottom unpremultiplied, as a canvas gradient mixes) over the
@@ -6160,8 +6577,8 @@ precision highp float;
 #define ROCKET_N ${ROCKET_N}
 #define ASTEROID_N ${ASTEROID_N}
 #define FAR_N ${FAR_N}
-uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uOrg, uGlow, uN0, uN1;
-uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[9], uSh[6], uWp[2], uFr[FAR_N * 4], uPl[9], uBt[${SKY_BT_N}];
+uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uOrg, uPc, uGlow, uN0, uN1;
+uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[9], uSh[6], uWp[2], uFr[FAR_N * 4], uPl[9], uBt[${SKY_BT_N}], uSy[${SKY_SY_N}], uVy[2];
 uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
 uniform int uGN, uFrN;
 uniform sampler2D ${SKY_TEX.join(', ')};
@@ -6178,8 +6595,11 @@ ${NEBULA_GLSL}
 ${ASTEROID_GLSL}
 ${LENS_GLSL}
 ${SHIP_GLSL}
+${VEIL_GLSL}
 ${PLANET_GLSL}
 ${BATTLE_GLSL}
+${SYSTEM_GLSL}
+${VOYAGE_GLSL}
 ${WARP_GLSL}
 ${FAR_GLSL}
 void main() {
@@ -6187,11 +6607,17 @@ void main() {
   vec4 t = mix(uTop, uBot, p.y / uSize.y);
   vec4 c = over(vec4(t.rgb * t.a, t.a), uBg);
   vec2 pl = lensP(p); // where the sky under the satellites is looked up (the gravity lens bends it; p without one)
-  vec2 pw = warpP(pl, uWp[1].z); // the deep sky's lookup, stretched a little by the warp drift
-  vec4 d = texture(uDeep, (pw - uD.xy) * uD.zw);
-  vec3 g = d.rgb * uFx.y;
+  vec2 pw = warpZ(pl, uWp[1].z); // the deep sky's lookup, stretched a little by the warp drift (zoomed in a voyage)
+  // the place's deep sky: its band turned by the place's turn (uPc) about the window's middle, dimmed in a voyage (uPc.w)
+  vec2 pr = pw - 0.5 * uSize.xy;
+  pr = vec2(pr.x * uPc.x - pr.y * uPc.y, pr.x * uPc.y + pr.y * uPc.x) + 0.5 * uSize.xy;
+  vec4 d = texture(uDeep, (pr - uD.xy) * uD.zw);
+  vec3 g = d.rgb * uFx.y * uPc.w;
   c = over(vec4(g, max(g.r, max(g.g, g.b))), c);
-  c = over(vec4(texture(uDust, (pw - uDu.xy) * uDu.z).r * d.a * uFx.z), c);
+  c = over(vec4(texture(uDust, (pr - uDu.xy) * uDu.z).r * d.a * uFx.z * uPc.w), c);
+  // the sights from here to the asteroids, but for the stars (they streak), dim in a voyage (uPc.z): these mixed back
+  // towards this, the far sights and rocks gathered in fs and laid over it at that share
+  vec4 c0 = c;
   // the nebula drift, over the deep sky and under the stars, which show through it
   if (uNb[0].w > 0.0) c = over(nebula(pl), c);
   // the far event's parts (supernovae, mergers, bursts...), far away, under the stars: uFrN of them, a count the compiler
@@ -6199,21 +6625,28 @@ void main() {
   for (int i = 0; i < uFrN; i++) c = over(farPart(pl, uFr[i * 4], uFr[i * 4 + 1], uFr[i * 4 + 2], uFr[i * 4 + 3]), c);
   // the lens's far galaxies, bent into arcs, over those and under the stars
   c = over(lensLight(pl - uLn[0].xy), c);
+  c = mix(c0, c, uPc.z);
   ${STAR_GLSL}
   // the far sights, over the stars and bent by a black hole between like them: a planet, a battle, the capital ship (and its
   // escort); then the black hole's stream, its dark core and ring over them, and its jets; all under the asteroids,
   // satellites and streaks
-  c = over(planet(p, pl), c);
-  c = over(battle(pl), c);
-  c = over(ship(p, pl), c);
-  c = over(lensFeed(p), c);
-  c = over(lensHole(p), c);
-  c = over(lensJets(p), c);
+  // (in a voyage they zoom with the deep sky: pf, the squeeze's w share)
+  vec2 pf = warpZ(pl, uWp[1].w);
+  vec4 fs = system(pf);
+  fs = over(planet(p, pf), fs);
+  fs = over(battle(pf), fs);
+  fs = over(ship(p, pf), fs);
+  fs = over(lensFeed(p), fs);
+  fs = over(lensHole(p), fs);
+  fs = over(lensJets(p), fs);
   // the asteroids' sharp rocks, over the stars and under the satellites and streaks; an empty slot is skipped
   for (int i = 0; i < ASTEROID_N; i++) {
     vec4 a = uAs[i], b = uAs[ASTEROID_N + i];
-    if (a.w > 0.0 && b.w < 1.0) c = over(rock(p, a, b, uAs[2 * ASTEROID_N].xy), c);
+    if (a.w > 0.0 && b.w < 1.0) fs = over(rock(p, a, b, uAs[2 * ASTEROID_N].xy), fs);
   }
+  c = over(fs * uPc.z, c);
+  // a voyage's light glows at its point over it all
+  c = over(voyageGlow(p), c);
   // the satellites: each a small soft point (a Gaussian SAT_R CSS px across, uSat's z its alpha) and its beacon's
   // flash (w) a little wider in its colour (uSac); the first empty slot ends them, and a pixel far from one skips it
   for (int i = 0; i < SAT_N; i++) {
@@ -6416,6 +6849,7 @@ function skyGLFinish(G) {
   G.wploc = gl.getUniformLocation(p, 'uWp');
   G.frloc = gl.getUniformLocation(p, 'uFr'); G.frnloc = gl.getUniformLocation(p, 'uFrN');
   G.plloc = gl.getUniformLocation(p, 'uPl'); G.btloc = gl.getUniformLocation(p, 'uBt');
+  G.syloc = gl.getUniformLocation(p, 'uSy'); G.vyloc = gl.getUniformLocation(p, 'uVy');
   G.gloc = ['uGlow', 'uN0', 'uN1', 'uGB', 'uGE', 'uGC', 'uGL', 'uGN'].map((name) => gl.getUniformLocation(p, name));
   SKY_TEX.forEach((name, i) => {
     gl.activeTexture(gl.TEXTURE0 + i);
@@ -6438,6 +6872,7 @@ function skyGLFinish(G) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   // the deep sky's textures (they don't depend on dpr), as they are: its alpha is star-dust density, not coverage
   const D = deepSky();
+  G.deepPix = D;
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
   gl.activeTexture(gl.TEXTURE0 + TEX_DEEP);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, DEEP_W, DEEP_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, D.deep);
@@ -6635,6 +7070,20 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   u[28] = wrap(dx, dw); u[29] = wrap(dy, dh); u[30] = 1 / dw; u[31] = 1 / dh;
   u[32] = wrap(dx, dt); u[33] = wrap(dy, dt); u[34] = 1 / dt; u[35] = 0;
   u[36] = VIG_A[glass ? 1 : 0]; u[37] = DEEP_A; u[38] = DUST_A; u[39] = DITHER;
+  // the place (see "Look", PLACE_*): its deep sky's pixels when a voyage brought the sky to it, its band's turn, and a voyage's
+  // dimming of the sights and the deep sky (1, 1 when none)
+  const D = deepSky(), pc = placeNow(), vo = voyageNow();
+  if (G.deepPix !== D) {
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.activeTexture(gl.TEXTURE0 + TEX_DEEP);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, DEEP_W, DEEP_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, D.deep);
+    gl.activeTexture(gl.TEXTURE0 + TEX_DUST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, DUST_T, DUST_T, 0, gl.RED, gl.UNSIGNED_BYTE, D.dust);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    G.deepPix = D; G.drawn = false;
+  }
+  u[48] = Math.cos(pc.rot); u[49] = Math.sin(pc.rot);
+  u[50] = vo ? 1 - (1 - VOYAGE_SIGHTS) * vo.dim : 1; u[51] = vo ? 1 - (1 - VOYAGE_DEEP) * vo.dim : 1;
   // the moon (its picture into its texture when its phase or the dpr changed; all 0 when it isn't shown)
   const mo = moonAt(dpr);
   if (mo && G.moonKey !== mo.im.key) {
@@ -6728,6 +7177,11 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     const o = SKY_WP;
     u[o] = wp.x * dpr; u[o + 1] = wp.y * dpr; u[o + 2] = wp.dx; u[o + 3] = wp.dy;
     u[o + 4] = wp.a * WARP_STRETCH; u[o + 5] = WARP_RADIAL; u[o + 6] = WARP_DEEP;
+  } else if (vo && vo.st > 0) {
+    // a voyage takes the squeeze: streaks out from its point (y 2), the deep sky zooming in (z); the far sights hold (w)
+    const o = SKY_WP;
+    u[o] = vo.x * dpr; u[o + 1] = vo.y * dpr; u[o + 2] = 1;
+    u[o + 4] = vo.st * VOYAGE_STRETCH; u[o + 5] = 2; u[o + 6] = VOYAGE_PUSH / VOYAGE_STRETCH; u[o + 7] = 0;
   }
   // the far event's parts, after the warp (all 0 when none), and how many (uFrN)
   const fr = farNow();
@@ -6781,6 +7235,31 @@ function drawSkyGL(glass, glows, k, ox, oy) {
       u[b + 4] = q.age; u[b + 5] = q.seed || 0; u[b + 6] = q.kind; u[b + 7] = q.side || 0;
     });
   }
+  // the star system, after the battle (all 0 when none): see SYSTEM_GLSL
+  const sy = systemNow();
+  if (sy) {
+    const o = SKY_SY;
+    u[o] = sy.x * dpr; u[o + 1] = sy.y * dpr; u[o + 2] = sy.R * dpr; u[o + 3] = sy.a;
+    u[o + 4] = sy.co; u[o + 5] = sy.sn; u[o + 6] = sy.open; u[o + 7] = sy.t;
+    u[o + 8] = sy.stars.length; u[o + 9] = sy.planets.length;
+    if (sy.belt) { u[o + 10] = sy.belt[0]; u[o + 11] = sy.belt[1]; }
+    if (sy.disc) { u[o + 12] = sy.disc.r; u[o + 13] = sy.disc.gap; }
+    u[o + 14] = sy.seed;
+    sy.stars.forEach((q, i) => {
+      const b = o + 16 + i * 8;
+      u[b] = q.x * dpr; u[b + 1] = q.y * dpr; u[b + 2] = q.r * dpr; u[b + 3] = q.L;
+      u[b + 4] = q.rgb[0]; u[b + 5] = q.rgb[1]; u[b + 6] = q.rgb[2]; u[b + 7] = q.z;
+    });
+    sy.planets.forEach((q, i) => {
+      const b = o + 40 + i * 16;
+      u[b] = q.x * dpr; u[b + 1] = q.y * dpr; u[b + 2] = q.r * dpr; u[b + 3] = q.z >= 0 ? 1 : -1;
+      u[b + 4] = q.rgb[0]; u[b + 5] = q.rgb[1]; u[b + 6] = q.rgb[2]; u[b + 7] = q.kind;
+      u[b + 8] = q.L[0]; u[b + 9] = q.L[1]; u[b + 10] = q.L[2]; u[b + 11] = q.ring ? 1 : 0;
+      u[b + 12] = q.ar; u[b + 13] = q.th; u[b + 14] = q.dir; u[b + 15] = SYSTEM_TRAIL;
+    });
+  }
+  // the voyage's light (all 0 when none)
+  if (vo) { u[SKY_VY] = vo.x * dpr; u[SKY_VY + 1] = vo.y * dpr; u[SKY_VY + 2] = vo.glow; u[SKY_VY + 4] = vo.flash; u[SKY_VY + 5] = vo.t; }
   I.glowGL = glowPrep(G, glows, k, ox, oy, dpr);
   // the field again when its quads changed; the sky's pass when anything it shows did
   let fresh = !G.gn || (G.fieldOk && G.ni === G.lastNi);
@@ -6805,6 +7284,8 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   gl.uniform4fv(G.frloc, u, SKY_FR, FAR_N * 16); gl.uniform1i(G.frnloc, G.frn);
   gl.uniform4fv(G.plloc, u, SKY_PL, 36);
   gl.uniform4fv(G.btloc, u, SKY_BT, SKY_BT_N * 4);
+  gl.uniform4fv(G.syloc, u, SKY_SY, SKY_SY_N * 4);
+  gl.uniform4fv(G.vyloc, u, SKY_VY, 8);
   if (G.glow) {
     const L = G.gloc, gu = G.gu, M = GLOW_MAX * 4;
     for (let j = 0; j < 3; j++) gl.uniform4fv(L[j], gu, j * 4, 4);
