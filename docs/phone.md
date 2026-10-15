@@ -337,7 +337,8 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 lead, send: true }`, then `/teams/add` for a team above and `/teams/leave` with `quiet` for a member its order missed),
 `/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`, `/teams/rename`, `/bots/:id/switch`, `/bots/:id/map`, `/bots/:id/watch` and `/bots/:id/tasks/:taskId`,
 `/chat/dynamic` (Dynamic on or off for any chat, below), and `/accounts/add`, `/accounts/login`,
-`/accounts/code` and `/accounts/cancel` (only to sign in a missing Claude A or B, below).
+`/accounts/code` and `/accounts/cancel` (only to sign in a missing Claude A or B, below), and `/push/token` (the
+relay's own route, never the server's: "Notifications").
 
 **GET and POST:** `/sync/move` (Continue here, asked of a machine that is on for a chat whose host is off: "Several
 machines" below). The POST takes only `{ id, force? }` (403 for any other field; 400 when `id` is not a conversation
@@ -656,6 +657,42 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   drops the older pairing. Settings lists the machines (online or last seen, the Fleet View version); a tap
   unpairs that one only.
 
+## Notifications
+
+Each machine pushes its own alerts to the phones paired with it, through Expo's push service (which hands them to
+Apple). No new dependency on the PC: `phone-push.js`, started by the relay, calls
+`https://exp.host/--/api/v2/push/send` with plain `fetch`.
+
+- **Private by default.** The relay is end-to-end encrypted, and a push is not: Expo and Apple see what it says. So a
+  push names only what happened: **"A chat needs you"** (an alert of kind `question`, `error` or `stalled`, or a plan
+  that did not finish), **"A chat finished"** (`done`) or **"A PR merged"** (`merged`), with data `{ sid, kind,
+  machine, team? }` (`kind` `needs`, `finished` or `merged`; `machine` the pairing's `dev`; `team` when the chat is a
+  team member). Never a chat's name, its words or a PR's number. The phone's Settings switch **Show chat names**
+  (off by default) adds the chat's name as the body (`<name> · PR #<n>` for a merge): Expo and Apple then see that
+  name.
+- **The token.** The phone asks iOS for permission once, not on a first launch: after a minute in front while paired
+  and a machine is online, an alert says what notifications say, and only its "Turn on" brings up iOS's question
+  (Settings' **Notifications** switch asks too). It then sends its Expo push token to every machine it is paired with:
+  `POST /push/token { token, names, peers }`, the relay's own route (answered by the relay, never passed to the
+  server; a phone's only, 403 for a computer; 403 for any other key, 400 for a token that is not
+  `Expo(nent)PushToken[...]`, a `names` that is not true or false, more than 8 `peers`). `peers` are the sync device
+  ids of the other machines that took the token, so a machine leaves a chat another one runs (`workspace.host`) to
+  that machine and the phone hears it once. `{ token: null }` (notifications off) drops it. The relay keeps it on the
+  device's record in `devices.json` (`push: { token, names, peers, at }`); `GET /relay/status` says only `push: true`.
+  Revoking the device drops it, and so does Expo answering `DeviceNotRegistered`. An older Fleet View answers 403,
+  and the phone does not ask it again until something changes.
+- **What goes when.** `phone-push.js` reads this server's `GET /state` alerts every 5 s (with `If-None-Match`), only
+  while some phone has a token. Per chat (a team's members as one: its group chat) and kind, one push in 10 minutes;
+  a chat with two kinds in one read gets the more urgent (needs, merged, finished); several chats in one read go as one
+  push per kind ("3 chats need you", no `sid`). The newest alert `n` seen is kept in `<dataDir>/relay/push.json` with
+  the coalescing times, so a restart sends nothing twice; the first read with no cursor, and the first after no phone
+  had a token, send nothing (no burst of old alerts), and an alert over 10 minutes old is never sent.
+- **On the phone.** A tap opens the chat (`data.sid`) or the team's group chat (`data.team`); one about several chats
+  opens the app as it was. While the app is in front a push shows, unless it is about the chat on view. The phone's
+  code: `phone/src/lib/push.ts` (prefs, where a tap goes, the registration) and `phone/src/data/push.tsx`.
+- **Build.** `expo-notifications` is native (the app's 0.6.0 build), with `aps-environment` production. Expo's push
+  service needs the APNs key for `com.glodusk.fleetview` on EAS (`eas credentials`, iOS, Push Notifications).
+
 ## The relay on the PC
 
 - `relay.js` runs inside the Fleet View server. Its Supabase side is off unless sync S1 is set up and signed in and
@@ -666,7 +703,8 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   starts it, and assumes nothing else about the PC. That way it can move to a cloud host later (Henry wants the
   session host on Supabase Compute once that leaves its waitlist).
 - **Devices:** `<dataDir>/relay/devices.json` lists `{ id, name, mode: "relay", state: "pending" |
-  "paired", createdAt, exp?, pairedAt?, lastSeen?, app?, device? }` (a file from before modes has no `mode`: relay;
+  "paired", createdAt, exp?, pairedAt?, lastSeen?, app?, device?, push? }` (`push`: the phone's notifications token,
+  see "Notifications"; a file from before modes has no `mode`: relay;
   a device with `mode: "local"`, paired on the Wi-Fi before that way was taken out, is dropped at start with its key).
   The keys are kept apart, in `protectedStore(<dataDir>/relay,
   'relay-keys')`, as one JSON object: per device `{ k }` (its own `K'`) once the pairing finished, or
@@ -691,9 +729,9 @@ as above, one QR code per machine) and talks to each over its own channel or soc
 - `phone/` in this repo: Expo SDK 57, TypeScript, expo-router. The name is "Fleet View", the bundle
   `com.glodusk.fleetview`, the scheme `fleetview`. It ships to TestFlight only, and is left out of the share repo.
 - **Pairing.** The app opens on the pair screen until it is paired: the computers in the lobby, or a pairing code.
-  An older app's start screen pick (AsyncStorage `fv.way`) is cleared at launch. `app.json` still has the iOS keys
-  the Wi-Fi way needed (`NSLocalNetworkUsageDescription`, `NSAllowsLocalNetworking`, from app version 0.2.0); they
-  are native, so they go with the next store build.
+  An older app's start screen pick (AsyncStorage `fv.way`) is cleared at launch. The iOS keys the Wi-Fi way needed
+  (`NSLocalNetworkUsageDescription`, `NSAllowsLocalNetworking`, from app version 0.2.0) went with the 0.6.0 store
+  build.
 - One `Transport` interface with three implementations: `RelayTransport` (release; over `SupabaseCarrier`),
   `DirectTransport` (`__DEV__`
   only: `http://localhost:4777` through `adb reverse tcp:4777 tcp:4777`, with the `Origin` header for page POSTs and

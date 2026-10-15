@@ -35,6 +35,8 @@
 // retryAfter), parts both ways (out of order, a surrogate pair at the cut, over 64 parts -> 413, 64 parts, 4
 // assemblies, 60 s, 21,000,000 characters), the token re-sent on refresh and at the heartbeat, a heartbeat left
 // unanswered (reconnect), presence setting lastSeen, sign-out and sign-in (leave, then join again on a new socket),
+// the phone's push token (POST /push/token answered by the relay itself and kept on the device, its checks, status
+// never showing it, dropPush, gone with a revoke; phone-push.js is off here),
 // revoke (notice, leave, key deleted, a request still being checked never going on), stop('pc-closing') (notice,
 // socket closed), backoff on refused joins and on a socket that keeps dropping (1 s doubling to 60 s, never a spin).
 // /relay/* (PC only, Origin on POSTs, no key in the status) and the CLI over loopback (pair.html with the QR code,
@@ -389,6 +391,8 @@ function relayOpts(o) {
     log: (t) => (o.logs || []).push(t), now: () => clock.t, WebSocketImpl: FakeWS, timers: o.timers, keyStore: o.keyStore,
     readConfig: () => { o.configReads = (o.configReads || 0) + 1; return { config: { url: SB_URL, key: SB_KEY } }; },
     port: o.port, startLimits: o.startLimits,
+    // never phone-push.js here (scripts/phone-push-test.js tests it): no push could ever reach Expo
+    push: false,
   };
 }
 // the fence's environment: the fake home and app data folders, for this process only
@@ -692,6 +696,42 @@ async function main() {
   await sleep(60);
   ok(!ph.answers(ws, 'h6').length && (await relay.status()).devices[0].dropped === dOther + 1, 'the other K\': dropped, never answered');
   ok(JSON.parse(A.keyStore.peek())[ph.dev].k === hs1.k.toString('base64url'), 'and the key stays K\'');
+  await tick(A.timers, 1001, ws);
+
+  // the phone's push token (phone-push.js): the relay's own route, kept on the device's record, never the server's
+  const PUSH_TOKEN = 'ExponentPushToken[pushTestToken_0123]', PEER_B = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+  const nSeen = seen.length;
+  r = await ph.ask(ws, 'POST', '/push/token', { b: { token: PUSH_TOKEN, names: false, peers: [PEER_B.toUpperCase()] } });
+  eq(r && { s: r.s, b: r.b }, { s: 200, b: { ok: true, push: true } }, 'POST /push/token: 200');
+  ok(seen.length === nSeen, 'and nothing reached the server');
+  eq(relay.pushTargets(), [{ dev: ph.dev, token: PUSH_TOKEN, names: false, peers: [PEER_B] }], 'pushTargets: the phone, its token, names off, its peers (lower case)');
+  devs = JSON.parse(fs.readFileSync(devicesFile, 'utf8')).devices;
+  ok(devs[0].push && devs[0].push.token === PUSH_TOKEN && devs[0].push.names === false, 'devices.json keeps it on the device');
+  let stPush = (await relay.status()).devices[0];
+  ok(stPush.push === true && !JSON.stringify(await relay.status()).includes('pushTestToken'), 'status says push: true, never the token');
+  for (const [b, want, what] of [
+    [{ token: 'abc' }, 400, 'not an Expo token'], [{ token: PUSH_TOKEN, names: 'yes' }, 400, 'names not a boolean'],
+    [{ token: PUSH_TOKEN, peers: ['nope'] }, 400, 'a peer that is no device id'], [{ token: PUSH_TOKEN, peers: Array(9).fill(PEER_B) }, 400, '9 peers'],
+    [{ token: PUSH_TOKEN, via: 'phone', other: 1 }, 403, 'another key'], [{}, 400, 'no token'],
+  ]) {
+    r = await ph.ask(ws, 'POST', '/push/token', { b });
+    ok(r && r.s === want, `POST /push/token with ${what}: ${want} (${r && r.s})`);
+  }
+  r = await ph.ask(ws, 'GET', '/push/token');
+  ok(r && r.s === 400, `GET /push/token: 400 (${r && r.s})`);
+  ok(relay.pushTargets().length === 1 && relay.pushTargets()[0].token === PUSH_TOKEN, 'none of those changed it');
+  r = await ph.ask(ws, 'POST', '/push/token', { b: { token: null } });
+  ok(r && r.s === 200 && r.b.push === false && !relay.pushTargets().length, 'token null: off');
+  ok(!JSON.parse(fs.readFileSync(devicesFile, 'utf8')).devices[0].push, 'and off devices.json');
+  r = await ph.ask(ws, 'POST', '/push/token', { b: { token: PUSH_TOKEN, names: true } });
+  ok(r && r.s === 200 && relay.pushTargets()[0].names === true && relay.pushTargets()[0].peers.length === 0, 'on again, with names');
+  relay.dropPush(ph.dev, 'ExponentPushToken[someOtherToken99]', 'test');
+  ok(relay.pushTargets().length === 1, 'dropPush with a token it no longer has changes nothing');
+  relay.dropPush(ph.dev, PUSH_TOKEN, 'Expo says the app is not registered');
+  ok(!relay.pushTargets().length && !JSON.parse(fs.readFileSync(devicesFile, 'utf8')).devices[0].push, 'dropPush drops it (DeviceNotRegistered)');
+  r = await ph.ask(ws, 'POST', '/push/token', { b: { token: PUSH_TOKEN } });
+  ok(r && r.s === 200 && relay.pushTargets().length === 1, 'registered again (the revoke below drops it)');
+  ok(!A.logs.join('\n').includes('pushTestToken'), 'server.log never holds the token');
   await tick(A.timers, 1001, ws);
 
   // forwarding: who the server sees
@@ -1648,6 +1688,7 @@ async function main() {
   ok(ws.frames('phx_leave', ph.wire).length === 1, 'then leaves the channel');
   ok(!(ph.dev in JSON.parse(A.keyStore.peek())) && (ph3.dev in JSON.parse(A.keyStore.peek())), 'and deletes its key (only its)');
   ok(!JSON.parse(fs.readFileSync(devicesFile, 'utf8')).devices.some((dv) => dv.id === ph.dev), 'devices.json no longer lists it');
+  ok(!relay.pushTargets().some((x) => x.dev === ph.dev), 'and its push token went with it');
   const sentNow = ws.sent.length;
   ph.send(ws, { t: 'req', id: 'gone1', at: clock.t, m: 'GET', p: '/api/status' });
   await sleep(60);

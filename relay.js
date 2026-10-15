@@ -76,6 +76,11 @@
 //             10 minutes (a fork from a message one; a team one per member; a message to a conversation that opens one /state says is not
 //             running 1, a team message one per member not running); 64 MB of answers being read at once. Over one: 429 with
 //             b.retryAfter (ms), not kept
+//   push      POST /push/token { token, names?, peers? } is the relay's own route, a phone's only (403 for a computer),
+//             never passed to the server: the phone's Expo push token (null: none) on its device record, whether it
+//             wants the chats' names, and the sync device ids of the other machines it registered with (at most 8).
+//             phone-push.js, started with the relay, pushes this server's alerts to those tokens (docs/phone.md
+//             "Notifications"); revoking the device drops its token with it
 //   revoke    notice 'revoked', leave, delete the key; a request of its still being checked never goes on.
 //             stop('pc-closing') sends notice 'pc-closing' on every channel
 //
@@ -135,7 +140,8 @@
 //   Paths: the method and the whole path must match; ids match their patterns; '..', '//', '%', '?', '#', '\' refused.
 //
 // Devices: <dataDir>/relay/devices.json [{ id, name, mode: 'relay', state: 'pending' | 'paired', createdAt,
-// exp?, pairedAt?, lastSeen?, app?, device?, kind?, peer? }] (app and device: what the phone's hello said; a file from
+// exp?, pairedAt?, lastSeen?, app?, device?, kind?, peer?, push? }] (push: { token, names, peers, at }, the phone's
+// POST /push/token; app and device: what the phone's hello said; a file from
 // before modes has no mode: relay; one with mode 'local', a phone paired on this PC's Wi-Fi before that way was taken
 // out, is dropped at start with its key), no keys; the keys in sync-api.js's protectedStore(<dataDir>/relay,
 // 'relay-keys') as one JSON object { <dev>: { k, qr? } } (see loadKeys).
@@ -151,16 +157,17 @@
 // createRelay(opts) -> { start(), stop(reason) -> Promise, handle(req, res, ctx), status() -> Promise, pair(name,
 // mode) -> Promise [code, json], revoke(id) -> Promise [code, json], addComputer({ dev, name, peer, key }) -> Promise
 // of the device's view, removeComputer(peer, why) -> Promise of how many went, computers() -> [{ id, peer, name,
-// pairedAt, lastSeen, channel }] }
+// pairedAt, lastSeen, channel }], pushTargets() -> [{ dev, token, names, peers }], dropPush(dev, token, why) }
 //   opts: { port, dataDir, logDir, sync (createSync()'s instance), apiToken (a function giving it, or the token
 //   file's path), relayKey (a function giving api.js's relayKey(), for the marker), version (string or function),
 //   pcName, log(text), onComputerGone(peer) (a computer revoked with revoke(),
 //   not through link.js: fleet-view.js has the link unlink it on both machines) } and, for tests: now, WebSocketImpl, timers
 //   ({ setTimeout, clearTimeout }), keyStore (a store as sync-api.js's), readConfig(dataDir), routeMs, waitRouteMs,
-//   startLimits ({ atOnce, max }, read at each request), resDeviceMax, uploadMax
+//   startLimits ({ atOnce, max }, read at each request), resDeviceMax, uploadMax, push (false: no phone-push.js; an
+//   object: more of its options, such as a fake sendUrl)
 // Routes (fleet-view.js sends /relay/* here; this PC only, never through the relay; POSTs need this page's Origin):
-//   GET  /relay/status  { enabled, signedIn, email, connected, devices } (never a key; a device still pairing says how
-//                       many handshakes its code made)
+//   GET  /relay/status  { enabled, signedIn, email, connected, devices } (never a key or a push token: push says
+//                       whether a phone has one; a device still pairing says how many handshakes its code made)
 //   POST /relay/pair    { name?, mode?: 'relay' (the only one; 'local', the Wi-Fi way that is gone, gets 400) } ->
 //                       { ok, id, mode, link, svg, exp }: the link (and its QR code) is shown once
 //   POST /relay/revoke  { id }
@@ -176,6 +183,7 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 const P = require(path.join(__dirname, 'platform.js'));
 const SYNC_API = require(path.join(__dirname, 'sync-api.js'));
+const PHONE_PUSH = require(path.join(__dirname, 'phone-push.js'));
 
 const LABEL = 'fleet-view relay v1'; // the envelope's (HKDF salt and AAD), the same in protocol v2
 const PAIRED_INFO = 'fleet-view relay v2 paired'; // K' = HKDF-SHA256(ikm K || X25519 secret, no salt, this, 32)
@@ -229,6 +237,10 @@ const PHONE_RE = /^[A-Za-z0-9_-]{8,40}$/; // a phone's install id (pairing by si
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TOKEN_RE = /^[A-Za-z0-9._~+/=-]{8,4096}$/;
 const MARK_KEY_RE = /^[\x21-\x7e]{16,256}$/; // the marker's key goes in a header: printable ASCII only
+// the phone's notifications (phone-push.js): its Expo push token comes by the relay's own route, never the server's
+const PUSH_PATH = '/push/token';
+const PUSH_TOKEN_RE = /^Expo(?:nent)?PushToken\[[A-Za-z0-9_-]{8,200}\]$/;
+const PUSH_KEYS = new Set(['token', 'names', 'peers']), PEERS_MAX = 8;
 const clip = (s, n = 200) => String(s == null ? '' : s).replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, n);
 const arr = (x) => (Array.isArray(x) ? x : []);
 
@@ -647,16 +659,24 @@ function createRelay(opts = {}) {
       app: o.app ? clip(o.app, 40) : undefined, device: o.device ? clip(o.device, 60) : undefined, gone: false,
       // the phone's install id when it paired by sign-in (relay-lobby.js): its next pairing here replaces this one
       phone: !computer && typeof o.phone === 'string' && PHONE_RE.test(o.phone) ? o.phone : undefined,
+      push: computer ? undefined : pushOf(o.push),
       k: null, keys: null, qr: false, until: 0, cands: [], hsN: 0, hsAt: 0, old: null,
       ch: { state: 'closed', topic: null, joinRef: null, backoff: BACKOFF_MIN, timer: null, refused: null },
       nonces: new Map(), kept: new Map(), keptGet: 0, opened: [], inFlight: 0, startLog: [], starting: 0,
       unpacking: 0, unpackWait: [], resBytes: 0, parts: new Map(), dropped: 0,
     };
   }
+  // a device record's push (devices.json, or a phone's POST /push/token as it is kept) -> { token, names, peers, at }
+  // or undefined
+  function pushOf(x) {
+    if (!x || typeof x !== 'object' || typeof x.token !== 'string' || !PUSH_TOKEN_RE.test(x.token)) return undefined;
+    const peers = [...new Set(arr(x.peers).filter((p) => typeof p === 'string' && UUID_RE.test(p)).map((p) => p.toLowerCase()))].slice(0, PEERS_MAX);
+    return { token: x.token, names: x.names === true, peers, at: Number(x.at) || now() };
+  }
   // (a phone's has no kind: devices.json from before computers reads the same)
   const deviceView = (dv) => {
     const o = { id: dv.id, name: dv.name, mode: dv.mode, state: dv.state, createdAt: dv.createdAt };
-    for (const k of ['exp', 'pairedAt', 'lastSeen', 'app', 'device', 'phone']) if (dv[k] !== undefined) o[k] = dv[k];
+    for (const k of ['exp', 'pairedAt', 'lastSeen', 'app', 'device', 'phone', 'push']) if (dv[k] !== undefined) o[k] = dv[k];
     if (isComputer(dv)) { o.kind = 'computer'; o.peer = dv.peer; }
     return o;
   };
@@ -1094,6 +1114,8 @@ function createRelay(opts = {}) {
   async function run(dv, msg) {
     const m = msg.m, p = msg.p;
     if (m !== 'GET' && m !== 'POST') return fail(400, 'm must be GET or POST');
+    // the phone's push token: the relay's own route, answered here
+    if (p === PUSH_PATH) return pushToken(dv, m, msg.b);
     // a linked computer may also call the /peer/... routes; a phone never
     const peerRoute = isComputer(dv) && peerRouteAllowed(m, p);
     if (!routeAllowed(m, p) && !peerRoute) return fail(403, isComputer(dv) ? 'not something another computer may call' : 'not something the phone may call');
@@ -1138,6 +1160,35 @@ function createRelay(opts = {}) {
     if (m === 'GET' && p === '/state' && r.s === 200 && r.b && typeof r.b === 'object') places = placesFrom(r.b);
     if (m === 'GET') { fenceAnswer(p, r); accountsAnswer(p, r); }
     return r;
+  }
+  // POST /push/token { token, names?, peers? } (docs/phone.md "Notifications"): token an Expo push token, or null for
+  // none; names true or false; peers at most PEERS_MAX sync device ids. A phone's only. -> the answer, or null when
+  // the device was revoked meanwhile
+  function pushToken(dv, m, b) {
+    if (isComputer(dv)) return fail(403, 'not something another computer may call');
+    if (m !== 'POST') return fail(400, 'POST');
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return fail(400, 'b must be a JSON object');
+    if (Object.keys(b).some((k) => !PUSH_KEYS.has(k))) return fail(403, 'only token, names and peers');
+    if (b.token !== null && !(typeof b.token === 'string' && PUSH_TOKEN_RE.test(b.token))) return fail(400, 'token must be an Expo push token, or null');
+    if (b.names !== undefined && typeof b.names !== 'boolean') return fail(400, 'names must be true or false');
+    if (b.peers !== undefined && !(Array.isArray(b.peers) && b.peers.length <= PEERS_MAX && b.peers.every((x) => typeof x === 'string' && UUID_RE.test(x)))) return fail(400, `peers must be at most ${PEERS_MAX} sync device ids`);
+    if (dv.gone || devices.get(dv.id) !== dv) return null;
+    const had = !!dv.push;
+    dv.push = b.token === null ? undefined : pushOf({ token: b.token, names: b.names, peers: b.peers, at: now() });
+    saveDevices();
+    if (had !== !!dv.push) note(`${dv.id} (${dv.name}) ${dv.push ? 'takes notifications now' : 'takes no notifications now'}`);
+    return { s: 200, b: { ok: true, push: !!dv.push } };
+  }
+  // the phones that take notifications, for phone-push.js
+  const pushTargets = () => [...devices.values()].filter((dv) => !dv.gone && dv.push && dv.state === 'paired' && !isComputer(dv))
+    .map((dv) => ({ dev: dv.id, token: dv.push.token, names: dv.push.names, peers: dv.push.peers }));
+  // a token Expo no longer takes (DeviceNotRegistered): off that device, unless it sent a new one meanwhile
+  function dropPush(dev, token, why) {
+    const dv = devices.get(dev);
+    if (!dv || !dv.push || dv.push.token !== token) return;
+    dv.push = undefined;
+    saveDevices();
+    note(`${dv.id} (${dv.name}) takes no notifications now: ${why || 'its token was dropped'}`);
   }
   // per device: how long before another envelope may open (ms), or 0, which counts this one. Every envelope that opens
   // counts: requests and their repeats, parts and hellos
@@ -1443,7 +1494,7 @@ function createRelay(opts = {}) {
   // ---------- the socket ----------
   let ws = null, wsOpen = false, refN = 0, hbTimer = null, hbRef = null, reconnectTimer = null, sweepTimer = null;
   let sockBackoff = BACKOFF_MIN, uid = null, token = null, want = false, started = false, stopped = false, startedAt = Infinity;
-  let unsubscribe = null, evalChain = Promise.resolve();
+  let unsubscribe = null, evalChain = Promise.resolve(), push = null;
   const mkRef = () => String(++refN);
   function wire(o) {
     if (!ws || !wsOpen) return false;
@@ -1712,6 +1763,11 @@ function createRelay(opts = {}) {
       else evaluate(true);
     });
     evaluate();
+    // the phones' notifications: it reads this server's /state only while a phone has a token
+    if (opts.push !== false) {
+      push = PHONE_PUSH.createPush({ port, dataDir, now, timers: T, log: note, targets: pushTargets, drop: dropPush, ...(opts.push && typeof opts.push === 'object' ? opts.push : {}) });
+      push.start();
+    }
   }
   // reason 'pc-closing': every phone is told first (the server is shutting down)
   function stop(reason) {
@@ -1719,6 +1775,7 @@ function createRelay(opts = {}) {
     stopped = true;
     want = false;
     if (unsubscribe) { try { unsubscribe(); } catch {} }
+    if (push) push.stop();
     cancel(sweepTimer); sweepTimer = null;
     if (reason === 'pc-closing') for (const dv of devices.values()) if (dv.state === 'paired') notice(dv, 'pc-closing');
     disconnect(reason === 'pc-closing' ? 'pc closing' : 'relay stopped');
@@ -1822,7 +1879,7 @@ function createRelay(opts = {}) {
     return {
       enabled, signedIn, email, connected: wsOpen,
       devices: [...devices.values()].filter((dv) => dv.state === 'paired' || dv.exp > t).map((dv) => ({
-        ...deviceView(dv), ...(dv.state === 'paired' ? { finished: !dv.qr } : {}), ...(dv.qr ? { handshakes: dv.hsN } : {}), channel: channelOf(dv),
+        ...deviceView(dv), push: !!dv.push, ...(dv.state === 'paired' ? { finished: !dv.qr } : {}), ...(dv.qr ? { handshakes: dv.hsN } : {}), channel: channelOf(dv),
         ...(dv.ch.refused ? { problem: dv.ch.refused } : {}), dropped: dv.dropped,
       })),
     };
@@ -1856,7 +1913,7 @@ function createRelay(opts = {}) {
     return send(404, { ok: false, message: 'no such route' });
   }
 
-  return { start, stop, handle, status, pair, revoke, addComputer, removeComputer, computers };
+  return { start, stop, handle, status, pair, revoke, addComputer, removeComputer, computers, pushTargets, dropPush };
 }
 
 // ---------- CLI ----------
