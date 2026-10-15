@@ -221,9 +221,15 @@ function when(ms, now) {
 // a conversation's own colour, picked with Colour on its right-click (app.js settings.sessHues): id -> CSS colour or null
 let pickedColor = () => null;
 export function setPickedColors(fn) { pickedColor = typeof fn === 'function' ? fn : () => null; }
+// app.js's Colour item for a conversation the shell's menu does not list (a finished one): (id, name) -> menu item
+let colorItemFor = () => null;
+export function setColorItem(fn) { colorItemFor = typeof fn === 'function' ? fn : () => null; }
+const isConv = (c) => !!(c && c.id && c.kind !== 'bot' && c.kind !== 'team');
 const colorOf = (c) => {
   const own = ownColorOf(c); // a bot's look (state.bots)
   if (own) return own;
+  const picked = isConv(c) ? pickedColor(c.id) : null; // a bot's colour lives in Edit bot, not here
+  if (picked) return picked;
   const r = c && c.repo && c.repo.color;
   if (HEX.test(String(r || ''))) return r;
   if (c && c.kind === 'team' && HEX.test(String(c.statusColor || ''))) return c.statusColor;
@@ -631,8 +637,9 @@ function build(el, ui) {
     if (r.dataset.team) { ui.contextMenu({ kind: 'team', id: r.dataset.team, extra }, e.clientX, e.clientY); return; }
     if (r.dataset.bot && botOf(st, r.dataset.bot)) { botMenu(el, ui, r.dataset.bot, e.clientX, e.clientY); return; }
     if (r.dataset.id && inState(st, r.dataset.id) && !(r.dataset.bot && elsewhereBot(st, r.dataset.bot))) { ui.contextMenu({ kind: 'session', id: r.dataset.id, extra }, e.clientX, e.clientY); return; }
-    // another machine's bot (run on its own machine), a gone conversation: Pin / Unpin alone
-    if (c) openCtxMenu({ x: e.clientX, y: e.clientY, title: c.name, dot: colorOf(c), items: extra });
+    // another machine's bot (run on its own machine): Pin / Unpin alone; a finished conversation: its Colour too
+    const col = isConv(c) && !r.dataset.bot ? colorItemFor(c.id, c.name) : null;
+    if (c) openCtxMenu({ x: e.clientX, y: e.clientY, title: c.name, dot: colorOf(c), items: col ? [...extra, col] : extra });
   });
   // drag a row to move it (see dragOver)
   el._list.addEventListener('pointerdown', (e) => {

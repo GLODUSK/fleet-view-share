@@ -183,7 +183,7 @@
 import { renderCards } from './cards.js';
 import { renderWall } from './wall.js';
 import { renderProjects, followProjectsPick } from './projects.js';
-import { renderChats, renderBotPanel, botTeams, botFace, seenNow, setPickedColors, selectChat } from './chats.js';
+import { renderChats, renderBotPanel, botTeams, botFace, seenNow, setPickedColors, setColorItem, selectChat } from './chats.js';
 import { BOT_JOBS, jobLabel, ownBots, onMap, watchesOf, botMascot, botName, watchName } from './map-bots.js';
 import { buildContacts } from './chats-model.js';
 // the New team form's rules (a team's size, its lead, a name cleaned, the checks before Make team sends), shared with
@@ -999,8 +999,10 @@ function sessionColorItem(s) {
     render(); // a team member's mascot in the Bots view reads sessHues itself (setPickedColors): it wears it now
   });
 }
-// the Bots view's team members (chats.js) wear the colour picked for their conversation
+// the Bots view's rows and team members (chats.js) wear the colour picked for their conversation; a finished one's
+// right-click there has Colour too
 setPickedColors((id) => (sessHues.has(id) ? hueCss(sessHues.get(id)) : null));
+setColorItem((id, name) => sessionColorItem({ id, name }));
 function repoRenameItem(root) {
   const r = repoRootOf({ root });
   return {
