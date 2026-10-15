@@ -67,6 +67,9 @@
 // (scrolled up to the start, as bots do); each one before it waits for a click on "Show the conversation before ·
 // <name>". Display only: nothing changes in what Claude sees. Older messages have Copy only, no option picking, and
 // count for nothing of this conversation's (launched options, the "You" bar at the top, Rewind's count).
+// A model or effort switch never shows in any chat (Henry, 2026-10-15: "i dont want to see that lil bubble"): no
+// bubble for the "/effort x" or "/model x" sent (the model menu's pick, or typed), and its note and Claude Code's
+// answer ("Set effort level to …": chats-model.js switchNote) are left out of the feed. The menu shows what runs now.
 //
 // ?fixture=1 reads ./fixtures/conversation-sample.json instead of the server (same JSON); with it,
 // ?chatWindow=<n> shrinks the first page (to try "Show earlier") and ?chatRepeat=<n> repeats the sample n times
@@ -77,7 +80,7 @@ import { mountCompose } from './compose.js';
 import { handToChat } from './handto.js';
 import { onRekey, termApi } from './term.js';
 import { openViewer, openInCode } from './viewer.js';
-import { botFeed } from './chats-model.js';
+import { botFeed, switchNote } from './chats-model.js';
 import { recommendationsOf } from './recommend.js';
 
 const params = (() => { try { return new URLSearchParams(location.search); } catch { return new URLSearchParams(); } })();
@@ -987,7 +990,10 @@ const toBottom = (c) => { c.feed.scrollTop = c.feed.scrollHeight; c.stick = true
 const SENT_MAX_MS = 10 * 60 * 1000; // a message the transcript never shows (it was dropped) goes after this
 const CMD_MAX_MS = 60 * 1000; // a slash command: some log nothing (/clear starts a new transcript), so it goes sooner
 const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+// "/model x" or "/effort x" (switchNote's { model } or { effort }, not its {} for Claude Code's answer)
+const switchCmd = (t) => Object.keys(switchNote(norm(t)) || {}).length > 0;
 function addSent(c, d) {
+  if (switchCmd(d.text)) return; // a model or effort switch: no bubble (the menu shows it)
   const el = document.createElement('div');
   el.className = 'ci ci-user sending';
   const imgs = (d.images || []).map((src, n) => `<span class="cu-img"><img src="${esc(src)}" alt="attached image ${n + 1}"></span>`).join('');
@@ -1625,6 +1631,7 @@ function draw(c, how) {
   const keys = new Set();
   const seq = []; // { it } or { steps: [...] }
   for (const it of c.bubbles ? botFeed(c.past.length ? c.past.concat(c.items) : c.items) : c.hist.length ? chainFeed(c) : c.items) {
+    if (it.kind === 'note' && switchNote(it.text)) continue; // a model or effort switch: never shown
     const k = String(it.key);
     if (keys.has(k)) continue; // a repeated key would fight over one element
     keys.add(k);
