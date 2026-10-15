@@ -1377,11 +1377,85 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     assert.equal(boxNow, '');
     assert.ok(!fake.writes.includes('\x1b'));
     ok('rewind: a message not in the list, or not that many times, gets Esc and 409; a list that never opened leaves nothing in the prompt');
+
+    // ---------- fork from a message ----------
+    // the original in its folder on disk; the host's create starts the fork as new-91 (pid 777; a key no test above used), whose screen is the
+    // fake Claude Code above (the original's is never read or typed into)
+    Object.assign(ctx, { UNSAFE_PATH: /["%^&|<>\x00-\x1f]/, allowedFolders: () => [dir], whereIs: (id) => (id === ID ? { known: true, cwd: dir, account: 'A' } : { known: false }), accounts: () => ['A', 'B'] });
+    const FORK = { id: 'new-91', pid: 777, alive: true, status: null, pending: true, account: 'A', cols: 80, rows: 24 };
+    const forkOf = (o = {}) => { fake.onOpen = (a) => { fake.list = [...fake.list.filter((x) => x.id !== FORK.id), { ...FORK }]; return { ok: true, key: FORK.id, pid: FORK.pid, forkFrom: a.forkFrom, ...o }; }; };
+    const forkState = async (want, ms = 15000) => {
+      let f = null;
+      for (const end = Date.now() + ms; Date.now() < end; await sleep(200)) {
+        f = (await call('GET', `/api/sessions/${FORK.id}/activity`))[1].fork;
+        if (f && want.includes(f.state)) return f;
+      }
+      return f;
+    };
+    const F = `${S}/fork`;
+
+    // refused, nothing started: bad input, an overseer's from a session, a conversation not on disk, an older host
+    claude(['fix the bug']); fake.opened = null; forkOf();
+    for (const bad of [{}, { text: '' }, { text: 'x', nth: -1 }, { text: 'x', nth: 1.5 }, { text: 'x', nth: '1' }, { text: 'a\u0001b' }]) {
+      assert.equal((await call('POST', F, bad))[0], 400, JSON.stringify(bad));
+    }
+    live({ status: 'idle', role: 'bot:a1b2c3d4e5f6' });
+    assert.equal((await call('POST', F, { text: 'fix the bug' }))[0], 403);
+    assert.equal((await call('POST', F, { text: 'fix the bug', via: 'phone' }))[0], 403); // no relay key
+    fake.list = [];
+    assert.equal((await call('POST', '/api/sessions/0000000b-0000-4000-8000-000000000000/fork', { text: 'fix the bug' }))[0], 404);
+    assert.equal(fake.opened, null);
+    forkOf({ forkFrom: undefined });
+    [c, o] = await call('POST', F, { text: 'fix the bug' });
+    assert.equal(c, 502); assert.match(o.message, /too old to fork/);
+    assert.deepEqual(fake.writes, []);
+    ok('fork: refused on bad input, an overseer\'s from a session, a conversation not on disk; an older host\'s plain start is stopped');
+
+    // the older of two "fix the bug" (nth 1): answered at once with the fork's key; once the fork is up, /rewind, ↑ to
+    // it, Enter, "Restore conversation" (2, never 1: code and conversation), and the message cleared from its prompt.
+    // The original is not running: the fork starts in its folder under its account
+    claude(['fix the bug', 'Reply ALPHA.', 'fix the bug', 'thanks']); fake.list = []; forkOf();
+    [c, o] = await call('POST', F, { text: 'fix the bug', nth: 1 });
+    assert.equal(c, 200, o.message);
+    assert.equal(o.key, 'new-91'); assert.equal(o.forkFrom, ID); assert.equal(typeof o.at, 'number');
+    assert.deepEqual(fake.opened, { cwd: dir, account: 'A', forkFrom: ID });
+    assert.deepEqual(fake.writes, []); // nothing typed before it is up
+    const going = (await call('GET', '/api/sessions/new-91/activity'))[1].fork;
+    assert.equal(going.state, 'working'); assert.equal(going.at, o.at); assert.equal(going.from, ID);
+    const forked = await forkState(['done', 'failed']);
+    assert.equal(forked.state, 'done', JSON.stringify(forked));
+    assert.equal(forked.text, 'fix the bug');
+    assert.equal(picked, 'fix the bug'); assert.equal(ptr, 0);
+    assert.equal(pasted(), '/rewind');
+    assert.ok(fake.writes.includes('2') && !fake.writes.includes('1'), JSON.stringify(fake.writes));
+    assert.equal(boxNow, '');
+    assert.ok(fake.writes.some((w) => w.startsWith('\x15')));
+    ok('fork: answered once the fork started; once up, /rewind to the nth message, "Restore conversation" only, the message cleared from its prompt');
+
+    // followed by its pid through the host's re-key (new-91 to its id): the key still reads it once it looked again
+    const FID = '0000000c-0000-4000-8000-000000000000';
+    fake.list = [{ ...FORK, id: FID, pending: false }];
+    await sleep(2500); // (it looks every 2 s)
+    const fa = (await call('GET', '/api/sessions/new-91/activity'))[1];
+    assert.equal(fa.id, FID); assert.equal(fa.fork.state, 'done');
+    // a session that is not that fork has none
+    live({ status: 'idle', pid: 900 });
+    assert.equal((await call('GET', `${S}/activity`))[1].fork, null);
+    ok('fork: its activity follows it by its pid through a re-key; another session\'s says none');
+
+    // a message not in the fork's list: Esc, and it keeps the whole conversation
+    claude(['fix the bug', 'thanks']); fake.list = []; Object.assign(FORK, { id: 'new-92', pid: 778 }); forkOf();
+    [c, o] = await call('POST', F, { text: 'never said this' });
+    assert.equal(c, 200, o.message);
+    const failed = await forkState(['done', 'failed']);
+    assert.equal(failed.state, 'failed'); assert.match(failed.message, /isn't in \/rewind's list.*whole conversation/);
+    assert.equal(at, 'prompt');
+    ok('fork: a message not in its /rewind list gets Esc, and the fork keeps the whole conversation (failed)');
   }
 
   const paths = API.ENDPOINTS.map((e) => `${e.method} ${e.path}`);
   for (const p of ['POST /api/sessions/:id/now', 'POST /api/sessions/:id/unsend', 'POST /api/sessions/:id/model', 'GET /api/sessions/:id/activity',
-    'POST /api/sessions/:id/enter', 'POST /api/sessions/:id/background', 'POST /api/sessions/:id/mode', 'POST /api/sessions/:id/rewind']) assert.ok(paths.includes(p), p);
+    'POST /api/sessions/:id/enter', 'POST /api/sessions/:id/background', 'POST /api/sessions/:id/mode', 'POST /api/sessions/:id/rewind', 'POST /api/sessions/:id/fork']) assert.ok(paths.includes(p), p);
   ok('GET /api lists the new verbs');
 })().then(() => { console.log(`${n} tests passed`); }, (e) => { console.error(e); process.exitCode = 1; })
   .finally(() => { server.close(); setTimeout(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} process.exit(); }, 100); });

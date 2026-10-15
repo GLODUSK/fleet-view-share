@@ -853,8 +853,9 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
   { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
   { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort?, queue? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. Not idle: 409 notReady, or with queue: true 202 { queued, model?, effort? }: applied once Claude finishes this step (GET /state\'s switchPending until then; dropped after 30 min). An overseer\'s: Henry only (his phone)' },
-  { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code), mode (default | acceptEdits | plan | auto | bypass | null), bg (a shell command Ctrl+B can send to the background), prompt (its prompt box\'s text; a bash-mode one as "!<command>"; null when not on screen), rewind (the last POST .../rewind: { state: asking | sending | sent | restored | kept | failed, text, edit, message, at }, or null)' },
+  { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code), mode (default | acceptEdits | plan | auto | bypass | null), bg (a shell command Ctrl+B can send to the background), prompt (its prompt box\'s text; a bash-mode one as "!<command>"; null when not on screen), rewind (the last POST .../rewind: { state: asking | sending | sent | restored | kept | failed, text, edit, message, at }, or null), fork (on a fork POST .../fork started: { state: working | done | failed, text, from, message, at }, or null)' },
   { method: 'POST', path: '/api/sessions/:id/rewind', body: '{ text, nth?, edit? }', does: 'the page\'s Rewind (and Edit, with edit) on one of your messages: Claude Code\'s /rewind back to just before it. text: the message as the transcript has it; nth: which of the messages with that text, counted from the newest (default 0). Only while Claude is idle with no menu or panel up and nothing typed in its prompt (409). -> { menu, at }: Claude Code\'s restore question, now up, which the caller answers (POST .../answer); once restored the message leaves its prompt and edit is sent in its place (activity\'s rewind says how it ended). An overseer\'s: Henry only (his phone)' },
+  { method: 'POST', path: '/api/sessions/:id/fork', body: '{ text, nth? }', does: 'the page\'s Fork on one of your messages: a fork of the conversation (claude --resume <id> --fork-session, in its folder under its account; it need not be running) that goes back to just before that message. text and nth as for .../rewind. -> { key, forkFrom, at } as soon as the fork started; then, once it is up, Claude Code\'s /rewind in the fork to the message, "Restore conversation" only (never the code: the original shares the folder), and the message cleared from the fork\'s prompt, for the caller\'s box (the fork\'s activity\'s fork says how it went). An overseer\'s: Henry only (his phone)' },
   { method: 'POST', path: '/api/sessions/:id/enter', body: '{ text }', does: 'the page\'s Send it on a message left in Claude Code\'s prompt: Enter once more, only while its prompt box holds exactly that text (spaces aside) and no menu is up' },
   { method: 'POST', path: '/api/sessions/:id/background', does: 'the page\'s Run in background: Ctrl+B, only while Claude works and its screen offers it (activity\'s bg)' },
   { method: 'POST', path: '/api/sessions/:id/mode', body: '{ mode: "default" | "acceptEdits" | "plan" | "auto" | "bypass" }', does: 'the permission mode: Shift+Tab until its footer shows that mode (at most 5 presses; 409 with the mode it is on when it has no such mode), only while Claude is idle with no menu up. An overseer\'s: Henry only (his phone)' },
@@ -2108,8 +2109,25 @@ async function rewindSession(key, b, ctx, via = null) {
 }
 
 async function rewindSteps(host, p0, text, nth, edit, ctx, via) {
+  const w = await rewindWalk(host, p0, text, nth);
+  if (w.err) return w.err;
+  const { p, menu } = w;
+  // followed from here: what the restore puts back in its prompt is cleared, and an edit sent in its place
+  const job = { id: p.id, text, edit, via, at: Date.now(), sawMenu: !!menu, emptyAt: 0, state: 'asking', message: '', doneAt: 0 };
+  rewinds.set(p.id, job);
+  followRewind(job, ctx);
+  if (ctx && ctx.log) ctx.log(`api: ${p.id}: rewound to before a message${edit ? ' (an edit)' : ''}${menu ? '; Claude Code asks what to restore' : ''}`);
+  const then = edit ? 'your edit goes in once the conversation is back' : 'the message comes back to your box';
+  return [200, { ok: true, id: p.id, menu, at: job.at, message: menu ? `Claude Code asks what to restore: answer it; ${then}` : `went back to just before it; ${then}` }];
+}
+
+// The walk itself, for Rewind and Fork from here (followFork): the prompt checked empty and idle with no menu, the
+// terminal made tall enough, "/rewind" and Enter, ↑ up its list to the nth entry from the newest that shows text, Enter,
+// then up to REWIND_PICK_MS for Claude Code to ask what to restore (or restore at once). -> { p (at the size it was
+// read), menu (the restore question, or null), restored } or { err: [409, json] }, anything half done backed out of
+async function rewindWalk(host, p0, text, nth) {
   let p = p0;
-  const no = (code, message, more = {}) => [code, { ok: false, id: p.id, ...more, message }];
+  const no = (code, message, more = {}) => ({ err: [code, { ok: false, id: p.id, ...more, message }] });
   const m0 = await menuNow(host, p);
   if (m0) return no(409, MENU_UP, { menu: m0 });
   // the prompt, empty: one read can miss it (a redraw on its way), so it is read again for a moment (compose.js)
@@ -2166,13 +2184,7 @@ async function rewindSteps(host, p0, text, nth, edit, ctx, via) {
     else if (SCREEN.promptBox(SCREEN.render(s, cols, rows, 60, false, true))) restored = true;
   }
   if (!menu && !restored) return no(409, await rewindBackOut(host, p, 'Claude Code did not take the pick'));
-  // followed from here: what the restore puts back in its prompt is cleared, and an edit sent in its place
-  const job = { id: p.id, text, edit, via, at: Date.now(), sawMenu: !!menu, emptyAt: 0, state: 'asking', message: '', doneAt: 0 };
-  rewinds.set(p.id, job);
-  followRewind(job, ctx);
-  if (ctx && ctx.log) ctx.log(`api: ${p.id}: rewound to before a message${edit ? ' (an edit)' : ''}${menu ? '; Claude Code asks what to restore' : ''}`);
-  const then = edit ? 'your edit goes in once the conversation is back' : 'the message comes back to your box';
-  return [200, { ok: true, id: p.id, menu, at: job.at, message: menu ? `Claude Code asks what to restore: answer it; ${then}` : `went back to just before it; ${then}` }];
+  return { p, menu, restored };
 }
 
 // After the pick (compose.js takeRewound and restored): every REWIND_TICK_MS, while the restore question is up, it
@@ -2239,6 +2251,156 @@ function rewindNow(id) {
   if (!j) return null;
   if (j.doneAt && Date.now() - j.doneAt > REWIND_SHOW_MS) { rewinds.delete(id); return null; }
   return { state: j.state, text: j.text, edit: j.edit, message: j.message || null, at: j.at };
+}
+
+// ---------- Fork from one of your messages ----------
+// What the page's Fork on a message does (web/forkat.js, web/app.js forkFromMessage), for a caller with no terminal of
+// its own (the phone's chat): a fork of the conversation (claude --resume <id> --fork-session, the host's create, in its
+// folder under its account), answered as soon as the host started it, so the caller is not held for minutes. Then, in
+// the background (followFork): once the fork is up (its prompt empty a moment, nothing running, no menu or panel: a
+// trust question waits for a person), Rewind's walk up its /rewind list to the message (rewindWalk), and on Claude Code's
+// question "Restore conversation" only, picked here: never the code, since the fork works in the original's folder and
+// restoring code would undo the original's edits too. What the restore puts back in the fork's prompt is cleared there;
+// the message is the caller's to put in the fork's box. GET .../activity's `fork`, read on the fork, says how it goes.
+// The fork is followed by its pty's pid, so the host's re-keys (new-<n> to an id; from the original's id to its own once
+// it writes, when the original was not running) never lose it, and its new-<n> key keeps naming it (keyToId). The
+// original is untouched and need not be running. An overseer's conversation is Henry's alone to fork (his phone); the
+// fork does not take its role.
+const FORK_READY_MS = 1500; // its prompt empty and nothing running this long before /rewind goes in (forkat.js)
+const FORK_START_MS = 3 * 60e3; // a fork not ready by then (a trust question no one answers) is left as it is
+const FORK_TICK_MS = 300;
+const FORK_BOX_MS = 8000; // after the restore: how long the message may take to come back into its prompt
+const FORK_SHOW_MS = 10 * 60e3; // how long after it ended GET .../activity still says how (and its key is followed)
+const FORK_OPTION = /^Restore conversation$/i;
+const forks = new Set(); // the forks followed: { pid, key, from, text, nth, at, state, message, doneAt }
+// the fork's entry in the host's list, wherever the host has re-keyed it
+const forkEntry = (list, job) => (Array.isArray(list) ? list : []).find((x) => x && (Number.isInteger(job.pid) ? x.pid === job.pid : x.id === resolveKey(job.key))) || null;
+
+// POST /api/sessions/:id/fork { text, nth? }: text and nth as for .../rewind. -> 200 { ok, key, forkFrom, account, at,
+// message }: key, the fork's (new-<n>, as POST /api/sessions gives it, followed to its id); at, when it started (the
+// fork's activity's fork.at)
+async function forkSession(key, b, ctx, via = null) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  const text = cleanText(b.text);
+  if (!text) return [400, { ok: false, message: 'text must be the message as it was sent' }];
+  if (b.nth != null && !(Number.isInteger(b.nth) && b.nth >= 0 && b.nth < REWIND_PRESSES)) return [400, { ok: false, message: `nth must be a whole number from 0 (the newest message with that text) to ${REWIND_PRESSES - 1}` }];
+  const nth = b.nth || 0;
+  return withHost(async (host) => {
+    const p = hosted(await host.call('list'), key);
+    const id = convId(p ? p.id : resolveKey(key));
+    if (!id) return [409, { ok: false, message: 'it has no conversation id yet: fork it once it has started' }];
+    // its history is an overseer's: Henry's to branch, as it is his to rewind
+    const bot = ctx.botOf ? ctx.botOf(id) : null;
+    if ((isOverseer(p && p.role) || (bot && isBotRole(bot.role))) && via !== 'henry') return [403, { ok: false, id, message: 'only Henry forks an overseer\'s conversation (his phone)' }];
+    const where = resumable(id, ctx);
+    if (where.err) return where.err;
+    const account = p && acctOk(p.account, ctx) ? p.account : acctOk(where.account, ctx) ? where.account : 'B';
+    const r = await host.call('create', { cwd: where.cwd, account, forkFrom: id });
+    if (!r || !r.ok || typeof r.key !== 'string') return [502, { ok: false, id, message: (r && r.message) || 'the session host could not start the fork' }];
+    // an older host ignores forkFrom: a fresh conversation without the history, so it goes again
+    if (r.forkFrom !== id) {
+      await host.call('kill', r.key).catch(() => {});
+      return [502, { ok: false, id, message: 'the session host is too old to fork a conversation (restart it: node desktop/restart-host.js); the session it started was stopped' }];
+    }
+    for (const j of forks) if (j.doneAt && Date.now() - j.doneAt > FORK_SHOW_MS) forks.delete(j);
+    const job = { pid: Number.isInteger(r.pid) ? r.pid : null, key: r.key, from: id, text, nth, at: Date.now(), state: 'working', message: '', doneAt: 0 };
+    forks.add(job);
+    followFork(job, ctx);
+    if (ctx && ctx.log) ctx.log(`api: ${id}: forked as ${r.key}, to go back to just before a message`);
+    return [200, { ok: true, key: r.key, id: null, forkFrom: id, account, at: job.at, message: 'forked: once it is up it goes back to just before your message, which then waits for its box' }];
+  });
+}
+
+// job.state: working -> done | failed (GET .../activity's fork). A failed one has the whole conversation.
+async function followFork(job, ctx) {
+  const end = (state, message) => {
+    Object.assign(job, { state, message, doneAt: Date.now() });
+    if (ctx && ctx.log) ctx.log(`api: ${job.key}: fork from a message ${state}${state === 'failed' ? `: ${message}` : ''}`);
+  };
+  // the fork in the host's list now, its key followed to its id
+  const look = async (host) => {
+    const q = forkEntry(await host.call('list'), job);
+    if (q && H.ID_RE.test(q.id) && !q.pending) keyToId.set(job.key, q.id);
+    return q;
+  };
+  const GONE = 'the fork ended before it went back to your message';
+  const whole = (why) => `${why}; the fork has the whole conversation`;
+  try {
+    // 1. up: its prompt on screen and empty, no spinner, nothing asked, for FORK_READY_MS. The screen, not the host's
+    // status: a fork of a running conversation stays new-<n> without one until it writes (its pid file names the original)
+    let since = 0;
+    for (;;) {
+      await sleep(FORK_TICK_MS);
+      if (Date.now() - job.at > FORK_START_MS) return end('failed', whole('it was not ready to go back within 3 minutes (it may be asking whether to trust the folder)'));
+      const st = await withHost(async (host) => {
+        const q = await look(host);
+        if (!q || !q.alive) return 'gone';
+        if (q.status === 'busy' || panelOpen(q) || (await menuNow(host, q))) return 'not';
+        const box = SCREEN.promptBox(await rowsNow(host, q, 60, true));
+        return box && !box.text && !SCREEN.spinner(await rowsNow(host, q, 40))?.strong ? 'ready' : 'not';
+      });
+      if (st === 'gone') return end('failed', GONE);
+      if (st !== 'ready') since = 0;
+      else if (!since) since = Date.now();
+      else if (Date.now() - since >= FORK_READY_MS) break;
+    }
+    // 2. /rewind, up its list to the message, Enter (Rewind's walk)
+    const w = await withHost(async (host) => {
+      const q = await look(host);
+      if (!q || !q.alive) return { gone: true };
+      return typeOne(q.id, () => rewindWalk(host, q, job.text, job.nth));
+    });
+    if (w.gone) return end('failed', GONE);
+    if (w.err) return end('failed', whole(w.err[1].message));
+    // 3. its question: "Restore conversation" (not "Restore code and conversation", its default when files changed)
+    if (w.menu) {
+      const opt = w.menu.options.find((o) => FORK_OPTION.test(String(o.label || '').trim()));
+      if (!opt) {
+        await withHost(async (host) => { const q = await look(host); if (q && q.alive) await host.call('write', q.id, '\x1b'); });
+        return end('failed', whole('Claude Code did not offer to restore the conversation alone (Esc closed its question)'));
+      }
+      const [code, a] = await answerMenu(job.key, { option: opt.n, sig: w.menu.sig, allowPermission: true }, ctx, null, null);
+      if (code !== 200) return end('failed', `"Restore conversation" could not be picked (${(a && a.message) || code}): see the fork's Session tab`);
+    }
+    // 4. the message the restore puts back in its prompt: cleared there (it is the caller's for the fork's box)
+    const after = await withHost(async (host) => {
+      let asked = false;
+      for (const stop = Date.now() + FORK_BOX_MS; Date.now() < stop;) {
+        await sleep(200);
+        const q = await look(host);
+        if (!q || !q.alive) return 'gone';
+        asked = !!(await menuNow(host, q));
+        if (asked) continue;
+        const box = SCREEN.promptBox(await rowsNow(host, q, 60, true));
+        if (box && box.text) return (await typeOne(q.id, () => clearPrompt(host, q))) ? 'cleared' : 'stuck';
+      }
+      return asked ? 'asked' : 'empty';
+    });
+    if (after === 'gone') return end('failed', GONE);
+    if (after === 'asked') return end('failed', 'Claude Code\'s restore question is still up in the fork: answer it there');
+    if (after === 'stuck') return end('failed', 'went back to just before your message, but it is still in the fork\'s prompt: clear it in the Session tab');
+    end('done', 'went back to just before your message: it waits for your box to edit and send');
+  } catch (e) {
+    if (!job.doneAt) end('failed', `the fork could not be followed: ${String((e && e.message) || e)}`);
+  }
+  // its key kept naming it while it is shown, until it has its own id (it gets one once it writes, after a message)
+  try {
+    while (Date.now() - job.doneAt < FORK_SHOW_MS) {
+      const q = await withHost(look);
+      if (!q || !q.alive || (H.ID_RE.test(q.id) && !q.pending && q.id !== job.from)) return;
+      await sleep(POLL_MS * 4);
+    }
+  } catch {}
+}
+// what GET .../activity says of the fork it reads (by its pty's pid): { state, text, from, message, at }, or null (not a
+// fork from a message, or one that ended over FORK_SHOW_MS ago)
+function forkNow(p) {
+  for (const j of forks) {
+    if (!(Number.isInteger(j.pid) ? p.pid === j.pid : resolveKey(j.key) === p.id)) continue;
+    if (j.doneAt && Date.now() - j.doneAt > FORK_SHOW_MS) { forks.delete(j); return null; }
+    return { state: j.state, text: j.text, from: j.from, message: j.message || null, at: j.at };
+  }
+  return null;
 }
 
 // POST /api/sessions/:id/model { model?, effort? }: the page's model and effort picker, for this conversation only.
@@ -2573,7 +2735,8 @@ async function readActivity(key, ctx) {
     let doing = null;
     try { doing = cid && ctx.doing ? ctx.doing(cid) : null; } catch {}
     // rewind: how a Rewind or Edit from here is going (rewindNow), so the caller can put the text back in its box
-    const base = { ok: true, id: p.id, alive: !!p.alive, status: p.status || null, waitingFor: p.waitingFor || null, doing, rewind: rewindNow(p.id) };
+    // fork: on a fork from a message, how its going back is going (forkNow), so the caller can put the message in its box
+    const base = { ok: true, id: p.id, alive: !!p.alive, status: p.status || null, waitingFor: p.waitingFor || null, doing, rewind: rewindNow(p.id), fork: forkNow(p) };
     if (!p.alive) return [200, { ...base, busy: false, line: null, verb: null, detail: null, waiting: null, menu: null, effort: null, queue: [], mode: null, bg: false, prompt: null }];
     const marked = await rowsNow(host, p, 60, true);
     const rows = marked.map((l) => l.replace(/[\x01-\x04]/g, '').replace(/\s+$/, '')).slice(-40);
@@ -2683,7 +2846,7 @@ async function listConversations(query, ctx) {
 //        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,
 //        bots: { list(), create(b), start(id), update(id, b), remove(id), look(b) } each -> [code, json] or a Promise of one
 //        (/api/bots, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
-const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode|rewind';
+const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode|rewind|fork';
 const GET_VERBS = new Set(['menu', 'transcript', 'activity']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
 const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|lead|disband|message))?\/?$/;
@@ -2796,6 +2959,7 @@ function handle(req, res, pathname, ctx) {
       case 'background': return run(backgroundSession(k));
       case 'mode': return body((b) => switchMode(k, b, ctx, via(b)));
       case 'rewind': return body((b) => rewindSession(k, b, ctx, via(b)));
+      case 'fork': return body((b) => forkSession(k, b, ctx, via(b)));
       default: break;
     }
   }

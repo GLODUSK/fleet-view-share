@@ -262,7 +262,7 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
 
   | Route | Relay | With `wait` | The phone waits |
   |---|---|---|---|
-  | `POST /api/sessions`, `/api/bots`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it); the page's `/bots/:id/tasks/:taskId` (Run now starts the bot first when it is not running) and `/bots/:id/watch` (a new watch or job starts the bot first, then tells it) | 95 s | 95 s + the wait | 100 s (+ the wait) |
+  | `POST /api/sessions`, `/api/sessions/:id/fork`, `/api/bots`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it; a fork from a message answers once the fork started, and goes back to the message after); the page's `/bots/:id/tasks/:taskId` (Run now starts the bot first when it is not running) and `/bots/:id/watch` (a new watch or job starts the bot first, then tells it) | 95 s | 95 s + the wait | 100 s (+ the wait) |
   | `POST /api/sessions/:id/message` and `/open`; `POST /api/teams`, `/api/teams/:id/add`, `/lead` and `/message`; the page's `/teams`, `/teams/add` and `/teams/lead` (each may resume a stopped conversation first, up to 60 s, before it types) | 75 s | 75 s + the wait | 80 s (+ the wait) |
   | any other `/api/*` POST with `wait` (e.g. `/answer`) | 60 s | | the wait + 15 s |
   | `GET /api/sessions/:id/activity` (the chat's activity line, polled) | 5 s | | 20 s |
@@ -301,7 +301,7 @@ Per device, on the relay:
 - **30 envelopes a second and 1,200 a minute**, counting every envelope that opens: requests, their repeats, parts
   and hellos. Over that, a `req` or `hello` gets 429 with `retryAfter`, and a part is dropped.
 - **The routes that start or resume a Claude: 2 at once, and 12 in 10 minutes.** Each counts one (`POST
-  /api/sessions`, `/api/sessions/:id/open`, `/api/bots`, `/api/bots/:id/start`,
+  /api/sessions`, `/api/sessions/:id/open`, `/api/sessions/:id/fork`, `/api/bots`, `/api/bots/:id/start`,
   `/api/teams/:id/add`, the page's `/teams/add`, the page's `/bots/:id/tasks/:taskId` with `action: "run"`, and the page's `/bots/:id/watch` with a `job`), a team one per distinct member (`POST /api/teams`, the page's
   `/teams`; 12 at most), and a lead only when there is one (`/api/teams/:id/lead`, `/teams/lead`). A message counts
   what it may resume, as `/state` says it (read again when over 15 s old): `POST /api/sessions/:id/message` that
@@ -328,7 +328,7 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 **POST:** `/api/sessions`, `/api/sessions/:id/message`, `/api/sessions/:id/answer`, `/api/sessions/:id/interrupt`,
 `/api/sessions/:id/open`, `/api/sessions/:id/stop`, `/api/sessions/:id/remove`, `/api/sessions/:id/now`,
 `/api/sessions/:id/unsend`, `/api/sessions/:id/model`, `/api/sessions/:id/enter`, `/api/sessions/:id/background`,
-`/api/sessions/:id/mode`, `/api/sessions/:id/rewind`, `/api/teams`,
+`/api/sessions/:id/mode`, `/api/sessions/:id/rewind`, `/api/sessions/:id/fork`, `/api/teams`,
 `/api/teams/:id/add`, `/api/teams/:id/remove`, `/api/teams/:id/lead`, `/api/teams/:id/disband`,
 `/api/teams/:id/message`, `/api/bots`, `/api/bots/:id`, `/api/bots/:id/start`,
 `/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
@@ -442,7 +442,8 @@ Narrower rules:
   mode, below), each true or false (400). `GET /api/sessions/:id/activity` takes nothing; besides the activity line it
   says `mode` (the permission mode its footer shows: `default`, `acceptEdits`, `plan`, `auto`, `bypass`, or null),
   `bg` (a shell command runs that Ctrl+B can send to the background), `prompt` (the prompt box's text, a bash-mode
-  one as `!<command>`, null when it is not on screen) and `rewind` (the last Rewind or Edit, below, or null). The phone reads it every 1.5 s while Claude works or a message
+  one as `!<command>`, null when it is not on screen), `rewind` (the last Rewind or Edit, below, or null) and `fork` (on a
+  fork from a message, how its going back goes, below, or null). The phone reads it every 1.5 s while Claude works or a message
   it sent may still be in the prompt, every 5 s while the session runs idle.
   - **Send it** (the page's `fv-chat-stuck`): `POST /api/sessions/:id/enter { text }` takes only `text` (403
     otherwise), text as for `/unsend` (400). api.js presses Enter once more only while the prompt box holds exactly that
@@ -482,6 +483,24 @@ Narrower rules:
     long-press menu for this conversation's own messages, off with the reason while the PC can't be reached, the chat
     is not running there, Claude works or a question is up; Edit opens the composer on the message with an "Editing
     your message" bar and its x.
+  - **Fork from here** (the page's Fork on one of your messages, web/forkat.js): `POST /api/sessions/:id/fork { text,
+    nth? }` takes only those two (403 otherwise), as `/rewind`'s (400). api.js starts a fork of the conversation (`claude
+    --resume <id> --fork-session`, the host's create, in its folder under its account; it need not be running, and its
+    state does not matter) and answers 200 `{ key, forkFrom, at }` as soon as the host started it. Then, in the
+    background: once the fork is up (its prompt empty and nothing running for 1.5 s, no menu or panel; a trust question
+    waits for a person, given up on after 3 minutes), Rewind's walk up its `/rewind` list to the message, and on Claude
+    Code's question "Restore conversation" only, picked by api.js (never the code: the fork works in the original's
+    folder, so restoring code would undo the original's edits too). What the restore puts back in the fork's prompt is
+    cleared there. The fork's `/activity` says how it goes, read on its key (followed by its pty's pid through the
+    host's re-keys): `fork { state: working | done | failed, text, from, message, at }`, for 10 minutes after it ended;
+    failed keeps the whole conversation. It is marked: an overseer's conversation is Henry's alone to fork, and the fork
+    does not take its role. It counts one start. The phone offers Fork from here on its long-press menu for this
+    conversation's own messages (not in a bot's chat), off with the reason while the PC can't be reached or the chat
+    can't be forked from the phone (no folder or account known), and opens the fork's key as a new chat, pinned to the
+    machine that forked it: "Going back to just before your message..." while it goes, then the message in its box to
+    change and send, or why it could not go back. Claude Code may not say a fork's own id until it writes (until then it
+    goes by its key, or by the original's id when the original was not running, never taken for the fork's): the chat
+    waits on the key, with the message in a box there once it went back, and opens once the PC has the id.
 - `POST /chat/dynamic` takes only `id` (a conversation id), `model` and `effort` (403 otherwise), at least one of the
   two, each `true` or `false` (400).
 - `POST /repos/add` takes only a root Fleet View already knows (in `/state`'s repos or the removed list). The
@@ -552,8 +571,8 @@ key counts as unsigned.
 
 - **Who sets it:** the relay alone, on the routes api.js reads it on: `POST /api/sessions` (the prompt),
   `/api/sessions/:id/message`, `/api/sessions/:id/answer` (a free-text answer), `/api/sessions/:id/open` (the
-  prompt), `/api/sessions/:id/model`, `/api/sessions/:id/mode` and `/api/sessions/:id/rewind` (an overseer's switch or
-  rewind is Henry's alone; so is a shell command in its session, through `/message`), `/api/teams/:id/message`, and the
+  prompt), `/api/sessions/:id/model`, `/api/sessions/:id/mode`, `/api/sessions/:id/rewind` and `/api/sessions/:id/fork`
+  (an overseer's switch, rewind or fork is Henry's alone; so is a shell command in its session, through `/message`), `/api/teams/:id/message`, and the
   bots' `POST /api/bots`, `/api/bots/:id` and `/api/bots/:id/remove` (whose body is then just the marker). A task sent to a bot goes through `/message`, so it is marked too.
 - **When:** only after the envelope opened with the device's own key, its nonce and `at` passed, the route is on
   the allowlist and its narrower rules passed.
@@ -582,7 +601,7 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   last while it stays online, else the first online. A machine's `/state` lists every chat it knows, its own and the
   synced ones.
 - **A chat's requests go to its host** (`phone/src/transport/multi.ts`, `phone/src/lib/hosts.ts`): send, answer,
-  interrupt, now, unsend, model, enter, background, mode, rewind, activity, menu, the session, the transcript, `/conversation`
+  interrupt, now, unsend, model, enter, background, mode, rewind, fork, activity, menu, the session, the transcript, `/conversation`
   and its pictures, and,
   for the chat on view, the routes that read its folder (`/chat/image`, `/chat/files`, `/chat/commands`,
   `/chat/kind`, `/file`). The host is the chat's `workspace.host` in `/state` (null: the machine that listed it), or
@@ -596,7 +615,7 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   (`workspace.kind: 'bound'`, a folder only its host has) says "Only on <name>, which is offline." Either way the
   feed, its pictures and the transcript still come from the reading machine's synced copy, and nothing else is sent:
   each such request fails at once, nothing sent, with those words.
-- **A chat started from the phone** stays on the machine that started it (its `new-<n>` key, then its id) until
+- **A chat started from the phone** (a fork from a message too) stays on the machine that started it (its `new-<n>` key, then its id) until
   `/state` names its host, and so does one taken over with Continue on; at most 10 minutes.
 - **Per machine:** a machine that revokes the phone, or no longer takes its pairing, drops that one pairing, with a
   note naming it; the last one gone is the same as Unpair. The same machine paired again (the same sync device id)

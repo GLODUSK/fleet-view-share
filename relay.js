@@ -55,11 +55,12 @@
 //             /api/teams, /api/teams/:id/add, /lead and /message, the page's /teams, /teams/add and /teams/lead. Those
 //             two get the body's wait (at most 50 s) on top: 145 s and 125 s at most. Shorter for the chat's verbs:
 //             GET /api/sessions/:id/activity 5 s, POST /api/sessions/:id/now, /enter and /background 10 s, /model and
-//             /mode 20 s (/unsend 30 s); /rewind 60 s (it walks up Claude Code's /rewind list a press at a time).
+//             /mode 20 s (/unsend 30 s); /rewind 60 s (it walks up Claude Code's /rewind list a press at a time). POST
+//             /api/sessions/:id/fork starts a Claude (a fork) and answers once it started, so it gets the 95 s too.
 //   marker    "via": "phone" in the body and X-Fleet-View-Relay: <opts.relayKey()> (api.js viaOf: what Henry sent
 //             from his phone, which a bot takes as his, and what makes, changes or removes a bot or switches an
 //             overseer's model) on the routes api.js reads it on (MARKED): POST /api/sessions,
-//             /api/sessions/:id/message, /answer, /open, /model, /mode and /rewind, /api/teams/:id/message, /api/bots,
+//             /api/sessions/:id/message, /answer, /open, /model, /mode, /rewind and /fork, /api/teams/:id/message, /api/bots,
 //             /api/bots/:id and /api/bots/:id/remove. Set only once every check
 //             above and the allowlist's passed; a via the phone sent is dropped from every body first. No
 //             opts.relayKey (or a bad one): no marker, said in the log once.
@@ -72,7 +73,7 @@
 //             most 64; from the phone at most 21,000,000 in all, 4 being put together per device, 60 s each
 //   limits    per device: 20 requests in flight; 30 envelopes a second and 1,200 a minute (every one that opens:
 //             requests, their repeats, parts, hellos); the routes that start or resume a Claude 2 at once and 12 in
-//             10 minutes (a team one per member; a message to a conversation that opens one /state says is not
+//             10 minutes (a fork from a message one; a team one per member; a message to a conversation that opens one /state says is not
 //             running 1, a team message one per member not running); 64 MB of answers being read at once. Over one: 429 with
 //             b.retryAfter (ms), not kept
 //   revoke    notice 'revoked', leave, delete the key; a request of its still being checked never goes on.
@@ -89,7 +90,9 @@
 //                       /model  only model, effort and queue (403): model and/or effort as api.js MODEL_RE and
 //                       EFFORTS take them, queue true or false (400);  /message  now and shell, when there, true or
 //                       false (400);  /enter  only text, as /unsend (403, 400);  /background  no fields (403);
-//                       /mode  only mode (403), one of api.js MODES (400)
+//                       /mode  only mode (403), one of api.js MODES (400);
+//                       /rewind  only text, nth and edit (403);  /fork  only text and nth (403), as a /rewind's (400);
+//                       a fork counts one start
 //   POST /chat/dynamic  (Dynamic for any chat: a part sized per message, on or off) only id, a conversation id, and
 //                       model and/or effort, each true or false (403 for any other field, 400 for a bad one)
 //   POST /api/bots, /api/bots/:id   only name, brief, role, account, model, effort, shape and color, as bots.js
@@ -344,7 +347,7 @@ const ALLOW = {
   GET: ['/state', '/conversation', '/conversation/image', '/repo-history', '/chat/commands', '/chat/files', '/chat/kind', '/file',
     '/since', '/api/sessions', `/api/sessions/${KEY}`, `/api/sessions/${KEY}/(?:menu|transcript|activity)`, '/api/conversations',
     '/api/teams', '/api/status', '/accounts', '/sync/move'],
-  POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model|enter|background|mode|rewind)`, '/api/teams',
+  POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model|enter|background|mode|rewind|fork)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
     '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/(?:switch|map|watch)`, `/bots/${BOT}/tasks/${TASK}`,
@@ -388,8 +391,8 @@ const SIGNIN_LETTERS = ['A', 'B'];
 const ACCOUNT_KEYS = { '/accounts/add': ['letter'], '/accounts/login': ['account'], '/accounts/code': ['account', 'code'], '/accounts/cancel': ['account'] };
 // the chat's verbs: send now and run in background take nothing, unsend and Send it (enter) the message's text, a
 // switch a model and/or an effort as api.js takes them (MODEL_RE, EFFORTS), the permission mode one of api.js MODES, a
-// rewind the message's text, which of that text it is (nth) and an edit's text
-const VERB_RE = new RegExp(`^/api/sessions/${KEY}/(now|unsend|model|message|enter|background|mode|rewind)$`);
+// rewind the message's text, which of that text it is (nth) and an edit's text, a fork from a message the first two
+const VERB_RE = new RegExp(`^/api/sessions/${KEY}/(now|unsend|model|message|enter|background|mode|rewind|fork)$`);
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9.\-\[\]]{0,59}$/, EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypass'];
 // a message's text as api.js cleanText takes it: line breaks made \n, then something besides spaces, and no control
@@ -397,17 +400,18 @@ const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypass'];
 const textOk = (v) => typeof v === 'string' && !!v.trim() && !/[\x00-\x08\x0b-\x1f\x7f]/.test(v.replace(/\r\n|[\u0085\u2028\u2029]/g, '\n'));
 // POST routes api.js reads the relay's marker on (viaOf): text that reaches a Claude as Henry's (a shell command in an
 // overseer's session too), and making, changing or removing a bot, switching a conversation's model or permission mode or
-// rewinding it (Henry's alone for an overseer)
-const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|open|model|mode|rewind)|teams/${TEAM}/message|bots|bots/${BOT}|bots/${BOT}/remove)$`);
+// rewinding or forking it (Henry's alone for an overseer)
+const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|open|model|mode|rewind|fork)|teams/${TEAM}/message|bots|bots/${BOT}|bots/${BOT}/remove)$`);
 // POST routes that start a Claude before they answer (api.js startSession waits up to 60 s for it, settles, types;
-// POST /api/bots makes the bot and starts it; a bot's watch starts it before it tells it), and ones that may resume a stopped conversation first (up to 60 s
+// POST /api/bots makes the bot and starts it; a bot's watch starts it before it tells it; a fork from a message answers
+// once the fork started, and goes back to the message after), and ones that may resume a stopped conversation first (up to 60 s
 // too) before they type into it
-const START_ROUTES = new RegExp(`^(?:/api/(?:sessions|bots|bots/${BOT}/start)|/bots/${BOT}/(?:tasks/${TASK}|watch))$`);
+const START_ROUTES = new RegExp(`^(?:/api/(?:sessions|sessions/${KEY}/fork|bots|bots/${BOT}/start)|/bots/${BOT}/(?:tasks/${TASK}|watch))$`);
 const RESUME_ROUTES = new RegExp(`^(?:/api/sessions/${KEY}/(?:message|open)|/api/teams(?:/${TEAM}/(?:add|lead|message))?|/teams(?:/add|/lead)?)$`);
 // the routes that start or resume a Claude, as the per-device start limits count them: one each, a team one per
 // member (POST /api/teams and the page's /teams), a lead only when there is one (it gets its brief). A message to a
 // conversation or a team weighs what it may resume (resumeWeight), not this
-const STARTS_ONE = new RegExp(`^(?:/api/(?:sessions|sessions/${KEY}/open|bots|bots/${BOT}/start|teams/${TEAM}/add)|/teams/add)$`);
+const STARTS_ONE = new RegExp(`^(?:/api/(?:sessions|sessions/${KEY}/(?:open|fork)|bots|bots/${BOT}/start|teams/${TEAM}/add)|/teams/add)$`);
 const STARTS_LEAD = new RegExp(`^(?:/api/teams/${TEAM}/lead|/teams/lead)$`);
 function startWeight(m, p, b) {
   if (m !== 'POST') return 0;
@@ -888,6 +892,13 @@ function createRelay(opts = {}) {
       if (!textOk(b.text)) return [400, 'text must be the message as it was sent'];
       if (b.nth !== undefined && !(Number.isInteger(b.nth) && b.nth >= 0)) return [400, 'nth must be a whole number from 0'];
       return b.edit === undefined || textOk(b.edit) ? null : [400, 'edit must be the text to send in its place'];
+    }
+    // a fork from a message: the message's text and which of that text it is, as a rewind's (no edit: its box gets it)
+    if (verb === 'fork') {
+      const bad = Object.keys(b).filter((k) => !['text', 'nth'].includes(k));
+      if (bad.length) return no(`a fork from a message takes only text and nth, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      if (!textOk(b.text)) return [400, 'text must be the message as it was sent'];
+      return b.nth === undefined || (Number.isInteger(b.nth) && b.nth >= 0) ? null : [400, 'nth must be a whole number from 0'];
     }
     if (verb === 'model') {
       // queue: while Claude works, api.js keeps the switch and makes it once it is idle (202 { queued: true })
