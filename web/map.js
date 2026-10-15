@@ -105,8 +105,11 @@
 // little soft, a faint veil of haze glows just outside them and its lights are muted. A handful of tiny, warm windows (a hash
 // picks which cells of a few rows are lit, SHIP_WINDOW_P) and, at the stern, two dim engine glows with a short faint plume
 // are the only lights. Sometimes (SHIP_ESCORT_P) a small escort, the same ship at a fraction of the size, follows a little behind and
-// to one side. Brightness is constant, no light blinks or pulses: it comes in off the window and leaves off it. The canvas
-// fallback shows none.
+// to one side. Brightness is constant, no light blinks or pulses. It comes out of hyperspace (Henry, 2026-10-14: "like Elite
+// Dangerous"): partway into the window a jump point opens, a churning blue cloud round a thin white slit across its path, and
+// with a flash the ship breaks out of it bow first, smeared along its heading and glowing blue, fast, then slows to its cruise
+// within a second or so (the escort comes out of the same rift just after it); what is still behind the rift is not drawn, and
+// the rift folds shut once both are out. It leaves off the far side of the window as before. The canvas fallback shows none.
 // The warp drift (event 'warp', WARP_*): now and then, for a second or two, the stars stretch into long streaks along one
 // direction and settle back, like a hyperspace jump seen from far away. Motion only: no flash, nothing brightens, a star
 // keeps its light and just lengthens (the shader looks each star layer up through a squeeze of the sky along that direction
@@ -202,7 +205,7 @@
 // (not held back by SHOWER_GAP) (stats().meteor: how many streaks show or are about to; meteorIn: ms to the next shooting
 // star, null when none is due; showers: how many showers started). rocket(hubId) sends a deploy's rocket up now under
 // that hub (null: anywhere) (event(name) starts that space event now, ignoring EVENT_GAP; no name lists the registered ones, null stops
-// the one running, skipSeconds: begins that far into an event that has a clock; stats().event: { running, last, nextIn } as name / name / ms, null when none; stats().nebula: the cloud's middle and size in CSS px, its alpha and palette, null when none; stats().asteroids: the field's light direction and the rocks in view, far to near, { x, y, r, blur, a } in CSS px, null when none; stats().lens: the lens's middle and Einstein radius in CSS px, its size share a and its galaxies' light, null when none; ship(escort, skipSeconds) starts the capital ship now, escort: true or false to force the escort (null: a pick); stats().ship: its middle and half-length in CSS px, its alpha, its heading as a unit vector and whether an escort follows, null when none; warp(skipSeconds) starts the warp drift now; stats().warp: its stretch share, point and direction, null when none; far(name, skipSeconds) starts that far event now (web/sky-far.js; no name: the kinds, null stops it); stats().far: { running, label, nextIn, at, off, shown: its parts { form, x, y, r, a } in CSS px }) (stats().rockets: { flying, launched, shown: [{ x, y, head, trail, puff }] }, the head in CSS px). moon(date) sets the clock the moon and the sky tint go by (null: the real one);
+// the one running, skipSeconds: begins that far into an event that has a clock; stats().event: { running, last, nextIn } as name / name / ms, null when none; stats().nebula: the cloud's middle and size in CSS px, its alpha and palette, null when none; stats().asteroids: the field's light direction and the rocks in view, far to near, { x, y, r, blur, a } in CSS px, null when none; stats().lens: the lens's middle and Einstein radius in CSS px, its size share a and its galaxies' light, null when none; ship(escort, skipSeconds) starts the capital ship now, escort: true or false to force the escort (null: a pick); stats().ship: its middle and half-length in CSS px, its alpha, its heading as a unit vector, whether an escort follows and its jump point (the rift: { x, y, h, a, flash, smear } in CSS px, null once shut), null when none; warp(skipSeconds) starts the warp drift now; stats().warp: its stretch share, point and direction, null when none; far(name, skipSeconds) starts that far event now (web/sky-far.js; no name: the kinds, null stops it); stats().far: { running, label, nextIn, at, off, shown: its parts { form, x, y, r, a } in CSS px }) (stats().rockets: { flying, launched, shown: [{ x, y, head, trail, puff }] }, the head in CSS px). moon(date) sets the clock the moon and the sky tint go by (null: the real one);
 // stats().moon is its phase (0 new, 0.5 full), lit share, waxing, alpha and place (CSS px), shown when visible.
 // nodes() lists each node's draw params too (scale, alpha, spin, fin); debug() has the reactions and label
 // rectangles; merge('s:<id>') launches that conversation's merge now; stats().heads is where each comet's head is (CSS px); stats().sky says what draws the sky ('webgl2'
@@ -605,6 +608,18 @@ const SHIP_HAZE = [0.08, 0.106, 0.13], SHIP_HAZE_A = 0.8, SHIP_HAZE_MAX = 0.95, 
 const SHIP_MIST = 0.35;
 const SHIP_RIM = [0.6, 0.72, 1], SHIP_RIM_WARM = [1, 0.84, 0.64], SHIP_RIM_A = 0.16;
 const SHIP_WINDOW = [1, 0.78, 0.46], SHIP_WINDOW_A = 0.32, SHIP_WINDOW_P = 0.14, SHIP_ENGINE = [0.6, 0.78, 1], SHIP_ENGINE_A = 0.3;
+// its arrival out of hyperspace (see "Look"): the jump point opens SHIP_JUMP_AT of the way across the window along its path (from
+// the side it comes in by, a pick) over SHIP_JUMP_OPEN ms, then the bow breaks out. It comes out SHIP_JUMP_B half-lengths ahead
+// of where its cruise alone would take it, the lead shrinking with time constant SHIP_JUMP_TAU ms (so it leaves the rift at
+// about B / TAU half-lengths a ms and slows to its cruise). The rift stays open SHIP_JUMP_HOLD ms after (the escort comes out
+// in that time) and folds shut over SHIP_JUMP_CLOSE ms. SHIP_JUMP_R: the rift's half-height, in the ship's half-lengths;
+// SHIP_JUMP_RGB, SHIP_JUMP_CORE: its cloud's blue and its slit's white; SHIP_JUMP_A: its alpha at its brightest (it is as far
+// off as the ship, so hazed); SHIP_JUMP_FLASH: the flash's alpha as the bow breaks out; SHIP_JUMP_STREAK: how far the hull
+// smears back along its heading as it comes out (in its lengths), fading as the lead does, its blue glow with it (SHIP_JUMP_GLOW:
+// that glow's light at the start, over the haze)
+const SHIP_JUMP_AT = [0.2, 0.4], SHIP_JUMP_OPEN = 1200, SHIP_JUMP_B = 4, SHIP_JUMP_TAU = 420, SHIP_JUMP_HOLD = 1100, SHIP_JUMP_CLOSE = 1600;
+const SHIP_JUMP_R = 0.62, SHIP_JUMP_RGB = [0.34, 0.55, 1], SHIP_JUMP_CORE = [0.84, 0.92, 1], SHIP_JUMP_A = 0.5, SHIP_JUMP_FLASH = 0.38;
+const SHIP_JUMP_STREAK = 2.2, SHIP_JUMP_GLOW = 0.5;
 const SHIP_HULL = [
   [[-0.9, -0.085], [-0.4, -0.1], [0.3, -0.075], [0.97, -0.014], [1, 0], [0.92, 0.014], [0.3, 0.07], [-0.45, 0.105], [-0.9, 0.1]], // the main wedge
   [[-0.78, -0.09], [-0.7, -0.135], [-0.1, -0.145], [0.2, -0.115], [0.5, -0.06], [0.2, -0.05]], // the stepped upper deck
@@ -1049,7 +1064,7 @@ export function mapStats() {
     asteroids: (() => { const e = I.event; if (!e || e.name !== 'asteroids') return null;
       return { light: e.ev.light.map((v) => Math.round(v * 100) / 100), shown: asteroidsNow().map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.r * 10) / 10, blur: Math.round(r.blur), a: Math.round(r.a * 1e3) / 1e3 })) }; })(),
     lens: (() => { const l = lensNow(); return l ? { x: Math.round(l.x), y: Math.round(l.y), r: Math.round(l.r * 10) / 10, a: Math.round(l.a * 1e3) / 1e3, src: l.srcs.map((o) => Math.round(o.amp * 1e3) / 1e3) } : null; })(),
-    ship: (() => { const q = shipNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3, dir: [Math.round(q.cs * 1e3) / 1e3, Math.round(q.sn * 1e3) / 1e3], escort: !!q.eo } : null; })(),
+    ship: (() => { const q = shipNow(); return q ? { x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3, dir: [Math.round(q.cs * 1e3) / 1e3, Math.round(q.sn * 1e3) / 1e3], escort: !!q.eo, jump: q.j ? { x: Math.round(q.j.x), y: Math.round(q.j.y), h: Math.round(q.j.h), a: Math.round(q.j.a * 1e3) / 1e3, flash: Math.round(q.j.fl * 1e3) / 1e3, smear: Math.round(q.j.sm * 1e3) / 1e3 } : null } : null; })(),
     warp: (() => { const q = warpNow(); return q ? { a: Math.round(q.a * 1e3) / 1e3, x: Math.round(q.x), y: Math.round(q.y), dir: [Math.round(q.dx * 1e3) / 1e3, Math.round(q.dy * 1e3) / 1e3] } : null; })(),
     far: { running: I.far ? I.far.name : null, label: I.far ? FAR_KINDS.get(I.far.name).label : null, ms: I.far ? I.far.ms : null, nextIn: I.farAt ? Math.round(I.farAt - performance.now()) : null,
       at: I.far ? [Math.round(I.far.x), Math.round(I.far.y)] : null, off: [...I.skyOff],
@@ -3212,7 +3227,7 @@ function eventStart(t, name) {
   return true;
 }
 // what the log calls each space event
-const EVENT_LABELS = { nebula: 'Nebula drift', asteroids: 'Asteroid field', lens: 'Gravity lens (a black hole)', ship: 'Capital ship', warp: 'Warp drift' };
+const EVENT_LABELS = { nebula: 'Nebula drift', asteroids: 'Asteroid field', lens: 'Gravity lens (a black hole)', ship: 'Capital ship (out of hyperspace)', warp: 'Warp drift' };
 // the next kind by weight, never the one shown last (unless it is the only one), never one switched off (null: none left)
 function eventPick() {
   const on = [...EVENTS.keys()].filter((k) => !I.skyOff.has(k));
@@ -3351,8 +3366,10 @@ function lensNow() {
   return { x, y, r, a: sm, phi: ev.phi, srcs };
 }
 // ---------- the distant capital ship (see "Look", SHIP_*) ----------
-// start: the ship's size, its straight, nearly level path across the window at SHIP_DEPTH (eventCam), from just clear of one side
-// to just clear of the other (with room for the escort behind it, if it has one), as the camera is now, and the escort's place
+// start: the ship's size, its straight, nearly level path across the window at SHIP_DEPTH (eventCam), as the camera is now, from
+// the jump point (aj along it from the window's middle, SHIP_JUMP_AT of the way across from the side it comes in by) to just
+// clear of the far side (with room for the escort behind it, if it has one); its cruise (v, CSS px a second along it: as fast as
+// when it crossed the whole window in SHIP_MS), and ms: the rift's opening plus the time to the far side; the escort's place
 // (behind and to one side, in half-lengths) and size; seed: which cells of its rows are lit
 let shipForce = null; // tests (__map.ship): whether the escort follows (null: a pick)
 registerEvent('ship', {
@@ -3362,24 +3379,39 @@ registerEvent('ship', {
     const escort = shipForce != null ? shipForce : rnd() < SHIP_ESCORT_P;
     const eo = escort ? [-pickIn(SHIP_ESCORT_BACK), (rnd() < 0.5 ? -1 : 1) * pickIn(SHIP_ESCORT_SIDE), pickIn(SHIP_ESCORT_SCALE), rnd()] : null;
     const proj = 0.575 * (Math.abs(W * dx) + Math.abs(H * dy)), rear = (escort ? 2.6 : 1.3) * R, len = 2 * proj + rear + 1.2 * R;
-    const off = (rnd() * 2 - 1) * SHIP_OFF * H, a0 = -(proj + rear);
-    return { at: t, ms, cam, R, dx, dy, x0: cam.mx + dx * a0 - dy * off, y0: cam.my + dy * a0 + dx * off, vx: dx * len / (ms / 1000), vy: dy * len / (ms / 1000),
-      eo, seed: rnd() };
+    const off = (rnd() * 2 - 1) * SHIP_OFF * H, edge = 0.5 * (Math.abs(W * dx) + Math.abs(H * dy)), aj = edge * (2 * pickIn(SHIP_JUMP_AT) - 1);
+    const v = len / (ms / 1000), a1 = proj + 1.2 * R, run = Math.max(10, (a1 - (aj - SHIP_BOW * R) - SHIP_JUMP_B * R) / v);
+    return { at: t, ms: SHIP_JUMP_OPEN + run * 1000, cam, R, dx, dy, x0: cam.mx - dy * off, y0: cam.my + dx * off, aj, v, eo, seed: rnd() };
   },
   step(ev, t) { return t - ev.at < ev.ms; },
 });
 // the ship as it is now, in CSS px of the window (null when none runs): its middle (x, y), half-length r (with the camera's zoom at its
-// depth), alpha a (it fades in and out over SHIP_FADE at the ends of its life), its heading (cs, sn; unit), flip (-1 when it
-// goes left, so its top stays up), the seed and the escort's place and size as laid (eo, or null)
+// depth), alpha a (it fades out over SHIP_FADE at the end of its life; it comes in out of the rift), its heading (cs, sn; unit),
+// flip (-1 when it goes left, so its top stays up), the seed, the escort's place and size as laid (eo, or null), and the jump j:
+// the rift's middle (x, y) and half-height (h), its alpha (a, 0 once shut), the flash (fl), the hull's smear (sm, in its lengths)
+// and the clock (t, s since it began opening). Before the bow breaks out its middle sits SHIP_BOW half-lengths behind the rift
+// (all of it is still behind, unseen); after, the lead it came out with (SHIP_JUMP_B half-lengths) runs down to its cruise
+const SHIP_BOW = 1.05; // the bow's tip, in half-lengths ahead of the middle
 function shipNow() {
   const e = I.event;
   if (!e || e.name !== 'ship') return null;
-  const ev = e.ev, age = Math.max(0, performance.now() - ev.at), s = age / 1000;
-  const fade = Math.min(1, age / SHIP_FADE, (ev.ms - age) / SHIP_FADE);
+  const ev = e.ev, age = Math.max(0, performance.now() - ev.at), out = (age - SHIP_JUMP_OPEN) / 1000, s = Math.max(0, out);
+  const fade = Math.min(1, (ev.ms - age) / SHIP_FADE);
   if (fade <= 0) return null;
-  const [x, y] = eventAt(ev.cam, ev.x0 + ev.vx * s, ev.y0 + ev.vy * s);
+  const lead = Math.exp((-s * 1000) / SHIP_JUMP_TAU), al = ev.aj - SHIP_BOW * ev.R + ev.v * s + SHIP_JUMP_B * ev.R * (1 - lead);
+  const [x, y] = eventAt(ev.cam, ev.x0 + ev.dx * al, ev.y0 + ev.dy * al);
   const r = ev.R * Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), SHIP_DEPTH * STAR_ZOOM) / ev.cam.sc;
-  return { x, y, r, a: fade * fade * (3 - 2 * fade), cs: ev.dx, sn: ev.dy, flip: ev.dx < 0 ? -1 : 1, seed: ev.seed, eo: ev.eo };
+  // the rift: opening (it grows from a fifth of its height), open while they come out, then folding shut to a sliver
+  const sm3 = (v) => { const q = clamp(v, 0, 1); return q * q * (3 - 2 * q); };
+  const shut = sm3((age - SHIP_JUMP_OPEN - SHIP_JUMP_HOLD) / SHIP_JUMP_CLOSE), open = sm3(age / SHIP_JUMP_OPEN);
+  let j = null;
+  if (shut < 1) {
+    const [jx, jy] = eventAt(ev.cam, ev.x0 + ev.dx * ev.aj, ev.y0 + ev.dy * ev.aj);
+    const grow = 1 - Math.pow(1 - open, 3);
+    j = { x: jx, y: jy, h: SHIP_JUMP_R * r * (0.2 + 0.8 * grow) * (1 - 0.8 * shut), a: open * (1 - shut),
+      fl: SHIP_JUMP_FLASH * (out < 0 ? sm3((out + 0.3) / 0.3) : Math.exp(-out / 0.32)), sm: out < 0 ? SHIP_JUMP_STREAK : SHIP_JUMP_STREAK * lead, t: age / 1000 };
+  }
+  return { x, y, r, a: fade * fade * (3 - 2 * fade), cs: ev.dx, sn: ev.dy, flip: ev.dx < 0 ? -1 : 1, seed: ev.seed, eo: ev.eo, j };
 }
 // ---------- the warp drift (see "Look", WARP_*) ----------
 // start: its length, the squeeze's direction and its point, laid in CSS px of the window at WARP_DEPTH (eventCam)
@@ -3983,13 +4015,13 @@ const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, 
 // empty slot), then ASTEROID_N more, its spin's cos and sin, aspect, and in w the edge blur (device px, whole; 0: a sharp
 // rock) plus its seed (0-1) in the fraction, then one with the light's direction (x, y); then the gravity lens's uLn (from SKY_LN): its
 // middle (device px; x, y), Einstein radius (device px) and alpha (w; 0: none), then per far galaxy two: its place from the lens's middle
-// (device px; x, y), size (device px) and light (w; 0: none), and its turn's cos and sin and aspect (the first one's w: the ring's bright side); then the capital ship's uSh (from SKY_SH), three: its middle (device px; x, y), half-length (device px) and alpha (w; 0: none), its heading's cos and sin, flip (-1: it goes left, its top still up) and seed (0-1), then its escort's place from the ship's middle (in half-lengths along its heading, x, and across it, y), size (z, in the ship's; 0: no escort) and seed. then the warp drift's uWp (from SKY_WP), two: its point (device px; x, y) and the squeeze's direction (z, w), then its stretch (x; 0: none), the direction's radial share (y) and the deep sky's share (z). Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
+// (device px; x, y), size (device px) and light (w; 0: none), and its turn's cos and sin and aspect (the first one's w: the ring's bright side); then the capital ship's uSh (from SKY_SH), five: its middle (device px; x, y), half-length (device px) and alpha (w; 0: none), its heading's cos and sin, flip (-1: it goes left, its top still up) and seed (0-1), then its escort's place from the ship's middle (in half-lengths along its heading, x, and across it, y), size (z, in the ship's; 0: no escort) and seed, then its jump's rift: its middle (device px; x, y), half-height (device px) and alpha (w; 0: shut), and the flash's alpha, the hull's smear (in its lengths), whether the hull is cut at the rift (z: 1 while it is open) and the clock (s). then the warp drift's uWp (from SKY_WP), two: its point (device px; x, y) and the squeeze's direction (z, w), then its stretch (x; 0: none), the direction's radial share (y) and the deep sky's share (z). Its textures (SKY_TEX's order is their unit): the star tiles (uS0 and up, only the layers
 // without a cell), the deep sky, its star dust, the glows' noise and their field, and the moon's picture (moonImage).
 // uTint (STAR_TINT) is set once.
 const SKY_U = ['uSize', 'uBg', 'uTop', 'uBot', 'uL0', 'uL1', 'uL2', 'uD', 'uDu', 'uFx', 'uMo', 'uOrg'];
 const SKY_M = SKY_U.length * 4;
 const SKY_NB = SKY_M + METEOR_N * 8 + SAT_N * 8 + ROCKET_N * 12; // the nebula drift's five vec4s, after the rockets
-const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_SH = SKY_LN + 20, SKY_WP = SKY_SH + 12, SKY_FR = SKY_WP + 8, SKY_END = SKY_FR + FAR_N * 12; // the asteroid field's vec4s, after the nebula; the lens's five, then the ship's three, then the warp's two, then the far event's three per part (FAR_GLSL), after them
+const SKY_AS = SKY_NB + 20, SKY_LN = SKY_AS + (ASTEROID_N * 2 + 1) * 4, SKY_SH = SKY_LN + 20, SKY_WP = SKY_SH + 20, SKY_FR = SKY_WP + 8, SKY_END = SKY_FR + FAR_N * 12; // the asteroid field's vec4s, after the nebula; the lens's five, then the ship's five, then the warp's two, then the far event's three per part (FAR_GLSL), after them
 const STAR_TILES = STAR_LAYERS.filter((L) => !L.cell);
 const SKY_TEX = [...STAR_TILES.map((L, t) => 'uS' + t), 'uDeep', 'uDust', 'uNoise', 'uField', 'uMoon'];
 const TEX_DEEP = SKY_TEX.indexOf('uDeep'), TEX_DUST = TEX_DEEP + 1, TEX_NOISE = TEX_DEEP + 2, TEX_FIELD = TEX_DEEP + 3;
@@ -4873,21 +4905,30 @@ ${SHIP_NOTCH.map((b) => `  n = min(n, shB(q, ${f4(b)}));`).join('\n')}
 }
 const float SH_ROWS[${SHIP_ROWS.length}] = float[${SHIP_ROWS.length}](${SHIP_ROWS.map(glf).join(', ')});
 const vec2 SH_ENG[${SHIP_ENGINES.length}] = vec2[${SHIP_ENGINES.length}](${SHIP_ENGINES.map(f2).join(', ')});
-vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A) {
+vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A, vec4 jp, float sm) {
   vec2 d = p - c, e1 = fr.xy, e2 = vec2(-fr.y, fr.x);
   vec2 u = vec2(dot(d, e1), fr.z * dot(d, e2)) / R;
+  // coming out of hyperspace: smeared back from the bow along its heading (sm: by that many of its lengths)
+  u.x = ${glf(SHIP_BOW)} - (${glf(SHIP_BOW)} - u.x) / (1.0 + sm);
   if (u.x < -1.7 || u.x > 1.35 || abs(u.y) > 0.62) return vec4(0.0);
   float dp = uSize.z, w = (0.7 + (0.3 + ${glf(SHIP_SOFT)}) * dp) / R;
+  // what is still behind the rift (jp: its middle, and z 1 while it is open) is still in hyperspace: not drawn
+  if (jp.z > 0.0) A *= smoothstep(-dp, dp, dot(p - jp.xy, e1));
+  if (A <= 0.0) return vec4(0.0);
+  float hot = sm / ${glf(SHIP_JUMP_STREAK)};
   float sd = shSD(u), dd = sd * R;
   float cov = 1.0 - smoothstep(-w, w, sd);
   float plate = nbF(vec2(u.x * 36.0, u.y * 120.0) + fr.w * 71.0, 2);
   vec3 body = ${col(SHIP_BODY)} * (0.8 + 0.5 * plate) + ${col(SHIP_LIFT)} * smoothstep(0.12, -0.14, u.y);
+  body = mix(body, ${col(SHIP_JUMP_RGB)} * 0.4, 0.7 * hot); // the blue it sheds as it slows
   float hz = min(${glf(SHIP_HAZE_MAX)}, ${glf(SHIP_HAZE_A)} * (1.0 + 0.35 * smoothstep(-0.05, 0.15, u.y)) * (wp < 1.0 ? 1.4 : 1.0));
   float mist = smoothstep(0.35, 0.7, nbF(p / (1.4 * R) + 3.1, 3));
   hz = min(0.97, hz + 0.1 * mist);
   body = mix(body, ${col(SHIP_HAZE)}, hz);
   float ba = cov * ${glf(SHIP_BODY_A)} * (1.0 - ${glf(SHIP_MIST)} * mist) * A, lit = A * (1.0 - 0.75 * hz) * (1.0 - 0.5 * mist);
   vec4 o = vec4(body * ba, ba);
+  // still fast out of the rift: the hull glows the jump's blue-white through the haze, fading as it slows
+  o.rgb += mix(${col(SHIP_JUMP_RGB)}, ${col(SHIP_JUMP_CORE)}, 0.5) * (${glf(SHIP_JUMP_GLOW)} * hot * hot * cov * A);
   if (dd > 0.0 && dd < 56.0 * dp) {
     float hg = ${glf(SHIP_HAZE_GLOW)} * exp(-dd / min(13.0 * dp, 0.13 * R)) * A;
     hg *= (1.0 - smoothstep(0.42, 0.62, abs(u.y))) * smoothstep(-1.7, -1.5, u.x) * (1.0 - smoothstep(1.15, 1.35, u.x));
@@ -4930,17 +4971,38 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A) {
   }
   return o;
 }
+// the jump point (uSh[3], uSh[4]; h the heading): a churning blue cloud, a flattened oval across the path round a thin white
+// slit, and the flash as the bow breaks out with its flare thrown ahead along the heading; light only (half its alpha hides)
+vec4 shipJump(vec2 p, vec4 j, vec4 k, vec2 h) {
+  float H = j.z, dp = uSize.z;
+  vec2 d = p - j.xy;
+  float r2 = dot(d, d) / (H * H);
+  if (r2 > 16.0) return vec4(0.0);
+  float a = dot(d, h), c = dot(d, vec2(-h.y, h.x));
+  vec2 q = vec2(a / (0.62 * H), c / (1.05 * H));
+  float sw = nbF(vec2(a, c) / (0.28 * H) + vec2(k.w * 0.9, -k.w * 0.6), 3);
+  float cl = exp(-1.3 * dot(q, q)) * (0.2 + 1.3 * sw * sw);
+  vec2 qc = vec2(a / (0.07 * H + 0.8 * dp), c / (0.9 * H));
+  float co = 0.75 * exp(-2.5 * dot(qc, qc));
+  float fl = k.x * (exp(-1.6 * r2) + (a > 0.0 ? 0.55 * exp(-a / (1.8 * H)) * exp(-pow(c / (0.1 * H + 0.1 * a), 2.0)) : 0.0));
+  vec3 L = (${col(SHIP_JUMP_RGB)} * cl * 1.1 + ${col(SHIP_JUMP_CORE)} * co) * j.w * ${glf(SHIP_JUMP_A)} + ${col(SHIP_JUMP_CORE)} * fl;
+  return vec4(L, 0.5 * max(L.r, max(L.g, L.b)));
+}
 vec4 ship(vec2 p) {
-  vec4 a = uSh[0], f = uSh[1], e = uSh[2];
+  vec4 a = uSh[0], f = uSh[1], e = uSh[2], j = uSh[3], k = uSh[4];
   if (a.w <= 0.0) return vec4(0.0);
   vec2 d = p - a.xy;
-  float reach = a.z * (e.z > 0.0 ? 2.9 : 1.7);
-  if (dot(d, d) > reach * reach) return vec4(0.0);
-  vec4 o = shipOne(p, a.xy, a.z, f, 1.0, a.w);
-  if (e.z > 0.0) {
-    vec2 c2 = a.xy + a.z * (e.x * f.xy + e.y * f.z * vec2(-f.y, f.x));
-    o = over(o, shipOne(p, c2, a.z * e.z, vec4(f.xyz, e.w), 0.34, a.w));
+  vec4 o = vec4(0.0);
+  float reach = a.z * (e.z > 0.0 ? 2.9 : 1.7) * (1.0 + k.y);
+  if (dot(d, d) <= reach * reach) {
+    vec4 jp = vec4(j.xy, k.z, 0.0);
+    o = shipOne(p, a.xy, a.z, f, 1.0, a.w, jp, k.y);
+    if (e.z > 0.0) {
+      vec2 c2 = a.xy + a.z * (e.x * f.xy + e.y * f.z * vec2(-f.y, f.x));
+      o = over(o, shipOne(p, c2, a.z * e.z, vec4(f.xyz, e.w), 0.34, a.w, jp, k.y));
+    }
   }
+  if (j.w > 0.0 || k.x > 0.0) o = over(shipJump(p, j, k, f.xy), o);
   return o;
 }`;
 })();
@@ -4959,7 +5021,7 @@ precision highp float;
 #define ASTEROID_N ${ASTEROID_N}
 #define FAR_N ${FAR_N}
 uniform vec4 uSize, uBg, uTop, uBot, uL0, uL1, uL2, uD, uDu, uFx, uMo, uOrg, uGlow, uN0, uN1;
-uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[5], uSh[3], uWp[2], uFr[FAR_N * 3];
+uniform vec4 uM[METEOR_N], uMc[METEOR_N], uSat[SAT_N], uSac[SAT_N], uRk[ROCKET_N], uRp[ROCKET_N], uRw[ROCKET_N], uNb[5], uAs[ASTEROID_N * 2 + 1], uLn[5], uSh[5], uWp[2], uFr[FAR_N * 3];
 uniform vec4 uGB[GLOW_MAX], uGE[GLOW_MAX], uGC[GLOW_MAX], uGL[GLOW_MAX];
 uniform int uGN;
 uniform sampler2D ${SKY_TEX.join(', ')};
@@ -5500,6 +5562,10 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     u[o] = sh.x * dpr; u[o + 1] = sh.y * dpr; u[o + 2] = sh.r * dpr; u[o + 3] = sh.a;
     u[o + 4] = sh.cs; u[o + 5] = sh.sn; u[o + 6] = sh.flip; u[o + 7] = sh.seed;
     if (sh.eo) for (let j = 0; j < 4; j++) u[o + 8 + j] = sh.eo[j];
+    if (sh.j) {
+      u[o + 12] = sh.j.x * dpr; u[o + 13] = sh.j.y * dpr; u[o + 14] = sh.j.h * dpr; u[o + 15] = sh.j.a;
+      u[o + 16] = sh.j.fl; u[o + 17] = sh.j.sm; u[o + 18] = 1; u[o + 19] = sh.j.t;
+    }
   }
   // the warp drift, after the ship (all 0 when none)
   const wp = warpNow();
@@ -5534,7 +5600,7 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   gl.uniform4fv(G.nbloc, u, SKY_NB, 20);
   gl.uniform4fv(G.asloc, u, SKY_AS, ASTEROID_N * 8 + 4);
   gl.uniform4fv(G.lnloc, u, SKY_LN, 20);
-  gl.uniform4fv(G.shloc, u, SKY_SH, 12);
+  gl.uniform4fv(G.shloc, u, SKY_SH, 20);
   gl.uniform4fv(G.wploc, u, SKY_WP, 8);
   gl.uniform4fv(G.frloc, u, SKY_FR, FAR_N * 12);
   if (G.glow) {
