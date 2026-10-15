@@ -55,7 +55,8 @@
 // A small soft moon (MOON_*) shows tonight's real phase (lit from the right while waxing, the left while waning, a
 // faint earthshine on its dark side, a halo as bright as it is full) and crosses the top of the screen with the local
 // clock, east (left) to west: it lags the sun by its phase (full rises at dusk, last quarter is high at dawn), sets
-// below the horizon and fades out by day. Fixed to the screen, worked out once a minute, painted once per phase.
+// below the horizon and fades out by day. It slides with the pan as the stars do (a long pan takes it off one side and
+// back in from the other); worked out once a minute, painted once per phase.
 // Satellites (SAT_*; Henry asked for them): one small steady point, a little warm, for each background agent or
 // workflow agent running on the map (at most SAT_N), drifting slowly across the upper sky on a straight, slightly
 // tilted path (a minute or two to cross the window) with a faint red or white beacon blink every couple of seconds, so
@@ -470,8 +471,9 @@ const MOON_MARIA = [[-0.36, -0.4, 0.28, 0.16], [0.2, -0.36, 0.18, 0.14], [0.36, 
 // its path: it rises at MOON_SPAN of the width left of the middle, peaks MOON_TOP of the height from the top and
 // sets as far right, MOON_LOW from the top at the horizon; MOON_DAY: the hours it fades out (from, to) in the
 // morning and back in (from, to) at dusk; under MOON_MIN lit it is not shown (new moon). Reference new moon and
-// synodic month for its phase.
-const MOON_SPAN = 0.4, MOON_TOP = 0.1, MOON_LOW = 0.42, MOON_DAY = [7, 9, 17, 19], MOON_MIN = 0.015;
+// synodic month for its phase. MOON_WRAP: the px beyond two windows its slide with the pan wraps at (moonPlace), more
+// than its halo is wide, so it never shows at both edges at once.
+const MOON_SPAN = 0.4, MOON_TOP = 0.1, MOON_LOW = 0.42, MOON_DAY = [7, 9, 17, 19], MOON_MIN = 0.015, MOON_WRAP = 240;
 const MOON_NEW = Date.UTC(2000, 0, 6, 18, 14), MOON_MONTH = 29.530588853;
 // lunar eclipses (just for fun): the real total and partial ones 2026-2035 from NASA's catalog
 // (eclipse.gsfc.nasa.gov/LEdecade), each [greatest eclipse (TD, NASA's own time), umbral magnitude, partial phase's
@@ -1071,7 +1073,7 @@ export function mapStats() {
       shown: farNow().map((q) => ({ form: q.form, x: Math.round(q.x), y: Math.round(q.y), r: Math.round(q.r * 10) / 10, a: Math.round(q.a * 1e3) / 1e3 })) },
     nebula: (() => { const n = nebulaNow(); return n ? { x: Math.round(n.x), y: Math.round(n.y), r: Math.round(n.r), a: Math.round(n.a * 1e3) / 1e3, pal: n.pal } : null; })(),
     moon: (({ phase, frac, waxing, a, x, y }) => ({ phase: Math.round(phase * 1e4) / 1e4, frac: Math.round(frac * 1e4) / 1e4, waxing, a: Math.round(a * 1e3) / 1e3,
-      visible: a > 0, x: Math.round(x), y: Math.round(y) }))(moonNow()), skyDraws: I.skyGL ? I.skyGL.draws || 0 : 0,
+      visible: a > 0, x: Math.round(x), y: Math.round(y) }))((m => ({ ...m, ...moonPlace(m) }))(moonNow())), skyDraws: I.skyGL ? I.skyGL.draws || 0 : 0,
     satellites: { want: satWant().length, shown: satsNow().map((s) => ({ x: Math.round(s.x), y: Math.round(s.y), a: Math.round(s.a * 1e3) / 1e3, blink: Math.round(s.f * 1e3) / 1e3 })) },
     rockets: { flying: I.rockets.length, launched: I.rocketsN, shown: rocketsNow().map((r) => { const [x, y] = rocketHead(r);
       return { x: Math.round(x), y: Math.round(y), head: Math.round(r.ha * 1e3) / 1e3, trail: Math.round(r.ta * 1e3) / 1e3, puff: Math.round(r.puff * 1e3) / 1e3 }; }) },
@@ -3642,9 +3644,9 @@ function drawMeteors(ctx) {
 
 // ---------- the moon (see "Look", MOON_*) ----------
 // the moon this minute: its phase (0-1, 0 new, 0.5 full), lit share, waxing, alpha (0: not shown) and middle (CSS px of
-// the window); worked out again only when the minute or the window's size changes, so the sky's uniforms stay the
-// same between frames. Its path is laid over the window (I.moonF, the frame the satellites and rockets use too), so no
-// panel, strip or menu ever moves it
+// the window, before the sky's slide: moonPlace); worked out again only when the minute or the window's size changes.
+// Its path is laid over the window (I.moonF, the frame the satellites and rockets use too), so no panel, strip or menu
+// ever moves it; only the pan does, as it does the stars
 function moonNow() {
   const d = moonForce || new Date(), min = Math.floor(d.getTime() / 60000), h = skyHour();
   const vw = I.skyW || window.innerWidth || 1, vh = I.skyH || window.innerHeight || 1;
@@ -3750,13 +3752,21 @@ function moonImage(phase, dpr, ecl) {
   I.moonImg = { key, c, S };
   return I.moonImg;
 }
+// where the moon's middle is this frame (CSS px of the window): its place on its path, slid with the sky as the stars
+// are (Henry 2026-10-14: it stayed put while the stars panned, so it seemed to follow the camera). The slide wraps
+// every window plus MOON_WRAP px each way, so a long pan carries it off one side and back in from the other, both
+// ends off the window, and it is never lost for good
+function moonPlace(m) {
+  const c = skyCam(), F = I.moonF, wrap = (v, P) => v - P * Math.round(v / P);
+  return { x: m.x + wrap(-c.cx, 2 * F.W + MOON_WRAP), y: m.y + wrap(-c.cy, 2 * F.H + MOON_WRAP) };
+}
 // where the moon's picture goes this frame, in device px: its top left (whole px, so its texels sit on the screen's
 // pixels), its size and alpha; null when it isn't shown
 function moonAt(dpr) {
   const m = moonNow();
   if (!(m.a > 0)) return null;
-  const im = moonImage(m.phase, dpr, m.ecl);
-  return { im, x: Math.round(m.x * dpr - im.S / 2), y: Math.round(m.y * dpr - im.S / 2), a: m.a };
+  const im = moonImage(m.phase, dpr, m.ecl), p = moonPlace(m);
+  return { im, x: Math.round(p.x * dpr - im.S / 2), y: Math.round(p.y * dpr - im.S / 2), a: m.a };
 }
 // the canvas draws the moon (no WebGL2): its picture, pixel for pixel
 function drawMoon(ctx) {
