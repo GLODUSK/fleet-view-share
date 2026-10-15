@@ -1628,13 +1628,15 @@ export function mountCompose(slot, s) {
     return true;
   }
 
-  // what the box holds, or (cmd) a command the model picker sends; the draft stays as it is then. In bash mode the
+  // what the box holds, or (cmd) a command the model picker sends (menuPick: the menu's model or effort pick, which says
+  // why when it doesn't go); the draft stays as it is then. In bash mode the
   // box holds a shell command: a typed "!" goes first (see the top), and only the command goes.
   // -> true when it went in
-  async function send(cmd = null) {
+  async function send(cmd = null, menuPick = false) {
     const t = termApi();
-    if (!t || st.sending) return false;
     const fromBox = cmd == null;
+    // (the box's Send is disabled meanwhile; a model or effort pick says why it didn't go)
+    if (!t || st.sending) { if (menuPick) err(!t ? noTermMsg('Changing the model') : 'Still sending the last message: pick again in a moment'); return false; }
     // the mic is on or still writing out: stop listening, and send once every word said is in the box
     if (fromBox && (st.dict || st.drain)) {
       if (st.dict) stopDictation(true);
@@ -1676,6 +1678,8 @@ export function mountCompose(slot, s) {
       if (shell) { contNeeded('Bash mode'); return false; }
       if (plan.how === 'link') { err(`${plan.host.name} isn't linked with this machine yet: they link by themselves while both are on (Link in the Sync card if you unlinked it)`); return false; }
       if (plan.how === 'moving') { err(`It is moving here from ${plan.host.name}: wait a moment, then send`); return false; }
+      // (a model or effort pick gets no card: its Continue would send the box's draft, not the pick)
+      if (plan.how === 'offline' && menuPick) { err(`${plan.host.name} runs it and is offline: pick again once it is back`); return false; }
       if (plan.how === 'offline') { st.offline = { id, name: plan.host.name, kind: plan.kind, pinned: !!pinNow() }; drawNotes(); return false; }
       if (plan.how === 'remote') {
         if (list.some((a) => a.file)) { contNeeded('Attaching files'); return false; }
@@ -1737,8 +1741,9 @@ export function mountCompose(slot, s) {
       await refreshHosts();
       id = keyNow(id);
       await yesFirst();
-      // any other question: its card is up above the box, and the draft stays for after it
-      if (blocked()) return;
+      // any other question: its card is up above the box, and the draft stays for after it (a model or effort pick,
+      // which has no draft, says why it didn't go)
+      if (blocked()) { if (menuPick) err('Claude is asking something: answer it first'); return; }
       // a command's panel is up: the text would land in it, so it closes first. Read from the screen; while the
       // screen can't be read yet, from the host's list (then only a panel a "/" command opened). Never both: two
       // quick Escs at Claude Code's prompt open its rewind menu.
@@ -1748,19 +1753,20 @@ export function mountCompose(slot, s) {
         const why = await closeHostPanel(id);
         if (why) { err(why); return; }
       }
+      // a message sent from here left in Claude Code's prompt (a Stop or Rewind's Esc put it back there): cleared
+      // first, so the new one doesn't go in glued onto it. Before the dynamic switch too: the switch is refused while
+      // anything is typed in the prompt. Only text that is one of ours goes; anything else typed there stays
+      let before = screenReady(id) ? boxNow(id) : null;
+      if (before && before.text && st.id === id && (sentTexts.get(id) || []).some((m) => bare(m) === bare(before.text))) {
+        if (!(await clearBox(id))) { err('Couldn\'t clear the prompt: an earlier message is in it (Session tab)'); return; }
+      }
       // a dynamic bot: its model and effort sized for this message, switched first when they need to be
       const pick = shell || /^\/[^\s/]/.test(msg) ? null : await dynamicPick(id, text);
       if (st.id === id && st.step) { st.step = ''; drawNotes(); }
       if (pick) await yesFirst();
       if (pick && blocked()) return;
       id = keyNow(id);
-      let before = screenReady(id) ? boxNow(id) : null; // (before bash mode's "!")
-      // a message sent from here left in Claude Code's prompt (a Stop or Rewind's Esc put it back there): cleared
-      // first, so the new one doesn't go in glued onto it
-      if (before && before.text && st.id === id && (sentTexts.get(id) || []).some((m) => bare(m) === bare(before.text))) {
-        if (!(await clearBox(id))) { err('Couldn\'t clear the prompt: an earlier message is in it (Session tab)'); return; }
-        before = boxNow(id);
-      }
+      before = screenReady(id) ? boxNow(id) : null; // (before bash mode's "!")
       if (shell) {
         // bash mode: "!" as a key of its own into an empty prompt (a "!" after text, or a pasted one, is just text)
         if (before && before.text) { err('Something is typed in the session\'s prompt: clear it in the Session tab first'); return; }
@@ -2614,32 +2620,52 @@ export function mountCompose(slot, s) {
 
   // ----- the model and effort picker -----
   // what the session runs: the screen's effort when it shows, else the last reply's, else what it was started with; what was picked here wins
-  // until the session shows it (the model shows with the next reply) or 10 minutes pass
+  // until the session shows it (the model shows with the next reply) or 10 minutes pass. pending: a pick made while
+  // Claude works (Claude Code holds a typed /effort or /model until the step ends), or a switch the server says is
+  // queued (the session's switchPending, a phone's): it shows, marked "next", until the session shows it applied
   function current() {
     const s = st.s, big = !!(s.context && s.context.limit >= 1000000);
     let model = s.model ? modelKey(s.model, big) : defaultModelKey(s.defaultModel !== undefined ? s.defaultModel : launch?.accounts[s.account]?.model), effort = st.effort || s.effort || starting()?.effort || null;
+    const pending = { model: false, effort: false };
     const w = st.want;
     if (w && Date.now() - w.at > 10 * 60e3) st.want = null;
     else if (w) {
       if (w.model && s.model !== w.from) w.model = null; // a reply named the model it runs now
       if (w.effort && (st.effort || s.effort) === w.effort) w.effort = null;
-      if (w.model) model = w.model;
-      if (w.effort) effort = w.effort;
+      if (w.model) { model = w.model; pending.model = !!w.next?.model; }
+      if (w.effort) { effort = w.effort; pending.effort = !!w.next?.effort; }
       if (!w.model && !w.effort) st.want = null;
     }
-    return { model, effort };
+    // (one that failed shows no pending value: drawModel says why once)
+    const sp = s.switchPending && typeof s.switchPending === 'object' && !s.switchPending.error ? s.switchPending : null;
+    if (sp && typeof sp.model === 'string' && sp.model && sp.model !== model) { model = sp.model; pending.model = true; }
+    if (sp && EFFORTS.includes(sp.effort) && sp.effort !== effort) { effort = sp.effort; pending.effort = true; }
+    return { model, effort, pending };
   }
+  // a pick made here: shown until the session shows it (see current); queued, it was made while Claude works
+  function wantPick(got, from, queued = false) {
+    const w = st.want || {}, next = { ...(w.next || {}) };
+    for (const k of Object.keys(got)) next[k] = queued;
+    st.want = { ...w, ...got, from, at: Date.now(), next };
+  }
+  let switchErrSaid = ''; // the queued switch's error drawModel said last (each says once)
   // its model or effort that is dynamic shows as Dynamic (checked in the menu, the one it runs now marked "now"); the
   // menu also offers Dynamic, and a fixed pick for a part that is dynamic turns Dynamic off for the bot or chat
   function drawModel() {
     const t = termApi();
-    const { model, effort } = current();
+    const { model, effort, pending } = current();
+    // a switch queued by the server (the phone's) that failed: said once
+    const spe = st.s.switchPending && typeof st.s.switchPending === 'object' && st.s.switchPending.error;
+    if (spe) {
+      const k = `${st.id}|${st.s.switchPending.at}|${spe}`;
+      if (switchErrSaid !== k) { switchErrSaid = k; err(`Couldn't switch: ${spe}`); }
+    }
     // a chat another machine runs: a pick is sent there, and Dynamic (which sizes what is sent from here) is not offered
     const host = remoteOn() ? hostOfChat(st.s) : null;
     const dyn = host ? null : dynNow(st.s), bot = !!(dyn && dyn.botId);
     const dm = !!(dyn && dyn.model), de = !!(dyn && dyn.effort);
     const name = dm ? 'Dynamic' : model ? modelLabel(model, true) : 'Model';
-    const key = `${name}|${model}|${effort}|${!!dyn}|${bot && dyn.name}|${dm}|${de}|${host && host.name}|${!!t}|${!!(st.menu || st.panel)}|${st.sending}`;
+    const key = `${name}|${model}|${effort}|${pending.model}|${pending.effort}|${!!dyn}|${bot && dyn.name}|${dm}|${de}|${host && host.name}|${!!t}|${!!(st.menu || st.panel)}|${st.sending}`;
     if (st.drawn.model === key) return;
     st.drawn.model = key;
     // the model name shortens when space runs out; the effort, in its Claude Code color, always shows in full
@@ -2648,14 +2674,18 @@ export function mountCompose(slot, s) {
     eff.hidden = de ? dm : !EFFORTS.includes(effort); // both dynamic: the one word says it
     eff.className = `cmp-eff eff${eff.hidden ? '' : ` eff-${de ? 'dynamic' : effort}`}`;
     eff.textContent = eff.hidden ? '' : de ? 'dynamic' : effort;
+    // picked while Claude works: it applies when this step ends, so it reads as next until it shows
+    const nextEff = pending.effort && !de, nextModel = pending.model && !dm;
+    eff.classList.toggle('cmp-next', !eff.hidden && nextEff);
+    modelBtn.querySelector('.cmp-model-t').classList.toggle('cmp-next', nextModel);
     modelBtn.disabled = !t || !!st.menu || !!st.panel || st.sending;
     const now = [st.s.model || (dm && model ? modelLabel(model) : ''), effort ? `${effort} effort` : ''].filter(Boolean).join(', ');
     modelBtn.title = !t ? noTermMsg('Changing the model')
       : dm || de ? `${dyn.name || (bot ? 'This bot' : 'This chat')}'s ${dm && de ? 'model and effort are' : dm ? 'model is' : 'effort is'} dynamic: sized for each message you send${now ? ` (now ${now})` : ''}`
-      : `Model and effort${st.s.model ? ` (now ${st.s.model}${effort ? `, ${effort} effort` : ''})` : ''}`;
-    const item = (k, label, on, attr, mark = false) => `<button type="button" role="menuitemradio" class="cmp-mi${on ? ' on' : ''}" ${attr}="${esc(k)}" aria-checked="${on}">`
+      : `Model and effort${st.s.model ? ` (now ${st.s.model}${effort && !nextEff ? `, ${effort} effort` : ''})` : ''}${nextEff || nextModel ? `; ${[nextModel && modelLabel(model), nextEff && `${effort} effort`].filter(Boolean).join(', ')} applies when Claude finishes this step` : ''}`;
+    const item = (k, label, on, attr, mark = false, next = false) => `<button type="button" role="menuitemradio" class="cmp-mi${on ? ' on' : ''}" ${attr}="${esc(k)}" aria-checked="${on}">`
       + `<span class="cmp-mi-c">${on ? ic('check', 13) : ''}</span><span${attr === 'data-effort' ? ` class="eff eff-${esc(k)}"` : ''}>${esc(label)}</span>`
-      + `${mark ? '<span class="cmp-mi-now">now</span>' : ''}</button>`;
+      + `${mark ? '<span class="cmp-mi-now">now</span>' : next ? '<span class="cmp-mi-now">next</span>' : ''}</button>`;
     // Dynamic as a small switch in the section's heading, so the menu grows by no rows (none before a new session has
     // its conversation id)
     const head = (label, kind, on) => (!dyn ? `<div class="cmp-mh">${label}</div>`
@@ -2665,9 +2695,10 @@ export function mountCompose(slot, s) {
     const ids = model && !MODEL_IDS.includes(model) ? [model, ...MODEL_IDS] : MODEL_IDS;
     const note = host ? `Sent to ${host.name}, where it runs; also becomes the default for new sessions there`
       : dm || de ? `A fixed pick turns Dynamic off for this ${bot ? 'bot' : 'chat'}, and becomes the default for new sessions` : 'Also becomes the default for new sessions';
-    modelMenu.innerHTML = head('Model', 'model', dm) + ids.map((k) => item(k, modelLabel(k), !dm && k === model, 'data-model', dm && k === model)).join('')
+    modelMenu.innerHTML = head('Model', 'model', dm) + ids.map((k) => item(k, modelLabel(k), !dm && k === model, 'data-model', dm && k === model, nextModel && k === model)).join('')
       + '<div class="cmp-msep" role="separator"></div>' + head('Effort', 'effort', de)
-      + EFFORTS.map((e) => item(e, e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1), !de && e === effort, 'data-effort', de && e === effort)).join('')
+      + EFFORTS.map((e) => item(e, e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1), !de && e === effort, 'data-effort', de && e === effort, nextEff && e === effort)).join('')
+      + (nextEff || nextModel ? `<div class="cmp-mnote">${esc(`${[nextModel && modelLabel(model), nextEff && `Effort ${effort}`].filter(Boolean).join(' and ')} applies when Claude finishes this step`)}</div>` : '')
       + `<div class="cmp-mnote">${esc(note)}</div>`;
   }
   function openModelMenu(open) {
@@ -2707,7 +2738,7 @@ export function mountCompose(slot, s) {
     if (r.status === 200) {
       const effortNow = r.body && typeof r.body.effortNow === 'string' && EFFORTS.includes(r.body.effortNow) ? r.body.effortNow : null;
       const got = { ...want, ...(want.effort && effortNow ? { effort: effortNow } : {}) };
-      st.want = { ...(st.want || {}), ...got, from, at: Date.now() }; // the model menu shows it until the screen does
+      wantPick(got, from); // the model menu shows it until the screen does
       st.drawn.model = null;
       drawModel();
       Object.assign(pick, { model: got.model || pick.model, effort: got.effort || pick.effort, switched: true });
@@ -2749,9 +2780,9 @@ export function mountCompose(slot, s) {
     openModelMenu(false);
     const dyn = remoteOn() ? null : dynNow(st.s); // (Dynamic sizes what is sent from here, so not a chat another machine runs)
     if (dyn && dyn[kind] && !(await setDynPart(dyn, kind, v))) return;
-    const from = st.s.model || null;
-    if (!(await send(kind === 'model' ? `/model ${v}` : `/effort ${v}`))) return;
-    st.want = { ...(st.want || {}), [kind]: v, from, at: Date.now() };
+    const from = st.s.model || null, busy = st.busy; // (busy: Claude Code holds it until this step ends)
+    if (!(await send(kind === 'model' ? `/model ${v}` : `/effort ${v}`, true))) return;
+    wantPick({ [kind]: v }, from, busy);
     st.drawn.model = null;
     drawModel();
   }
@@ -2805,8 +2836,10 @@ export function mountCompose(slot, s) {
     let menu = alive && lines.length ? parseMenu(screenText(st.id, 40, { rows: true })) : null;
     // a model or effort switch's question (the picker's /effort, a Launch's): answered Yes as it comes up, no card
     // (a Yes that didn't take shows the card after 3 s, for a click)
-    if (switchYes(menu)) {
-      if (st.yes?.sig !== menu.sig) { st.yes = { sig: menu.sig, at: Date.now() }; sayYes(st.id); }
+    // Only one this tab typed (its last "/command" a /model or /effort): one the phone or another machine sent, the
+    // server answers (api.js watchSwitch), and a second Yes here would land in the prompt as a stray digit
+    if (switchYes(menu) && (st.yes?.sig === menu.sig || /^\/(?:model|effort)$/.test(st.cmd))) {
+      if (st.yes?.sig !== menu.sig) { st.yes = { sig: menu.sig, at: Date.now() }; st.cmd = ''; sayYes(st.id); }
       if (Date.now() - st.yes.at < 3000) menu = null;
     }
     // the one a "/command" sent from here opened is that command's, numbered list or not (/model); else a numbered
@@ -3105,10 +3138,10 @@ export function mountCompose(slot, s) {
   async function raiseEffort(want) {
     const k = EFFORTS.indexOf(want);
     if (k < 0 || EFFORTS.indexOf(current().effort) >= k) return;
-    const from = st.s.model || null, asked = st.elsewhereAt;
+    const from = st.s.model || null, asked = st.elsewhereAt, busy = st.busy;
     // (not gone in: "send again to open a second copy" stays for the text to ask, not taken as said by this)
     if (await send(`/effort ${want}`) !== true) { st.elsewhereAt = asked; return; }
-    st.want = { ...(st.want || {}), effort: want, from, at: Date.now() }; // the picker shows it until the screen does
+    wantPick({ effort: want }, from, busy); // the picker shows it until the screen does
     st.drawn.model = null;
     drawModel();
     await sleep(ENTER_DELAY_MS); // the command takes effect before the text is typed

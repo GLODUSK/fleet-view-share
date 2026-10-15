@@ -405,6 +405,9 @@ html.glass.mac .cmp-box { background: rgba(14, 17, 27, 0.46); } /* the Mac's lig
 .cmp-modelb .cmp-model-t { font: 500 11px/1 var(--font-mono); }
 .cmp-modelb .cmp-eff { flex: none; font-size: 11px; }
 .cmp-modelb .cmp-eff[hidden] { display: none; }
+/* picked while Claude works: it applies when the step ends (compose.js current, pending) */
+.cmp-modelb .cmp-next { opacity: .65; font-style: italic; }
+.cmp-modelb .cmp-eff.cmp-next::after { content: " next"; color: var(--faint); font-style: normal; }
 .cmp-mi .eff { font: inherit; font-weight: 600; }
 /* a dynamic bot's menu: the model or effort it runs now, beside the fixed one */
 .cmp-mi-now { margin-left: auto; padding-left: 10px; color: var(--faint); font: 400 10.5px/1 var(--font-ui); }

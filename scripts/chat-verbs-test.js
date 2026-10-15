@@ -508,6 +508,207 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     ok('model: "Switch model?" answered Yes; another menu closed (409); the default put back after a late save');
   }
 
+  // ---------- the switch question's wording (Claude Code 2.1.299's binary) ----------
+  const EDGE = '▔'.repeat(60);
+  // its effort question as the session host's screen shows it (RECONSTRUCTED from the binary's strings and layout, not
+  // captured): numbered, the ❯ on Yes, no keys line (hideInputGuide). Its unnumbered form (hideIndexes, for an
+  // over-draft model pick, the ❯ on "No, go back") has no keys line either, so screen.js does not read it as a menu
+  const effortQ = (lvl = 'medium') => [EDGE, '   Change effort level?', '   Your next response will be slower and use more tokens', '',
+    `   This conversation is cached for the current effort level. Switching to ${lvl} means the full history gets`, '   re-read on your next message.', '',
+    `   ❯ 1. Yes, switch to ${lvl}`, '     2. No, go back', ''];
+  {
+    const q = SCREEN.menuDetails(effortQ());
+    assert.equal(q.title, 'Change effort level?');
+    assert.equal(API.isSwitchConfirm(q), true);
+    assert.equal(API.isSwitchConfirm(SCREEN.menuDetails(effortQ('xhigh').map((l) => l.replace('❯ 1.', '  1.').replace('  2.', '❯ 2.')))), true);
+    // unnumbered, as a menu reader may give it
+    assert.equal(API.isSwitchConfirm({ title: 'Switch model?', unnumbered: true, options: [{ n: 1, label: 'Yes, switch to Opus 5.5' }, { n: 2, label: 'No, go back', on: true }] }), true);
+    assert.equal(API.isSwitchConfirm(SCREEN.menuDetails([EDGE, '   Switch model?', '   A PreModelSwitch hook asked you to confirm', '', '   ❯ 1. Yes, switch to Opus 5.5', '     2. No, go back'])), true);
+    // the screen-reader mode's labels
+    assert.equal(API.isSwitchConfirm({ title: 'Change effort level?', options: [{ n: 1, label: 'y. Yes, switch to low' }, { n: 2, label: 'n. No, go back' }] }), true);
+    // not it: another title, a third option, no "No, go back", a permission prompt with a Yes, nothing
+    assert.equal(API.isSwitchConfirm({ title: 'Do you want to proceed?', options: [{ n: 1, label: 'Yes, switch to medium' }, { n: 2, label: 'No, go back' }] }), false);
+    assert.equal(API.isSwitchConfirm({ title: 'Switch model?', options: [{ n: 1, label: 'Yes, switch to Opus' }, { n: 2, label: 'No, go back' }, { n: 3, label: 'Yes, and always' }] }), false);
+    assert.equal(API.isSwitchConfirm({ title: 'Switch model?', options: [{ n: 1, label: 'Yes, switch to Opus' }, { n: 2, label: 'No' }] }), false);
+    assert.equal(API.isSwitchConfirm({ title: 'Change effort level?', options: [{ n: 1, label: 'Yes' }, { n: 2, label: 'No, go back' }] }), false);
+    assert.equal(API.isSwitchConfirm(null), false);
+    ok('isSwitchConfirm: Claude Code\'s "Change effort level?" / "Switch model?" (numbered, unnumbered, a hook\'s, screen-reader), nothing else');
+  }
+
+  // ---------- model with queue: while Claude works it waits, then applies once idle ----------
+  {
+    const file = path.join(home, '.claude', 'settings.json');
+    const start = { model: 'claude-opus-5-5', modelSettings: { 'claude-opus-5-5': { effortLevel: 'high' } } };
+    fs.writeFileSync(file, JSON.stringify(start, null, 2) + '\n');
+    const logs = [];
+    ctx.log = (s) => logs.push(s);
+    let footer = '  ◐ high · /effort', said = [], typed = '';
+    const draw = () => { fake.screen = screenOf(['earlier output', ...said, '', ...box('', footer)]); };
+    reset(); live({ status: 'busy' }); draw();
+    fake.onWrite = (w) => {
+      if (w.startsWith('\x1b[200~')) { typed += w.slice(6, -6); return; }
+      if (w !== '\r') return;
+      const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+      let m;
+      if ((m = /^\/model (\S+)$/.exec(typed))) { j.model = m[1]; said.push(`  ⎿  Set model to ${m[1]}`); }
+      if ((m = /^\/effort (\S+)$/.exec(typed))) { (j.modelSettings[j.model] = j.modelSettings[j.model] || {}).effortLevel = m[1]; footer = `  ◐ ${m[1]} · /effort`; said.push(`  ⎿  Set effort level to ${m[1]}`); }
+      typed = '';
+      fs.writeFileSync(file, JSON.stringify(j, null, 2) + '\n');
+      draw();
+    };
+    // without queue: refused as before, now saying notReady, and logged once (handle's own line left out)
+    API.switchParts.refusals.clear();
+    const [c0, o0] = await call('POST', `${S}/model`, { effort: 'low' });
+    assert.equal(c0, 409);
+    assert.equal(o0.notReady, true);
+    await call('POST', `${S}/model`, { effort: 'low' });
+    assert.equal(logs.filter((l) => l.includes(`model switch for ${ID}: refused`)).length, 1, logs.join('\n'));
+    assert.ok(!logs.some((l) => /POST .*\/model -> 409/.test(l)), logs.join('\n'));
+    assert.equal((await call('POST', `${S}/model`, { effort: 'low', queue: 'yes' }))[0], 400);
+    // with queue: 202, nothing typed, kept; a second one adds the model and keeps the effort
+    const [c1, o1] = await call('POST', `${S}/model`, { effort: 'low', queue: true });
+    assert.equal(c1, 202, o1.message);
+    assert.deepEqual({ ok: o1.ok, queued: o1.queued, id: o1.id, effort: o1.effort, message: o1.message }, { ok: true, queued: true, id: ID, effort: 'low', message: 'applies when Claude finishes this step' });
+    const [c2, o2] = await call('POST', `${S}/model`, { model: 'sonnet', queue: true });
+    assert.equal(c2, 202, o2.message);
+    assert.equal(o2.model, 'sonnet');
+    assert.equal(o2.effort, 'low');
+    const sp = API.switchPending(ID);
+    assert.equal(sp.model, 'sonnet');
+    assert.equal(sp.effort, 'low');
+    assert.ok(Number.isFinite(sp.at));
+    assert.equal(sp.error, undefined);
+    assert.deepEqual(fake.writes, []);
+    // still busy a while: nothing typed
+    await sleep(2000);
+    assert.deepEqual(fake.writes, []);
+    // idle: applied after the settle, the default put back, gone from the pending list
+    live({ status: 'idle' });
+    for (const end = Date.now() + 12000; Date.now() < end && API.switchPending(ID);) await sleep(250);
+    assert.equal(API.switchPending(ID), null, logs.join('\n'));
+    assert.equal(pasted(), '/model sonnet/effort low');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), start);
+    assert.ok(logs.some((l) => l.includes(`queued model switch for ${ID} applied`)), logs.join('\n'));
+    // idle already: queue changes nothing, it switches now (200)
+    reset(); live({ status: 'idle' }); said = []; draw();
+    const [c3, o3] = await call('POST', `${S}/model`, { effort: 'max', queue: true });
+    assert.equal(c3, 200, o3.message);
+    assert.equal(API.switchPending(ID), null);
+    // an overseer's from a session: 403, never queued
+    reset(); live({ status: 'busy', role: 'bot:a1b2c3d4e5f6' });
+    assert.equal((await call('POST', `${S}/model`, { effort: 'low', queue: true }))[0], 403);
+    assert.equal(API.switchPending(ID), null);
+    // too old: dropped after 30 minutes, logged
+    reset(); live({ status: 'busy' });
+    assert.equal((await call('POST', `${S}/model`, { effort: 'low', queue: true }))[0], 202);
+    API.switchParts.pending.get(ID).at -= 31 * 60e3;
+    // (a tick of its own timer may be running: tick returns at once then)
+    const ticked = async () => { for (const end = Date.now() + 5000; Date.now() < end && API.switchPending(ID);) { await API.switchParts.tick(); await sleep(50); } };
+    await ticked();
+    assert.equal(API.switchPending(ID), null);
+    assert.ok(logs.some((l) => /dropped: not applied within 30 minutes/.test(l)), logs.join('\n'));
+    // the session ended: dropped
+    assert.equal((await call('POST', `${S}/model`, { effort: 'low', queue: true }))[0], 202);
+    fake.list = [{ id: ID, alive: false, exitCode: 0 }];
+    await ticked();
+    assert.equal(API.switchPending(ID), null);
+    assert.ok(logs.some((l) => /dropped: its session ended/.test(l)), logs.join('\n'));
+    // applying fails (settings.json not JSON): the reason kept for /state, not tried again
+    reset(); live({ status: 'busy' });
+    assert.equal((await call('POST', `${S}/model`, { effort: 'low', queue: true }))[0], 202);
+    fs.writeFileSync(file, '{ not json');
+    live({ status: 'idle' });
+    for (const end = Date.now() + 8000; Date.now() < end && !(API.switchPending(ID) || {}).error;) await sleep(250);
+    const failed = API.switchPending(ID);
+    assert.ok(failed && /not JSON/.test(failed.error), JSON.stringify(failed));
+    assert.equal(failed.effort, 'low');
+    assert.ok(logs.some((l) => /queued model switch .* failed: 409/.test(l)), logs.join('\n'));
+    assert.deepEqual(fake.writes, []);
+    // a new one starts afresh
+    fs.writeFileSync(file, JSON.stringify(start, null, 2) + '\n');
+    live({ status: 'busy' });
+    const [c4, o4] = await call('POST', `${S}/model`, { model: 'haiku', queue: true });
+    assert.equal(c4, 202, o4.message);
+    assert.deepEqual(API.switchPending(ID), { model: 'haiku', at: API.switchPending(ID).at });
+    API.switchParts.pending.clear();
+    ctx.log = () => {};
+    ok('model with queue: 202 while busy, parts merged, applied once idle; dropped when old or ended; a failure kept as error; refusals logged once');
+  }
+
+  // ---------- model: the question answered elsewhere (an open page) before its Yes went in ----------
+  {
+    const file = path.join(home, '.claude', 'settings.json');
+    const start = { model: 'claude-opus-5-5', modelSettings: { 'claude-opus-5-5': { effortLevel: 'high' } } };
+    fs.writeFileSync(file, JSON.stringify(start, null, 2) + '\n');
+    reset(); live({ status: 'idle' });
+    const idle = (said = []) => screenOf(['earlier output', ...said, '', ...box('', '  ◐ high · /effort')]);
+    let shown = idle(), reads = 0, typed = '';
+    // the question is read once (by the switch), then the page has answered it: gone, the effort saved
+    Object.defineProperty(fake, 'screen', { configurable: true, get: () => {
+      if (shown === 'question' && ++reads > 1) {
+        shown = idle(['  ⎿  Set effort level to medium']);
+        const j = JSON.parse(fs.readFileSync(file, 'utf8')); j.modelSettings['claude-opus-5-5'].effortLevel = 'medium'; fs.writeFileSync(file, JSON.stringify(j, null, 2) + '\n');
+      }
+      return shown === 'question' ? screenOf(['earlier output', '', ...effortQ()]) : shown;
+    }, set: (v) => { shown = v; } });
+    fake.onWrite = (w) => { if (w.startsWith('\x1b[200~')) typed += w.slice(6, -6); else if (w === '\r' && /^\/effort /.test(typed)) { typed = ''; shown = 'question'; } };
+    const [c, o] = await call('POST', `${S}/model`, { effort: 'medium' });
+    delete fake.screen; fake.screen = idle();
+    assert.equal(c, 200, o.message);
+    assert.equal(o.confirmed, 'Yes, switch to medium (answered elsewhere)');
+    assert.ok(!fake.writes.includes('1'), 'nothing pressed into the prompt');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), start);
+    ok('model: the switch question answered elsewhere first: the save waited for, 200, nothing pressed');
+  }
+
+  // ---------- a typed /effort or /model: its switch question answered Yes, no other menu ----------
+  {
+    const logs = [];
+    ctx.log = (s) => logs.push(s);
+    let typed = '';
+    const idleBox = () => screenOf(['earlier output', '', ...box()]);
+    // a fake Claude Code: Enter on a /effort brings up its question (or menu()), "1" on it switches
+    const begin = (menu) => {
+      reset(); logs.length = 0; live({ status: 'idle' }); fake.screen = idleBox(); typed = '';
+      fake.onWrite = (w) => {
+        if (w.startsWith('\x1b[200~')) { typed += w.slice(6, -6); return; }
+        if (w === '\r') { const t = typed; typed = ''; if (/^\/(effort|model) /.test(t) || menu.always) { fake.screen = screenOf(menu.rows); live({ status: 'waiting' }); } return; }
+        if (w === '1' && menu.yes) { fake.screen = screenOf(['earlier output', '  ⎿  Set effort level to medium', '', ...box()]); live({ status: 'idle' }); }
+      };
+    };
+    // idle: the question comes up and "1" picks its Yes
+    begin({ rows: ['earlier output', '', ...effortQ()], yes: true });
+    const [c1, o1] = await call('POST', `${S}/message`, { text: '/effort medium' });
+    assert.equal(c1, 200, o1.message);
+    for (const end = Date.now() + 4000; Date.now() < end && !fake.writes.includes('1');) await sleep(100);
+    assert.ok(fake.writes.includes('1'), 'its Yes was picked');
+    await sleep(800);
+    assert.ok(logs.some((l) => /answered "Change effort level\?" with "Yes, switch to medium" after a typed \/effort medium/.test(l)), logs.join('\n'));
+    // another menu after the command: never answered
+    begin({ rows: ['Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel'] });
+    await call('POST', `${S}/message`, { text: '/model sonnet' });
+    await sleep(2500);
+    assert.ok(!fake.writes.includes('1'), 'another menu is never answered');
+    // a plain message that brings up the question: not ours to answer
+    begin({ rows: ['earlier output', '', ...effortQ()], yes: true, always: true });
+    await call('POST', `${S}/message`, { text: 'please set effort medium' });
+    await sleep(2500);
+    assert.ok(!fake.writes.includes('1'), 'only after a typed /effort or /model');
+    // sent while busy: answered once the question comes up after the step
+    begin({ rows: ['earlier output', '', ...effortQ()], yes: true });
+    live({ status: 'busy' });
+    fake.onWrite = (w) => { if (w === '1') { fake.screen = idleBox(); live({ status: 'idle' }); } };
+    await call('POST', `${S}/message`, { text: '/effort medium' });
+    await sleep(2000);
+    assert.ok(!fake.writes.includes('1'));
+    fake.screen = screenOf(['earlier output', '', ...effortQ()]); live({ status: 'waiting' });
+    for (const end = Date.now() + 5000; Date.now() < end && !fake.writes.includes('1');) await sleep(100);
+    assert.ok(fake.writes.includes('1'), 'answered after the step');
+    await sleep(500);
+    ctx.log = () => {};
+    ok('message: a typed /effort or /model has its switch question answered Yes (idle, or after the step); no other menu, no plain message');
+  }
+
   // ---------- answer: the unnumbered trust question ----------
   {
     // compose.js's parseMenu reads it the same (everything but kind)

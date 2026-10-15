@@ -332,7 +332,8 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 `/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
 `/chat/image`, and the page's `/teams` (the phone's New team sends it as the page's New team does: `{ members, order, name,
 lead, send: true }`, then `/teams/add` for a team above and `/teams/leave` with `quiet` for a member its order missed),
-`/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`, `/teams/rename`, `/bots/:id/switch` and `/bots/:id/tasks/:taskId`, and `/accounts/add`, `/accounts/login`,
+`/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`, `/teams/rename`, `/bots/:id/switch` and `/bots/:id/tasks/:taskId`,
+`/chat/dynamic` (Dynamic on or off for any chat, below), and `/accounts/add`, `/accounts/login`,
 `/accounts/code` and `/accounts/cancel` (only to sign in a missing Claude A or B, below).
 
 **GET and POST:** `/sync/move` (Continue here, asked of a machine that is on for a chat whose host is off: "Several
@@ -378,6 +379,14 @@ The bots:
   session runs now, asks the PC to switch first: the page's `POST /bots/:id/switch { id, model?, effort? }`, `id` its
   conversation. It is a page route, so it goes with this PC's Origin (fleet-view.js lets only the page switch a bot)
   and is not marked.
+- **Dynamic for any chat** (fleet-view.js `setDynamicChat`, settings.dynamicChats): `/state`'s sessions carry
+  `dynamic: { model, effort } | null` (true: that part is sized per message). The phone's model sheet turns a part on
+  or off with the page's `POST /chat/dynamic { id, model?, effort? }` (`true` or `false`; a fixed pick for a dynamic
+  part turns it off first), answered `{ ok, dynamic }`; a bot's goes by `POST /api/bots/:id` as before. Before a
+  message to such a chat the phone sizes it as for a bot and switches with `POST /api/sessions/:id/model` (the 200k
+  models; a bot's the 1M ones by `/bots/:id/switch`). The send waits 8 s at most for that switch, then goes anyway and
+  says it was not switched (it may still land). Not offered for a chat another machine runs (`workspace.host`): Dynamic
+  sizes what is sent from here. A page route: this PC's Origin, not marked.
 - **A bot's tasks and routines** (bots.js, bot-tasks.js): `/state`'s `bots[].tasks` lists each bot's tasks.json
   (`tasksError` when it can't be read), and the page's `POST /bots/:id/tasks/:taskId { action }` acts on one:
   `pause`, `resume`, `run` (send it to the bot now, started first if it is not running) or `delete`. A task id is
@@ -404,11 +413,17 @@ Narrower rules:
   takes what is queued now) takes no fields (403 otherwise) and counts toward no start limit.
   `POST /api/sessions/:id/unsend { text }` takes only `text` (403 otherwise), which must be text as api.js
   `cleanText` takes it: something besides spaces, no control characters but new lines and tabs (400).
-  `POST /api/sessions/:id/model { model?, effort? }` takes only those two (403 otherwise), at least one, `model` a
-  name api.js `MODEL_RE` takes and `effort` one of `low`, `medium`, `high`, `xhigh`, `max` (400); it is marked,
-  because api.js switches an overseer's model only for Henry (on any other conversation the marker changes nothing).
+  `POST /api/sessions/:id/model { model?, effort?, queue? }` takes only those three (403 otherwise), at least one of
+  `model` and `effort`, `model` a name api.js `MODEL_RE` takes, `effort` one of `low`, `medium`, `high`, `xhigh`,
+  `max`, and `queue` true or false (400); it is marked, because api.js switches an overseer's model only for Henry (on
+  any other conversation the marker changes nothing). The phone sends `queue: true` for a pick made while Claude
+  works: api.js answers 202 `{ ok, queued: true, model?, effort?, message }` and makes it once Claude is idle, and
+  `/state`'s session says `switchPending: { model?, effort?, at, error? }` until then (the phone shows "after this
+  step"; an `error` once).
   `POST /api/sessions/:id/message` may carry `now` (send it at once, stopping the step Claude is on), which must be
   true or false (400). `GET /api/sessions/:id/activity` takes nothing.
+- `POST /chat/dynamic` takes only `id` (a conversation id), `model` and `effort` (403 otherwise), at least one of the
+  two, each `true` or `false` (400).
 - `POST /repos/add` takes only a root Fleet View already knows (in `/state`'s repos or the removed list). The
   same goes for the roots of `/sessions/move`, `/push-target` and `/repo-history`.
 - `GET /file`, `/chat/kind`, `/chat/files` and `/chat/commands`' folder are fenced: see the next section.

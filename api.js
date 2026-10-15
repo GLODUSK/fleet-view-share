@@ -483,11 +483,57 @@ async function need(host, key, alive) {
   return { p };
 }
 
+// A message that is just "/model <x>" or "/effort <x>" (the phone's, a remote chat's) may bring up Claude Code's
+// "Switch model?" / "Change effort level?" (isSwitchConfirm), which only an open page answered (web/compose.js
+// sayYes); elsewhere it became a "Needs you" card with every later message queued behind it. The sender asked for the
+// switch, so its Yes is picked here as switchModel picks it (answerMenu). Sent while idle: watched CONFIRM_WATCH_MS.
+// Sent while busy (it waits in Claude Code's queue): watched from when Claude stops working, for as long, up to
+// CONFIRM_BUSY_MS in all. Any other menu is never answered: the watch waits it out (busy) or ends (idle).
+const SWITCH_CMD_RE = /^\/(?:model|effort)[ \t]+\S+[ \t]*$/;
+const CONFIRM_WATCH_MS = 5000, CONFIRM_BUSY_MS = 30 * 60e3;
+const switchWatch = new Map(); // id -> the watch now: a newer command's watch takes over from an older one
+async function yesToSwitch(host, id, cmd, status, ctx, mine) {
+  const cap = Date.now() + (status === 'busy' ? CONFIRM_BUSY_MS : CONFIRM_WATCH_MS);
+  let end = status === 'busy' ? 0 : cap;
+  while (Date.now() < cap) {
+    await sleep(end ? POLL_MS / 2 : SWITCH_TICK_MS);
+    if (switchWatch.get(id) !== mine) return null;
+    const p = hosted(await host.call('list'), id);
+    if (!p || !p.alive) return null;
+    if (!end) { if (p.status === 'busy') continue; end = Math.min(cap, Date.now() + CONFIRM_WATCH_MS); }
+    if (Date.now() > end) return null;
+    const m = await menuNow(host, p);
+    if (!m) continue;
+    if (switchQuestion(m) && !isSwitchConfirm(m)) continue; // still drawing
+    if (!isSwitchConfirm(m)) { if (status !== 'busy') return null; end = 0; continue; }
+    const yes = m.options.find((o) => YES_SWITCH.test(o.label));
+    const [code, a] = await answerMenu(p.id, { option: yes.n, sig: m.sig, allowPermission: true }, ctx, null, null);
+    if (code === 200 && a.changed) {
+      if (ctx && ctx.log) ctx.log(`api: ${p.id}: answered "${m.title}" with "${yes.label}" after a typed ${cmd}`);
+      return yes.label;
+    }
+    // gone meanwhile (an open page answered it): done; still up: tried again while the watch lasts
+    if (!(await menuNow(host, p))) return null;
+  }
+  return null;
+}
+const watchSwitch = (id, text, status, ctx) => {
+  const cmd = typeof text === 'string' ? text.trim() : '';
+  if (!SWITCH_CMD_RE.test(cmd)) return;
+  // a host connection held by the watch (withHost), so it outlives the request that sent the text
+  const mine = {};
+  switchWatch.set(id, mine);
+  withHost((h) => yesToSwitch(h, id, cmd, status, ctx, mine))
+    .catch((e) => { if (ctx && ctx.log && !(e instanceof HostDown)) ctx.log(`api: ${id}: watching for the switch question after ${cmd} failed: ${e.message}`); })
+    .finally(() => { if (switchWatch.get(id) === mine) switchWatch.delete(id); });
+};
+
 // Send text into a hosted, live session as message does: a "/" panel closed first, never into a menu, then wait
 // as asked. note(id, sentAt, status): called once it went in (status: the session's before it, 'busy' or 'idle').
 // q: { from, original, onSent?, onDrop? } to keep it in the queue (see below) instead of refusing it while a menu or a
 // panel is up; it goes in later. now: one that went in while Claude was busy (into Claude Code's queue) is sent at
-// once, as the page's Interrupt on a queued message does (pressSendNow). -> [code, json]
+// once, as the page's Interrupt on a queued message does (pressSendNow). A typed /model or /effort has its switch
+// question answered (watchSwitch). -> [code, json]
 async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null, now = false) {
   const later = (more, why = 'is showing a question or a prompt; it goes in once that is answered') => {
     enqueue(p.id, text, q);
@@ -517,6 +563,7 @@ async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null,
   if (typed.r) return typed.r;
   const { sentAt, status, sentNow } = typed;
   if (note) note(p.id, sentAt, status);
+  watchSwitch(p.id, text, status, ctx);
   const w = await afterSend(host, p.id, sentAt, status, ms, ctx, gone);
   return [200, { ok: true, id: p.id, ...extra, status, ...(sentNow ? { sentNow } : {}), ...w,
     message: doneText(w, ms, sentNow ? 'sent now (Claude stopped the step it was on)' : status === 'busy' ? 'sent while Claude was busy (queued)' : 'sent') }];
@@ -622,6 +669,7 @@ async function tickQueue() {
         const sent = await typeOne(p.id, () => { sentAt = Date.now(); return sendText(host, p.id, q.text, () => menuNow(host, p)); });
         if (!sent.entered) { unqueue(q, 'a menu came up just before Enter (the text is in its prompt box, not sent)'); continue; }
         unqueue(q);
+        watchSwitch(p.id, q.text, p.status || null, qCtx);
         if (q.from && qCtx && qCtx.noteMessage) qCtx.noteMessage(q.from, convId(p.id) || p.id, q.original || q.text, q.kind ? { kind: q.kind } : undefined);
         runHooks(q, 'onSent', convId(p.id) || p.id, sentAt, p.status || null);
       }
@@ -764,7 +812,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow)' },
   { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
   { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
-  { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. An overseer\'s: Henry only (his phone)' },
+  { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort?, queue? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. Not idle: 409 notReady, or with queue: true 202 { queued, model?, effort? }: applied once Claude finishes this step (GET /state\'s switchPending until then; dropped after 30 min). An overseer\'s: Henry only (his phone)' },
   { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code)' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
   { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|chrome|other), title, context, options, sig; or null' },
@@ -1785,7 +1833,8 @@ async function unsendMessage(key, b, ctx) {
 // commands as the page does, waits until Claude Code has saved them, then puts those keys back as they were (the rest
 // of the file as Claude Code left it), so new sessions start as before. Only while Claude is idle with nothing typed in
 // its prompt (a command typed mid-turn waits in Claude Code's queue, and would be saved after this stopped watching),
-// and one switch at a time (settingsTurn), so a second can't take the first's value for the one to put back.
+// and one switch at a time (settingsTurn), so a second can't take the first's value for the one to put back; with
+// queue: true one asked for meanwhile waits until then (queueSwitch, below).
 // An overseer's (a bot's) model is Henry's to change (as his phone changes a bot's: bots.js), so for one
 // of them only the phone relay may (viaOf).
 // Mid-conversation, /model may first ask "Switch model?" and /effort "Change effort level?" (the history is re-read): the caller asked
@@ -1795,8 +1844,16 @@ async function unsendMessage(key, b, ctx) {
 const SAVE_MS = 5000; // how long Claude Code may take to save a switch
 const LATE_SAVE_MS = 3000; // a command whose save was not seen: how long its late save is waited for
 const SETTLE_SAVE_MS = 1500; // after the default is put back: when it is looked at again and the screen read for the effort
-const YES_SWITCH = /^Yes, switch\b/;
-const isSwitchConfirm = (m) => !!m && /^(Switch model|Change effort level)\?/.test(m.title) && m.options.some((o) => YES_SWITCH.test(o.label));
+// Claude Code 2.1.299's question (its binary: kind "model" | "effort", title "Switch model?" | "Change effort level?",
+// subtitle "Your next response will be slower and use more tokens" or "A PreModelSwitch hook asked you to confirm",
+// then a two-option select: `Yes, switch to ${model or effort}` and "No, go back"; numbered unless hideIndexes, and in
+// its screen-reader mode "y. …" / "n. …" over "Enter y/n:"). Both options and the title, nothing looser: never another menu
+const SWITCH_Q = /^(?:Switch model|Change effort level)\?/;
+const YES_SWITCH = /^(?:y\.\s*)?Yes, switch to\b/;
+const NO_SWITCH = /^(?:n\.\s*)?No, go back\b/;
+const switchQuestion = (m) => !!m && SWITCH_Q.test(String(m.title || '').trim());
+const isSwitchConfirm = (m) => switchQuestion(m) && Array.isArray(m.options) && m.options.length === 2
+  && m.options.some((o) => YES_SWITCH.test(o.label)) && m.options.some((o) => NO_SWITCH.test(o.label));
 const SAVED_KEYS = ['model', 'modelSettings', 'effortLevel'];
 // the home the session host starts claude under (host.js acctDir), and the account's folder in it (accounts.js)
 const settingsFileOf = (account) => path.join(ACCOUNTS.configDir(account, process.env.USERPROFILE || os.homedir()), 'settings.json');
@@ -1830,17 +1887,27 @@ function saidSince(before, after) {
   for (let i = lines.length - 1; i >= 0; i--) { const m = SAID_RE.exec(lines[i]); if (m) return m[1].trim(); }
   return null;
 }
-async function switchModel(key, b, ctx, via = null) {
+// switchModel's checks of the body -> [400, json] or null
+function switchBad(b) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
   if (b.model == null && b.effort == null) return [400, { ok: false, message: 'give model, effort or both' }];
   if (b.model != null && (typeof b.model !== 'string' || !MODEL_RE.test(b.model))) return [400, { ok: false, message: 'model must be a model name like opus, sonnet, haiku or claude-opus-5-5[1m] (letters, digits, . - [ ])' }];
   if (b.effort != null && !EFFORTS.includes(b.effort)) return [400, { ok: false, message: `effort must be one of ${EFFORTS.join(', ')}` }];
+  if ('queue' in b && typeof b.queue !== 'boolean') return [400, { ok: false, message: 'queue must be true or false' }];
+  return null;
+}
+// The switch itself, now or never: a refusal before anything was typed because the session can't take it yet (Claude
+// working or waiting, a panel or a menu up, its prompt box not on screen or not empty) says notReady, which
+// switchModel queues with queue: true, and the queued switch's tick (tickSwitches) takes as "try again later"
+async function switchNow(key, b, ctx, via = null) {
+  const bad = switchBad(b);
+  if (bad) return bad;
   const run = settingsTurn.then(() => withHost(async (host) => {
     const { p, err } = await need(host, key, true);
     if (err) return err;
     if (isOverseer(p.role) && via !== 'henry') return [403, { ok: false, id: p.id, message: 'only Henry changes an overseer\'s model or effort (his phone)' }];
-    if (panelOpen(p)) return [409, { ok: false, id: p.id, panel: true, message: PANEL_UP }];
-    if (p.status !== 'idle') return [409, { ok: false, id: p.id, status: p.status || null, message: 'Claude is working: switch once it is idle (or interrupt it first)' }];
+    if (panelOpen(p)) return [409, { ok: false, id: p.id, panel: true, notReady: true, message: PANEL_UP }];
+    if (p.status !== 'idle') return [409, { ok: false, id: p.id, status: p.status || null, notReady: true, message: p.status === 'waiting' ? 'Claude is waiting on an answer: switch once it is idle' : 'Claude is working: switch once it is idle (or interrupt it first)' }];
     const account = /^[A-Z]$/.test(p.account) ? p.account : 'B';
     const file = settingsFileOf(account);
     const was = readSettings(file);
@@ -1869,9 +1936,9 @@ async function switchModel(key, b, ctx, via = null) {
         for (const cmd of [b.model != null && `/model ${b.model}`, b.effort != null && `/effort ${b.effort}`].filter(Boolean)) {
           const m = await menuNow(host, p);
           if (m && last) return closeOurs(m, last);
-          if (m) return [409, { ...out, ok: false, menu: m, said, message: MENU_UP }];
+          if (m) return [409, { ...out, ok: false, menu: m, said, notReady: true, message: MENU_UP }];
           const box = SCREEN.promptBox(await rowsNow(host, p, 60, true));
-          if (!box || box.text) return [409, { ...out, ok: false, said, message: box ? 'something is typed in its prompt: clear it in the Session tab first' : 'its prompt is not on screen' }];
+          if (!box || box.text) return [409, { ...out, ok: false, said, ...(last ? {} : { notReady: true }), message: box ? 'something is typed in its prompt: clear it in the Session tab first' : 'its prompt is not on screen' }];
           const raw0 = String((await host.call('snapshot', p.id)) || '');
           const file0 = readSettings(file);
           typed = true; unsaved = true; last = cmd;
@@ -1879,7 +1946,7 @@ async function switchModel(key, b, ctx, via = null) {
           if (!sent.entered) return [409, { ...out, ok: false, menu: true, said, message: MENU_LATE }];
           // saved (the file changed), or Claude Code answered without saving (kept, refused); a menu first: "Switch
           // model?" gets its Yes, any other is closed
-          let line = null, saved = false;
+          let line = null, saved = false, elsewhere = false;
           for (let end = Date.now() + SAVE_MS; Date.now() < end;) {
             await sleep(POLL_MS / 2);
             const q = await menuNow(host, p);
@@ -1888,6 +1955,11 @@ async function switchModel(key, b, ctx, via = null) {
               const [code, a] = await answerMenu(p.id, { option: yes.n, sig: q.sig, allowPermission: true }, ctx, null, via);
               if (code !== 200 || !a.changed) {
                 const now = await menuNow(host, p);
+                // gone before its Yes went in: an open page answers this question too (web/compose.js sayYes), so it
+                // was answered there, and the save is waited for as after our own answer. The same question with
+                // another sig (the pointer moved, or it was drawn again): read again
+                if (!now && !elsewhere) { elsewhere = true; out.confirmed = `${yes.label} (answered elsewhere)`; end = Date.now() + SAVE_MS; continue; }
+                if (now && switchQuestion(now)) continue;
                 if (now) return closeOurs(now, cmd);
                 return [409, { ...out, ok: false, menu: q, said, message: `${cmd} asked "${q.title}" and its Yes could not be picked: ${a.message}` }];
               }
@@ -1895,6 +1967,9 @@ async function switchModel(key, b, ctx, via = null) {
               end = Date.now() + SAVE_MS; // the save comes after the answer
               continue;
             }
+            // the question still drawing (its options not readable yet, or read mid-redraw after a page's answer):
+            // looked at again until SAVE_MS is up, then closed as any other menu (below)
+            if (q && switchQuestion(q)) continue;
             if (q) return closeOurs(q, cmd);
             const snap = String((await host.call('snapshot', p.id)) || '');
             const f = readSettings(file);
@@ -1948,6 +2023,121 @@ async function switchModel(key, b, ctx, via = null) {
   }));
   settingsTurn = run.catch(() => {});
   return run;
+}
+
+// A refused switch: one server.log line (id, why), at most one per session a minute so a caller's loop can't flood it
+// (the ones held back are counted in the next line)
+// (handle's own line for a failed call is left out for these: quietOuts)
+const REFUSAL_LOG_MS = 60e3;
+const refusalLog = new Map(); // id -> { at, held }
+const quietOuts = new WeakSet(); // replies whose refusal is logged here already
+function logRefusal(ctx, id, why) {
+  if (!ctx || !ctx.log) return;
+  const t = Date.now(), r = refusalLog.get(id);
+  if (r && t - r.at < REFUSAL_LOG_MS) { r.held++; return; }
+  refusalLog.delete(id);
+  refusalLog.set(id, { at: t, held: 0 });
+  if (refusalLog.size > 200) refusalLog.delete(refusalLog.keys().next().value);
+  ctx.log(`api: model switch for ${id}: ${why}${r && r.held ? ` (and ${r.held} more like it in the last minute)` : ''}`);
+}
+
+// ---------- a switch that waits for Claude to finish ----------
+// POST .../model with queue: true, while the session can't take a switch now (notReady: Claude working, waiting on
+// an answer, a panel or a menu up, its prompt box not on screen or holding a draft): kept here, one per conversation
+// (a later one replaces the parts it names), and switched through switchNow once that session has been idle with no
+// panel for SWITCH_SETTLE_MS (a turn's end can be followed at once by a message Claude Code had queued). Looked at every
+// SWITCH_TICK_MS while any waits; a not-ready refusal again waits SWITCH_RETRY_MS. Dropped once applied, after
+// SWITCH_MAX_MS, or when its session ends; a switch that fails keeps its reason (/state's switchPending.error, the log)
+// for SWITCH_FAILED_KEEP_MS and is not tried again. In memory only: a server restart forgets it (it asked "when Claude
+// finishes this step", and the step a restart sees is another).
+const SWITCH_TICK_MS = 1500, SWITCH_SETTLE_MS = 1500, SWITCH_RETRY_MS = 5000, SWITCH_MAX_MS = 30 * 60e3, SWITCH_FAILED_KEEP_MS = 5 * 60e3;
+const pendingSwitch = new Map(); // conversation id -> { model?, effort?, at, via, ctx, idleAt, nextAt, error?, failedAt? }
+let swTimer = null, swTicking = false;
+const swKey = (id) => convId(id) || String(id);
+function queueSwitch(id, b, ctx, via) {
+  const k = swKey(id);
+  let x = pendingSwitch.get(k);
+  // one that failed is done with: this one starts afresh
+  if (!x || x.error) pendingSwitch.set(k, (x = { at: 0, idleAt: 0, nextAt: 0 }));
+  if (b.model != null) x.model = b.model;
+  if (b.effort != null) x.effort = b.effort;
+  Object.assign(x, { at: Date.now(), via, ctx });
+  if (!swTimer) { swTimer = setInterval(tickSwitches, SWITCH_TICK_MS); if (swTimer.unref) swTimer.unref(); }
+  return x;
+}
+// what the switch now done covers no longer waits (a part asked again meanwhile for another value still does)
+function settleSwitch(k, done) {
+  const x = pendingSwitch.get(k);
+  if (!x) return;
+  for (const p of ['model', 'effort']) if (done[p] != null && x[p] === done[p]) delete x[p];
+  if (x.model == null && x.effort == null) pendingSwitch.delete(k);
+}
+function dropSwitch(k, x, why) {
+  if (pendingSwitch.get(k) === x) pendingSwitch.delete(k);
+  if (why && x.ctx && x.ctx.log) x.ctx.log(`api: queued model switch for ${k} (${[x.model, x.effort].filter(Boolean).join(', ')}) dropped: ${why}`);
+}
+async function tickSwitches() {
+  if (swTicking) return;
+  if (!pendingSwitch.size) { clearInterval(swTimer); swTimer = null; return; }
+  swTicking = true;
+  try {
+    await withHost(async (host) => {
+      const list = await host.call('list');
+      for (let [k, x] of [...pendingSwitch]) {
+        if (pendingSwitch.get(k) !== x) continue;
+        const now = Date.now();
+        if (now - x.at > SWITCH_MAX_MS) { dropSwitch(k, x, x.error ? null : `not applied within ${SWITCH_MAX_MS / 60e3} minutes`); continue; }
+        if (x.error) { if (now - x.failedAt > SWITCH_FAILED_KEEP_MS) dropSwitch(k, x); continue; }
+        // it handed off meanwhile: the one that carries on takes it (unless that one has its own already)
+        const succ = x.ctx && x.ctx.successorOf && convId(k) ? x.ctx.successorOf(convId(k)) : null;
+        if (succ && succ !== k && !pendingSwitch.has(succ)) { pendingSwitch.delete(k); pendingSwitch.set((k = succ), x); }
+        const p = hosted(list, k);
+        if (!p || !p.alive) { dropSwitch(k, x, 'its session ended'); continue; }
+        if (p.status !== 'idle' || panelOpen(p) || typingInto(p.id)) { x.idleAt = 0; continue; }
+        if (!x.idleAt) { x.idleAt = now; continue; }
+        if (now - x.idleAt < SWITCH_SETTLE_MS || now < x.nextAt) continue;
+        const want = { ...(x.model != null ? { model: x.model } : {}), ...(x.effort != null ? { effort: x.effort } : {}) };
+        const [code, out] = await switchNow(k, want, x.ctx, x.via);
+        if (code === 200 && out.ok) {
+          settleSwitch(k, want);
+          if (x.ctx && x.ctx.log) x.ctx.log(`api: queued model switch for ${k} applied (${Object.values(want).join(', ')}): ${out.message}`);
+        } else if (out && out.notReady) {
+          x.idleAt = 0; x.nextAt = Date.now() + SWITCH_RETRY_MS;
+        } else if (pendingSwitch.get(k) === x) {
+          x.error = (out && out.message) || `failed (${code})`; x.failedAt = Date.now();
+          if (x.ctx && x.ctx.log) x.ctx.log(`api: queued model switch for ${k} (${Object.values(want).join(', ')}) failed: ${code} ${x.error}`);
+        }
+      }
+    });
+  } catch (e) {
+    // no host: each waits on (SWITCH_MAX_MS ends it); anything else is logged once a tick
+    if (!(e instanceof HostDown)) { const c = [...pendingSwitch.values()].find((x) => x.ctx && x.ctx.log); if (c) c.ctx.log(`api: the queued model switches failed: ${e.message}`); }
+  } finally { swTicking = false; }
+}
+// /state's switchPending for a conversation: { model?, effort?, at, error? } or null
+function switchPending(id) {
+  const x = id ? pendingSwitch.get(swKey(id)) : null;
+  if (!x) return null;
+  return { ...(x.model != null ? { model: x.model } : {}), ...(x.effort != null ? { effort: x.effort } : {}), at: x.at, ...(x.error ? { error: x.error } : {}) };
+}
+
+// POST /api/sessions/:id/model { model?, effort?, queue? }: switchNow, and with queue: true a switch the session
+// can't take now waits for it (queueSwitch): 202 { ok, queued, id, model?, effort? } with what will be applied.
+// Validation and the overseer rule come first either way; a switch made now settles a queued one's same parts.
+async function switchModel(key, b, ctx, via = null) {
+  const bad = switchBad(b);
+  if (bad) return bad;
+  const [code, out] = await switchNow(key, b, ctx, via);
+  if (code === 409 && out && out.notReady && out.id) {
+    if (b.queue === true) {
+      const x = queueSwitch(out.id, b, ctx, via);
+      logRefusal(ctx, out.id, `queued until Claude finishes this step (${out.message})`);
+      return [202, { ok: true, queued: true, id: out.id, ...(x.model != null ? { model: x.model } : {}), ...(x.effort != null ? { effort: x.effort } : {}), message: 'applies when Claude finishes this step' }];
+    }
+    logRefusal(ctx, out.id, `refused: ${out.message}`);
+    quietOuts.add(out);
+  } else if (code === 200 && out && out.ok && out.id) settleSwitch(swKey(out.id), b);
+  return [code, out];
 }
 
 // GET /api/sessions/:id/activity: the page's activity line (compose.js drawAct, its tick's reading) for a caller to
@@ -2081,7 +2271,7 @@ function handle(req, res, pathname, ctx) {
   const what = `${req.method} ${pathname}`;
   const answer = ([code, out]) => {
     // one line per failed call, never the token or the text
-    if (code >= 400) ctx.log(`api: ${what} -> ${code} ${out && out.message ? out.message : ''}`.trim());
+    if (code >= 400 && !(out && quietOuts.has(out))) ctx.log(`api: ${what} -> ${code} ${out && out.message ? out.message : ''}`.trim());
     if (!res.destroyed) ctx.sendJson(res, code, out);
   };
   // a caller that hung up while it waited for a reply: stop waiting
@@ -2189,5 +2379,7 @@ function handle(req, res, pathname, ctx) {
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
 // relayKey: the phone relay's key (see viaOf), for fleet-view.js to hand the relay
 module.exports = { ensureToken, handle, startBot, openBot, endHosted, hostList, hostKill, hostSwitch, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
-  startQueue, queuedIds, switchModel, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
-  askParts: { asks, summaryText, laterText, overseerAnswers, answerLines, flushAsk, settleAnswer, askJson } };
+  startQueue, queuedIds, switchModel, switchPending, isSwitchConfirm, TOKEN_FILE, ENDPOINTS, MODEL_RE, EFFORTS,
+  askParts: { asks, summaryText, laterText, overseerAnswers, answerLines, flushAsk, settleAnswer, askJson },
+  // the queued switches and their tick, for a test to age one or run a tick at once
+  switchParts: { pending: pendingSwitch, tick: tickSwitches, refusals: refusalLog } };

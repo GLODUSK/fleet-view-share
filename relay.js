@@ -84,8 +84,10 @@
 //                       is a path, and each hiddenRepos, repoNames and repoOrder root, must be a known root
 //   POST /api/sessions  no role (403: a bot starts by /api/bots/:id/start)
 //   POST /api/sessions/:id/now  no fields (403);  /unsend  only text (403), as api.js cleanText takes it (400);
-//                       /model  only model and effort (403), one or both, as api.js MODEL_RE and EFFORTS take them
-//                       (400);  /message  now, when there, true or false (400)
+//                       /model  only model, effort and queue (403): model and/or effort as api.js MODEL_RE and
+//                       EFFORTS take them, queue true or false (400);  /message  now, when there, true or false (400)
+//   POST /chat/dynamic  (Dynamic for any chat: a part sized per message, on or off) only id, a conversation id, and
+//                       model and/or effort, each true or false (403 for any other field, 400 for a bad one)
 //   POST /api/bots, /api/bots/:id   only name, brief, role, account, model, effort, shape and color, as bots.js
 //                       reads (anything else: 403);  POST /api/bots/:id/start and /remove  no fields at all (403). A
 //                       bot id: 12 hex digits
@@ -337,7 +339,7 @@ const ALLOW = {
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
     '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/${TASK}`,
-    '/accounts/(?:add|login|code|cancel)', '/sync/move'],
+    '/accounts/(?:add|login|code|cancel)', '/sync/move', '/chat/dynamic'],
 };
 const ALLOW_RE = Object.fromEntries(Object.entries(ALLOW).map(([m, list]) => [m, new RegExp(`^(?:${list.join('|')})$`)]));
 // what only a linked computer may call besides (docs/link.md): the /peer/... routes, which fleet-view.js serves to the
@@ -822,6 +824,14 @@ function createRelay(opts = {}) {
       if (b.model != null && !(typeof b.model === 'string' && MODEL_RE.test(b.model))) return [400, 'model must be a model name like claude-opus-5-5'];
       return b.effort == null || EFFORTS.includes(b.effort) ? null : [400, `effort must be one of ${EFFORTS.join(', ')}`];
     }
+    // Dynamic for any chat (fleet-view.js setDynamicChat): a page route, so this PC's Origin, not marked
+    if (p === '/chat/dynamic') {
+      const bad = Object.keys(b).filter((k) => !['id', 'model', 'effort'].includes(k));
+      if (bad.length) return no(`Dynamic takes only id, model and effort, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      if (!(typeof b.id === 'string' && UUID_RE.test(b.id))) return [400, 'id must be a conversation id'];
+      if (b.model == null && b.effort == null) return [400, 'give model, effort or both'];
+      return [b.model, b.effort].every((v) => v == null || typeof v === 'boolean') ? null : [400, 'model and effort must be true or false'];
+    }
     const verb = (VERB_RE.exec(p) || [])[1];
     if (verb === 'now') return Object.keys(b).length ? no('send now takes nothing else from the phone') : null;
     if (verb === 'unsend') {
@@ -830,9 +840,11 @@ function createRelay(opts = {}) {
       return textOk(b.text) ? null : [400, 'text must be the message as it was sent'];
     }
     if (verb === 'model') {
-      const bad = Object.keys(b).filter((k) => k !== 'model' && k !== 'effort');
-      if (bad.length) return no(`a switch takes only model and effort, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      // queue: while Claude works, api.js keeps the switch and makes it once it is idle (202 { queued: true })
+      const bad = Object.keys(b).filter((k) => k !== 'model' && k !== 'effort' && k !== 'queue');
+      if (bad.length) return no(`a switch takes only model, effort and queue, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
       if (b.model == null && b.effort == null) return [400, 'give model, effort or both'];
+      if (b.queue !== undefined && typeof b.queue !== 'boolean') return [400, 'queue must be true or false'];
       if (b.model != null && !(typeof b.model === 'string' && MODEL_RE.test(b.model))) return [400, 'model must be a model name like opus, sonnet, haiku or claude-opus-5-5[1m]'];
       return b.effort == null || EFFORTS.includes(b.effort) ? null : [400, `effort must be one of ${EFFORTS.join(', ')}`];
     }

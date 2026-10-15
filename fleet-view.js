@@ -4916,6 +4916,9 @@ function sessionJson(s, now, owners = syncOwners()) {
     team: team ? team.id : null,
     leads: led ? led.id : null,
     dynamic: dynamicView(s.id),
+    // a model or effort switch asked for with queue while Claude worked (api.js queueSwitch): { model?, effort?, at,
+    // error? } until it is applied, fails (error), or is dropped; null when none waits
+    switchPending: s.demo ? null : API.switchPending(s.id),
     planSteps: prog.mode === 'plan' ? wf.phases.map((p, i) => {
       const done = wf.done === 'completed';
       return { name: p, state: done || i < wf.cur ? 'past' : i === wf.cur ? 'current' : 'future' };
