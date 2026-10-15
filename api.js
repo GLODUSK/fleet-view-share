@@ -1629,13 +1629,32 @@ async function removeConversation(key, ctx) {
 }
 
 // GET /api/sessions/:id/menu
-async function readMenu(key) {
+async function readMenu(key, ctx) {
   return withHost(async (host) => {
     const { p, err } = await need(host, key, false);
     if (err) return err;
     if (!p.alive) return [200, { ok: true, id: p.id, alive: false, menu: null }];
-    return [200, { ok: true, id: p.id, alive: true, menu: await menuNow(host, p) }];
+    return [200, { ok: true, id: p.id, alive: true, menu: hideSwitch(p, await menuNow(host, p), ctx) }];
   });
+}
+// A model or effort switch's question is never shown to a reader (the phone, another machine's page), not even for a
+// moment (Henry, 2026-10-15): whoever asked for the switch wants it. Its asker answers it (switchNow, watchSwitch, the
+// page's sayYes); one still up Q_LATE_MS after a reader first saw it gets its Yes here (by its sig, so never a stray
+// digit), tried again every Q_RETRY_MS. -> the menu, or null for a switch question
+const Q_LATE_MS = 5000, Q_RETRY_MS = 3000;
+const switchSeen = new Map(); // id -> { sig, at, tried }
+function hideSwitch(p, m, ctx) {
+  if (!isSwitchConfirm(m)) { switchSeen.delete(p.id); return m; }
+  let s = switchSeen.get(p.id);
+  if (!s || s.sig !== m.sig) switchSeen.set(p.id, (s = { sig: m.sig, at: Date.now(), tried: 0 }));
+  if (Date.now() - s.at >= Q_LATE_MS && Date.now() - s.tried >= Q_RETRY_MS) {
+    s.tried = Date.now();
+    const yes = m.options.find((o) => YES_SWITCH.test(o.label));
+    answerMenu(p.id, { option: yes.n, sig: m.sig, allowPermission: true }, ctx, null, null)
+      .then(([code, a]) => { if (code === 200 && a.changed && ctx && ctx.log) ctx.log(`api: ${p.id}: answered "${m.title}" with "${yes.label}" (left unanswered)`); })
+      .catch(() => {});
+  }
+  return null;
 }
 
 // POST /api/sessions/:id/answer { option: n | "submit" | "esc", sig?, text?, allowPermission?, wait? }
@@ -2868,6 +2887,7 @@ async function readActivity(key, ctx) {
     const rows = marked.map((l) => l.replace(/[\x01-\x04]/g, '').replace(/\s+$/, '')).slice(-40);
     const spin = SCREEN.spinner(rows);
     let m = SCREEN.menuDetails(rows);
+    if (isSwitchConfirm(m)) m = null; // never shown (hideSwitch)
     // a command's panel (only when its top edge is on screen, as the page's tick: reading it costs another render),
     // weighed against a menu as shownFrom does
     let shown = marked.some((l) => /▔{12}/.test(l)) ? panelFrom(raw, p) : null;
@@ -3068,7 +3088,7 @@ function handle(req, res, pathname, ctx) {
   const k = key && H.ID_RE.test(key) ? key.toLowerCase() : key;
   if (req.method === 'GET') {
     if (!verb) return key ? run(readSession(k, query(), ctx)) : run(listSessions(ctx));
-    if (verb === 'menu') return run(readMenu(k));
+    if (verb === 'menu') return run(readMenu(k, ctx));
     if (verb === 'transcript') return run(readTranscript(k, query(), ctx));
     if (verb === 'activity') return run(readActivity(k, ctx));
     return answer([405, { ok: false, message: 'method not allowed' }]);

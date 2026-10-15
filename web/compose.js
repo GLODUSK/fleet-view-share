@@ -100,6 +100,8 @@ const PANEL_LINES = 80; // a command's panel can fill a tall screen
 const REWIND_ROWS = 24; // /rewind's list needs about this many rows to show its entries and ❯
 const PANEL_STEP_MS = 300; // Esc, then look again
 const PANEL_OWN_MS = 15000; // a panel that comes up this soon after a "/command" sent from here is that command's
+const SWITCH_LATE_MS = 5000; // a switch question another asked for, left to it this long before this tab says Yes
+const SWITCH_RETRY_MS = 3000; // a Yes to a switch question that didn't take: tried again this often
 // a panel's keys, as the terminal sends them
 const PANEL_KEYS = {
   left: ['←', '\x1b[D', 'Left'], right: ['→', '\x1b[C', 'Right'], up: ['↑', '\x1b[A', 'Up'], down: ['↓', '\x1b[B', 'Down'],
@@ -1906,7 +1908,8 @@ export function mountCompose(slot, s) {
   }
   function remoteTick() {
     pollRemote();
-    const a = st.rem.act, menu = st.rem.menu;
+    // (a switch question there is never shown: that machine's server answers it, api.js readMenu)
+    const a = st.rem.act, menu = switchYes(st.rem.menu) ? null : st.rem.menu;
     st.panel = null; st.panelOwned = false; st.mode = null; st.effort = null; st.bgHint = false;
     st.busy = !!(a && a.busy) && !menu;
     if ((st.menu && st.menu.sig) !== (menu && menu.sig)) { st.menu = menu; st.drawn.card = null; } else st.menu = menu;
@@ -2834,13 +2837,18 @@ export function mountCompose(slot, s) {
     lines = lines.slice(-40);
     const spin = parseSpinner(lines);
     let menu = alive && lines.length ? parseMenu(screenText(st.id, 40, { rows: true })) : null;
-    // a model or effort switch's question (the picker's /effort, a Launch's): answered Yes as it comes up, no card
-    // (a Yes that didn't take shows the card after 3 s, for a click)
-    // Only one this tab typed (its last "/command" a /model or /effort): one the phone or another machine sent, the
-    // server answers (api.js watchSwitch), and a second Yes here would land in the prompt as a stray digit
-    if (switchYes(menu) && (st.yes?.sig === menu.sig || /^\/(?:model|effort)$/.test(st.cmd))) {
-      if (st.yes?.sig !== menu.sig) { st.yes = { sig: menu.sig, at: Date.now() }; st.cmd = ''; sayYes(st.id); }
-      if (Date.now() - st.yes.at < 3000) menu = null;
+    // a model or effort switch's question is never shown, not even for a moment (Henry, 2026-10-15): whoever asked for
+    // the switch wants it. One this tab typed (its last "/command" a /model or /effort) is answered Yes at once; one the
+    // phone, another machine or Dynamic asked for, the server answers (api.js watchSwitch, switchNow), so a Yes here
+    // too could land in the prompt as a stray digit: this tab says it only when it is still up SWITCH_LATE_MS later.
+    // A Yes that didn't take is tried again every SWITCH_RETRY_MS
+    if (switchYes(menu)) {
+      if (st.yes?.sig !== menu.sig) st.yes = { sig: menu.sig, at: Date.now(), tried: 0 };
+      const mine = /^\/(?:model|effort)$/.test(st.cmd);
+      if ((mine || Date.now() - st.yes.at >= SWITCH_LATE_MS) && Date.now() - st.yes.tried >= SWITCH_RETRY_MS) {
+        st.yes.tried = Date.now(); st.cmd = ''; sayYes(st.id);
+      }
+      menu = null;
     }
     // the one a "/command" sent from here opened is that command's, numbered list or not (/model); else a numbered
     // menu is a question Claude asks (a permission prompt), which the menu card answers
