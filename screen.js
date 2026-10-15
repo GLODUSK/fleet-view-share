@@ -704,4 +704,29 @@ function modeShown(lines) {
 // screen). Only worth anything while Claude works (the caller checks)
 const bgOffered = (lines) => (Array.isArray(lines) ? lines : []).some((l) => /ctrl\+b\b/i.test(String(l ?? '')) && /\bbackground\b/i.test(String(l ?? '')));
 
-module.exports = { render, createScreen, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, bashBox, spinner, effortShown, modeShown, bgOffered };
+// parseRewind: /rewind's list ("Restore the code and/or conversation to the point before…", its entries newest at the
+// bottom, "(current)" last): the entry the ❯ is on, and a signature of where it is (the ❯'s row and the "↑ N more"
+// above it), so a press of ↑ that moved nothing shows. -> { sel, sig }, or null when the list isn't on screen
+function rewindList(lines) {
+  const L = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
+  const top = L.findLastIndex((l) => /Restore the code and\/or conversation/.test(l));
+  if (top < 0) return null;
+  let sel = null, at = -1, above = 0;
+  for (let i = top + 1; i < L.length && sel == null; i++) {
+    const u = /↑\s*(\d+)\s+more/.exec(L[i]);
+    if (u) above = +u[1];
+    const m = /^\s*❯\s+(.*\S)\s*$/.exec(L[i]);
+    if (m) { sel = m[1]; at = i - top; }
+  }
+  return sel == null ? null : { sel, sig: `${at}|${above}|${sel}` };
+}
+// rewindMatches: does a /rewind entry ("Reply ALPHA.…", the message's first line cut to the width) show this message?
+// Never the "(current)" entry
+const flatText = (v) => String(v || '').replace(/\[Image #\d+\]\s*/g, '').replace(/\s+/g, ' ').trim();
+function rewindMatches(sel, text) {
+  const e = flatText(sel).replace(/…$/, '').trim(), t = flatText(String(text || '').split('\n')[0]);
+  if (!e || e === '(current)') return false;
+  return t === e || (t.startsWith(e) && /…$/.test(String(sel).trim()));
+}
+
+module.exports = { render, createScreen, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, bashBox, spinner, effortShown, modeShown, bgOffered, rewindList, rewindMatches };

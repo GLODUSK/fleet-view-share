@@ -54,11 +54,11 @@
 //             /api/teams, /api/teams/:id/add, /lead and /message, the page's /teams, /teams/add and /teams/lead. Those
 //             two get the body's wait (at most 50 s) on top: 145 s and 125 s at most. Shorter for the chat's verbs:
 //             GET /api/sessions/:id/activity 5 s, POST /api/sessions/:id/now, /enter and /background 10 s, /model and
-//             /mode 20 s (/unsend 30 s).
+//             /mode 20 s (/unsend 30 s); /rewind 60 s (it walks up Claude Code's /rewind list a press at a time).
 //   marker    "via": "phone" in the body and X-Fleet-View-Relay: <opts.relayKey()> (api.js viaOf: what Henry sent
 //             from his phone, which a bot takes as his, and what makes, changes or removes a bot or switches an
 //             overseer's model) on the routes api.js reads it on (MARKED): POST /api/sessions,
-//             /api/sessions/:id/message, /answer, /open, /model and /mode, /api/teams/:id/message, /api/bots,
+//             /api/sessions/:id/message, /answer, /open, /model, /mode and /rewind, /api/teams/:id/message, /api/bots,
 //             /api/bots/:id and /api/bots/:id/remove. Set only once every check
 //             above and the allowlist's passed; a via the phone sent is dropped from every body first. No
 //             opts.relayKey (or a bad one): no marker, said in the log once.
@@ -181,7 +181,9 @@ const RESTART_SLACK_MS = 2000, EXPIRED_MS = KEEP_MS - 60e3;
 const ROUTE_MS = 30e3, WAIT_ROUTE_MS = 60e3, WAIT_CAP_S = 50;
 const START_ROUTE_MS = 95e3, RESUME_ROUTE_MS = 75e3; // routes that start or resume a Claude first (START_ROUTES, RESUME_ROUTES)
 // the chat's verbs (api.js): the activity line (cheap, polled), send now, a model or effort switch (/model, /effort)
-const ACTIVITY_MS = 5e3, NOW_MS = 10e3, MODEL_MS = 20e3;
+// and a Rewind or Edit (/rewind: "/rewind", then ↑ a press at a time up its list, each read back; api.js bounds the
+// walk at 40 s)
+const ACTIVITY_MS = 5e3, NOW_MS = 10e3, MODEL_MS = 20e3, REWIND_MS = 60e3;
 const ZIP_MIN = 1024; // JSON over this many bytes goes compressed
 const PART_MAX = 400000, PARTS_MAX = 64, ASSEMBLIES_MAX = 4, ASSEMBLY_MS = 60e3, UP_TEXT_MAX = 21000000;
 // one message (or part) up is at most PART_MAX UTF-16 units of text, 3 bytes each in UTF-8, and its own fields: its
@@ -338,7 +340,7 @@ const ALLOW = {
   GET: ['/state', '/conversation', '/conversation/image', '/repo-history', '/chat/commands', '/chat/files', '/chat/kind', '/file',
     '/since', '/api/sessions', `/api/sessions/${KEY}`, `/api/sessions/${KEY}/(?:menu|transcript|activity)`, '/api/conversations',
     '/api/teams', '/api/status', '/accounts', '/sync/move'],
-  POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model|enter|background|mode)`, '/api/teams',
+  POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model|enter|background|mode|rewind)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
     '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/${TASK}`,
@@ -377,17 +379,18 @@ const TASK_ACTIONS = ['pause', 'resume', 'run', 'delete'];
 const SIGNIN_LETTERS = ['A', 'B'];
 const ACCOUNT_KEYS = { '/accounts/add': ['letter'], '/accounts/login': ['account'], '/accounts/code': ['account', 'code'], '/accounts/cancel': ['account'] };
 // the chat's verbs: send now and run in background take nothing, unsend and Send it (enter) the message's text, a
-// switch a model and/or an effort as api.js takes them (MODEL_RE, EFFORTS), the permission mode one of api.js MODES
-const VERB_RE = new RegExp(`^/api/sessions/${KEY}/(now|unsend|model|message|enter|background|mode)$`);
+// switch a model and/or an effort as api.js takes them (MODEL_RE, EFFORTS), the permission mode one of api.js MODES, a
+// rewind the message's text, which of that text it is (nth) and an edit's text
+const VERB_RE = new RegExp(`^/api/sessions/${KEY}/(now|unsend|model|message|enter|background|mode|rewind)$`);
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9.\-\[\]]{0,59}$/, EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypass'];
 // a message's text as api.js cleanText takes it: line breaks made \n, then something besides spaces, and no control
 // character but \n and \t
 const textOk = (v) => typeof v === 'string' && !!v.trim() && !/[\x00-\x08\x0b-\x1f\x7f]/.test(v.replace(/\r\n|[\u0085\u2028\u2029]/g, '\n'));
 // POST routes api.js reads the relay's marker on (viaOf): text that reaches a Claude as Henry's (a shell command in an
-// overseer's session too), and making, changing or removing a bot or switching a conversation's model or permission
-// mode (Henry's alone for an overseer)
-const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|open|model|mode)|teams/${TEAM}/message|bots|bots/${BOT}|bots/${BOT}/remove)$`);
+// overseer's session too), and making, changing or removing a bot, switching a conversation's model or permission mode or
+// rewinding it (Henry's alone for an overseer)
+const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|open|model|mode|rewind)|teams/${TEAM}/message|bots|bots/${BOT}|bots/${BOT}/remove)$`);
 // POST routes that start a Claude before they answer (api.js startSession waits up to 60 s for it, settles, types;
 // POST /api/bots makes the bot and starts it), and ones that may resume a stopped conversation first (up to 60 s
 // too) before they type into it
@@ -434,6 +437,7 @@ function routeTimeout(m, p, waitS = 0, base = ROUTE_MS, waitBase = WAIT_ROUTE_MS
   if (m === 'GET' && verb === 'activity') return ACTIVITY_MS;
   if (m === 'POST' && (verb === 'now' || verb === 'enter' || verb === 'background')) return NOW_MS;
   if (m === 'POST' && (verb === 'model' || verb === 'mode' || BOT_SWITCH.test(p))) return MODEL_MS;
+  if (m === 'POST' && verb === 'rewind') return REWIND_MS;
   const long = m !== 'POST' ? 0 : START_ROUTES.test(p) ? START_ROUTE_MS : RESUME_ROUTES.test(p) ? RESUME_ROUTE_MS : 0;
   if (long) return long + waitS * 1000;
   return waitS ? waitBase : base;
@@ -850,6 +854,14 @@ function createRelay(opts = {}) {
       const bad = Object.keys(b).filter((k) => k !== 'mode');
       if (bad.length) return no(`a mode switch takes only mode, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
       return MODES.includes(b.mode) ? null : [400, `mode must be one of ${MODES.join(', ')}`];
+    }
+    // a rewind: text as api.js cleanText takes it, nth a whole number (api.js takes 0..499), an edit text as well
+    if (verb === 'rewind') {
+      const bad = Object.keys(b).filter((k) => !['text', 'nth', 'edit'].includes(k));
+      if (bad.length) return no(`a rewind takes only text, nth and edit, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      if (!textOk(b.text)) return [400, 'text must be the message as it was sent'];
+      if (b.nth !== undefined && !(Number.isInteger(b.nth) && b.nth >= 0)) return [400, 'nth must be a whole number from 0'];
+      return b.edit === undefined || textOk(b.edit) ? null : [400, 'edit must be the text to send in its place'];
     }
     if (verb === 'model') {
       // queue: while Claude works, api.js keeps the switch and makes it once it is idle (202 { queued: true })
@@ -1857,7 +1869,7 @@ module.exports = {
   createRelay, cli, seal, open, decrypt, dirKey, aadText, topicOf, slices, pairLink, qrSvg, routeAllowed, peerRouteAllowed, PEER_ALLOW, pathOk,
   routeTimeout, startWeight, resumeKind, resumeWeight, xPair, xPublic, pairedKey, secretName, stepsOk, ALLOW, SIGNIN_LETTERS, SETTINGS_KEYS, MARKED, LABEL, PAIRED_INFO, LINK_V,
   PART_MAX, PARTS_MAX, C_MAX, LOCAL_GONE,
-  TIMES: { ROUTE_MS, WAIT_ROUTE_MS, WAIT_CAP_S, START_ROUTE_MS, RESUME_ROUTE_MS, ACTIVITY_MS, NOW_MS, MODEL_MS },
+  TIMES: { ROUTE_MS, WAIT_ROUTE_MS, WAIT_CAP_S, START_ROUTE_MS, RESUME_ROUTE_MS, ACTIVITY_MS, NOW_MS, MODEL_MS, REWIND_MS },
   LIMITS: { IN_FLIGHT_MAX, PER_S, PER_MIN, STARTS_AT_ONCE, STARTS_MAX, STARTS_MS, RES_DEVICE_MAX, UNPACKS_MAX, UNPACK_WAIT_MAX, INFLATE_UP_MAX, HS_GAP_MS, HS_MAX },
 };
 

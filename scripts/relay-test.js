@@ -459,7 +459,7 @@ async function main() {
     // a dynamic bot's switch, and its tasks' actions (page routes)
     ['POST', `/bots/${BOT}/switch`], ['POST', `/bots/${BOT}/tasks/t-deploys`], ['POST', `/bots/${BOT}/tasks/a.b_c-1`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(63)}`],
     // the chat's verbs
-    ['GET', `/api/sessions/${SID}/activity`], ['GET', '/api/sessions/new-3/activity'], ...['now', 'unsend', 'model', 'enter', 'background', 'mode'].map((v) => ['POST', `/api/sessions/${SID}/${v}`]),
+    ['GET', `/api/sessions/${SID}/activity`], ['GET', '/api/sessions/new-3/activity'], ...['now', 'unsend', 'model', 'enter', 'background', 'mode', 'rewind'].map((v) => ['POST', `/api/sessions/${SID}/${v}`]),
     // the Claude accounts screen
     ['GET', '/accounts'], ['POST', '/accounts/add'], ['POST', '/accounts/login'], ['POST', '/accounts/code'], ['POST', '/accounts/cancel'],
     // Continue here asked of a machine that is on, for a chat whose host is off (the phone with several machines)
@@ -492,7 +492,8 @@ async function main() {
     ['POST', `/api/sessions/${SID}/activity`], ['GET', `/api/sessions/${SID}/now`], ['GET', `/api/sessions/${SID}/model`], ['GET', `/api/sessions/${SID}/unsend`],
     ['POST', `/api/sessions/${SID}/now/x`], ['POST', `/api/sessions/${SID}/models`], ['GET', '/api/sessions/activity'], ['POST', '/api/sessions/now'],
     ['GET', `/api/sessions/${SID}/enter`], ['GET', `/api/sessions/${SID}/background`], ['GET', `/api/sessions/${SID}/mode`], ['POST', `/api/sessions/${SID}/modes`],
-    ['POST', '/api/sessions/mode'], ['POST', `/api/sessions/${SID}/shell`],
+    ['POST', '/api/sessions/mode'], ['POST', `/api/sessions/${SID}/shell`], ['GET', `/api/sessions/${SID}/rewind`], ['POST', `/api/sessions/${SID}/rewinds`],
+    ['POST', '/api/sessions/rewind'], ['POST', `/api/sessions/${SID}/rewind/x`],
     // near misses of the Claude accounts screen: never remove, relabel or anything else under /accounts
     ['POST', '/accounts/remove'], ['POST', '/accounts/relabel'], ['POST', '/accounts/switch'], ['POST', '/accounts'], ['GET', '/accounts/'],
     ['GET', '/accounts/add'], ['GET', '/accounts/code'], ['POST', '/accounts/add/'], ['POST', '/accounts/Add'], ['POST', '/accounts/add/A'],
@@ -506,21 +507,21 @@ async function main() {
   for (const [m, p] of refused) ok(!R.routeAllowed(m, p), `refused: ${m} ${JSON.stringify(p)}`);
   // the marked routes (api.js viaOf reads the marker on exactly these) and the route timeouts
   const marked = ['/api/sessions', `/api/sessions/${SID}/message`, `/api/sessions/${SID}/answer`, `/api/sessions/${SID}/open`, '/api/sessions/new-3/message', '/api/teams/t0a1b2c3d/message',
-    '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/remove`, `/api/sessions/${SID}/model`, `/api/sessions/${SID}/mode`];
+    '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/remove`, `/api/sessions/${SID}/model`, `/api/sessions/${SID}/mode`, `/api/sessions/${SID}/rewind`];
   const unmarked = [`/api/sessions/${SID}/interrupt`, `/api/sessions/${SID}/stop`, `/api/sessions/${SID}/remove`, '/api/teams', '/api/teams/t0a1b2c3d/add',
     `/api/bots/${BOT}/start`, '/api/bots/b1', '/settings', '/rename', '/teams', `/api/sessions/${SID}`, `/api/sessions/${SID}/message/`,
     `/api/sessions/${SID}/now`, `/api/sessions/${SID}/unsend`, `/api/sessions/${SID}/activity`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/t1`,
     `/api/sessions/${SID}/enter`, `/api/sessions/${SID}/background`];
   for (const p of marked) ok(R.MARKED.test(p), `marked: ${p}`);
   for (const p of unmarked) ok(!R.MARKED.test(p), `not marked: ${p}`);
-  eq(R.TIMES, { ROUTE_MS: 30e3, WAIT_ROUTE_MS: 60e3, WAIT_CAP_S: 50, START_ROUTE_MS: 95e3, RESUME_ROUTE_MS: 75e3, ACTIVITY_MS: 5e3, NOW_MS: 10e3, MODEL_MS: 20e3 }, 'the timeouts');
+  eq(R.TIMES, { ROUTE_MS: 30e3, WAIT_ROUTE_MS: 60e3, WAIT_CAP_S: 50, START_ROUTE_MS: 95e3, RESUME_ROUTE_MS: 75e3, ACTIVITY_MS: 5e3, NOW_MS: 10e3, MODEL_MS: 20e3, REWIND_MS: 60e3 }, 'the timeouts');
   const times = [
     ['POST', '/api/sessions', 0, 95e3], ['POST', '/api/sessions', 50, 145e3], ['POST', `/api/bots/${BOT}/start`, 0, 95e3],
     ['POST', '/api/bots', 0, 95e3], ['POST', `/api/bots/${BOT}`, 0, 30e3],
     ['GET', `/api/sessions/${SID}/activity`, 0, 5e3], ['POST', `/api/sessions/${SID}/now`, 0, 10e3], ['POST', `/api/sessions/${SID}/model`, 0, 20e3],
     ['POST', `/api/sessions/${SID}/unsend`, 0, 30e3], ['GET', `/api/sessions/${SID}/transcript`, 0, 30e3],
     ['POST', `/api/sessions/${SID}/enter`, 0, 10e3], ['POST', `/api/sessions/${SID}/background`, 0, 10e3], ['POST', `/api/sessions/${SID}/mode`, 0, 20e3],
-    ['POST', `/api/sessions/${SID}/message`, 0, 75e3], ['POST', `/api/sessions/${SID}/message`, 10, 85e3], ['POST', `/api/sessions/${SID}/open`, 50, 125e3],
+    ['POST', `/api/sessions/${SID}/rewind`, 0, 60e3], ['POST', `/api/sessions/${SID}/message`, 0, 75e3], ['POST', `/api/sessions/${SID}/message`, 10, 85e3], ['POST', `/api/sessions/${SID}/open`, 50, 125e3],
     ['POST', '/api/teams', 0, 75e3], ['POST', '/api/teams/t0a1b2c3d/add', 0, 75e3], ['POST', '/api/teams/t0a1b2c3d/lead', 0, 75e3],
     ['POST', '/api/teams/t0a1b2c3d/message', 0, 75e3], ['POST', '/teams', 0, 75e3], ['POST', '/teams/add', 0, 75e3], ['POST', '/teams/lead', 0, 75e3],
     ['POST', `/api/sessions/${SID}/answer`, 0, 30e3], ['POST', `/api/sessions/${SID}/answer`, 50, 60e3], ['POST', `/api/sessions/${SID}/stop`, 0, 30e3],
@@ -940,6 +941,14 @@ async function main() {
     ['background', {}, 200, null, false], ['background', { via: 'phone' }, 200, {}, false], ['background', { text: 'x' }, 403],
     ['mode', { mode: 'plan' }, 200, null, true], ['mode', { mode: 'acceptEdits' }, 200, null, true], ['mode', { mode: 'default', via: 'server' }, 200, { mode: 'default' }, true],
     ['mode', { mode: 'yolo' }, 400], ['mode', {}, 400], ['mode', { mode: 5 }, 400], ['mode', { mode: 'plan', queue: true }, 403],
+    // Rewind and Edit (marked: an overseer's is Henry's alone)
+    ['rewind', { text: 'fix the bug' }, 200, null, true], ['rewind', { text: 'fix the bug', nth: 2 }, 200, null, true], ['rewind', { text: 'fix the bug', nth: 0 }, 200, null, true],
+    ['rewind', { text: 'line one\r\nline two', edit: 'fix the other bug\nplease' }, 200, null, true],
+    ['rewind', { text: 'fix the bug', nth: 1, edit: 'x', via: 'server' }, 200, { text: 'fix the bug', nth: 1, edit: 'x' }, true],
+    ['rewind', {}, 400], ['rewind', { text: '' }, 400], ['rewind', { text: '  ' }, 400], ['rewind', { text: 5 }, 400], ['rewind', { text: 'a\u0001b' }, 400],
+    ['rewind', { text: 'x', nth: -1 }, 400], ['rewind', { text: 'x', nth: 1.5 }, 400], ['rewind', { text: 'x', nth: '1' }, 400], ['rewind', { text: 'x', nth: null }, 400],
+    ['rewind', { text: 'x', edit: '' }, 400], ['rewind', { text: 'x', edit: 5 }, 400], ['rewind', { text: 'x', edit: 'a\u001bb' }, 400], ['rewind', { text: 'x', edit: null }, 400],
+    ['rewind', { text: 'x', wait: 5 }, 403], ['rewind', { text: 'x', from: SID }, 403], ['rewind', { text: 'x', restore: 'code' }, 403], ['rewind', { text: 'x', now: true }, 403],
   ];
   for (const [verb, b, want, body, marked] of verbCases) {
     const p = `/api/sessions/${SID}/${verb}`, sent = JSON.parse(JSON.stringify(b));
@@ -1128,6 +1137,7 @@ async function main() {
     ['sl-now', `/api/sessions/${SID}/now`, {}, 10e3],
     ['sl-enter', `/api/sessions/${SID}/enter`, { text: 'x' }, 10e3],
     ['sl-mode', `/api/sessions/${SID}/mode`, { mode: 'plan' }, 20e3],
+    ['sl-rewind', `/api/sessions/${SID}/rewind`, { text: 'x' }, 60e3],
     ['sl-model', `/api/sessions/${SID}/model`, { model: 'sonnet' }, 20e3],
     ['sl-unsend', `/api/sessions/${SID}/unsend`, { text: 'x' }, 30e3],
     ['sl-msg', `/api/sessions/${SID}/message`, { text: 'm' }, 75e3],

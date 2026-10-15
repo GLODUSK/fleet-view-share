@@ -1226,9 +1226,162 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     ok('message shell: "!" as a key into an empty box, then the command and Enter; refused over a draft or a menu, never queued; "!" taken as text taken back');
   }
 
+  // ---------- rewind and edit ----------
+  {
+    // the screen readers: the list's ❯ entry and where it is; an entry matches by the first line, cut with "…"
+    const LIST_HEAD = ' Restore the code and/or conversation to the point before…';
+    assert.deepEqual(SCREEN.rewindList(['', ' Rewind', '', LIST_HEAD, '', '   ↑ 3 more', '   fix it', ' ❯ Reply ALPHA.', '   (current)']), { sel: 'Reply ALPHA.', sig: '4|3|Reply ALPHA.' });
+    assert.equal(SCREEN.rewindList(['some output', RULE, '❯ Reply ALPHA.', RULE]), null);
+    assert.ok(SCREEN.rewindMatches('Reply ALPHA.', 'Reply ALPHA.\nand more'));
+    assert.ok(SCREEN.rewindMatches('Look at the long th…', 'Look at the long thing  here'));
+    assert.ok(!SCREEN.rewindMatches('Look at the long th', 'Look at the long thing'));
+    assert.ok(!SCREEN.rewindMatches('(current)', '(current)'));
+    assert.ok(SCREEN.rewindMatches('see this', '[Image #1] see this'));
+    ok('screen.js: /rewind\'s list (the ❯ entry, its sig) and an entry matching a message');
+
+    // a fake Claude Code: the prompt, /rewind's list (newest at the bottom, (current) last) and its restore question
+    let entries = [], ptr = 0, at = 'prompt', boxNow = '', picked = null;
+    const draw = () => {
+      if (at === 'list') {
+        fake.screen = screenOf(['', ' Rewind', '', LIST_HEAD, '', ...entries.map((e, i) => (i === ptr ? ` ❯ ${e}` : `   ${e}`)), '', ' Enter to continue · Esc to exit']);
+      } else if (at === 'confirm') {
+        fake.screen = screenOf(['', ' Rewind', '', ' Confirm you want to restore to the point before you sent this message:', '', `   ${picked}`, '',
+          ' ❯ 1. Restore code and conversation', '   2. Restore conversation', '   3. Restore code', '   4. Never mind', '', ' Enter to select · Esc to cancel']);
+      } else fake.screen = screenOf(['● done.', '', ...box(boxNow)]);
+    };
+    const claude = (list) => {
+      reset(); live({ status: 'idle' });
+      entries = [...list, '(current)']; ptr = entries.length - 1; at = 'prompt'; boxNow = ''; picked = null; draw();
+      fake.onWrite = (w) => {
+        if (w.startsWith('\x1b[200~')) { if (at === 'prompt') boxNow += w.slice(6, -6); }
+        else if (w === '\r' && at === 'prompt') { if (boxNow === '/rewind') { at = 'list'; ptr = entries.length - 1; } boxNow = ''; }
+        else if (w === '\x1b[A' && at === 'list') ptr = Math.max(0, ptr - 1);
+        else if (w === '\r' && at === 'list') { picked = entries[ptr]; at = 'confirm'; }
+        else if (w === '\x1b') at = 'prompt';
+        else if (at === 'confirm' && /^[1-4]$/.test(w)) { at = 'prompt'; if (w === '1' || w === '2') boxNow = picked; }
+        else if (w.startsWith('\x15')) boxNow = '';
+        draw();
+      };
+    };
+    const rewindState = async (want, ms = 8000) => {
+      let r = null;
+      for (const end = Date.now() + ms; Date.now() < end; await sleep(150)) {
+        r = (await call('GET', `${S}/activity`))[1].rewind;
+        if (r && want.includes(r.state)) return r;
+      }
+      return r;
+    };
+    const ups = () => fake.writes.filter((w) => w === '\x1b[A').length;
+
+    // refused, nothing pressed: busy, waiting on an answer, a panel up, a menu up, something typed, an overseer's
+    claude(['fix the bug']); live({ status: 'busy' });
+    let [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug' });
+    assert.equal(c, 409); assert.match(o.message, /working/);
+    live({ status: 'waiting', waitingFor: 'approve Bash(ls)' });
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug' });
+    assert.equal(c, 409); assert.match(o.message, /waiting on an answer/);
+    live({ status: 'waiting', waitingFor: 'dialog open' });
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug' });
+    assert.equal(c, 409); assert.equal(o.panel, true);
+    live({ status: 'idle' });
+    fake.screen = screenOf(['Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel']);
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug' });
+    assert.equal(c, 409); assert.match(o.message, /asking something/); assert.equal(o.menu.kind, 'permission');
+    boxNow = 'a draft'; draw();
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug' });
+    assert.equal(c, 409); assert.match(o.message, /something is typed in its prompt \("a draft"\)/);
+    boxNow = ''; draw();
+    live({ status: 'idle', role: 'bot:a1b2c3d4e5f6' });
+    assert.equal((await call('POST', `${S}/rewind`, { text: 'fix the bug' }))[0], 403);
+    assert.equal((await call('POST', `${S}/rewind`, { text: 'fix the bug', via: 'phone' }))[0], 403); // no relay key
+    assert.deepEqual(fake.writes, []);
+    // bad input
+    live({ status: 'idle' });
+    for (const bad of [{}, { text: '' }, { text: 'x', nth: -1 }, { text: 'x', nth: 1.5 }, { text: 'x', nth: '1' }, { text: 'x', edit: '' }, { text: 'x', edit: 5 }, { text: 'a\u0001b' }]) {
+      assert.equal((await call('POST', `${S}/rewind`, bad))[0], 400, JSON.stringify(bad));
+    }
+    assert.deepEqual(fake.writes, []);
+    ok('rewind: refused while busy, waiting, a panel or a menu is up, something is typed, an overseer\'s from a session, or bad input; nothing pressed');
+
+    // Rewind: "/rewind", Enter, ↑ to the older of two "fix the bug" (nth 1), Enter; the restore question is the caller's
+    claude(['fix the bug', 'Reply ALPHA.', 'fix the bug', 'thanks']);
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug', nth: 1 });
+    assert.equal(c, 200, o.message);
+    assert.equal(picked, 'fix the bug');
+    assert.equal(ptr, 0);
+    assert.equal(pasted(), '/rewind');
+    assert.deepEqual(fake.writes.slice(0, 2), ['\x1b[200~/rewind\x1b[201~', '\r']);
+    assert.equal(ups(), 4);
+    assert.equal(fake.writes[fake.writes.length - 1], '\r');
+    assert.ok(o.menu && o.menu.options.some((x) => x.label === 'Restore conversation'), JSON.stringify(o.menu));
+    const asking = await rewindState(['asking']);
+    assert.equal(asking.state, 'asking');
+    assert.equal(asking.at, o.at); // the caller tells this one from an older one by it
+    assert.deepEqual([asking.text, asking.edit], ['fix the bug', null]);
+    // answered "Restore conversation" (the phone's menu card): the message comes back into its prompt, and is cleared there
+    const [ca, oa] = await call('POST', `${S}/answer`, { option: 2, sig: o.menu.sig, allowPermission: true });
+    assert.equal(ca, 200, oa.message);
+    const done = await rewindState(['restored', 'kept', 'failed']);
+    assert.equal(done.state, 'restored', JSON.stringify(done));
+    assert.equal(done.text, 'fix the bug');
+    assert.equal(boxNow, '');
+    assert.ok(fake.writes.some((w) => w.startsWith('\x15')));
+    assert.equal(pasted(), '/rewind'); // nothing else typed
+    ok('rewind: /rewind, ↑ to the nth message with that text from the newest, Enter; the restore question left to the caller; the restored message cleared from its prompt');
+
+    // Edit: the newest "fix the bug" (nth 0); once restored, the edit goes in its place
+    claude(['fix the bug', 'Reply ALPHA.', 'fix the bug', 'thanks']);
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug', edit: 'fix the other bug' });
+    assert.equal(c, 200, o.message);
+    assert.equal(ptr, 2);
+    assert.equal(ups(), 2);
+    assert.match(o.message, /your edit goes in/);
+    await call('POST', `${S}/answer`, { option: 1, sig: o.menu.sig, allowPermission: true });
+    const sent = await rewindState(['sent', 'restored', 'kept', 'failed']);
+    assert.equal(sent.state, 'sent', JSON.stringify(sent));
+    assert.equal(sent.edit, 'fix the other bug');
+    assert.equal(pasted(), '/rewindfix the other bug');
+    assert.equal(fake.writes[fake.writes.length - 1], '\r');
+    ok('rewind with edit: once the restore put the message back, it is cleared and the edit sent in its place');
+
+    // Edit answered "Never mind": the conversation stays as it was, the edit is not sent ("kept")
+    claude(['fix the bug']);
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug', edit: 'something else' });
+    assert.equal(c, 200, o.message);
+    await call('POST', `${S}/answer`, { option: 4, sig: o.menu.sig, allowPermission: true });
+    const kept = await rewindState(['sent', 'restored', 'kept', 'failed']);
+    assert.equal(kept.state, 'kept', JSON.stringify(kept));
+    assert.equal(kept.edit, 'something else');
+    assert.equal(pasted(), '/rewind');
+    ok('rewind with edit, Never mind: nothing restored, the edit not sent (kept)');
+
+    // not in the list: up to the top, then Esc; a second one with that text that isn't there: says how many there are
+    claude(['fix the bug', 'thanks']);
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'never said this' });
+    assert.equal(c, 409); assert.equal(o.notFound, true); assert.match(o.message, /isn't in \/rewind's list/);
+    assert.equal(fake.writes[fake.writes.length - 1], '\x1b');
+    assert.equal(at, 'prompt');
+    claude(['fix the bug', 'thanks']);
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug', nth: 1 });
+    assert.equal(c, 409); assert.match(o.message, /one message with that text, not 2/);
+    assert.equal(at, 'prompt');
+    // the list never opens (Claude Code took "/rewind" as text): it is cleared from its prompt again
+    claude(['fix the bug']);
+    fake.onWrite = (w) => {
+      if (w.startsWith('\x1b[200~')) boxNow += w.slice(6, -6);
+      else if (w.startsWith('\x15')) boxNow = '';
+      draw();
+    };
+    [c, o] = await call('POST', `${S}/rewind`, { text: 'fix the bug' });
+    assert.equal(c, 409); assert.match(o.message, /did not open.*cleared/);
+    assert.equal(boxNow, '');
+    assert.ok(!fake.writes.includes('\x1b'));
+    ok('rewind: a message not in the list, or not that many times, gets Esc and 409; a list that never opened leaves nothing in the prompt');
+  }
+
   const paths = API.ENDPOINTS.map((e) => `${e.method} ${e.path}`);
   for (const p of ['POST /api/sessions/:id/now', 'POST /api/sessions/:id/unsend', 'POST /api/sessions/:id/model', 'GET /api/sessions/:id/activity',
-    'POST /api/sessions/:id/enter', 'POST /api/sessions/:id/background', 'POST /api/sessions/:id/mode']) assert.ok(paths.includes(p), p);
+    'POST /api/sessions/:id/enter', 'POST /api/sessions/:id/background', 'POST /api/sessions/:id/mode', 'POST /api/sessions/:id/rewind']) assert.ok(paths.includes(p), p);
   ok('GET /api lists the new verbs');
 })().then(() => { console.log(`${n} tests passed`); }, (e) => { console.error(e); process.exitCode = 1; })
   .finally(() => { server.close(); setTimeout(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} process.exit(); }, 100); });

@@ -285,7 +285,10 @@ function sizeOf(p) {
 }
 // the menu on that session's screen now ({ kind, title, context, more, options, sig }, screen.js), or null
 async function menuNow(host, p) {
-  const raw = await host.call('snapshot', p.id);
+  return menuFrom(await host.call('snapshot', p.id), p);
+}
+// the same, from a snapshot already read (a reader that wants the menu and the rows of one moment)
+function menuFrom(raw, p) {
   const { cols, rows } = sizeOf(p);
   const m = SCREEN.menuDetailsShown(typeof raw === 'string' ? raw : '', cols, rows);
   // the sig as a caller passes it back: 12 hex characters, safe on any command line
@@ -850,7 +853,8 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
   { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
   { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort?, queue? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. Not idle: 409 notReady, or with queue: true 202 { queued, model?, effort? }: applied once Claude finishes this step (GET /state\'s switchPending until then; dropped after 30 min). An overseer\'s: Henry only (his phone)' },
-  { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code), mode (default | acceptEdits | plan | auto | bypass | null), bg (a shell command Ctrl+B can send to the background), prompt (its prompt box\'s text; a bash-mode one as "!<command>"; null when not on screen)' },
+  { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code), mode (default | acceptEdits | plan | auto | bypass | null), bg (a shell command Ctrl+B can send to the background), prompt (its prompt box\'s text; a bash-mode one as "!<command>"; null when not on screen), rewind (the last POST .../rewind: { state: asking | sending | sent | restored | kept | failed, text, edit, message, at }, or null)' },
+  { method: 'POST', path: '/api/sessions/:id/rewind', body: '{ text, nth?, edit? }', does: 'the page\'s Rewind (and Edit, with edit) on one of your messages: Claude Code\'s /rewind back to just before it. text: the message as the transcript has it; nth: which of the messages with that text, counted from the newest (default 0). Only while Claude is idle with no menu or panel up and nothing typed in its prompt (409). -> { menu, at }: Claude Code\'s restore question, now up, which the caller answers (POST .../answer); once restored the message leaves its prompt and edit is sent in its place (activity\'s rewind says how it ended). An overseer\'s: Henry only (his phone)' },
   { method: 'POST', path: '/api/sessions/:id/enter', body: '{ text }', does: 'the page\'s Send it on a message left in Claude Code\'s prompt: Enter once more, only while its prompt box holds exactly that text (spaces aside) and no menu is up' },
   { method: 'POST', path: '/api/sessions/:id/background', does: 'the page\'s Run in background: Ctrl+B, only while Claude works and its screen offers it (activity\'s bg)' },
   { method: 'POST', path: '/api/sessions/:id/mode', body: '{ mode: "default" | "acceptEdits" | "plan" | "auto" | "bypass" }', does: 'the permission mode: Shift+Tab until its footer shows that mode (at most 5 presses; 409 with the mode it is on when it has no such mode), only while Claude is idle with no menu up. An overseer\'s: Henry only (his phone)' },
@@ -2015,6 +2019,228 @@ async function switchMode(key, b, ctx, via = null) {
   });
 }
 
+// ---------- Rewind and Edit on one of your messages ----------
+// What the page's Rewind and Edit do (web/chat.js rewind and editMsg, web/compose.js rewindTo, rewindSteps, takeRewound
+// and restored), for a caller with no terminal of its own (the phone's chat): Claude Code's own /rewind, driven through
+// the host, with the screen read from its snapshot. "/rewind" is typed and sent, ↑ walks up its list (newest at the
+// bottom) until the ❯ is on the nth entry from the end that shows the message (screen.js rewindList, rewindMatches: an
+// entry is the message's first line, cut to the width), and Enter picks it. Claude Code then asks what to restore
+// (code and conversation, the conversation, the code, or Never mind). As on the page that question is the user's: it is
+// never answered here (the phone shows it as a menu card, POST .../answer). Once answered, Claude Code puts the message
+// back into its prompt; followRewind clears it there and, for an Edit, sends the edited text in its place
+// (deliverText, as POST .../message would), or the restore left the conversation as it was and the edit is not sent.
+// GET .../activity's `rewind` says how it ended, so the caller can put the text back in its own box: the old message
+// after a Rewind (as the page's box gets it), the edit when it did not go.
+// Unlike the page, it never stops Claude first (Esc mid-turn) or starts a session that is not running: only while
+// Claude is idle, no menu or panel up and nothing typed in its prompt (409 says which). Something unexpected on screen
+// mid-way is backed out of (rewindBackOut) and said. An overseer's conversation is Henry's alone to rewind (his phone).
+const REWIND_ROWS = 24; // /rewind's list needs about this many rows to show its entries and ❯ (compose.js)
+const REWIND_LINES = 80; // the rows its list is read from (compose.js PANEL_LINES)
+const REWIND_WALK_MS = 40000; // the walk up its list at most (the relay gives the whole route 60 s)
+const REWIND_PRESSES = 500; // ↑ presses at most (compose.js)
+const REWIND_PICK_MS = 6000; // after the pick: how long Claude Code may take to ask what to restore
+const REWIND_TICK_MS = 400; // followRewind: how often it reads the screen
+const REWIND_FOLLOW_MS = 120000; // ...and for how long (compose.js takeRewound)
+const REWIND_EMPTY_MS = 1500; // the question gone and the prompt empty this long: nothing was restored (compose.js)
+const REWIND_SHOW_MS = 180000; // how long after it ended GET .../activity still says how
+const rewinds = new Map(); // host id -> the rewind followed now (followRewind)
+const clipText = (v) => { const s = String(v || '').replace(/\s+/g, ' ').trim(); return s.length > 60 ? `${s.slice(0, 59)}…` : s; };
+// a restore question rather than the list itself (a list footer that reads as a menu, or the question drawn under the
+// list's header): its options are Claude Code's restore choices
+const RESTORE_OPT = /^(?:Restore\b|Never mind\b|Summarize\b)/i;
+const restoreAsked = (m) => !!m && m.options.some((o) => RESTORE_OPT.test(String(o.label || '').trim()));
+
+// Ctrl+U until the prompt box is empty (it clears a row at a time; Unsend's loop) -> true once it is
+async function clearPrompt(host, p) {
+  for (let i = 0; i < 40; i++) {
+    const box = SCREEN.promptBox(await rowsNow(host, p, 60, true));
+    if (!box) return false;
+    if (!box.text) return true;
+    await host.call('write', p.id, '\x15'.repeat(Math.min(box.lines + 1, 30)));
+    await sleep(120);
+  }
+  return false;
+}
+// Something other than what was expected is on screen mid-way: back out of it, so nothing is left half done. The list
+// or its restore question gets one Esc (never two: two quick Escs at Claude Code's prompt open its rewind list),
+// "/rewind" left in the prompt is cleared. Any other menu is left alone: Esc would answer it (deny a tool call).
+// -> what happened, for the 409
+async function rewindBackOut(host, p, what) {
+  const raw = await host.call('snapshot', p.id);
+  const { cols, rows } = sizeOf(p);
+  const s = typeof raw === 'string' ? raw : '';
+  const L = SCREEN.render(s, cols, rows, REWIND_LINES, false);
+  const m = menuFrom(s, p);
+  if (SCREEN.rewindList(L) || restoreAsked(m)) {
+    await host.call('write', p.id, '\x1b');
+    return `${what} (Esc closed /rewind: see the Session tab)`;
+  }
+  if (m) return `${what}; Claude is asking something now ("${clipText(m.title || 'a menu')}"): answer it in the chat`;
+  const box = SCREEN.promptBox(SCREEN.render(s, cols, rows, 60, false, true));
+  if (box && /^\/rewind\b/.test(box.text)) return (await clearPrompt(host, p)) ? `${what} ("/rewind" was cleared from its prompt)` : `${what}; "/rewind" is still in its prompt: clear it in the Session tab`;
+  return `${what}: see the Session tab`;
+}
+
+// POST /api/sessions/:id/rewind { text, nth?, edit? }: text is the message as the transcript has it, nth which of the
+// messages showing that text it is, counted from the newest (0, the default: the newest), edit the text to send in its
+// place (Edit). -> 200 { ok, id, menu, at, message }: menu is Claude Code's restore question now up (null when it
+// restored at once), to be answered by the caller; at, when it started (GET .../activity's rewind.at for this one)
+async function rewindSession(key, b, ctx, via = null) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  const text = cleanText(b.text);
+  if (!text) return [400, { ok: false, message: 'text must be the message as it was sent' }];
+  if (b.nth != null && !(Number.isInteger(b.nth) && b.nth >= 0 && b.nth < REWIND_PRESSES)) return [400, { ok: false, message: `nth must be a whole number from 0 (the newest message with that text) to ${REWIND_PRESSES - 1}` }];
+  const nth = b.nth || 0;
+  let edit = null;
+  if (b.edit != null) {
+    edit = cleanText(b.edit);
+    if (!edit) return [400, { ok: false, message: 'edit must be the text to send in its place, without control characters other than new lines and tabs' }];
+  }
+  return withHost(async (host) => {
+    const { p, err } = await need(host, key, true);
+    if (err) return err;
+    // it drops turns from the conversation: an overseer's history is Henry's to change, as its model and mode
+    if (isOverseer(p.role) && via !== 'henry') return [403, { ok: false, id: p.id, message: 'only Henry rewinds an overseer\'s conversation (his phone)' }];
+    if (panelOpen(p)) return [409, { ok: false, id: p.id, panel: true, message: PANEL_UP }];
+    if (p.status !== 'idle') return [409, { ok: false, id: p.id, status: p.status || null, message: p.status === 'waiting' ? 'Claude is waiting on an answer: answer it first, then rewind' : 'Claude is working: stop it first, then rewind' }];
+    return typeOne(p.id, () => rewindSteps(host, p, text, nth, edit, ctx, via));
+  });
+}
+
+async function rewindSteps(host, p0, text, nth, edit, ctx, via) {
+  let p = p0;
+  const no = (code, message, more = {}) => [code, { ok: false, id: p.id, ...more, message }];
+  const m0 = await menuNow(host, p);
+  if (m0) return no(409, MENU_UP, { menu: m0 });
+  // the prompt, empty: one read can miss it (a redraw on its way), so it is read again for a moment (compose.js)
+  const boxNow = async () => SCREEN.promptBox(await rowsNow(host, p, 60, true));
+  let b0 = await boxNow();
+  for (let i = 0; i < 10 && !(b0 && !b0.text); i++) { await sleep(150); b0 = await boxNow(); }
+  if (!b0) return no(409, 'its prompt is not on screen: see the Session tab');
+  if (b0.text) return no(409, `something is typed in its prompt ("${clipText(b0.text)}"): clear it in the Session tab first`);
+  if (SCREEN.spinner(await rowsNow(host, p, 40))?.strong) return no(409, 'Claude is working: stop it first, then rewind');
+  // a short terminal shows too little of the list: made taller first, as the page does (compose.js growRows), and the
+  // screen then read at that size
+  const size = sizeOf(p);
+  if (size.rows < REWIND_ROWS) {
+    await host.call('resize', p.id, size.cols, REWIND_ROWS);
+    await sleep(600); // the pty takes the new size and Claude Code redraws
+    const fresh = hosted(await host.call('list'), p.id) || p;
+    p = { ...fresh, cols: size.cols, rows: Math.max(REWIND_ROWS, Number.isInteger(fresh.rows) ? fresh.rows : 0) };
+  }
+  // "/rewind" and Enter, never into a menu that came up meanwhile
+  const sent = await sendText(host, p.id, '/rewind', () => menuNow(host, p));
+  if (!sent.entered) return no(409, `${MENU_UP} (a menu came up just before Enter: "/rewind" is in its prompt box, not sent)`, { menu: true });
+  const list = async () => SCREEN.rewindList(await rowsNow(host, p, REWIND_LINES));
+  let r = null;
+  for (let i = 0; i < 20 && !r; i++) { await sleep(150); r = await list(); }
+  if (!r) return no(409, await rewindBackOut(host, p, 'its /rewind list did not open'));
+  // up the list to the message (the nth of that text from the newest): ↑, then up to 8 looks for the ❯ to move
+  let seen = 0, last = r.sig, picked = false;
+  const until = Date.now() + REWIND_WALK_MS;
+  for (let i = 0; i < REWIND_PRESSES && !picked; i++) {
+    if (Date.now() > until) { await host.call('write', p.id, '\x1b'); return no(409, 'finding that message in /rewind\'s list took too long (Esc closed it)'); }
+    await host.call('write', p.id, '\x1b[A');
+    let n = null;
+    for (let j = 0; j < 8; j++) { await sleep(60); n = await list(); if (!n || n.sig !== last) break; }
+    if (!n) return no(409, await rewindBackOut(host, p, 'the /rewind list closed'));
+    if (n.sig === last) break; // the top, and it wasn't there
+    last = n.sig;
+    if (SCREEN.rewindMatches(n.sel, text) && seen++ === nth) { await host.call('write', p.id, '\r'); picked = true; }
+  }
+  if (!picked) {
+    await host.call('write', p.id, '\x1b');
+    return no(409, seen ? `/rewind's list has ${seen === 1 ? 'one message' : `${seen} messages`} with that text, not ${nth + 1} (Esc closed it)` : 'that message isn\'t in /rewind\'s list (Esc closed it)', { notFound: true });
+  }
+  // Claude Code asks what to restore, or (nothing to ask) restores at once: up to REWIND_PICK_MS for either, each look
+  // one snapshot (the menu and the rows of one moment)
+  let menu = null, restored = false;
+  for (const end = Date.now() + REWIND_PICK_MS; Date.now() < end && !menu && !restored;) {
+    await sleep(150);
+    const raw = await host.call('snapshot', p.id);
+    const s = typeof raw === 'string' ? raw : '';
+    const { cols, rows } = sizeOf(p);
+    const m = menuFrom(s, p);
+    if (SCREEN.rewindList(SCREEN.render(s, cols, rows, REWIND_LINES, false))) { if (restoreAsked(m)) menu = m; continue; } // still the list
+    if (m) menu = m;
+    else if (SCREEN.promptBox(SCREEN.render(s, cols, rows, 60, false, true))) restored = true;
+  }
+  if (!menu && !restored) return no(409, await rewindBackOut(host, p, 'Claude Code did not take the pick'));
+  // followed from here: what the restore puts back in its prompt is cleared, and an edit sent in its place
+  const job = { id: p.id, text, edit, via, at: Date.now(), sawMenu: !!menu, emptyAt: 0, state: 'asking', message: '', doneAt: 0 };
+  rewinds.set(p.id, job);
+  followRewind(job, ctx);
+  if (ctx && ctx.log) ctx.log(`api: ${p.id}: rewound to before a message${edit ? ' (an edit)' : ''}${menu ? '; Claude Code asks what to restore' : ''}`);
+  const then = edit ? 'your edit goes in once the conversation is back' : 'the message comes back to your box';
+  return [200, { ok: true, id: p.id, menu, at: job.at, message: menu ? `Claude Code asks what to restore: answer it; ${then}` : `went back to just before it; ${then}` }];
+}
+
+// After the pick (compose.js takeRewound and restored): every REWIND_TICK_MS, while the restore question is up, it
+// waits; once it is gone, what the restore put back in the prompt is cleared there (Ctrl+U), and then an edit goes in its
+// place (deliverText: a menu up meanwhile refuses it) or, a plain Rewind, the message is the caller's to put back in its
+// box. The prompt left empty REWIND_EMPTY_MS after the question went: the conversation stayed as it was ("Restore code"
+// only, or "Never mind"), and the edit is not sent. A newer rewind of the same session takes over (the older one stops).
+// job.state: asking -> sending -> sent | restored | kept | failed (GET .../activity's rewind)
+async function followRewind(job, ctx) {
+  const mine = () => rewinds.get(job.id) === job;
+  const end = (state, message) => {
+    if (!mine()) return;
+    Object.assign(job, { state, message, doneAt: Date.now() });
+    if (ctx && ctx.log) ctx.log(`api: ${job.id}: rewind ${state}`);
+  };
+  try {
+    while (mine() && Date.now() - job.at < REWIND_FOLLOW_MS) {
+      await sleep(REWIND_TICK_MS);
+      if (!mine()) return;
+      const step = await withHost(async (host) => {
+        const p = hosted(await host.call('list'), job.id);
+        if (!p || !p.alive) return { end: ['failed', 'the session ended before the restore'] };
+        const raw = await host.call('snapshot', p.id);
+        const s = typeof raw === 'string' ? raw : '';
+        if (menuFrom(s, p)) { job.sawMenu = true; job.emptyAt = 0; return null; }
+        const { cols, rows } = sizeOf(p);
+        const box = SCREEN.promptBox(SCREEN.render(s, cols, rows, 60, false, true));
+        if (!box) return null;
+        if (!box.text) {
+          if (!job.sawMenu) return null;
+          if (!job.emptyAt) job.emptyAt = Date.now();
+          return Date.now() - job.emptyAt >= REWIND_EMPTY_MS ? { end: ['kept', 'the conversation stayed as it was (Restore code only, or Never mind)'] } : null;
+        }
+        const clear = await typeOne(p.id, () => clearPrompt(host, p));
+        return clear ? { cleared: true } : { end: ['failed', 'the old message is in its prompt and could not be cleared: clear it in the Session tab'] };
+      });
+      if (!step) continue;
+      if (step.end) return end(...step.end);
+      if (!mine()) return;
+      if (!job.edit) return end('restored', 'went back to just before your message: it is back in your box to change and send again');
+      job.state = 'sending';
+      // the host may still list the /rewind dialog as open for a moment (it reads the pid files every 800 ms), and the
+      // send would press Esc to close it: wait for the list to catch up first
+      await withHost(async (host) => {
+        for (const stop = Date.now() + 2500; Date.now() < stop;) {
+          if (!panelOpen(hosted(await host.call('list'), job.id))) return;
+          await sleep(POLL_MS / 2);
+        }
+      });
+      if (!mine()) return;
+      const [code, out] = await deliverText(job.id, job.edit, { kind: 'message', queue: false, open: false, via: job.via }, ctx);
+      return code === 200 ? end('sent', 'went back to just before your message and sent your edit in its place')
+        : end('failed', `went back to just before your message, but your edit was not sent: ${(out && out.message) || code}`);
+    }
+    if (mine()) end('kept', 'nothing came back into its prompt within 2 minutes: the conversation may be as it was (see the Session tab)');
+  } catch (e) {
+    end('failed', `the restore could not be followed: ${String((e && e.message) || e)}`);
+  }
+}
+// what GET .../activity says of the session's rewind: { state, text, edit, message, at }, or null (none, or one that
+// ended over REWIND_SHOW_MS ago)
+function rewindNow(id) {
+  const j = rewinds.get(id);
+  if (!j) return null;
+  if (j.doneAt && Date.now() - j.doneAt > REWIND_SHOW_MS) { rewinds.delete(id); return null; }
+  return { state: j.state, text: j.text, edit: j.edit, message: j.message || null, at: j.at };
+}
+
 // POST /api/sessions/:id/model { model?, effort? }: the page's model and effort picker, for this conversation only.
 // Claude Code has no session-only switch: /model <id> and /effort <level> switch the running session AND save the
 // choice in its account's settings.json as the default for every new session (`model`, and
@@ -2346,7 +2572,8 @@ async function readActivity(key, ctx) {
     const cid = convId(p.id);
     let doing = null;
     try { doing = cid && ctx.doing ? ctx.doing(cid) : null; } catch {}
-    const base = { ok: true, id: p.id, alive: !!p.alive, status: p.status || null, waitingFor: p.waitingFor || null, doing };
+    // rewind: how a Rewind or Edit from here is going (rewindNow), so the caller can put the text back in its box
+    const base = { ok: true, id: p.id, alive: !!p.alive, status: p.status || null, waitingFor: p.waitingFor || null, doing, rewind: rewindNow(p.id) };
     if (!p.alive) return [200, { ...base, busy: false, line: null, verb: null, detail: null, waiting: null, menu: null, effort: null, queue: [], mode: null, bg: false, prompt: null }];
     const marked = await rowsNow(host, p, 60, true);
     const rows = marked.map((l) => l.replace(/[\x01-\x04]/g, '').replace(/\s+$/, '')).slice(-40);
@@ -2456,7 +2683,7 @@ async function listConversations(query, ctx) {
 //        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,
 //        bots: { list(), create(b), start(id), update(id, b), remove(id), look(b) } each -> [code, json] or a Promise of one
 //        (/api/bots, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
-const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode';
+const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode|rewind';
 const GET_VERBS = new Set(['menu', 'transcript', 'activity']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
 const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|lead|disband|message))?\/?$/;
@@ -2568,6 +2795,7 @@ function handle(req, res, pathname, ctx) {
       case 'enter': return body((b) => enterAgain(k, b));
       case 'background': return run(backgroundSession(k));
       case 'mode': return body((b) => switchMode(k, b, ctx, via(b)));
+      case 'rewind': return body((b) => rewindSession(k, b, ctx, via(b)));
       default: break;
     }
   }
