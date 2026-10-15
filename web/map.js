@@ -305,7 +305,12 @@
 // glowMs, frames, passes (a second), msPerS (GPU ms a second: /10 is its share in %), cpuMs (skyPaint), lost }, see gpuStats.
 // hold(true) keeps the director from starting anything by itself; stats().event.life: { name: [ms since it began, its ms] },
 // stats().scene.ms its length. scripts/sky-gpu-bench.js runs each event alone against an empty sky with these (headless
-// Edge on the real GPU, Windows' GPU % beside the timer; --live: the running app's GPU %, PC or Mac).
+// Edge on the real GPU, Windows' GPU % beside the timer; --live: the running app's GPU %, PC or Mac). rects(mode): each
+// event drawn in its own rectangle (true, the default), the full program over the whole sky as before (false, to compare
+// cost and pixels), or as true with the rectangles outlined on the backdrop ('show'); stats().rects: { mode, base (the base
+// sky's program is ready), all (the full program drew everything: the warp, a voyage, or boxes over RECT_ALL of the
+// window), share (of the window the full program drew), list ([x0, y0, x1, y1], CSS px) }, see "Each event in its own
+// rectangle".
 // ?skyHour=<0-24> forces the sky's hour; ?sky2d=1 has the canvas draw the sky, as without WebGL2; ?glow2d=1 has it
 // draw only the repo nebulae (to compare the two).
 //
@@ -1282,6 +1287,8 @@ export function mapStats() {
     event: { running: [...I.events.keys()], last: I.eventLast, nextIn: I.eventAt ? Math.round(I.eventAt - performance.now()) : null,
       life: Object.fromEntries([...I.events.values()].map((e) => [e.name, [Math.round(performance.now() - e.at), e.ev && e.ev.ms ? Math.round(e.ev.ms) : null]])) },
     gpu: gpuStats(),
+    rects: I.skyGL ? { mode: rectMode, base: !!I.skyGL.B, all: !!I.skyGL.rectAll, share: Math.round((I.skyGL.rectShare || 0) * 1e3) / 1e3,
+      list: (I.skyGL.rects || []).map((r) => r.map((v) => Math.round(v / (I.dpr || 1)))) } : null,
     asteroids: (() => { const e = evOf('asteroids'); if (!e) return null;
       return { light: e.ev.light.map((v) => Math.round(v * 100) / 100), shown: asteroidsNow().map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.r * 10) / 10, blur: Math.round(r.blur), a: Math.round(r.a * 1e3) / 1e3 })) }; })(),
     lens: (() => { const l = lensNow(); return l ? { x: Math.round(l.x), y: Math.round(l.y), r: Math.round(l.r * 10) / 10, a: Math.round(l.a * 1e3) / 1e3, src: l.srcs.map((o) => Math.round(o.amp * 1e3) / 1e3),
@@ -1465,6 +1472,12 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     gpuMeter: (on) => { gpuOn = !!on; if (I && I.skyGL && !gpuOn) gpuMeterDrop(I.skyGL); if (I) I.dirty = true; return gpuOn; },
     // the director holds (true: no event, scene or far event starts by itself; the hooks still start them) or goes on (false)
     hold: (on) => { skyHold = !!on; return skyHold; },
+    // each event in its own rectangle (true, the default), the full program over the whole sky (false), or as true with the
+    // rectangles outlined ('show'); no argument: the mode. See "Each event in its own rectangle" and stats().rects
+    rects: (mode) => {
+      if (mode !== undefined) { rectMode = mode === 'show' ? 'show' : !!mode; if (I && I.skyGL) I.skyGL.drawn = false; if (I) I.dirty = true; }
+      return rectMode;
+    },
     meteor: () => { if (!I) return false; I.meteors.push(meteorMake(performance.now())); I.dirty = true; return true; }, // a shooting star now
     shower: () => !!I && shower(performance.now(), null, true), // a meteor shower now
     // a space event now by name (ignoring EVENT_GAP and EVENT_MAX, beside any running), skip seconds into it; no name: the
@@ -6413,11 +6426,12 @@ vec4 farPart(vec2 p, vec4 A, vec4 B, vec4 C, vec4 D) {
   float a = clamp(m * A.w, 0.0, 1.0), sh = clamp(shd, 0.0, 1.0) * shk;
   return vec4(lt * (a / max(m, 1e-5)) * (1.0 - sh), a * (1.0 - sh) + sh);
 }`;
-// per star layer its line in SKY_FS: its tile's texel, or its stars made per cell
-const STAR_GLSL = STAR_LAYERS.map((L, i) => (L.cell
-  ? `c = over(starField(warpP(pl, ${glf(WARP_LAYER[i])}), uL${i}, ${glf(L.cell)}, ${glf(L.n * (L.cell / STAR_TILE) ** 2)}, ${glf((L.sparkle || 0) / L.n)}, ` +
+// per star layer its line in SKY_FS: its tile's texel, or its stars made per cell; looked up where the warp stretches
+// it to (ev), or (the base sky's program, SKY_BASE_FS: no warp there) at the pixel itself
+const starGLSL = (ev) => STAR_LAYERS.map((L, i) => (L.cell
+  ? `c = over(starField(${ev ? `warpP(pl, ${glf(WARP_LAYER[i])})` : 'p'}, uL${i}, ${glf(L.cell)}, ${glf(L.n * (L.cell / STAR_TILE) ** 2)}, ${glf((L.sparkle || 0) / L.n)}, ` +
     `${glf(L.cl ? L.cl[1] : 0)}, vec4(${L.r.concat(L.a).map(glf).join(', ')}), ${L.seed}u, ${glf(L.twinkle || 0)}, uSize.w), c);`
-  : `c = over(star(uS${STAR_TILES.indexOf(L)}, uL${i}, warpP(pl, ${glf(WARP_LAYER[i])})), c);`)).join('\n  ');
+  : `c = over(star(uS${STAR_TILES.indexOf(L)}, uL${i}, ${ev ? `warpP(pl, ${glf(WARP_LAYER[i])})` : 'p'}), c);`)).join('\n  ');
 // the nebula drift (see "Look", NEBULA_*), premultiplied, at device px p; uNb (see SKY_U's comment): the cloud lives in its
 // own plane (middle, turn, long half-axis = 1), so its noise travels with it. A value noise, summed over octaves each turned
 // and doubled (nbF), warped twice by itself (the dust looks pulled into streams), gives its density; a ridged noise along
@@ -7067,11 +7081,14 @@ vec4 battle(vec2 p) {
 })();
 // per device pixel, premultiplied: the tint (mixed top to bottom unpremultiplied, as a canvas gradient mixes) over the
 // page's colour, the deep sky's light and its star dust (dense where the band is) over that, then each star layer,
-// back to front (STAR_GLSL), sampled where the pixel's centre falls on its tile or made there, the satellites, the shooting
+// back to front (starGLSL), sampled where the pixel's centre falls on its tile or made there, the satellites, the shooting
 // star and the moon; then the vignette
 // (black, so in glass it dims the acrylic a little too), the repo glows ('screen': 1 - (1 - sky)(1 - glow), on colour and alpha alike, as the canvas does) and
-// a dither fixed to the pixel (never to time) that breaks the faint gradients' 8-bit bands
-const SKY_FS = `#version 300 es
+// a dither fixed to the pixel (never to time) that breaks the faint gradients' 8-bit bands. ev: with the space events
+// (SKY_FS: the nebula, the far event, the lens, the warp, the sights, the asteroids, the voyage); without them (SKY_BASE_FS)
+// it is the base sky alone, the same sum less those terms, for the pixels no event reaches (see "Each event in its own
+// rectangle")
+const skyFS = (ev) => `#version 300 es
 precision highp float;
 #define GLOW_MAX ${GLOW_MAX}
 #define METEOR_N ${METEOR_N}
@@ -7093,23 +7110,12 @@ float hash(uvec2 v) {
   h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12; h *= 0x297a2d39u; h ^= h >> 15;
   return float(h) / 4294967295.0;
 }
-${NEBULA_GLSL}
-${ASTEROID_GLSL}
-${LENS_GLSL}
-${SHIP_GLSL}
-${VEIL_GLSL}
-${PLANET_GLSL}
-${BATTLE_GLSL}
-${SYSTEM_GLSL}
-${VOYAGE_GLSL}
-${WARP_GLSL}
-${FAR_GLSL}
-void main() {
+${ev ? [NEBULA_GLSL, ASTEROID_GLSL, LENS_GLSL, SHIP_GLSL, VEIL_GLSL, PLANET_GLSL, BATTLE_GLSL, SYSTEM_GLSL, VOYAGE_GLSL, WARP_GLSL, FAR_GLSL].join('\n') + '\n' : ''}void main() {
   vec2 p = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y); // the pixel's centre, device px from the top left
   vec4 t = mix(uTop, uBot, p.y / uSize.y);
   vec4 c = over(vec4(t.rgb * t.a, t.a), uBg);
-  vec2 pl = lensP(p); // where the sky under the satellites is looked up (the gravity lens bends it; p without one)
-  vec2 pw = warpZ(pl, uWp[1].z); // the deep sky's lookup, stretched a little by the warp drift (zoomed in a voyage)
+  ${ev ? `vec2 pl = lensP(p); // where the sky under the satellites is looked up (the gravity lens bends it; p without one)
+  vec2 pw = warpZ(pl, uWp[1].z); // the deep sky's lookup, stretched a little by the warp drift (zoomed in a voyage)` : 'vec2 pw = p; // the base sky: no lens, no warp'}
   // the place's deep sky: its band turned by the place's turn (uPc) about the window's middle, dimmed in a voyage (uPc.w)
   vec2 pr = pw - 0.5 * uSize.xy;
   pr = vec2(pr.x * uPc.x - pr.y * uPc.y, pr.x * uPc.y + pr.y * uPc.x) + 0.5 * uSize.xy;
@@ -7117,7 +7123,7 @@ void main() {
   vec3 g = d.rgb * uFx.y * uPc.w;
   c = over(vec4(g, max(g.r, max(g.g, g.b))), c);
   c = over(vec4(texture(uDust, (pr - uDu.xy) * uDu.z).r * d.a * uFx.z * uPc.w), c);
-  // the sights from here to the asteroids, but for the stars (they streak), dim in a voyage (uPc.z): these mixed back
+  ${ev ? `// the sights from here to the asteroids, but for the stars (they streak), dim in a voyage (uPc.z): these mixed back
   // towards this, the far sights and rocks gathered in fs and laid over it at that share
   vec4 c0 = c;
   // the nebula drift, over the deep sky and under the stars, which show through it
@@ -7128,8 +7134,8 @@ void main() {
   // the lens's far galaxies, bent into arcs, over those and under the stars
   c = over(lensLight(pl - uLn[0].xy), c);
   c = mix(c0, c, uPc.z);
-  ${STAR_GLSL}
-  // the far sights, over the stars and bent by a black hole between like them: a planet, a battle, the capital ship (and its
+  ` : ''}${starGLSL(ev)}
+  ${ev ? `// the far sights, over the stars and bent by a black hole between like them: a planet, a battle, the capital ship (and its
   // escort); then the black hole's stream, its dark core and ring over them, and its jets; all under the asteroids,
   // satellites and streaks
   // (in a voyage they zoom with the deep sky: pf, the squeeze's w share)
@@ -7149,7 +7155,7 @@ void main() {
   c = over(fs * uPc.z, c);
   // a voyage's light glows at its point over it all
   c = over(voyageGlow(p), c);
-  // the satellites: each a small soft point (a Gaussian SAT_R CSS px across, uSat's z its alpha) and its beacon's
+  ` : ''}// the satellites: each a small soft point (a Gaussian SAT_R CSS px across, uSat's z its alpha) and its beacon's
   // flash (w) a little wider in its colour (uSac); the first empty slot ends them, and a pixel far from one skips it
   for (int i = 0; i < SAT_N; i++) {
     vec4 s = uSat[i];
@@ -7220,12 +7226,12 @@ void main() {
     vec2 mq = (p - uMo.xy) * uMo.z;
     if (all(greaterThanEqual(mq, vec2(0.0))) && all(lessThan(mq, vec2(1.0)))) c = over(texture(uMoon, mq) * uMo.w, c);
   }
-  // the close asteroid (soft focus, its blur 1 px or more), in front of all that, the moon too
+  ${ev ? `// the close asteroid (soft focus, its blur 1 px or more), in front of all that, the moon too
   for (int i = 0; i < ASTEROID_N; i++) {
     vec4 a = uAs[i], b = uAs[ASTEROID_N + i];
     if (a.w > 0.0 && b.w >= 1.0) c = over(rock(p, a, b, uAs[2 * ASTEROID_N].xy), c);
   }
-  vec2 q = p / uSize.xy * 2.0 - 1.0;
+  ` : ''}vec2 q = p / uSize.xy * 2.0 - 1.0;
   c = over(vec4(0.0, 0.0, 0.0, uFx.x * smoothstep(0.3, 2.0, dot(q, q))), c);
   // the glows: per repo whose box holds the pixel, its field's texel; the noise is the same for every repo. The field
   // and the noise are laid over the map's box (uOrg: its top left and bottom right, device px), and none shows outside it
@@ -7252,6 +7258,7 @@ void main() {
   if (c.a > 0.998) c.rgb += n; else c *= 1.0 + n / max(c.a, 1.0 / 255.0);
   color = clamp(c, 0.0, 1.0);
 }`;
+const SKY_FS = skyFS(true), SKY_BASE_FS = skyFS(false);
 // a software WebGL (SwiftShader, WARP / Microsoft Basic Render, llvmpipe): the sky's shader would take whole seconds a
 // frame there, so the canvas draws it. failIfMajorPerformanceCaveat (SKY_GL_ATTRS) refuses most of them already; this
 // catches one a browser hands out anyway. The renderer's name comes from WEBGL_debug_renderer_info, else RENDERER
@@ -7279,7 +7286,7 @@ function skyGLMake(cv) {
     inst: new Float32Array(64 * GLOW_INST), ni: 0, lastInst: new Float32Array(64 * GLOW_INST), lastNi: -1,
     gu: new Float32Array((3 + 4 * GLOW_MAX) * 4), lastGu: new Float32Array((3 + 4 * GLOW_MAX) * 4), gn: 0, lastGn: -1, cols: new Map() };
   // a lost context: the map's canvas draws the sky from the next frame on, until the context is back
-  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; G.pend = null; G.tq = null; I.dirty = true; });
+  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; G.pend = null; G.bpend = null; G.B = null; G.tq = null; I.dirty = true; });
   cv.addEventListener('webglcontextrestored', () => { skyGLInit(G); I.dirty = true; });
   skyGLInit(G);
   return G;
@@ -7311,61 +7318,68 @@ const glProgram = (gl, vs, fs, what) => glLinked(gl, glLink(gl, vs, fs), what);
 // skyGLPoll finishes it once the link is done, and until then the backdrop keeps what it has for SKY_GL_WAIT, then the
 // canvas draws the sky. Without the extension it waits for the link here, as it always did.
 const SKY_GL_WAIT = 400;
+// The base sky's program (SKY_BASE_FS, see "Each event in its own rectangle") links beside it, the same way; until it
+// is ready (or if it fails) the full program draws every pixel, as it did before there was one
 function skyGLInit(G) {
   const gl = G.gl;
-  G.ok = false;
+  G.ok = false; G.B = null;
   try { G.par = gl.getExtension('KHR_parallel_shader_compile'); } catch { G.par = null; }
   G.pend = glLink(gl, SKY_VS, SKY_FS);
+  G.bpend = glLink(gl, SKY_VS, SKY_BASE_FS);
   G.pendAt = performance.now();
-  if (!G.par) skyGLFinish(G);
+  if (!G.par) { skyGLFinish(G); skyGLBase(G); }
 }
-// whether the sky's program is ready (G.ok), finishing it when its link is done; never waits for the link
+// a link done (or no way to ask: then it waits for it)
+function glDone(G, pend) {
+  try { return !G.par || !!G.gl.getProgramParameter(pend.p, G.par.COMPLETION_STATUS_KHR); } catch { return true; }
+}
+// whether the sky's program is ready (G.ok), finishing it (and the base sky's) when its link is done; never waits for a link
 function skyGLPoll(G) {
-  if (G.ok) return true;
-  if (!G.pend || G.gl.isContextLost()) return false;
-  let done = true;
-  try { done = !!G.gl.getProgramParameter(G.pend.p, G.par.COMPLETION_STATUS_KHR); } catch { done = true; }
-  if (done) { skyGLFinish(G); if (I) I.dirty = true; }
+  if (G.gl.isContextLost()) return false;
+  if (G.ok) { if (G.bpend && glDone(G, G.bpend)) { skyGLBase(G); if (I) I.dirty = true; } return true; }
+  if (!G.pend) return false;
+  if (glDone(G, G.pend)) { skyGLFinish(G); if (I) I.dirty = true; }
   return G.ok;
+}
+// the base sky's program, once the full one is ready (it shares its textures): its uniforms' places, or none (G.B null)
+function skyGLBase(G) {
+  if (!G.ok || !G.bpend) return;
+  const p = glLinked(G.gl, G.bpend, 'base sky');
+  G.bpend = null;
+  G.B = p ? skyLocs(G.gl, p) : null;
+}
+// a sky program's uniforms' places (G.F: the full one, G.B: the base sky's), its texture units and star tints set
+function skyLocs(gl, p) {
+  const at = (name) => gl.getUniformLocation(p, name);
+  gl.useProgram(p);
+  SKY_TEX.forEach((name, i) => gl.uniform1i(at(name), i));
+  // the star tints for the layers the shader makes: rgb and the weights summed up to each, over their total
+  const tint = new Float32Array(STAR_TINT.length * 4);
+  let tsum = 0;
+  STAR_TINT.forEach(([rgb, w], i) => { tsum += w; tint.set(rgb.split(',').map((v) => v / 255).concat(tsum / STAR_TINT_SUM), i * 4); });
+  gl.uniform4fv(at('uTint'), tint);
+  return { p, loc: SKY_U.map(at), m: ['uM', 'uMc'].map(at), s: ['uSat', 'uSac'].map(at), r: ['uRk', 'uRp', 'uRw'].map(at),
+    nb: at('uNb'), as: at('uAs'), ln: at('uLn'), sh: at('uSh'), wp: at('uWp'), fr: at('uFr'), frn: at('uFrN'), pl: at('uPl'),
+    bt: at('uBt'), sy: at('uSy'), vy: at('uVy'), g: ['uGlow', 'uN0', 'uN1', 'uGB', 'uGE', 'uGC', 'uGL', 'uGN'].map(at) };
 }
 // the sky's link still runs and began less than SKY_GL_WAIT ago: the backdrop keeps what it has (skyPaint), so a
 // driver with the shader in its cache never shows the canvas's sky for a frame first
 const skyGLWaits = (G) => !!(G && !G.ok && G.pend && performance.now() - G.pendAt < SKY_GL_WAIT);
-// the programs and the textures (the star tiles' pixels come in drawSkyGL, once per dpr); the sky's program and the
-// textures stay bound, the glows' program only while it fills the field (glowField)
+// the programs and the textures (the star tiles' pixels come in drawSkyGL, once per dpr); the textures stay bound, the
+// sky's two programs are picked for each pass (skyUniforms), the glows' only while it fills the field (glowField)
 function skyGLFinish(G) {
   const gl = G.gl, pend = G.pend, p = pend ? glLinked(gl, pend, 'sky') : null;
   G.pend = null;
   G.ok = !!p;
   if (!G.ok) return;
-  gl.useProgram(p);
-  G.prog = p;
-  G.loc = SKY_U.map((name) => gl.getUniformLocation(p, name));
-  G.mloc = ['uM', 'uMc'].map((name) => gl.getUniformLocation(p, name));
-  G.sloc = ['uSat', 'uSac'].map((name) => gl.getUniformLocation(p, name));
-  G.rloc = ['uRk', 'uRp', 'uRw'].map((name) => gl.getUniformLocation(p, name));
-  G.nbloc = gl.getUniformLocation(p, 'uNb');
-  G.asloc = gl.getUniformLocation(p, 'uAs');
-  G.lnloc = gl.getUniformLocation(p, 'uLn');
-  G.shloc = gl.getUniformLocation(p, 'uSh');
-  G.wploc = gl.getUniformLocation(p, 'uWp');
-  G.frloc = gl.getUniformLocation(p, 'uFr'); G.frnloc = gl.getUniformLocation(p, 'uFrN');
-  G.plloc = gl.getUniformLocation(p, 'uPl'); G.btloc = gl.getUniformLocation(p, 'uBt');
-  G.syloc = gl.getUniformLocation(p, 'uSy'); G.vyloc = gl.getUniformLocation(p, 'uVy');
-  G.gloc = ['uGlow', 'uN0', 'uN1', 'uGB', 'uGE', 'uGC', 'uGL', 'uGN'].map((name) => gl.getUniformLocation(p, name));
+  G.F = skyLocs(gl, p);
   SKY_TEX.forEach((name, i) => {
     gl.activeTexture(gl.TEXTURE0 + i);
     gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
     // repeated and smoothed like the canvas's pattern, no mipmaps
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.uniform1i(gl.getUniformLocation(p, name), i);
   });
-  // the star tints for the layers the shader makes: rgb and the weights summed up to each, over their total
-  const tint = new Float32Array(STAR_TINT.length * 4);
-  let tsum = 0;
-  STAR_TINT.forEach(([rgb, w], i) => { tsum += w; tint.set(rgb.split(',').map((v) => v / 255).concat(tsum / STAR_TINT_SUM), i * 4); });
-  gl.uniform4fv(gl.getUniformLocation(p, 'uTint'), tint);
   // a tile's pixels go in premultiplied, as its canvas keeps them
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
   G.dpr = 0; G.drawn = false; G.moonKey = '';
@@ -7520,7 +7534,7 @@ function glowField(G) {
     gl.uniform2f(G.uA, G.fw, G.fh);
     gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, G.ni);
-    gl.disable(gl.BLEND); gl.bindVertexArray(null); gl.useProgram(G.prog);
+    gl.disable(gl.BLEND); gl.bindVertexArray(null); // the sky's pass picks its own program again (skyUniforms)
   }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   G.lastInst = G.lastInst.length < G.inst.length ? new Float32Array(G.inst.length) : G.lastInst;
@@ -7528,7 +7542,8 @@ function glowField(G) {
 }
 // ---------- the GPU meter (tests: __map.gpuMeter, scripts/sky-gpu-bench.js) ----------
 // Henry (2026-10-15): the sky's sights may look better only while Fleet View stays under 5% of the GPU, so each one's cost
-// is measured, not guessed. With the meter on, each pass the sky's shader draws (the sky's, the glows' field) is timed on
+// is measured, not guessed. With the meter on, each pass the sky's shader draws (the sky's: the base sky's and the full
+// program's boxes together, see "Each event in its own rectangle"; the glows' field) is timed on
 // the GPU (EXT_disjoint_timer_query_webgl2), and skyPaint's CPU ms is kept. Off (the default) it costs nothing: no queries,
 // no extension asked for. A pass takes a query from a small pool (GPU_POOL in flight; with all of them out it goes
 // untimed); results are read a few frames later, when the GPU has them, never waited for; a GPU_DISJOINT (the clock
@@ -7599,6 +7614,138 @@ function gpuStats() {
   const last2 = (l) => l.filter((o) => o.t > now - 2000);
   return { on: true, ext: !!M.ext, ms: avg(M.sky), glowMs: avg(M.glow), frames: M.sky.length, passes: last2(M.sky).length / 2,
     msPerS: r3(last2(M.sky).concat(last2(M.glow)).reduce((a, o) => a + o.ms, 0) / 2), cpuMs: avg(M.cpu), lost: M.lost };
+}
+// ---------- Each event in its own rectangle (tests: __map.rects, stats().rects) ----------
+// Henry (2026-10-15): the base sky stays full-screen and each event is drawn in its own small rectangle, so a richer event
+// costs only the pixels it covers. The sky is two programs from one source (skyFS): the full one (SKY_FS, everything, as
+// it always drew, its source unchanged so a driver's cache still has it) draws only inside each event's rectangle (a
+// scissor), every pixel there exactly as one full pass would; the base sky's (SKY_BASE_FS: the tint, the deep sky, the
+// stars, the satellites, streaks, rockets, moon, vignette, glows and dither; a tenth of the source) draws the rest, cut
+// into boxes round them (rectsRest), so no pixel is drawn twice. Outside them every event's terms are exactly 0 (each event's code already
+// returns nothing past its own reach, and over() of nothing leaves the sky as it was), so the base sky is the same sum
+// there, and the picture is the one full pass drew, pixel for pixel. What this saves: the full program's cost over most of
+// the window (its event code's registers and branches weigh on every pixel even with nothing in the sky: an empty 4K sky
+// took 0.26 ms a pass with it, 0.09 with the base sky's; a far event's 0.45, 0.13), and whatever an event's code does
+// before its own cut-off. The rectangles are worked out on the CPU each frame from the uniforms the
+// shader gets (device px, the top left the origin), each the box round that event's own cut-off in its shader: the
+// nebula's reach, each far part's (FAR_CUT by its shape, its frame's scale qk), the lens's bending reach (LENS_REACH; its
+// ring, stream and jets), the ship (and escort) and its rift, the planet (its air, rings, moon, a tide's stretch), the
+// battle, the star system, each asteroid (its dust). The lens bends the lookups of everything near it (lensP), so near it
+// the full program draws anyway; away from it a lookup is the pixel itself, so each event's box is in the window's px.
+// The warp drift and a voyage move the whole sky (warpP, warpZ, the voyage's glow and dimming): then, or when the boxes
+// cover more than RECT_ALL of the window, the full program draws all of it in one pass. Boxes that overlap are merged into
+// one, so no pixel is drawn twice by the full program. RECT_PAD: device px of slack round each box (its cut-off is inside
+// already; this is for rounding)
+const RECT_PAD = 4, RECT_ALL = 0.85;
+// farPart's cut-off by shape (radii), as each shape's first test in FAR_GLSL has it (FAR_REACH, for placing an event,
+// has 1.2 for a stream, whose cut-off is 1.25); a shape not listed draws nothing, and gets the widest anyway
+const FAR_CUT = { ...FAR_REACH, 5: 1.25 }, FAR_CUT_MAX = 2.5;
+// rectMode (__map.rects): true (the default) draws as above, false the full program alone over the whole canvas, as
+// before (to compare); 'show' as true, the boxes outlined on the backdrop
+let rectMode = true;
+// this frame's boxes from the uniforms u (canvas w x h device px, dpr): G.rects ([x0, y0, x1, y1], whole px, merged, cut
+// to the canvas), G.rest (the boxes the base sky draws, rectsRest), G.rectAll (the full program draws everything) and
+// G.rectShare (the share of the canvas the full program draws)
+function skyRects(G, u, w, h, dpr) {
+  const out = [];
+  let all = false;
+  const boxXY = (x, y, rx, ry) => { if (rx > 0 && ry > 0 && Number.isFinite(x + y + rx + ry)) out.push([x - rx - RECT_PAD, y - ry - RECT_PAD, x + rx + RECT_PAD, y + ry + RECT_PAD]); };
+  const box = (x, y, r) => boxXY(x, y, r, r);
+  // the warp drift (its stretch) and a voyage (its light, flash or dimming) reach every pixel
+  if (u[SKY_WP + 4] > 0 || u[SKY_VY + 2] > 0 || u[SKY_VY + 4] > 0 || u[50] !== 1 || u[51] !== 1) all = true;
+  // the nebula drift: nebula(), a.w > 0, out to sqrt(1.3) of its long half-axis; and inside its own ellipse (r, in its
+  // half-axes) out to 1.275, where its edge (env: 1 - r + 0.55 (f - 0.5), f its density, never over 1) is 0 whatever the
+  // density: the box round that ellipse (1.3 of its half-axes, turned) where it is narrower
+  const nb = SKY_NB;
+  if (u[nb + 3] > 0) {
+    const C = Math.sqrt(1.3) * u[nb + 2], A = 1.3 * u[nb + 2], B = A * u[nb + 6], co = u[nb + 4], si = u[nb + 5];
+    boxXY(u[nb], u[nb + 1], Math.min(C, Math.hypot(A * co, B * si)), Math.min(C, Math.hypot(A * si, B * co)));
+  }
+  // the far event's parts: farPart(), L = |d| / r * qk past FAR_CUT; the clouds gather in from wider (qk < 1), a galaxy
+  // recedes (qk >= 1)
+  for (let i = 0; i < G.frn; i++) {
+    const o = SKY_FR + i * 16, f = Math.round(u[o + 4]), en = u[o + 13], ex = u[o + 14];
+    const qk = f === 2 || f === 5 || f === 8 || f === 9 || f === 13 || f === 24 ? 1 / (1 + 0.3 * (ex * ex + (1 - en) * (1 - en))) : f === 4 ? 1 + 0.5 * ex * ex : 1;
+    box(u[o], u[o + 1], ((FAR_CUT[f] || FAR_CUT_MAX) * Math.max(u[o + 2], 0.5) / qk) * 1.01);
+  }
+  // the gravity lens: its bending (LENS_REACH), its galaxies' arcs (2 R), its shade and ring, the stream it eats, its jets
+  const ln = SKY_LN;
+  if (u[ln + 3] > 0) {
+    const R = u[ln + 2];
+    let r = Math.max(LENS_REACH * R, 2 * R, LENS_SHADE * R + 8 * dpr);
+    if (u[ln + 27] > 0) r = Math.max(r, u[ln + 20] + 2 * u[ln + 23]);
+    if (u[ln + 30] > 0) { const L = u[ln + 30] + R; r = Math.max(r, L + 4 * (0.05 * R + 0.07 * L + dpr)); }
+    box(u[ln], u[ln + 1], r);
+  }
+  // the capital ship (and escort; smeared out of the rift by k.y) and its rift: ship(), drawn only while a.w > 0
+  const sh = SKY_SH;
+  if (u[sh + 3] > 0) {
+    box(u[sh], u[sh + 1], u[sh + 2] * (u[sh + 10] > 0 ? 2.9 : 1.7) * (1 + u[sh + 17]));
+    if (u[sh + 15] > 0 || u[sh + 16] > 0) box(u[sh + 12], u[sh + 13], 4 * u[sh + 14]);
+  }
+  // the planet: its air's halo, rings and moon, in its radii, the tide's stretch undone (along it by td.z, across by
+  // 1 / sqrt(td.z))
+  const pl = SKY_PL;
+  if (u[pl + 3] > 0 && u[pl + 2] > 0) {
+    const th = u[pl + 15], mz = u[pl + 30], tz = u[pl + 26];
+    const reach = Math.max(1 + 5 * th + 0.25, Math.max(u[pl + 33] + 0.1, mz > 0 ? Math.hypot(u[pl + 28], u[pl + 29]) + mz + 0.1 : 0));
+    box(u[pl], u[pl + 1], reach * u[pl + 2] * (tz > 1 ? Math.sqrt(tz * tz + 1 / tz) : 1));
+  }
+  // the battle: its reach; the star system: 1.75 of its outer orbit and 40 px
+  if (u[SKY_BT + 2] > 0) box(u[SKY_BT], u[SKY_BT + 1], u[SKY_BT + 2]);
+  if (u[SKY_SY + 3] > 0) box(u[SKY_SY], u[SKY_SY + 1], 1.75 * u[SKY_SY + 2] + 40 * dpr);
+  // each asteroid: rock(), its dust out to 3.3 radii (a big one), its blur
+  for (let i = 0; i < ASTEROID_N; i++) {
+    const o = SKY_AS + i * 4, R = u[o + 2];
+    if (!(u[o + 3] > 0)) continue;
+    box(u[o], u[o + 1], R * (R > ASTEROID_DUST_MIN * dpr ? 3.3 : 1.5) + 2.5 * Math.floor(u[o + ASTEROID_N * 4 + 3]) + 3 * dpr);
+  }
+  // cut to the canvas, whole px out, then merged until none overlap
+  let list = [];
+  for (const b of out) {
+    const r = [Math.max(0, Math.floor(b[0])), Math.max(0, Math.floor(b[1])), Math.min(w, Math.ceil(b[2])), Math.min(h, Math.ceil(b[3]))];
+    if (r[2] > r[0] && r[3] > r[1]) list.push(r);
+  }
+  for (let merged = true; merged && list.length > 1;) {
+    merged = false;
+    for (let i = 0; i < list.length && !merged; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i], b = list[j];
+        if (a[0] >= b[2] || b[0] >= a[2] || a[1] >= b[3] || b[1] >= a[3]) continue;
+        list[i] = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+        list.splice(j, 1);
+        merged = true;
+        break;
+      }
+    }
+  }
+  const area = list.reduce((s, r) => s + (r[2] - r[0]) * (r[3] - r[1]), 0) / Math.max(1, w * h);
+  if (area > RECT_ALL) all = true;
+  if (all) list = [];
+  G.rects = list; G.rectAll = all; G.rectShare = all ? 1 : area;
+  G.rest = all ? [] : rectsRest(list, w, h);
+}
+// the rest of the canvas (w x h) outside the boxes (which don't overlap), as boxes: the canvas cut into bands at every
+// box's top and bottom edge, each band's gaps between the boxes that cross it, a gap the same as the band above's
+// joined to it. The base sky draws only these, so no pixel is drawn by both programs
+function rectsRest(list, w, h) {
+  if (!list.length) return [[0, 0, w, h]];
+  const ys = [...new Set([0, h, ...list.flatMap((r) => [r[1], r[3]])])].sort((a, b) => a - b), out = [];
+  let prev = [];
+  for (let i = 0; i + 1 < ys.length; i++) {
+    const y0 = ys[i], y1 = ys[i + 1], cur = [];
+    const xs = list.filter((r) => r[1] <= y0 && r[3] >= y1).map((r) => [r[0], r[2]]).sort((a, b) => a[0] - b[0]);
+    let x = 0;
+    for (const [a, b] of xs) { if (a > x) cur.push([x, a]); x = Math.max(x, b); }
+    if (x < w) cur.push([x, w]);
+    const next = [];
+    for (const [a, b] of cur) {
+      const up = prev.find((q) => q[0] === a && q[2] === b && q[3] === y0);
+      if (up) { up[3] = y1; next.push(up); } else { const q = [a, y0, b, y1]; out.push(q); next.push(q); }
+    }
+    prev = next;
+  }
+  return out;
 }
 // the sky (and the repo glows, when it can: I.glowGL) on its canvas, drawn only when its uniforms or the glows'
 // quads changed; false when the map's canvas must draw the sky itself
@@ -7852,31 +7999,50 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   if (G.gn && !fresh) { gpuBegin(G, 'glow'); glowField(G); gpuEnd(G); }
   G.last.set(u); G.lastGu.set(G.gu); G.lastGn = G.gn; G.drawn = true; G.draws = (G.draws || 0) + 1;
   gl.viewport(0, 0, cv.width, cv.height);
-  for (let j = 0; j < SKY_U.length; j++) gl.uniform4fv(G.loc[j], u, j * 4, 4);
-  for (let j = 0; j < 2; j++) gl.uniform4fv(G.mloc[j], u, SKY_M + j * METEOR_N * 4, METEOR_N * 4);
-  for (let j = 0; j < 2; j++) gl.uniform4fv(G.sloc[j], u, SKY_M + METEOR_N * 8 + j * SAT_N * 4, SAT_N * 4);
-  for (let j = 0; j < 3; j++) gl.uniform4fv(G.rloc[j], u, SKY_M + METEOR_N * 8 + SAT_N * 8 + j * ROCKET_N * 4, ROCKET_N * 4);
-  gl.uniform4fv(G.nbloc, u, SKY_NB, 20);
-  gl.uniform4fv(G.asloc, u, SKY_AS, ASTEROID_N * 8 + 4);
-  gl.uniform4fv(G.lnloc, u, SKY_LN, 36);
-  gl.uniform4fv(G.shloc, u, SKY_SH, 24);
-  gl.uniform4fv(G.wploc, u, SKY_WP, 8);
-  gl.uniform4fv(G.frloc, u, SKY_FR, FAR_N * 16); gl.uniform1i(G.frnloc, G.frn);
-  gl.uniform4fv(G.plloc, u, SKY_PL, 36);
-  gl.uniform4fv(G.btloc, u, SKY_BT, SKY_BT_N * 4);
-  gl.uniform4fv(G.syloc, u, SKY_SY, SKY_SY_N * 4);
-  gl.uniform4fv(G.vyloc, u, SKY_VY, 8);
-  if (G.glow) {
-    const L = G.gloc, gu = G.gu, M = GLOW_MAX * 4;
-    for (let j = 0; j < 3; j++) gl.uniform4fv(L[j], gu, j * 4, 4);
-    for (let j = 0; j < 4; j++) gl.uniform4fv(L[3 + j], gu, 12 + j * M, M);
-    gl.uniform1i(L[7], G.gn);
-  }
+  // the base sky outside the events' rectangles, the full program inside them; or the full program alone (rects off, no
+  // base program yet, or an event over the whole sky)
+  skyRects(G, u, cv.width, cv.height, dpr);
   gpuBegin(G, 'sky');
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  if (G.B && rectMode && !G.rectAll) {
+    // one triangle over the canvas per box, cut to it (the scissor: only its pixels are shaded)
+    const each = (list) => { for (const r of list) { gl.scissor(r[0], cv.height - r[3], r[2] - r[0], r[3] - r[1]); gl.drawArrays(gl.TRIANGLES, 0, 3); } };
+    gl.enable(gl.SCISSOR_TEST);
+    skyUniforms(G, G.B); each(G.rest);
+    if (G.rects.length) { skyUniforms(G, G.F); each(G.rects); }
+    gl.disable(gl.SCISSOR_TEST);
+  } else {
+    skyUniforms(G, G.F);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
   gpuEnd(G);
   G.painted = true; // a new picture for the backdrop (skyPaint)
   return true;
+}
+// this frame's uniforms (G.u, G.gu) into a sky program (L: G.F or G.B, skyLocs), which is then the one in use; a
+// uniform the program has no use for (the base sky's: the events') has no place and is skipped
+function skyUniforms(G, L) {
+  const gl = G.gl, u = G.u;
+  gl.useProgram(L.p);
+  for (let j = 0; j < SKY_U.length; j++) gl.uniform4fv(L.loc[j], u, j * 4, 4);
+  for (let j = 0; j < 2; j++) gl.uniform4fv(L.m[j], u, SKY_M + j * METEOR_N * 4, METEOR_N * 4);
+  for (let j = 0; j < 2; j++) gl.uniform4fv(L.s[j], u, SKY_M + METEOR_N * 8 + j * SAT_N * 4, SAT_N * 4);
+  for (let j = 0; j < 3; j++) gl.uniform4fv(L.r[j], u, SKY_M + METEOR_N * 8 + SAT_N * 8 + j * ROCKET_N * 4, ROCKET_N * 4);
+  gl.uniform4fv(L.nb, u, SKY_NB, 20);
+  gl.uniform4fv(L.as, u, SKY_AS, ASTEROID_N * 8 + 4);
+  gl.uniform4fv(L.ln, u, SKY_LN, 36);
+  gl.uniform4fv(L.sh, u, SKY_SH, 24);
+  gl.uniform4fv(L.wp, u, SKY_WP, 8);
+  gl.uniform4fv(L.fr, u, SKY_FR, FAR_N * 16); gl.uniform1i(L.frn, G.frn);
+  gl.uniform4fv(L.pl, u, SKY_PL, 36);
+  gl.uniform4fv(L.bt, u, SKY_BT, SKY_BT_N * 4);
+  gl.uniform4fv(L.sy, u, SKY_SY, SKY_SY_N * 4);
+  gl.uniform4fv(L.vy, u, SKY_VY, 8);
+  if (G.glow) {
+    const g = L.g, gu = G.gu, M = GLOW_MAX * 4;
+    for (let j = 0; j < 3; j++) gl.uniform4fv(g[j], gu, j * 4, 4);
+    for (let j = 0; j < 4; j++) gl.uniform4fv(g[3 + j], gu, 12 + j * M, M);
+    gl.uniform1i(g[7], G.gn);
+  }
 }
 
 // the sky on the page's backdrop (I.skyEl): the sky's shader's picture, copied only when it drew a new one (it carries
@@ -7901,6 +8067,7 @@ function skyPaintNow(glass, glows, k, ox, oy) {
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.clearRect(0, 0, w, h);
     g.drawImage(I.skyCanvas, 0, 0);
+    if (rectMode === 'show') skyRectsShow(g, I.skyGL, w, h);
     return;
   }
   if (skyGLWaits(I.skyGL)) return; // the sky's shader is about to be ready (skyGLInit)
@@ -7914,6 +8081,16 @@ function skyPaintNow(glass, glows, k, ox, oy) {
   drawMeteors(g);
   drawRockets(g);
   drawMoon(g);
+}
+// __map.rects('show'): each event's rectangle outlined on the backdrop (device px), or the whole window's edge when the
+// full program drew all of it
+function skyRectsShow(g, G, w, h) {
+  const d = I.dpr || 1;
+  g.save();
+  g.lineWidth = 2 * d; g.strokeStyle = 'rgba(255, 70, 200, 0.9)';
+  if (G.rectAll) g.strokeRect(3 * d, 3 * d, w - 6 * d, h - 6 * d);
+  for (const r of G.rects || []) g.strokeRect(r[0] + d, r[1] + d, r[2] - r[0] - 2 * d, r[3] - r[1] - 2 * d);
+  g.restore();
 }
 // a frame with the Map hidden: the sky alone, behind the view that shows
 function drawSkyOnly() {
