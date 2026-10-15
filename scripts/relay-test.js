@@ -334,7 +334,7 @@ const fv = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x'), text = Buffer.concat(parts).toString('utf8');
     let body = null;
     try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-    seen.push({ method: req.method, path: u.pathname, query: Object.fromEntries(u.searchParams), headers: req.headers, body });
+    seen.push({ method: req.method, path: u.pathname, query: Object.fromEntries(u.searchParams), headers: req.headers, body, raw: Buffer.concat(parts) });
     const json = (code, o, h = {}) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', ...h }); res.end(JSON.stringify(o)); };
     const p = u.pathname;
     if (holdPaths.has(p)) { if (!held.has(p)) held.set(p, []); held.get(p).push(res); return; }
@@ -452,7 +452,7 @@ async function main() {
     ['GET', '/api/sessions/new-12'], ['GET', `/api/sessions/${SID}/menu`], ['GET', `/api/sessions/${SID}/transcript`], ['GET', '/api/conversations'],
     ['GET', '/api/teams'], ['GET', '/api/status'], ['POST', '/api/sessions'], ...['message', 'answer', 'interrupt', 'open', 'stop', 'remove'].map((v) => ['POST', `/api/sessions/${SID}/${v}`]),
     ['POST', '/api/teams'], ...['add', 'remove', 'lead', 'disband', 'message'].map((v) => ['POST', `/api/teams/t0a1b2c3d/${v}`]), ['POST', '/settings'],
-    ['POST', '/rename'], ['POST', '/sessions/move'], ['POST', '/push-target'], ['POST', '/repos/remove'], ['POST', '/repos/add'], ['POST', '/chat/image'],
+    ['POST', '/rename'], ['POST', '/sessions/move'], ['POST', '/push-target'], ['POST', '/repos/remove'], ['POST', '/repos/add'], ['POST', '/chat/image'], ['POST', '/upload'],
     ['POST', '/teams'], ['POST', '/teams/add'], ['POST', '/teams/remove'], ['POST', '/teams/leave'], ['POST', '/teams/lead'], ['POST', '/teams/rename'],
     ['POST', '/api/bots'], ['POST', `/api/bots/${BOT}`], ['POST', '/api/bots/0123456789ab'],
     ['POST', `/api/bots/${BOT}/start`], ['POST', `/api/bots/${BOT}/remove`],
@@ -469,7 +469,7 @@ async function main() {
   const refused = [
     ['GET', '/reveal'], ['POST', '/reveal'], ['POST', '/open'], ['GET', '/update'], ['POST', '/update/apply'], ['GET', '/sync/status'], ['POST', '/sync/signout'],
     ['GET', '/remote/me'], ['POST', '/remote/approve'], ['GET', '/preview/x'], ['POST', '/housekeeping/clean'], ['GET', '/folders'],
-    ['POST', '/upload'], ['GET', '/relay/status'], ['POST', '/relay/pair'], ['POST', '/api/ask'], ['GET', '/api/ask/a0123456789'], ['GET', '/api'],
+    ['GET', '/upload'], ['POST', '/upload/x'], ['GET', '/relay/status'], ['POST', '/relay/pair'], ['POST', '/api/ask'], ['GET', '/api/ask/a0123456789'], ['GET', '/api'],
     ['POST', `/api/sessions/${SID}/wait`], ['GET', `/api/sessions/${SID}/message`], ['POST', '/state'], ['GET', '/settings'], ['POST', '/teams/evil'],
     ['POST', '/repos/scratch'], ['GET', '/timeline'], ['POST', '/usage/ack'], ['GET', '/'], ['GET', '/index.html'], ['PUT', '/state'], ['DELETE', '/state'],
     ['GET', '/state/'], ['GET', '/api/sessions/not-an-id'], ['GET', '/api/sessions/NEW-1x'], ['POST', '/api/teams/T0A1B2C3D/message'], ['POST', '/api/teams/t01/add'],
@@ -856,6 +856,35 @@ async function main() {
     eq(last.body, body || sentRest, `POST ${p}: the body that went on`);
     ok(last.headers.origin === ORIGIN && !last.headers.authorization && last.headers['x-fleet-view-relay'] === undefined, `POST ${p}: this PC's Origin, no token, not marked`);
   }
+  // a file from the phone (files.js upload): only a plain name and the bytes as base64, sent on as the raw body with the
+  // Origin files.js originOk takes (its own Host's), at most 15 MB (1,000 bytes here)
+  await tick(A.timers, 1001, ws);
+  const bytes = Buffer.from([0, 1, 2, 0xff, 0xfe, 0x0d, 0x0a, 0x80, 0x41]);
+  r = await ph.ask(ws, 'POST', '/upload', { q: { name: 'notes (1).bin' }, b: { data: bytes.toString('base64'), via: 'phone' } });
+  last = seenFor('/upload').pop();
+  ok(r && r.s === 200 && last && Buffer.compare(last.raw, bytes) === 0 && last.query.name === 'notes (1).bin' && Object.keys(last.query).length === 1, `POST /upload: 200, the raw bytes and the name went on (${r && r.s})`);
+  ok(last.headers['content-type'] === 'application/octet-stream' && last.headers.origin === ORIGIN && last.headers.origin === `http://${last.headers.host}`, `POST /upload: octet-stream, this PC's Origin, which is its Host's (files.js originOk)`);
+  ok(!last.headers.authorization && last.headers['x-fleet-view-relay'] === undefined, 'POST /upload: no token, not marked');
+  optsA.uploadMax = 1000;
+  const b64 = (n) => Buffer.alloc(n, 7).toString('base64');
+  const uploadCases = [
+    // [query, body, want]
+    [{ name: 'empty.txt' }, { data: '' }, 200], [{ name: 'max.bin' }, { data: b64(1000) }, 200], [{ name: 'v1.2 final.pdf' }, { data: 'QQ==' }, 200],
+    [{ name: 'big.bin' }, { data: b64(1001) }, 413], [{ name: 'big.bin' }, { data: 'Q'.repeat(2000) }, 413],
+    [{ name: 'a.txt', cwd: 'C:\\' }, { data: 'QQ==' }, 403], [{ name: 'a.txt' }, { data: 'QQ==', mime: 'text/plain' }, 403], [{ name: 'a.txt' }, { data: 'QQ==', path: 'C:\\x' }, 403],
+    [{}, { data: 'QQ==' }, 400], [{ name: '' }, { data: 'QQ==' }, 400], [{ name: '   ' }, { data: 'QQ==' }, 400], [{ name: 5 }, { data: 'QQ==' }, 400],
+    [{ name: 'a/b.txt' }, { data: 'QQ==' }, 400], [{ name: 'a\\b.txt' }, { data: 'QQ==' }, 400], [{ name: '..' }, { data: 'QQ==' }, 400], [{ name: 'x..y' }, { data: 'QQ==' }, 400],
+    [{ name: 'a\nb' }, { data: 'QQ==' }, 400], [{ name: 'a\u0000b' }, { data: 'QQ==' }, 400], [{ name: 'x'.repeat(201) }, { data: 'QQ==' }, 400], [{ name: 'x'.repeat(200) }, { data: 'QQ==' }, 200],
+    [{ name: 'a.txt' }, {}, 400], [{ name: 'a.txt' }, { data: 'QQ=' }, 400], [{ name: 'a.txt' }, { data: 'QQ-_' }, 400], [{ name: 'a.txt' }, { data: 'Q=Q=' }, 400], [{ name: 'a.txt' }, { data: 12 }, 400],
+  ];
+  for (const [q, b, want] of uploadCases) {
+    await tick(A.timers, 100, ws);
+    const n0 = seenFor('/upload').length;
+    r = await ph.ask(ws, 'POST', '/upload', { q, b });
+    const reached = seenFor('/upload').length - n0;
+    ok(r && r.s === want && reached === (want === 200 ? 1 : 0), `POST /upload ${JSON.stringify(q).slice(0, 60)} ${JSON.stringify(b).slice(0, 40)}: want ${want}, got ${r && r.s} (${r && r.b && r.b.message || ''}), reached ${reached}`);
+  }
+  optsA.uploadMax = undefined;
   // the Claude accounts screen: what GET /accounts passes on, and a sign-in only for A or B with no login
   await tick(A.timers, 1001, ws);
   ACCTS_VIEW.v = {

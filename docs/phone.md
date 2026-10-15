@@ -269,6 +269,7 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
   | `POST /api/sessions/:id/now` (send now), `/enter` (Send it) and `/background` (Run in background) | 10 s | | 20 s |
   | `POST /api/sessions/:id/model` (a model or effort switch: `/model`, `/effort`, the default put back), `/mode` (the permission mode: Shift+Tab, read back after each press), and the page's `/bots/:id/switch` (the same, for a dynamic bot) | 20 s | | 25 s (`/model` and `/bots/:id/switch`: the caller sets `timeoutMs`) |
   | `POST /api/sessions/:id/rewind` (Rewind and Edit: "/rewind", then ↑ a press at a time up its list, each read back; api.js bounds the walk at 40 s) | 60 s | | 65 s |
+  | `POST /chat/image` and `/upload` (a picture or a file from the phone: a 15 MB one goes up as 53 parts, 20 a second, before the PC saves it) | 30 s | | 90 s (the caller sets `timeoutMs`) |
   | everything else (`/unsend` among them) | 30 s | | 20 s |
 
   So 145 s and 125 s at most. The wait added is the one the relay passed on (`true` and anything over 50 count as
@@ -290,7 +291,7 @@ The text is cut into slices of at most 400,000 UTF-16 code units, never between 
 Each part is its own envelope (compressed as usual). The receiver joins the chunks in order once all `parts` arrived,
 then parses the result as the message. Limits: at most 64 parts, at most 4 messages being put together per device at
 once, and a set not complete within 60 seconds is dropped. From the phone, the whole text may be up to 21,000,000
-characters (a 15 MB image as base64 in `POST /chat/image`), and the phone sends at most 20 parts a second: every part
+characters (a 15 MB image or file as base64 in `POST /chat/image` or `/upload`), and the phone sends at most 20 parts a second: every part
 counts against the relay's per-second limit, and a part over it is dropped, not answered.
 
 ### Limits
@@ -332,7 +333,7 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 `/api/teams/:id/add`, `/api/teams/:id/remove`, `/api/teams/:id/lead`, `/api/teams/:id/disband`,
 `/api/teams/:id/message`, `/api/bots`, `/api/bots/:id`, `/api/bots/:id/start`,
 `/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
-`/chat/image`, and the page's `/teams` (the phone's New team sends it as the page's New team does: `{ members, order, name,
+`/chat/image`, `/upload` (a file from the phone, below), and the page's `/teams` (the phone's New team sends it as the page's New team does: `{ members, order, name,
 lead, send: true }`, then `/teams/add` for a team above and `/teams/leave` with `quiet` for a member its order missed),
 `/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`, `/teams/rename`, `/bots/:id/switch`, `/bots/:id/map`, `/bots/:id/watch` and `/bots/:id/tasks/:taskId`,
 `/chat/dynamic` (Dynamic on or off for any chat, below), and `/accounts/add`, `/accounts/login`,
@@ -503,13 +504,27 @@ Narrower rules:
     waits on the key, with the message in a box there once it went back, and opens once the PC has the id.
 - `POST /chat/dynamic` takes only `id` (a conversation id), `model` and `effort` (403 otherwise), at least one of the
   two, each `true` or `false` (400).
+- **Files from the phone** (files.js `upload`, the page's browser upload: web/pcfiles.js): `POST /upload?name=<its name>
+  { data }` takes only the query's `name` and the body's `data` (403 otherwise). `name` must be a plain file name: at
+  most 200 characters, no `/` or `\`, no control character, no `..` (400; files.js `cleanName` makes it safe for Windows
+  after). `data` is the file in standard base64 with its padding (400), at most 15 MB of bytes (413: what one message
+  from the phone holds as base64, under files.js's own 200 MB). The relay decodes it and sends the bytes on as the
+  raw body (`Content-Type: application/octet-stream`) with this PC's Origin, as the page's upload does; files.js
+  saves it only as `<dataDir>/uploads/<yyyy-mm-dd>/<8 hex>-<name>` (kept a week) and answers
+  `{ ok, path, name, size }`. Not marked. The phone's composer offers **File from the phone** (the Files app through expo-document-picker,
+  one or more; a binary without its native half, the store app up to 0.4.0, shows it off with "comes with the next app
+  update") and **File or folder on the PC** (the file viewer opened on the chat's folder, `GET /file` behind the
+  fence below: Attach takes the folder listed or the file opened, by its path, with nothing sent up). A file over 15
+  MB is refused on the phone with its size. Each is a chip over the box (its name, its size or "on the PC", a spinner
+  while it goes up, why it did not and a tap to retry), and its path on the PC goes after the text when the message
+  is sent, as a picture's does. iOS's picker can't pick a folder from the phone.
 - `POST /repos/add` takes only a root Fleet View already knows (in `/state`'s repos or the removed list). The
   same goes for the roots of `/sessions/move`, `/push-target` and `/repo-history`.
 - `GET /file`, `/chat/kind`, `/chat/files` and `/chat/commands`' folder are fenced: see the next section.
 - `GET /conversation/image` serves only a known conversation's pictures; `POST /api/sessions` checks its repo and
   `forkFrom`, and the page's `/teams` routes take conversation ids.
 - Everything else is refused, including `/reveal`, `/open`, `/update/*`, `/sync/*`, every other `/accounts/*` (`/accounts/remove` among them), `/remote*`,
-  `/preview/*`, `/housekeeping/*`, `/folders`, `/upload`, `/relay/*`, `/api/ask*` and `/api/sessions/:id/wait`.
+  `/preview/*`, `/housekeeping/*`, `/folders`, `/relay/*`, `/api/ask*` and `/api/sessions/:id/wait`.
 
 ### What the phone may read (the fence)
 
@@ -603,7 +618,7 @@ as above, one QR code per machine) and talks to each over its own channel or soc
 - **A chat's requests go to its host** (`phone/src/transport/multi.ts`, `phone/src/lib/hosts.ts`): send, answer,
   interrupt, now, unsend, model, enter, background, mode, rewind, fork, activity, menu, the session, the transcript, `/conversation`
   and its pictures, and,
-  for the chat on view, the routes that read its folder (`/chat/image`, `/chat/files`, `/chat/commands`,
+  for the chat on view, the routes that read its folder (`/chat/image`, `/upload`, `/chat/files`, `/chat/commands`,
   `/chat/kind`, `/file`). The host is the chat's `workspace.host` in `/state` (null: the machine that listed it), or
   for an older machine its `syncOwner` (not one moving `away` from the lister), else the machine that listed it. A
   host is matched to a pairing by its sync device id, and by name only when that machine sends no `device`.

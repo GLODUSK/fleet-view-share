@@ -95,6 +95,12 @@
 //                       a fork counts one start
 //   POST /chat/dynamic  (Dynamic for any chat: a part sized per message, on or off) only id, a conversation id, and
 //                       model and/or effort, each true or false (403 for any other field, 400 for a bad one)
+//   POST /upload        (a file from the phone: files.js upload, which saves it only in its uploads folder and answers
+//                       its path) only the query's name, a plain file name (at most 200 characters, no / or \, no
+//                       control character, no '..'), and the body's data, the file in standard base64, at most 15 MB
+//                       (413; what one message from the phone holds as base64, under files.js's 200 MB), sent on as
+//                       the raw body with this PC's Origin, as the page's browser upload (403 for any other field,
+//                       400 for a bad one)
 //   POST /api/bots, /api/bots/:id   only name, brief, role, account, model, effort, shape and color, as bots.js
 //                       reads (anything else: 403);  POST /api/bots/:id/start and /remove  no fields at all (403). A
 //                       bot id: 12 hex digits
@@ -149,7 +155,7 @@
 //   pcName, log(text), onComputerGone(peer) (a computer revoked with revoke(),
 //   not through link.js: fleet-view.js has the link unlink it on both machines) } and, for tests: now, WebSocketImpl, timers
 //   ({ setTimeout, clearTimeout }), keyStore (a store as sync-api.js's), readConfig(dataDir), routeMs, waitRouteMs,
-//   startLimits ({ atOnce, max }, read at each request), resDeviceMax
+//   startLimits ({ atOnce, max }, read at each request), resDeviceMax, uploadMax
 // Routes (fleet-view.js sends /relay/* here; this PC only, never through the relay; POSTs need this page's Origin):
 //   GET  /relay/status  { enabled, signedIn, email, connected, devices } (never a key; a device still pairing says how
 //                       many handshakes its code made)
@@ -205,6 +211,9 @@ const IN_FLIGHT_MAX = 20, PER_S = 30, PER_MIN = 1200;
 // per device, the routes that start or resume a Claude (startWeight): 2 at once, and 12 in 10 minutes (a team counts
 // one per member, and the largest team has 12)
 const STARTS_AT_ONCE = 2, STARTS_MAX = 12, STARTS_MS = 10 * 60e3;
+// POST /upload (a file from the phone, files.js upload): at most 15 MB, what one message from the phone holds as base64
+// (UP_TEXT_MAX), well under files.js's UPLOAD_MAX (200 MB); its name a plain file name of at most 200 characters
+const UPLOAD_MAX = 15 << 20, UPLOAD_NAME_MAX = 200;
 const RES_MAX = 32 << 20; // bytes read from the server for one answer
 const RES_DEVICE_MAX = 64 << 20; // bytes of answers being read for one device at once (429 past it)
 const HEARTBEAT_MS = 25e3, JOIN_MS = 10e3, BACKOFF_MIN = 1e3, BACKOFF_MAX = 60e3;
@@ -349,7 +358,7 @@ const ALLOW = {
     '/api/teams', '/api/status', '/accounts', '/sync/move'],
   POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model|enter|background|mode|rewind|fork)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
-    '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)',
+    '/repos/remove', '/repos/add', '/chat/image', '/upload', '/teams', '/teams/(?:add|remove|leave|lead|rename)',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/(?:switch|map|watch)`, `/bots/${BOT}/tasks/${TASK}`,
     '/accounts/(?:add|login|code|cancel)', '/sync/move', '/chat/dynamic'],
 };
@@ -398,6 +407,11 @@ const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypass'];
 // a message's text as api.js cleanText takes it: line breaks made \n, then something besides spaces, and no control
 // character but \n and \t
 const textOk = (v) => typeof v === 'string' && !!v.trim() && !/[\x00-\x08\x0b-\x1f\x7f]/.test(v.replace(/\r\n|[\u0085\u2028\u2029]/g, '\n'));
+// an upload's name: a plain file name (no folder in it, no control character, no '..'), at most UPLOAD_NAME_MAX
+// characters; files.js cleanName makes it safe for Windows after
+const uploadNameOk = (n) => typeof n === 'string' && !!n.trim() && n.length <= UPLOAD_NAME_MAX && !/[\\/\x00-\x1f\x7f]/.test(n) && !n.includes('..');
+// standard base64 with its padding, and the bytes it holds (-1 when it is not that)
+const b64Bytes = (s) => (typeof s === 'string' && s.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(s) ? (s.length / 4) * 3 - (s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0) : -1);
 // POST routes api.js reads the relay's marker on (viaOf): text that reaches a Claude as Henry's (a shell command in an
 // overseer's session too), and making, changing or removing a bot, switching a conversation's model or permission mode or
 // rewinding or forking it (Henry's alone for an overseer)
@@ -563,6 +577,7 @@ function createRelay(opts = {}) {
   const readConfig = typeof opts.readConfig === 'function' ? opts.readConfig : SYNC_API.readConfig;
   const routeMs = Number(opts.routeMs) || ROUTE_MS, waitRouteMs = Number(opts.waitRouteMs) || WAIT_ROUTE_MS;
   const resDeviceMax = () => Number(opts.resDeviceMax) || RES_DEVICE_MAX; // read each time (tests change it)
+  const uploadMax = () => Math.min(UPLOAD_MAX, Number(opts.uploadMax) || UPLOAD_MAX); // (the same)
   const relayDir = path.join(dataDir, 'relay');
   const devicesFile = path.join(relayDir, 'devices.json');
   const pairPage = path.join(relayDir, 'pair.html');
@@ -871,6 +886,18 @@ function createRelay(opts = {}) {
       if (b.model == null && b.effort == null) return [400, 'give model, effort or both'];
       return [b.model, b.effort].every((v) => v == null || typeof v === 'boolean') ? null : [400, 'model and effort must be true or false'];
     }
+    // a file from the phone (files.js upload, which saves it only in its uploads folder): its name in the query and its
+    // bytes as standard base64, nothing else (forward sends them on as the raw body)
+    if (p === '/upload') {
+      const badQ = Object.keys(q).filter((k) => k !== 'name'), bad = Object.keys(b).filter((k) => k !== 'data');
+      if (badQ.length || bad.length) return no(`an upload takes only name and data, not ${[...badQ, ...bad].slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      if (!uploadNameOk(q.name)) return [400, `name must be a plain file name: no folder, no "..", at most ${UPLOAD_NAME_MAX} characters`];
+      const max = uploadMax(), mb = Math.round(max / 1048576);
+      if (typeof b.data === 'string' && b.data.length > Math.ceil(max / 3) * 4) return [413, `the file is over ${mb} MB: at most that goes to the PC from the phone`];
+      const n = b64Bytes(b.data);
+      if (n < 0) return [400, 'data must be the file in standard base64'];
+      return n > max ? [413, `the file is over ${mb} MB: at most that goes to the PC from the phone`] : null;
+    }
     const verb = (VERB_RE.exec(p) || [])[1];
     if (verb === 'now') return Object.keys(b).length ? no('send now takes nothing else from the phone') : null;
     if (verb === 'background') return Object.keys(b).length ? no('run in background takes nothing else from the phone') : null;
@@ -1000,8 +1027,10 @@ function createRelay(opts = {}) {
         headers['X-Fleet-View-Peer'] = peer;
       }
       if (m === 'POST') {
-        body = Buffer.from(JSON.stringify(b || {}), 'utf8');
-        headers['Content-Type'] = 'application/json';
+        // an upload's bytes go as the raw body files.js reads, as the page's browser upload sends them (narrow checked them)
+        const raw = p === '/upload' && b && typeof b.data === 'string';
+        body = raw ? Buffer.from(b.data, 'base64') : Buffer.from(JSON.stringify(b || {}), 'utf8');
+        headers['Content-Type'] = raw ? 'application/octet-stream' : 'application/json';
         headers['Content-Length'] = body.length;
         if (!api) headers.Origin = origin;
       }
@@ -1905,9 +1934,9 @@ async function cli(argv, io = {}) {
 module.exports = {
   createRelay, cli, seal, open, decrypt, dirKey, aadText, topicOf, slices, pairLink, qrSvg, routeAllowed, peerRouteAllowed, PEER_ALLOW, pathOk,
   routeTimeout, startWeight, resumeKind, resumeWeight, xPair, xPublic, pairedKey, secretName, stepsOk, ALLOW, SIGNIN_LETTERS, SETTINGS_KEYS, MARKED, LABEL, PAIRED_INFO, LINK_V,
-  PART_MAX, PARTS_MAX, C_MAX, LOCAL_GONE,
+  PART_MAX, PARTS_MAX, C_MAX, LOCAL_GONE, uploadNameOk, b64Bytes,
   TIMES: { ROUTE_MS, WAIT_ROUTE_MS, WAIT_CAP_S, START_ROUTE_MS, RESUME_ROUTE_MS, ACTIVITY_MS, NOW_MS, MODEL_MS, REWIND_MS },
-  LIMITS: { IN_FLIGHT_MAX, PER_S, PER_MIN, STARTS_AT_ONCE, STARTS_MAX, STARTS_MS, RES_DEVICE_MAX, UNPACKS_MAX, UNPACK_WAIT_MAX, INFLATE_UP_MAX, HS_GAP_MS, HS_MAX },
+  LIMITS: { IN_FLIGHT_MAX, PER_S, PER_MIN, STARTS_AT_ONCE, STARTS_MAX, STARTS_MS, RES_DEVICE_MAX, UNPACKS_MAX, UNPACK_WAIT_MAX, INFLATE_UP_MAX, HS_GAP_MS, HS_MAX, UPLOAD_MAX, UPLOAD_NAME_MAX },
 };
 
 if (require.main === module) {
