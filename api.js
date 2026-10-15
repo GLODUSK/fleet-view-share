@@ -295,6 +295,26 @@ function menuFrom(raw, p) {
   if (m) m.sig = crypto.createHash('sha1').update(m.sig).digest('hex').slice(0, 12);
   return m;
 }
+// the command's panel on that session's screen (/usage, /config...: screen.js panelShown, as the page's card reads it),
+// from a snapshot, or null: { title, tabs: [{ label, on }], body: [lines], keys, sig (12 hex, as a menu's), cmd (the
+// "/" command that opened it, the host's slashPanel, else null) }. Read loose (its keys line may be missing while a tab
+// loads) once the host says a panel is open there
+function panelFrom(raw, p) {
+  const { cols, rows } = sizeOf(p);
+  const x = SCREEN.panelShown(typeof raw === 'string' ? raw : '', cols, rows, { loose: panelOpen(p) || !!p.slashPanel });
+  if (!x) return null;
+  return { title: x.title, tabs: x.tabs, body: x.body, keys: x.keys, sig: crypto.createHash('sha1').update(x.sig).digest('hex').slice(0, 12), cmd: p.slashPanel || null };
+}
+// the menu and the panel of one reading of its screen, weighed as the page's tick weighs them: a panel a "/" command
+// opened is that command's, whatever list it shows; else a menu up is a question Claude asks (a permission prompt),
+// and the panel under it is none. -> { menu, panel }, at most one of them
+function shownFrom(raw, p) {
+  let menu = menuFrom(raw, p);
+  let panel = typeof raw === 'string' && raw.includes('▔'.repeat(12)) ? panelFrom(raw, p) : null;
+  if (panel && menu && !p.slashPanel) panel = null;
+  else if (panel) menu = null;
+  return { menu, panel };
+}
 // A panel open in that session (/usage, /config: its claude waits on "dialog open") would take the text. One a
 // "/" command opened (the host's slashPanel) gets Esc, as the host itself does after a minute left alone, and
 // this waits until the host's list says it closed; any other (a startup dialog: Esc could refuse it) is left
@@ -853,12 +873,13 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
   { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
   { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort?, queue? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. Not idle: 409 notReady, or with queue: true 202 { queued, model?, effort? }: applied once Claude finishes this step (GET /state\'s switchPending until then; dropped after 30 min). An overseer\'s: Henry only (his phone)' },
-  { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code), mode (default | acceptEdits | plan | auto | bypass | null), bg (a shell command Ctrl+B can send to the background), prompt (its prompt box\'s text; a bash-mode one as "!<command>"; null when not on screen), rewind (the last POST .../rewind: { state: asking | sending | sent | restored | kept | failed, text, edit, message, at }, or null), fork (on a fork POST .../fork started: { state: working | done | failed, text, from, message, at }, or null)' },
+  { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code), mode (default | acceptEdits | plan | auto | bypass | null), bg (a shell command Ctrl+B can send to the background), prompt (its prompt box\'s text; a bash-mode one as "!<command>"; null when not on screen), rewind (the last POST .../rewind: { state: asking | sending | sent | restored | kept | failed, text, edit, message, at }, or null), fork (on a fork POST .../fork started: { state: working | done | failed, text, from, message, at }, or null), panel (a command\'s panel up, as the page\'s panel card shows it: { title, tabs: [{ label, on }], body: [lines], keys (its keys line), sig, cmd (the "/" command that opened it, or null) }, or null; POST .../panel drives it)' },
   { method: 'POST', path: '/api/sessions/:id/rewind', body: '{ text, nth?, edit? }', does: 'the page\'s Rewind (and Edit, with edit) on one of your messages: Claude Code\'s /rewind back to just before it. text: the message as the transcript has it; nth: which of the messages with that text, counted from the newest (default 0). Only while Claude is idle with no menu or panel up and nothing typed in its prompt (409). -> { menu, at }: Claude Code\'s restore question, now up, which the caller answers (POST .../answer); once restored the message leaves its prompt and edit is sent in its place (activity\'s rewind says how it ended). An overseer\'s: Henry only (his phone)' },
   { method: 'POST', path: '/api/sessions/:id/fork', body: '{ text, nth? }', does: 'the page\'s Fork on one of your messages: a fork of the conversation (claude --resume <id> --fork-session, in its folder under its account; it need not be running) that goes back to just before that message. text and nth as for .../rewind. -> { key, forkFrom, at } as soon as the fork started; then, once it is up, Claude Code\'s /rewind in the fork to the message, "Restore conversation" only (never the code: the original shares the folder), and the message cleared from the fork\'s prompt, for the caller\'s box (the fork\'s activity\'s fork says how it went). An overseer\'s: Henry only (his phone)' },
   { method: 'POST', path: '/api/sessions/:id/enter', body: '{ text }', does: 'the page\'s Send it on a message left in Claude Code\'s prompt: Enter once more, only while its prompt box holds exactly that text (spaces aside) and no menu is up' },
   { method: 'POST', path: '/api/sessions/:id/background', does: 'the page\'s Run in background: Ctrl+B, only while Claude works and its screen offers it (activity\'s bg)' },
   { method: 'POST', path: '/api/sessions/:id/mode', body: '{ mode: "default" | "acceptEdits" | "plan" | "auto" | "bypass" }', does: 'the permission mode: Shift+Tab until its footer shows that mode (at most 5 presses; 409 with the mode it is on when it has no such mode), only while Claude is idle with no menu up. An overseer\'s: Henry only (his phone)' },
+  { method: 'POST', path: '/api/sessions/:id/panel', body: '{ key: "up" | "down" | "left" | "right" | "tab" | "enter" | "esc" } or { tab: n }', does: 'the page\'s panel card: drive a command\'s panel open in its terminal (/usage, /status, /config, /mcp...: activity\'s panel shows it): key pressed once, or Tab until tab n (from 0, as activity\'s panel lists them) is on. Only while a panel is up (409 otherwise, with the menu when a question is up instead). -> { panel }: as it reads after (null once it closed). An overseer\'s: Henry only (his phone)' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
   { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|chrome|other), title, context, options, sig; or null' },
   { method: 'POST', path: '/api/sessions/:id/answer', body: '{ option: n | "submit" | "esc", sig?, text?, allowPermission?, wait? }', does: 'answer the menu (text: for a "Type something." option; "submit": a multiple-choice question\'s Submit); any menu but a question needs allowPermission (esc never does); the folder trust question answered Yes also has a Claude in Chrome offer that follows it answered Yes (chromeOffer: \'accepted\')' },
@@ -2020,6 +2041,60 @@ async function switchMode(key, b, ctx, via = null) {
   });
 }
 
+// POST /api/sessions/:id/panel { key } | { tab }: the page's panel card (compose.js panelKey, panelTab) for a caller
+// that has no terminal of its own (the phone): key, one of PANEL_KEYS, pressed once, as the card's keycaps press it;
+// tab, which of the panel's tabs (from 0, as /activity's panel lists them): Tab pressed until that one is on, from the
+// one on now. Only while a panel is on its screen (shownFrom: not a question Claude asks), so an Esc never reaches
+// Claude mid-turn as an interrupt and an Enter never answers a menu. -> { panel }: the panel as it reads a moment after
+// (null once it closed: an Esc waits up to PANEL_GONE_MS for that, as a search box takes one Esc first). An
+// overseer's: Henry only (his phone), as its permission mode (a panel such as /permissions or /config changes it)
+const PANEL_KEYS = { up: '\x1b[A', down: '\x1b[B', left: '\x1b[D', right: '\x1b[C', tab: '\t', enter: '\r', esc: '\x1b' };
+const PANEL_TABS_MAX = 20;
+const PANEL_TAB_MS = 90; // between the Tabs to a tab (compose.js panelTab)
+const PANEL_LOOK_MS = 250; // after a key, before the panel is read again
+const PANEL_GONE_MS = 1500; // after an Esc: how long to look for the panel to close
+const NO_PANEL = 'no panel is open in its terminal (a "/" command such as /usage opens one)';
+async function pressPanel(key, b, ctx, via = null) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  const hasKey = b.key !== undefined, hasTab = b.tab !== undefined;
+  if (hasKey === hasTab) return [400, { ok: false, message: 'give key or tab (one of the two)' }];
+  if (hasKey && !Object.prototype.hasOwnProperty.call(PANEL_KEYS, b.key)) return [400, { ok: false, message: `key must be one of ${Object.keys(PANEL_KEYS).join(', ')}` }];
+  if (hasTab && !(Number.isInteger(b.tab) && b.tab >= 0 && b.tab < PANEL_TABS_MAX)) return [400, { ok: false, message: `tab must be a whole number from 0 to ${PANEL_TABS_MAX - 1} (which tab, from the left)` }];
+  return withHost(async (host) => {
+    const { p, err } = await need(host, key, true);
+    if (err) return err;
+    if (isOverseer(p.role) && via !== 'henry') return [403, { ok: false, id: p.id, message: 'only Henry drives an overseer\'s panel (his phone)' }];
+    return typeOne(p.id, async () => {
+      const read = async () => shownFrom(await host.call('snapshot', p.id), p);
+      const now = await read();
+      if (!now.panel) return [409, { ok: false, id: p.id, panel: null, ...(now.menu ? { menu: now.menu, message: MENU_UP } : { message: NO_PANEL }) }];
+      let what;
+      if (hasTab) {
+        const tabs = now.panel.tabs, cur = tabs.findIndex((t) => t.on);
+        if (!tabs.length) return [409, { ok: false, id: p.id, panel: now.panel, message: 'this panel has no tabs' }];
+        if (b.tab >= tabs.length) return [409, { ok: false, id: p.id, panel: now.panel, message: `this panel has ${tabs.length} tabs` }];
+        if (cur < 0) return [409, { ok: false, id: p.id, panel: now.panel, message: 'which tab is on could not be read' }];
+        for (let n = (b.tab - cur + tabs.length) % tabs.length; n > 0; n--) {
+          await host.call('write', p.id, PANEL_KEYS.tab);
+          if (n > 1) await sleep(PANEL_TAB_MS);
+        }
+        what = `on the ${tabs[b.tab].label} tab`;
+      } else {
+        await host.call('write', p.id, PANEL_KEYS[b.key]);
+        what = `${b.key === 'esc' ? 'Esc' : b.key === 'enter' ? 'Enter' : b.key === 'tab' ? 'Tab' : `${b.key[0].toUpperCase()}${b.key.slice(1)}`} pressed`;
+      }
+      // the panel as it reads now: an Esc looks a while longer for it to close
+      let after = null;
+      for (const end = Date.now() + (b.key === 'esc' ? PANEL_GONE_MS : 0); ;) {
+        await sleep(PANEL_LOOK_MS);
+        after = (await read()).panel;
+        if (!after || Date.now() >= end) break;
+      }
+      return [200, { ok: true, id: p.id, panel: after, message: after ? what : `${what}: the panel closed` }];
+    });
+  });
+}
+
 // ---------- Rewind and Edit on one of your messages ----------
 // What the page's Rewind and Edit do (web/chat.js rewind and editMsg, web/compose.js rewindTo, rewindSteps, takeRewound
 // and restored), for a caller with no terminal of its own (the phone's chat): Claude Code's own /rewind, driven through
@@ -2725,8 +2800,10 @@ async function switchModel(key, b, ctx, via = null) {
 // page's tick reads besides: mode (the permission mode its footer shows: screen.js modeShown, null when it can't be
 // read), bg (a shell command runs that Ctrl+B can send to the background: POST .../background), and prompt (the prompt
 // box's text, "" empty, a bash-mode box's as "!<command>", null when it isn't on screen), so a caller can tell a message
-// it sent is still sitting there unsent (POST .../enter). One host list, one read of its screen (rendered once, with the
-// dim marks the box needs) and the transcript's cached state: cheap enough to poll every second or two.
+// it sent is still sitting there unsent (POST .../enter), and panel: a command's panel up (/usage, /config...), as the
+// page's panel card shows it (panelFrom; null when none), for a caller to show and drive (POST .../panel). One host
+// list, one read of its screen (rendered once, with the dim marks the box needs; once more with the colour marks while a
+// panel's edge is on it) and the transcript's cached state: cheap enough to poll every second or two.
 async function readActivity(key, ctx) {
   return withHost(async (host) => {
     const { p, err } = await need(host, key, false);
@@ -2737,17 +2814,24 @@ async function readActivity(key, ctx) {
     // rewind: how a Rewind or Edit from here is going (rewindNow), so the caller can put the text back in its box
     // fork: on a fork from a message, how its going back is going (forkNow), so the caller can put the message in its box
     const base = { ok: true, id: p.id, alive: !!p.alive, status: p.status || null, waitingFor: p.waitingFor || null, doing, rewind: rewindNow(p.id), fork: forkNow(p) };
-    if (!p.alive) return [200, { ...base, busy: false, line: null, verb: null, detail: null, waiting: null, menu: null, effort: null, queue: [], mode: null, bg: false, prompt: null }];
-    const marked = await rowsNow(host, p, 60, true);
+    if (!p.alive) return [200, { ...base, busy: false, line: null, verb: null, detail: null, waiting: null, menu: null, effort: null, queue: [], mode: null, bg: false, prompt: null, panel: null }];
+    const raw = await host.call('snapshot', p.id);
+    const { cols, rows: high } = sizeOf(p);
+    const marked = SCREEN.render(typeof raw === 'string' ? raw : '', cols, high, 60, false, true);
     const rows = marked.map((l) => l.replace(/[\x01-\x04]/g, '').replace(/\s+$/, '')).slice(-40);
     const spin = SCREEN.spinner(rows);
-    const m = SCREEN.menuDetails(rows);
-    const panel = panelOpen(p);
+    let m = SCREEN.menuDetails(rows);
+    // a command's panel (only when its top edge is on screen, as the page's tick: reading it costs another render),
+    // weighed against a menu as shownFrom does
+    let shown = marked.some((l) => /▔{12}/.test(l)) ? panelFrom(raw, p) : null;
+    if (shown && m && !p.slashPanel) shown = null;
+    else if (shown) m = null;
+    const panel = panelOpen(p) || !!shown;
     const busy = (p.status === 'busy' || !!(spin && spin.strong)) && !m && !panel;
     return [200, { ...base, busy, line: busy ? `${spin ? `${spin.verb}…` : 'Working…'}${spin && spin.detail ? ` (${spin.detail})` : ''}` : null,
       verb: spin ? spin.verb : null, detail: spin ? spin.detail || null : null, waiting: m ? 'menu' : panel ? 'panel' : null,
       menu: m ? { kind: m.kind, title: m.title } : null, effort: SCREEN.effortShown(rows), queue: await claudeQueue(p.id, ctx),
-      mode: m || panel ? null : SCREEN.modeShown(rows), bg: busy && SCREEN.bgOffered(rows), prompt: m || panel ? null : boxText(marked) }];
+      mode: m || panel ? null : SCREEN.modeShown(rows), bg: busy && SCREEN.bgOffered(rows), prompt: m || panel ? null : boxText(marked), panel: shown }];
   });
 }
 
@@ -2846,7 +2930,7 @@ async function listConversations(query, ctx) {
 //        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,
 //        bots: { list(), create(b), start(id), update(id, b), remove(id), look(b) } each -> [code, json] or a Promise of one
 //        (/api/bots, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
-const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode|rewind|fork';
+const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode|rewind|fork|panel';
 const GET_VERBS = new Set(['menu', 'transcript', 'activity']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
 const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|lead|disband|message))?\/?$/;
@@ -2960,6 +3044,7 @@ function handle(req, res, pathname, ctx) {
       case 'mode': return body((b) => switchMode(k, b, ctx, via(b)));
       case 'rewind': return body((b) => rewindSession(k, b, ctx, via(b)));
       case 'fork': return body((b) => forkSession(k, b, ctx, via(b)));
+      case 'panel': return body((b) => pressPanel(k, b, ctx, via(b)));
       default: break;
     }
   }

@@ -1166,6 +1166,93 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     ok('mode: Shift+Tab until the footer shows it; on it already, a mode it lacks, no redraw; not busy, a menu, unread; an overseer\'s is Henry\'s');
   }
 
+  // ---------- a command's panel (activity's panel, POST .../panel) ----------
+  {
+    // a fake Claude Code's Settings panel, as /usage draws it (web/term.js's fake): a ▔ edge, its tabs with the one on in
+    // a background colour, its keys at the bottom. Tab and → go to the next tab, ← back, Esc closes it (the prompt again)
+    const E = '\x1b[', TABS = ['Status', 'Config', 'Usage', 'Stats'];
+    const BODY = { Status: ['Version:           2.1.294'], Config: ['❯ Auto-compact      true', '  Show tips         true'],
+      Usage: ['Current session', `${E}38;2;177;185;249m${'█'.repeat(6)}${E}0m                   12% used`], Stats: ['Sessions: 412'] };
+    let at = 2, open = true;
+    const draw = () => {
+      const tabs = TABS.map((t, i) => (i === at ? `${E}38;2;0;0;0m${E}48;2;177;185;249m ${t} ${E}0m` : ` ${t} `)).join(' ');
+      fake.screen = open
+        ? ['done.', '', RULE, '❯ /usage', '▔'.repeat(60), `   ${E}1mSettings${E}0m ${tabs}`, '', ...BODY[TABS[at]].map((l) => `   ${l}`), '', `   ${E}2mEsc to cancel${E}0m`].join('\r\n')
+        : screenOf(['done.', '', ...box()]);
+    };
+    const start = (o = {}) => {
+      reset(); at = 2; open = true; draw();
+      live({ status: 'waiting', waitingFor: 'dialog open', slashPanel: '/usage', ...o });
+      fake.onWrite = (w) => {
+        if (!open) return;
+        if (w === '\t' || w === '\x1b[C') at = (at + 1) % TABS.length;
+        else if (w === '\x1b[D') at = (at + TABS.length - 1) % TABS.length;
+        else if (w === '\x1b') open = false;
+        draw();
+      };
+    };
+    start();
+    const [c0, a0] = await call('GET', `${S}/activity`);
+    assert.equal(c0, 200);
+    assert.equal(a0.waiting, 'panel');
+    assert.equal(a0.busy, false);
+    assert.equal(a0.menu, null);
+    assert.equal(a0.panel.title, 'Settings');
+    assert.deepEqual(a0.panel.tabs, TABS.map((label, i) => ({ label, on: i === 2 })));
+    assert.deepEqual(a0.panel.body, ['Current session', '██████                   12% used']);
+    assert.equal(a0.panel.keys, 'Esc to cancel');
+    assert.equal(a0.panel.cmd, '/usage');
+    assert.match(a0.panel.sig, /^[0-9a-f]{12}$/);
+    // a key: pressed once, and the panel as it reads after
+    const [c1, o1] = await call('POST', `${S}/panel`, { key: 'right' });
+    assert.equal(c1, 200, o1.message);
+    assert.deepEqual(fake.writes, ['\x1b[C']);
+    assert.equal(o1.panel.tabs.findIndex((t) => t.on), 3);
+    assert.notEqual(o1.panel.sig, a0.panel.sig);
+    // a tab: Tab until it is on (from Stats round to Config: two presses)
+    fake.writes = [];
+    const [c2, o2] = await call('POST', `${S}/panel`, { tab: 1 });
+    assert.equal(c2, 200, o2.message);
+    assert.deepEqual(fake.writes, ['\t', '\t']);
+    assert.equal(o2.panel.tabs.findIndex((t) => t.on), 1);
+    assert.deepEqual(o2.panel.body, ['❯ Auto-compact      true', '  Show tips         true']);
+    // the one on already: nothing pressed; past its tabs: 409
+    fake.writes = [];
+    assert.equal((await call('POST', `${S}/panel`, { tab: 1 }))[0], 200);
+    assert.deepEqual(fake.writes, []);
+    assert.equal((await call('POST', `${S}/panel`, { tab: 7 }))[0], 409);
+    // Esc closes it: panel null
+    const [c3, o3] = await call('POST', `${S}/panel`, { key: 'esc' });
+    assert.equal(c3, 200, o3.message);
+    assert.equal(o3.panel, null);
+    assert.match(o3.message, /closed/);
+    ok('panel: activity shows it (title, tabs with the one on, body, keys, the command); a key, a tab, Esc closes it');
+
+    // no panel up: nothing pressed (an Esc would interrupt Claude mid-turn); a question up instead: 409 with it
+    reset(); live({ status: 'busy' }); fake.screen = screenOf(['✻ Brewing… (2s · esc to interrupt)', '', ...box()]);
+    const [c4, o4] = await call('POST', `${S}/panel`, { key: 'esc' });
+    assert.equal(c4, 409); assert.equal(o4.panel, null);
+    assert.equal((await call('GET', `${S}/activity`))[1].panel, null);
+    live({ status: 'waiting' }); fake.screen = screenOf(['Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel']);
+    const [c5, o5] = await call('POST', `${S}/panel`, { key: 'enter' });
+    assert.equal(c5, 409); assert.equal(o5.menu.kind, 'permission');
+    assert.deepEqual(fake.writes, []);
+    // an old panel above the prompt (it closed): none
+    open = false; fake.screen = ['▔'.repeat(60), '   Settings  Status  Config  Usage', '', '   Esc to cancel', '', ...box()].join('\r\n');
+    live({ status: 'idle' });
+    assert.equal((await call('GET', `${S}/activity`))[1].panel, null);
+    // bad input; an overseer's is Henry's (the relay's key)
+    start();
+    for (const bad of [{}, { key: 'space' }, { key: 'esc', tab: 1 }, { tab: -1 }, { tab: 20 }, { tab: '1' }, { key: '\x1b' }]) assert.equal((await call('POST', `${S}/panel`, bad))[0], 400, JSON.stringify(bad));
+    start({ role: 'bot:0123456789ab' });
+    assert.equal((await call('POST', `${S}/panel`, { key: 'esc' }))[0], 403);
+    assert.equal((await call('POST', `${S}/panel`, { key: 'esc', via: 'phone' }))[0], 403, 'no relay key');
+    assert.deepEqual(fake.writes, []);
+    const [c6] = await call('POST', `${S}/panel`, { key: 'down', via: 'phone' }, { 'x-fleet-view-relay': API.relayKey() });
+    assert.equal(c6, 200);
+    ok('panel: nothing pressed with no panel up, a question up (409 with it) or an old frame; bad input; an overseer\'s is Henry\'s');
+  }
+
   // ---------- bash mode (message with shell) ----------
   {
     // a fake Claude Code: "!" into an empty box switches to bash mode (its prefix "!"), the paste goes after it, Enter runs it
@@ -1455,7 +1542,7 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
 
   const paths = API.ENDPOINTS.map((e) => `${e.method} ${e.path}`);
   for (const p of ['POST /api/sessions/:id/now', 'POST /api/sessions/:id/unsend', 'POST /api/sessions/:id/model', 'GET /api/sessions/:id/activity',
-    'POST /api/sessions/:id/enter', 'POST /api/sessions/:id/background', 'POST /api/sessions/:id/mode', 'POST /api/sessions/:id/rewind', 'POST /api/sessions/:id/fork']) assert.ok(paths.includes(p), p);
+    'POST /api/sessions/:id/enter', 'POST /api/sessions/:id/background', 'POST /api/sessions/:id/mode', 'POST /api/sessions/:id/rewind', 'POST /api/sessions/:id/fork', 'POST /api/sessions/:id/panel']) assert.ok(paths.includes(p), p);
   ok('GET /api lists the new verbs');
 })().then(() => { console.log(`${n} tests passed`); }, (e) => { console.error(e); process.exitCode = 1; })
   .finally(() => { server.close(); setTimeout(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} process.exit(); }, 100); });

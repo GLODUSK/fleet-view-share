@@ -266,7 +266,7 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
   | `POST /api/sessions/:id/message` and `/open`; `POST /api/teams`, `/api/teams/:id/add`, `/lead` and `/message`; the page's `/teams`, `/teams/add` and `/teams/lead` (each may resume a stopped conversation first, up to 60 s, before it types) | 75 s | 75 s + the wait | 80 s (+ the wait) |
   | any other `/api/*` POST with `wait` (e.g. `/answer`) | 60 s | | the wait + 15 s |
   | `GET /api/sessions/:id/activity` (the chat's activity line, polled) | 5 s | | 20 s |
-  | `POST /api/sessions/:id/now` (send now), `/enter` (Send it) and `/background` (Run in background) | 10 s | | 20 s |
+  | `POST /api/sessions/:id/now` (send now), `/enter` (Send it), `/background` (Run in background) and `/panel` (a key in a command's panel: Tab to a tab a press at a time, an Esc read back up to 1.5 s) | 10 s | | 20 s |
   | `POST /api/sessions/:id/model` (a model or effort switch: `/model`, `/effort`, the default put back), `/mode` (the permission mode: Shift+Tab, read back after each press), and the page's `/bots/:id/switch` (the same, for a dynamic bot) | 20 s | | 25 s (`/model` and `/bots/:id/switch`: the caller sets `timeoutMs`) |
   | `POST /api/sessions/:id/rewind` (Rewind and Edit: "/rewind", then ↑ a press at a time up its list, each read back; api.js bounds the walk at 40 s) | 60 s | | 65 s |
   | `POST /chat/image` and `/upload` (a picture or a file from the phone: a 15 MB one goes up as 53 parts, 20 a second, before the PC saves it) | 30 s | | 90 s (the caller sets `timeoutMs`) |
@@ -329,7 +329,7 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 **POST:** `/api/sessions`, `/api/sessions/:id/message`, `/api/sessions/:id/answer`, `/api/sessions/:id/interrupt`,
 `/api/sessions/:id/open`, `/api/sessions/:id/stop`, `/api/sessions/:id/remove`, `/api/sessions/:id/now`,
 `/api/sessions/:id/unsend`, `/api/sessions/:id/model`, `/api/sessions/:id/enter`, `/api/sessions/:id/background`,
-`/api/sessions/:id/mode`, `/api/sessions/:id/rewind`, `/api/sessions/:id/fork`, `/api/teams`,
+`/api/sessions/:id/mode`, `/api/sessions/:id/panel`, `/api/sessions/:id/rewind`, `/api/sessions/:id/fork`, `/api/teams`,
 `/api/teams/:id/add`, `/api/teams/:id/remove`, `/api/teams/:id/lead`, `/api/teams/:id/disband`,
 `/api/teams/:id/message`, `/api/bots`, `/api/bots/:id`, `/api/bots/:id/start`,
 `/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
@@ -443,9 +443,10 @@ Narrower rules:
   mode, below), each true or false (400). `GET /api/sessions/:id/activity` takes nothing; besides the activity line it
   says `mode` (the permission mode its footer shows: `default`, `acceptEdits`, `plan`, `auto`, `bypass`, or null),
   `bg` (a shell command runs that Ctrl+B can send to the background), `prompt` (the prompt box's text, a bash-mode
-  one as `!<command>`, null when it is not on screen), `rewind` (the last Rewind or Edit, below, or null) and `fork` (on a
-  fork from a message, how its going back goes, below, or null). The phone reads it every 1.5 s while Claude works or a message
-  it sent may still be in the prompt, every 5 s while the session runs idle.
+  one as `!<command>`, null when it is not on screen), `rewind` (the last Rewind or Edit, below, or null), `fork` (on a
+  fork from a message, how its going back goes, below, or null) and `panel` (a command's panel up, below, or null). The
+  phone reads it every 1.5 s while Claude works, a message it sent may still be in the prompt or a panel is up (and
+  while a "/" command that opens one is on its way), every 5 s while the session runs idle.
   - **Send it** (the page's `fv-chat-stuck`): `POST /api/sessions/:id/enter { text }` takes only `text` (403
     otherwise), text as for `/unsend` (400). api.js presses Enter once more only while the prompt box holds exactly that
     text (spaces and `\` aside; a bash command as `!<command>`) and no menu or panel is up; 409 `{ gone: true }` when it
@@ -461,6 +462,24 @@ Narrower rules:
     a mode the session lacks), only while Claude is idle with no menu or panel up (409), from a mode it can read. It is
     marked: an overseer's mode is Henry's alone, as its model. A project chat's composer has the mode button next to the
     model's; a bot's box stays plain.
+  - **A command's panel** (the page's panel card: `/usage`, `/status`, `/config`, `/mcp`, `/help`, `/permissions`,
+    `/theme`, `/resume`...). `/activity`'s `panel` is the panel on its screen as the page's card reads it (screen.js
+    `panelShown`, a port of compose.js `parsePanel`; api.js `panelFrom`): `{ title, tabs: [{ label, on }], body:
+    [lines], keys, sig, cmd }`, `keys` its keys line ("↑/↓ to navigate · Enter to confirm · Esc to cancel"), `sig` 12
+    hex that change with any of it, `cmd` the "/" command that opened it (the host's `slashPanel`) or null; a question
+    up instead is the menu's (a panel a "/" command opened is that command's, whatever list it shows). `waiting` says
+    `panel` then. `POST /api/sessions/:id/panel { key } | { tab }` takes only one of the two (403 for any other field,
+    400 for both or neither): `key` one of `up`, `down`, `left`, `right`, `tab`, `enter`, `esc` (400), pressed once, as
+    the page's keycaps press it; `tab` a whole number from 0 to 19 (400), which of the panel's tabs: api.js presses Tab
+    until it is on, from the one on now (409 past its tabs, or when it has none). Only while a panel is on its screen
+    (409 otherwise, with `menu` when a question is up instead), so an Esc never reaches Claude mid-turn and an Enter
+    never answers a menu. 200 `{ panel }`: as it reads a moment after, null once it closed (an Esc looks up to 1.5 s for
+    that). It is marked: an overseer's panel is Henry's alone, as its mode (`/permissions` and `/config` change it). Not
+    a start. The phone shows it as a card over the box (a question's card comes first): the title (and the command when
+    it differs), the tabs as pills (a tap goes to that tab), the lines (in monospace; `/usage`'s bars in cyan, the row
+    the ❯ is on in white), the keycaps the page offers (↑ ↓ ← →, Tab when it has tabs, Enter, Esc) and an x (Esc), with
+    the keys line under them; each key's answer shows at once. A "/" command that opens a panel, sent from the phone's
+    box, brings its card up as soon as the PC typed it; one typed on the PC shows too.
   - **Bash mode**: `POST /api/sessions/:id/message { text, shell: true }` runs `text` (its leading `!` dropped) as a
     shell command: api.js types `!` as a key of its own into the empty prompt, waits for the box to draw bash mode (its
     `!` prefix), then pastes the command and presses Enter. 409 when the prompt holds anything, a menu is up, or Claude
@@ -586,8 +605,8 @@ key counts as unsigned.
 
 - **Who sets it:** the relay alone, on the routes api.js reads it on: `POST /api/sessions` (the prompt),
   `/api/sessions/:id/message`, `/api/sessions/:id/answer` (a free-text answer), `/api/sessions/:id/open` (the
-  prompt), `/api/sessions/:id/model`, `/api/sessions/:id/mode`, `/api/sessions/:id/rewind` and `/api/sessions/:id/fork`
-  (an overseer's switch, rewind or fork is Henry's alone; so is a shell command in its session, through `/message`), `/api/teams/:id/message`, and the
+  prompt), `/api/sessions/:id/model`, `/api/sessions/:id/mode`, `/api/sessions/:id/panel`, `/api/sessions/:id/rewind` and
+  `/api/sessions/:id/fork` (an overseer's switch, panel keys, rewind or fork is Henry's alone; so is a shell command in its session, through `/message`), `/api/teams/:id/message`, and the
   bots' `POST /api/bots`, `/api/bots/:id` and `/api/bots/:id/remove` (whose body is then just the marker). A task sent to a bot goes through `/message`, so it is marked too.
 - **When:** only after the envelope opened with the device's own key, its nonce and `at` passed, the route is on
   the allowlist and its narrower rules passed.
@@ -616,7 +635,7 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   last while it stays online, else the first online. A machine's `/state` lists every chat it knows, its own and the
   synced ones.
 - **A chat's requests go to its host** (`phone/src/transport/multi.ts`, `phone/src/lib/hosts.ts`): send, answer,
-  interrupt, now, unsend, model, enter, background, mode, rewind, fork, activity, menu, the session, the transcript, `/conversation`
+  interrupt, now, unsend, model, enter, background, mode, panel, rewind, fork, activity, menu, the session, the transcript, `/conversation`
   and its pictures, and,
   for the chat on view, the routes that read its folder (`/chat/image`, `/upload`, `/chat/files`, `/chat/commands`,
   `/chat/kind`, `/file`). The host is the chat's `workspace.host` in `/state` (null: the machine that listed it), or

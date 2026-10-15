@@ -14,7 +14,10 @@
 //                                                   rows joined unless join is false, blank rows at the bottom
 //                                                   dropped), like term.js screenText; marks: inverse runs read
 //                                                   "\x01text\x02" and dim ones "\x03text\x04", like term.js
-//                                                   screenMarked(id, n, { dim: true }) (only those two: no colours)
+//                                                   screenMarked(id, n, { dim: true }) (only those two: no colours);
+//                                                   marks 'bg': inverse runs and runs on a background colour read
+//                                                   "\x01text\x02", and no dim marks, as screenMarked(id, n) reads
+//                                                   them (a panel's tab that is on)
 //   createScreen(cols, rows, { maxLines }) -> { write, resize, lines, serialize, size }   the same terminal, fed a
 //                                                   piece at a time; serialize() draws its screen again, colours and
 //                                                   all. The session host plays into one what falls off the output
@@ -28,6 +31,10 @@
 //   promptBox(lines), spinner(lines), effortShown(lines): ports of compose.js parsePromptBox, parseSpinner and
 //                                                   parseEffort, for api.js's chat verbs (unsend, activity, model)
 //   bashBox(lines): the prompt box in bash mode (its prefix "!"), as promptBox reads the other
+//   panelDetails(lines, o) -> { title, tabs: [{ label, on }], body: [lines], keys, sig } | null   a port of compose.js
+//                                                   parsePanel (a command's panel: /usage, /config...), for api.js's
+//                                                   /activity and POST .../panel
+//   panelShown(raw, cols, rows, o) -> the same, from raw output (its rows unjoined, with the 'bg' marks)
 //   modeShown(lines), bgOffered(lines): compose.js parseMode and its tick's bgHint reading, for api.js's /mode,
 //                                                   /background and the activity line
 'use strict';
@@ -43,7 +50,7 @@ function widthOf(cp) {
   return 1;
 }
 
-const DIM = 1, INV = 2; // a style's marks (render's): SGR 2 and 7
+const DIM = 1, INV = 2, BG = 4; // a style's marks (render's): SGR 2 and 7, and a background colour (SGR 4x, 10x, 48)
 // the DECSET modes serialize() draws again: 1 cursor keys, 7 auto-wrap, 25 the cursor shown, 1000-1006 and 1015 mouse
 // reports, 1004 focus reports, 2004 bracketed paste
 const MODES = new Set([1, 7, 25, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 2004]);
@@ -81,7 +88,7 @@ function createScreen(cols, rows, o = {}) {
     return k;
   };
   // what an erase leaves (as xterm does it): blanks in the pen's background colour, nothing else
-  const eraseAttr = () => (pen.bg ? styleFor(pen.bg, 0) : 0);
+  const eraseAttr = () => (pen.bg ? styleFor(pen.bg, BG) : 0);
   // a new row: empty, or with a background colour set, a whole row of blanks in it
   const fresh = (w = false) => { const e = eraseAttr(); return e ? { c: Array(W).fill(' '), a: Array(W).fill(e), w } : { c: [], a: [], w }; };
   const penStyle = () => {
@@ -96,7 +103,7 @@ function createScreen(cols, rows, o = {}) {
     if (pen.s) p.push(9);
     if (pen.fg) p.push(pen.fg);
     if (pen.bg) p.push(pen.bg);
-    return styleFor(p.join(';'), (pen.d ? DIM : 0) | (pen.v ? INV : 0));
+    return styleFor(p.join(';'), (pen.d ? DIM : 0) | (pen.v ? INV : 0) | (pen.bg ? BG : 0));
   };
   // the rows top..bot move up n (new blank rows at bot); the whole screen scrolling keeps the top rows as scrollback
   const scrollUp = (n) => {
@@ -306,17 +313,19 @@ function createScreen(cols, rows, o = {}) {
       let text = '';
       if (!marks) text = l.c.map((c) => (c == null ? ' ' : c)).join('');
       else {
+        // what reads as highlighted (\x01…\x02) and as dim (\x03…\x04): 'bg' counts a background colour too, and no dim
+        const HL = marks === 'bg' ? INV | BG : INV, DM = marks === 'bg' ? 0 : DIM;
         let on = 0;
         for (let k = 0; k < l.c.length; k++) {
           const v = l.c[k] == null ? 0 : styles[l.a[k] || 0].f;
-          if ((on & DIM) && !(v & DIM)) text += '\x04';
-          if ((on & INV) !== (v & INV)) text += v & INV ? '\x01' : '\x02';
-          if ((v & DIM) && !(on & DIM)) text += '\x03';
+          if ((on & DM) && !(v & DM)) text += '\x04';
+          if (!(on & HL) !== !(v & HL)) text += v & HL ? '\x01' : '\x02';
+          if ((v & DM) && !(on & DM)) text += '\x03';
           on = v;
           text += l.c[k] == null ? ' ' : l.c[k];
         }
-        if (on & DIM) text += '\x04';
-        if (on & INV) text += '\x02';
+        if (on & DM) text += '\x04';
+        if (on & HL) text += '\x02';
       }
       text = text.replace(/\s+$/, '');
       if (join && l.w && out.length) out[out.length - 1] += text; else out.push(text);
@@ -729,4 +738,61 @@ function rewindMatches(sel, text) {
   return t === e || (t.startsWith(e) && /…$/.test(String(sel).trim()));
 }
 
-module.exports = { render, createScreen, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, bashBox, spinner, effortShown, modeShown, bgOffered, rewindList, rewindMatches };
+// parsePanel: a command's panel, what /usage, /status, /config, /help, /mcp, /permissions, /theme, /resume and the like
+// draw in place of the prompt. Claude Code edges it with a full-width ▔ line on top and names its keys inside it ("Esc
+// to cancel", "↑/↓ to navigate · Enter to confirm · Esc to cancel"), with no prompt box under it; a tall one scrolls
+// within itself ("↓ 20 more"), so it fits the screen. lines may carry render's 'bg' marks (\x01…\x02): the tab row's
+// marked word is the tab it shows. o.loose: the keys line may be missing (a tab still loading, of a panel already known
+// to be up). -> { title, tabs: [{ label, on }], body: [lines], keys, sig } or null
+const PANEL_TOP = /^\s*▔{12,}\s*$/;
+const PANEL_ESC = /\besc to (?:cancel|close|clear|go back|exit|quit)\b/i;
+const unmark = (l) => String(l ?? '').replace(/[\x01\x02]/g, '');
+function panelDetails(lines, o = {}) {
+  const M = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? '').replace(/\s+$/, ''));
+  const L = M.map(unmark);
+  let top = -1;
+  for (let i = L.length - 1; i >= 0 && top < 0; i--) if (PANEL_TOP.test(L[i])) top = i;
+  if (top < 0) return null;
+  while (top + 1 < L.length && /^\s*▔+\s*$/.test(L[top + 1])) top++; // an edge wider than the screen, wrapped onto two rows
+  const body = L.slice(top + 1), marked = M.slice(top + 1);
+  // the prompt box under it: an old frame above the prompt, not a panel that is up
+  for (let i = 1; i < body.length; i++) if (isRule(body[i - 1]) && /^\s*[❯>](\s|$)/.test(body[i])) return null;
+  if (!o.loose && !body.some((l) => PANEL_ESC.test(l))) return null;
+  while (body.length && !body[body.length - 1].trim()) { body.pop(); marked.pop(); }
+  // its keys, when they close it: the last line, and a line of them above it that it wrapped from
+  let keys = '';
+  const last = body.length - 1;
+  if (last >= 0 && PANEL_ESC.test(body[last])) {
+    let k = last;
+    if (k > 0 && / to /.test(body[k - 1]) && / · /.test(body[k - 1]) && body[k - 1].trim()) k--;
+    keys = body.splice(k).map((l) => l.trim()).join(' ');
+    marked.splice(k);
+    while (body.length && !body[body.length - 1].trim()) { body.pop(); marked.pop(); }
+  }
+  // the title: its first line; a row of tabs ("Settings  Status   Config   Usage   Stats") when it has three or
+  // more words two spaces apart, the first of them its name
+  let f = 0;
+  while (f < body.length && !body[f].trim()) f++;
+  let title = '', tabs = [];
+  if (f < body.length) {
+    const parts = marked[f].trim().split(/(?:\s{2,}|(?=\x01)|(?<=\x02))/).map((p) => p.trim()).filter((p) => unmark(p).trim());
+    if (parts.length >= 3) {
+      title = unmark(parts[0]).trim();
+      tabs = parts.slice(1).map((p) => ({ label: unmark(p).trim(), on: p.includes('\x01') }));
+    } else title = body[f].trim();
+    body.splice(0, f + 1);
+  }
+  while (body.length && !body[0].trim()) body.shift();
+  const squeezed = body.filter((l, x) => l.trim() || (body[x - 1] || '').trim()); // no two blank lines in a row
+  const ind = Math.min(...squeezed.filter((l) => l.trim()).map((l) => l.search(/\S/)), 99);
+  const out = squeezed.map((l) => l.slice(Math.min(ind, l.match(/^\s*/)[0].length)));
+  const sig = JSON.stringify([title, tabs.map((t) => [t.label, t.on]), out, keys]);
+  return { title, tabs, body: out, keys, sig };
+}
+// over the rows as drawn (a buffer row each, as the page's screenMarked reads them), the last PANEL_LINES of them: a
+// command's panel can fill a tall screen
+const PANEL_LINES = 80;
+const panelShown = (raw, cols, rows, o) => panelDetails(render(raw, cols, rows, PANEL_LINES, false, 'bg'), o);
+
+module.exports = { render, createScreen, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, bashBox, spinner, effortShown, modeShown, bgOffered, rewindList, rewindMatches,
+  panelDetails, panelShown };

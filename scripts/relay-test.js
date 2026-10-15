@@ -459,7 +459,8 @@ async function main() {
     // a dynamic bot's switch, its map spot, its watches and its tasks' actions (page routes)
     ['POST', `/bots/${BOT}/switch`], ['POST', `/bots/${BOT}/map`], ['POST', `/bots/${BOT}/watch`], ['POST', `/bots/${BOT}/tasks/t-deploys`], ['POST', `/bots/${BOT}/tasks/a.b_c-1`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(63)}`],
     // the chat's verbs
-    ['GET', `/api/sessions/${SID}/activity`], ['GET', '/api/sessions/new-3/activity'], ...['now', 'unsend', 'model', 'enter', 'background', 'mode', 'rewind', 'fork'].map((v) => ['POST', `/api/sessions/${SID}/${v}`]),
+    ['GET', `/api/sessions/${SID}/activity`], ['GET', '/api/sessions/new-3/activity'], ...['now', 'unsend', 'model', 'enter', 'background', 'mode', 'panel', 'rewind', 'fork'].map((v) => ['POST', `/api/sessions/${SID}/${v}`]),
+    ['POST', '/api/sessions/new-3/panel'],
     // the Claude accounts screen
     ['GET', '/accounts'], ['POST', '/accounts/add'], ['POST', '/accounts/login'], ['POST', '/accounts/code'], ['POST', '/accounts/cancel'],
     // Continue here asked of a machine that is on, for a chat whose host is off (the phone with several machines)
@@ -497,6 +498,8 @@ async function main() {
     ['POST', '/api/sessions/mode'], ['POST', `/api/sessions/${SID}/shell`], ['GET', `/api/sessions/${SID}/rewind`], ['POST', `/api/sessions/${SID}/rewinds`],
     ['POST', '/api/sessions/rewind'], ['POST', `/api/sessions/${SID}/rewind/x`],
     ['GET', `/api/sessions/${SID}/fork`], ['POST', `/api/sessions/${SID}/forks`], ['POST', '/api/sessions/fork'], ['POST', `/api/sessions/${SID}/fork/x`],
+    ['GET', `/api/sessions/${SID}/panel`], ['POST', `/api/sessions/${SID}/panels`], ['POST', '/api/sessions/panel'], ['POST', `/api/sessions/${SID}/panel/esc`],
+    ['POST', `/api/sessions/${SID}/keys`], ['POST', `/api/sessions/${SID}/press`], ['POST', `/api/sessions/${SID}/write`],
     // near misses of the Claude accounts screen: never remove, relabel or anything else under /accounts
     ['POST', '/accounts/remove'], ['POST', '/accounts/relabel'], ['POST', '/accounts/switch'], ['POST', '/accounts'], ['GET', '/accounts/'],
     ['GET', '/accounts/add'], ['GET', '/accounts/code'], ['POST', '/accounts/add/'], ['POST', '/accounts/Add'], ['POST', '/accounts/add/A'],
@@ -510,7 +513,8 @@ async function main() {
   for (const [m, p] of refused) ok(!R.routeAllowed(m, p), `refused: ${m} ${JSON.stringify(p)}`);
   // the marked routes (api.js viaOf reads the marker on exactly these) and the route timeouts
   const marked = ['/api/sessions', `/api/sessions/${SID}/message`, `/api/sessions/${SID}/answer`, `/api/sessions/${SID}/open`, '/api/sessions/new-3/message', '/api/teams/t0a1b2c3d/message',
-    '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/remove`, `/api/sessions/${SID}/model`, `/api/sessions/${SID}/mode`, `/api/sessions/${SID}/rewind`, `/api/sessions/${SID}/fork`];
+    '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/remove`, `/api/sessions/${SID}/model`, `/api/sessions/${SID}/mode`, `/api/sessions/${SID}/rewind`, `/api/sessions/${SID}/fork`,
+    `/api/sessions/${SID}/panel`, '/api/sessions/new-3/panel'];
   const unmarked = [`/api/sessions/${SID}/interrupt`, `/api/sessions/${SID}/stop`, `/api/sessions/${SID}/remove`, '/api/teams', '/api/teams/t0a1b2c3d/add',
     `/api/bots/${BOT}/start`, '/api/bots/b1', '/settings', '/rename', '/teams', `/api/sessions/${SID}`, `/api/sessions/${SID}/message/`,
     `/api/sessions/${SID}/now`, `/api/sessions/${SID}/unsend`, `/api/sessions/${SID}/activity`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/t1`,
@@ -524,6 +528,7 @@ async function main() {
     ['GET', `/api/sessions/${SID}/activity`, 0, 5e3], ['POST', `/api/sessions/${SID}/now`, 0, 10e3], ['POST', `/api/sessions/${SID}/model`, 0, 20e3],
     ['POST', `/api/sessions/${SID}/unsend`, 0, 30e3], ['GET', `/api/sessions/${SID}/transcript`, 0, 30e3],
     ['POST', `/api/sessions/${SID}/enter`, 0, 10e3], ['POST', `/api/sessions/${SID}/background`, 0, 10e3], ['POST', `/api/sessions/${SID}/mode`, 0, 20e3],
+    ['POST', `/api/sessions/${SID}/panel`, 0, 10e3],
     ['POST', `/api/sessions/${SID}/rewind`, 0, 60e3], ['POST', `/api/sessions/${SID}/fork`, 0, 95e3], ['POST', `/api/sessions/${SID}/message`, 0, 75e3], ['POST', `/api/sessions/${SID}/message`, 10, 85e3], ['POST', `/api/sessions/${SID}/open`, 50, 125e3],
     ['POST', '/api/teams', 0, 75e3], ['POST', '/api/teams/t0a1b2c3d/add', 0, 75e3], ['POST', '/api/teams/t0a1b2c3d/lead', 0, 75e3],
     ['POST', '/api/teams/t0a1b2c3d/message', 0, 75e3], ['POST', '/teams', 0, 75e3], ['POST', '/teams/add', 0, 75e3], ['POST', '/teams/lead', 0, 75e3],
@@ -984,6 +989,14 @@ async function main() {
     ['background', {}, 200, null, false], ['background', { via: 'phone' }, 200, {}, false], ['background', { text: 'x' }, 403],
     ['mode', { mode: 'plan' }, 200, null, true], ['mode', { mode: 'acceptEdits' }, 200, null, true], ['mode', { mode: 'default', via: 'server' }, 200, { mode: 'default' }, true],
     ['mode', { mode: 'yolo' }, 400], ['mode', {}, 400], ['mode', { mode: 5 }, 400], ['mode', { mode: 'plan', queue: true }, 403],
+    // a key in a command's panel, or which of its tabs (marked: an overseer's is Henry's alone, as its mode); never text
+    // or a raw key sequence
+    ...['up', 'down', 'left', 'right', 'tab', 'enter', 'esc'].map((key) => ['panel', { key }, 200, null, true]),
+    ['panel', { tab: 0 }, 200, null, true], ['panel', { tab: 19 }, 200, null, true], ['panel', { key: 'esc', via: 'server' }, 200, { key: 'esc' }, true],
+    ['panel', {}, 400], ['panel', { key: 'esc', tab: 1 }, 400], ['panel', { key: 'space' }, 400], ['panel', { key: 'ESC' }, 400], ['panel', { key: '\x1b' }, 400],
+    ['panel', { key: '\r' }, 400], ['panel', { key: 5 }, 400], ['panel', { key: null }, 400], ['panel', { key: ['esc'] }, 400],
+    ['panel', { tab: -1 }, 400], ['panel', { tab: 20 }, 400], ['panel', { tab: 1.5 }, 400], ['panel', { tab: '1' }, 400], ['panel', { tab: null }, 400],
+    ['panel', { key: 'esc', text: 'x' }, 403], ['panel', { keys: 'abc' }, 403], ['panel', { data: '\x1b' }, 403], ['panel', { key: 'esc', wait: 5 }, 403],
     // Rewind and Edit (marked: an overseer's is Henry's alone)
     ['rewind', { text: 'fix the bug' }, 200, null, true], ['rewind', { text: 'fix the bug', nth: 2 }, 200, null, true], ['rewind', { text: 'fix the bug', nth: 0 }, 200, null, true],
     ['rewind', { text: 'line one\r\nline two', edit: 'fix the other bug\nplease' }, 200, null, true],
@@ -1186,6 +1199,7 @@ async function main() {
     ['sl-now', `/api/sessions/${SID}/now`, {}, 10e3],
     ['sl-enter', `/api/sessions/${SID}/enter`, { text: 'x' }, 10e3],
     ['sl-mode', `/api/sessions/${SID}/mode`, { mode: 'plan' }, 20e3],
+    ['sl-panel', `/api/sessions/${SID}/panel`, { key: 'esc' }, 10e3],
     ['sl-rewind', `/api/sessions/${SID}/rewind`, { text: 'x' }, 60e3],
     ['sl-fork', `/api/sessions/${SID}/fork`, { text: 'x' }, 95e3],
     ['sl-model', `/api/sessions/${SID}/model`, { model: 'sonnet' }, 20e3],
