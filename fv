@@ -3,4 +3,7 @@
 # (a link to it on PATH, such as ~/.local/bin/fv, is followed back to the repo)
 f=$0
 while [ -L "$f" ]; do l=$(readlink "$f"); case $l in /*) f=$l ;; *) f=$(dirname "$f")/$l ;; esac; done
+# Git Bash turns an argument starting with "/" into a Windows path when it starts node ("/effort high" became
+# "C:/Program Files/Git/effort high"): a message's /effort and /model lines are kept as typed (other paths still turn)
+export MSYS2_ARG_CONV_EXCL="/effort;/model${MSYS2_ARG_CONV_EXCL:+;$MSYS2_ARG_CONV_EXCL}"
 exec node "$(dirname "$f")/scripts/fv.js" "$@"
