@@ -31,7 +31,7 @@ const SETTINGS = path.join(ROOT, 'fleet-view.json'), FAKE = path.join(ROOT, 'fak
 for (const d of [DATA, PIDS, PROJECTS, path.join(ROOT, 'handoffs')]) fs.mkdirSync(d, { recursive: true });
 // restoreIdle: every idle one is resumed too, as before parking (desktop/host-restore-test.js tests parking)
 fs.writeFileSync(SETTINGS, JSON.stringify({ autoContinue: true, restoreIdle: true }));
-const PANEL_CLOSE_MS = 2500;
+const PANEL_CLOSE_MS = 2500, STALL_IDLE_MS = 3000;
 
 // node-pty lives in desktop/node_modules; a git worktree has none, so use the main checkout's
 function nodePath() {
@@ -79,7 +79,7 @@ process.stdin.resume();
 const NODE_PATH = nodePath();
 const ENV = {
   ...process.env, FV_HOST_PIPE: PIPE, FV_HOST_DIR: DATA, FV_HOST_SESSIONS_DIR: PIDS, FV_HOST_SETTINGS: SETTINGS,
-  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_PANEL_CLOSE_MS: String(PANEL_CLOSE_MS), FV_HOST_RESTORE_GAP_MS: '100',
+  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_STALL_IDLE_MS: String(STALL_IDLE_MS), FV_HOST_STALL_LOOK_MS: '300', FV_HOST_PANEL_CLOSE_MS: String(PANEL_CLOSE_MS), FV_HOST_RESTORE_GAP_MS: '100',
   FV_TERM_CMD: `"${process.execPath}" "${FAKE}"`, FV_HANDOFF_DIR: path.join(ROOT, 'handoffs'),
   ...(NODE_PATH ? { NODE_PATH } : {}),
 };
@@ -560,6 +560,30 @@ async function main() {
   const before = received(K2).length;
   const told = await waitFor(() => noteSent({ cwd: K2.cwd }, 'continue') && received(K2).length > before, 15000);
   check('k. rescue: moved back to A, then "continue" is typed and sent once it is idle', kRescue && kRescue.ok && isA(configs(K2)[2]) && told, { kRescue, configs: configs(K2), received: received(K2).slice(-80) });
+
+  // ===== t. stall: a live session idle with its turn left open (its log ends on a tool's result) is told to carry on
+  // once it has been idle STALL_IDLE_MS with no key; one whose turn ended, and one typed into since it went idle, are not
+  const NOTE_STALL = 'Your turn stopped mid-way';
+  const ST = session('stall'), SE = session('stall-ended'), SK = session('stall-typed');
+  const callLine = jl({ type: 'assistant', message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'u9', name: 'Bash', input: {} }] } });
+  const resultLine = userLine([{ type: 'tool_result', tool_use_id: 'u9', content: 'Exit code 4' }]);
+  for (const s of [ST, SK]) fs.writeFileSync(transcript(s), userLine('record the clips') + callLine + resultLine);
+  fs.writeFileSync(transcript(SE), userLine('record the clips') + callLine + resultLine + asstLine('Recorded.'));
+  for (const s of [ST, SE, SK]) await cl.req('open', { id: s.id, cwd: s.cwd, account: 'B', cols: 100, rows: 30 });
+  await waitFor(() => starts(ST).length && starts(SE).length && starts(SK).length, 10000);
+  const stAt = Date.now();
+  for (const s of [ST, SE, SK]) pidFile(s, 'idle');
+  await sleep(STALL_IDLE_MS - 1500);
+  await cl.req('write', SK.id, 'z');
+  const stOk = await waitFor(() => noteSent(ST, NOTE_STALL), 15000);
+  check('t. stall: idle with its turn open, the note is typed and sent, not before the idle wait', stOk && Date.now() - stAt >= STALL_IDLE_MS, { ms: Date.now() - stAt, received: received(ST) });
+  await sleep(1500);
+  check('t. stall: one whose turn ended gets no note', !received(SE).includes(NOTE_STALL), received(SE));
+  check('t. stall: one typed into since it went idle gets no note', received(SK) === 'z', received(SK));
+  // the note went in, but nothing new in its log: it is not told again
+  const stNotes = () => received(ST).split(NOTE_STALL).length - 1;
+  await sleep(STALL_IDLE_MS + 1500);
+  check('t. stall: told once while its log stays the same; the typed-into one still not told', stNotes() === 1 && received(SK) === 'z', { st: received(ST), sk: received(SK) });
 
   // ===== s. snapshot: the prompt box, drawn once, is still in a replay after more than 512 KB of output =====
   const SCREEN = require(path.join(__dirname, '..', 'screen.js'));

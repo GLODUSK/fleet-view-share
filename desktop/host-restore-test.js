@@ -88,6 +88,8 @@ const bashBg = (tool, task, ago = 60000) => [
   { type: 'assistant', timestamp: iso(ago), message: { role: 'assistant', content: [{ type: 'tool_use', id: tool, name: 'Bash', input: { command: 'npm run build', run_in_background: true } }] } },
   { type: 'user', timestamp: iso(ago), toolUseResult: { backgroundTaskId: task }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tool, content: `Command running in background with ID: ${task}` }] } },
 ];
+// the reply that ends a turn
+const ended = () => ({ type: 'assistant', timestamp: iso(), message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'It builds in the background.' }] } });
 const notice = (task, status) => ({ type: 'user', timestamp: iso(), message: { role: 'user', content: `<task-notification>\n<task-id>${task}</task-id>\n<status>${status}</status>\n<summary>done</summary>\n</task-notification>` } });
 
 const started = new Set();
@@ -182,20 +184,41 @@ function unitRunningTasks(H) {
   check('runningTasks: none in a plain transcript, 0 for a missing file', run([{ type: 'user', message: { role: 'user', content: 'hi' } }]) === 0 && H.runningTasks(path.join(ROOT, 'nope.jsonl')) === 0);
 }
 
+function unitOpenTurn(H) {
+  const f = path.join(ROOT, 'turn.jsonl');
+  const run = (lines) => { fs.writeFileSync(f, lines.map((o) => `${JSON.stringify(o)}
+`).join('')); return H.openTurn(f); };
+  const asst = (stop, content, o = {}) => ({ type: 'assistant', message: { role: 'assistant', stop_reason: stop, content }, ...o });
+  const user = (content, o = {}) => ({ type: 'user', message: { role: 'user', content }, ...o });
+  const call = asst('tool_use', [{ type: 'tool_use', id: 'u1', name: 'Bash', input: {} }]);
+  const result = (text) => user([{ type: 'tool_result', tool_use_id: 'u1', content: text }]);
+  const ended = asst('end_turn', [{ type: 'text', text: 'Done.' }]);
+  const extra = [{ type: 'system', subtype: 'turn_duration' }, { type: 'custom-title', customTitle: 'x' }];
+  check('openTurn: a tool result with no reply after it is open', run([user('go'), call, result('Exit code 4'), ...extra]) === true);
+  check('openTurn: a tool call with no result is open', run([user('go'), call]) === true);
+  check('openTurn: a turn that ended is closed', run([user('go'), call, result('ok'), ended, ...extra]) === false);
+  check('openTurn: one stopped with Esc is closed', run([user('go'), call, result('[Request interrupted by user for tool use]'), user([{ type: 'text', text: '[Request interrupted by user for tool use]' }])]) === false);
+  check('openTurn: Claude Code filler after a resume is passed over', run([user('go'), call, result('[Tool call interrupted]'), asst('stop_sequence', [{ type: 'text', text: 'No response requested.' }], { message: { role: 'assistant', model: '<synthetic>', stop_reason: 'stop_sequence', content: [{ type: 'text', text: 'No response requested.' }] } })]) === true);
+  check('openTurn: an agent entries (sidechain) and a prompt with no answer do not count', run([ended, { ...call, isSidechain: true }]) === false && run([ended, user('hello?')]) === false);
+  check('openTurn: false for a missing file', H.openTurn(path.join(ROOT, 'nope.jsonl')) === false);
+}
+
 async function main() {
   if (!NODE_PATH) { check('node-pty found (desktop/node_modules)', false); return; }
   unitRunningTasks(require(path.join(__dirname, 'host.js')));
+  unitOpenTurn(require(path.join(__dirname, 'host.js')));
 
-  // ===== 1. a restore: 6 to start, 6 idle ones to park =====
+  // ===== 1. a restore: 7 to start, 6 idle ones to park =====
   const BOT = `bot:${'c3'.repeat(6)}`;
   const R = conv('r', { restartBy: true }), SEL = conv('sel'), B1 = conv('b1', { busy: true }), B2 = conv('b2', { busy: true });
-  const BT = conv('bt', { role: BOT }), T = conv('t');
+  const BT = conv('bt', { role: BOT }), T = conv('t'), M = conv('m');
   const T2 = conv('t2'), P1 = conv('p1', { account: 'A', cols: 111 }), P2 = conv('p2'), P3 = conv('p3'), P4 = conv('p4'), P5 = conv('p5');
-  transcript(T, bashBg('t1', 'bt1')); // still running when the host stopped
+  transcript(T, [...bashBg('t1', 'bt1'), ended()]); // still running when the host stopped
+  transcript(M, bashBg('t1', 'bm1').map((e) => ({ ...e, toolUseResult: undefined }))); // saved idle, but its log ends on a tool's result: cut off mid-turn
   transcript(T2, [...bashBg('t1', 'bt2'), notice('bt2', 'completed')]); // finished: parked
-  const EAGER = [R, SEL, B1, B2, BT, T], PARKED = [T2, P1, P2, P3, P4, P5];
+  const EAGER = [R, SEL, B1, B2, M, BT, T], PARKED = [T2, P1, P2, P3, P4, P5];
   // in the list's order: parked ones between the others, the shown one and the asker late
-  writeList([P1, B1, T2, BT, P2, T, P3, B2, P4, SEL, P5, R], { selectedId: SEL.id, wide: false });
+  writeList([P1, B1, T2, BT, P2, T, P3, B2, P4, SEL, P5, R, M], { selectedId: SEL.id, wide: false });
   settings({});
   const t0 = Date.now();
   startHost();
@@ -219,11 +242,13 @@ async function main() {
   const gaps = order.slice(1).map((x, i) => x.at - order[i].at);
   check(`1. starts are staggered (about ${GAP} ms apart, never two at once)`, gaps.every((g) => g >= GAP * 0.6), { order, gaps });
   const names = order.map((x) => x.n).join(',');
-  check('1. order: the restart asker and the shown one, the busy ones, the bot, then the idle one with running tasks', /^(r,sel|sel,r),b1,b2,bt,t$/.test(names), names);
+  check('1. order: the restart asker and the shown one, the busy ones, the one whose log ends mid-turn, the bot, then the idle one with running tasks', /^(r,sel|sel,r),b1,b2,m,bt,t$/.test(names), names);
   check('1. the idle one whose transcript shows a background task running is resumed (a log line)', hostLog().includes(`restore: ${T.id} had 1 background task(s) running; it is resumed`), hostLog().split('\n').filter((l) => l.includes('restore')));
+  check('1. the one saved idle whose log ends mid-turn is resumed as interrupted, a note due (log lines)', hostLog().includes(`restore: ${M.id} was saved idle but its log ends mid-turn; it is resumed`)
+    && new RegExp(`restore: ${M.id} resumed \\(pid \\d+\\), was interrupted, note due \\(interrupted\\)`).test(hostLog()), hostLog().split('\n').filter((l) => l.includes(M.id)));
   await sleep(GAP + 800);
   check('1. the other idle ones are parked: never started', PARKED.every((c) => starts(c).length === 0), PARKED.map((c) => starts(c).length));
-  check('1. the log says how many resumed and parked', hostLog().includes(`restore: 6 of 12 resumed, 6 parked until opened`), hostLog().split('\n').filter((l) => l.includes('restore')));
+  check('1. the log says how many resumed and parked', hostLog().includes(`restore: 7 of 13 resumed, 6 parked until opened`), hostLog().split('\n').filter((l) => l.includes('restore')));
   const list1 = await cl.req('list'), parked1 = await cl.req('parked');
   check('1. list() has only the running ones; parked() lists the parked ones', EAGER.every((c) => list1.some((x) => x.id === c.id && x.alive)) && PARKED.every((c) => !list1.some((x) => x.id === c.id))
     && PARKED.every((c) => parked1.some((x) => x.id === c.id && x.parked)) && parked1.length === PARKED.length, { list1: list1.map((x) => x.id), parked1 });

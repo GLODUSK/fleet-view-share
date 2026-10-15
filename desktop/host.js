@@ -66,7 +66,8 @@
 // (2026-10-13: a 12 s synchronous restore made the window take the host for stuck, kill it and start another, five
 // times in 71 s). Started straight away, in this order: the restart asker (restartBy) and the conversation the window
 // showed (ui.selectedId); the busy or interrupted ones; bots (role) and pickups; idle ones whose transcript
-// shows background tasks still running (runningTasks, read before the resume reports them stopped). Every other idle
+// shows background tasks still running (runningTasks, read before the resume reports them stopped), or whose log ends
+// mid-turn (openTurn: saved idle only because claude died first, as at a shutdown; resumed as interrupted). Every other idle
 // one is parked: not started, kept in the restore list (parked: true) across saves and hosts until it is opened, and
 // then resumed as the restore would have (its saved folder, account and role). open() or sendTo() of one still waiting
 // (parked, or its turn not come) starts it at once and takes it out of the queue; kill() of one forgets it; a quit or
@@ -85,7 +86,8 @@
 // restart (restartBy), and to an idle one whose transcript, in what the resume wrote, shows a background task
 // stopped or killed (a <task-notification>) that nothing answered; it looks for that for 20 s, then lets it be.
 // Any key typed into the session first, the session starting work by itself, or 3 minutes without getting
-// ready drops the note. "autoContinue": false in ~/.fleet-view.json turns it off.
+// ready drops the note. A session that stalls while it runs (idle 2 minutes, no key typed, its log ending mid-turn)
+// gets a note too (stallTick). "autoContinue": false in ~/.fleet-view.json turns it off.
 //
 // Panels: while a panel is open (/usage, /config, a picker) Claude Code holds back background-task updates, so
 // one left open stalls the session. The host follows what is typed into each prompt; when a "/" command opened
@@ -136,7 +138,7 @@
 // %LOCALAPPDATA%\fleet-view\test-<name> (or FV_HOST_DIR); only with such a pipe does it honour FV_TERM_CMD (a
 // harmless command in place of `claude`, given the same arguments), FV_HOST_SESSIONS_DIR (one more folder of pid files),
 // FV_HOST_IDLE_MS, FV_HOST_SETTINGS (another settings file), FV_HOST_PROJECTS_DIR (where transcripts are, instead
-// of ~/.claude*/projects), FV_HOST_NUDGE_GIVEUP_MS, FV_HOST_PANEL_CLOSE_MS, FV_HOST_RESTORE_GAP_MS, FV_HOST_RESTORE_RETRY_MS
+// of ~/.claude*/projects), FV_HOST_NUDGE_GIVEUP_MS, FV_HOST_STALL_IDLE_MS, FV_HOST_STALL_LOOK_MS, FV_HOST_PANEL_CLOSE_MS, FV_HOST_RESTORE_GAP_MS, FV_HOST_RESTORE_RETRY_MS
 // and FV_HOST_TEST_END_HANG (a restart's end phase never finishes, see handOver).
 // desktop/host-test.js and desktop/host-restore-test.js use them.
 'use strict';
@@ -165,6 +167,9 @@ const PANEL_CLOSE_MS = 60 * 1000; // a "/" panel left open this long with no key
 const ESC_GAP_MS = 3000; // two Escs closer than this at Claude Code's prompt open its rewind menu
 const NUDGE_GIVEUP_MS = 3 * 60 * 1000; // a resumed session not ready this long after its start gets no note
 const NUDGE_IDLE_MS = 2500, NUDGE_QUIET_MS = 1500, NUDGE_TASKS_MS = 20000;
+// a live session idle this long, with no key typed, whose log ends mid-turn is told to carry on (see stallTick);
+// its log is looked at no more often than STALL_LOOK_MS, and a session gets at most STALL_MAX notes an hour
+const STALL_IDLE_MS = 2 * 60 * 1000, STALL_LOOK_MS = 30 * 1000, STALL_MAX = 3;
 const RESTORE_GAP_MS = 1800; // between two starts of a restore (see Restore list)
 const RESTORE_RETRY_MS = 15000; // a restore tries one it could not start once more this much later (see Restore list)
 const END_GAP_MS = P.isWin ? 40 : 0; // between two Ctrl+Cs when every session ends at once (see endAll)
@@ -413,6 +418,47 @@ function runningTasks(file, now = Date.now()) {
   return [...bg.values()].filter((until) => until > now).length;
 }
 
+// Was the transcript's last turn left open: its last real entry (from the end 2 MB, the main thread only) a tool call
+// with no answer (an assistant entry that stopped for tool_use) or a tool's result with no reply after it? That is a
+// turn cut off mid-way (the PC went down, claude died, a stream broke), never one that ended: an ended turn's last
+// entry is the assistant's (end_turn), and one stopped with Esc ends on "[Request interrupted by user…]". Claude
+// Code's own filler ('<synthetic>', "No response requested.") and entries that are not user or assistant are passed
+// over. A user prompt that never got an answer does not count: a /command's output looks just like one.
+const recentLog = (file, now = Date.now()) => { try { return now - fs.statSync(file).mtimeMs < 24 * 3600e3; } catch { return false; } };
+function openTurn(file) {
+  let text = '';
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = fs.fstatSync(fd).size, len = Math.min(size, 2 << 20);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      text = buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } catch { return false; }
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.includes('"type":"user"') && !line.includes('"type":"assistant"')) continue;
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (!e || typeof e !== 'object' || e.isSidechain || !e.message || typeof e.message !== 'object') continue;
+    const c = e.message.content;
+    const blocks = Array.isArray(c) ? c.filter((b) => b && typeof b === 'object') : [];
+    if (e.type === 'assistant') {
+      const said = blocks.filter((b) => b.type === 'text').map((b) => String(b.text || '').trim());
+      if (e.message.model === '<synthetic>' || (said.length && said.every((s) => s === 'No response requested.'))) continue;
+      return e.message.stop_reason === 'tool_use' || blocks.some((b) => b.type === 'tool_use');
+    }
+    if (e.type !== 'user' || e.isMeta) continue;
+    const results = blocks.filter((b) => b.type === 'tool_result');
+    if (!results.length) return false;
+    const said = (b) => (typeof b.content === 'string' ? b.content : Array.isArray(b.content) ? b.content.map((x) => (x && x.text) || '').join(' ') : '');
+    return !results.some((b) => /interrupted by user|doesn't want to proceed/i.test(said(b)));
+  }
+  return false;
+}
+
 // ---------- conversations on another device (sync's "Continue here", ../sync-move.js) ----------
 // <data dir>/sync/away.json, which the server's sync runner writes (temp file + rename) and deletes:
 //   { v: 1, at, ids: { <id>: { device: <that device's name>, why: 'owned' | 'moving' } } }
@@ -623,7 +669,7 @@ function spawnHelperExecutable(name) {
 // opts: { send(event, ...args): to every client, changed(): the set or a status changed, program: what runs in
 //         place of `claude`, with the same arguments (test override),
 //         sessionDirs: more folders to read, log(text), settings() -> the settings file's keys,
-//         panelCloseMs / nudgeGiveUpMs (test overrides) }
+//         panelCloseMs / nudgeGiveUpMs / stallIdleMs / stallLookMs (test overrides) }
 function createPtys(opts = {}) {
   const send = opts.send || (() => {});
   const changed = opts.changed || (() => {});
@@ -637,6 +683,7 @@ function createPtys(opts = {}) {
   const dirs = () => sessionDirs(opts.sessionDirs);
   const getSettings = opts.settings || (() => settings());
   const nudgeGiveUpMs = opts.nudgeGiveUpMs > 0 ? opts.nudgeGiveUpMs : NUDGE_GIVEUP_MS;
+  const stallIdleMs = opts.stallIdleMs > 0 ? opts.stallIdleMs : STALL_IDLE_MS, stallLookMs = opts.stallLookMs > 0 ? opts.stallLookMs : STALL_LOOK_MS;
   function panelCloseMs() {
     if (Number.isFinite(opts.panelCloseMs) && opts.panelCloseMs >= 0) return opts.panelCloseMs;
     const s = getSettings().panelAutoCloseSec;
@@ -1025,7 +1072,7 @@ function createPtys(opts = {}) {
       }
     }
     if (moved) changed();
-    for (const t of live) { if (t.alive) { panelTick(t, now); nudgeTick(t, now); } }
+    for (const t of live) { if (t.alive) { panelTick(t, now); stallTick(t, now); nudgeTick(t, now); } }
     const pend = live.filter((t) => t.isNew);
     // resumed ones not tied to their claude yet: the file with their id whose process runs in their pty (a
     // terminal elsewhere may have the same conversation open), so a later /clear or /resume can be followed
@@ -1167,6 +1214,7 @@ function createPtys(opts = {}) {
     if (n.kind === 'continue') return 'continue'; // switchAccount's rescue: the turn the limit cut off goes on
     if (n.kind === 'restart') return `[Fleet View] The session host restarted as you asked. Check that the newest "started:" line in ${P.isWin ? '%LOCALAPPDATA%\\fleet-view\\host.log' : logFile()} shows the new version, then carry on.`;
     if (n.kind === 'tasks') return `[Fleet View] Your background tasks stopped when ${n.cause}; the notes above say which. Check what they finished, start again what still needs to run, then carry on.`;
+    if (n.kind === 'stalled') return '[Fleet View] Your turn stopped mid-way and you have been idle since. Check what finished, then carry on.';
     return `[Fleet View] You were cut off mid-turn: ${n.cause}. Check what finished, then carry on.`;
   }
   const settled = (t, now) => t.alive && t.status === 'idle' && t.idleSince > 0 && now - t.idleSince >= NUDGE_IDLE_MS
@@ -1175,7 +1223,7 @@ function createPtys(opts = {}) {
     const n = t.nudge;
     if (!n || n.typing) return;
     const drop = (why) => { if (why) log(`auto-continue: ${t.id} ${why}`); t.nudge = null; changed(); };
-    if (now - t.startedAt > nudgeGiveUpMs) return drop(`gave up: not ready ${Math.round(nudgeGiveUpMs / 1000)} s after it started`);
+    if (now - (n.at || t.startedAt) > nudgeGiveUpMs) return drop(`gave up: not ready ${Math.round(nudgeGiveUpMs / 1000)} s after ${n.at ? 'it stalled' : 'it started'}`);
     if (t.seenIdle && t.status === 'busy') return drop('not needed: it started work');
     if (!settled(t, now)) return;
     if (n.kind === 'tasks') {
@@ -1203,6 +1251,29 @@ function createPtys(opts = {}) {
       changed();
       log(`auto-continue: ${t.id} told to carry on (${n.kind})`);
     }, 300);
+  }
+
+  // Stalls: a live session whose claude has sat idle for STALL_IDLE_MS, with no key typed into it since (a draft in its
+  // box would take the note on its end: someone at it decides), while
+  // its log ends mid-turn (openTurn: a tool call or result with no reply) stopped without ending its turn: a stream
+  // that broke, a claude resumed by hand after it died. Claude Code starts no turn by itself, so it gets the note
+  // (nudgeTick types it, as after a restore). Its log is looked at again only once it has grown; STALL_MAX notes an
+  // hour at most, so one that stalls again at once is left to you. "autoContinue": false turns this off too.
+  function stallTick(t, now) {
+    if (t.nudge || t.isNew || t.status !== 'idle' || !t.seenIdle || !t.idleSince || now - t.idleSince < stallIdleMs) return;
+    if ((t.inputAt || 0) >= t.idleSince || now - (t.stallLook || 0) < stallLookMs) return;
+    if (getSettings().autoContinue === false) return;
+    t.stallLook = now;
+    const tr = findTranscript(t.id, t.cwd);
+    if (!tr || tr.size === t.stallSize) return;
+    t.stallSize = tr.size;
+    if (!openTurn(tr.file)) return;
+    t.stalls = (t.stalls || []).filter((at) => now - at < 3600e3);
+    if (t.stalls.length >= STALL_MAX) { log(`auto-continue: ${t.id} stalled again; ${STALL_MAX} notes this hour already, so it is left to you`); return; }
+    t.stalls.push(now);
+    t.nudge = { kind: 'stalled', at: now };
+    changed();
+    log(`auto-continue: ${t.id} idle ${Math.round((now - t.idleSince) / 1000)} s with its turn left open; note due (stalled)`);
   }
 
   function resize(id, cols, rows) {
@@ -1478,6 +1549,8 @@ function runHost() {
     log,
     panelCloseMs: testMs('FV_HOST_PANEL_CLOSE_MS'),
     nudgeGiveUpMs: testMs('FV_HOST_NUDGE_GIVEUP_MS'),
+    stallIdleMs: testMs('FV_HOST_STALL_IDLE_MS'),
+    stallLookMs: testMs('FV_HOST_STALL_LOOK_MS'),
   });
 
   // On start, once the pipe listens: the conversations the last list had, one start at a time (see Restore list).
@@ -1565,6 +1638,16 @@ function runHost() {
         if (restoreStopped()) break;
         if (!ptys.heldOf(c.id)) continue; // opened or closed meanwhile
         const tr = findTranscript(c.id, c.s.cwd);
+        // saved idle, but its log ends mid-turn: its claude died before the list was saved (a shutdown kills claude
+        // first, and its pid file goes with it), so it was cut off as surely as a busy one, and is told to carry on.
+        // Not one whose log has been still for a day: that turn was left long ago, and stays parked
+        if (tr && recentLog(tr.file) && openTurn(tr.file)) {
+          const s = { ...c.s, interrupted: true };
+          ptys.hold(c.id, s, extraFor(c.id, s, true, roleOf(s.role)));
+          queue.push({ key: c.id, tier: 1 });
+          log(`restore: ${c.id} was saved idle but its log ends mid-turn; it is resumed`);
+          continue;
+        }
         const k = tr ? runningTasks(tr.file) : 0;
         if (!k) continue;
         ptys.hold(c.id, c.s, c.extra);
@@ -1942,7 +2025,7 @@ function runHost() {
 }
 
 module.exports = {
-  createPtys, sessionDirs, readPidFiles, normDir, pipeName, dataDir, hostFile, sessionsFile, logFile, fileHash, readJson, runningTasks,
+  createPtys, sessionDirs, readPidFiles, normDir, pipeName, dataDir, hostFile, sessionsFile, logFile, fileHash, readJson, runningTasks, openTurn,
   HOST_JS, ID_RE, KEY_RE, NEW_RE, PROTO, FV_ALLOWED, BOT_ROLE_RE, ptyName: () => ptyName, ptyError: () => ptyError,
 };
 
