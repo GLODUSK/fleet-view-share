@@ -639,6 +639,10 @@ export function taskNote(text) {
 // what a bot answers a task with when there is nothing to report (bot-tasks.js runText asks for "[quiet]"): the
 // whole run is left out of the chat, its note too (fleet-view.js QUIET_REPLY: no preview, no bot note for it)
 const QUIET = /^\s*(?:\[quiet\]|nothing new(?: to report)?|no(?:thing| new \w+)(?: new)?(?: to report)?(?: this (?:hour|time|run))?)[.!]?\s*$/i;
+// a bare "[quiet]" is never a reply, whatever it answers (a peer's note, a finished background task, a watch): it is
+// left out with the steps just before it, and the Fleet View note it answered (Henry, 2026-10-15: "dont allow these
+// quiet messages")
+const QUIET_TAG = /^\s*\[quiet\][.!]?\s*$/i;
 export function botFeed(items) {
   const out = [];
   // what is being left out: 'ack' the bare "ok" to a setup note (thinking and tool steps since then don't count),
@@ -686,6 +690,11 @@ export function botFeed(items) {
       skip = null;
       if (was === 'one' || (was === 'ack' && ACK.test(String(it.text || ''))) || (was === 'pickup' && PICKED.test(String(it.text || '')))) continue;
       if (task >= 0 && QUIET.test(String(it.text || ''))) { out.length = task; task = -1; continue; }
+      if (QUIET_TAG.test(String(it.text || ''))) {
+        while (out.length && (out[out.length - 1].kind === 'thinking' || out[out.length - 1].kind === 'tool')) out.pop();
+        if (out.length && out[out.length - 1].kind === 'setup') out.pop();
+        continue;
+      }
       const r = reactionOf(it.text);
       if (r) {
         if (mine >= 0 && !out[mine].reaction) out[mine] = copy(out[mine], { reaction: r.emoji });

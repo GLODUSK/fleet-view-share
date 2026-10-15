@@ -708,6 +708,22 @@ test('botFeed: a scheduled task shows as one tidy line, and a quiet run of it sh
   assert.deepEqual(botFeed([{ key: 1, kind: 'user', text: head }, { key: 2, kind: 'tool', name: 'Bash', input: {} }, { key: 3, kind: 'assistant', text: 'One new request: a logo change.' }]).map((it) => it.key), [1, 2, 3]);
   // only the run's own answer: after your message, "Nothing new." is a real reply
   assert.deepEqual(botFeed([{ key: 1, kind: 'user', text: head }, { key: 2, kind: 'assistant', text: 'One new request.' }, { key: 3, kind: 'user', text: 'anything else?' }, { key: 4, kind: 'assistant', text: 'Nothing new.' }]).map((it) => it.key), [1, 2, 3, 4]);
+  // a bare "[quiet]" never shows, whatever it answers: its steps and the Fleet View note before it go too, while
+  // a peer's message and your own stay (Henry, 2026-10-15)
+  assert.deepEqual(botFeed([
+    { key: 1, kind: 'assistant', text: 'Merged #12.' },
+    { key: 2, kind: 'note', text: 'Background command finished', bg: true },
+    { key: 3, kind: 'tool', name: 'Bash', input: {} },
+    { key: 4, kind: 'assistant', text: '[quiet]' },
+    { key: 5, kind: 'user', text: '[Fleet View] Watch: fix-x went idle.' },
+    { key: 6, kind: 'thinking', text: 'hm' },
+    { key: 7, kind: 'tool', name: 'Bash', input: {} },
+    { key: 8, kind: 'assistant', text: ' [quiet] ' },
+    { key: 9, kind: 'user', text: '[Message from "fix-y" (abc)] Got it.' },
+    { key: 10, kind: 'assistant', text: '[quiet]' },
+  ]).map((it) => it.key), [1, 9]);
+  // a reply that only mentions it shows
+  assert.deepEqual(botFeed([{ key: 1, kind: 'assistant', text: 'I said [quiet] then.' }]).map((it) => it.key), [1]);
 });
 
 test('reactions: a reply starting "[react:<emoji>]" puts the emoji on your last message', () => {
