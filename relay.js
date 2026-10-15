@@ -53,11 +53,12 @@
 //             /open and the team routes that send a brief or an order (deliverText resumes one not running): POST
 //             /api/teams, /api/teams/:id/add, /lead and /message, the page's /teams, /teams/add and /teams/lead. Those
 //             two get the body's wait (at most 50 s) on top: 145 s and 125 s at most. Shorter for the chat's verbs:
-//             GET /api/sessions/:id/activity 5 s, POST /api/sessions/:id/now 10 s, /model 20 s (/unsend 30 s).
+//             GET /api/sessions/:id/activity 5 s, POST /api/sessions/:id/now, /enter and /background 10 s, /model and
+//             /mode 20 s (/unsend 30 s).
 //   marker    "via": "phone" in the body and X-Fleet-View-Relay: <opts.relayKey()> (api.js viaOf: what Henry sent
 //             from his phone, which a bot takes as his, and what makes, changes or removes a bot or switches an
 //             overseer's model) on the routes api.js reads it on (MARKED): POST /api/sessions,
-//             /api/sessions/:id/message, /answer, /open and /model, /api/teams/:id/message, /api/bots,
+//             /api/sessions/:id/message, /answer, /open, /model and /mode, /api/teams/:id/message, /api/bots,
 //             /api/bots/:id and /api/bots/:id/remove. Set only once every check
 //             above and the allowlist's passed; a via the phone sent is dropped from every body first. No
 //             opts.relayKey (or a bad one): no marker, said in the log once.
@@ -85,7 +86,9 @@
 //   POST /api/sessions  no role (403: a bot starts by /api/bots/:id/start)
 //   POST /api/sessions/:id/now  no fields (403);  /unsend  only text (403), as api.js cleanText takes it (400);
 //                       /model  only model, effort and queue (403): model and/or effort as api.js MODEL_RE and
-//                       EFFORTS take them, queue true or false (400);  /message  now, when there, true or false (400)
+//                       EFFORTS take them, queue true or false (400);  /message  now and shell, when there, true or
+//                       false (400);  /enter  only text, as /unsend (403, 400);  /background  no fields (403);
+//                       /mode  only mode (403), one of api.js MODES (400)
 //   POST /chat/dynamic  (Dynamic for any chat: a part sized per message, on or off) only id, a conversation id, and
 //                       model and/or effort, each true or false (403 for any other field, 400 for a bad one)
 //   POST /api/bots, /api/bots/:id   only name, brief, role, account, model, effort, shape and color, as bots.js
@@ -335,7 +338,7 @@ const ALLOW = {
   GET: ['/state', '/conversation', '/conversation/image', '/repo-history', '/chat/commands', '/chat/files', '/chat/kind', '/file',
     '/since', '/api/sessions', `/api/sessions/${KEY}`, `/api/sessions/${KEY}/(?:menu|transcript|activity)`, '/api/conversations',
     '/api/teams', '/api/status', '/accounts', '/sync/move'],
-  POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model)`, '/api/teams',
+  POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model|enter|background|mode)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
     '/repos/remove', '/repos/add', '/chat/image', '/teams', '/teams/(?:add|remove|leave|lead|rename)',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/${TASK}`,
@@ -373,16 +376,18 @@ const TASK_ACTIONS = ['pause', 'resume', 'run', 'delete'];
 // { code }). Every one only for a letter with no login (accountRefused); accountsAnswer: what GET /accounts passes on
 const SIGNIN_LETTERS = ['A', 'B'];
 const ACCOUNT_KEYS = { '/accounts/add': ['letter'], '/accounts/login': ['account'], '/accounts/code': ['account', 'code'], '/accounts/cancel': ['account'] };
-// the chat's verbs: send now takes nothing, unsend the message's text, a switch a model and/or an effort as api.js
-// takes them (MODEL_RE, EFFORTS)
-const VERB_RE = new RegExp(`^/api/sessions/${KEY}/(now|unsend|model|message)$`);
+// the chat's verbs: send now and run in background take nothing, unsend and Send it (enter) the message's text, a
+// switch a model and/or an effort as api.js takes them (MODEL_RE, EFFORTS), the permission mode one of api.js MODES
+const VERB_RE = new RegExp(`^/api/sessions/${KEY}/(now|unsend|model|message|enter|background|mode)$`);
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9.\-\[\]]{0,59}$/, EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypass'];
 // a message's text as api.js cleanText takes it: line breaks made \n, then something besides spaces, and no control
 // character but \n and \t
 const textOk = (v) => typeof v === 'string' && !!v.trim() && !/[\x00-\x08\x0b-\x1f\x7f]/.test(v.replace(/\r\n|[\u0085\u2028\u2029]/g, '\n'));
-// POST routes api.js reads the relay's marker on (viaOf): text that reaches a Claude as Henry's, and making, changing
-// or removing a bot or switching a conversation's model (Henry's alone for an overseer)
-const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|open|model)|teams/${TEAM}/message|bots|bots/${BOT}|bots/${BOT}/remove)$`);
+// POST routes api.js reads the relay's marker on (viaOf): text that reaches a Claude as Henry's (a shell command in an
+// overseer's session too), and making, changing or removing a bot or switching a conversation's model or permission
+// mode (Henry's alone for an overseer)
+const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|open|model|mode)|teams/${TEAM}/message|bots|bots/${BOT}|bots/${BOT}/remove)$`);
 // POST routes that start a Claude before they answer (api.js startSession waits up to 60 s for it, settles, types;
 // POST /api/bots makes the bot and starts it), and ones that may resume a stopped conversation first (up to 60 s
 // too) before they type into it
@@ -427,8 +432,8 @@ function resumeWeight(pl, m, p, b) {
 function routeTimeout(m, p, waitS = 0, base = ROUTE_MS, waitBase = WAIT_ROUTE_MS) {
   const verb = (VERB_RE.exec(p) || [])[1] || (/\/activity$/.test(p) ? 'activity' : null);
   if (m === 'GET' && verb === 'activity') return ACTIVITY_MS;
-  if (m === 'POST' && verb === 'now') return NOW_MS;
-  if (m === 'POST' && (verb === 'model' || BOT_SWITCH.test(p))) return MODEL_MS;
+  if (m === 'POST' && (verb === 'now' || verb === 'enter' || verb === 'background')) return NOW_MS;
+  if (m === 'POST' && (verb === 'model' || verb === 'mode' || BOT_SWITCH.test(p))) return MODEL_MS;
   const long = m !== 'POST' ? 0 : START_ROUTES.test(p) ? START_ROUTE_MS : RESUME_ROUTES.test(p) ? RESUME_ROUTE_MS : 0;
   if (long) return long + waitS * 1000;
   return waitS ? waitBase : base;
@@ -834,10 +839,17 @@ function createRelay(opts = {}) {
     }
     const verb = (VERB_RE.exec(p) || [])[1];
     if (verb === 'now') return Object.keys(b).length ? no('send now takes nothing else from the phone') : null;
-    if (verb === 'unsend') {
+    if (verb === 'background') return Object.keys(b).length ? no('run in background takes nothing else from the phone') : null;
+    if (verb === 'unsend' || verb === 'enter') {
+      const what = verb === 'enter' ? 'Send it' : 'unsend';
       const bad = Object.keys(b).filter((k) => k !== 'text');
-      if (bad.length) return no(`unsend takes only text, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      if (bad.length) return no(`${what} takes only text, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
       return textOk(b.text) ? null : [400, 'text must be the message as it was sent'];
+    }
+    if (verb === 'mode') {
+      const bad = Object.keys(b).filter((k) => k !== 'mode');
+      if (bad.length) return no(`a mode switch takes only mode, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);
+      return MODES.includes(b.mode) ? null : [400, `mode must be one of ${MODES.join(', ')}`];
     }
     if (verb === 'model') {
       // queue: while Claude works, api.js keeps the switch and makes it once it is idle (202 { queued: true })
@@ -848,7 +860,7 @@ function createRelay(opts = {}) {
       if (b.model != null && !(typeof b.model === 'string' && MODEL_RE.test(b.model))) return [400, 'model must be a model name like opus, sonnet, haiku or claude-opus-5-5[1m]'];
       return b.effort == null || EFFORTS.includes(b.effort) ? null : [400, `effort must be one of ${EFFORTS.join(', ')}`];
     }
-    if (verb === 'message' && 'now' in b && typeof b.now !== 'boolean') return [400, 'now must be true or false'];
+    if (verb === 'message') for (const k of ['now', 'shell']) if (k in b && typeof b[k] !== 'boolean') return [400, `${k} must be true or false`];
     return null;
   }
   // a sign-in from the phone (see SIGNIN_LETTERS): its body as accounts.js reads it, its letter A or B (upper case goes

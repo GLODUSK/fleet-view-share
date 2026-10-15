@@ -266,8 +266,8 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
   | `POST /api/sessions/:id/message` and `/open`; `POST /api/teams`, `/api/teams/:id/add`, `/lead` and `/message`; the page's `/teams`, `/teams/add` and `/teams/lead` (each may resume a stopped conversation first, up to 60 s, before it types) | 75 s | 75 s + the wait | 80 s (+ the wait) |
   | any other `/api/*` POST with `wait` (e.g. `/answer`) | 60 s | | the wait + 15 s |
   | `GET /api/sessions/:id/activity` (the chat's activity line, polled) | 5 s | | 20 s |
-  | `POST /api/sessions/:id/now` (send now) | 10 s | | 20 s |
-  | `POST /api/sessions/:id/model` (a model or effort switch: `/model`, `/effort`, the default put back), and the page's `/bots/:id/switch` (the same, for a dynamic bot) | 20 s | | 25 s (the caller sets `timeoutMs`) |
+  | `POST /api/sessions/:id/now` (send now), `/enter` (Send it) and `/background` (Run in background) | 10 s | | 20 s |
+  | `POST /api/sessions/:id/model` (a model or effort switch: `/model`, `/effort`, the default put back), `/mode` (the permission mode: Shift+Tab, read back after each press), and the page's `/bots/:id/switch` (the same, for a dynamic bot) | 20 s | | 25 s (`/model` and `/bots/:id/switch`: the caller sets `timeoutMs`) |
   | everything else (`/unsend` among them) | 30 s | | 20 s |
 
   So 145 s and 125 s at most. The wait added is the one the relay passed on (`true` and anything over 50 count as
@@ -326,7 +326,8 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 
 **POST:** `/api/sessions`, `/api/sessions/:id/message`, `/api/sessions/:id/answer`, `/api/sessions/:id/interrupt`,
 `/api/sessions/:id/open`, `/api/sessions/:id/stop`, `/api/sessions/:id/remove`, `/api/sessions/:id/now`,
-`/api/sessions/:id/unsend`, `/api/sessions/:id/model`, `/api/teams`,
+`/api/sessions/:id/unsend`, `/api/sessions/:id/model`, `/api/sessions/:id/enter`, `/api/sessions/:id/background`,
+`/api/sessions/:id/mode`, `/api/teams`,
 `/api/teams/:id/add`, `/api/teams/:id/remove`, `/api/teams/:id/lead`, `/api/teams/:id/disband`,
 `/api/teams/:id/message`, `/api/bots`, `/api/bots/:id`, `/api/bots/:id/start`,
 `/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
@@ -420,8 +421,34 @@ Narrower rules:
   works: api.js answers 202 `{ ok, queued: true, model?, effort?, message }` and makes it once Claude is idle, and
   `/state`'s session says `switchPending: { model?, effort?, at, error? }` until then (the phone shows "after this
   step"; an `error` once).
-  `POST /api/sessions/:id/message` may carry `now` (send it at once, stopping the step Claude is on), which must be
-  true or false (400). `GET /api/sessions/:id/activity` takes nothing.
+  `POST /api/sessions/:id/message` may carry `now` (send it at once, stopping the step Claude is on) and `shell` (bash
+  mode, below), each true or false (400). `GET /api/sessions/:id/activity` takes nothing; besides the activity line it
+  says `mode` (the permission mode its footer shows: `default`, `acceptEdits`, `plan`, `auto`, `bypass`, or null),
+  `bg` (a shell command runs that Ctrl+B can send to the background) and `prompt` (the prompt box's text, a bash-mode
+  one as `!<command>`, null when it is not on screen). The phone reads it every 1.5 s while Claude works or a message
+  it sent may still be in the prompt, every 5 s while the session runs idle.
+  - **Send it** (the page's `fv-chat-stuck`): `POST /api/sessions/:id/enter { text }` takes only `text` (403
+    otherwise), text as for `/unsend` (400). api.js presses Enter once more only while the prompt box holds exactly that
+    text (spaces and `\` aside; a bash command as `!<command>`) and no menu or panel is up; 409 `{ gone: true }` when it
+    is not there any more. The phone offers it on a message the PC typed whose text `/activity`'s `prompt` still shows
+    2.5 s later ("Not sent: it is still in Claude's prompt"). A message with pictures reads differently in the box (its
+    paths became `[Image #N]`), so it is never offered there.
+  - **Run in background** (the page's Ctrl+B): `POST /api/sessions/:id/background` takes no fields (403 otherwise);
+    api.js presses Ctrl+B only while Claude works, its screen offers it ("ctrl+b to run in background") and no menu or
+    panel is up (409). The phone's activity line shows the button while `/activity` says `bg`.
+  - **The permission mode** (the page's mode menu): `POST /api/sessions/:id/mode { mode }` takes only `mode` (403
+    otherwise), one of `default`, `acceptEdits`, `plan`, `auto`, `bypass` (400). api.js presses Shift+Tab until the
+    footer shows that mode (at most 5 presses, stopping once round to where it began: 409 with the `mode` it is on, for
+    a mode the session lacks), only while Claude is idle with no menu or panel up (409), from a mode it can read. It is
+    marked: an overseer's mode is Henry's alone, as its model. A project chat's composer has the mode button next to the
+    model's; a bot's box stays plain.
+  - **Bash mode**: `POST /api/sessions/:id/message { text, shell: true }` runs `text` (its leading `!` dropped) as a
+    shell command: api.js types `!` as a key of its own into the empty prompt, waits for the box to draw bash mode (its
+    `!` prefix), then pastes the command and presses Enter. 409 when the prompt holds anything, a menu is up, or Claude
+    Code took the `!` as text (taken back with a Backspace); never queued behind a menu, not with `from` or `now` (400);
+    in an overseer's session only Henry's (marked, 403 otherwise). The phone sends it for a message that starts with `!`
+    (a "! bash" tag over the box; a tap on it sends the text as a plain message instead), shown as `!<command>` as the
+    transcript's `<bash-input>` reads.
 - `POST /chat/dynamic` takes only `id` (a conversation id), `model` and `effort` (403 otherwise), at least one of the
   two, each `true` or `false` (400).
 - `POST /repos/add` takes only a root Fleet View already knows (in `/state`'s repos or the removed list). The
@@ -492,7 +519,8 @@ key counts as unsigned.
 
 - **Who sets it:** the relay alone, on the routes api.js reads it on: `POST /api/sessions` (the prompt),
   `/api/sessions/:id/message`, `/api/sessions/:id/answer` (a free-text answer), `/api/sessions/:id/open` (the
-  prompt), `/api/sessions/:id/model` (an overseer's switch is Henry's alone), `/api/teams/:id/message`, and the
+  prompt), `/api/sessions/:id/model` and `/api/sessions/:id/mode` (an overseer's switch is Henry's alone; so is a
+  shell command in its session, through `/message`), `/api/teams/:id/message`, and the
   bots' `POST /api/bots`, `/api/bots/:id` and `/api/bots/:id/remove` (whose body is then just the marker). A task sent to a bot goes through `/message`, so it is marked too.
 - **When:** only after the envelope opened with the device's own key, its nonce and `at` passed, the route is on
   the allowlist and its narrower rules passed.
@@ -521,7 +549,8 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   last while it stays online, else the first online. A machine's `/state` lists every chat it knows, its own and the
   synced ones.
 - **A chat's requests go to its host** (`phone/src/transport/multi.ts`, `phone/src/lib/hosts.ts`): send, answer,
-  interrupt, now, unsend, model, activity, menu, the session, the transcript, `/conversation` and its pictures, and,
+  interrupt, now, unsend, model, enter, background, mode, activity, menu, the session, the transcript, `/conversation`
+  and its pictures, and,
   for the chat on view, the routes that read its folder (`/chat/image`, `/chat/files`, `/chat/commands`,
   `/chat/kind`, `/file`). The host is the chat's `workspace.host` in `/state` (null: the machine that listed it), or
   for an older machine its `syncOwner` (not one moving `away` from the lister), else the machine that listed it. A

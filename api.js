@@ -533,8 +533,8 @@ const watchSwitch = (id, text, status, ctx) => {
 // q: { from, original, onSent?, onDrop? } to keep it in the queue (see below) instead of refusing it while a menu or a
 // panel is up; it goes in later. now: one that went in while Claude was busy (into Claude Code's queue) is sent at
 // once, as the page's Interrupt on a queued message does (pressSendNow). A typed /model or /effort has its switch
-// question answered (watchSwitch). -> [code, json]
-async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null, now = false) {
+// question answered (watchSwitch). shell: text is a shell command for bash mode (typeShell), never queued. -> [code, json]
+async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null, now = false, shell = false) {
   const later = (more, why = 'is showing a question or a prompt; it goes in once that is answered') => {
     enqueue(p.id, text, q);
     return [202, { ok: true, id: p.id, ...extra, ...more, queued: true, message: `queued: ${nameFor(p.id, ctx)} ${why}` }];
@@ -553,6 +553,10 @@ async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null,
     // a permission prompt, a question or the plan approval: the Enter would answer it for that session
     const m = await menuNow(host, cur);
     if (m) return { r: q ? later({ menu: m }) : [409, { ok: false, id: p.id, ...extra, menu: m, message: MENU_UP }] };
+    if (shell) {
+      const bad = await typeShell(host, cur);
+      if (bad) return { r: [409, { ok: false, id: p.id, ...extra, shell: true, message: bad }] };
+    }
     const sentAt = Date.now();
     const sent = await sendText(host, p.id, text, () => menuNow(host, cur));
     if (!sent.entered) return { r: [409, { ok: false, id: p.id, ...extra, menu: true, message: MENU_LATE }] };
@@ -563,10 +567,38 @@ async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null,
   if (typed.r) return typed.r;
   const { sentAt, status, sentNow } = typed;
   if (note) note(p.id, sentAt, status);
-  watchSwitch(p.id, text, status, ctx);
+  if (!shell) watchSwitch(p.id, text, status, ctx);
   const w = await afterSend(host, p.id, sentAt, status, ms, ctx, gone);
-  return [200, { ok: true, id: p.id, ...extra, status, ...(sentNow ? { sentNow } : {}), ...w,
-    message: doneText(w, ms, sentNow ? 'sent now (Claude stopped the step it was on)' : status === 'busy' ? 'sent while Claude was busy (queued)' : 'sent') }];
+  return [200, { ok: true, id: p.id, ...extra, status, ...(sentNow ? { sentNow } : {}), ...(shell ? { shell } : {}), ...w,
+    message: doneText(w, ms, shell ? 'run in bash mode' : sentNow ? 'sent now (Claude stopped the step it was on)' : status === 'busy' ? 'sent while Claude was busy (queued)' : 'sent') }];
+}
+
+// Bash mode, as the page's (compose.js send): Claude Code switches to it only on a "!" typed as a key of its own into an
+// empty prompt (a pasted one is just text), and its box then draws "!" where the ❯ was (screen.js bashBox). So: the box
+// must be on screen and empty (anything typed there would run with the command), the "!" goes alone, and the command is
+// pasted only once the box shows bash mode, up to BANG_MS_MAX. One the box took as text instead gets a Backspace (that
+// "!" is ours) and is refused. Runs inside the typing's turn (typeOne). -> null when the box is in bash mode, else why not
+const BANG_MS_MAX = 1500;
+const SHELL_TYPED = 'something is typed in its prompt: a shell command goes only into an empty prompt (clear it in the Session tab first)';
+async function typeShell(host, p) {
+  const rows0 = await rowsNow(host, p, 60, true);
+  const box = SCREEN.promptBox(rows0);
+  if (!box) return SCREEN.bashBox(rows0) ? 'its prompt is in bash mode already (from the terminal): leave it there first' : 'its prompt is not on screen';
+  if (box.text) return SHELL_TYPED;
+  await host.call('write', p.id, '!');
+  for (const end = Date.now() + BANG_MS_MAX; Date.now() < end;) {
+    await sleep(POLL_MS / 4);
+    const rows = await rowsNow(host, p, 60, true);
+    const bash = SCREEN.bashBox(rows);
+    if (bash) return bash.text ? SHELL_TYPED : null;
+    const now = SCREEN.promptBox(rows);
+    if (now && now.text === '!') {
+      await host.call('write', p.id, '\x7f');
+      return 'Claude Code took the "!" as text, not bash mode (it was taken back): try again';
+    }
+    if (now && now.text) return SHELL_TYPED; // typed into meanwhile: left as it is
+  }
+  return 'Claude Code did not switch to bash mode (it may not read keys yet): look at its prompt in the Session tab';
 }
 
 function doneText(w, ms, sent) {
@@ -750,6 +782,7 @@ async function resumeIn(host, id, where, account, ctx, gone) {
 // o.via, for text with no from: 'server' (Fleet View's own) or 'henry' (the phone relay, viaOf); an overseer (a bot)
 // gets any other such text marked unsigned (overseer.js frame). Callers never set it from a request body.
 // o.overseerText: the text an overseer gets instead (an ask's answers without the question in their header). o.now: see deliver.
+// o.shell: text is a shell command, run in bash mode (deliver), never queued, never framed (an overseer's: Henry's only).
 async function deliverText(key, text, o, ctx, gone = () => false) {
   qCtx = qCtx || ctx;
   const asked = resolveKey(key);
@@ -783,15 +816,19 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
       if (extra.resumed) await sleep(SETTLE_MS);
     }
     const from = o.from || null, kind = o.ask ? 'question' : null;
+    // a shell command runs as typed (a frame would be part of the command), and its output goes into the conversation
+    // unsigned: in an overseer's only Henry's (the phone relay) may
+    if (o.shell && isOverseer(p.role) && o.via !== 'henry') return [403, { ok: false, id: p.id, ...extra, message: 'only Henry runs a shell command in an overseer\'s session (his phone)' }];
     // an overseer reads text by where it came from (overseer.js frame): another conversation's (from), Fleet View's own,
     // Henry's (the phone relay), or unsigned
-    const typed = isOverseer(p.role) ? OVERSEER.frame(o.overseerText != null ? o.overseerText : body, from ? 'bot' : o.via === 'server' || o.via === 'henry' ? o.via : 'unsigned') : body;
+    const typed = o.shell ? body : isOverseer(p.role) ? OVERSEER.frame(o.overseerText != null ? o.overseerText : body, from ? 'bot' : o.via === 'server' || o.via === 'henry' ? o.via : 'unsigned') : body;
     const note = (to, at, status) => {
       if (from && ctx.noteMessage) ctx.noteMessage(from, convId(to) || to, o.original || body, kind ? { kind } : undefined);
       if (o.onSent) o.onSent(convId(to) || to, at, status);
     };
+    // (a shell command is never queued behind a menu: the queue would paste it as a message)
     return deliver(host, p, typed, o.wait || 0, ctx, gone, note, extra,
-      o.queue === false ? null : { from, original: o.original || body, ...(kind ? { kind } : {}), onSent: o.onSent, onDrop: o.onDrop }, o.now === true);
+      o.queue === false || o.shell ? null : { from, original: o.original || body, ...(kind ? { kind } : {}), onSent: o.onSent, onDrop: o.onDrop }, o.now === true, o.shell === true);
   });
 }
 
@@ -809,11 +846,14 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/bots/look', body: '{ from: your conversation id, shape?: "hex"|"drop"|"round"|"pill"|"tri"|"square"|"star"|"clover"|"flower"|"heart", color?: "#rrggbb" }', does: 'a bot changes its own avatar (null: picked for it); only from a bot\'s own conversation, and only its look (fv look)' },
   { method: 'POST', path: '/api/bots/:id/remove', does: 'Henry only, as POST /api/bots: end a bot\'s session and take it off the list (its folder and conversations are kept)' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, role, its turn; tail: the last characters of its screen' },
-  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow)' },
+  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now?, shell? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow). shell (not with from or now): text is a shell command, run in bash mode ("!" typed as a key of its own into an empty prompt, then the command; a leading "!" in text is dropped); 409 when its prompt is not empty or a menu is up, never queued' },
   { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
   { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
   { method: 'POST', path: '/api/sessions/:id/model', body: '{ model?, effort?, queue? }', does: 'switch this conversation\'s model and/or effort (/model, /effort, while Claude is idle) and put the default for new sessions back as it was: { said, defaultKept, restored, effortNow }. Not idle: 409 notReady, or with queue: true 202 { queued, model?, effort? }: applied once Claude finishes this step (GET /state\'s switchPending until then; dropped after 30 min). An overseer\'s: Henry only (his phone)' },
-  { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code)' },
+  { method: 'GET', path: '/api/sessions/:id/activity', does: 'the activity line, cheap to poll: busy, line ("Brewing… (12s · ↓ 1.2k tokens)"), verb, detail, doing (tool in use), waiting (menu | panel | null), menu { kind, title }, effort, queue (messages queued in Claude Code), mode (default | acceptEdits | plan | auto | bypass | null), bg (a shell command Ctrl+B can send to the background), prompt (its prompt box\'s text; a bash-mode one as "!<command>"; null when not on screen)' },
+  { method: 'POST', path: '/api/sessions/:id/enter', body: '{ text }', does: 'the page\'s Send it on a message left in Claude Code\'s prompt: Enter once more, only while its prompt box holds exactly that text (spaces aside) and no menu is up' },
+  { method: 'POST', path: '/api/sessions/:id/background', does: 'the page\'s Run in background: Ctrl+B, only while Claude works and its screen offers it (activity\'s bg)' },
+  { method: 'POST', path: '/api/sessions/:id/mode', body: '{ mode: "default" | "acceptEdits" | "plan" | "auto" | "bypass" }', does: 'the permission mode: Shift+Tab until its footer shows that mode (at most 5 presses; 409 with the mode it is on when it has no such mode), only while Claude is idle with no menu up. An overseer\'s: Henry only (his phone)' },
   { method: 'POST', path: '/api/sessions/:id/wait', body: '{ timeout? (s, default 1800) }', does: 'wait, sending nothing, until it is ready for you: endedBy idle | reply | question | menu | apiError | exit | gone' },
   { method: 'GET', path: '/api/sessions/:id/menu', does: 'the select menu on its screen now: kind (question|permission|plan|trust|chrome|other), title, context, options, sig; or null' },
   { method: 'POST', path: '/api/sessions/:id/answer', body: '{ option: n | "submit" | "esc", sig?, text?, allowPermission?, wait? }', does: 'answer the menu (text: for a "Type something." option; "submit": a multiple-choice question\'s Submit); any menu but a question needs allowPermission (esc never does); the folder trust question answered Yes also has a Claude in Chrome offer that follows it answered Yes (chromeOffer: \'accepted\')' },
@@ -1020,7 +1060,16 @@ async function sendMessage(key, b, ctx, gone, via = null) {
   if (!text) return [400, { ok: false, message: 'text must be text, without control characters other than new lines and tabs' }];
   const ms = waitMs(b.wait);
   if (ms === null) return [400, { ok: false, message: WAIT_BAD }];
-  for (const k of ['queue', 'open', 'now']) if (k in b && typeof b[k] !== 'boolean') return [400, { ok: false, message: `${k} must be true or false` }];
+  for (const k of ['queue', 'open', 'now', 'shell']) if (k in b && typeof b[k] !== 'boolean') return [400, { ok: false, message: `${k} must be true or false` }];
+  // shell: the text is a shell command for bash mode (its "!", when it has one, is the mode's: dropped), one's own,
+  // never sent now (it does not queue the way a message does)
+  if (b.shell === true) {
+    if (b.from !== undefined && b.from !== null) return [400, { ok: false, message: 'shell goes only with a message of your own (no from)' }];
+    if (b.now === true) return [400, { ok: false, message: 'shell and now do not go together' }];
+    const cmd = text.replace(/^\s*!/, '');
+    if (!cmd.trim()) return [400, { ok: false, message: 'a shell command must say what to run' }];
+    return deliverText(key, cmd, { kind: 'message', wait: ms, queue: false, open: b.open === true, via, shell: true }, ctx, gone);
+  }
   let from = null;
   if (b.from !== undefined && b.from !== null) {
     from = typeof b.from === 'string' ? convId(b.from) : null;
@@ -1826,6 +1875,116 @@ async function unsendMessage(key, b, ctx) {
   });
 }
 
+// ---------- the chat's other verbs: Send it, run in background, the permission mode ----------
+// a text with no spaces at all (and no "\": Claude Code makes "\" then Enter a new line), so a box that wraps a long
+// word anywhere still reads as the text (compose.js watchSent's squash)
+const bare = (v) => flat(v).replace(/[\s\\]/g, '');
+// the prompt box's text from marked rows: '' empty, a bash-mode box's as "!<command>" (as the feed shows a "!"
+// command), null when neither is on screen
+function boxText(marked) {
+  const box = SCREEN.promptBox(marked);
+  if (box) return box.text;
+  const bash = SCREEN.bashBox(marked);
+  return bash ? `!${bash.text}` : null;
+}
+
+// POST /api/sessions/:id/enter { text }: the page's Send it ('fv-chat-stuck', compose.js enterAgain) for a message left
+// in Claude Code's prompt: it took the Enter as something else (one typed while it starts up is dropped), so the text
+// sits there unsent. Enter once more, and only while the box holds exactly that text (bare, as above; a bash command as
+// "!<command>") with no menu or panel up: anything else typed there, or a question the Enter would answer, gets no key.
+async function enterAgain(key, b) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  const text = cleanText(b.text);
+  const want = text ? bare(text) : '';
+  if (!want) return [400, { ok: false, message: 'text must be the message as it was sent' }];
+  return withHost(async (host) => {
+    const { p, err } = await need(host, key, true);
+    if (err) return err;
+    if (panelOpen(p)) return [409, { ok: false, id: p.id, panel: true, message: PANEL_UP }];
+    return typeOne(p.id, async () => {
+      const m = await menuNow(host, p);
+      if (m) return [409, { ok: false, id: p.id, menu: m, message: MENU_UP }];
+      const now = boxText(await rowsNow(host, p, 60, true));
+      if (now == null) return [409, { ok: false, id: p.id, message: 'its prompt is not on screen' }];
+      if (bare(now) !== want) {
+        return [409, { ok: false, id: p.id, gone: !now, message: now ? 'something else is in its prompt now: see the Session tab' : 'it is not in Claude\'s prompt any more: it went in, or was cleared' }];
+      }
+      await host.call('write', p.id, '\r');
+      return [200, { ok: true, id: p.id, message: 'Enter pressed again' }];
+    });
+  });
+}
+
+// POST /api/sessions/:id/background: the page's Run in background (compose.js runInBackground): Ctrl+B, which sends the
+// shell command Claude runs to the background so Claude carries on. Only while Claude works and its screen offers it
+// ("ctrl+b to run in background"), with no menu or panel up (the key would go to them).
+async function backgroundSession(key) {
+  return withHost(async (host) => {
+    const { p, err } = await need(host, key, true);
+    if (err) return err;
+    if (panelOpen(p)) return [409, { ok: false, id: p.id, panel: true, message: PANEL_UP }];
+    return typeOne(p.id, async () => {
+      const m = await menuNow(host, p);
+      if (m) return [409, { ok: false, id: p.id, menu: m, message: MENU_UP }];
+      const rows = await rowsNow(host, p, 40);
+      const spin = SCREEN.spinner(rows);
+      if (!(p.status === 'busy' || (spin && spin.strong)) || !SCREEN.bgOffered(rows)) {
+        return [409, { ok: false, id: p.id, status: p.status || null, message: 'nothing can go to the background now: Claude Code offers it only while a shell command runs' }];
+      }
+      await host.call('write', p.id, '\x02');
+      return [200, { ok: true, id: p.id, message: 'Ctrl+B pressed: the shell command goes on in the background' }];
+    });
+  });
+}
+
+// POST /api/sessions/:id/mode { mode }: the page's permission mode menu (compose.js switchMode): Shift+Tab, which cycles
+// Claude Code's modes, until its footer shows the one asked for (screen.js modeShown, after each press up to
+// MODE_LOOK_MS for the footer to redraw), at most MODE_MAX_PRESSES presses, stopping once round to where it began (a
+// mode this session does not have: bypass only when it started with it, auto where Claude Code offers it). Only from a
+// mode it can read, while Claude is idle, with no menu or panel up: Shift+Tab on a permission prompt answers it ("allow
+// all edits during this session"). An overseer's mode is Henry's to change, as its model (only through the phone relay).
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypass'];
+const MODE_LABEL = { default: 'Ask before edits', acceptEdits: 'Accept edits', plan: 'Plan mode', auto: 'Auto mode', bypass: 'Bypass permissions' };
+const MODE_MAX_PRESSES = 5, MODE_STEP_MS = 250, MODE_LOOK_MS = 1000;
+async function switchMode(key, b, ctx, via = null) {
+  if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  if (!MODES.includes(b.mode)) return [400, { ok: false, message: `mode must be one of ${MODES.join(', ')}` }];
+  const want = b.mode;
+  return withHost(async (host) => {
+    const { p, err } = await need(host, key, true);
+    if (err) return err;
+    if (isOverseer(p.role) && via !== 'henry') return [403, { ok: false, id: p.id, message: 'only Henry changes an overseer\'s permission mode (his phone)' }];
+    if (panelOpen(p)) return [409, { ok: false, id: p.id, panel: true, message: PANEL_UP }];
+    if (p.status !== 'idle') return [409, { ok: false, id: p.id, status: p.status || null, message: p.status === 'waiting' ? 'Claude is waiting on an answer: switch the mode once it is idle' : 'Claude is working: switch the mode once it is idle' }];
+    return typeOne(p.id, async () => {
+      const read = async () => SCREEN.modeShown(await rowsNow(host, p, 40));
+      const m = await menuNow(host, p);
+      if (m) return [409, { ok: false, id: p.id, menu: m, message: MENU_UP }];
+      const from = await read();
+      if (!from) return [409, { ok: false, id: p.id, message: 'its mode could not be read (the footer under its prompt is not on screen)' }];
+      if (from === want) return [200, { ok: true, id: p.id, mode: from, changed: false, message: `it is on ${MODE_LABEL[from]} already` }];
+      let now = from;
+      for (let i = 0; i < MODE_MAX_PRESSES && now !== want; i++) {
+        if (await menuNow(host, p)) break;
+        const was = now;
+        await host.call('write', p.id, '\x1b[Z');
+        for (const end = Date.now() + MODE_LOOK_MS; Date.now() < end;) {
+          await sleep(MODE_STEP_MS);
+          const x = await read();
+          if (x && x !== was) { now = x; break; }
+        }
+        if (now === from) break; // round the whole cycle without it
+      }
+      if (now === want) {
+        if (ctx && ctx.log) ctx.log(`api: ${p.id}: permission mode ${from} -> ${now}`);
+        return [200, { ok: true, id: p.id, mode: now, from, changed: true, message: `switched to ${MODE_LABEL[now]}` }];
+      }
+      const why = want === 'bypass' ? ' (only a session started with it has it)' : want === 'auto' ? ' (only where Claude Code offers it)' : '';
+      return [409, { ok: false, id: p.id, mode: now, from, changed: now !== from, message: `couldn't switch to ${MODE_LABEL[want]}${why}; it is on ${MODE_LABEL[now] || now}` }];
+    });
+  });
+}
+
 // POST /api/sessions/:id/model { model?, effort? }: the page's model and effort picker, for this conversation only.
 // Claude Code has no session-only switch: /model <id> and /effort <level> switch the running session AND save the
 // choice in its account's settings.json as the default for every new session (`model`, and
@@ -2144,8 +2303,12 @@ async function switchModel(key, b, ctx, via = null) {
 // poll: busy as the page has it (the host says busy, or the screen shows the live spinner, and no menu or panel up),
 // line ("Brewing… (12s · ↓ 1.2k tokens)", or "Working…" without a spinner), the spinner's verb and detail, doing (the
 // tool running or the last action, from the transcript: doingOf), waiting ('menu' | 'panel' | null) with the menu's
-// kind and title, the effort its footer shows, and queue (what Claude Code holds queued, while it runs). One host list,
-// one read of its screen and the transcript's cached state: cheap enough to poll every second or two.
+// kind and title, the effort its footer shows, and queue (what Claude Code holds queued, while it runs). Also what the
+// page's tick reads besides: mode (the permission mode its footer shows: screen.js modeShown, null when it can't be
+// read), bg (a shell command runs that Ctrl+B can send to the background: POST .../background), and prompt (the prompt
+// box's text, "" empty, a bash-mode box's as "!<command>", null when it isn't on screen), so a caller can tell a message
+// it sent is still sitting there unsent (POST .../enter). One host list, one read of its screen (rendered once, with the
+// dim marks the box needs) and the transcript's cached state: cheap enough to poll every second or two.
 async function readActivity(key, ctx) {
   return withHost(async (host) => {
     const { p, err } = await need(host, key, false);
@@ -2154,15 +2317,17 @@ async function readActivity(key, ctx) {
     let doing = null;
     try { doing = cid && ctx.doing ? ctx.doing(cid) : null; } catch {}
     const base = { ok: true, id: p.id, alive: !!p.alive, status: p.status || null, waitingFor: p.waitingFor || null, doing };
-    if (!p.alive) return [200, { ...base, busy: false, line: null, verb: null, detail: null, waiting: null, menu: null, effort: null, queue: [] }];
-    const rows = await rowsNow(host, p, 40);
+    if (!p.alive) return [200, { ...base, busy: false, line: null, verb: null, detail: null, waiting: null, menu: null, effort: null, queue: [], mode: null, bg: false, prompt: null }];
+    const marked = await rowsNow(host, p, 60, true);
+    const rows = marked.map((l) => l.replace(/[\x01-\x04]/g, '').replace(/\s+$/, '')).slice(-40);
     const spin = SCREEN.spinner(rows);
     const m = SCREEN.menuDetails(rows);
     const panel = panelOpen(p);
     const busy = (p.status === 'busy' || !!(spin && spin.strong)) && !m && !panel;
     return [200, { ...base, busy, line: busy ? `${spin ? `${spin.verb}…` : 'Working…'}${spin && spin.detail ? ` (${spin.detail})` : ''}` : null,
       verb: spin ? spin.verb : null, detail: spin ? spin.detail || null : null, waiting: m ? 'menu' : panel ? 'panel' : null,
-      menu: m ? { kind: m.kind, title: m.title } : null, effort: SCREEN.effortShown(rows), queue: await claudeQueue(p.id, ctx) }];
+      menu: m ? { kind: m.kind, title: m.title } : null, effort: SCREEN.effortShown(rows), queue: await claudeQueue(p.id, ctx),
+      mode: m || panel ? null : SCREEN.modeShown(rows), bg: busy && SCREEN.bgOffered(rows), prompt: m || panel ? null : boxText(marked) }];
   });
 }
 
@@ -2261,7 +2426,7 @@ async function listConversations(query, ctx) {
 //        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,
 //        bots: { list(), create(b), start(id), update(id, b), remove(id), look(b) } each -> [code, json] or a Promise of one
 //        (/api/bots, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
-const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity';
+const VERBS = 'message|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode';
 const GET_VERBS = new Set(['menu', 'transcript', 'activity']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
 const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|lead|disband|message))?\/?$/;
@@ -2370,6 +2535,9 @@ function handle(req, res, pathname, ctx) {
       case 'now': return run(sendNowSession(k, ctx));
       case 'unsend': return body((b) => unsendMessage(k, b, ctx));
       case 'model': return body((b) => switchModel(k, b, ctx, via(b)));
+      case 'enter': return body((b) => enterAgain(k, b));
+      case 'background': return run(backgroundSession(k));
+      case 'mode': return body((b) => switchMode(k, b, ctx, via(b)));
       default: break;
     }
   }

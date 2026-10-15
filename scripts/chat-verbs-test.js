@@ -966,8 +966,222 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     ok('transcript: queue while it runs, none once it ended');
   }
 
+  // ---------- the screen readers for Send it, bash mode, run in background and the mode ----------
+  {
+    const bashRows = (t = '') => ['done.', RULE, `! ${t}`, RULE, '  ! for bash mode'];
+    assert.deepEqual(SCREEN.bashBox(bashRows()), { text: '', lines: 1 });
+    assert.deepEqual(SCREEN.bashBox(bashRows('git status')), { text: 'git status', lines: 1 });
+    assert.equal(SCREEN.promptBox(bashRows('git status')), null, 'nothing types a message into bash mode');
+    assert.equal(SCREEN.bashBox(['done.', ...box('!not bash')]), null);
+    assert.equal(SCREEN.modeShown([...box('', '  ⏵⏵ accept edits on (shift+tab to cycle)')]), 'acceptEdits');
+    assert.equal(SCREEN.modeShown([...box('', '  ⏸ plan mode on (shift+tab to cycle)')]), 'plan');
+    assert.equal(SCREEN.modeShown([...box('', '  ⏵⏵ bypass permissions on (shift+tab to cycle)')]), 'bypass');
+    assert.equal(SCREEN.modeShown([...box('', '  ⏵⏵ auto mode on (shift+tab to cycle)')]), 'auto');
+    assert.equal(SCREEN.modeShown([...box()]), 'default');
+    assert.equal(SCREEN.modeShown(['Do you want to proceed?', '❯ 1. Yes', '  2. No']), null);
+    assert.equal(SCREEN.bgOffered(['● Bash(npm test)', '  ⎿  Running… (ctrl+b to run in background)']), true);
+    assert.equal(SCREEN.bgOffered(['● Bash(npm test)', '  ⎿  Running…']), false);
+    ok('screen.js: bashBox, modeShown and bgOffered read what compose.js reads');
+  }
+
+  // ---------- activity: mode, bg and prompt ----------
+  {
+    reset(); live();
+    fake.screen = screenOf(['● Bash(npm test)', '  ⎿  Running… (ctrl+b to run in background)', '✻ Brewing… (12s · esc to interrupt)', '', ...box('', '  ⏵⏵ accept edits on (shift+tab to cycle)')]);
+    const [, a] = await call('GET', `${S}/activity`);
+    assert.equal(a.mode, 'acceptEdits');
+    assert.equal(a.bg, true);
+    assert.equal(a.prompt, '');
+    reset(); live({ status: 'idle' });
+    fake.screen = screenOf(['done.', '', ...box('still here')]);
+    const [, b] = await call('GET', `${S}/activity`);
+    assert.equal(b.mode, 'default');
+    assert.equal(b.bg, false, 'only while Claude works');
+    assert.equal(b.prompt, 'still here');
+    fake.screen = screenOf(['done.', RULE, '! ls -la', RULE, '  ! for bash mode']);
+    assert.equal((await call('GET', `${S}/activity`))[1].prompt, '!ls -la');
+    fake.screen = screenOf(['Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel']);
+    const [, c] = await call('GET', `${S}/activity`);
+    assert.equal(c.prompt, null);
+    assert.equal(c.mode, null);
+    fake.list = [{ id: ID, alive: false, exitCode: 0 }];
+    const [, d] = await call('GET', `${S}/activity`);
+    assert.deepEqual([d.mode, d.bg, d.prompt], [null, false, null]);
+    ok('activity: the mode, a shell command for the background, the prompt box\'s text');
+  }
+
+  // ---------- Send it (enter) ----------
+  {
+    reset(); live({ status: 'idle' });
+    let boxText = 'fix the  build\nplease';
+    const draw = () => { fake.screen = screenOf(['done.', '', ...box(boxText)]); };
+    draw();
+    fake.onWrite = (w) => { if (w === '\r') { boxText = ''; draw(); } };
+    const [code, out] = await call('POST', `${S}/enter`, { text: 'fix the build please' });
+    assert.equal(code, 200, out.message);
+    assert.deepEqual(fake.writes, ['\r']);
+    // gone meanwhile: nothing pressed
+    reset(); boxText = ''; draw();
+    const [c2, o2] = await call('POST', `${S}/enter`, { text: 'fix the build please' });
+    assert.equal(c2, 409);
+    assert.equal(o2.gone, true);
+    assert.deepEqual(fake.writes, []);
+    // something else typed there, or only the start of it: nothing pressed
+    reset(); boxText = 'fix the build please and more'; draw();
+    assert.equal((await call('POST', `${S}/enter`, { text: 'fix the build please' }))[0], 409);
+    assert.deepEqual(fake.writes, []);
+    // a bash command left in a bash-mode box
+    reset(); fake.screen = screenOf(['done.', RULE, '! git status', RULE, '  ! for bash mode']);
+    assert.equal((await call('POST', `${S}/enter`, { text: '!git status' }))[0], 200);
+    assert.deepEqual(fake.writes, ['\r']);
+    // a menu up, or no box: nothing pressed
+    reset(); fake.screen = screenOf(['Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel']);
+    assert.equal((await call('POST', `${S}/enter`, { text: 'fix the build please' }))[0], 409);
+    reset(); fake.screen = screenOf(['no box']);
+    assert.equal((await call('POST', `${S}/enter`, { text: 'x' }))[0], 409);
+    assert.deepEqual(fake.writes, []);
+    reset(); live({ status: 'waiting', waitingFor: 'dialog open' });
+    assert.equal((await call('POST', `${S}/enter`, { text: 'x' }))[0], 409);
+    assert.equal((await call('POST', `${S}/enter`, {}))[0], 400);
+    assert.equal((await call('POST', `${S}/enter`, { text: '   ' }))[0], 400);
+    assert.deepEqual(fake.writes, []);
+    ok('enter: Enter again only while the box holds exactly that text; not gone, other text, a menu, a panel');
+  }
+
+  // ---------- run in background ----------
+  {
+    reset(); live();
+    const running = ['● Bash(npm test)', '  ⎿  Running… (ctrl+b to run in background)', '✻ Brewing… (12s · esc to interrupt)', '', ...box()];
+    fake.screen = screenOf(running);
+    const [code, out] = await call('POST', `${S}/background`, {});
+    assert.equal(code, 200, out.message);
+    assert.deepEqual(fake.writes, ['\x02']);
+    reset(); live({ status: 'idle' }); fake.screen = screenOf(['done.', '', ...box()]);
+    assert.equal((await call('POST', `${S}/background`, {}))[0], 409);
+    reset(); live(); fake.screen = screenOf(['✻ Brewing… (12s · esc to interrupt)', '', ...box()]);
+    assert.equal((await call('POST', `${S}/background`, {}))[0], 409, 'busy, but not on a shell command');
+    reset(); live({ status: 'waiting' }); fake.screen = screenOf([...running.slice(0, 2), 'Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel']);
+    assert.equal((await call('POST', `${S}/background`, {}))[0], 409);
+    assert.deepEqual(fake.writes, []);
+    ok('background: Ctrl+B only while a shell command runs that offers it; not idle, another step, a menu');
+  }
+
+  // ---------- the permission mode ----------
+  {
+    // a fake Claude Code: Shift+Tab cycles default -> acceptEdits -> plan -> default (no bypass in this session)
+    const CYCLE = ['default', 'acceptEdits', 'plan'];
+    const FOOT = { default: '  ? for shortcuts', acceptEdits: '  ⏵⏵ accept edits on (shift+tab to cycle)', plan: '  ⏸ plan mode on (shift+tab to cycle)' };
+    let at = 0;
+    const draw = () => { fake.screen = screenOf(['done.', '', ...box('', FOOT[CYCLE[at]])]); };
+    const start = (mode, o = {}) => {
+      reset(); live({ status: 'idle', ...o }); at = CYCLE.indexOf(mode); draw();
+      fake.onWrite = (w) => { if (w === '\x1b[Z') { at = (at + 1) % CYCLE.length; draw(); } };
+    };
+    start('default');
+    const [code, out] = await call('POST', `${S}/mode`, { mode: 'plan' });
+    assert.equal(code, 200, out.message);
+    assert.deepEqual([out.mode, out.from, out.changed], ['plan', 'default', true]);
+    assert.deepEqual(fake.writes, ['\x1b[Z', '\x1b[Z']);
+    // on it already: nothing pressed
+    start('acceptEdits');
+    const [c2, o2] = await call('POST', `${S}/mode`, { mode: 'acceptEdits' });
+    assert.equal(c2, 200);
+    assert.equal(o2.changed, false);
+    assert.deepEqual(fake.writes, []);
+    // a mode this session does not have: round the cycle once, back where it began, 409
+    start('plan');
+    const [c3, o3] = await call('POST', `${S}/mode`, { mode: 'bypass' });
+    assert.equal(c3, 409);
+    assert.equal(o3.mode, 'plan');
+    assert.match(o3.message, /only a session started with it/);
+    assert.equal(fake.writes.length, 3);
+    // the footer never changes (it does not read keys): one press, then it stops
+    start('default'); fake.onWrite = null;
+    assert.equal((await call('POST', `${S}/mode`, { mode: 'plan' }))[0], 409);
+    assert.equal(fake.writes.length, 1);
+    // busy, a menu up, a mode it can't read: nothing pressed
+    start('default', { status: 'busy' });
+    assert.equal((await call('POST', `${S}/mode`, { mode: 'plan' }))[0], 409);
+    start('default'); fake.screen = screenOf(['Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel']);
+    assert.equal((await call('POST', `${S}/mode`, { mode: 'plan' }))[0], 409);
+    start('default'); fake.screen = screenOf(['no footer here']);
+    assert.equal((await call('POST', `${S}/mode`, { mode: 'plan' }))[0], 409);
+    assert.deepEqual(fake.writes, []);
+    // bad input; an overseer's is Henry's (the relay's key)
+    assert.equal((await call('POST', `${S}/mode`, { mode: 'yolo' }))[0], 400);
+    assert.equal((await call('POST', `${S}/mode`, {}))[0], 400);
+    start('default', { role: 'bot:0123456789ab' });
+    assert.equal((await call('POST', `${S}/mode`, { mode: 'plan' }))[0], 403);
+    assert.equal((await call('POST', `${S}/mode`, { mode: 'plan', via: 'phone' }))[0], 403, 'no relay key');
+    assert.deepEqual(fake.writes, []);
+    const [c4] = await call('POST', `${S}/mode`, { mode: 'plan', via: 'phone' }, { 'x-fleet-view-relay': API.relayKey() });
+    assert.equal(c4, 200);
+    ok('mode: Shift+Tab until the footer shows it; on it already, a mode it lacks, no redraw; not busy, a menu, unread; an overseer\'s is Henry\'s');
+  }
+
+  // ---------- bash mode (message with shell) ----------
+  {
+    // a fake Claude Code: "!" into an empty box switches to bash mode (its prefix "!"), the paste goes after it, Enter runs it
+    let bash = false, typed = '', asText = false;
+    const draw = () => { fake.screen = screenOf(['done.', '', ...(bash ? [RULE, `! ${typed}`, RULE, '  ! for bash mode'] : box(typed))]); };
+    const start = (o = {}) => {
+      reset(); live({ status: 'idle', ...o }); bash = false; typed = o.typed || ''; asText = !!o.asText; draw();
+      fake.onWrite = (w) => {
+        if (w === '!' && !typed && !bash && !asText) bash = true;
+        else if (w === '!') typed += '!';
+        else if (w === '\x7f') typed = typed.slice(0, -1);
+        else if (w.startsWith('\x1b[200~')) typed += w.slice(6, -6);
+        else if (w === '\r') { bash = false; typed = ''; }
+        draw();
+      };
+    };
+    start();
+    const [code, out] = await call('POST', `${S}/message`, { text: 'git status', shell: true });
+    assert.equal(code, 200, out.message);
+    assert.equal(out.shell, true);
+    assert.equal(fake.writes[0], '!');
+    assert.equal(pasted(), 'git status');
+    assert.equal(fake.writes[fake.writes.length - 1], '\r');
+    // its own "!" is the mode's
+    start();
+    assert.equal((await call('POST', `${S}/message`, { text: '!ls -la', shell: true }))[0], 200);
+    assert.equal(pasted(), 'ls -la');
+    // something typed in the box, or a menu up: nothing pressed, never queued
+    start({ typed: 'a draft' });
+    const [c2, o2] = await call('POST', `${S}/message`, { text: 'git status', shell: true, queue: true });
+    assert.equal(c2, 409);
+    assert.match(o2.message, /typed in its prompt/);
+    assert.deepEqual(fake.writes, []);
+    start(); fake.screen = screenOf(['Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel']);
+    assert.equal((await call('POST', `${S}/message`, { text: 'git status', shell: true, queue: true }))[0], 409);
+    assert.deepEqual(fake.writes, []);
+    assert.ok(!API.queuedIds().includes(ID), 'a shell command is never queued');
+    // the "!" taken as text: taken back with a Backspace, nothing pasted
+    start({ asText: true });
+    const [c3, o3] = await call('POST', `${S}/message`, { text: 'git status', shell: true });
+    assert.equal(c3, 409);
+    assert.match(o3.message, /as text/);
+    assert.deepEqual(fake.writes, ['!', '\x7f']);
+    // bad input
+    assert.equal((await call('POST', `${S}/message`, { text: 'x', shell: 'yes' }))[0], 400);
+    assert.equal((await call('POST', `${S}/message`, { text: 'x', shell: true, now: true }))[0], 400);
+    assert.equal((await call('POST', `${S}/message`, { text: '!', shell: true }))[0], 400);
+    assert.equal((await call('POST', `${S}/message`, { text: 'x', shell: true, from: ID }))[0], 400);
+    // an overseer's: Henry's only
+    start({ role: 'bot:0123456789ab' });
+    assert.equal((await call('POST', `${S}/message`, { text: 'git status', shell: true }))[0], 403);
+    assert.deepEqual(fake.writes, []);
+    // a plain message starting with "!" is still pasted as text
+    start();
+    assert.equal((await call('POST', `${S}/message`, { text: '!important: read this' }))[0], 200);
+    assert.ok(!fake.writes.includes('!'));
+    assert.equal(pasted(), '!important: read this');
+    ok('message shell: "!" as a key into an empty box, then the command and Enter; refused over a draft or a menu, never queued; "!" taken as text taken back');
+  }
+
   const paths = API.ENDPOINTS.map((e) => `${e.method} ${e.path}`);
-  for (const p of ['POST /api/sessions/:id/now', 'POST /api/sessions/:id/unsend', 'POST /api/sessions/:id/model', 'GET /api/sessions/:id/activity']) assert.ok(paths.includes(p), p);
+  for (const p of ['POST /api/sessions/:id/now', 'POST /api/sessions/:id/unsend', 'POST /api/sessions/:id/model', 'GET /api/sessions/:id/activity',
+    'POST /api/sessions/:id/enter', 'POST /api/sessions/:id/background', 'POST /api/sessions/:id/mode']) assert.ok(paths.includes(p), p);
   ok('GET /api lists the new verbs');
 })().then(() => { console.log(`${n} tests passed`); }, (e) => { console.error(e); process.exitCode = 1; })
   .finally(() => { server.close(); setTimeout(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} process.exit(); }, 100); });

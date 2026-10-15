@@ -27,6 +27,9 @@
 //   menuShown(raw, cols, rows) -> the same, from raw output
 //   promptBox(lines), spinner(lines), effortShown(lines): ports of compose.js parsePromptBox, parseSpinner and
 //                                                   parseEffort, for api.js's chat verbs (unsend, activity, model)
+//   bashBox(lines): the prompt box in bash mode (its prefix "!"), as promptBox reads the other
+//   modeShown(lines), bgOffered(lines): compose.js parseMode and its tick's bgHint reading, for api.js's /mode,
+//                                                   /background and the activity line
 'use strict';
 
 // ---------- the terminal ----------
@@ -617,7 +620,7 @@ const menuShown = (raw, cols, rows) => menuIn(render(raw, cols, rows, 40, false)
 // the ❯ gone, text '' when it shows only its hint; null when it isn't on screen (a menu or panel covers it). lines
 // may carry render's marks: what the box draws dim is Claude Code's grey suggestion of a next message, not typed text
 const BOX_HINT = /^(?:Press up to edit queued messages|Try ".*")$/;
-const dropDim = (l, first) => (first ? l.replace(/^(\s*[❯>]\s?)\x01[^\x02]\x02(?=\x03)/, '$1') : l)
+const dropDim = (l, first, lead = '[❯>]') => (first ? l.replace(new RegExp(`^(\\s*${lead}\\s?)\\x01[^\\x02]\\x02(?=\\x03)`), '$1') : l)
   .replace(/\x03[^\x04]*(\x04|$)/g, '').replace(/[\x01-\x04]/g, '');
 // the background agents Claude Code lists under its footer ("● main", a row per agent): where the rows end without it
 const AGENT_ROW = /^\s*[●◯]\s+\S/;
@@ -626,7 +629,8 @@ function agentListStart(L) {
   while (e > 0 && (AGENT_ROW.test(L[e - 1]) || !L[e - 1].trim())) e--;
   return L.slice(e).some((l) => /^\s*●\s+main\b/.test(l)) ? e : L.length;
 }
-function promptBox(lines) {
+// lead: the box's prefix, "❯" (or ">" in older versions), or "!" in bash mode (bashBox)
+function boxWith(lines, lead) {
   const M = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
   const L = M.map((l) => l.replace(/[\x01-\x04]/g, ''));
   const end = agentListStart(L);
@@ -635,11 +639,16 @@ function promptBox(lines) {
   if (b < 1 || !isRule(L[b])) return null;
   let a = b - 1;
   while (a >= 0 && !isRule(L[a])) a--;
-  if (a < 0 || b - a < 2 || !/^\s*[❯>](\s|$)/.test(L[a + 1])) return null;
-  const rows = M.slice(a + 1, b).map((l, k) => dropDim(l, !k));
-  const text = rows.map((l, i) => (i ? l.replace(/^ {2}/, '') : l.replace(/^\s*[❯>]\s?/, '')).trimEnd()).join('\n').trim();
+  if (a < 0 || b - a < 2 || !new RegExp(`^\\s*${lead}(\\s|$)`).test(L[a + 1])) return null;
+  const rows = M.slice(a + 1, b).map((l, k) => dropDim(l, !k, lead));
+  const text = rows.map((l, i) => (i ? l.replace(/^ {2}/, '') : l.replace(new RegExp(`^\\s*${lead}\\s?`), '')).trimEnd()).join('\n').trim();
   return { text: BOX_HINT.test(text) ? '' : text, lines: rows.length };
 }
+const promptBox = (lines) => boxWith(lines, '[❯>]');
+// The box in bash mode: Claude Code draws its prefix "!" instead of the ❯ once a "!" typed into an empty box switched it
+// (its binary: mode "bash" -> "!"), and the text after it is the shell command. -> { text, lines } or null (not in bash
+// mode, or not on screen). promptBox reads null for it, so nothing that types a message ever types into bash mode
+const bashBox = (lines) => boxWith(lines, '!');
 // parseSpinner: the spinner line while Claude works ("✻ Brewing… (12s · ↓ 1.2k tokens · esc to interrupt)", its
 // parentheses maybe running onto the next rows) -> { verb, detail, strong } or null; strong: it carries the time,
 // tokens or "esc to interrupt", so it is the live spinner and not some text
@@ -673,4 +682,26 @@ function effortShown(lines) {
   return null;
 }
 
-module.exports = { render, createScreen, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, spinner, effortShown };
+// parseMode: the permission mode, from the footer under the prompt: 'bypass', 'acceptEdits', 'plan', 'auto', 'default'
+// (no mode line, but the prompt or "? for shortcuts" is there), or null when the footer isn't on screen (a menu covers
+// it)
+function modeShown(lines) {
+  const L = (Array.isArray(lines) ? lines : []).slice(-8).map((l) => String(l ?? ''));
+  for (let i = L.length - 1; i >= 0; i--) {
+    const l = L[i];
+    if (!/⏵⏵|⏸|shift\+tab/i.test(l)) continue;
+    if (/bypass permissions on/i.test(l)) return 'bypass';
+    if (/accept edits on/i.test(l)) return 'acceptEdits';
+    if (/plan mode on/i.test(l)) return 'plan';
+    if (/auto mode on/i.test(l)) return 'auto';
+  }
+  if (L.some((l) => /\?\s*for shortcuts/i.test(l))) return 'default';
+  // the prompt line right under the box's top rule ("❯ ", or "> " in older versions)
+  for (let i = 1; i < L.length; i++) if (/^\s*[❯>](\s|$)/.test(L[i]) && isRule(L[i - 1])) return 'default';
+  return null;
+}
+// the tick's bgHint: a shell command Claude runs that can go to the background ("ctrl+b to run in background" on
+// screen). Only worth anything while Claude works (the caller checks)
+const bgOffered = (lines) => (Array.isArray(lines) ? lines : []).some((l) => /ctrl\+b\b/i.test(String(l ?? '')) && /\bbackground\b/i.test(String(l ?? '')));
+
+module.exports = { render, createScreen, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, bashBox, spinner, effortShown, modeShown, bgOffered };
