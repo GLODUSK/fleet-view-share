@@ -10,7 +10,7 @@
 // (never Henry's data; it checks /state's home is null before anything else), starts headless Edge on the real GPU
 // (--size, device scale 1) with a profile kept under B:\Temp (a cold compile of the sky's shader took ~17 min on D3D11 in
 // 2026-10, and headless Edge relinks it every run even with its cache written; it waits up to --wait seconds, default
-// 1500, for stats().sky 'webgl2'), opens the Map tab (?fixture=1, so window.__map is there), keeps the page
+// 1500, for stats().sky 'webgl2' with the full program linked, stats().rects.full), opens the Map tab (?fixture=1, so window.__map is there), keeps the page
 // awake (__map.rest(false)), holds the director (__map.hold(true): nothing starts by itself), turns the GPU meter on
 // (__map.gpuMeter(true), web/map.js: the sky's passes timed with EXT_disjoint_timer_query_webgl2) and then runs, one at a
 // time: the empty sky (baseline), each space event (__map.event()), each scene (__map.scene()) and each far event
@@ -196,7 +196,8 @@ async function bench() {
     await ev('__map.rest(false)');
     const c0 = Date.now();
     let sky = null;
-    while ((sky = await ev('__map.stats() && __map.stats().sky')) !== 'webgl2' && Date.now() - c0 < WAIT * 1000) await sleep(2000);
+    // (the WebGL sky draws before its full program is linked, without a warp or voyage; the rows want it linked)
+    while ((sky = await ev('(() => { const s = __map.stats(); return s && s.sky === "webgl2" && s.rects && s.rects.full === false ? "linking" : s && s.sky; })()')) !== 'webgl2' && Date.now() - c0 < WAIT * 1000) await sleep(2000);
     console.log(`sky: ${sky} after ${Math.round((Date.now() - c0) / 1000)} s (profile ${prof})`);
     if (sky !== 'webgl2') throw new Error(`the sky never went to WebGL2 in ${WAIT} s (a cold shader compile takes many minutes; try a longer --wait)\n` + problems.join('\n'));
 

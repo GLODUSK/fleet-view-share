@@ -320,11 +320,16 @@
 // Edge on the real GPU, Windows' GPU % beside the timer; --live: the running app's GPU %, PC or Mac). rects(mode): each
 // event drawn in its own rectangle (true, the default), the full program over the whole sky as before (false, to compare
 // cost and pixels), or as true with the rectangles outlined on the backdrop ('show'); stats().rects: { mode, base (the base
-// sky's program is ready), all (the full program drew everything: the warp, a voyage, or boxes over RECT_ALL of the
-// window), share (of the window the full program drew), list ([x0, y0, x1, y1], CSS px), ev (each box's events, EV_* bits),
-// drew (the events of the program that drew each box; -1 the full one), link ({ full, base }: ms from the start to each
-// program's link), progs ([{ ev, ready, failed, ms (its link) }], the rectangles' own programs) }, see "Each event in its
-// own rectangle" and "A rectangle's own program"; rects('full') draws each box with the full program, as before those.
+// sky's program is ready), all (one program drew everything: the warp, a voyage, or boxes over RECT_ALL of the
+// window), allBy (that program's events: -1 the full one, 0 the base sky's; null when the boxes drew), share (of the
+// window the events' programs drew), list ([x0, y0, x1, y1], CSS px), ev (each box's events, EV_* bits), drew (the events
+// of the program that drew each box; -1 the full one, 0 the base sky's: none linked for it yet), need (a warp or a voyage
+// is up), lack (the events the last frame had no program for), full (the full program is linked), held ({ kind: n }: the
+// directors' picks held back until the sky can draw them), link ({ full, base, first }: ms from the start to each
+// program's link and to the WebGL sky's first frame), progs ([{ ev, ready, failed, ms (its link) }], the rectangles' own
+// programs) }, see "Each event in its own rectangle", "A rectangle's own program" and "The sky before its full program";
+// rects('full') draws each box with the full program, as before those. skyPix(how, keep): the last frame's pixels drawn
+// again (skyPixels), to compare a picture before the full program with the full program's.
 // ?skyProgs=all links every one-event rectangle program at the start (see "A rectangle's own program").
 // ?skyHour=<0-24> forces the sky's hour; ?sky2d=1 has the canvas draw the sky, as without WebGL2; ?glow2d=1 has it
 // draw only the repo nebulae (to compare the two).
@@ -1354,14 +1359,16 @@ export function mapStats() {
   if (!I) return null;
   const s = I.stats;
   return { avgMs: s.n ? s.sum / s.n : 0, maxMs: s.max, frames: s.frames, comets: I.comets.length, queued: I.cometQ.length,
-    heads: cometHeads(), big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length, sky: I.skyGL && I.skyGL.ok ? 'webgl2' : '2d',
+    heads: cometHeads(), big: I.comets.concat(I.cometQ).filter((c) => c.big).length, bursts: I.bursts.length, sky: I.skyGL && I.skyGL.ok && I.skyGL.firstMs != null ? 'webgl2' : '2d',
     meteor: I.meteors.length, showers: I.showers, meteorIn: I.meteorAt ? Math.round(I.meteorAt - performance.now()) : null,
     event: { running: [...I.events.keys()], last: I.eventLast, nextIn: I.eventAt ? Math.round(I.eventAt - performance.now()) : null,
       life: Object.fromEntries([...I.events.values()].map((e) => [e.name, [Math.round(performance.now() - e.at), e.ev && e.ev.ms ? Math.round(e.ev.ms) : null]])) },
     gpu: gpuStats(),
     rects: I.skyGL ? { mode: rectMode, base: !!I.skyGL.B, all: !!I.skyGL.rectAll, share: Math.round((I.skyGL.rectShare || 0) * 1e3) / 1e3,
       list: (I.skyGL.rects || []).map((r) => r.slice(0, 4).map((v) => Math.round(v / (I.dpr || 1)))),
-      ev: (I.skyGL.rects || []).map((r) => r[4]), drew: I.skyGL.rectProg || [], link: { full: I.skyGL.fullMs || null, base: I.skyGL.baseMs || null },
+      ev: (I.skyGL.rects || []).map((r) => r[4]), drew: I.skyGL.rectProg || [], allBy: I.skyGL.rectBy == null ? null : I.skyGL.rectBy, need: !!I.skyGL.rectNeed,
+      lack: I.skyGL.lack || 0, full: !!I.skyGL.F, held: { ...(I.skyGL.held || {}) },
+      link: { full: I.skyGL.fullMs || null, base: I.skyGL.baseMs || null, first: I.skyGL.firstMs == null ? null : I.skyGL.firstMs },
       progs: [...(I.skyGL.V || new Map())].map(([ev, v]) => ({ ev, ready: !!v.L, failed: v.bad, ms: v.ms || null })) } : null,
     asteroids: (() => { const e = evOf('asteroids'); if (!e) return null;
       return { light: e.ev.light.map((v) => Math.round(v * 100) / 100), shown: asteroidsNow().map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.r * 10) / 10, blur: Math.round(r.blur), a: Math.round(r.a * 1e3) / 1e3 })) }; })(),
@@ -1541,6 +1548,7 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
   window.__map = { nodes: () => mapNodes(), stats: () => mapStats(), debug: () => mapDebug(), comet: mapComet, merge: mapMerge,
     sky: (h) => { skyForce = h == null ? null : Number(h); if (I) I.sky = null; }, // force the sky's hour (null: the clock)
     skyGL: () => (I && I.skyGL ? I.skyGL.gl : null), // the sky's WebGL2 context, for a context-loss test
+    skyPix: (how, keep) => skyPixels(how, keep), // the last frame's sky drawn again and read back (skyPixels)
     // rest as if away (true), never (false) or as the desktop says (null); battery(on) as if on battery or not
     rest: (on) => { restForce = on == null ? null : !!on; wake(); return resting(); }, battery: (on) => { away.battery = !!on; wake(); },
     // the GPU meter on (true) or off (false, its queries let go); see stats().gpu (gpuStats) and scripts/sky-gpu-bench.js
@@ -3716,9 +3724,13 @@ function eventPick() {
   // (a planet parked for minutes is no reason to send black holes: a hunt aims one at it)
   const lens = I.events.has('lens'), prey = I.events.has('ship'), seek = !sys && !I.skyOff.has('system');
   const wt = (k) => EVENTS.get(k).weight * ((lens && k === 'ship') || (prey && k === 'lens') ? EVENT_PAIR : 1) * (k === 'voyage' && seek ? VOYAGE_SEEK : 1);
-  let w = Math.random() * pool.reduce((a, k) => a + wt(k), 0);
-  for (const k of pool) if ((w -= wt(k)) < 0) return k;
-  return pool[pool.length - 1];
+  const pick = (P) => { let w = Math.random() * P.reduce((a, k) => a + wt(k), 0); for (const k of P) if ((w -= wt(k)) < 0) return k; return P[P.length - 1]; };
+  // (before the sky's full program is linked, a kind it can't draw yet is held back, its program asked for, and one it can
+  // draw picked instead: see "The sky before its full program")
+  const k = pick(pool);
+  if (skyCanShow(k)) return k;
+  const ok = pool.filter((q) => q !== k && skyCanShow(q, true));
+  return ok.length ? pick(ok) : null;
 }
 // tests (__map.hold): the director starts nothing by itself (no space event, scene or far event; what runs goes on, and the
 // tests' hooks still start any), so a bench sees only what it started
@@ -3777,7 +3789,7 @@ function sceneStart(t, name) {
       if (eventStart(t, n, sy ? { sys: sy.ev, stay: sy.ev.stay } : {})) eventSkip(n, SYSTEM_ARRIVE / 1000);
     }
     pool = [name];
-  } else pool = [...SCENES].filter(([k, d]) => free(k, d)).map(([k]) => k);
+  } else pool = !skyCanShow('scene') ? [] : [...SCENES].filter(([k, d]) => free(k, d)).map(([k]) => k);
   while (pool.length) {
     let w = Math.random() * pool.reduce((a, k) => a + SCENES.get(k).weight, 0), k = pool[pool.length - 1];
     for (const q of pool) if ((w -= SCENES.get(q).weight) < 0) { k = q; break; }
@@ -4196,7 +4208,7 @@ function parkStep(ev, t) {
   if (t - ev.at < ev.stay) return true;
   if (I.skyOff.has('voyage')) { if (!ev.go) ev.go = t; return t - ev.go < SYSTEM_LEAVE; }
   ev.go = 0;
-  if (!skyHold && !I.scene && !I.events.has('voyage')) eventStart(t, 'voyage');
+  if (!skyHold && !I.scene && !I.events.has('voyage') && skyCanShow('voyage', true)) eventStart(t, 'voyage');
   return true;
 }
 // a parked sight's size share k and alpha a at `now` (ms): grown in from SYSTEM_GONE over SYSTEM_ARRIVE, and shrinking back
@@ -4999,7 +5011,7 @@ function farStep(t, rest) {
     return;
   }
   if (!I.farAt) I.farAt = t + pickIn(FAR_GAP);
-  else if (t >= I.farAt && !skyHold) { const k = farPick(); if (!k || !farStart(t, k)) I.farAt = t + pickIn(FAR_GAP); }
+  else if (t >= I.farAt && !skyHold) { const k = skyCanShow('far') && farPick(); if (!k || !farStart(t, k)) I.farAt = t + pickIn(FAR_GAP); }
 }
 // a part's light over its life (f 0-1 through its own t0..t1; age: ms since the event began): a 0-1, and how far it has
 // come in (en) and gone out (ex), 0-1 each, which the shader turns into the shape's own way in and out (farPart: it
@@ -5454,7 +5466,8 @@ function drawSky(ctx) {
 // (one drawImage, skyPaint), and is left alone otherwise. The map's canvas, over the backdrop, is see-through but for
 // the map itself. The sky's canvas is never on the page: shown, a WebGL canvas that changes keeps about four buffers of
 // its size (a 1600x665 map at dpr 2: +90 MB of GPU memory), off the page about two (+40 MB). No WebGL2 (or only a
-// software one, glSoftware), the context lost, or the sky's shader still compiling (skyGLInit): the backdrop draws the
+// software one, glSoftware), the context lost, or the sky's shaders still compiling (skyGLInit; the WebGL sky starts with
+// the base sky's, see "The sky before its full program"): the backdrop draws the
 // sky itself (drawSky, drawStars).
 const SKY_GL_ATTRS = { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
   preserveDrawingBuffer: false, powerPreference: 'low-power', failIfMajorPerformanceCaveat: true };
@@ -7841,7 +7854,7 @@ function skyGLMake(cv) {
     inst: new Float32Array(64 * GLOW_INST), ni: 0, lastInst: new Float32Array(64 * GLOW_INST), lastNi: -1,
     gu: new Float32Array((3 + 4 * GLOW_MAX) * 4), lastGu: new Float32Array((3 + 4 * GLOW_MAX) * 4), gn: 0, lastGn: -1, cols: new Map() };
   // a lost context: the map's canvas draws the sky from the next frame on, until the context is back
-  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; G.pend = null; G.bpend = null; G.B = null; G.V = new Map(); G.tq = null; I.dirty = true; });
+  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; G.pend = null; G.bpend = null; G.B = null; G.F = null; G.V = new Map(); G.tq = null; I.dirty = true; });
   cv.addEventListener('webglcontextrestored', () => { skyGLInit(G); I.dirty = true; });
   skyGLInit(G);
   return G;
@@ -7873,41 +7886,67 @@ const glProgram = (gl, vs, fs, what) => glLinked(gl, glLink(gl, vs, fs), what);
 // skyGLPoll finishes it once the link is done, and until then the backdrop keeps what it has for SKY_GL_WAIT, then the
 // canvas draws the sky. Without the extension it waits for the link here, as it always did.
 const SKY_GL_WAIT = 400;
-// The base sky's program (SKY_BASE_FS, see "Each event in its own rectangle") links beside it, the same way; until it
-// is ready (or if it fails) the full program draws every pixel, as it did before there was one
+// The sky before its full program (Henry, 2026-10-16: the WebGL sky about a minute after launch, not after the full
+// program's cold link, 13-28 min on D3D11). The base sky's program (SKY_BASE_FS, see "Each event in its own rectangle")
+// links first, in 0.4 s, and with it and the textures (skyGLTex) the WebGL sky draws (G.ok): the base sky everywhere no
+// event reaches, each event's rectangle by a program with its events (skyProg; SKY_PROG_FIRST start at once, then
+// skyProgNext links one at a time what is on screen, SKY_PROG_EARLY, then what the director asks for), and boxes over
+// RECT_ALL of the window (a nebula drift's) by the program of all their events over the whole window: no warp and no
+// voyage there, so each pixel is the one the full program draws. The full program links alongside, from the start (the
+// long pole; the one-event links, one at a time and SKY_PROG_MAX at most, slow it a little and never for long), and once
+// it is there everything is as before: the warp and a voyage, rects(false) and rects('full'), a box with no program of
+// its own yet (the mixes linked for the director give their room back, skyGLFinish). Until then nothing on screen may
+// need it: the director holds back the warp, a voyage and the scenes (all of them need the full program or a sight a
+// voyage brings), and starts another kind only once a linked program has it and every event up (skyCanShow), so wherever
+// their rectangles meet one program draws them (a mix links in minutes, 4 for a far event and a battle: until then the
+// sights mostly come one at a time). Henry's rule (performance never visibly lowers the map's quality) and no flicker:
+// the canvas draws the sky until the WebGL sky can draw its frame whole (the frame needs nothing that isn't linked:
+// drawSkyGL keeps the canvas's sky till then, as it did for the full link), then the switch, once; never back to the
+// canvas but for a lost context. A sight the hooks (tests) start before its program is there is drawn by the base sky
+// (left out) until its program is linked (at once: seconds alone, minutes for a mix), and the hooks' warp or voyage
+// without the full program draws the sky without their terms. With the base program failed the
+// full one draws, as before there was one; with the full one failed the WebGL sky goes on without the warp and voyages.
+// Without KHR_parallel_shader_compile every link waits here, the full and the base ones together, as they always did
+// (a one-event program's link would freeze the page: none, so the full program draws the boxes)
 function skyGLInit(G) {
   const gl = G.gl;
-  G.ok = false; G.B = null; G.V = new Map();
+  G.ok = false; G.B = null; G.F = null; G.V = new Map(); G.want = null; G.lack = 0; G.ask = 0; G.firstMs = null; G.fullMs = G.baseMs = 0;
   try { G.par = gl.getExtension('KHR_parallel_shader_compile'); } catch { G.par = null; }
-  G.pend = glLink(gl, SKY_VS, SKY_FS);
-  G.bpend = glLink(gl, SKY_VS, SKY_BASE_FS);
+  if (!G.par) {
+    G.pend = glLink(gl, SKY_VS, SKY_FS);
+    G.bpend = glLink(gl, SKY_VS, SKY_BASE_FS);
+    G.pendAt = performance.now();
+    skyGLFinish(G); skyGLBase(G);
+    return;
+  }
+  // the base sky first (then SKY_PROG_FIRST, for tests), then the full one; the rest follow one at a time (skyProgNext)
   G.pendAt = performance.now();
-  if (!G.par) { skyGLFinish(G); skyGLBase(G); return; }
-  // the parked star system's program links beside them: one is up after nearly every voyage (see skyProg)
+  G.bpend = glLink(gl, SKY_VS, SKY_BASE_FS);
   for (const m of SKY_PROG_FIRST) skyProgLink(G, m, true);
+  G.pend = glLink(gl, SKY_VS, SKY_FS);
 }
 // a link done (or no way to ask: then it waits for it)
 function glDone(G, pend) {
   try { return !G.par || !!G.gl.getProgramParameter(pend.p, G.par.COMPLETION_STATUS_KHR); } catch { return true; }
 }
-// whether the sky's program is ready (G.ok), finishing it (and the base sky's) when its link is done; never waits for a link
+// whether the WebGL sky can draw (G.ok: the base or the full program and the textures), finishing each link that is done
+// (and, with no full program yet, starting the next one, skyProgNext); never waits for a link
 function skyGLPoll(G) {
   if (G.gl.isContextLost()) return false;
-  if (G.ok) {
-    if (G.bpend && glDone(G, G.bpend)) { skyGLBase(G); if (I) I.dirty = true; }
-    for (const [m, v] of G.V) if (v.pend && glDone(G, v.pend)) skyProgDone(G, m, v);
-    return true;
-  }
-  if (!G.pend) return false;
-  if (glDone(G, G.pend)) { skyGLFinish(G); if (I) I.dirty = true; }
+  if (G.bpend && glDone(G, G.bpend)) { skyGLBase(G); if (I) I.dirty = true; }
+  if (G.pend && glDone(G, G.pend)) { skyGLFinish(G); if (I) I.dirty = true; }
+  for (const [m, v] of G.V) if (v.pend && glDone(G, v.pend)) skyProgDone(G, m, v);
+  if (!G.F && G.par) skyProgNext(G);
   return G.ok;
 }
-// the base sky's program, once the full one is ready (it shares its textures): its uniforms' places, or none (G.B null)
+// the base sky's program: its uniforms' places, or none (G.B null); with it the textures, if the full program didn't
+// bring them first (without the extension only the full program starts the WebGL sky, as before)
 function skyGLBase(G) {
-  if (!G.ok || !G.bpend) return;
+  if (!G.bpend) return;
   const p = glLinked(G.gl, G.bpend, 'base sky');
   G.bpend = null; G.baseMs = Math.round(performance.now() - G.pendAt);
   G.B = p ? skyLocs(G.gl, p) : null;
+  if (p && G.par) skyGLTex(G);
 }
 // a sky program's uniforms' places (G.F: the full one, G.B: the base sky's), its texture units and star tints set
 function skyLocs(gl, p) {
@@ -7923,17 +7962,33 @@ function skyLocs(gl, p) {
     nb: at('uNb'), as: at('uAs'), ln: at('uLn'), sh: at('uSh'), wp: at('uWp'), fr: at('uFr'), frn: at('uFrN'), pl: at('uPl'),
     bt: at('uBt'), sy: at('uSy'), vy: at('uVy'), g: ['uGlow', 'uN0', 'uN1', 'uGB', 'uGE', 'uGC', 'uGL', 'uGN'].map(at) };
 }
-// the sky's link still runs and began less than SKY_GL_WAIT ago: the backdrop keeps what it has (skyPaint), so a
-// driver with the shader in its cache never shows the canvas's sky for a frame first
-const skyGLWaits = (G) => !!(G && !G.ok && G.pend && performance.now() - G.pendAt < SKY_GL_WAIT);
-// the programs and the textures (the star tiles' pixels come in drawSkyGL, once per dpr); the textures stay bound, the
-// sky's two programs are picked for each pass (skyUniforms), the glows' only while it fills the field (glowField)
+// the WebGL sky hasn't drawn yet, its links began less than SKY_GL_WAIT ago and one may still bring it: the backdrop keeps
+// what it has (skyPaint), so a driver with the shaders in its cache never shows the canvas's sky for a frame first
+const skyGLWaits = (G) => !!(G && G.firstMs == null && (G.ok || G.pend || G.bpend) && performance.now() - G.pendAt < SKY_GL_WAIT);
+// the full program (G.F; null if it failed), and the textures if the base sky didn't bring them first
 function skyGLFinish(G) {
   const gl = G.gl, pend = G.pend, p = pend ? glLinked(gl, pend, 'sky') : null;
   G.pend = null; G.fullMs = Math.round(performance.now() - G.pendAt);
-  G.ok = !!p;
-  if (!G.ok) return;
-  G.F = skyLocs(gl, p);
+  G.F = p ? skyLocs(gl, p) : null;
+  if (p) skyGLTex(G);
+  G.drawn = false;
+  // the mixes linked (or linking) for the time before it, for what the director asked (skyCanShow), give their room back,
+  // so the one-event programs still to come (a planet's, once voyages bring them) have it, as before: from now on a mix
+  // links only once it has been wanted for SKY_PROG_WAIT
+  if (p) for (const [m, v] of G.V) {
+    if (bitsOf(m) < 2 || v.bad) continue;
+    if (v.pend) for (const s of v.pend.sh) gl.deleteShader(s);
+    gl.deleteProgram(v.L ? v.L.p : v.pend ? v.pend.p : null);
+    G.V.delete(m);
+  }
+}
+// the textures (the star tiles' pixels come in drawSkyGL, once per dpr), once per context, with the first sky program
+// linked (the WebGL sky can draw from then on: G.ok); the textures stay bound, the sky's programs are picked for each
+// pass (skyUniforms), the glows' only while it fills the field (glowField)
+function skyGLTex(G) {
+  if (G.ok) return;
+  G.ok = true;
+  const gl = G.gl;
   SKY_TEX.forEach((name, i) => {
     gl.activeTexture(gl.TEXTURE0 + i);
     gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
@@ -8205,15 +8260,18 @@ const FAR_CUT = { ...FAR_REACH, 5: 1.25 }, FAR_CUT_MAX = 2.5;
 // before (to compare); 'show' as true, the boxes outlined on the backdrop
 let rectMode = true;
 // this frame's boxes from the uniforms u (canvas w x h device px, dpr): G.rects ([x0, y0, x1, y1], whole px, merged, cut
-// to the canvas), G.rest (the boxes the base sky draws, rectsRest), G.rectAll (the full program draws everything) and
-// G.rectShare (the share of the canvas the full program draws)
+// to the canvas), G.rest (the boxes the base sky draws, rectsRest), G.rectAll (one program draws everything: the full
+// one; before it is linked, the program of G.rectEv, every box's events), G.rectShare (the share of the canvas the
+// events' programs draw) and G.rectNeed (a warp or a voyage is up)
 function skyRects(G, u, w, h, dpr) {
   const out = [];
   let all = false, ev = 0; // ev: the event (EV_*) whose boxes come next, kept with each box (skyProg)
   const boxXY = (x, y, rx, ry) => { if (rx > 0 && ry > 0 && Number.isFinite(x + y + rx + ry)) out.push([x - rx - RECT_PAD, y - ry - RECT_PAD, x + rx + RECT_PAD, y + ry + RECT_PAD, ev]); };
   const box = (x, y, r) => boxXY(x, y, r, r);
-  // the warp drift (its stretch) and a voyage (its light, flash or dimming) reach every pixel
-  if (u[SKY_WP + 4] > 0 || u[SKY_VY + 2] > 0 || u[SKY_VY + 4] > 0 || u[50] !== 1 || u[51] !== 1) all = true;
+  // the warp drift (its stretch) and a voyage (its light, flash or dimming) reach every pixel: the full program draws
+  // them (G.rectNeed; without it, none: see "The sky before its full program")
+  G.rectNeed = u[SKY_WP + 4] > 0 || u[SKY_VY + 2] > 0 || u[SKY_VY + 4] > 0 || u[50] !== 1 || u[51] !== 1;
+  if (G.rectNeed && G.F) all = true;
   // the nebula drift: nebula(), a.w > 0, out to sqrt(1.3) of its long half-axis; and inside its own ellipse (r, in its
   // half-axes) out to 1.275, where its edge (env: 1 - r + 0.55 (f - 0.5), f its density, never over 1) is 0 whatever the
   // density: the box round that ellipse (1.3 of its half-axes, turned) where it is narrower
@@ -8299,6 +8357,7 @@ function skyRects(G, u, w, h, dpr) {
   }
   const area = list.reduce((s, r) => s + (r[2] - r[0]) * (r[3] - r[1]), 0) / Math.max(1, w * h);
   if (area > RECT_ALL) all = true;
+  G.rectEv = list.reduce((m, r) => m | r[4], 0);
   if (all) list = [];
   G.rects = list; G.rectAll = all; G.rectShare = all ? 1 : area;
   G.rest = all ? [] : rectsRest(list, w, h);
@@ -8338,12 +8397,23 @@ function rectsRest(list, w, h) {
 // driver's cache keeps each. Without the extension there are none (a link would freeze the page), and a failed one is
 // never tried again
 const SKY_PROG_MAX = 8, SKY_PROG_WAIT = 30000;
-// tests: ?skyProgs=all starts every one-event program with the full one, so a test needn't wait for each in turn
+// tests: ?skyProgs=all starts every one-event program with the full one, so a test needn't wait for each in turn (the cap
+// is then full: before the full program, events whose boxes meet have no program, see "The sky before its full program")
 const SKY_PROG_FIRST = typeof location !== 'undefined' && /[?&]skyProgs=all(&|$)/.test(location.search)
-  ? [EV_SYSTEM, EV_NEB, EV_FAR, EV_LENS, EV_SHIP, EV_PLANET, EV_BATTLE, EV_AST] : [EV_SYSTEM];
+  ? [EV_SYSTEM, EV_NEB, EV_FAR, EV_LENS, EV_SHIP, EV_PLANET, EV_BATTLE, EV_AST] : [];
+// with no full program yet (see "The sky before its full program"), the one-event programs of the kinds the directors
+// start, linked one at a time after what is on screen, before what the director asks for (skyProgNext): the quick ones first,
+// then the far events' (they come about once a minute), the battle's and the ship's, and last the parked star system's
+// (one is up after nearly every voyage, and voyages wait for the full program); all but SKY_PROG_KEEP of SKY_PROG_MAX, so
+// the mixes the sights up need can still link. With the full program there first (a driver with it in its cache) each
+// links when its event first shows, as before
+const SKY_PROG_EARLY = [EV_NEB, EV_AST, EV_FAR, EV_BATTLE, EV_SHIP, EV_SYSTEM], SKY_PROG_KEEP = 2;
 const bitsOf = (k) => { let n = 0; for (; k; k &= k - 1) n++; return n; };
+// the program that draws a box with events m: its own once linked, else the smallest linked one with all of them, else
+// the full program; null when there is none yet (no full program: see "The sky before its full program"), its link then
+// started at once (G.lack: what the frame lacked, skyProgNext links it first)
 function skyProg(G, m) {
-  if (rectMode === 'full') return G.F;
+  if (rectMode === 'full' && G.F) return G.F;
   const v = G.V.get(m);
   if (v && v.L) return v.L;
   if (!v) {
@@ -8353,7 +8423,38 @@ function skyProg(G, m) {
   }
   let best = G.F, nb = 99;
   for (const [k, w] of G.V) if (w.L && (k & m) === m && bitsOf(k) < nb) { best = w.L; nb = bitsOf(k); }
+  if (!best) { G.lack |= m; if (!v) skyProgLink(G, m); }
   return best;
+}
+// with no full program yet: the next program to link once none is linking, what the last frame lacked (G.lack), else the
+// next of SKY_PROG_EARLY while there is room for them, else what the director asked for (G.ask, skyCanShow: a mix of the
+// sights up and the one it picked, minutes to link, so after the one-event ones, which let any sight start on its own)
+function skyProgNext(G) {
+  for (const v of G.V.values()) if (v.pend) return;
+  const early = G.V.size < SKY_PROG_MAX - SKY_PROG_KEEP && SKY_PROG_EARLY.find((k) => !G.V.has(k));
+  const m = (G.lack && !G.V.has(G.lack) && G.lack) || early || (G.ask && !G.V.has(G.ask) && G.ask);
+  if (m) skyProgLink(G, m);
+}
+// each space event's EV_* bit (the warp and a voyage have none: only the full program draws them)
+const EV_OF = { nebula: EV_NEB, asteroids: EV_AST, lens: EV_LENS, ship: EV_SHIP, planet: EV_PLANET, battle: EV_BATTLE, system: EV_SYSTEM, far: EV_FAR };
+// whether the sky can draw `kind` (a space event's name, 'far' or 'scene') if a director starts it now: always with the full
+// program (or no WebGL sky coming: the canvas's sky, as before); without it never a warp, a voyage or a scene, and another
+// kind only once a linked program has its event and every one up (see "The sky before its full program"). Else (unless
+// quiet) it asks for that program (G.ask, skyProgNext links it) and counts the kind held back (G.held, stats().rects.held)
+function skyCanShow(kind, quiet) {
+  const G = I && I.skyGL;
+  if (!G || G.F || G.gl.isContextLost() || !(G.ok || G.pend || G.bpend)) return true;
+  let m = EV_OF[kind] || 0;
+  if (m) {
+    for (const k of I.events.keys()) m |= EV_OF[k] || 0;
+    if (I.far) m |= EV_FAR;
+    for (const [k, v] of G.V) if (v.L && (k & m) === m) return true;
+  }
+  if (quiet) return false;
+  if (m && !G.V.has(m)) G.ask = m;
+  const H = G.held || (G.held = {});
+  H[kind] = (H[kind] || 0) + 1;
+  return false;
 }
 // start linking the program for events m, unless it is there, the cap is reached or (unless first: SKY_PROG_FIRST)
 // another one is linking
@@ -8624,36 +8725,76 @@ function drawSkyGL(glass, glows, k, ox, oy) {
   for (let j = 1; same && j < 4; j++) for (let i = 0; same && i < G.gn * 4; i++) same = G.gu[12 + j * GLOW_MAX * 4 + i] === G.lastGu[12 + j * GLOW_MAX * 4 + i];
   if (same) return true;
   if (G.gn && !fresh) { gpuBegin(G, 'glow'); glowField(G); gpuEnd(G); }
-  G.last.set(u); G.lastGu.set(G.gu); G.lastGn = G.gn; G.drawn = true; G.draws = (G.draws || 0) + 1;
+  G.last.set(u); G.lastGu.set(G.gu); G.lastGn = G.gn; G.drawn = true;
   gl.viewport(0, 0, cv.width, cv.height);
-  // the base sky outside the events' rectangles, the full program inside them; or the full program alone (rects off, no
-  // base program yet, or an event over the whole sky)
-  skyRects(G, u, cv.width, cv.height, dpr);
-  gpuBegin(G, 'sky');
-  if (G.B && rectMode && !G.rectAll) {
+  if (!skyPass(G, false, true)) {
+    // the WebGL sky can't draw this frame whole yet, and hasn't drawn one: the canvas's sky (and the glows) go on
+    G.drawn = false; I.glowGL = false;
+    return false;
+  }
+  G.draws = (G.draws || 0) + 1;
+  G.painted = true; // a new picture for the backdrop (skyPaint)
+  return true;
+}
+// the sky's pass from this frame's uniforms (G.u), the GPU meter round it (meter): the base sky outside the events'
+// rectangles, each box by the program of the events in it (skyProg); or one program over the whole window: the full one
+// (full; rects off, no base program, or an event over the whole sky), or, before it is linked, the program of every box's
+// events (G.rectAll by RECT_ALL). A box with no program for it yet is drawn by the base sky (G.lack), but for the first
+// frame: until one can be drawn whole (nothing lacking, no warp or voyage without the full program) nothing is drawn and
+// false says so, so the canvas's sky stays (see "The sky before its full program")
+function skyPass(G, full, meter) {
+  const gl = G.gl, cv = I.skyCanvas;
+  // the base sky outside the events' rectangles, each rectangle's program inside them; or one program alone
+  skyRects(G, G.u, cv.width, cv.height, I.dpr || 1);
+  G.lack = 0;
+  const F = G.F, one = F && (full || !rectMode || !G.B || G.rectAll) ? F : !G.B ? null : G.rectAll ? skyProg(G, G.rectEv) || G.B : null;
+  if (!one && !G.B) return false;
+  const by = new Map();
+  if (!one) {
+    // each box by the program of the events in it (skyProg; the base sky's while it has none), the boxes of one program together
+    G.rectProg = G.rects.map((r) => {
+      const L = skyProg(G, r[4]) || G.B;
+      let list = by.get(L);
+      if (!list) by.set(L, (list = []));
+      list.push(r);
+      return L === F ? -1 : L === G.B ? 0 : L.ev;
+    });
+  } else G.rectProg = [];
+  G.rectBy = !one ? null : one === F ? -1 : one === G.B ? 0 : one.ev;
+  if (G.firstMs == null && (G.lack || (G.rectNeed && !F))) return false;
+  if (meter) gpuBegin(G, 'sky');
+  if (!one) {
     // one triangle over the canvas per box, cut to it (the scissor: only its pixels are shaded)
     const each = (list) => { for (const r of list) { gl.scissor(r[0], cv.height - r[3], r[2] - r[0], r[3] - r[1]); gl.drawArrays(gl.TRIANGLES, 0, 3); } };
     gl.enable(gl.SCISSOR_TEST);
     skyUniforms(G, G.B); each(G.rest);
-    // each box by the program of the events in it (skyProg), the boxes of one program together
-    const by = new Map();
-    G.rectProg = G.rects.map((r) => {
-      const L = skyProg(G, r[4]);
-      let list = by.get(L);
-      if (!list) by.set(L, (list = []));
-      list.push(r);
-      return L === G.F ? -1 : L.ev;
-    });
     for (const [L, list] of by) { skyUniforms(G, L); each(list); }
     gl.disable(gl.SCISSOR_TEST);
   } else {
-    G.rectProg = [];
-    skyUniforms(G, G.F);
+    skyUniforms(G, one);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
-  gpuEnd(G);
-  G.painted = true; // a new picture for the backdrop (skyPaint)
+  if (meter) gpuEnd(G);
+  if (G.firstMs == null) G.firstMs = Math.round(performance.now() - G.pendAt);
   return true;
+}
+// tests (__map.skyPix): the last frame's sky drawn again from its uniforms (or keep's: an earlier call's), the repo glows
+// left out, as it is drawn now (how undefined) or by the full program alone ('full'), and its pixels read back:
+// { px (RGBA, the bottom row first), u, frn, place, w, h, drew, all, allBy }, to compare with another later; null without
+// the WebGL sky drawing (or the full program, for 'full')
+function skyPixels(how, keep) {
+  const G = I && I.skyGL;
+  if (!G || !G.ok || G.firstMs == null || G.gl.isContextLost() || (how === 'full' && !G.F)) return null;
+  const gl = G.gl, cv = I.skyCanvas, gn = G.gn;
+  if (keep) { G.u.set(keep.u); G.frn = keep.frn; }
+  G.gn = 0;
+  gl.viewport(0, 0, cv.width, cv.height);
+  const ok = skyPass(G, how === 'full', false);
+  G.gn = gn;
+  const px = ok ? new Uint8Array(cv.width * cv.height * 4) : null;
+  if (ok) gl.readPixels(0, 0, cv.width, cv.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  G.drawn = false; I.dirty = true;
+  return ok ? { px, u: G.u.slice(), frn: G.frn, place: placeNow().seed, w: cv.width, h: cv.height, drew: G.rectProg.slice(), all: G.rectAll, allBy: G.rectBy } : null;
 }
 // this frame's uniforms (G.u, G.gu) into a sky program (L: G.F or G.B, skyLocs), which is then the one in use; a
 // uniform the program has no use for (the base sky's: the events') has no place and is skipped
