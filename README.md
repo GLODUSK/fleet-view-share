@@ -656,7 +656,7 @@ A script on this machine can drive the live sessions the desktop app hosts: star
 | `fv read <id> [--tail n]` | its status and latest reply |
 | `fv menu <id>` | the menu on its screen: title, numbered options with descriptions, kind, sig |
 | `fv answer <id> <n\|esc> [--text T] [--sig S] [--allow-permission] [--wait [s]]` | answers it |
-| `fv launch <id> [<n>…] [--from <id>] [--list] [--wait [s]]` | the chat's Launch button on its newest reply that offers options: the recommended ones (or these numbers) go as the button sends them, so the page and the phone show them Launched; `--list` shows the options |
+| `fv launch <id> [<n>…] [--from <id>] [--list] [--wait [s]]` | the chat's Launch button on its newest reply that offers options: the recommended ones (or these numbers) go as the button sends them, so the page and the phone show them Launched; a pick-one list (`- ( ) …`, drawn as radio buttons) gives one per launch, and once one is launched the rest of it are decided; `--list` shows the options |
 | `fv interrupt <id>` | Esc, mid-turn |
 | `fv effort [<id>] <level>`, `fv model [<id>] <model> [--effort E]` | switches its effort or model (`POST /api/sessions/<id>/model` with `queue`), the default for new sessions left as it was; no id: your own conversation (`CLAUDE_CODE_SESSION_ID`). One that is working switches as soon as it finishes this step, so a session that runs it on itself has it from its next turn |
 | `fv open <id> [--account A\|B\|C…] [--prompt P] [--wait [s]]` | resumes an old conversation |

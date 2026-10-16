@@ -145,6 +145,8 @@ const PURIFY = {
   RETURN_DOM_FRAGMENT: true,
 };
 
+// a pick-one option's mark at the start of its item: "( ) ", ticked "(x) ", "(X) " or "(•) " (pickList)
+const ONE_MARK = /^\(([ xX•])\)\s/;
 // markdown to a safe fragment: marked, DOMPurify, then links open outside, tables scroll, code blocks become cards
 function mdFragment(L, text, c) {
   const frag = L.DOMPurify.sanitize(L.md.parse(String(text || '')), PURIFY);
@@ -155,9 +157,10 @@ function mdFragment(L, text, c) {
     if (inp.getAttribute('type') !== 'checkbox') inp.remove(); else { inp.disabled = true; inp.tabIndex = -1; }
   }
   // a loose list (blank lines between items) wraps each item in <p>: lift a task item's first one into its <li>, so
-  // the box is the li's own child like in a tight list (pickList and chat.css look for li > input)
+  // the box is the li's own child like in a tight list (pickList and chat.css look for li > input); a pick-one item's
+  // "( ) " the same, so it is the li's first text
   for (const p of frag.querySelectorAll('li > p:first-child')) {
-    if (p.firstElementChild?.matches('input[type="checkbox"]') && !p.firstChild.textContent.trim()) p.replaceWith(...p.childNodes);
+    if ((p.firstElementChild?.matches('input[type="checkbox"]') && !p.firstChild.textContent.trim()) || (p.firstChild?.nodeType === 3 && ONE_MARK.test(p.firstChild.data))) p.replaceWith(...p.childNodes);
   }
   for (const t of frag.querySelectorAll('table')) {
     const w = document.createElement('div');
@@ -735,18 +738,49 @@ const LAUNCH_LINE = 'Launch subagents accordingly with model and effort: first c
 // launch.js REC_LINE, word for word
 const REC_LINE = 'Launch subagents accordingly: one subagent per item, at the model and effort it names, else the ones the work calls for (say which you picked: code edits keep this session\'s model, lookups and research go to Haiku or Sonnet; effort low for lookups and mechanical edits, medium for routine code on a clear spec, high for a feature across several files or anything touching money, permissions or migrations, xhigh for design calls, hard bugs and security); an item that needs no work, say so and skip it; items that touch the same files one after another (the rest in parallel), each in its own worktree; then review every diff yourself, run the checks, and ship.';
 const LAUNCH_HEAD = 'Go with these:';
+// An either/or list writes its items "- ( ) …" (marked leaves that as text): the ( ) items of one list are a pick-one
+// group and get radio buttons, so ticking one unticks the rest and a launch sends one of them. Once one is launched
+// the group is decided: the others go off (greyed, no tag). Options are still numbered in reading order, ( ) and [ ]
+// alike, as launch.js and the phone number them. "(x)", "(X)" or "(•)" is ticked: progress, like "[x]".
+// a list item's first text when it opens with a pick-one mark, else null (a bullet list's only, as launch.js and
+// the phone read it)
+function oneMark(li) {
+  const t = li.firstChild;
+  return t && t.nodeType === 3 && li.parentElement?.tagName === 'UL' && ONE_MARK.test(t.data) ? t : null;
+}
 // -> whether the reply offers a task list (and got its boxes and button)
 function pickList(el, md, it, c) {
-  const boxes = [...md.querySelectorAll('li > input[type="checkbox"]')];
-  if (!boxes.length || boxes.some((b) => b.checked)) return false;
+  const items = [...md.querySelectorAll('li')].filter((li) => li.querySelector(':scope > input[type="checkbox"]') || oneMark(li));
+  if (!items.length || items.some((li) => li.querySelector(':scope > input[type="checkbox"]')?.checked || ONE_MARK.exec(oneMark(li)?.data || '')?.[1].trim())) return false;
   const key = String(it.key);
+  // a pick-one item's mark becomes a radio button, named for its list
+  const lists = new Map();
+  const boxes = items.map((li) => {
+    const box = li.querySelector(':scope > input[type="checkbox"]');
+    if (box) return box;
+    const t = oneMark(li);
+    t.data = t.data.replace(ONE_MARK, '');
+    if (!lists.has(li.parentElement)) lists.set(li.parentElement, String(lists.size + 1));
+    const r = Object.assign(document.createElement('input'), { type: 'radio', name: `cpk-${key}-${lists.get(li.parentElement)}` });
+    r.dataset.group = lists.get(li.parentElement);
+    li.prepend(r, ' ');
+    return r;
+  });
   const rec = boxes.map((b) => markRecommended(b.parentElement));
+  // the first recommended of a pick-one group starts ticked, not every one
+  const lit = new Set();
+  const on = rec.flatMap((r, n) => {
+    const g = boxes[n].dataset.group;
+    if (!r || (g && lit.has(g))) return [];
+    if (g) lit.add(g);
+    return [n];
+  });
   let p = c.picks.get(key);
-  if (!p) c.picks.set(key, p = { on: new Set(rec.flatMap((r, n) => (r ? [n] : []))), mine: new Set() });
+  if (!p) c.picks.set(key, p = { on: new Set(on), mine: new Set() });
   boxes.forEach((b, n) => {
     b.tabIndex = 0;
     b.dataset.pick = String(n);
-    b.setAttribute('aria-label', `pick option ${n + 1}`);
+    b.setAttribute('aria-label', `pick option ${n + 1}${b.dataset.group ? ' (pick one)' : ''}`);
   });
   // each option as a launch message gives it, to know it again there
   el._opts = boxes.map((b) => optionText(b.parentElement));
@@ -832,13 +866,19 @@ function drawPick(el, p, launched) {
   if (!go) return;
   if (el._rec) { drawRec(el, p, launched, go); return; }
   let left = 0;
-  for (const b of el.querySelectorAll('.chat-md li > input[data-pick]')) {
+  const boxes = [...el.querySelectorAll('.chat-md li > input[data-pick]')];
+  const isDone = (b) => p.mine.has(+b.dataset.pick) || launched.has(launchKey(el._opts?.[+b.dataset.pick]));
+  // pick-one groups with a launched option: decided, the rest of them off
+  const decided = new Set(boxes.filter((b) => b.dataset.group && isDone(b)).map((b) => b.dataset.group));
+  for (const b of boxes) {
     const i = +b.dataset.pick;
-    const done = p.mine.has(i) || launched.has(launchKey(el._opts?.[i]));
-    if (done) p.on.delete(i); else left++;
-    b.disabled = done;
-    b.checked = !done && p.on.has(i);
+    const done = isDone(b);
+    const off = !done && decided.has(b.dataset.group);
+    if (done || off) p.on.delete(i); else left++;
+    b.disabled = done || off;
+    b.checked = !done && !off && p.on.has(i);
     const li = b.parentElement;
+    li.classList.toggle('off', off);
     if (li.classList.contains('done') === done) continue;
     li.classList.toggle('done', done);
     if (!done) { li.querySelector('.cpk-done')?.remove(); continue; }
@@ -1240,13 +1280,27 @@ function wire(c) {
     c.bgOpen = !c.bgOpen;
     drawBg(c);
   });
-  // an option ticked in a reply (pickList)
+  // an option ticked in a reply (pickList); a pick-one option unticks the rest of its group
+  const pickOn = (el, p, b) => {
+    for (const r of el.querySelectorAll(`input[data-pick][data-group="${b.dataset.group}"]`)) p.on.delete(+r.dataset.pick);
+    p.on.add(+b.dataset.pick);
+  };
   feed.addEventListener('change', (e) => {
     const b = e.target.closest?.('input[data-pick]');
     const el = b?.closest('.ci');
     const p = el && c.picks.get(el.dataset.key);
     if (!p || b.disabled) return;
-    if (b.checked) p.on.add(+b.dataset.pick); else p.on.delete(+b.dataset.pick);
+    if (b.type === 'radio') { if (b.checked && !p.on.has(+b.dataset.pick)) pickOn(el, p, b); } // (arrow keys)
+    else if (b.checked) p.on.add(+b.dataset.pick); else p.on.delete(+b.dataset.pick);
+    drawPick(el, p, launchedOptions(c));
+  });
+  // a pick-one option: a click (or Space) ticks it, and a click on the ticked one unticks it, so a group can be left out
+  feed.addEventListener('click', (e) => {
+    const b = e.target.closest?.('input[type="radio"][data-pick]');
+    const el = b?.closest('.ci');
+    const p = el && c.picks.get(el.dataset.key);
+    if (!p || b.disabled) return;
+    if (p.on.has(+b.dataset.pick)) p.on.delete(+b.dataset.pick); else pickOn(el, p, b);
     drawPick(el, p, launchedOptions(c));
   });
   pane.addEventListener('fv-chat-sent', (e) => { if (e.detail && e.detail.id === c.id) addSent(c, e.detail); });

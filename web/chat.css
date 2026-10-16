@@ -144,12 +144,12 @@ html:not(.glass) .cu-bubble.expanded .cu-more { background: #232a3d; }
 .chat-md li { margin: 0.18em 0; padding-left: 0.15em; }
 .chat-md li > ul, .chat-md li > ol { margin: 0.15em 0 0.2em; }
 .chat-md li::marker { color: var(--dim); }
-.chat-md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.3em; }
-.chat-md input[type="checkbox"] { margin: 0 6px 0 0; vertical-align: -2px; accent-color: var(--mint); }
+.chat-md li:has(> input[type="checkbox"]), .chat-md li:has(> input[type="radio"]) { list-style: none; margin-left: -1.3em; }
+.chat-md input[type="checkbox"], .chat-md input[type="radio"] { margin: 0 6px 0 0; vertical-align: -2px; accent-color: var(--mint); }
 /* options to pick from (chat.js pickList): live boxes, and Launch under them */
-.chat-md.picking input[type="checkbox"] { accent-color: var(--cyan); } /* picking is the next move: the Send blue, not done-green */
-.chat-md.picking input[type="checkbox"]:not(:disabled) { cursor: pointer; }
-.chat-md.picking input[type="checkbox"]:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.chat-md.picking input[type="checkbox"], .chat-md.picking input[type="radio"] { accent-color: var(--cyan); } /* picking is the next move: the Send blue, not done-green */
+.chat-md.picking input[type="checkbox"]:not(:disabled), .chat-md.picking input[type="radio"]:not(:disabled) { cursor: pointer; }
+.chat-md.picking input[type="checkbox"]:focus-visible, .chat-md.picking input[type="radio"]:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .chat-md.picking li:has(> input:checked) { color: var(--text); }
 /* a recommended option: a lit row and a badge after its name */
 .chat-md.picking li.rec {
@@ -166,6 +166,11 @@ html:not(.glass) .cu-bubble.expanded .cu-more { background: #232a3d; }
 .chat-md.picking li.done.rec { background: none; box-shadow: none; }
 .chat-md.picking li.done .cpk-rec { display: none; }
 .chat-md.picking li.done > input { opacity: 0.45; }
+/* the other options of a decided pick-one list (chat.js drawPick): greyed, no tag */
+.chat-md.picking li.off, .chat-md.picking li.off strong, .chat-md.picking li.off b, .chat-md.picking li.off code { color: var(--faint); }
+.chat-md.picking li.off.rec { background: none; box-shadow: none; }
+.chat-md.picking li.off .cpk-rec { display: none; }
+.chat-md.picking li.off > input { opacity: 0.45; }
 .cpk-done {
   display: inline-block; margin: 0 2px 0 6px; padding: 0 7px; border-radius: 999px; vertical-align: 1px;
   background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.14);

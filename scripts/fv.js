@@ -380,12 +380,13 @@ function leftLines(left) {
   return (left || []).map((x) => `${x.disbanded ? `team "${x.name}" is disbanded` : `team "${x.name}" lost a member`}; told ${x.told.filter((y) => y.ok).length}`);
 }
 
-// fv launch: the options of the reply it read, marked (> picked, ✓ launched already, ★ recommended), then what it did
+// fv launch: the options of the reply it read, marked (> picked, ✓ launched already, - another of its pick-one list
+// launched, ★ recommended; a pick-one option ends "(pick one: list N)"), then what it did
 function launchLines(j, dry) {
   const out = [];
   const picked = new Set(j.picked || []);
-  for (const o of j.options || []) out.push(`${picked.has(o.n) && !dry ? '>' : ' '} ${o.done ? '✓' : o.rec ? '★' : ' '} ${o.n}. ${clip(o.text, 150)}`);
-  out.push('  (★ recommended, ✓ launched already)');
+  for (const o of j.options || []) out.push(`${picked.has(o.n) && !dry ? '>' : ' '} ${o.done ? '✓' : o.decided ? '-' : o.rec ? '★' : ' '} ${o.n}. ${clip(o.text, 150)}${o.group ? ` (pick one: list ${o.group})` : ''}`);
+  out.push(`  (★ recommended, ✓ launched already${(j.options || []).some((o) => o.group) ? ', - its pick-one list is decided; one per pick-one list' : ''})`);
   return out;
 }
 

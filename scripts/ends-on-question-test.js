@@ -52,6 +52,10 @@ asks('Here are the options:\n\n- [ ] **Ship it** (recommended): merge and deploy
   'an open task list, then an offer: the options are still waiting');
 asks('Two ways to go:\n\n- [ ] **Ship it** (recommended): merge and deploy · Opus, low\n- [ ] **Hold**: wait for review · Opus, low',
   'an open task list at the end');
+asks('Either way works:\n\n- ( ) **Leave it as is** (recommended): the 30-s average holds ~79 °C · Opus, low\n- ( ) **Make fans react faster**: smooth over 15 s · Opus, low',
+  'a pick-one list at the end');
+asks('Either way works:\n\n- ( ) **Leave it** (recommended): as is · Opus, low\n- ( ) **Change it**: 15 s · Opus, low\n\nHappy to dig further if needed.',
+  'a pick-one list, then an offer: still waiting');
 asks('If you want it on, should I turn it on now?', 'an if-sentence that ends on a question');
 asks('Want me to quit SignalRGB now? It won\'t free the 86 GB already lost, but if it\'s the cause, it stops the leak from growing until you reboot.',
   'real: a proposal, then a non-offer sentence');
@@ -65,6 +69,9 @@ asks('Which screen were you on? If it\'s the old Vehicles step you want back, I\
 ok(Q.endsOnOpenList('- [ ] a\n- [ ] b\n  more of b\n'), 'endsOnOpenList: open list with an indented line at the end');
 ok(!Q.endsOnOpenList('- [ ] a\n\nThen I merged it.'), 'endsOnOpenList: text after the list');
 ok(!Q.endsOnOpenList('- [x] a\n- [x] b'), 'endsOnOpenList: ticked boxes are a progress list');
+ok(Q.endsOnOpenList('- ( ) a\n- ( ) b\n'), 'endsOnOpenList: an open pick-one list');
+ok(!Q.endsOnOpenList('- (x) a\n- (x) b'), 'endsOnOpenList: ticked pick-one marks are an answer');
+ok(!Q.endsOnOpenList('- ( ) a\n\nThen I merged it.'), 'endsOnOpenList: text after a pick-one list');
 done('PR #12 merged and deployed. The worktree is removed.', 'plain status');
 done('Use `foo?.bar` here, and see https://example.com/a?page=2 for more.', 'code and links are not questions');
 done('', 'empty');

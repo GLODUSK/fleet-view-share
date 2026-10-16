@@ -31,12 +31,15 @@ const CLOSER_RES = [
 ];
 
 // A reply that ends on a task list with unticked boxes ("- [ ] **Short name** …", the options the chat turns into
-// checkboxes) is waiting on you too: nothing runs until you tick and launch. Only the list at the very end counts:
-// after its last open box there may be nothing but blank lines or the indented lines of its items.
+// checkboxes, or "- ( ) …", a pick-one list it turns into radio buttons) is waiting on you too: nothing runs until you
+// tick and launch. Only the list at the very end counts: after its last open box there may be nothing but blank lines
+// or the indented lines of its items.
+const OPEN_ITEM = /^\s*[-*+]\s+(?:\[ \]|\( \))\s/;
+const OPEN_ITEM_M = new RegExp(OPEN_ITEM.source, 'm');
 function endsOnOpenList(text) {
   const lines = String(text || '').split('\n');
   let last = -1;
-  lines.forEach((l, i) => { if (/^\s*[-*+]\s+\[ \]\s/.test(l)) last = i; });
+  lines.forEach((l, i) => { if (OPEN_ITEM.test(l)) last = i; });
   return last >= 0 && lines.slice(last + 1).every((l) => !l.trim() || /^\s/.test(l));
 }
 
@@ -58,7 +61,7 @@ function endsOnQuestion(text) {
   const sentences = lines.flatMap((l) => l.split(/(?<=[.!?])\s+/)).map((s) => s.trim()).filter(Boolean);
   if (isCloser(sentences[sentences.length - 1])) {
     // the offer ends it; only unticked options above it or a direct proposal right before it still ask
-    if (/^\s*[-*+]\s+\[ \]\s/m.test(String(text || ''))) return true;
+    if (OPEN_ITEM_M.test(String(text || ''))) return true;
     const prev = sentences[sentences.length - 2] || '';
     return /\?\s*$/.test(prev) && ASKS_RE.test(prev);
   }

@@ -98,7 +98,7 @@ Pass `--sig <sig>` from `fv menu` so the answer is refused if the menu changed m
 
 **Pick from a conversation's option list (its checkbox list)**
 
-When a reply offers options as a task list (`- [ ] **Name** (recommended): … · Opus, high`) and you are told to pick some ("apply the recommended ones"), launch them with `fv launch`, never by typing "Go with these: …" yourself. It sends exactly what the chat's **Launch selected** button sends, so the page and the phone grey those options as Launched, as if Henry had clicked; it also raises that session to high effort first, as the button does.
+When a reply offers options as a task list (`- [ ] **Name** (recommended): … · Opus, high`, or a pick-one list, `- ( ) …`, below) and you are told to pick some ("apply the recommended ones"), launch them with `fv launch`, never by typing "Go with these: …" yourself. It sends exactly what the chat's **Launch selected** button sends, so the page and the phone grey those options as Launched, as if Henry had clicked; it also raises that session to high effort first, as the button does.
 
 ```
 fv launch 3f2a9c1e --list                    # the options of its newest list: ★ recommended, ✓ launched already
@@ -107,6 +107,8 @@ fv launch 3f2a9c1e 1 3 --from <my id>        # launch options 1 and 3
 ```
 
 Options launched already are left out. With `--from` the message says who launched them, like `fv send --from`.
+
+An either/or list writes its items with a radio mark instead of a box: `- ( ) **Name** (recommended): … · Opus, low`. The `( )` items of one list are a pick-one group: the chat draws them as radio buttons, and `fv launch` takes at most one per group (two from one group is refused; `--recommended` takes the first recommended of each). They are numbered with the `[ ]` items, in reading order (`--list` marks them "pick one: list N"). Once one of a group is launched, the group is decided: its other options can't be launched (`-` in `--list`).
 
 A reply with no task list that still gives a recommendation ("**My recommendation:** …", "I'd recommend …", "(recommended)" on a plain item) has a **Launch recommendation** button (none when the advice is to do nothing: hold off, wait, leave it as is, don't), and `fv launch` presses it the same way: its options are the recommended things, and the launch line has that session work out each one's model and effort.
 

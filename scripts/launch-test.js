@@ -53,6 +53,54 @@ const REPLY = [
   ok('optionsOf: a ticked box is progress (null); no task list is null; code blocks skipped; nested items count; 400 characters at most');
 }
 
+// ---------- pick-one lists: "- ( ) …" ----------
+const ONE_REPLY = [
+  'Two ways:',
+  '',
+  '- ( ) **Leave it as is** (recommended): the 30-s average holds ~79 °C · Opus, low',
+  '- ( ) **Make fans react faster** (recommended): smooth over 15 s instead of 30 · Opus, low',
+  '',
+  'And separately:',
+  '',
+  '- [ ] **Log the temperatures**: a line a minute · Opus, low',
+  '- ( ) **Ship today**: as is · Opus, low',
+  '- ( ) **Ship tomorrow** (recommended): after a soak · Opus, low',
+  '  - ( ) **Nested A**: x',
+  '  - ( ) **Nested B**: y',
+].join('\n');
+{
+  const o = L.optionsOf(ONE_REPLY);
+  assert.deepEqual(o.map((x) => [x.n, x.group || 0, x.rec]), [[1, 1, true], [2, 1, true], [3, 0, false], [4, 2, false], [5, 2, true], [6, 3, false], [7, 3, false]]);
+  assert.equal(o[0].text, 'Leave it as is: the 30-s average holds ~79 °C · Opus, low');
+  assert.equal(L.optionsOf('- (x) **Done**: a\n- ( ) **Not yet**: b'), null);
+  assert.equal(L.optionsOf('- (•) **Done**: a\n- [ ] **Not yet**: b'), null);
+  assert.equal(L.optionsOf('1. ( ) numbered is not one'), null);
+  // two lists split by a paragraph are two groups; a blank line inside a list keeps it one
+  assert.deepEqual(L.optionsOf('- ( ) a\n\n- ( ) b\n\ntext\n- ( ) c').map((x) => x.group), [1, 1, 2]);
+  ok('optionsOf: ( ) items count with [ ] ones in reading order, grouped per list and level; (x)/(•) is progress (null)');
+
+  const fresh = o.map((x) => ({ ...x, done: false }));
+  assert.deepEqual(L.choose(fresh, 'recommended'), { ns: [1, 5] });
+  assert.match(L.choose(fresh, [1, 2]).error, /options 1, 2 are one pick-one list \(either\/or\): launch one of them/);
+  assert.match(L.choose(fresh, [3, 6, 7]).error, /options 6, 7 are one pick-one list/);
+  assert.deepEqual(L.choose(fresh, [2, 3, 4, 6]), { ns: [2, 3, 4, 6], skipped: [] });
+
+  // a launched one decides its group: the others count as done, and --recommended skips the group
+  const items = [
+    { i: 0, type: 'assistant', text: ONE_REPLY },
+    { i: 1, type: 'user', text: L.launchText(o, [2]) },
+  ];
+  const c = L.latestChoice(items);
+  assert.deepEqual(c.options.slice(0, 2).map((x) => [x.done, !!x.decided]), [[false, true], [true, false]]);
+  assert.ok(!c.options[3].decided && !c.options[4].decided, 'another group is not decided');
+  assert.deepEqual(L.choose(c.options, 'recommended'), { ns: [5] });
+  assert.match(L.choose(c.options, [1]).error, /launched already \(or another of its pick-one list is\)/);
+  assert.deepEqual(L.choose(c.options, [1, 4]), { ns: [4], skipped: [1] });
+  const all = L.decide(c.options.map((x) => ({ ...x, done: x.n === 2 || x.n === 4 })));
+  assert.match(L.choose(all, 'recommended').error, /recommended options are launched already \(1, 5\)/);
+  ok('choose: one per pick-one list; --recommended takes the first recommended of each; a launched option decides its list');
+}
+
 // ---------- the message, and what counts as launched ----------
 {
   const o = L.optionsOf(REPLY);
