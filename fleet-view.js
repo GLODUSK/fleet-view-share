@@ -42,6 +42,10 @@ const SWITCH = require(path.join(__dirname, 'account-switch.js'));
 const FEED_MOD = require(path.join(__dirname, 'feed-mod.js'));
 const TT = require(path.join(__dirname, 'team-tree.js'));
 const SKY = require(path.join(__dirname, 'sky-events.js')).createSkyEvents({ dir: require(path.join(__dirname, 'platform.js')).dataDir() });
+// the log of conversations leaving the map (left-map.log) and what the map showed at the last run (on-map.json)
+const LEFT_MAP = require(path.join(__dirname, 'left-map.js'));
+// when Fleet View was not running (uptime.json), so the 3-hour rule counts only the time it ran
+const UPTIME_MOD = require(path.join(__dirname, 'uptime.js'));
 // the mic's speech library: downloaded once, checked against pinned hashes, served from here (/vendor-cache/...)
 const VENDOR = require(path.join(__dirname, 'vendor-cache.js')).createVendorCache({ dir: path.join(P.dataDir(), 'vendor'), log: (k, t) => logOnce(k, t) });
 
@@ -2687,6 +2691,15 @@ function checkAlerts(s, prev) {
 // A conversation another device runs is on the list here exactly while it is on that device's (ownerView), whatever
 // this copy says, while that device is there: the same chat comes and goes on both machines at once.
 const KEEP_DONE_MS = 3 * 3600e3;
+// The 3 hours count only while Fleet View runs (uptime.js): a PC off overnight, asleep or hibernated stops the clock,
+// so the map at start is the one it left (Henry, 2026-10-16: 30 conversations went to 6 after a night off). runAge is
+// that age of a time; the 45-minute window for unfinished ones stays on the wall clock. Not for --demo, --tui or
+// --snapshot (the wall clock, no file)
+const UPTIME = UPTIME_MOD.createUptime({ file: path.join(P.dataDir(), 'uptime.json'), on: WEB && !DEMO });
+const runAge = (since, now) => UPTIME.onTime(since, now);
+// past the 3-hour horizon by the wall clock and by running time: the wall clock first, so a log well inside it never
+// counts gaps
+const pastRun = (since, now, ms) => now - since > ms && runAge(since, now) > ms;
 const passed = new Map(); // session id -> log mtime when it was dropped
 // The device that runs it (sync-live.js), while that device is there and its snapshot was read: { listed, last }.
 // listed: its snapshot names it, which it does exactly while it keeps it on its own list (the snapshot is that list);
@@ -2705,12 +2718,20 @@ function ownerView(id) {
   return rv.live.fresh instanceof Set && rv.live.fresh.has(String(o.device).toLowerCase()) ? { listed: false, last: 0 } : null;
 }
 const ownerLast = (id) => { const v = ownerView(id); return v ? v.last : 0; };
+// shown again from the menus' "Left the map" list (showLeftAgain), or opened (markOpened: POST /open, the API's open
+// and resume, a claude resumed on one off the map; Fleet View #548): id -> when. The age rules count that as its end
+// and its last activity, so it stays KEEP_DONE_MS from then whatever its state, and as long as its claude runs here
+// (idle in a panel too), then leaves by them as before (kept in shown-again.json across a restart). Only these: an
+// idle claude on any other conversation keeps it no longer than before
+const shownAgain = new Map();
+const shownAgainAt = (id) => shownAgain.get(id) || 0;
+const keepShown = (id, now) => { const at = shownAgainAt(id); return !!at && (runAge(at, now) < KEEP_DONE_MS || liveProcs.has(id)); };
 const endedAtOf = (s) => s.turnEndT || s.mtime || 0;
-const keepDone = (s, now) => s.state === 'DONE' && now - endedAtOf(s) < KEEP_DONE_MS;
+const keepDone = (s, now) => (s.state === 'DONE' && runAge(endedAtOf(s), now) < KEEP_DONE_MS) || keepShown(s.id, now);
 // finished hours ago by its own log's end of turn. A DONE forced another way (a handoff that killed a turn) is
 // left to the window rule, and so is one another device owns and still lists: that device's state stands. The Bots
 // tab's conversations (overseerKeep) are never dropped this way
-const endedLongAgo = (s, now) => s.state === 'DONE' && !s.turnOpen && !s.remote?.entry && !!s.turnEndT && now - s.turnEndT >= KEEP_DONE_MS && !liveWaiting(s.id) && !overseerKeep.has(s.id);
+const endedLongAgo = (s, now) => s.state === 'DONE' && !s.turnOpen && !s.remote?.entry && !!s.turnEndT && runAge(s.turnEndT, now) >= KEEP_DONE_MS && !keepShown(s.id, now) && !liveWaiting(s.id) && !overseerKeep.has(s.id);
 // an unfinished conversation the map showed (remembered): kept while it was active in the last day
 const keepRemembered = (s, now) => s.state !== 'DONE' && remembered.sessions.has(s.id) && now - (s.actT || s.mtime || 0) < REMEMBER_MS;
 // its live claude waits on you (a prompt, or a panel left open): kept however long its log has been quiet
@@ -2725,7 +2746,193 @@ function overseerIds() {
   try { for (const id of (BOTS && BOTS.chatIds()) || []) out.add(id); } catch {}
   return out;
 }
-function dropSession(s) {
+// ---------- left the map (left-map.js) ----------
+// Every conversation that leaves the map gets a line in left-map.log (rule: which of the rules took it off), and one
+// whose departure breaks those rules a "looks wrong" line in server.log too. on-map.json keeps what the map shows, so a
+// start logs the ones that left while Fleet View was off. Not for --demo, --tui or --snapshot (WEB), and never in the
+// way of a poll: dropSession runs in the poll loop, so every step is in a try and reads no transcript
+const LEFT_ON = WEB && !DEMO;
+const LEFT = LEFT_MAP.createLeftMap({ dir: P.dataDir() });
+let leftPrev = null; // id -> its entry in on-map.json at start, until the first discover and poll have run (leftAtStart)
+let leftStarted = false, leftSig = '', leftSavedAt = 0;
+const leftSeen = new Set(); // ids logged before leftAtStart, which it skips
+// off the map whatever its state: a demo, hidden, in a hidden workspace or on an account turned off
+const leftOff = (s) => s.demo || hiddenNow(s.id) || !!(s.root && repoHidden(s.root)) || acctOff(s);
+// on the map: polled past the old-log check (s.shown), or on it at the last run (one read again at start)
+const leftOn = (s) => !!s.shown && !leftOff(s);
+const leftWas = (s) => (!!s.shown || !!(leftPrev && leftPrev.has(s.id))) && !leftOff(s);
+const leftFacts = (s) => ({ id: s.id, name: s.name || s.custom || null, repo: s.root || null, cwd: s.cwd || null, account: s.account || null, file: s.file || null, state: s.state || null, lastActive: s.last || s.mtime || null, endedAt: s.turnEndT || null });
+function leftLog(f, rule, why) {
+  const now = Date.now();
+  let by = null;
+  const fileExists = f.file ? fs.existsSync(f.file) : null;
+  if (fileExists === false && rule !== 'file-gone') { by = rule; rule = 'file-gone'; }
+  // a finished one goes by running time (uptime.js): the time Fleet View was off since it ended is said, not counted
+  const off = !why && f.state === 'DONE' && (rule === 'finished-3h' || rule === 'quiet-window') ? UPTIME.offBetween(f.endedAt || f.lastActive || now, now) : 0;
+  if (off >= 60e3) why = `${LEFT_MAP.RULES[rule]} (running time: ${Math.round(off / 60e3)} min with Fleet View off not counted)`;
+  // worked out again from the times, apart from the rule code, so a bug there is caught
+  const wrong = LEFT_MAP.looksWrong({ now, rule, state: f.state, lastActive: f.lastActive, endedAt: f.endedAt, fileExists, windowMs: WINDOW_MS, keepDoneMs: KEEP_DONE_MS });
+  const rec = LEFT.left(f, rule, { why, by, wrong });
+  if (rec) LEFT_MAP.noteLeft(leftById, rec, LEFT_IDS); // the menus' list, without reading the file again
+  if (!leftStarted) leftSeen.add(f.id);
+  if (wrong) logOnce(`left-map:${f.id}:${rule}`, `left-map: looks wrong: ${f.id.slice(0, 8)} "${f.name || ''}" ${/^left by /.test(wrong) ? wrong : `left by ${by || rule}: ${wrong}`}`);
+}
+function leftDrop(s, rule) {
+  if (!LEFT_ON) return;
+  try { if (leftWas(s)) leftLog(leftFacts(s), rule); } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: could not log a departure\n${errorText(e)}`); }
+}
+// one newly hidden (call it before it is on hidden): only one the map showed
+function leftHide(id, rule, why) {
+  if (!LEFT_ON) return;
+  try {
+    const s = sessions.get(id);
+    if (s && !s.demo && (s.shown || (leftPrev && leftPrev.has(id)))) leftLog(leftFacts(s), rule, why);
+  } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: could not log a hide\n${errorText(e)}`); }
+}
+function leftSave(now) {
+  const list = [], ids = [];
+  for (const s of sessions.values()) if (leftOn(s)) { list.push(leftFacts(s)); ids.push(s.id); }
+  leftSig = ids.sort().join(',');
+  leftSavedAt = now;
+  LEFT.writeOnMap(list);
+}
+// after each poll: on-map.json again when the set on the map changed, at most every 30 s
+function leftTick(now) {
+  if (!LEFT_ON || !leftStarted) return;
+  const ids = [];
+  for (const s of sessions.values()) if (leftOn(s)) ids.push(s.id);
+  if (ids.sort().join(',') === leftSig || now - leftSavedAt < 30e3) return;
+  leftSave(now);
+}
+function leftLoad() {
+  if (!LEFT_ON) return;
+  try { leftPrev = new Map(LEFT.readOnMap().map((e) => [e.id, e])); } catch { leftPrev = new Map(); }
+  // the menus' list from the log's tail, once, and the Show again times still running (before the first discover)
+  try { leftById = LEFT.latest(LEFT_IDS); } catch { leftById = new Map(); }
+  try { for (const [id, at] of LEFT.readShown(SHOWN_READ_MS)) if (UUID_RE.test(id)) shownAgain.set(id.toLowerCase(), at); } catch {}
+}
+// once the first discover and poll have run: each one on the map at the last run that is not here now left while
+// Fleet View was off (too old to be read at start), unless it was set aside since or one of them logged it already
+function leftAtStart() {
+  if (!LEFT_ON || leftStarted) return;
+  try {
+    for (const [id, e] of leftPrev || []) {
+      if (leftSeen.has(id) || setAside.has(String(id).toLowerCase())) continue;
+      const s = sessions.get(id), f = { ...e, id };
+      // hidden since (on another device, or by hand in the settings file), read again or not
+      if (hiddenNow(id) || (e.repo && repoHidden(e.repo))) { leftLog(s ? leftFacts(s) : f, 'hidden', 'hidden while Fleet View was off'); continue; }
+      if (s) continue;
+      const m = f.file ? mtime(f.file) : 0;
+      if (m > (Number(f.lastActive) || 0)) f.lastActive = m;
+      leftLog(f, 'aged-out-while-off');
+    }
+  } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: the check at start failed\n${errorText(e)}`); }
+  leftPrev = null;
+  leftStarted = true;
+  leftSeen.clear();
+  try { leftSave(Date.now()); } catch {}
+}
+// ---------- "Left the map": the menus' list of the ones the age rules took off (web/app.js leftMapMenuItem) ----------
+// The newest left-map.log record of each of the last LEFT_IDS conversations, read back once at start (leftLoad) and
+// added to as leftLog writes, never the file per /state. /state's leftMap is the newest 50 whose newest departure is an
+// age rule, less the ones on the map again or shown again since, hidden (Removed conversations lists those), in a
+// removed workspace, on an account turned off, set aside or the Bots tab's. --demo: a few made-up ones (demoLeft)
+const LEFT_IDS = LEFT_MAP.KEEP_IDS, LEFT_LIST_MAX = 50;
+// a Show again or open time is kept a while past its 3 hours, then pruned, unless its claude still runs; one read back
+// at start can be days old (a panel left open), as its claude may still run
+const SHOWN_KEEP_MS = KEEP_DONE_MS + 3600e3, SHOWN_READ_MS = 7 * 24 * 3600e3;
+let leftById = new Map(); // id -> its newest record, newest last
+let demoLeft = []; // --demo: made-up entries in the leftMap shape, plus gone: true once shown again
+function leftMapList(tagOf) {
+  if (DEMO) return demoLeft.filter((x) => !x.gone).map(({ gone, ...x }) => x);
+  const acctIsOff = (r) => offAccounts.length > 0 && offAccounts.includes(liveAcct(r.id, r.account));
+  const skip = (r) => {
+    const s = sessions.get(r.id), where = r.repo || r.cwd;
+    return !!(s && s.shown) || shownAgainAt(r.id) >= r.t || hiddenNow(r.id) || !!(r.repo && repoHidden(r.repo)) || setAside.has(String(r.id).toLowerCase())
+      || overseerKeep.has(r.id) || !!tagOf(r.id) || !!(where && inBots(where)) || acctIsOff(r);
+  };
+  return LEFT_MAP.leftList(leftById, { skip, max: LEFT_LIST_MAX }).map((r) => ({
+    id: r.id, name: plain(names.get(r.id) || r.name || r.id.slice(0, 8), 80), account: liveAcct(r.id, r.account),
+    repo: r.repo ? { name: repoName(r.repo), root: r.repo, color: toHex(familyColor(r.repo)) } : null,
+    cwd: r.cwd || null, leftAt: r.t, rule: r.rule, why: r.why || LEFT_MAP.RULES[r.rule], lastActive: r.lastActive || null,
+  }));
+}
+function saveShownAgain() {
+  const now = Date.now();
+  for (const [id, at] of shownAgain) if (runAge(at, now) >= SHOWN_KEEP_MS && !liveProcs.has(id)) shownAgain.delete(id);
+  if (LEFT_ON) LEFT.writeShown(shownAgain);
+}
+// POST /left-map/show { ids } (or { id }): back on the map with nothing started, kept as if it had just finished
+// (shownAgain, the age rules' end time for it); undo: true takes the times off again, and the age rules take them
+// off as before. Only conversations with a transcript here
+function showLeftAgain(b) {
+  const ids = !b ? null : Array.isArray(b.ids) ? b.ids : typeof b.id === 'string' ? [b.id] : null;
+  if (!ids || !ids.length || ids.length > LEFT_LIST_MAX) return [400, { ok: false, message: `ids (1 to ${LEFT_LIST_MAX} conversation ids) are needed` }];
+  const undo = b.undo === true;
+  if (DEMO) {
+    const want = new Set(ids.map(String)), shown = [];
+    for (const x of demoLeft) if (want.has(x.id) && !!x.gone === undo) { x.gone = !undo; shown.push(x.id); }
+    return [200, { ok: true, shown, demo: true }];
+  }
+  const now = Date.now(), shown = [], unknown = [];
+  for (const raw of ids) {
+    const id = typeof raw === 'string' ? raw.toLowerCase() : '';
+    if (!UUID_RE.test(id)) { unknown.push(String(raw).slice(0, 40)); continue; }
+    if (undo) { if (shownAgain.delete(id)) shown.push(id); continue; }
+    if (!sessions.has(id) && !findLog(id)) { unknown.push(id); continue; }
+    shownAgain.set(id, now);
+    passed.delete(id); // discover reads its log again, however old
+    shown.push(id);
+  }
+  if (shown.length) {
+    saveShownAgain();
+    if (!undo) setImmediate(() => { try { discover(); } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: discover after Show again failed\n${errorText(e)}`); } });
+  }
+  if (!unknown.length) return [200, { ok: true, shown }];
+  return [shown.length ? 200 : 404, { ok: false, shown, unknown, message: `no transcript here for ${unknown.length === 1 ? 'that conversation' : `${unknown.length} of them`}` }];
+}
+// Opened, so on the map (Fleet View #548: an old one resumed in the panel ran but never showed, its log too old for
+// discover and endedLongAgo dropping it): the same time Show again sets, from POST /open, the API's open and resume
+// (api.js resumeIn, ctx.opened) and a claude resumed on one off the map (scanLiveProcs: the panel's Continue and
+// Projects' Older conversations go to the session host, not here)
+function markOpened(id) {
+  if (DEMO || typeof id !== 'string' || !UUID_RE.test(id)) return;
+  id = id.toLowerCase();
+  shownAgain.set(id, Date.now());
+  passed.delete(id);
+  try { saveShownAgain(); } catch {}
+  if (!sessions.has(id)) setImmediate(() => { try { discover(); } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: discover after an open failed\n${errorText(e)}`); } });
+}
+// a claude that started on a log made before it (a resume, never a new conversation, whose log comes after)
+function resumedLog(id, p) {
+  const log = conversationLog(id);
+  if (!log || !log.file || !p.startedAt) return false;
+  const st = fs.statSync(log.file), born = st.birthtimeMs || st.mtimeMs;
+  return born > 0 && born < p.startedAt - 5e3;
+}
+let liveScanned = false; // the first scan's claudes were running at start: none of them counts as just opened
+// a session host that just started resumes every panel the last one ran: those claudes are a restart, not an open, so
+// one started within HOST_RESUME_MS of the host (host.json's startedAt) never counts (idle panels that had aged off
+// the map would all come back)
+const HOST_RESUME_MS = 120e3;
+const hostStartedAt = () => Number((readJson(path.join(P.dataDir(), 'host.json')) || {}).startedAt) || 0;
+function noteResumed(byId, now) {
+  if (DEMO) return;
+  if (liveScanned) {
+    let hostAt = null;
+    for (const [sid, p] of byId) {
+      const was = procConv.get(p.pid);
+      if (was && was.id === sid && was.startedAt === p.startedAt) continue; // seen at the last scan
+      if (hostAt === null) hostAt = hostStartedAt();
+      if (hostAt && p.startedAt >= hostAt && p.startedAt - hostAt < HOST_RESUME_MS) continue; // the host's restart resumed it
+      if (!UUID_RE.test(sid) || sessions.get(sid)?.shown || keepShown(sid.toLowerCase(), now)) continue; // on the map already
+      try { if (resumedLog(sid, p)) markOpened(sid); } catch {}
+    }
+  }
+  liveScanned = true;
+}
+function dropSession(s, rule) {
+  leftDrop(s, rule);
   sessions.delete(s.id);
   if (remembered.sessions.delete(s.id)) saveSettings();
   passed.set(s.id, s.mtime);
@@ -2737,8 +2944,9 @@ function dropSession(s) {
 
 function discover() {
   const now = Date.now();
+  UPTIME.tick(now); // a wake from sleep is a gap before the age rules below run
   const horizon = Math.max(WINDOW_MS, KEEP_DONE_MS);
-  for (const [id, m] of passed) if (now - m > horizon) passed.delete(id);
+  for (const [id, m] of passed) if (pastRun(m, now, horizon)) passed.delete(id);
   overseerKeep = overseerIds();
   // set aside by "Start clean": one a claude has open here again comes back; the rest stay out of the map
   if (setAside.size) for (const id of liveProcs.keys()) if (setAside.has(String(id).toLowerCase())) bringBack([id], 'a claude opened it here');
@@ -2752,8 +2960,9 @@ function discover() {
         if (!f.endsWith('.jsonl')) continue;
         const file = path.join(pdir, f), m = mtime(file), id = f.slice(0, -6);
         if (setAside.size && setAside.has(id.toLowerCase()) && !setAsideBack(id.toLowerCase(), file, m)) continue;
-        const rem = (remembered.sessions.has(id) && now - m < REMEMBER_MS * 7) || overseerKeep.has(id);
-        if (!sessions.has(id) && !rem && !liveWaiting(id) && (now - m > horizon || passed.get(id) === m) && !ownerView(id)?.listed) continue;
+        // shown again from "Left the map" (keepShown): read again however old its log, as one kept is
+        const rem = (remembered.sessions.has(id) && now - m < REMEMBER_MS * 7) || overseerKeep.has(id) || keepShown(id, now);
+        if (!sessions.has(id) && !rem && !liveWaiting(id) && (pastRun(m, now, horizon) || passed.get(id) === m) && !ownerView(id)?.listed) continue;
         const old = found.get(id);
         if (!old || m > old.m) found.set(id, { file, pdir, m, account: r.account, root: r.dir });
       }
@@ -2767,23 +2976,25 @@ function discover() {
       const ct = readJson(path.join(s.dir, 'custom-title.json'));
       if (ct?.customTitle) s.custom = ct.customTitle;
       // older than the window: kept only if it is a finished turn, so its PRs are read once that is known
-      s.late = now - x.m > WINDOW_MS && !remembered.sessions.has(id) && !liveWaiting(id) && !overseerKeep.has(id);
+      s.late = now - x.m > WINDOW_MS && !remembered.sessions.has(id) && !liveWaiting(id) && !overseerKeep.has(id) && !keepShown(id, now);
       if (!s.late) prsFor(s);
       sessions.set(id, s);
     }
     if (s.file === x.file) s.mtime = x.m;
   }
   for (const s of [...sessions.values()]) {
-    if (!s.demo && setAside.size && setAside.has(String(s.id).toLowerCase())) { dropSession(s); continue; }
+    if (!s.demo && setAside.size && setAside.has(String(s.id).toLowerCase())) { dropSession(s, 'set-aside'); continue; }
     if (overseerKeep.has(s.id)) continue;
     const ov = s.demo ? null : ownerView(s.id);
-    if (ov) { if (!ov.listed) dropSession(s); continue; }
-    if (endedLongAgo(s, now) || (s.state && now - s.mtime > WINDOW_MS && !keepDone(s, now) && !keepRemembered(s, now) && !liveWaiting(s.id))) dropSession(s);
+    if (ov) { if (!ov.listed) dropSession(s, 'other-device'); continue; }
+    if (endedLongAgo(s, now)) dropSession(s, 'finished-3h');
+    else if (s.state && now - s.mtime > WINDOW_MS && !keepDone(s, now) && !keepRemembered(s, now) && !liveWaiting(s.id)) dropSession(s, 'quiet-window');
   }
 }
 
 function poll() {
   const now = Date.now();
+  UPTIME.tick(now); // the heartbeat (uptime.json every minute), and a wake from sleep noted before the age rules
   const budget = { left: 8 << 20 }; // bytes of history read for token counts per poll, across sessions
   pollRemote = syncRemote();
   for (const s of [...sessions.values()]) {
@@ -2800,6 +3011,7 @@ function afterPoll(now) {
   try { checkConflicts(now); } catch (e) { logOnce('conflicts:' + (e && e.message), `conflicts failed\n${errorText(e)}`); }
   try { pruneTeams(now); } catch (e) { logOnce('teams:' + (e && e.message), `teams failed\n${errorText(e)}`); }
   try { tlTick(now); } catch (e) { logOnce('timeline:' + (e && e.message), `timeline failed\n${errorText(e)}`); }
+  try { leftTick(now); } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: could not save on-map.json\n${errorText(e)}`); }
 }
 function pollOne(s, now, budget) {
   // a record at a time: a log line that trips the reader is skipped, not the rest of what was read
@@ -2815,12 +3027,12 @@ function pollOne(s, now, budget) {
   // copy's tail says (laid down mid-turn, it can look unfinished here)
   const ov = s.late && !s.demo ? ownerView(s.id) : null;
   if (ov) {
-    if (!ov.listed) { dropSession(s); return; }
+    if (!ov.listed) { dropSession(s, 'other-device'); return; }
     s.late = false;
     prsFor(s);
   }
   // an old log that doesn't end on a finished turn: drop it before reading its agents and history
-  if (s.late && (s.turnOpen || s.asking || s.apiError || s.endedOnQuestion || now - endedAtOf(s) >= KEEP_DONE_MS)) { dropSession(s); return; }
+  if (s.late && (s.turnOpen || s.asking || s.apiError || s.endedOnQuestion || runAge(endedAtOf(s), now) >= KEEP_DONE_MS)) { dropSession(s, 'late-unfinished'); return; }
   // subagents: plain Agent calls and workflow agents, tailed while they are fresh
   const sub = path.join(s.dir, 'subagents');
   const files = ls(sub).filter((f) => f.endsWith('.jsonl')).map((f) => path.join(sub, f));
@@ -2886,19 +3098,20 @@ function pollOne(s, now, budget) {
   // another device runs it: its state is that device's, never this lagging copy's (before the alerts, so they agree)
   applyRemote(s, pollRemote);
   if (s.late) {
-    if (!keepDone(s, now)) { dropSession(s); return; }
+    if (!keepDone(s, now)) { dropSession(s, s.state === 'DONE' ? 'finished-3h' : 'late-unfinished'); return; }
     s.late = false;
     prsFor(s);
   }
   // finished hours ago and its log only touched since: gone before it shows or raises an alert
-  if (endedLongAgo(s, now)) { dropSession(s); return; }
+  if (endedLongAgo(s, now)) { dropSession(s, 'finished-3h'); return; }
+  s.shown = true; // on the map: only these are logged when they leave (left-map.js)
   easBackground(s);
   if (prev && prev !== s.state) tl.changed = true;
   checkAlerts(s, prev);
   s.events = s.events.filter((t) => now - t < 30 * 60e3);
   // a finished conversation keeps its files while it is kept, for the detail panel
   const keepFiles = s.state === 'DONE' ? Math.max(WINDOW_MS, KEEP_DONE_MS) : WINDOW_MS;
-  for (const [k, fl] of s.files) if (now - fl.t > keepFiles) s.files.delete(k);
+  for (const [k, fl] of s.files) if (s.state === 'DONE' ? pastRun(fl.t, now, keepFiles) : now - fl.t > keepFiles) s.files.delete(k);
 }
 
 // ---------- drawing ----------
@@ -3256,7 +3469,7 @@ function openConversation(s, now) {
     return;
   }
   pendingOpen = null;
-  launchConversation(s).then((r) => { notice = { text: '  ' + r.message, color: r.ok ? C.mint : C.red, until: Date.now() + (r.ok ? 4000 : 5000) }; });
+  launchConversation(s).then((r) => { if (r && r.ok) markOpened(s.id); notice = { text: '  ' + r.message, color: r.ok ? C.mint : C.red, until: Date.now() + (r.ok ? 4000 : 5000) }; });
 }
 
 // start claude --resume <id> under the conversation's account (~/.claude-<x> for X, the default ~/.claude for B):
@@ -4174,6 +4387,16 @@ function demoInit() {
     demoMsgAt = now;
   }
   demoTimeline(now);
+  // "Left the map": made-up conversations the age rules took off, so the menus' list can be seen (demo-left-* ids)
+  demoLeft = [
+    ['wishlist-sync-fix', 'storefront-web', 'A', 'finished-3h', 3.4, 3.5],
+    ['nightly-reindex', 'search-service', 'B', 'aged-out-while-off', 8.2, 11.6],
+    ['docs-search-box', 'docs', 'A', 'quiet-window', 0.9, 1.7],
+    ['scratch notes', null, 'B', 'finished-3h', 26, 29.3],
+  ].map(([name, repo, account, rule, leftH, lastH], i) => ({
+    id: `demo-left-${i}`, name, account, repo: repo ? { name: repo, root: demoRoot(repo), color: toHex(familyColor(demoRoot(repo))) } : null,
+    cwd: repo ? demoRoot(repo) : null, leftAt: Math.round(now - leftH * 3600e3), rule, why: LEFT_MAP.RULES[rule], lastActive: Math.round(now - lastH * 3600e3),
+  })).sort((a, b) => b.leftAt - a.leftAt);
   demoTick();
   feedLive = true;
   // a few alerts of the newer kinds, so the list has them from the start
@@ -4775,6 +4998,8 @@ function scanLiveProcs() {
     const was = procConv.get(p.pid);
     if (was && was.startedAt === p.startedAt && was.id !== sid && UUID_RE.test(was.id)) cleared.set(was.id.toLowerCase(), { to: sid.toLowerCase(), at: now });
   }
+  // one resumed off the map since the last scan: on it, as opened (markOpened)
+  try { noteResumed(byId, now); } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: checking for resumed conversations failed\n${errorText(e)}`); }
   procConv = new Map([...byId].map(([sid, p]) => [p.pid, { id: sid, startedAt: p.startedAt }]));
   for (const [id, c] of cleared) if (now - c.at > 24 * 3600e3) cleared.delete(id);
 }
@@ -6380,7 +6605,7 @@ function removedList(now) {
 }
 // a stand-in for POST /open of a conversation that is no longer in the session map: one in the history index
 // (any age, the Projects view's "Older conversations"), else one on the hidden list or taken off it in the last 2 minutes
-// (the page's Continue un-hides it first)
+// (the page's Continue un-hides it first), or one on "Left the map" (leftById)
 const recentlyContinued = new Map(); // id -> when it left the hidden list
 function removedSession(id) {
   if (typeof id !== 'string' || !UUID_RE.test(id) || DEMO) return null;
@@ -6388,7 +6613,7 @@ function removedSession(id) {
   const e = historyById(id);
   if (e && fs.existsSync(e.file)) return { id, name: historyName(e), cwd: e.cwd, account: e.account, projRoot: e.projRoot, root: e.repoRoot, state: 'DONE' };
   const t = recentlyContinued.get(id);
-  if (!hidden.some((h) => h.id === id) && !(t && Date.now() - t < 120e3)) return null;
+  if (!hidden.some((h) => h.id === id) && !(t && Date.now() - t < 120e3) && !leftById.has(id)) return null;
   const f = findLog(id);
   const info = f && readLogInfo(f.file, f.pdir, id);
   if (!info) return null;
@@ -6682,12 +6907,16 @@ function buildState() {
     aged: agedLive(listed, now),
     // the most recently removed conversations (settings.hidden), newest first, for the page's Continue
     removed: removedList(now),
+    // the conversations the age rules took off the map lately, newest first, for the menus' "Left the map" (leftMapList):
+    // [{ id, name, account, repo, cwd, leftAt, rule, why, lastActive }]
+    leftMap: leftMapList(tagOf),
     // the "recently finished" strip: the last 10 conversations per workspace that finished their turn in the last 3
     // hours (the page keeps the 10 newest of the workspaces it shows; a global 10 left a quiet workspace empty)
-    // (one that never said or was asked anything, a conversation opened and left empty, is not listed)
-    finished: newestPerRepo(out.filter((x) => x.state === 'DONE' && x.endedAt && now - x.endedAt < KEEP_DONE_MS && (x.lastReply || x.goal))
-      .sort((a, b) => b.endedAt - a.endedAt), 10)
-      .map((x) => ({ id: x.id, name: x.name, account: x.account, repo: x.repo, endedAt: x.endedAt, summary: summaryOf(sessions.get(x.id)?.lastReply) || clipWords(x.goal, 140) || null })),
+    // (one that never said or was asked anything, a conversation opened and left empty, is not listed). One shown
+    // again from "Left the map" counts as finished at the click (shownAgain: that time, for the order)
+    finished: newestPerRepo(out.filter((x) => x.state === 'DONE' && x.endedAt && (runAge(x.endedAt, now) < KEEP_DONE_MS || keepShown(x.id, now)) && (x.lastReply || x.goal))
+      .sort((a, b) => Math.max(b.endedAt, shownAgainAt(b.id)) - Math.max(a.endedAt, shownAgainAt(a.id))), 10)
+      .map((x) => ({ id: x.id, name: x.name, account: x.account, repo: x.repo, endedAt: x.endedAt, ...(keepShown(x.id, now) ? { shownAgain: shownAgainAt(x.id) } : {}), summary: summaryOf(sessions.get(x.id)?.lastReply) || clipWords(x.goal, 140) || null })),
     clashes,
     conflicts: conflictsOf(onMap),
     worktrees: worktreesOf([...repos.keys()], all, now),
@@ -6813,6 +7042,8 @@ function applySettings(b) {
       const still = new Set(h.map((x) => x.id)), was = new Set(hidden.map((x) => x.id));
       for (const x of hidden) if (!still.has(x.id)) recentlyContinued.set(x.id, now);
       for (const [id, t] of recentlyContinued) if (now - t > 120e3 || still.has(id)) recentlyContinued.delete(id);
+      // removed on the page: one line in left-map.log each (left-map.js), only for one newly on the list
+      for (const id of still) if (!was.has(id)) leftHide(id, 'hidden');
       hidden = h;
       // removed on the page just now: out of its team too (the page usually took it out already)
       for (const id of still) if (!was.has(id)) leaveOnHide(id);
@@ -7007,6 +7238,8 @@ function hideConversation(id) {
   if (typeof id !== 'string' || !UUID_RE.test(id) || DEMO) return false;
   id = id.toLowerCase();
   const now = Date.now();
+  // left-map.log: one line, unless it was off the map already (sweepTemp hides the API's throwaway sessions)
+  if (!hiddenNow(id)) leftHide(id, 'hidden-api', apiTemp.includes(id) ? 'a throwaway API session that ended' : null);
   hidden = hidden.filter((h) => h.id !== id);
   hidden.push({ id, at: now });
   if (hidden.length > HIDDEN_MAX) hidden.sort((a, b) => a.at - b.at).splice(0, hidden.length - HIDDEN_MAX);
@@ -7133,6 +7366,8 @@ const apiCtx = {
   successorOf,
   // open in a claude outside Fleet View (a terminal): resuming it here would run it twice
   openElsewhere: (id) => !DEMO && liveProcs.has(String(id || '').toLowerCase()),
+  // resumed or opened here (api.js resumeIn): on the map from now, as Show again puts one (markOpened, Fleet View #548)
+  opened: (id) => markOpened(String(id || '')),
   // removed from the map (the page's Remove), unless it worked again since: an ask's answers aren't typed into it
   isRemoved: (id) => hiddenNow(String(id || '').toLowerCase()),
   // the team a conversation is in: { id, name, lead, members } or null (the one it reports in, else the one it leads);
@@ -7312,7 +7547,7 @@ function applyPrefs(group, items) {
     const h = cleanHidden(items) || [];
     const still = new Set(h.map((x) => x.id)), was = new Map(hidden.map((x) => [x.id, x.at]));
     for (const [id, at] of was) if (!still.has(id)) { syncUnhid.set(id, { at, t: now }); recentlyContinued.set(id, now); }
-    for (const x of h) if (!was.has(x.id)) { apiHidAt.set(x.id, now); syncUnhid.delete(x.id); }
+    for (const x of h) if (!was.has(x.id)) { apiHidAt.set(x.id, now); syncUnhid.delete(x.id); leftHide(x.id, 'hidden', 'hidden on another device'); }
     hidden = h;
     forgotten = (cleanForgotten(items.filter((x) => x && x.forgot).map((x) => x.id)) || []).filter((id) => still.has(id));
     hiddenSync++;
@@ -7599,7 +7834,7 @@ async function freshBeforeStart({ api, log, say }) {
   for (const [id, c] of plan.aside) {
     setAside.set(id, { id, at: now, size: c.size, m: c.m });
     const s = sessions.get(id);
-    if (s && !s.demo) dropSession(s);
+    if (s && !s.demo) dropSession(s, 'set-aside');
   }
   // on disk before anything else changes; a failure keeps the loops off (they hold back what is set aside meanwhile)
   try { saveSetAside(); } catch (e) { throw new Error(`starting clean: the set-aside list could not be saved (${errMsg(e)})`); }
@@ -8178,7 +8413,8 @@ function handleRequest(req, res) {
         // a removed conversation outside the window (the page's Continue) opens from its log
         const s = b && typeof b.id === 'string' ? sessions.get(b.id) || removedSession(b.id) : null;
         if (!s) return sendJson(res, 404, { ok: false, message: 'no such conversation' });
-        launchConversation(s).then((r) => sendJson(res, 200, r), (e) => requestFailed(req, res, e));
+        // opened: on the map for KEEP_DONE_MS from now, and while its claude runs (markOpened)
+        launchConversation(s).then((r) => { if (r && r.ok) markOpened(s.id); sendJson(res, 200, r); }, (e) => requestFailed(req, res, e));
       });
     }
     if (pathname === '/reveal') {
@@ -8196,6 +8432,14 @@ function handleRequest(req, res) {
       return readBody(req, res, (b) => {
         if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
         const [code, out] = pathname === '/repos/add' ? addRepo(b.path) : removeAddedRepo(b.root);
+        sendJson(res, code, out);
+      });
+    }
+    // "Left the map" ▸ Show again (web/app.js showLeftAgain)
+    if (pathname === '/left-map/show') {
+      return readBody(req, res, (b) => {
+        if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
+        const [code, out] = showLeftAgain(b);
         sendJson(res, code, out);
       });
     }
@@ -8451,6 +8695,10 @@ function exitWith(code, reason) {
   exiting = true;
   exitReason = reason;
   try { flushSettings(); } catch {}
+  // what the map shows now, with its latest times, for the next start's check (left-map.js)
+  try { if (LEFT_ON && leftStarted) leftSave(Date.now()); } catch {}
+  // the last heartbeat (uptime.js): the time off from now on is not counted by the 3-hour rule
+  try { UPTIME.stop(); } catch {}
   try { REMOTE.flush(); } catch {}
   try { REMOTE.unserveSync(); } catch {}
   // every paired phone is told the PC is going (notice pc-closing), then the relay's socket closes
@@ -8584,7 +8832,13 @@ function startWeb() {
     histOn = true;
     bootStep('history', loadHistory);
     prsLater = new Set(); // each log's PR links: read by the 'prs' step below, after the list is out
+    // left-map.js: what the map showed at the last run, before the first read drops any of it; then the ones that left
+    // while Fleet View was off
+    leftLoad();
+    // uptime.js: the time since the last run's heartbeat was off, before the first read judges any conversation's age
+    try { UPTIME.start(); } catch (e) { logLine(`uptime: could not start\n${errorText(e)}`); }
     try { bootStep('procs', scanLiveProcs); bootStep('discover', discover); bootStep('poll', poll); } catch (e) { console.error(e.stack); logLine(`first read of the logs failed\n${errorText(e)}`); }
+    leftAtStart();
     bootSteps('the list is ready');
     every(250, 'history', historyStep);
     every(1500, 'procs', scanLiveProcs);

@@ -494,8 +494,9 @@ function rebase(st) {
     if (s.ship && s.ship.app) s.ship.app.at = sh(s.ship.app.at);
     if (s.handoff) s.handoff.at = sh(s.handoff.at);
   }
-  for (const f of st.finished || []) f.endedAt = sh(f.endedAt);
+  for (const f of st.finished || []) { f.endedAt = sh(f.endedAt); f.shownAgain = sh(f.shownAgain); }
   for (const r of st.removed || []) { r.removedAt = sh(r.removedAt); r.lastActive = sh(r.lastActive); }
+  for (const r of st.leftMap || []) { r.leftAt = sh(r.leftAt); r.lastActive = sh(r.lastActive); }
   for (const e of st.feed || []) e.t = sh(e.t);
   for (const a of st.alerts || []) a.t = sh(a.t);
   for (const t of st.teams || []) { t.at = sh(t.at); for (const m of t.messages || []) m.t = sh(m.t); }
@@ -1372,6 +1373,54 @@ async function continueConversation(r) {
   if (!res || !res.ok) toast((res && res.message) || 'could not reach Fleet View to open it', C.red);
 }
 
+// ---------- left the map: the ones the age rules took off, back with a click (right-click a repo, or empty space) ----------
+// state.leftMap: the server's 50 newest ({ id, name, account, repo, cwd, leftAt, rule, why, lastActive }), newest first,
+// less hidden ones (Removed conversations lists those) and ones on the map again (Henry, 2026-10-16: one aged out
+// overnight and only Projects still had it). Show again puts one back with nothing started, kept 3 hours from the
+// click as if it had just finished, then it leaves by the usual rules; Continue opens it as for a removed one
+const leftShown = new Map(); // id -> the leftAt of the entry shown again here: that entry stays off the list (a later departure is listed)
+function leftMapFor(folder = null) {
+  const keys = folder ? new Set([normRoot(folder), normRoot(repoForFolder(state || {}, folder).root)]) : null;
+  const list = (state?.leftMap || []).filter((r) => r && typeof r.id === 'string');
+  for (const r of list) if (leftShown.has(r.id) && (r.leftAt || 0) > leftShown.get(r.id)) leftShown.delete(r.id); // it left again since
+  return list.filter((r) => !r.bot && !leftShown.has(r.id) && !hidden.has(r.id) && !continued.has(r.id) && (!keys || (r.repo && keys.has(normRoot(r.repo.root)))));
+}
+// the "Left the map" item with its submenu, or null when there are none, as removedMenuItem: a box that scrolls, each
+// row with its own ▸ (Show again, Continue), and with two or more "Show all N again" on top
+function leftMapMenuItem(list, withRepo) {
+  if (!list.length) return null;
+  const now = Date.now(), n = list.length;
+  const all = n < 2 ? [] : [{ label: `Show all ${n} again`, icon: 'reply', note: 'nothing starts', bulk: true, run: () => showLeftAgain(list) }, { sep: true }];
+  return {
+    label: 'Left the map', icon: 'clock', note: `${n}`, scroll: true,
+    children: [...all, ...list.map((r) => ({
+      label: r.name, tag: isAcct(r.account) ? r.account : null, icon: 'shell',
+      note: `${withRepo ? `${r.repo ? r.repo.name : 'no workspace'} · ` : ''}left ${removedAgo(now - (r.leftAt || now))}${r.why ? ` · ${r.why}` : ''}`, at: r.leftAt || now,
+      children: [
+        { label: 'Show again', icon: 'reply', note: 'back on the map, nothing starts', run: () => showLeftAgain([r]) },
+        { label: 'Continue', icon: 'shell', note: 'opens it and starts its session', run: () => continueConversation(r) },
+      ],
+    }))],
+  };
+}
+// "Show again": POST /left-map/show; off the list at once, Undo takes the server's time off again
+async function showLeftAgain(list) {
+  const back = list.filter((r) => r && r.id && !leftShown.has(r.id));
+  if (!back.length) return;
+  const ids = back.map((r) => r.id);
+  for (const r of back) leftShown.set(r.id, r.leftAt || 0);
+  const undo = () => { for (const id of ids) leftShown.delete(id); post('/left-map/show', { ids, undo: true }); render(); };
+  toast(`Showing ${back.length === 1 ? back[0].name : `${back.length} conversations`} again`, C.mint, { label: 'Undo', run: undo, ms: 6000 });
+  render();
+  const res = await post('/left-map/show', { ids });
+  if (FIXTURE) return; // fixture data: the POST is only recorded (window.__fvPosts)
+  if (res && res.ok) return;
+  const ok = new Set((res && res.shown) || []);
+  for (const id of ids) if (!ok.has(id)) leftShown.delete(id);
+  toast((res && res.message) || 'could not reach Fleet View to show it again', C.red);
+  render();
+}
+
 // stand-ins for the continued ones: a dim card and map node until /state shows them working again
 function continuedSessions(st) {
   const out = [], now = Date.now();
@@ -1735,9 +1784,11 @@ const minsAgo = (ms) => (ms < 60e3 ? 'just now' : `${ago(ms)} ago`);
 // the strip starts short (shortCount); "Show N more" opens the rest until the page reloads
 let finMore = false;
 
-// the strip's rows: the last 10 in the picked repo, newest first (the map shows the same ones); drawn short
+// the strip's rows: the last 10 in the picked repo, newest first (the map shows the same ones); drawn short. One shown
+// again from "Left the map" sorts by that click (shownAgain), so it is not cut for being old
 function finishedRows(fin) {
-  return (fin || []).filter((f) => f && f.id && inRepo(f.repo)).sort((a, b) => b.endedAt - a.endedAt).slice(0, 10);
+  const at = (f) => Math.max(f.endedAt || 0, f.shownAgain || 0);
+  return (fin || []).filter((f) => f && f.id && inRepo(f.repo)).sort((a, b) => at(b) - at(a)).slice(0, 10);
 }
 let finList = []; // the strip's rows, all of them (not only the short list): what "Clear all" removes
 function drawFinished(v) {
@@ -2585,9 +2636,12 @@ function openContextMenu(target, x, y) {
       label: 'Workspace settings', icon: 'settings',
       children: [repoRenameItem(folder), repoColorItem(folder), { sep: true }, ...(pushHook() ? [repoPushItem(folder, repo.push || 'production')] : []), keepsItem(rIt.root, rIt.name)],
     });
-    // its removed conversations (only when it has any), all of them: continue, show again or forget each
+    // its removed conversations (only when it has any), all of them: continue, show again or forget each; then the
+    // ones the age rules took off the map (Left the map ▸): show again or continue each
     const rm = removedMenuItem(removedFor(folder), false);
     if (rm) items.push(rm);
+    const lm = leftMapMenuItem(leftMapFor(folder), false);
+    if (lm) items.push(lm);
     // the repo and its conversations leave every view (the workspace list too); Undo on the toast
     items.push({ sep: true }, { label: 'Remove workspace', icon: 'close', danger: true, run: () => removeRepo({ root: folder, name: target.name || repo.name }) });
     openCtxMenu({ x, y, title: target.name || repo.name || repoName(folder), dot: color, sub: folder, items });
@@ -2595,11 +2649,11 @@ function openContextMenu(target, x, y) {
   }
   if (target.kind === 'space') {
     // empty space on the map, around the cards or tiles, or the Projects list: first the workspace shown (never in
-    // Bots: no workspace filters it), then add a repo or one removed, and every removed conversation (its workspace in
-    // the note; those with no workspace are only here)
+    // Bots: no workspace filters it), then add a repo or one removed, and every removed conversation and every one that
+    // left the map (its workspace in the note; those with no workspace are only here)
     const show = local.view === 'chats' ? [] : [workspaceMenuItem(), { sep: true }];
     const rmRepos = removedReposMenuItem({ x, y });
-    const rmAll = removedMenuItem(removedFor(), true);
+    const rmAll = removedMenuItem(removedFor(), true), lmAll = leftMapMenuItem(leftMapFor(), true);
     // no desktop-notification switch here: the header's bell has it (Henry, 2026-10-10)
     const extra = [];
     const lay = layoutMenuItem();
@@ -2608,7 +2662,7 @@ function openContextMenu(target, x, y) {
     if (multi.size) extra.push({ label: `Clear selection (${multi.size})`, icon: 'close', run: () => setMulti([], 'menu') });
     // the map's own: put a bot on it where the menu was opened (map-bots.js draws it)
     const addBot = local.view === 'map' && typeof mapMod?.mapWorldAt === 'function' ? [addBotMenuItem(x, y)] : [];
-    openCtxMenu({ x, y, items: [...show, addRepoMenuItem({ x, y }), ...addBot, ...(rmRepos ? [rmRepos] : []), ...(rmAll ? [rmAll] : []), ...extra] });
+    openCtxMenu({ x, y, items: [...show, addRepoMenuItem({ x, y }), ...addBot, ...(rmRepos ? [rmRepos] : []), ...(rmAll ? [rmAll] : []), ...(lmAll ? [lmAll] : []), ...extra] });
     return;
   }
   const s = (view?.allSessions || state.sessions || []).find((x) => x.id === target.id);

@@ -799,6 +799,8 @@ async function resumeIn(host, id, where, account, ctx, gone) {
     if (!r || !r.ok) return { err: [502, { ok: false, id, message: (r && r.message) || 'the session host could not open it' }] };
     if (r.message === 'already running') alreadyRunning = true; // it started meanwhile
   }
+  // opened (or running already): back on the map however old its log (fleet-view.js markOpened, Fleet View #548)
+  try { if (ctx.opened) ctx.opened(id); } catch {}
   // one already running is taken as it is (a message to a busy one is queued, as message does). One that opens on
   // the Claude in Chrome offer has it answered (passChromeOffer), its screen read every MENU_EVERY_MS while not idle
   const until = Date.now() + START_MS;
@@ -3021,7 +3023,7 @@ async function listConversations(query, ctx) {
 //        between two, rename(id, name) -> [code, json], hide(id) -> off the map, markTemp(id), isTemp(id),
 //        conversations({ state, repo, all, limit }) -> [row], transcript(id, { since, limit }) -> Promise of { ..., queue },
 //        whereIs(id) -> { known, cwd, account }, successorOf(id) -> the one that carries on or null,
-//        openElsewhere(id) -> open in a claude outside Fleet View, isRemoved(id) -> removed from the map, teamOf(id) -> { id, name, lead, members } or null,
+//        openElsewhere(id) -> open in a claude outside Fleet View, opened(id) -> it was resumed or opened (on the map again), isRemoved(id) -> removed from the map, teamOf(id) -> { id, name, lead, members } or null,
 //        teamsOf(id) -> [those]: both of a mid-level lead's teams, the one above first,
 //        teams: { list(), get(id) -> { id, name, lead, members } or null, make(b), add(id, member, lead),
 //        remove(id, member), lead(id, member | null), disband(id) } each -> [code, json] or a Promise of one,
