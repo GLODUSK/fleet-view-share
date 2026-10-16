@@ -321,8 +321,11 @@
 // event drawn in its own rectangle (true, the default), the full program over the whole sky as before (false, to compare
 // cost and pixels), or as true with the rectangles outlined on the backdrop ('show'); stats().rects: { mode, base (the base
 // sky's program is ready), all (the full program drew everything: the warp, a voyage, or boxes over RECT_ALL of the
-// window), share (of the window the full program drew), list ([x0, y0, x1, y1], CSS px) }, see "Each event in its own
-// rectangle".
+// window), share (of the window the full program drew), list ([x0, y0, x1, y1], CSS px), ev (each box's events, EV_* bits),
+// drew (the events of the program that drew each box; -1 the full one), link ({ full, base }: ms from the start to each
+// program's link), progs ([{ ev, ready, failed, ms (its link) }], the rectangles' own programs) }, see "Each event in its
+// own rectangle" and "A rectangle's own program"; rects('full') draws each box with the full program, as before those.
+// ?skyProgs=all links every one-event rectangle program at the start (see "A rectangle's own program").
 // ?skyHour=<0-24> forces the sky's hour; ?sky2d=1 has the canvas draw the sky, as without WebGL2; ?glow2d=1 has it
 // draw only the repo nebulae (to compare the two).
 //
@@ -1357,7 +1360,9 @@ export function mapStats() {
       life: Object.fromEntries([...I.events.values()].map((e) => [e.name, [Math.round(performance.now() - e.at), e.ev && e.ev.ms ? Math.round(e.ev.ms) : null]])) },
     gpu: gpuStats(),
     rects: I.skyGL ? { mode: rectMode, base: !!I.skyGL.B, all: !!I.skyGL.rectAll, share: Math.round((I.skyGL.rectShare || 0) * 1e3) / 1e3,
-      list: (I.skyGL.rects || []).map((r) => r.map((v) => Math.round(v / (I.dpr || 1)))) } : null,
+      list: (I.skyGL.rects || []).map((r) => r.slice(0, 4).map((v) => Math.round(v / (I.dpr || 1)))),
+      ev: (I.skyGL.rects || []).map((r) => r[4]), drew: I.skyGL.rectProg || [], link: { full: I.skyGL.fullMs || null, base: I.skyGL.baseMs || null },
+      progs: [...(I.skyGL.V || new Map())].map(([ev, v]) => ({ ev, ready: !!v.L, failed: v.bad, ms: v.ms || null })) } : null,
     asteroids: (() => { const e = evOf('asteroids'); if (!e) return null;
       return { light: e.ev.light.map((v) => Math.round(v * 100) / 100), shown: asteroidsNow().map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.r * 10) / 10, blur: Math.round(r.blur), a: Math.round(r.a * 1e3) / 1e3 })) }; })(),
     lens: (() => { const l = lensNow(); return l ? { x: Math.round(l.x), y: Math.round(l.y), r: Math.round(l.r * 10) / 10, a: Math.round(l.a * 1e3) / 1e3, src: l.srcs.map((o) => Math.round(o.amp * 1e3) / 1e3),
@@ -1542,10 +1547,11 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     gpuMeter: (on) => { gpuOn = !!on; if (I && I.skyGL && !gpuOn) gpuMeterDrop(I.skyGL); if (I) I.dirty = true; return gpuOn; },
     // the director holds (true: no event, scene or far event starts by itself; the hooks still start them) or goes on (false)
     hold: (on) => { skyHold = !!on; return skyHold; },
-    // each event in its own rectangle (true, the default), the full program over the whole sky (false), or as true with the
-    // rectangles outlined ('show'); no argument: the mode. See "Each event in its own rectangle" and stats().rects
+    // each event in its own rectangle (true, the default), the full program over the whole sky (false), as true with the
+    // rectangles outlined ('show'), or each rectangle by the full program, not its own ('full', to compare); no argument:
+    // the mode. See "Each event in its own rectangle", "A rectangle's own program" and stats().rects
     rects: (mode) => {
-      if (mode !== undefined) { rectMode = mode === 'show' ? 'show' : !!mode; if (I && I.skyGL) I.skyGL.drawn = false; if (I) I.dirty = true; }
+      if (mode !== undefined) { rectMode = mode === 'show' || mode === 'full' ? mode : !!mode; if (I && I.skyGL) I.skyGL.drawn = false; if (I) I.dirty = true; }
       return rectMode;
     },
     meteor: () => { if (!I) return false; I.meteors.push(meteorMake(performance.now())); I.dirty = true; return true; }, // a shooting star now
@@ -6844,11 +6850,13 @@ vec4 farPart(vec2 p, vec4 A, vec4 B, vec4 C, vec4 D) {
   return vec4(lt * (a / max(m, 1e-5)) * (1.0 - sh), a * (1.0 - sh) + sh);
 }`;
 // per star layer its line in SKY_FS: its tile's texel, or its stars made per cell; looked up where the warp stretches
-// it to (ev), or (the base sky's program, SKY_BASE_FS: no warp there) at the pixel itself
+// it to (ev true), where the lens bends it to (ev an event mask, skyFS: a rectangle's program, no warp there), or (the
+// base sky's program, SKY_BASE_FS: no warp there) at the pixel itself
+const starAt = (ev, i) => (ev === true ? `warpP(pl, ${glf(WARP_LAYER[i])})` : ev ? 'pl' : 'p');
 const starGLSL = (ev) => STAR_LAYERS.map((L, i) => (L.cell
-  ? `c = over(starField(${ev ? `warpP(pl, ${glf(WARP_LAYER[i])})` : 'p'}, uL${i}, ${glf(L.cell)}, ${glf(L.n * (L.cell / STAR_TILE) ** 2)}, ${glf((L.sparkle || 0) / L.n)}, ` +
+  ? `c = over(starField(${starAt(ev, i)}, uL${i}, ${glf(L.cell)}, ${glf(L.n * (L.cell / STAR_TILE) ** 2)}, ${glf((L.sparkle || 0) / L.n)}, ` +
     `${glf(L.cl ? L.cl[1] : 0)}, vec4(${L.r.concat(L.a).map(glf).join(', ')}), ${L.seed}u, ${glf(L.twinkle || 0)}, uSize.w), c);`
-  : `c = over(star(uS${STAR_TILES.indexOf(L)}, uL${i}, ${ev ? `warpP(pl, ${glf(WARP_LAYER[i])})` : 'p'}), c);`)).join('\n  ');
+  : `c = over(star(uS${STAR_TILES.indexOf(L)}, uL${i}, ${starAt(ev, i)}), c);`)).join('\n  ');
 // the nebula drift (see "Look", NEBULA_*), premultiplied, at device px p; uNb (see SKY_U's comment): the cloud lives in its
 // own plane (middle, turn, long half-axis = 1), so its noise travels with it. A value noise, summed over octaves each turned
 // and doubled (nbF), warped twice by itself (the dust looks pulled into streams), gives its density; a ridged noise along
@@ -7599,10 +7607,32 @@ vec4 battle(vec2 p) {
 // back to front (starGLSL), sampled where the pixel's centre falls on its tile or made there, the satellites, the shooting
 // star and the moon; then the vignette
 // (black, so in glass it dims the acrylic a little too), the repo glows ('screen': 1 - (1 - sky)(1 - glow), on colour and alpha alike, as the canvas does) and
-// a dither fixed to the pixel (never to time) that breaks the faint gradients' 8-bit bands. ev: with the space events
-// (SKY_FS: the nebula, the far event, the lens, the warp, the sights, the asteroids, the voyage); without them (SKY_BASE_FS)
-// it is the base sky alone, the same sum less those terms, for the pixels no event reaches (see "Each event in its own
-// rectangle")
+// a dither fixed to the pixel (never to time) that breaks the faint gradients' 8-bit bands. ev: true with the space events
+// (SKY_FS: the nebula, the far event, the lens, the warp, the sights, the asteroids, the voyage); false without them
+// (SKY_BASE_FS): the base sky alone, the same sum less those terms, for the pixels no event reaches; an event mask (EV_*):
+// a rectangle's program, with only those events' terms, as SKY_FS has them where there is no warp and no voyage (see
+// "Each event in its own rectangle")
+// The events a rectangle's program can draw, a bit each (see skyProg)
+const EV_NEB = 1, EV_FAR = 2, EV_LENS = 4, EV_SHIP = 8, EV_PLANET = 16, EV_BATTLE = 32, EV_SYSTEM = 64, EV_AST = 128;
+// a rectangle's program's terms under the stars: the nebula, the far event's parts and the lens's galaxies, as SKY_FS
+// lays them (its mix back towards c0 by uPc.z is gone: a rectangle never has a voyage's dimming, uPc.z is 1)
+const skyPartUnder = (ev) => (!ev ? '' : (ev & EV_NEB ? 'if (uNb[0].w > 0.0) c = over(nebula(pl), c);\n  ' : '') +
+  (ev & EV_FAR ? 'for (int i = 0; i < uFrN; i++) c = over(farPart(pl, uFr[i * 4], uFr[i * 4 + 1], uFr[i * 4 + 2], uFr[i * 4 + 3]), c);\n  ' : '') +
+  (ev & EV_LENS ? 'c = over(lensLight(pl - uLn[0].xy), c);\n  ' : ''));
+// and over them, the far sights in SKY_FS's order (an event left out adds exactly nothing there: over() of 0 is the
+// same), looked up at pl (no warp: SKY_FS's pf is pl), the far asteroids among them, laid over the stars at full
+// strength (uPc.z 1)
+const skyPartSights = (ev) => {
+  if (!ev) return '';
+  const t = [[EV_SYSTEM, 'system(pl)'], [EV_PLANET, 'planet(p, pl)'], [EV_BATTLE, 'battle(pl)'], [EV_SHIP, 'ship(p, pl)'],
+    [EV_LENS, 'lensFeed(p)'], [EV_LENS, 'lensHole(p)'], [EV_LENS, 'lensJets(p)']].filter(([b]) => ev & b).map(([, f]) => `fs = over(${f}, fs);\n  `);
+  if (!t.length && !(ev & EV_AST)) return '';
+  return 'vec4 fs = vec4(0.0);\n  ' + t.join('') + (ev & EV_AST ? `for (int i = 0; i < ASTEROID_N; i++) {
+    vec4 a = uAs[i], b = uAs[ASTEROID_N + i];
+    if (a.w > 0.0 && b.w < 1.0) fs = over(rock(p, a, b, uAs[2 * ASTEROID_N].xy), fs);
+  }
+  ` : '') + 'c = over(fs, c);\n  ';
+};
 const skyFS = (ev) => `#version 300 es
 precision highp float;
 #define GLOW_MAX ${GLOW_MAX}
@@ -7632,8 +7662,8 @@ ${ev ? [NEBULA_GLSL, ASTEROID_GLSL, LENS_GLSL, SHIP_GLSL, VEIL_GLSL, PLANET_GLSL
   vec2 p = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y); // the pixel's centre, device px from the top left
   vec4 t = mix(uTop, uBot, p.y / uSize.y);
   vec4 c = over(vec4(t.rgb * t.a, t.a), uBg);
-  ${ev ? `vec2 pl = lensP(p); // where the sky under the satellites is looked up (the gravity lens bends it; p without one)
-  vec2 pw = warpZ(pl, uWp[1].z); // the deep sky's lookup, stretched a little by the warp drift (zoomed in a voyage)` : 'vec2 pw = p; // the base sky: no lens, no warp'}
+  ${ev === true ? `vec2 pl = lensP(p); // where the sky under the satellites is looked up (the gravity lens bends it; p without one)
+  vec2 pw = warpZ(pl, uWp[1].z); // the deep sky's lookup, stretched a little by the warp drift (zoomed in a voyage)` : ev ? `vec2 pl = ${ev & EV_LENS ? 'lensP(p)' : 'p'}, pw = pl; // a rectangle's program: no warp` : 'vec2 pw = p; // the base sky: no lens, no warp'}
   // the place's deep sky: its band turned by the place's turn (uPc) about the window's middle, dimmed in a voyage (uPc.w)
   vec2 pr = pw - 0.5 * uSize.xy;
   pr = vec2(pr.x * uPc.x - pr.y * uPc.y, pr.x * uPc.y + pr.y * uPc.x) + 0.5 * uSize.xy;
@@ -7641,7 +7671,7 @@ ${ev ? [NEBULA_GLSL, ASTEROID_GLSL, LENS_GLSL, SHIP_GLSL, VEIL_GLSL, PLANET_GLSL
   vec3 g = d.rgb * uFx.y * uPc.w;
   c = over(vec4(g, max(g.r, max(g.g, g.b))), c);
   c = over(vec4(texture(uDust, (pr - uDu.xy) * uDu.z).r * d.a * uFx.z * uPc.w), c);
-  ${ev ? `// the sights from here to the asteroids, but for the stars (they streak), dim in a voyage (uPc.z): these mixed back
+  ${ev !== true ? skyPartUnder(ev) : `// the sights from here to the asteroids, but for the stars (they streak), dim in a voyage (uPc.z): these mixed back
   // towards this, the far sights and rocks gathered in fs and laid over it at that share
   vec4 c0 = c;
   // the nebula drift, over the deep sky and under the stars, which show through it
@@ -7652,8 +7682,8 @@ ${ev ? [NEBULA_GLSL, ASTEROID_GLSL, LENS_GLSL, SHIP_GLSL, VEIL_GLSL, PLANET_GLSL
   // the lens's far galaxies, bent into arcs, over those and under the stars
   c = over(lensLight(pl - uLn[0].xy), c);
   c = mix(c0, c, uPc.z);
-  ` : ''}${starGLSL(ev)}
-  ${ev ? `// the far sights, over the stars and bent by a black hole between like them: a planet, a battle, the capital ship (and its
+  `}${starGLSL(ev)}
+  ${ev !== true ? skyPartSights(ev) : `// the far sights, over the stars and bent by a black hole between like them: a planet, a battle, the capital ship (and its
   // escort); then the black hole's stream, its dark core and ring over them, and its jets; all under the asteroids,
   // satellites and streaks
   // (in a voyage they zoom with the deep sky: pf, the squeeze's w share)
@@ -7673,7 +7703,7 @@ ${ev ? [NEBULA_GLSL, ASTEROID_GLSL, LENS_GLSL, SHIP_GLSL, VEIL_GLSL, PLANET_GLSL
   c = over(fs * uPc.z, c);
   // a voyage's light glows at its point over it all
   c = over(voyageGlow(p), c);
-  ` : ''}// the satellites: each a small soft point (a Gaussian SAT_R CSS px across, uSat's z its alpha) and its beacon's
+  `}// the satellites: each a small soft point (a Gaussian SAT_R CSS px across, uSat's z its alpha) and its beacon's
   // flash (w) a little wider in its colour (uSac); the first empty slot ends them, and a pixel far from one skips it
   for (int i = 0; i < SAT_N; i++) {
     vec4 s = uSat[i];
@@ -7747,7 +7777,7 @@ ${ev ? [NEBULA_GLSL, ASTEROID_GLSL, LENS_GLSL, SHIP_GLSL, VEIL_GLSL, PLANET_GLSL
     vec2 mq = (p - uMo.xy) * uMo.z;
     if (all(greaterThanEqual(mq, vec2(0.0))) && all(lessThan(mq, vec2(1.0)))) c = over(texture(uMoon, mq) * uMo.w, c);
   }
-  ${ev ? `// the close asteroid (soft focus, its blur 1 px or more), in front of all that, the moon too
+  ${ev === true || ev & EV_AST ? `// the close asteroid (soft focus, its blur 1 px or more), in front of all that, the moon too
   for (int i = 0; i < ASTEROID_N; i++) {
     vec4 a = uAs[i], b = uAs[ASTEROID_N + i];
     if (a.w > 0.0 && b.w >= 1.0) c = over(rock(p, a, b, uAs[2 * ASTEROID_N].xy), c);
@@ -7807,7 +7837,7 @@ function skyGLMake(cv) {
     inst: new Float32Array(64 * GLOW_INST), ni: 0, lastInst: new Float32Array(64 * GLOW_INST), lastNi: -1,
     gu: new Float32Array((3 + 4 * GLOW_MAX) * 4), lastGu: new Float32Array((3 + 4 * GLOW_MAX) * 4), gn: 0, lastGn: -1, cols: new Map() };
   // a lost context: the map's canvas draws the sky from the next frame on, until the context is back
-  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; G.pend = null; G.bpend = null; G.B = null; G.tq = null; I.dirty = true; });
+  cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G.ok = false; G.pend = null; G.bpend = null; G.B = null; G.V = new Map(); G.tq = null; I.dirty = true; });
   cv.addEventListener('webglcontextrestored', () => { skyGLInit(G); I.dirty = true; });
   skyGLInit(G);
   return G;
@@ -7843,12 +7873,14 @@ const SKY_GL_WAIT = 400;
 // is ready (or if it fails) the full program draws every pixel, as it did before there was one
 function skyGLInit(G) {
   const gl = G.gl;
-  G.ok = false; G.B = null;
+  G.ok = false; G.B = null; G.V = new Map();
   try { G.par = gl.getExtension('KHR_parallel_shader_compile'); } catch { G.par = null; }
   G.pend = glLink(gl, SKY_VS, SKY_FS);
   G.bpend = glLink(gl, SKY_VS, SKY_BASE_FS);
   G.pendAt = performance.now();
-  if (!G.par) { skyGLFinish(G); skyGLBase(G); }
+  if (!G.par) { skyGLFinish(G); skyGLBase(G); return; }
+  // the parked star system's program links beside them: one is up after nearly every voyage (see skyProg)
+  for (const m of SKY_PROG_FIRST) skyProgLink(G, m, true);
 }
 // a link done (or no way to ask: then it waits for it)
 function glDone(G, pend) {
@@ -7857,7 +7889,11 @@ function glDone(G, pend) {
 // whether the sky's program is ready (G.ok), finishing it (and the base sky's) when its link is done; never waits for a link
 function skyGLPoll(G) {
   if (G.gl.isContextLost()) return false;
-  if (G.ok) { if (G.bpend && glDone(G, G.bpend)) { skyGLBase(G); if (I) I.dirty = true; } return true; }
+  if (G.ok) {
+    if (G.bpend && glDone(G, G.bpend)) { skyGLBase(G); if (I) I.dirty = true; }
+    for (const [m, v] of G.V) if (v.pend && glDone(G, v.pend)) skyProgDone(G, m, v);
+    return true;
+  }
   if (!G.pend) return false;
   if (glDone(G, G.pend)) { skyGLFinish(G); if (I) I.dirty = true; }
   return G.ok;
@@ -7866,7 +7902,7 @@ function skyGLPoll(G) {
 function skyGLBase(G) {
   if (!G.ok || !G.bpend) return;
   const p = glLinked(G.gl, G.bpend, 'base sky');
-  G.bpend = null;
+  G.bpend = null; G.baseMs = Math.round(performance.now() - G.pendAt);
   G.B = p ? skyLocs(G.gl, p) : null;
 }
 // a sky program's uniforms' places (G.F: the full one, G.B: the base sky's), its texture units and star tints set
@@ -7890,7 +7926,7 @@ const skyGLWaits = (G) => !!(G && !G.ok && G.pend && performance.now() - G.pendA
 // sky's two programs are picked for each pass (skyUniforms), the glows' only while it fills the field (glowField)
 function skyGLFinish(G) {
   const gl = G.gl, pend = G.pend, p = pend ? glLinked(gl, pend, 'sky') : null;
-  G.pend = null;
+  G.pend = null; G.fullMs = Math.round(performance.now() - G.pendAt);
   G.ok = !!p;
   if (!G.ok) return;
   G.F = skyLocs(gl, p);
@@ -8169,8 +8205,8 @@ let rectMode = true;
 // G.rectShare (the share of the canvas the full program draws)
 function skyRects(G, u, w, h, dpr) {
   const out = [];
-  let all = false;
-  const boxXY = (x, y, rx, ry) => { if (rx > 0 && ry > 0 && Number.isFinite(x + y + rx + ry)) out.push([x - rx - RECT_PAD, y - ry - RECT_PAD, x + rx + RECT_PAD, y + ry + RECT_PAD]); };
+  let all = false, ev = 0; // ev: the event (EV_*) whose boxes come next, kept with each box (skyProg)
+  const boxXY = (x, y, rx, ry) => { if (rx > 0 && ry > 0 && Number.isFinite(x + y + rx + ry)) out.push([x - rx - RECT_PAD, y - ry - RECT_PAD, x + rx + RECT_PAD, y + ry + RECT_PAD, ev]); };
   const box = (x, y, r) => boxXY(x, y, r, r);
   // the warp drift (its stretch) and a voyage (its light, flash or dimming) reach every pixel
   if (u[SKY_WP + 4] > 0 || u[SKY_VY + 2] > 0 || u[SKY_VY + 4] > 0 || u[50] !== 1 || u[51] !== 1) all = true;
@@ -8178,12 +8214,14 @@ function skyRects(G, u, w, h, dpr) {
   // half-axes) out to 1.275, where its edge (env: 1 - r + 0.55 (f - 0.5), f its density, never over 1) is 0 whatever the
   // density: the box round that ellipse (1.3 of its half-axes, turned) where it is narrower
   const nb = SKY_NB;
+  ev = EV_NEB;
   if (u[nb + 3] > 0) {
     const C = Math.sqrt(1.3) * u[nb + 2], A = 1.3 * u[nb + 2], B = A * u[nb + 6], co = u[nb + 4], si = u[nb + 5];
     boxXY(u[nb], u[nb + 1], Math.min(C, Math.hypot(A * co, B * si)), Math.min(C, Math.hypot(A * si, B * co)));
   }
   // the far event's parts: farPart(), L = |d| / r * qk past FAR_CUT; the clouds gather in from wider (qk < 1), a galaxy
   // recedes (qk >= 1)
+  ev = EV_FAR;
   for (let i = 0; i < G.frn; i++) {
     const o = SKY_FR + i * 16, f = Math.round(u[o + 4]), en = u[o + 13], ex = u[o + 14];
     const qk = f === 2 || f === 5 || f === 8 || f === 9 || f === 13 || f === 24 ? 1 / (1 + 0.3 * (ex * ex + (1 - en) * (1 - en))) : f === 4 ? 1 + 0.5 * ex * ex : 1;
@@ -8191,6 +8229,7 @@ function skyRects(G, u, w, h, dpr) {
   }
   // the gravity lens: its bending (LENS_REACH), its galaxies' arcs (2 R), its shade and ring, the stream it eats, its jets
   const ln = SKY_LN;
+  ev = EV_LENS;
   if (u[ln + 3] > 0) {
     const R = u[ln + 2];
     let r = Math.max(LENS_REACH * R, 2 * R, LENS_SHADE * R + 8 * dpr);
@@ -8200,6 +8239,7 @@ function skyRects(G, u, w, h, dpr) {
   }
   // the capital ship (and escort; smeared out of the rift by k.y) and its rift: ship(), drawn only while a.w > 0
   const sh = SKY_SH;
+  ev = EV_SHIP;
   if (u[sh + 3] > 0) {
     box(u[sh], u[sh + 1], u[sh + 2] * (u[sh + 10] > 0 ? 2.9 : 1.7) * (1 + u[sh + 17]));
     if (u[sh + 15] > 0 || u[sh + 16] > 0) box(u[sh + 12], u[sh + 13], 4 * u[sh + 14]);
@@ -8207,6 +8247,7 @@ function skyRects(G, u, w, h, dpr) {
   // the planet: its air's halo, rings and moon, in its radii, the tide's stretch undone (along it by td.z, across by
   // 1 / sqrt(td.z))
   const pl = SKY_PL;
+  ev = EV_PLANET;
   if (u[pl + 3] > 0 && u[pl + 2] > 0) {
     const th = u[pl + 15], mz = u[pl + 30], tz = u[pl + 26];
     const reach = Math.max(1 + 5 * th + 0.25, Math.max(u[pl + 33] + 0.1, mz > 0 ? Math.hypot(u[pl + 28], u[pl + 29]) + mz + 0.1 : 0));
@@ -8217,7 +8258,9 @@ function skyRects(G, u, w, h, dpr) {
   // SYSTEM_NEB_K of it along the plane, SYSTEM_NEB_F of that across, rolled; not the orbits' flatness, so a tilted
   // system's nebula is never cut off above and below), inside system()'s own
   // reach (1.15 R + 72 px)
+  ev = EV_BATTLE;
   if (u[SKY_BT + 2] > 0) box(u[SKY_BT], u[SKY_BT + 1], u[SKY_BT + 2]);
+  ev = EV_SYSTEM;
   if (u[SKY_SY + 3] > 0) {
     const A = 1.08 * u[SKY_SY + 2], B = Math.abs(u[SKY_SY + 6]) * A, co = u[SKY_SY + 4], si = u[SKY_SY + 5], e = 72 * dpr, C = 1.15 * u[SKY_SY + 2] + e;
     const N = u[SKY_SY + (10 + 4 * SYSTEM_PL_N) * 4 + 2] > 0 ? 1.7 * SYSTEM_NEB_K * u[SKY_SY + 2] : 0, Nb = SYSTEM_NEB_F * N;
@@ -8225,15 +8268,16 @@ function skyRects(G, u, w, h, dpr) {
       Math.min(C, Math.max(Math.hypot(N * si, Nb * co), Math.hypot(A * si, B * co) + e)));
   }
   // each asteroid: rock(), its dust out to 3.3 radii (a big one), its blur
+  ev = EV_AST;
   for (let i = 0; i < ASTEROID_N; i++) {
     const o = SKY_AS + i * 4, R = u[o + 2];
     if (!(u[o + 3] > 0)) continue;
     box(u[o], u[o + 1], R * (R > ASTEROID_DUST_MIN * dpr ? 3.3 : 1.5) + 2.5 * Math.floor(u[o + ASTEROID_N * 4 + 3]) + 3 * dpr);
   }
-  // cut to the canvas, whole px out, then merged until none overlap
+  // cut to the canvas, whole px out, then merged until none overlap (a merged box keeps every event of both)
   let list = [];
   for (const b of out) {
-    const r = [Math.max(0, Math.floor(b[0])), Math.max(0, Math.floor(b[1])), Math.min(w, Math.ceil(b[2])), Math.min(h, Math.ceil(b[3]))];
+    const r = [Math.max(0, Math.floor(b[0])), Math.max(0, Math.floor(b[1])), Math.min(w, Math.ceil(b[2])), Math.min(h, Math.ceil(b[3])), b[4]];
     if (r[2] > r[0] && r[3] > r[1]) list.push(r);
   }
   for (let merged = true; merged && list.length > 1;) {
@@ -8242,7 +8286,7 @@ function skyRects(G, u, w, h, dpr) {
       for (let j = i + 1; j < list.length; j++) {
         const a = list[i], b = list[j];
         if (a[0] >= b[2] || b[0] >= a[2] || a[1] >= b[3] || b[1] >= a[3]) continue;
-        list[i] = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+        list[i] = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3]), a[4] | b[4]];
         list.splice(j, 1);
         merged = true;
         break;
@@ -8276,6 +8320,55 @@ function rectsRest(list, w, h) {
     prev = next;
   }
   return out;
+}
+// A rectangle's own program (Henry, 2026-10-15). The full program is big: every pixel in a box paid for all of it (its
+// registers and branches: the lens's lookups, the nebula, the far parts' loop, the planet, battle, ship...) whatever
+// reached it, and a parked star system, up nearly all the time, cost about as much again with system() drawing nothing in
+// its box. So each box is drawn by a program with only the events that reach it (skyFS of their EV_* bits, kept with each
+// box in skyRects): the same terms in the same order as the full program (where there is no warp and no voyage, as in
+// every box: those make the full program draw everything), the rest left out, so each pixel is what the full program
+// draws there. Each one links in the background (KHR_parallel_shader_compile), one at a time, at most SKY_PROG_MAX of
+// them; until its own is linked a box takes the smallest linked one that has all its events, else the full program. One
+// event alone starts its link at once; a mix of them (boxes that overlap, which pass) only once it has been wanted for
+// SKY_PROG_WAIT ms. SKY_PROG_FIRST start with the full one (skyGLInit). A program's source depends on its bits alone, so a
+// driver's cache keeps each. Without the extension there are none (a link would freeze the page), and a failed one is
+// never tried again
+const SKY_PROG_MAX = 8, SKY_PROG_WAIT = 30000;
+// tests: ?skyProgs=all starts every one-event program with the full one, so a test needn't wait for each in turn
+const SKY_PROG_FIRST = typeof location !== 'undefined' && /[?&]skyProgs=all(&|$)/.test(location.search)
+  ? [EV_SYSTEM, EV_NEB, EV_FAR, EV_LENS, EV_SHIP, EV_PLANET, EV_BATTLE, EV_AST] : [EV_SYSTEM];
+const bitsOf = (k) => { let n = 0; for (; k; k &= k - 1) n++; return n; };
+function skyProg(G, m) {
+  if (rectMode === 'full') return G.F;
+  const v = G.V.get(m);
+  if (v && v.L) return v.L;
+  if (!v) {
+    const now = performance.now(), W = G.want || (G.want = new Map());
+    if (!W.has(m)) W.set(m, now);
+    if (bitsOf(m) === 1 || now - W.get(m) >= SKY_PROG_WAIT) skyProgLink(G, m);
+  }
+  let best = G.F, nb = 99;
+  for (const [k, w] of G.V) if (w.L && (k & m) === m && bitsOf(k) < nb) { best = w.L; nb = bitsOf(k); }
+  return best;
+}
+// start linking the program for events m, unless it is there, the cap is reached or (unless first: SKY_PROG_FIRST)
+// another one is linking
+function skyProgLink(G, m, first) {
+  if (!G.par || G.V.has(m) || G.V.size >= SKY_PROG_MAX) return;
+  if (!first) for (const v of G.V.values()) if (v.pend) return;
+  G.V.set(m, { pend: glLink(G.gl, SKY_VS, skyFS(m)), at: performance.now(), L: null, ms: 0, bad: false });
+}
+// a program's link is done: its uniforms' places (skyLocs), and the sky drawn again with it; or, failed, never used
+function skyProgDone(G, m, v) {
+  const gl = G.gl, { p, sh } = v.pend;
+  v.pend = null; v.ms = Math.round(performance.now() - v.at);
+  const ok = !!gl.getProgramParameter(p, gl.LINK_STATUS);
+  if (!ok && !gl.isContextLost()) console.warn(`map: the sky's program for events ${m} failed, the full program draws them:`, sh.map((s) => gl.getShaderInfoLog(s)).join(' ') || gl.getProgramInfoLog(p));
+  for (const s of sh) gl.deleteShader(s);
+  if (!ok) { v.bad = true; gl.deleteProgram(p); return; }
+  v.L = skyLocs(gl, p); v.L.ev = m;
+  G.drawn = false;
+  if (I) I.dirty = true;
 }
 // the sky (and the repo glows, when it can: I.glowGL) on its canvas, drawn only when its uniforms or the glows'
 // quads changed; false when the map's canvas must draw the sky itself
@@ -8538,9 +8631,19 @@ function drawSkyGL(glass, glows, k, ox, oy) {
     const each = (list) => { for (const r of list) { gl.scissor(r[0], cv.height - r[3], r[2] - r[0], r[3] - r[1]); gl.drawArrays(gl.TRIANGLES, 0, 3); } };
     gl.enable(gl.SCISSOR_TEST);
     skyUniforms(G, G.B); each(G.rest);
-    if (G.rects.length) { skyUniforms(G, G.F); each(G.rects); }
+    // each box by the program of the events in it (skyProg), the boxes of one program together
+    const by = new Map();
+    G.rectProg = G.rects.map((r) => {
+      const L = skyProg(G, r[4]);
+      let list = by.get(L);
+      if (!list) by.set(L, (list = []));
+      list.push(r);
+      return L === G.F ? -1 : L.ev;
+    });
+    for (const [L, list] of by) { skyUniforms(G, L); each(list); }
     gl.disable(gl.SCISSOR_TEST);
   } else {
+    G.rectProg = [];
     skyUniforms(G, G.F);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
