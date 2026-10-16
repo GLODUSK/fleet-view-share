@@ -1,8 +1,8 @@
 // In-app file viewer: a file path in the chat (the file on a Read, Edit, Write, MultiEdit or NotebookEdit row, a
 // `path` or `path:line` in a reply, a Grep or Glob result) opens here instead of VS Code.
 //
-// openViewer({ path, cwd, line, find }) asks the server for it (GET /file, see files.js: only what lies inside the
-// folders Fleet View knows; a relative path is read against cwd) and shows it in a large frosted overlay over the
+// openViewer({ path, cwd, line, find }) asks the server for it (GET /file, see files.js: any path on the PC's own drives
+// but sign-in and key files; a relative path is read against cwd) and shows it in a large frosted overlay over the
 // page: the path, the lines numbered and highlighted (highlight.js, the grammars the chat's code blocks use),
 // scrolled to `line` and marked. With `find` and no line it goes to the first line holding find's first line (an
 // edit's new text) and marks as many lines as find has. A folder lists what is in it (a click opens that one, ".."

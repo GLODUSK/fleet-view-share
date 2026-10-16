@@ -6812,6 +6812,9 @@ function requestFailed(req, res, e) {
 // (case folded where paths ignore case: Windows, macOS)
 const samePath = (p) => P.foldCase(path.resolve(String(p)));
 function revealAllowed(kind, p) {
+  // whatever the file viewer may show (any local path but sign-in and key files: files.js readable), so its Open in
+  // VS Code / Explorer works for every path a chat links
+  if (FILES.readable(path.resolve(String(p)))) return true;
   const want = samePath(p);
   // a repo added by hand (it may have no conversations yet)
   if (kind !== 'file' && addedRepos.some((r) => samePath(r.root) === want)) return true;

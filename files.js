@@ -86,9 +86,11 @@ function kind(p) {
 module.exports = { files, kind, _test: { match, withDirs } };
 
 // ---------- GET /file: a file for the page's viewer (web/viewer.js) ----------
-// GET /file?path=<abs, or relative to cwd>&cwd=<folder>[&raw=1]. Only what lies inside a folder the page may read
-// (ctx.folders(): every conversation's folder and repo, remembered and added repos; case-insensitive on Windows,
-// links resolved first) is served; anything else gets 403, and a missing file 404 { missing: true }.
+// GET /file?path=<abs, or relative to cwd>&cwd=<folder>[&raw=1]. Any path on this machine's own drives is served, so
+// every path a chat shows as a link opens (a scratchpad, B:\Tools, a log), as GET /folders lists any folder already;
+// never a sign-in or key file or anything in a keys folder (readable: by the name asked for and the real one), a
+// network path (\\server\share makes Windows sign in to it) or an alternate data stream: those get 403, and a missing
+// file 404 { missing: true }.
 //   a folder -> { ok, dir: true, path, entries: ["sub/", "name"…], total } (folders first, at most DIR_MAX)
 //   a text file -> { ok, path, size, lines, text, lang, mtime } (its first TEXT_MAX bytes, with truncated: true past that)
 //   a binary file -> { ok, path, size, mtime, binary: true }; a picture -> { ok, path, size, mtime, image: true }
@@ -101,8 +103,9 @@ const TEXT_MAX = 1 << 20;
 const RAW_MAX = 40 << 20;
 const DIR_MAX = 500;
 const IMAGES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
-// sign-in tokens and an account's own settings (its login, MCP servers' keys), even inside a known folder
+// sign-in tokens and an account's own settings (its login, MCP servers' keys), and the folders that hold keys
 const NEVER = new Set(['.credentials.json', '.claude.json']);
+const NEVER_DIRS = new Set(['.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker', 'keychains']);
 // highlight.js's name for the extension (the page loads a few grammars; the others show as plain text)
 const LANGS = {
   js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
@@ -129,6 +132,17 @@ function inside(file, folders) {
     return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   });
 }
+// GET /file may show it: on Windows a drive's own path (no \\server\share, no device path) with no alternate data
+// stream ("x::$DATA"); no sign-in file and nothing in a keys folder. Checked by the name asked for and by the one it
+// really has (a link, another case, an 8.3 name)
+function readable(file) {
+  for (const n of [file, real(file)]) {
+    if (WIN && (!/^[a-z]:\\/i.test(n) || n.slice(2).includes(':'))) return false;
+    const parts = fold(n).split(/[\\/]/);
+    if (NEVER.has(parts[parts.length - 1]) || parts.some((x) => NEVER_DIRS.has(x))) return false;
+  }
+  return true;
+}
 // the absolute path the request names, or null
 function target(p, cwd) {
   let f = String(p || '').trim().replace(/^"(.*)"$/, '$1');
@@ -154,9 +168,7 @@ function serve(req, res, ctx) {
   const q = new URL(req.url, 'http://x').searchParams;
   const file = target(q.get('path'), q.get('cwd'));
   if (!file) return ctx.sendJson(res, 400, { ok: false, message: 'give an absolute path, or a cwd for a relative one' });
-  // the name it really has (a link, another case, an 8.3 name), and no alternate data streams ("x::$DATA")
-  const realName = real(file);
-  if (/:/.test(file.slice(2)) || /:/.test(realName.slice(2)) || NEVER.has(path.basename(realName).toLowerCase()) || !inside(file, ctx.folders() || [])) return ctx.sendJson(res, 403, { ok: false, path: file, message: 'outside the folders Fleet View knows' });
+  if (!readable(file)) return ctx.sendJson(res, 403, { ok: false, path: file, message: 'Fleet View never shows sign-in or key files, or network paths' });
   let st;
   try { st = fs.statSync(file); } catch { return ctx.sendJson(res, 404, { ok: false, missing: true, path: file, message: 'no such file' }); }
   const mtime = st.mtimeMs;
@@ -198,7 +210,8 @@ function serve(req, res, ctx) {
   return ctx.sendJson(res, 200, { ok: true, path: file, size: st.size, lines, text, lang: langOf(file), mtime, ...(truncated ? { truncated: true } : {}) });
 }
 module.exports.serve = serve;
-Object.assign(module.exports._test, { target, inside, langOf });
+module.exports.readable = readable;
+Object.assign(module.exports._test, { target, inside, langOf, readable });
 
 // ---------- GET /folders: the PC's folders, for the page's folder picker outside the desktop window ----------
 // The desktop window has the Windows folder dialog (fleetDesktop.pickFolder); a browser (Edge on this PC, or the Mac
