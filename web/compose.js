@@ -1132,9 +1132,9 @@ export function mountCompose(slot, s) {
     // background updates), a startup dialog, or a prompt this tab can't show. An older host sends no waitingFor.
     else if (h && h.status === 'waiting' && !st.menu && !st.panel) {
       const w = h.waitingFor;
-      // slashPanel: a "/" command opened it (the host saw it typed), so Esc closes it and sending does that first.
+      // slashPanel: a "/" command opened it (the host saw it typed): no note (Henry, 2026-10-15); sending closes it first.
       // Any other dialog (trusting a folder, a new MCP server) is answered in the terminal: Esc there refuses it.
-      if (h.slashPanel) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>The ${esc(h.slashPanel)} panel is open; background updates wait until it closes (sending closes it)</span><button type="button" class="cmp-chip-b" data-c="panel-esc">Close (Esc)</button></span>`);
+      if (h.slashPanel) { /* no note */ }
       else if (!w || w === 'dialog open') bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>A dialog or panel is open in this session: answer or close it in the Session tab</span></span>`);
       else bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>Claude is waiting: ${esc(w.length > 120 ? `${w.slice(0, 119)}…` : w)} — answer it in the Session tab</span></span>`);
     }
@@ -3067,7 +3067,6 @@ export function mountCompose(slot, s) {
     else if (c === 'free') answerFree(card.querySelector('.cmp-free-in')?.value || '');
     else if (c === 'msubmit') submitMulti();
     else if (c === 'esc') escMenu();
-    else if (c === 'panel-esc') writeKey('\x1b');
     else if (c === 'attach') fileIn.click();
     else if (c === 'mode') { openModelMenu(false); openModeMenu(modeMenu.hidden); }
     else if (c === 'model') { openModeMenu(false); openModelMenu(modelMenu.hidden); }
