@@ -3,9 +3,10 @@
 // clock of its own. The alert kinds (question, error, stalled and an unfinished plan: needs; done: finished; merged;
 // a finished plan and the others: nothing), the first read with no cursor sending nothing (catch-up), the cursor kept
 // in push.json across a restart (nothing sent twice, the new ones sent), the read after no phone had a token taking
-// the cursor anew, an alert over 10 minutes old never sent, coalescing (per chat and kind for 10 minutes, a team's
-// members as one, the most urgent kind of a chat in one read, several chats as one push per kind), content-free
-// payloads (no name, no text, no PR number) unless the phone's names is on, the chat another machine runs left to it
+// the cursor anew, an alert over 10 minutes old never sent, coalescing (per chat and kind: needs 3 minutes, finished
+// 2, merged per PR; a team's members as one, the most urgent kind of a chat in one read, several chats as one push
+// per kind), content-free payloads (no name, no text, no PR number) unless the phone's names is on, and with it on a
+// push per chat (its name, what happened, a line of its words: gist, askOf, detailOf), the chat another machine runs left to it
 // when the phone is registered there (peers), DeviceNotRegistered dropping that token, Expo refusing or not answering
 // (logged, no throw), and a log that never holds a token or a chat's name.
 // Everything in a temp folder (PHONE_PUSH_TEST_DIR, or the system temp folder), deleted at the end. Never the real
@@ -81,6 +82,23 @@ async function main() {
   eq([k('plan', 'plan Build it finished'), k('plan', 'plan Build it failed'), k('plan', 'plan Build it cancelled')], [null, 'needs', 'needs'], 'a plan: only one that did not finish');
   eq([PP.namesText(['a']), PP.namesText(['a', 'b']), PP.namesText(['a', 'b', 'c', 'd'])], ['a', 'a and b', 'a, b and 2 more'], 'namesText');
 
+  // ---------- a line of what a chat said ----------
+  const REPLY = '## Done\n\nAll three support items are **live** in production.\n\n```js\nconst x = 1;\n```\n\n1. Resolved tickets end\n2. [PR #12](https://x/12) merged\n\n| a | b |\n|---|---|';
+  eq(PP.gist(REPLY), 'Done. All three support items are live in production. Resolved tickets end. PR #12 merged. a · b', 'gist: headings, code, list marks, links and tables out, lines run together');
+  ok(PP.gist('word '.repeat(100)).length <= 240 && PP.gist('word '.repeat(100)).endsWith('…'), 'gist: at most 240 characters, cut between words');
+  eq(PP.askOf('I found two ways.\n\nShould I ship it now, or wait for the review?\n\nEither is fine.'), 'I found two ways. Should I ship it now, or wait for the review?', 'askOf: the last line with a question, and the short one before it');
+  eq(PP.askOf('Ship it?\nOr wait?'), 'Ship it? Or wait?', 'askOf: two short lines together');
+  eq(PP.askOf(`${'A long opening line that sets the scene for what comes after it, '.repeat(2)}\nShall I go on?`), 'Shall I go on?', 'askOf: a long line before: the question alone');
+  eq(PP.askOf('No question here.\nJust a note.'), 'No question here. Just a note.', 'askOf: no question: its end');
+  const row = { repo: { name: 'web' }, lastReply: 'Built it.\n\nWant me to merge?' };
+  eq(PP.detailOf({ kind: 'done', text: 'finished' }, row), { what: 'Finished · web', body: 'Built it. Want me to merge?' }, 'detailOf done: Finished, the repo, the reply');
+  eq(PP.detailOf({ kind: 'done', text: 'finished' }, { ...row, doneReply: 'What its bot chat shows.' }).body, 'What its bot chat shows.', 'detailOf done: a bot\'s shown reply when it differs');
+  eq(PP.detailOf({ kind: 'question', text: 'asked you a question' }, row), { what: 'Asks you · web', body: 'Built it. Want me to merge?' }, 'detailOf asked in a reply: the question');
+  eq(PP.detailOf({ kind: 'question', text: 'waits on you: Allow Bash: npm test?' }, row), { what: 'Waits on you', body: 'Allow Bash: npm test?' }, 'detailOf a prompt on screen: its words');
+  eq(PP.detailOf({ kind: 'merged', text: 'PR #482 merged' }, row), { what: 'Merged PR #482', body: 'Into web.' }, 'detailOf merged');
+  eq(PP.detailOf({ kind: 'error', text: 'hit an API error, retry it' }, null).what, 'Hit an API error', 'detailOf error, no row');
+  eq(PP.detailOf({ kind: 'plan', text: 'plan Build failed' }, null), { what: 'Plan failed', body: 'Plan Build failed' }, 'detailOf a failed plan');
+
   // ---------- catch-up: the first read sends nothing ----------
   alert(A, 'question'); alert(B, 'done');
   let push = make();
@@ -125,10 +143,30 @@ async function main() {
   clock.t += 11 * 60e3;
   alert(E, 'merged', { name: 'Fleet work', text: 'PR #482 merged' });
   await push.tick();
-  eq(take().map((m) => [m.title, m.body, m.data]), [['A PR merged', 'Fleet work · PR #482', { kind: 'merged', machine: 'devPhone1aaaaaaa', sid: E }]], 'names on: the chat\'s name and the PR as the body');
-  alert(C, 'question', { name: 'Gamma' }); alert(D, 'question', { name: 'Delta' }); alert(A, 'question', { name: 'Alpha' });
+  eq(take().map((m) => [m.title, m.subtitle, m.body, m.data]), [['Fleet work', 'Merged PR #482', undefined, { kind: 'merged', machine: 'devPhone1aaaaaaa', sid: E }]], 'names on: the chat\'s name as the title, the PR as the subtitle');
+  clock.t += 1000;
+  alert(E, 'merged', { name: 'Fleet work', text: 'PR #483 merged' });
   await push.tick();
-  eq(take().map((m) => [m.title, m.body]), [['3 chats need you', 'Gamma, Delta and 1 more']], 'several, names on: the first two and how many more');
+  eq(take().map((m) => m.subtitle), ['Merged PR #483'], 'another PR merged by that chat within 10 minutes: it goes (per PR)');
+  st.sessions = [{ id: C, name: 'Gamma', repo: { name: 'web' }, lastReply: 'Two ways to do it.\n\nShould I keep the old route?' }];
+  alert(C, 'question', { name: 'Gamma', text: 'asked you a question' }); alert(D, 'question', { name: 'Delta' }); alert(A, 'question', { name: 'Alpha' });
+  await push.tick();
+  got = take();
+  eq(got.map((m) => [m.title, m.data.sid]), [['Gamma', C], ['Delta', D], ['Alpha', A]], 'three chats, names on: a push each, each opening its chat');
+  eq([got[0].subtitle, got[0].body], ['Asks you · web', 'Two ways to do it. Should I keep the old route?'], 'the question it asks as the body');
+  clock.t += 4 * 60e3;
+  alert(A, 'done', { name: 'Alpha' }); alert(B, 'done', { name: 'Beta' }); alert(C, 'done', { name: 'Gamma' }); alert(D, 'done', { name: 'Delta' });
+  await push.tick();
+  eq(take().map((m) => [m.title, m.body]), [['4 chats finished', 'Alpha, Beta and 2 more']], 'four of a kind in one read: one push, the first two and how many more');
+  clock.t += 60e3;
+  alert(A, 'done', { name: 'Alpha' });
+  await push.tick();
+  ok(!take().length, 'finished again within 2 minutes: coalesced');
+  clock.t += 61e3;
+  alert(A, 'done', { name: 'Alpha' });
+  await push.tick();
+  eq(take().map((m) => m.title), ['Alpha'], 'finished again over 2 minutes on: it goes');
+  st.sessions = [];
 
   // ---------- a team's members are one group chat ----------
   const TEAM = 't0123ab';
@@ -136,7 +174,7 @@ async function main() {
   clock.t += 11 * 60e3;
   alert(B, 'done'); alert(C, 'done');
   await push.tick();
-  eq(take().map((m) => [m.title, m.data]), [['A chat finished', { kind: 'finished', machine: 'devPhone1aaaaaaa', sid: B, team: TEAM }]], 'two members finishing: one push for the team (its group chat)');
+  eq(take().map((m) => [m.title, m.subtitle, m.data]), [['Team', `Chat ${B.slice(0, 4)} · Finished`, { kind: 'finished', machine: 'devPhone1aaaaaaa', sid: B, team: TEAM }]], 'two members finishing: one push for the team (its group chat), the member in the subtitle');
   st.teams = [];
 
   // ---------- another machine's chat ----------
@@ -219,7 +257,7 @@ async function main() {
 
   // ---------- the log ----------
   const logText = logs.join('\n');
-  ok(![TOKEN1, TOKEN2, 'phone1Token', 'Secret project', 'Fleet work', 'Gamma'].some((s) => logText.includes(s)), 'the log never holds a token or a chat\'s name');
+  ok(![TOKEN1, TOKEN2, 'phone1Token', 'Secret project', 'Fleet work', 'Gamma', 'old route'].some((s) => logText.includes(s)), 'the log never holds a token, a chat\'s name or its words');
 
   fv.close(); ex.close();
   try { fs.rmSync(T, { recursive: true, force: true }); } catch {}

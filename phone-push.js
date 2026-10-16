@@ -4,18 +4,21 @@
 // the new ones go to Expo's push service (https://exp.host/--/api/v2/push/send, plain fetch, no SDK), which hands
 // them to Apple.
 //
-// Content-free by default: the relay is end-to-end encrypted, so a push never carries what a chat says. It names only
-// what happened ("A chat needs you", "A chat finished", "A PR merged") and data { sid, kind, machine } (team: the
-// group chat it is a member of), which the phone opens. A phone that turned on "Show chat names in notifications"
-// (names on its token) also gets the chat's name as the body (and the PR's number): Expo and Apple then carry that name.
+// The relay is end-to-end encrypted and a push is not: Expo and Apple see what it says. A phone with "Show what chats
+// say" on (names on its token; the phone's default) gets one push per chat: its name as the title, what happened as
+// the subtitle ("Finished · <repo>", "Asks you", "Merged PR #482"...) and a line of the chat's own words as the body
+// (the start of its last reply; the question it asks). With it off a push names only what happened ("A chat needs
+// you", "A chat finished", "A PR merged"). Either way data { sid, kind, machine } (team: the group chat it is a
+// member of), which the phone opens.
 //
 //   kinds     needs     an alert of kind question, error or stalled, or a plan that did not finish (failed or
 //                       cancelled); a finished plan pushes nothing (its chat goes on, and says done when it ends)
 //             finished  done
 //             merged    merged
-//   coalesce  per chat (a team's members as the team: one group chat) and kind, one push in 10 minutes; a chat
-//             with two kinds in one read gets the more urgent one (needs, merged, finished); several chats in one
-//             read go as one push per kind ("3 chats need you")
+//   coalesce  per chat (a team's members as the team: one group chat) and kind: needs once in 3 minutes, finished
+//             once in 2, merged once per PR; a chat with two kinds in one read gets the more urgent one (needs,
+//             merged, finished). Several chats of a kind in one read: one push each up to 3 (names on), else one push
+//             for them all ("4 chats need you")
 //   hosts     a chat another machine runs (/state's workspace.host) is left to that machine when the phone said it
 //             is registered there too (peers: those machines' sync device ids), so a phone paired with both hears once
 //   cursor    the newest n seen, kept in <dataDir>/relay/push.json with the coalescing times, so a restart never sends
@@ -24,7 +27,7 @@
 //   tokens    one Expo answers DeviceNotRegistered for (the app was deleted, or its notifications turned off) is
 //             dropped (opts.drop); a revoked device's goes with it (relay.js)
 //
-// The log (opts.log) says what failed, never a token or a chat's name.
+// The log (opts.log) says what failed, never a token, a chat's name or its words.
 //
 // createPush({ port, dataDir, targets() -> [{ dev, token, names, peers }], drop(dev, token, why), log, now, timers,
 //   fetch, sendUrl, pollMs }) -> { start(), stop(), tick() -> Promise }
@@ -35,11 +38,14 @@ const http = require('http');
 
 const SEND_URL = 'https://exp.host/--/api/v2/push/send';
 const POLL_MS = 5e3;
-const COALESCE_MS = 10 * 60e3; // per chat and kind
+const WINDOW_MS = { needs: 3 * 60e3, finished: 2 * 60e3, merged: 10 * 60e3 }; // per chat and kind (merged: per PR)
+const COALESCE_MS = Math.max(...Object.values(WINDOW_MS)); // the longest: how long push.json keeps a time
 const MAX_AGE_MS = 10 * 60e3; // an alert older than this is never sent
 const STATE_MS = 10e3, SEND_MS = 15e3;
 const TTL_S = 6 * 3600; // Apple stops trying after this: a "needs you" from yesterday is no news
 const BATCH_MAX = 100; // Expo takes at most 100 messages a request
+const ONE_EACH_MAX = 3; // names on: up to this many chats of a kind in one read get a push each
+const BODY_MAX = 240; // about four lines on the lock screen
 const RANK = { needs: 3, merged: 2, finished: 1 };
 const TITLE = {
   needs: (n) => (n > 1 ? `${n} chats need you` : 'A chat needs you'),
@@ -47,6 +53,7 @@ const TITLE = {
   merged: (n) => (n > 1 ? `${n} PRs merged` : 'A PR merged'),
 };
 const clip = (s, n = 200) => String(s == null ? '' : s).replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, n);
+const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
 // an alert's kind of push, or null for none (/state alerts: { n, t, sid, name, text, kind })
 function kindOf(a) {
@@ -64,20 +71,98 @@ function namesText(list) {
   return `${n.slice(0, 2).join(', ')} and ${n.length - 2} more`;
 }
 
-// the messages for one phone: one per kind (its items: [{ key, kind, sid, team, name, pr }]); names: its toggle
+// ---------- a line of what a chat said ----------
+// at most n characters, cut between words so a number or a name is never cut in half
+function clipWords(text, n) {
+  const t = String(text == null ? '' : text).replace(/[\x00-\x1f\x7f\s]+/g, ' ').trim();
+  if (t.length <= n) return t;
+  const cut = t.slice(0, n - 1), sp = cut.lastIndexOf(' ');
+  return (sp > n * 0.5 ? cut.slice(0, sp) : cut).replace(/[\s,;:.\-–—(]+$/, '') + '…';
+}
+// a reply's lines that say something, as plain text: no code, rules, table borders, list or markdown marks
+function proseLines(text) {
+  const out = [];
+  let fence = false;
+  for (const raw of String(text || '').replace(/\r\n?/g, '\n').split('\n')) {
+    if (/^\s*(```|~~~)/.test(raw)) { fence = !fence; continue; }
+    if (fence) continue;
+    const l = raw.replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/, '')
+      .replace(/^\|\s*|\s*\|$/g, '').replace(/\s*\|\s*/g, ' · ')
+      .replace(/\*\*|__|`/g, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').trim();
+    if (l.length < 2 || /^[-=_*·:…\s]+$/.test(l)) continue;
+    out.push(l);
+  }
+  return out;
+}
+// the start of a reply, its first lines run together, at most n characters
+function gist(text, n = BODY_MAX) {
+  let t = '';
+  for (const l of proseLines(text)) { t = t ? `${t}${/[.!?:;]$/.test(t) ? '' : '.'} ${l}` : l; if (t.length >= n) break; }
+  return clipWords(t, n);
+}
+// the question a reply ends on: its last line with a "?" (and the line before, when both are short), else its end
+function askOf(text, n = BODY_MAX) {
+  const lines = proseLines(text);
+  let i = lines.length - 1;
+  while (i >= 0 && !lines[i].includes('?')) i--;
+  if (i < 0) return gist(lines.slice(-2).join('\n'), n);
+  const q = i > 0 && lines[i].length < 80 && lines[i - 1].length < 120 ? `${lines[i - 1]} ${lines[i]}` : lines[i];
+  return clipWords(q, n);
+}
+
+// what happened and a line of the chat's words, for one alert and its chat's /state row (s, or null)
+// -> { what, body }
+function detailOf(a, s) {
+  const text = String(a.text || '');
+  // a bot's chat leaves some replies out: then the one it shows (doneReply, null before any)
+  const reply = s ? (Object.prototype.hasOwnProperty.call(s, 'doneReply') ? s.doneReply : s.lastReply) : '';
+  const repo = s && s.repo && typeof s.repo.name === 'string' ? clip(s.repo.name, 40) : '';
+  const inRepo = (w) => (repo ? `${w} · ${repo}` : w);
+  if (a.kind === 'question') {
+    const wait = /^waits on you: ([\s\S]+)$/.exec(text);
+    if (wait) return { what: 'Waits on you', body: clipWords(wait[1], BODY_MAX) };
+    if (/panel open/.test(text)) return { what: 'Has a panel open', body: 'A panel in its terminal holds back its updates (Esc closes it).' };
+    // asking with its question tool: the question and its choices; asked in its reply: the question it ends on
+    return { what: inRepo('Asks you'), body: /is asking/.test(text) ? gist(s && s.lastReply) : askOf(s && s.lastReply) };
+  }
+  if (a.kind === 'error') return { what: 'Hit an API error', body: 'Open it to retry.' };
+  if (a.kind === 'stalled') return { what: 'Stuck mid-turn', body: cap(clipWords(text, BODY_MAX)) };
+  if (a.kind === 'plan') return { what: /cancelled$/.test(text) ? 'Plan cancelled' : 'Plan failed', body: cap(clipWords(text, BODY_MAX)) };
+  if (a.kind === 'merged') {
+    const pr = (/PR #(\d+)/.exec(text) || [])[1];
+    return { what: pr ? `Merged PR #${pr}` : 'Merged its PR', body: repo ? `Into ${repo}.` : '' };
+  }
+  if (a.kind === 'done') return { what: inRepo('Finished'), body: gist(reply) || gist(s && s.lastReply) };
+  return { what: cap(clip(text, 80)), body: '' };
+}
+
+// the messages for one phone (its items: [{ key, kind, sid, team, teamName, name, pr, what, body }]); names: its
+// toggle. Names on: a push per chat (title its name, subtitle what happened, body its words), up to ONE_EACH_MAX of a
+// kind; names off, or more than that: one per kind saying only what happened (names on: and which chats)
 function messagesFor(target, items, machine) {
   const out = [];
   for (const kind of ['needs', 'merged', 'finished']) {
     const list = items.filter((x) => x.kind === kind);
     if (!list.length) continue;
+    if (target.names && list.length <= ONE_EACH_MAX) {
+      for (const x of list) {
+        const data = { kind, machine };
+        if (x.sid) data.sid = x.sid;
+        if (x.team) data.team = x.team;
+        const name = clip(x.name, 80);
+        const m = { to: target.token, title: clip(x.teamName, 80) || name || TITLE[kind](1), data, sound: 'default', priority: 'high', ttl: TTL_S };
+        const what = x.teamName && name ? `${name} · ${x.what || ''}` : x.what;
+        if (what) m.subtitle = clip(what, 120);
+        if (x.body) m.body = x.body;
+        out.push(m);
+      }
+      continue;
+    }
     const one = list.length === 1 ? list[0] : null;
     const data = { kind, machine };
     if (one) { if (one.sid) data.sid = one.sid; if (one.team) data.team = one.team; }
     const m = { to: target.token, title: TITLE[kind](list.length), data, sound: 'default', priority: 'high', ttl: TTL_S };
-    if (target.names) {
-      const body = one && kind === 'merged' && one.pr ? `${clip(one.name, 60)} · PR #${one.pr}` : namesText(list.map((x) => x.name));
-      if (body) m.body = body;
-    }
+    if (target.names) { const body = namesText(list.map((x) => x.teamName || x.name)); if (body) m.body = body; }
     out.push(m);
   }
   return out;
@@ -196,8 +281,11 @@ function createPush(o = {}) {
     if (moved) cursor = top;
     // per chat (a team's members as the team), its most urgent kind
     const sessions = new Map((Array.isArray(st.sessions) ? st.sessions : []).filter((s) => s && typeof s.id === 'string').map((s) => [s.id, s]));
-    const teamOf = new Map();
-    for (const tm of Array.isArray(st.teams) ? st.teams : []) for (const id of Array.isArray(tm && tm.members) ? tm.members : []) if (typeof id === 'string' && !teamOf.has(id)) teamOf.set(id, tm.id);
+    const teamOf = new Map(), teamName = new Map();
+    for (const tm of Array.isArray(st.teams) ? st.teams : []) {
+      if (tm && typeof tm.id === 'string' && typeof tm.name === 'string') teamName.set(tm.id, tm.name);
+      for (const id of Array.isArray(tm && tm.members) ? tm.members : []) if (typeof id === 'string' && !teamOf.has(id)) teamOf.set(id, tm.id);
+    }
     const best = new Map();
     for (const a of fresh) {
       const kind = kindOf(a);
@@ -209,11 +297,14 @@ function createPush(o = {}) {
       const s = sessions.get(a.sid);
       const host = s && s.workspace && s.workspace.host && typeof s.workspace.host.device === 'string' ? s.workspace.host.device.toLowerCase() : null;
       const pr = kind === 'merged' ? (/PR #(\d+)/.exec(String(a.text || '')) || [])[1] || null : null;
-      best.set(key, { key, kind, sid: a.sid, team, name: clip(a.name || (s && s.name), 80), pr, host });
+      const { what, body } = detailOf(a, s || null);
+      best.set(key, { key, kind, sid: a.sid, team, teamName: team ? clip(teamName.get(team), 80) : '', name: clip(a.name || (s && s.name), 80), pr, host, what, body });
     }
-    const items = [...best.values()].filter((x) => !(sent.get(`${x.key}|${x.kind}`) > t - COALESCE_MS));
+    // (a merge per PR: two PRs merged by one chat are two pieces of news)
+    const sentKey = (x) => `${x.key}|${x.kind}${x.pr ? `#${x.pr}` : ''}`;
+    const items = [...best.values()].filter((x) => !(sent.get(sentKey(x)) > t - WINDOW_MS[x.kind]));
     if (!items.length) { if (moved) save(); return; }
-    for (const x of items) sent.set(`${x.key}|${x.kind}`, t);
+    for (const x of items) sent.set(sentKey(x), t);
     save();
     const messages = [], owners = [];
     for (const target of list) {
@@ -252,4 +343,4 @@ function createPush(o = {}) {
   return { start, stop, tick };
 }
 
-module.exports = { createPush, kindOf, messagesFor, namesText, SEND_URL, POLL_MS, COALESCE_MS, MAX_AGE_MS };
+module.exports = { createPush, kindOf, messagesFor, namesText, detailOf, gist, askOf, SEND_URL, POLL_MS, WINDOW_MS, COALESCE_MS, MAX_AGE_MS };

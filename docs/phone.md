@@ -663,15 +663,20 @@ Each machine pushes its own alerts to the phones paired with it, through Expo's 
 Apple). No new dependency on the PC: `phone-push.js`, started by the relay, calls
 `https://exp.host/--/api/v2/push/send` with plain `fetch`.
 
-- **Private by default.** The relay is end-to-end encrypted, and a push is not: Expo and Apple see what it says. So a
-  push names only what happened: **"A chat needs you"** (an alert of kind `question`, `error` or `stalled`, or a plan
-  that did not finish), **"A chat finished"** (`done`) or **"A PR merged"** (`merged`), with data `{ sid, kind,
-  machine, team? }` (`kind` `needs`, `finished` or `merged`; `machine` the pairing's `dev`; `team` when the chat is a
-  team member). Never a chat's name, its words or a PR's number. The phone's Settings switch **Show chat names**
-  (off by default) adds the chat's name as the body (`<name> · PR #<n>` for a merge): Expo and Apple then see that
-  name.
+- **What a push says.** The relay is end-to-end encrypted, and a push is not: Expo and Apple see what it says. With
+  the phone's Settings switch **Show what chats say** on (the default) a push is about one chat: its name as the
+  title (a team's name for a member, the member then in the subtitle), what happened as the subtitle (`Finished · <repo>`,
+  `Asks you · <repo>`, `Waits on you`, `Hit an API error`, `Stuck mid-turn`, `Plan failed`, `Merged PR #<n>`) and a
+  line of the chat's own words as the body, at most 240 characters: the start of its last reply (the one a bot's chat
+  shows), the question it ends on (with the line before when both are short), or the prompt on its screen. Turned
+  off, a push names only what happened: **"A chat needs you"** (an alert of kind `question`, `error` or `stalled`,
+  or a plan that did not finish), **"A chat finished"** (`done`) or **"A PR merged"** (`merged`), never a chat's
+  name, its words or a PR's number. Either way data `{ sid, kind, machine, team? }` (`kind` `needs`, `finished` or
+  `merged`; `machine` the pairing's `dev`; `team` when the chat is a team member). A phone from before the switch
+  was on by default (it kept `names: false` without a choice) gets it on; one Henry turned off stays off
+  (`namesSet`).
 - **The token.** The phone asks iOS for permission once, not on a first launch: after a minute in front while paired
-  and a machine is online, an alert says what notifications say, and only its "Turn on" brings up iOS's question
+  and a machine is online, an alert says what notifications say (and that Settings can leave a chat's words out), and only its "Turn on" brings up iOS's question
   (Settings' **Notifications** switch asks too). It then sends its Expo push token to every machine it is paired with:
   `POST /push/token { token, names, peers }`, the relay's own route (answered by the relay, never passed to the
   server; a phone's only, 403 for a computer; 403 for any other key, 400 for a token that is not
@@ -682,13 +687,17 @@ Apple). No new dependency on the PC: `phone-push.js`, started by the relay, call
   Revoking the device drops it, and so does Expo answering `DeviceNotRegistered`. An older Fleet View answers 403,
   and the phone does not ask it again until something changes.
 - **What goes when.** `phone-push.js` reads this server's `GET /state` alerts every 5 s (with `If-None-Match`), only
-  while some phone has a token. Per chat (a team's members as one: its group chat) and kind, one push in 10 minutes;
-  a chat with two kinds in one read gets the more urgent (needs, merged, finished); several chats in one read go as one
-  push per kind ("3 chats need you", no `sid`). The newest alert `n` seen is kept in `<dataDir>/relay/push.json` with
+  while some phone has a token. Per chat (a team's members as one: its group chat) and kind: needs once in 3 minutes,
+  finished once in 2, merged once per PR; a chat with two kinds in one read gets the more urgent (needs, merged,
+  finished). Several chats of a kind in one read: a push each up to 3 with Show what chats say on, else one push for
+  them all ("4 chats need you", the first two names and how many more, no `sid`). The newest alert `n` seen is kept in `<dataDir>/relay/push.json` with
   the coalescing times, so a restart sends nothing twice; the first read with no cursor, and the first after no phone
   had a token, send nothing (no burst of old alerts), and an alert over 10 minutes old is never sent.
 - **On the phone.** A tap opens the chat (`data.sid`) or the team's group chat (`data.team`); one about several chats
-  opens the app as it was. While the app is in front a push shows, unless it is about the chat on view. The phone's
+  opens the app as it was. While the app is in front a push shows, unless it is about the chat on view. Turning
+  Notifications off also unregisters the phone from iOS's push, so nothing shows even from a machine that has not
+  heard yet (on registers again); a registration a machine did not take is sent again every 30 s and at each
+  comeback to the front, and an offline machine gets it once it is online. The phone's
   code: `phone/src/lib/push.ts` (prefs, where a tap goes, the registration) and `phone/src/data/push.tsx`.
 - **Build.** `expo-notifications` is native (the app's 0.6.0 build), with `aps-environment` production. Expo's push
   service needs the APNs key for `com.glodusk.fleetview` on EAS (`eas credentials`, iOS, Push Notifications).
