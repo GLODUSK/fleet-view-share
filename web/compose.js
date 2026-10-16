@@ -1134,9 +1134,9 @@ export function mountCompose(slot, s) {
       const w = h.waitingFor;
       // slashPanel: a "/" command opened it (the host saw it typed): no note (Henry, 2026-10-15); sending closes it first.
       // Any other dialog (trusting a folder, a new MCP server) is answered in the terminal: Esc there refuses it.
+      // Claude waiting on a named input ("Claude is waiting: …"): no note either (Henry, 2026-10-15).
       if (h.slashPanel) { /* no note */ }
       else if (!w || w === 'dialog open') bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>A dialog or panel is open in this session: answer or close it in the Session tab</span></span>`);
-      else bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>Claude is waiting: ${esc(w.length > 120 ? `${w.slice(0, 119)}…` : w)} — answer it in the Session tab</span></span>`);
     }
     // another machine runs it (/state's workspace.host, syncOwner): what Send does (followPlan), and that machine's own
     // state as the link last read it
