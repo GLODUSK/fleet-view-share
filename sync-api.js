@@ -243,7 +243,11 @@ const PS_HEAD = "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyCont
 const PS_PROTECT = `${PS_HEAD}[Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b,$e,'CurrentUser')))`;
 const PS_UNPROTECT = `${PS_HEAD}[Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Unprotect($b,$e,'CurrentUser')))`;
 // Windows PowerShell 5.1 (always there) runs a fixed script; the data goes in on stdin as base64 and comes out the same
-// way, so nothing secret is ever in a command line
+// way, so nothing secret is ever in a command line.
+// The 30 s cap is followed by a short grace before PowerShell is ended: when the event loop was held up past the cap
+// (a busy start), the timer runs before the I/O that came meanwhile, and PowerShell's answer may be waiting in the
+// pipe already; the grace lets it be read rather than thrown away (#541).
+const DPAPI_MS = 30e3, DPAPI_GRACE_MS = 1000;
 function dpapi(script, inputB64) {
   return new Promise((resolve, reject) => {
     const exe = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -253,7 +257,9 @@ function dpapi(script, inputB64) {
     } catch (e) { return reject(new SyncError(`could not start PowerShell for DPAPI: ${e.message}`)); }
     let out = '', err = '', done = false;
     const end = (e, v) => { if (done) return; done = true; clearTimeout(t); if (e) reject(e); else resolve(v); };
-    const t = setTimeout(() => { try { c.kill(); } catch {} end(new SyncError('DPAPI took too long (30 s)')); }, 30e3);
+    let t = setTimeout(() => {
+      t = setTimeout(() => { try { c.kill(); } catch {} end(new SyncError(`DPAPI took too long (${DPAPI_MS / 1000} s)`)); }, DPAPI_GRACE_MS);
+    }, DPAPI_MS);
     c.stdout.on('data', (b) => { out += b; });
     c.stderr.on('data', (b) => { if (err.length < 4000) err += b; });
     c.on('error', (e) => end(new SyncError(`could not start PowerShell for DPAPI: ${e.message}`)));
@@ -444,9 +450,11 @@ function createSync(opts = {}) {
   // { url, uid, email, member, accessToken, refreshToken, expiresAt (ms) }; one for another project URL is ignored
   let session = null, sessionSeen, loading = null;
   // a read that failed (DPAPI slow while the PC starts up) is tried again from this time on, not given up on: else the
-  // sign-in stays lost, and the phone with it, until the file changes
-  let readRetryAt = 0;
-  const READ_RETRY_MS = 30e3;
+  // sign-in stays lost, and the phone with it, until the file changes. 5 s after the first failure, then 10, 20 and
+  // 30 s at most (readFails: failures in a row). What was read is kept in memory (session) for the server's life:
+  // the store is read again only when its file changes (another process signed in or out), never per request.
+  let readRetryAt = 0, readFails = 0;
+  const READ_RETRY_MS = [5e3, 10e3, 20e3, 30e3];
   const forThis = (s, c) => (s && c && s.url === c.url && allowed(s) ? s : null);
   function parseSession(text) {
     if (!text) return null;
@@ -474,12 +482,17 @@ function createSync(opts = {}) {
         loading = (async () => {
           const was = session;
           let text;
+          const t0 = monoNow();
           try { text = await store.read(); } catch (e) {
-            log(`sync: the sign-in could not be read: ${e.message} (trying again in ${READ_RETRY_MS / 1000} s)`);
-            readRetryAt = now() + READ_RETRY_MS;
+            const wait = READ_RETRY_MS[Math.min(readFails, READ_RETRY_MS.length - 1)];
+            readFails++;
+            log(`sync: the sign-in could not be read: ${e.message} (trying again in ${wait / 1000} s)`);
+            readRetryAt = now() + wait;
             return; // the session it had stays, and sessionSeen too, so the next load() reads it again
           }
+          log(`sync: the sign-in was read in ${Math.round(monoNow() - t0)} ms${readFails ? ` (after ${readFails} failed read${readFails === 1 ? '' : 's'})` : ''}`);
           readRetryAt = 0;
+          readFails = 0;
           session = parseSession(text);
           sessionSeen = stamp;
           // another process signed in or out (one that only renewed it changes nothing a listener holds)

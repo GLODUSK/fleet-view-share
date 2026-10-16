@@ -886,6 +886,40 @@ function logLine(text) {
     fs.appendFileSync(LOG_FILE, `${at} [node ${process.pid}] ${String(text).replace(/\r?\n/g, '\n    ')}\n`);
   } catch {}
 }
+// ---------- start-up timing (server.log, a few lines per start; GLODUSK/fleet-view#541) ----------
+// ms since the process started (performance.now() counts from there), each start-up step's time, the first answers
+// to /state and /api/conversations, and the event loop's longest stall in the first minute
+const bootMs = () => Math.round(performance.now());
+const boot = { steps: [], first: new Set(['/state', '/api/conversations']), stall: 0, stallAt: 0 };
+function bootStep(name, fn) {
+  const t = performance.now();
+  try { return fn(); } finally { boot.steps.push(`${name} ${Math.round(performance.now() - t)}`); }
+}
+function bootSteps(what) {
+  if (!boot.steps.length) return;
+  logLine(`startup: ${what} at +${bootMs()} ms (ms each: ${boot.steps.join(', ')})`);
+  boot.steps = [];
+}
+// the first answer to each of boot.first's paths: when, its status, how long it took
+function bootServed(req, res) {
+  if (!boot.first.size) return;
+  const p = String(req.url || '').split('?')[0];
+  if (!boot.first.has(p)) return;
+  boot.first.delete(p);
+  const t = performance.now();
+  res.once('finish', () => logLine(`startup: first ${p} answered at +${bootMs()} ms (${res.statusCode}, ${Math.round(performance.now() - t)} ms, ${sessions.size} conversations held)`));
+}
+// a 100 ms tick for the first minute: how late it ran is how long the event loop was held up
+function watchBootStalls() {
+  let last = performance.now();
+  const tick = setInterval(() => {
+    const now = performance.now(), late = now - last - 100;
+    last = now;
+    if (late > boot.stall) { boot.stall = Math.round(late); boot.stallAt = Math.round(now - late); }
+  }, 100);
+  tick.unref();
+  setTimeout(() => { clearInterval(tick); logLine(`startup: the event loop's longest stall in the first minute: ${boot.stall} ms (from +${boot.stallAt} ms)`); }, 60e3).unref();
+}
 // an error that can repeat every poll is written once a minute at most, with how many were left out
 const logSeen = new Map(); // key -> { at, skipped }
 function logOnce(key, text) {
@@ -1669,7 +1703,25 @@ function addPr(s, n, repo, t) {
 }
 
 // pr-link records name every PR a session opened or touched; read the whole log once for them,
-// since the live tail only starts a few MB from the end
+// since the live tail only starts a few MB from the end. While the server starts (prsLater a Set) a log is put by
+// for a later step instead (prsStep, one log per turn of the event loop): reading every whole log at once held up
+// the first list by a second or more.
+let prsLater = null;
+function prsFor(s) {
+  if (prsLater) prsLater.add(s);
+  else scanPrs(s);
+}
+// one put-by log read; true while more are left
+function prsStep() {
+  if (!prsLater) return false;
+  const s = prsLater.values().next().value;
+  if (!s) { prsLater = null; return false; }
+  prsLater.delete(s);
+  if (sessions.get(s.id) === s) scanPrs(s);
+  if (prsLater.size) return true;
+  prsLater = null;
+  return false;
+}
 function scanPrs(s) {
   let text = '';
   try { text = fs.readFileSync(s.file, 'utf8'); } catch { return; }
@@ -2716,7 +2768,7 @@ function discover() {
       if (ct?.customTitle) s.custom = ct.customTitle;
       // older than the window: kept only if it is a finished turn, so its PRs are read once that is known
       s.late = now - x.m > WINDOW_MS && !remembered.sessions.has(id) && !liveWaiting(id) && !overseerKeep.has(id);
-      if (!s.late) scanPrs(s);
+      if (!s.late) prsFor(s);
       sessions.set(id, s);
     }
     if (s.file === x.file) s.mtime = x.m;
@@ -2765,7 +2817,7 @@ function pollOne(s, now, budget) {
   if (ov) {
     if (!ov.listed) { dropSession(s); return; }
     s.late = false;
-    scanPrs(s);
+    prsFor(s);
   }
   // an old log that doesn't end on a finished turn: drop it before reading its agents and history
   if (s.late && (s.turnOpen || s.asking || s.apiError || s.endedOnQuestion || now - endedAtOf(s) >= KEEP_DONE_MS)) { dropSession(s); return; }
@@ -2836,7 +2888,7 @@ function pollOne(s, now, budget) {
   if (s.late) {
     if (!keepDone(s, now)) { dropSession(s); return; }
     s.late = false;
-    scanPrs(s);
+    prsFor(s);
   }
   // finished hours ago and its log only touched since: gone before it shows or raises an alert
   if (endedLongAgo(s, now)) { dropSession(s); return; }
@@ -6153,14 +6205,42 @@ function buildOf() {
 // An id whose log is gone is left out of the list (it stays in settings).
 const REMOVED_MAX = 50;
 const removedLogs = new Map(); // id -> { file, account, root, m, info } | { missing: true, at }
-// <id>.jsonl in the projects folders (both accounts'; the newest copy wins, like discover)
-function findLog(id) {
-  let best = null;
+// Every <id>.jsonl in the projects folders, by id: one listing of the folders (names only, no stat), made again when
+// it is LOG_NAMES_MS old, or LOG_NAMES_MISS_MS old when an id isn't on it (a log written since). It used to be a stat
+// of <id>.jsonl in every project folder for each id looked up: /state's removed list looks up every removed
+// conversation, and with hundreds removed and a few hundred project folders that was ~200,000 stats, which held the
+// event loop for 20 s and more (#541), again each minute.
+const LOG_NAMES_MS = 30e3, LOG_NAMES_MISS_MS = 10e3;
+let logNames = null, logNamesAt = 0;
+function logsById(fresh) {
+  const now = Date.now();
+  if (logNames && now - logNamesAt < (fresh ? LOG_NAMES_MISS_MS : LOG_NAMES_MS)) return logNames;
+  const map = new Map();
   for (const r of roots()) {
     for (const proj of ls(r.dir)) {
-      const file = path.join(r.dir, proj, `${id}.jsonl`), m = mtime(file);
-      if (m && (!best || m > best.m)) best = { file, m, account: r.account, root: r.dir, pdir: path.join(r.dir, proj) };
+      const pdir = path.join(r.dir, proj);
+      for (const f of ls(pdir)) {
+        if (!f.endsWith('.jsonl')) continue;
+        const id = f.slice(0, -6).toLowerCase();
+        let list = map.get(id);
+        if (!list) map.set(id, (list = []));
+        list.push({ file: path.join(pdir, f), pdir, account: r.account, root: r.dir });
+      }
     }
+  }
+  logNames = map;
+  logNamesAt = now;
+  return map;
+}
+// <id>.jsonl in the projects folders (both accounts'; the newest copy wins, like discover)
+function findLog(id) {
+  const key = String(id || '').toLowerCase();
+  let list = logsById(false).get(key);
+  if (!list) list = logsById(true).get(key);
+  let best = null;
+  for (const x of list || []) {
+    const m = mtime(x.file);
+    if (m && (!best || m > best.m)) best = { file: x.file, m, account: x.account, root: x.root, pdir: x.pdir };
   }
   return best;
 }
@@ -6234,7 +6314,7 @@ function readLogInfo(file, pdir, id, { cap = 48 << 20, head = 4 << 20, votes = f
   }
   return { title: custom || agentName || ai || null, prompt, cwd, votes: count };
 }
-function removedOne(h, now, budget) {
+function removedOne(h, now, budget, hist) {
   const s = sessions.get(h.id);
   if (s && s.name && !s.demo) {
     refreshHue(s, now);
@@ -6247,14 +6327,19 @@ function removedOne(h, now, budget) {
   }
   let c = removedLogs.get(h.id);
   if (c && c.missing && now - c.at < 60e3) return null;
-  const m = c && !c.missing ? mtime(c.file) : 0;
-  if (!c || c.missing || !m) {
+  // the log's time now: one stat (findLog's own when it had to be looked for)
+  let cur = c && !c.missing ? mtime(c.file) : 0;
+  if (!c || c.missing || !cur) {
     const f = findLog(h.id);
     if (!f) { removedLogs.set(h.id, { missing: true, at: now }); return null; }
     c = { file: f.file, pdir: f.pdir, account: f.account, root: f.root, m: 0, info: null };
     removedLogs.set(h.id, c);
+    cur = f.m;
   }
-  const cur = mtime(c.file);
+  // the history index has read this log as it is now (history.json, kept across restarts): its title, first prompt
+  // and folder from there, with no read of the log (a /state used to read 12 of them)
+  const e = (!c.info || c.m !== cur) && cur ? hist().get(h.id) : null;
+  if (e && e.file === c.file && e.m === cur) { c.info = { title: e.title, prompt: e.prompt, cwd: e.cwd }; c.m = cur; }
   if (!c.info || c.m !== cur) {
     // read on a later /state once this one has read its share (12 logs or 64 MB)
     if (budget.left <= 0 || (budget.bytes <= 0 && budget.left < 12)) return undefined;
@@ -6278,6 +6363,8 @@ function removedOne(h, now, budget) {
 function removedList(now) {
   if (DEMO) return [];
   const budget = { left: 12, bytes: 64 << 20 };
+  let byId = null;
+  const hist = () => byId || (byId = historyNewest());
   const out = [];
   const keep = new Set(), forgot = new Set(forgotten);
   for (const h of [...hidden].sort((a, b) => b.at - a.at)) {
@@ -6285,7 +6372,7 @@ function removedList(now) {
     if (forgot.has(h.id)) continue; // "Forget": off the list for good
     keep.add(h.id);
     let r = null;
-    try { r = removedOne(h, now, budget); } catch (e) { logOnce('removed:' + (e && e.message), `removed list: skipped ${h.id}\n${errorText(e)}`); }
+    try { r = removedOne(h, now, budget, hist); } catch (e) { logOnce('removed:' + (e && e.message), `removed list: skipped ${h.id}\n${errorText(e)}`); }
     if (r) out.push(r);
   }
   for (const id of removedLogs.keys()) if (!keep.has(id)) removedLogs.delete(id);
@@ -7130,8 +7217,7 @@ function conversationLog(id) {
   }
   const missAt = convoMiss.get(id);
   if (missAt && Date.now() - missAt < CONVO_MISS_MS) return null;
-  let best = null, bm = 0;
-  for (const r of roots()) for (const proj of ls(r.dir)) { const f = path.join(r.dir, proj, id + '.jsonl'), m = mtime(f); if (m > bm) { bm = m; best = f; } }
+  const found = findLog(id), best = found ? found.file : null;
   if (best) { if (convoLogs.size > 200) convoLogs.clear(); convoLogs.set(id, best); convoMiss.delete(id); }
   else { if (convoMiss.size > 200) convoMiss.clear(); convoMiss.set(id, Date.now()); }
   return best ? { file: best } : null;
@@ -8026,6 +8112,7 @@ const convCtx = { sendJson, find: conversationLog, live: (id) => !DEMO && livePr
 // tailnet owner's, with remote access on. It never reaches the API; until its browser is approved on the PC it only
 // gets the pairing page, and after that the page's routes like this PC's own page, with its own Origin checks.
 function handle(req, res) {
+  if (boot.first.size) bootServed(req, res);
   try { handleRequest(req, res); } catch (e) { requestFailed(req, res, e); }
 }
 function handleRequest(req, res) {
@@ -8339,12 +8426,14 @@ function probeFleetView(answer) {
 
 // the code's version for the log: "1.0.12 (02dddec), file <time> UTC": the version number (version.js), the git
 // commit in parentheses when git can say (a restart check compares it with git merge-base), and fleet-view.js's own time
+// (version.js has the full commit already when it counted the version: its first 7 characters, with no git call of
+// its own; git is asked only when version.js could not say)
 function versionOf() {
-  let hash = '';
-  try { hash = require('child_process').execFileSync('git', ['-C', __dirname, 'rev-parse', '--short', 'HEAD'], { timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch {}
+  const cur = VERSION.current(), v = cur.version;
+  let hash = /^[0-9a-f]{40}$/.test(cur.commit || '') ? cur.commit.slice(0, 7) : '';
+  if (!hash) try { hash = require('child_process').execFileSync('git', ['-C', __dirname, 'rev-parse', '--short', 'HEAD'], { timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch {}
   let at = '';
   try { at = fs.statSync(__filename).mtime.toISOString().slice(0, 19).replace('T', ' '); } catch {}
-  const v = VERSION.current().version;
   return [v && hash ? `${v} (${hash})` : v || hash, at && `file ${at} UTC`].filter(Boolean).join(', ') || 'unknown';
 }
 
@@ -8417,7 +8506,9 @@ function startWeb() {
   // the automation API's token (api.js): made on the first start, never logged
   try { API.ensureToken(); } catch (e) { logLine(`api: could not make the API token: ${e.message}`); }
   const after = process.env.FV_RESTART_REASON ? `, restarted after ${process.env.FV_RESTART_REASON}` : '';
-  logLine(`start: port ${PORT}, version ${versionOf()}, node ${process.version}${DEMO ? ', demo' : ''}${NO_OPEN ? ', --no-open' : ''}${process.env.FLEET_VIEW_LOOP === '1' ? '' : ', no restart loop'}${after}`);
+  const loaded = bootMs(), version = bootStep('version', versionOf);
+  logLine(`start: port ${PORT}, version ${version}, node ${process.version}${DEMO ? ', demo' : ''}${NO_OPEN ? ', --no-open' : ''}${process.env.FLEET_VIEW_LOOP === '1' ? '' : ', no restart loop'}${after}; loaded in ${loaded} ms`);
+  watchBootStalls();
   setTimeout(registerLauncher, 5000);
   const server = http.createServer(handle);
   // POST /upload takes up to 200 MB from a browser on another computer, which over Tailscale can take longer than
@@ -8464,6 +8555,7 @@ function startWeb() {
   server.listen(PORT, '127.0.0.1');
   server.once('listening', () => {
     listening = true;
+    bootSteps('listening');
     console.log(`Fleet View on http://127.0.0.1:${PORT}/  (${DEMO ? 'demo data' : rootLabel()}${GITHUB ? '' : ', github off'})`);
     console.log('Close this window, or press Ctrl+C, to stop it.');
     // the desktop window this launch gave up on still runs: it shows this server's page, so no Edge window too
@@ -8475,47 +8567,80 @@ function startWeb() {
     // test only: FV_TEST_CRASH=1 throws an exception nothing catches 3 s after start, to check the crash log and restart
     // updates from the folder's git upstream (updater.js): the page's "Update available" pill. Busy counts only the
     // chats this machine runs: one another device runs (s.remote, its state copied from there) never holds it back
-    if (!DEMO) UPDATER.start({ log: logLine, busy: () => [...sessions.values()].filter((s) => inState(s) && !s.remote && (s.state === 'WORKING' || s.state === 'AGENTS')).length });
+    if (!DEMO) bootStep('updater', () => UPDATER.start({ log: logLine, busy: () => [...sessions.values()].filter((s) => inState(s) && !s.remote && (s.state === 'WORKING' || s.state === 'AGENTS')).length }));
     if (process.env.FV_TEST_CRASH === '1') setTimeout(() => { throw new Error('FV_TEST_CRASH: test crash 3 s after start'); }, 3000);
     const every = (ms, name, fn) => setInterval(() => { try { fn(); } catch (e) { logOnce(name + ':' + (e && e.message), `${name} failed\n${errorText(e)}`); } }, ms);
-    // remote access: this PC's tailnet name, read now and every minute; with the switch on, 443 is made to point here
-    REMOTE.start();
-    // the phone relay: it opens a socket only once a phone is paired (Supabase: and sync is signed in)
-    if (!DEMO) { RELAY.start(); LOBBY.start(); }
-    if (!DEMO) SYNC_RUNNER.start();
-    // the fleet-view-feed mod in each Claude login: refreshed when this folder's version differs (feed-mod.js)
-    FEED_MOD.start({ log: logLine, off: DEMO ? 'a demo' : null });
     if (DEMO) {
+      // remote access: the demo keeps its devices in memory
+      REMOTE.start();
+      FEED_MOD.start({ log: logLine, off: 'a demo' });
       demoInit();
       every(1500, 'demo', demoTick);
       return;
     }
-    // the history index: what history.json holds now, the rest built in the background
+    // First the list, at once: the history index (history.json as it is; the rest is built in the background), the
+    // live claudes and the logs, which is what /state and /api/conversations answer from. Nothing here waits on the
+    // network, the sign-in or the session host.
     histOn = true;
-    loadHistory();
+    bootStep('history', loadHistory);
+    prsLater = new Set(); // each log's PR links: read by the 'prs' step below, after the list is out
+    try { bootStep('procs', scanLiveProcs); bootStep('discover', discover); bootStep('poll', poll); } catch (e) { console.error(e.stack); logLine(`first read of the logs failed\n${errorText(e)}`); }
+    bootSteps('the list is ready');
     every(250, 'history', historyStep);
-    try { tlLoad(); } catch (e) { tl.loaded = true; logLine(`timeline: could not read ${TL_FILE}\n${errorText(e)}`); }
-    try { scanLiveProcs(); discover(); poll(); } catch (e) { console.error(e.stack); logLine(`first read of the logs failed\n${errorText(e)}`); }
-    accountsFromProcesses();
-    readWeekLeft();
     every(1500, 'procs', scanLiveProcs);
-    pruneFeeds();
-    every(3600e3, 'feeds', pruneFeeds);
-    every(10000, 'accounts', accountsFromProcesses);
-    every(10000, 'row-accounts', accountsFromRows);
+    every(1500, 'poll', poll);
+    every(8000, 'discover', discover);
     const prs = () => refreshGithub().catch((e) => logOnce('github:' + (e && e.message), `GitHub lookup failed\n${errorText(e)}`));
     const deploys = () => refreshDeploys().catch((e) => logOnce('deploys:' + (e && e.message), `deploy lookup failed\n${errorText(e)}`));
     const github = () => { prs(); deploys(); };
-    github();
-    every(1500, 'poll', poll);
-    every(8000, 'discover', discover);
+    // Then the rest, one step per turn of the event loop (setImmediate), so a request that came in meanwhile is
+    // answered between steps rather than after all of them. Sync, the relay and the lobby (the sign-in's DPAPI read)
+    // come after the list, and nothing local waits on them.
+    const later = [
+      // the PR links in each conversation's whole log (prsStep: one log a turn, true while more are left)
+      ['prs', prsStep],
+      // the timeline (the last 24 hours, read back and rewritten compacted): tlTick takes no frame before it
+      ['timeline', () => { try { tlLoad(); } catch (e) { tl.loaded = true; logLine(`timeline: could not read ${TL_FILE}\n${errorText(e)}`); } }],
+      ['accounts', accountsFromProcesses],
+      ['week-left', readWeekLeft],
+      ['feeds', pruneFeeds],
+      // remote access: this PC's tailnet name, read now and every minute; with the switch on, 443 is made to point here
+      ['remote', () => REMOTE.start()],
+      // the phone relay: it opens a socket only once a phone is paired (Supabase: and sync is signed in)
+      ['relay', () => { RELAY.start(); LOBBY.start(); }],
+      ['sync', () => SYNC_RUNNER.start()],
+      ['github', github],
+      // messages and orders that waited for a menu before the last restart (api.js's queue)
+      ['queue', () => API.startQueue(apiCtx)],
+    ];
+    const took = new Map(); // step -> ms, a step that goes again (returns true) adding up its turns
+    const next = () => {
+      if (exiting) return;
+      const step = later[0];
+      if (!step) {
+        boot.steps.push(...[...took].map(([k, ms]) => `${k} ${Math.round(ms)}`));
+        return bootSteps('started');
+      }
+      const t = performance.now();
+      let again = false;
+      try { again = step[1]() === true; } catch (e) { logOnce('startup:' + step[0], `startup: ${step[0]} failed\n${errorText(e)}`); }
+      took.set(step[0], (took.get(step[0]) || 0) + performance.now() - t);
+      if (!again) later.shift();
+      setImmediate(next);
+    };
+    setImmediate(next);
+    // the fleet-view-feed mod in each Claude login: refreshed when this folder's version differs (feed-mod.js), 20 s on
+    FEED_MOD.start({ log: logLine, off: null });
+    every(3600e3, 'feeds', pruneFeeds);
+    every(10000, 'accounts', accountsFromProcesses);
+    every(10000, 'row-accounts', accountsFromRows);
     every(5000, 'github', github);
     every(60e3, 'codegraph', codeGraphs);
     // the nightly clean-up: does nothing unless Henry turned it on in the card
     HK.startNightly();
     setTimeout(() => { try { codeGraphs(); } catch {} }, 20e3);
     // CodeGraph MCP servers left running after their session ended (code-index.js strays())
-    if (!DEMO) CODEGRAPH.startSweeping();
+    CODEGRAPH.startSweeping();
     // the API's throwaway sessions: off the map once they end
     every(10000, 'api-temp', sweepTemp);
     // conversations on an account close to its limit move to one with room (switchTick)
@@ -8526,23 +8651,37 @@ function startWeb() {
     every(5000, 'bot-tasks', () => { BOTS.schedule(); });
     // the bots' watches: a watched conversation's finished turn, question, error or stall goes to its bot (bots.js watchTick)
     every(5000, 'bot-watch', () => { BOTS.watchTick(); });
-    // messages and orders that waited for a menu before the last restart (api.js's queue)
-    API.startQueue(apiCtx);
   });
 }
 
 // code graphs (code-index.js): the main checkout of every repo added, or seen in the last week, and the checkout of
-// every conversation active in the last day (its worktree, say) get a CodeGraph index, built one at a time
+// every conversation active in the last day (its worktree, say) get a CodeGraph index, built one at a time.
+// Each folder is first looked at with an async stat (its .git, then the index code-index.js looks for), so a drive
+// that went to sleep (Z: and J: are spinning disks here) wakes on a libuv thread, not inside gitInfo's or
+// code-index.js's sync calls: those held the whole server up for seconds at a time (#541). One folder per turn.
+let codeGraphRound = false;
+const warmPath = (p) => fs.promises.stat(p).then(() => {}, () => {});
 function codeGraphs() {
-  const want = (dir) => {
-    if (!dir || isHomeRoot(dir)) return;
-    const g = gitInfo(path.join(dir, '_'));
-    if (g && !isHomeRoot(g.top)) CODEGRAPH.want(g.top, g.root);
-  };
+  if (codeGraphRound) return; // the last round is still going
+  const dirs = new Set();
+  const want = (dir) => { if (dir && !isHomeRoot(dir)) dirs.add(dir); };
   for (const r of addedRepos) if (!repoHidden(r.root)) want(r.root);
   const week = Date.now() - 7 * 24 * 3600e3, since = Date.now() - 24 * 3600e3;
   for (const [root, at] of remembered.repos) if (at > week && !repoHidden(root)) want(root);
   for (const s of sessions.values()) if (!s.demo && s.cwd && (s.last || s.mtime || 0) > since) want(s.cwd);
+  codeGraphRound = true;
+  (async () => {
+    const seen = new Set(); // a checkout goes once, with the main repo it was first seen with
+    for (const dir of dirs) {
+      if (exiting) return;
+      await warmPath(path.join(dir, '.git'));
+      const g = gitInfo(path.join(dir, '_'));
+      if (!g || isHomeRoot(g.top) || seen.has(g.top)) continue;
+      seen.add(g.top);
+      await warmPath(path.join(g.top, '.codegraph', 'codegraph.db'));
+      CODEGRAPH.want(g.top, g.root);
+    }
+  })().catch((e) => logOnce('codegraph:' + (e && e.message), `codegraph failed\n${errorText(e)}`)).finally(() => { codeGraphRound = false; });
 }
 
 // ---------- autostart: a "Fleet View" shortcut in the user's Startup folder ----------
