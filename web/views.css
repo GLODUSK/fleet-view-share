@@ -339,7 +339,8 @@ html.glass .card.multi.picked, html.glass .tile.multi.picked {
 .d-top .c-icon { height: 22px; }
 .d-head { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; flex: 1 1 auto; min-width: 0; }
 .d-head .name { font: 600 17px/1.3 var(--font-display); letter-spacing: -0.01em; overflow-wrap: anywhere; min-width: 0; }
-.d-sub { display: flex; align-items: center; gap: 8px; }
+.d-sub { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.d-sub .d-fork { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 /* the title and its rename pencil (shown on hover or keyboard focus); renaming, the title is a text box */
 .d-name-row { display: flex; align-items: flex-start; gap: 4px; max-width: 100%; min-width: 0; }
 .d-head .name { cursor: text; }

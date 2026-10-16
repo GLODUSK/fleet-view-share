@@ -357,7 +357,9 @@ function statusLines(j) {
   for (const m of j.members || []) {
     out.push(`${m.lead ? '★ ' : '  '}${short(m.id)}  ${clip(m.name || '', 40)}${m.role ? ` (role: ${clip(m.role, 60)})` : ''}  ${m.state || 'gone'}${m.doing && m.doing !== m.state ? ` · ${clip(m.doing, 80)}` : ''}${m.queued ? ' · text waiting for it' : ''}${m.removed ? ' · removed from the map' : ''}`);
     const where = [m.repo, m.branch ? `branch ${m.branch}` : '', m.pr ? `PR #${m.pr.number}${m.pr.state ? ` (${m.pr.state})` : ''}` : '',
-      m.ctx != null ? `ctx ${Math.round(m.ctx * 100)}%` : '', m.cost ? `$${Number(m.cost).toFixed(2)}` : ''].filter(Boolean).join(' · ');
+      m.ctx != null ? `ctx ${Math.round(m.ctx * 100)}%` : '', m.cost ? `$${Number(m.cost).toFixed(2)}` : '',
+      // a fork: where it came from (its name says "fork of …" until it has one of its own)
+      m.forkOf && m.forkOf.id ? `fork of ${m.forkOf.named ? `${clip(m.forkOf.name || '', 40)} ` : ''}(${short(m.forkOf.id)})` : ''].filter(Boolean).join(' · ');
     if (where) out.push(`      ${where}`);
     if (m.lastReply) out.push(`      last reply${m.lastReplyAt ? ` ${ago(m.lastReplyAt)}` : ''}: ${clip(String(m.lastReply).split('\n').find((l) => l.trim()) || '', 110)}`);
   }
@@ -807,4 +809,4 @@ if (require.main === module) {
   if (process.env.FV_DRY_RUN) process.stdout.write(`fv dry run: ${asciiJson({ argv, via })}\n`);
   main(argv).then((code) => { process.exitCode = code; });
 }
-module.exports = { main, parseArgs, shimArgs, resolveId, resolveTeam, menuLines, waitLines, transcriptLines };
+module.exports = { main, parseArgs, shimArgs, resolveId, resolveTeam, menuLines, waitLines, transcriptLines, statusLines };

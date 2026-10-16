@@ -890,7 +890,7 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
 // GET /api: what there is, for a caller (or a Claude) finding its way from the command line
 const ENDPOINTS = [
   { method: 'GET', path: '/api', does: 'this list, and fleetView: the Fleet View version (1.0.12; "" when unknown)' },
-  { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?, prefix?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive; with prefix (8+ characters of an id) only { ids }: every conversation id starting with it, off the map too' },
+  { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?, prefix?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive, forkOf (a fork: { id, name, named } of the one it came from; its name reads "fork of <that one>" until it has its own); with prefix (8+ characters of an id) only { ids }: every conversation id starting with it, off the map too' },
   { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("bot:<bot id>" or null)' },
   { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends. An account at 90% of its 5-hour or weekly limit gives way to the one with the most left (accountSwitched in the reply) while "Switch accounts when one runs low" is on' },
   { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers of the fleet, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, role, account, model, effort, folder, createdAt, convId, live' },
@@ -1019,6 +1019,7 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
     const label = (id) => {
       if (!id || id === fork || out.labeled) return;
       out.labeled = true;
+      if (fork && typeof ctx.noteFork === 'function') ctx.noteFork(id, fork);
       if (b.name != null) out.nameSet = ctx.rename(id, b.name)[0] === 200;
       if (b.temp) ctx.markTemp(id);
     };
@@ -3036,7 +3037,8 @@ async function listConversations(query, ctx) {
 //        sessionInfo(id) -> the conversation as /state shows it, or null,
 //        turnInfo(id) -> { promptAt, turnEndT, turnOpen, asking, askAt, askText, apiError, errAt, lastReply }, or null,
 //        nameOf(id) -> a conversation's name or null, noteMessage(from, to, text, { kind }?) -> records a message
-//        between two, rename(id, name) -> [code, json], hide(id) -> off the map, markTemp(id), isTemp(id),
+//        between two, rename(id, name) -> [code, json], noteFork(id, from) -> remembers a fork it made,
+//        hide(id) -> off the map, markTemp(id), isTemp(id),
 //        conversations({ state, repo, all, limit }) -> [row], idsStartingWith(prefix) -> [id] (off the map too), transcript(id, { since, limit }) -> Promise of { ..., queue },
 //        whereIs(id) -> { known, cwd, account }, successorOf(id) -> the one that carries on or null,
 //        openElsewhere(id) -> open in a claude outside Fleet View, opened(id) -> it was resumed or opened (on the map again), isRemoved(id) -> removed from the map, teamOf(id) -> { id, name, lead, members } or null,

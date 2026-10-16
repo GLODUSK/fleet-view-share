@@ -37,7 +37,7 @@ ok('transcriptOnly: a user record with queueTranscriptOnly true, nothing else (a
 const src = fs.readFileSync(path.join(__dirname, '..', 'fleet-view.js'), 'utf8');
 const fnSrc = (name) => { const i = src.indexOf(`\nfunction ${name}(`); assert.ok(i >= 0, `fleet-view.js has ${name}`); const m = /\r?\n\}/.exec(src.slice(i + 1)); return src.slice(i + 1, i + 1 + m.index + m[0].length) + '\n'; };
 const ctx = {
-  CONV, path, Date, String, Array, Math, JSON,
+  CONV, path, Date, String, Array, Math, JSON, FORKS: require(path.join(__dirname, '..', 'forks.js')),
   noteBackground: () => {}, pushEvent: () => {}, noteTool: () => {}, noteResult: () => {}, describeTool: () => ['x', ''], addPr: () => {},
   hushOf: () => undefined, hushed: () => false, localCwd: (c) => c, projDirKey: () => '', endsOnQuestion: () => false,
   HO: { pickupIn: () => null }, SWITCH: { limitHit: () => null }, BG_TOOLS: /^$/, QUIET_REPLY: /^\[quiet\]$/, pickupGen: 0,
@@ -68,5 +68,11 @@ s = feed(fresh(), TYPED, LAUNCH, END, RESUMED, { ...TYPED, timestamp: '2026-10-1
 assert.strictEqual(s.turnOpen, true);
 assert.strictEqual(s.prompt, 'did u finish');
 ok('ingestMain: a prompt typed after the note opens a turn as usual');
+// the copied records keep their source's id in session_id: the last one names the conversation it was forked from
+// (forks.js; the fork's own records carry its own id)
+s = feed(fresh(), { ...TYPED, session_id: SRC }, { ...END, session_id: SRC }, { ...TYPED, sessionId: FORK, session_id: FORK });
+assert.strictEqual(s.forkLog, SRC);
+assert.strictEqual(feed(fresh(), TYPED, END).forkLog, undefined);
+ok('ingestMain: a record copied from another conversation notes it as the source (forkLog); none, no source');
 
 console.log(`\n${n} passed, 0 failed`);

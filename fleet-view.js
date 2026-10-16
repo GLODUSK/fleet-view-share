@@ -44,6 +44,8 @@ const TT = require(path.join(__dirname, 'team-tree.js'));
 const SKY = require(path.join(__dirname, 'sky-events.js')).createSkyEvents({ dir: require(path.join(__dirname, 'platform.js')).dataDir() });
 // the log of conversations leaving the map (left-map.log) and what the map showed at the last run (on-map.json)
 const LEFT_MAP = require(path.join(__dirname, 'left-map.js'));
+// telling a fork from its log, and the name it shows (Fleet View #552)
+const FORKS = require(path.join(__dirname, 'forks.js'));
 // when Fleet View was not running (uptime.json), so the 3-hour rule counts only the time it ran
 const UPTIME_MOD = require(path.join(__dirname, 'uptime.js'));
 // the mic's speech library: downloaded once, checked against pinned hashes, served from here (/vendor-cache/...)
@@ -509,6 +511,22 @@ function cleanNames(o) {
   return out;
 }
 const names = DEMO ? new Map() : cleanNames(saved.names);
+// forks Fleet View made itself (claude --resume <id> --fork-session: the page's Fork, POST /api/sessions { forkFrom },
+// POST /api/sessions/:id/fork): settings.forks, [{ id, from, at }], at most 500. Forks made anywhere else are told by
+// their logs (forkSource), so this is the backup for a log that doesn't say (an older Claude Code's).
+const FORKS_MAX = 500;
+function cleanForks(list, now = Date.now()) {
+  const out = new Map();
+  if (!Array.isArray(list)) return out;
+  for (const x of list.slice(-FORKS_MAX)) {
+    if (!x || typeof x !== 'object' || typeof x.id !== 'string' || !UUID_RE.test(x.id) || typeof x.from !== 'string' || !UUID_RE.test(x.from)) continue;
+    const id = x.id.toLowerCase(), from = x.from.toLowerCase();
+    if (id === from) continue;
+    out.set(id, { id, from, at: Number.isFinite(x.at) && x.at > 0 && x.at <= now + 60e3 ? Math.round(x.at) : now });
+  }
+  return out;
+}
+const forks = DEMO ? new Map() : cleanForks(saved.forks);
 // workspaces renamed in Fleet View (right-click "Rename" on a workspace): settings.repoNames, [{ root, name }], at
 // most 200; the page shows that name wherever the workspace's folder name would show, the header title too
 const REPO_NAMES_MAX = 200;
@@ -862,6 +880,7 @@ function flushSettings() {
     remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
     moved: [...moved.values()],
     names: Object.fromEntries(names),
+    forks: [...forks.values()],
     pushTargets: { sessions: [...pushTargets.sessions.values()], repos: [...pushTargets.repos.values()] },
     remembered: { sessions: [...remembered.sessions].map(([id, at]) => ({ id, at })), repos: [...remembered.repos].map(([root, at]) => ({ root, at })) } };
   if (webBounds) ours.webBounds = webBounds; else delete ours.webBounds;
@@ -1635,8 +1654,131 @@ const baseName = (s) => (s && names.get(s.id)) || (s && s.remote && s.remote.ent
 // the current one while Fleet View knows the conversation, else the one given in Fleet View, else what was saved
 function nameNow(id, had) {
   const s = sessions.get(id);
-  if (s) return plain(baseName(s) || s.name || had || String(id).slice(0, 8), 80);
+  if (s) return plain(shownName(s) || s.name || had || String(id).slice(0, 8), 80);
   return names.get(id) || had;
+}
+// ---------- forks (Fleet View #552) ----------
+// A fork (claude --resume <id> --fork-session) starts as a copy of its source's log, title lines and all, so it showed
+// under its source's very name. Which conversation it came from: the one Fleet View forked it from (settings.forks,
+// noteFork), else its log's word (forks.js): ingestMain notes the last record naming another conversation in the part
+// of the log it reads, forkHeadScan the head of a long log whose read part is all its own, and forkConfirmed checks
+// the records really were copied from it (a /clear successor's name its predecessor too). null when it is no fork.
+function forkSource(s) {
+  if (!s) return null;
+  if (s.demo) {
+    if (!s.demo.forkOf) return null;
+    const src = [...sessions.values()].find((x) => x.demo && x.demo.name === s.demo.forkOf && !x.demo.forkOf);
+    return src ? src.id : null;
+  }
+  const id = String(s.id).toLowerCase();
+  const noted = forks.get(id);
+  if (noted) return noted.from;
+  const from = s.forkLog || s.forkHead || null;
+  if (!from || from === id) return null;
+  // a conversation Fleet View knows this one carries on from (a handoff's pickup, a /clear) is its predecessor
+  if (from === s.pickupFrom || cleared.get(from)?.to === id || successorOf(from) === id) return null;
+  return forkConfirmed(s, from) ? from : null;
+}
+// A source told by the log only, checked once per conversation and source (s.forkOk): the first copied record in the
+// fork's head (FORKS.firstCopied) must be in the first FORK_HEAD_MAX bytes of the source's log (found through
+// findLog's listing). A /clear successor carries its predecessor's id in every record, but its records are its own;
+// no source log found: no fork. A fork's head with no copied record yet is looked at again a minute later.
+const FORK_RECHECK_MS = 60e3;
+function forkConfirmed(s, from) {
+  const now = Date.now();
+  const k = s.forkOk;
+  if (k && k.from === from && (k.final || now < k.at + FORK_RECHECK_MS)) return k.ok;
+  let ok = false, final = true;
+  const c = FORKS.firstCopied(readHead(s.file, FORK_HEAD_MAX), s.id);
+  if (!c) final = false;
+  else {
+    const f = findLog(from);
+    ok = !!(f && FORKS.isCopied(readHead(f.file, FORK_HEAD_MAX), c.uuid));
+  }
+  s.forkOk = { from, ok, final, at: now };
+  return ok;
+}
+// a fork's source as it shows, and the fork's own name: { id, name, own } (own null while it still goes by the name it
+// was copied with: then it shows as "fork of <source>", shownName), or null. Copied with: the title lines at the head
+// of its log (forkTitlesOf) and its source's names; its own: a Fleet View rename, the name the device running it shows,
+// a /rename after the fork, or Claude Code's own new title (FORKS.ownName).
+function forkInfo(s) {
+  const from = forkSource(s);
+  if (!from) return null;
+  const src = sessions.get(from) || null;
+  const t = forkTitlesOf(s);
+  const srcName = plain((src && baseName(src)) || names.get(from) || t.custom || t.agent || t.ai || from.slice(0, 8), 80);
+  const own = s.demo ? (s.demo.name !== s.demo.forkOf ? s.demo.name : '')
+    : FORKS.ownName({ renamed: names.get(s.id), remote: s.remote && s.remote.entry && s.remote.entry.name, custom: s.custom, ai: s.aiTitle },
+      [t.custom, t.agent, t.ai, src && src.custom, src && src.aiTitle, names.get(from), srcName]);
+  return { id: from, name: srcName, own: plain(own, 80) || null };
+}
+// the name a conversation shows (the map, its lists and panels, fv, the API): baseName, but a fork that still goes by
+// the name it was copied with shows as "fork of <source>", and one with its own name shows that name
+function shownName(s) {
+  const f = s ? forkInfo(s) : null;
+  return f ? FORKS.label(f.own, f.name) : baseName(s);
+}
+// /state's and the API's forkOf: { id, name, named } (named: it has a name of its own, so its name doesn't say it is
+// a fork), or null
+function forkJson(s) {
+  const f = forkInfo(s);
+  return f ? { id: f.id, name: f.name, named: !!f.own } : null;
+}
+// Fleet View forked conversation id from `from` (api.js's start, the session host's list): kept in settings
+function noteFork(id, from) {
+  if (DEMO || typeof id !== 'string' || typeof from !== 'string' || !UUID_RE.test(id) || !UUID_RE.test(from)) return;
+  id = id.toLowerCase(); from = from.toLowerCase();
+  if (id === from || forks.get(id)?.from === from) return;
+  forks.delete(id);
+  forks.set(id, { id, from, at: Date.now() });
+  while (forks.size > FORKS_MAX) forks.delete(forks.keys().next().value);
+  saveSettings();
+}
+// the session host's forks: its list says forkFrom for each conversation it forked (the page's Fork, POST
+// /api/sessions/:id/fork). Looked at once soon after a new conversation shows up (discover), at most every
+// FORK_SWEEP_MS; nothing is started when no host runs (hostList: null)
+const FORK_SWEEP_MS = 10e3;
+let forkSweepAt = 0, forkSweepTimer = null;
+function forkSweepSoon() {
+  if (DEMO || forkSweepTimer) return;
+  const wait = Math.max(3e3, forkSweepAt + FORK_SWEEP_MS - Date.now());
+  forkSweepTimer = setTimeout(() => {
+    forkSweepTimer = null;
+    forkSweepAt = Date.now();
+    Promise.resolve(API.hostList()).then((list) => {
+      for (const p of Array.isArray(list) ? list : []) if (p && !p.pending && typeof p.forkFrom === 'string') noteFork(String(p.id || ''), p.forkFrom);
+    }, () => {});
+  }, wait);
+  if (forkSweepTimer.unref) forkSweepTimer.unref();
+}
+// A log longer than the part ingestMain reads (LOG_TAIL) whose read part named no other conversation (all the fork's
+// own, or no fork): the source's id from the copied records in its first FORK_HEAD_MAX bytes. Once per conversation.
+const FORK_HEAD_MAX = 1 << 20, FORK_TITLES_MAX = 64 << 10;
+function forkHeadScan(s) {
+  if (s.forkScanned || s.demo || !s.file) return;
+  s.forkScanned = true;
+  if (s.forkLog) return;
+  let size = 0;
+  try { size = fs.statSync(s.file).size; } catch { return; }
+  if (size <= LOG_TAIL) return;
+  s.forkHead = FORKS.sourceIn(readHead(s.file, FORK_HEAD_MAX), s.id);
+}
+// the first n bytes of a file as text ('' when it can't be read)
+function readHead(file, n) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try { const buf = Buffer.alloc(n); return buf.toString('utf8', 0, fs.readSync(fd, buf, 0, n, 0)); } finally { fs.closeSync(fd); }
+  } catch { return ''; }
+}
+// a fork's copied titles (FORKS.titlesIn of its log's head), read when it is first shown as a fork, and kept once the
+// head is past its title lines (a log with no message yet is read again next time)
+function forkTitlesOf(s) {
+  if (s.forkTitles) return s.forkTitles;
+  if (s.demo || !s.file) return (s.forkTitles = {});
+  const text = readHead(s.file, FORK_TITLES_MAX), t = FORKS.titlesIn(text);
+  if (text.includes('"parentUuid"') || text.length >= FORK_TITLES_MAX / 2) s.forkTitles = t;
+  return t;
 }
 // A pickup of a handoff keeps its predecessor's name, so the work goes on under one name. Run at each poll, before
 // the pickup is first listed (pollOne sets its name and state after this).
@@ -1695,9 +1837,9 @@ function renameSession(id, name) {
   else if (!DEMO) names.set(id, null);
   while (names.size > NAMES_MAX) names.delete(names.keys().next().value);
   const s = sessions.get(id);
-  if (s) s.name = clean(baseName(s) || s.id.slice(0, 8), 40);
+  if (s) s.name = clean(shownName(s) || s.id.slice(0, 8), 40);
   saveSettings();
-  return [200, { ok: true, id, name: n || null, shown: s ? plain(baseName(s) || s.id.slice(0, 8)) : n || null }];
+  return [200, { ok: true, id, name: n || null, shown: s ? plain(shownName(s) || s.id.slice(0, 8)) : n || null }];
 }
 
 function addPr(s, n, repo, t) {
@@ -2008,6 +2150,9 @@ function ingestMain(s, recs) {
     else if (d.type === 'ai-title' && d.aiTitle) s.aiTitle = d.aiTitle;
     else if (d.type === 'last-prompt' && d.lastPrompt) s.prompt = d.lastPrompt;
     else if (d.type === 'pr-link') addPr(s, d.prNumber, d.prRepository, Date.parse(d.timestamp) || Date.now());
+    // a record copied from the conversation it was forked from keeps that one's id here (forkSource)
+    const copied = FORKS.recordSource(d, s.id);
+    if (copied) s.forkLog = copied;
     if (raw.includes('task-notification')) {
       for (const m of raw.matchAll(/<task-id>(\w+)<\/task-id>[\s\S]*?<status>(\w+)<\/status>/g)) { s.finished.set(m[1], m[2]); if (m[2] !== 'running') s.bg.delete(m[1]); }
     }
@@ -2590,7 +2735,7 @@ let alertSeq = Date.now();
 const alertLog = [];
 const ALERT_LOG_MAX = 1000;
 function raise(s, text, color, kind, extra = {}) {
-  const a = { n: ++alertSeq, t: Date.now(), s: { id: s.id, name: s.name || plain(baseName(s) || '', 80) || String(s.id).slice(0, 8) }, text, color, kind, ...extra };
+  const a = { n: ++alertSeq, t: Date.now(), s: { id: s.id, name: s.name || plain(shownName(s) || '', 80) || String(s.id).slice(0, 8) }, text, color, kind, ...extra };
   alerts.push(a);
   if (alerts.length > 50) alerts.shift();
   alertLog.push(a);
@@ -2980,7 +3125,7 @@ function discover() {
       if (ct?.customTitle) s.custom = ct.customTitle;
       // older than the window: kept only if it is a finished turn, so its PRs are read once that is known
       s.late = now - x.m > WINDOW_MS && !remembered.sessions.has(id) && !liveWaiting(id) && !overseerKeep.has(id) && !keepShown(id, now);
-      if (!s.late) prsFor(s);
+      if (!s.late) { prsFor(s); forkSweepSoon(); } // a fork the session host made: its list says so
       sessions.set(id, s);
     }
     if (s.file === x.file) s.mtime = x.m;
@@ -3026,6 +3171,7 @@ function pollOne(s, now, budget) {
   s.mtime = mtime(s.file);
   if (!tails.has(s.file)) headPickup(s);
   ingest((r) => ingestMain(s, r), readNew(s.file, LOG_TAIL));
+  forkHeadScan(s); // once, after the first read (it knows then whether that read found the source's id)
   // old by this copy, but another device runs it: on the list exactly while it is on that device's, whatever this
   // copy's tail says (laid down mid-turn, it can look unfinished here)
   const ov = s.late && !s.demo ? ownerView(s.id) : null;
@@ -3060,7 +3206,7 @@ function pollOne(s, now, budget) {
   s.liveAgents = [...s.agents.values()].filter((a) => now - a.mtime < 90e3 || (a.open && lpAlive && now - a.mtime < AGENT_STEP_MS)).length;
   s.last = Math.max(s.mtime, ...[...s.agents.values()].map((a) => a.mtime));
   inheritName(s);
-  s.name = clean(baseName(s) || s.id.slice(0, 8), 40);
+  s.name = clean(shownName(s) || s.id.slice(0, 8), 40);
   const quiet = now - s.last;
   const prev = s.state;
   const lp = liveProcs.get(s.id);
@@ -4296,6 +4442,14 @@ const DEMO_DONE = [
   { name: 'booking-reminders-plan', repo: 'detailforge-web', ago: 24, goal: 'Plan booking reminders for the website and the phone app', handedOffTo: 'booking-reminders-web',
     files: ['docs/reminders-plan.md'],
     reply: 'Plan written to docs/reminders-plan.md: reminder rules in packages/core, a settings page on the web, the same screen in the app. Context reached the handoff size, so a fresh conversation picks it up from here.' },
+  // forks (forkOf: the name of the one it was forked from): one still under the name it was copied with (it shows as
+  // "fork of order-export-csv"), one that has its own
+  { name: 'order-export-csv', forkOf: 'order-export-csv', repo: 'storefront-web', ago: 4, goal: 'Try the order export as an Excel file too',
+    files: ['src/orders/export.ts'],
+    reply: 'An Excel export works from the same rows as the CSV one; it adds 180 KB to the bundle, so I left it on this branch for you to decide.' },
+  { name: 'ranking-weights-trial', forkOf: 'ranking-eval-harness', repo: 'search-service', ago: 96, goal: 'Score the new ranking weights with the harness',
+    files: ['eval/weights-new.json'],
+    reply: 'The new weights lift clicks 4% on last week\'s queries and lower long-tail clicks by 0.6%. The scores are in eval/weights-new.json.' },
 ];
 const pickOne = (a) => a[Math.floor(Math.random() * a.length)];
 const demoRoot = (repo) => path.join(path.sep === '\\' ? 'D:\\' : '/', 'demo', repo);
@@ -4380,6 +4534,7 @@ function demoInit() {
     }
     sessions.set(s.id, s);
   });
+  for (const s of sessions.values()) if (s.demo && s.demo.forkOf) s.name = clean(shownName(s) || s.id, 40); // its source is listed now
   for (const n of [401, 403, 405, 409]) { if (!mergedToday.has('acme/storefront-web')) mergedToday.set('acme/storefront-web', new Set()); mergedToday.get('acme/storefront-web').add(n); }
   // the team of two, with the messages they have sent so far
   const byName = (name) => [...sessions.values()].find((x) => x.demo && x.demo.name === name);
@@ -5099,7 +5254,7 @@ function handoffLinks(now = Date.now()) {
   }
   return hoCache;
 }
-const titleOf = (id) => { const x = sessions.get(id); return x ? plain(baseName(x) || x.name || '') || null : null; };
+const titleOf = (id) => { const x = sessions.get(id); return x ? plain(shownName(x) || x.name || '') || null : null; };
 // { handoff: { next, nextName, at } | null, pickedUpFrom: { id, name, file } | null } for /state (file: the handoff summary)
 function handoffOf(s, now) {
   if (s.demo) {
@@ -5183,9 +5338,11 @@ function sessionJson(s, now, owners = syncOwners()) {
   const rm = s.remote && s.remote.entry;
   return {
     id: s.id,
-    name: plain(baseName(s) || s.name || s.id.slice(0, 8)),
+    name: plain(shownName(s) || s.name || s.id.slice(0, 8)),
     // renamed in Fleet View (POST /rename): the name above is that one, not Claude Code's own title
     renamed: !!names.get(s.id) || (!!rm && rm.renamed),
+    // a fork (claude --resume --fork-session): the conversation it came from, { id, name, named } (forkJson), or null
+    forkOf: forkJson(s),
     account: shownAccount(s),
     state: s.state, label: (rm && rm.label) || st.label, stateColor: (rm && rm.stateColor) || toHex(st.color),
     hue: toHex(s.hue),
@@ -5313,7 +5470,7 @@ function applyRemote(s, rv) {
   s.state = r.entry ? (STATE[r.entry.state] ? r.entry.state : 'IDLE') : 'DONE';
   s.liveWait = null;
   s.stoppedIdle = false;
-  s.name = clean(baseName(s) || s.id.slice(0, 8), 40);
+  s.name = clean(shownName(s) || s.id.slice(0, 8), 40);
 }
 // agents running in it now: a plan's running agents, else its fresh subagent logs (the running device's count when
 // another device runs it)
@@ -5339,7 +5496,7 @@ function liveSnapshot() {
     const pr = pinOf(s);
     out.push({
       id: s.id, state: s.state, label: st.label, stateColor: toHex(st.color),
-      name: plain(baseName(s) || s.name || s.id.slice(0, 8)), renamed: !!names.get(s.id), account: accountFor(s),
+      name: plain(shownName(s) || s.name || s.id.slice(0, 8)), renamed: !!names.get(s.id), account: accountFor(s),
       last: s.last || s.mtime || now, active: Math.round(s.actT || 0), turnStart: s.promptAt || null,
       waitingOn: waitingOf(s), agents: runningAgents(s),
       repo: rp && (rp.origin || rp.name) ? { origin: rp.origin || null, name: rp.name || null } : null,
@@ -5581,7 +5738,7 @@ function memberOf(id) {
   const role = botRoleOf(id, s);
   if (!s) return { id, name: nameNow(id, null) || String(id).slice(0, 8), repo: 'no workspace', branch: null, ...(role ? { role } : {}) };
   const root = s.root || null;
-  return { id, name: plain(baseName(s) || s.name || id.slice(0, 8), 80), repo: root ? repoName(root) : 'no workspace',
+  return { id, name: plain(shownName(s) || s.name || id.slice(0, 8), 80), repo: root ? repoName(root) : 'no workspace',
     branch: (s.demo ? s.demo.branch : branchOf(topOf(s, root)) || s.gitBranch) || null, ...(role ? { role } : {}) };
 }
 // its name as briefs and notes say it: "Deploy watch (role: QA)" for a bot with a role, else just the name
@@ -5999,6 +6156,7 @@ function statusOf(q) {
       pr: s.ship && s.ship.pr ? { number: s.ship.pr, state: shp ? String(shp.state || '').toLowerCase() || null : null, url: s.links ? s.links.pr : null } : null,
       ctx: s.context && s.context.limit ? Math.round((s.context.used / s.context.limit) * 1000) / 1000 : null,
       cost: Math.round((s.cost || 0) * 100) / 100, removed: hiddenNow(id), lead, ...(m.role ? { role: m.role } : {}),
+      forkOf: s.forkOf || null,
     };
   });
   const brief = (x) => ({ id: x.id, name: x.name, lead: x.lead || null });
@@ -6092,7 +6250,7 @@ function noteMessage(from, to, text, o = {}) {
   from = UUID_RE.test(from) ? from.toLowerCase() : from;
   to = UUID_RE.test(to) ? to.toLowerCase() : to;
   const now = Date.now();
-  const nameOf = (id) => { const x = sessions.get(id); return x ? x.name || plain(baseName(x) || '', 80) || id.slice(0, 8) : id.slice(0, 8); };
+  const nameOf = (id) => { const x = sessions.get(id); return x ? x.name || plain(shownName(x) || '', 80) || id.slice(0, 8) : id.slice(0, 8); };
   // the team both are in: either of a mid-level lead's two (the one it leads, or the one it reports in)
   const shared = teamsOf(from).find((x) => x.members.includes(to)) || null;
   if (shared) {
@@ -6162,7 +6320,7 @@ function frameOf(s, now) {
   const used = s.ctxUsed || 0;
   const team = teamOf(s.id), led = ledTeamOf(s.id);
   return {
-    id: s.id, name: plain(baseName(s) || s.name || s.id.slice(0, 8)), state: s.state, label: st.label, stateColor: toHex(st.color), hue: toHex(s.hue),
+    id: s.id, name: plain(shownName(s) || s.name || s.id.slice(0, 8)), state: s.state, label: st.label, stateColor: toHex(st.color), hue: toHex(s.hue),
     account: shownAccount(s), repo: root ? { root, name: repoName(root), color: toHex(familyColor(root)) } : null, branch: branchInfo(s).branch,
     // cost to the cent and tokens to the thousand, so a frame lists only the conversations that really moved
     cost: Math.round((s.cost || 0) * 100) / 100, tokens: Math.round((s.tokens || 0) / 1000) * 1000, ctx: used ? Math.round((used / ctxLimit(s)) * 100) / 100 : null,
@@ -6394,7 +6552,7 @@ function sinceOut(q) {
   cost.total = r2(cost.total); for (const a of Object.keys(cost.byAccount)) cost.byAccount[a] = r2(cost.byAccount[a]);
   const calls = new Map();
   for (const e of tl.events) if (e.t > since && e.verb !== 'message') calls.set(e.sid, (calls.get(e.sid) || 0) + 1);
-  const nameOf = (id) => { const x = sessions.get(id); return x ? plain(baseName(x) || x.name || id.slice(0, 8)) : id.slice(0, 8); };
+  const nameOf = (id) => { const x = sessions.get(id); return x ? plain(shownName(x) || x.name || id.slice(0, 8)) : id.slice(0, 8); };
   return {
     ok: true, since, now,
     merged: shipsSince.filter((x) => x.kind === 'merged').map(shipRow),
@@ -6548,7 +6706,7 @@ function removedOne(h, now, budget, hist) {
     refreshHue(s, now);
     const root = s.root || null;
     return {
-      id: s.id, name: plain(baseName(s) || s.name || s.id.slice(0, 8)), account: shownAccount(s),
+      id: s.id, name: plain(shownName(s) || s.name || s.id.slice(0, 8)), account: shownAccount(s),
       repo: root ? { name: repoName(root), root, color: toHex(familyColor(root)) } : null,
       cwd: s.cwd || null, removedAt: h.at, lastActive: Math.round(s.last || s.mtime || 0) || null,
     };
@@ -6728,7 +6886,7 @@ function repoHistory(root) {
   const items = list.map((e) => {
     const s = sessions.get(e.id);
     return {
-      id: e.id, name: s && s.name && !s.demo ? plain(baseName(s) || s.name, 80) : historyName(e),
+      id: e.id, name: s && s.name && !s.demo ? plain(shownName(s) || s.name, 80) : historyName(e),
       account: liveAcct(e.id, e.account), cwd: e.cwd || null,
       repo: { name: repoName(e.repoRoot), root: e.repoRoot, color: toHex(familyColor(e.repoRoot)) },
       lastActive: Math.round(s && s.last > e.m ? s.last : e.m), removed: hidden.some((h) => h.id === e.id),
@@ -7316,7 +7474,7 @@ function conversationsFor(q) {
       id: s.id, name: s.name, state: s.state, label: s.label, account: s.account, repo: s.repo ? s.repo.root : null,
       branch: s.branch || null, cwd: s.cwd || null, lastReply: s.lastReply ? plain(s.lastReply, 500) : null,
       waitingOn: s.waitingOn || null, active: s.active || null, pr: s.ship && Number.isInteger(s.ship.pr) ? s.ship.pr : null,
-      openElsewhere: !!s.openElsewhere, hidden: isHidden, temp: apiTemp.includes(s.id),
+      openElsewhere: !!s.openElsewhere, hidden: isHidden, temp: apiTemp.includes(s.id), forkOf: s.forkOf || null,
     });
     if (out.length >= q.limit) break;
   }
@@ -7361,13 +7519,15 @@ const apiCtx = {
   // (control characters out: titles come from records anyone's log can hold, and an ESC would end the paste)
   nameOf(id) {
     const s = sessions.get(id);
-    return s ? plain(String(baseName(s) || s.name || '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' '), 80) || null : null;
+    return s ? plain(String(shownName(s) || s.name || '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' '), 80) || null : null;
   },
   // a message one conversation sent another went in: team messages, the feed, maybe an alert (o.kind: an ask's
   // 'question' or 'answer')
   noteMessage(from, to, text, o) { try { noteMessage(from, to, text, o); } catch (e) { logOnce('note-message:' + (e && e.message), `noting a message failed\n${errorText(e)}`); } },
   // its Fleet View name (the page's Rename) -> [code, json]
   rename: (id, name) => renameSession(id, name),
+  // a conversation it forked (POST /api/sessions { forkFrom }) got its own id
+  noteFork,
   // off the map (settings.hidden), and off the temp list -> true when it was a conversation id
   hide: hideConversation,
   // a throwaway session: hidden once it is stopped or ends
@@ -7570,7 +7730,7 @@ function applyPrefs(group, items) {
     const changed = new Set([...names.keys(), ...next.keys()].filter((id) => names.get(id) !== next.get(id)));
     names.clear();
     for (const [id, n] of next) names.set(id, n);
-    for (const id of changed) { const s = sessions.get(id); if (s) s.name = clean(baseName(s) || s.id.slice(0, 8), 40); }
+    for (const id of changed) { const s = sessions.get(id); if (s) s.name = clean(shownName(s) || s.id.slice(0, 8), 40); }
   } else if (group === 'moved') {
     moved = cleanMoved(items) || new Map();
     for (const x of sessions.values()) x.hueAt = 0; // work every repo out again now
@@ -8210,7 +8370,7 @@ function rulesRoute(req, res, pathname) {
     hit.push(s);
   }
   hit.sort((a, b) => (b.last || b.mtime || 0) - (a.last || a.mtime || 0));
-  const chats = hit.slice(0, PREVIEW_CHATS).map((s) => ({ id: s.id, name: plain(nameNow(s.id, baseName(s) || s.name || s.id.slice(0, 8))) }));
+  const chats = hit.slice(0, PREVIEW_CHATS).map((s) => ({ id: s.id, name: plain(nameNow(s.id, shownName(s) || s.name || s.id.slice(0, 8))) }));
   let root = listed(want) ? want : null;
   if (!root && draft.repo) { try { root = PREFS_ROOTS.in(draft.repo); } catch {} }
   return void countKept(root, draft.paths).then((f) => sendJson(res, 200, { ok: true, pins: hit.length, chats, files: f.files, more: f.more }),

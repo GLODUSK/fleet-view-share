@@ -10682,6 +10682,8 @@ function fillTip(n) {
       row(tip, 'parity', `${web && !app ? 'web side' : app && !web ? 'app side' : 'paired'} · ${web && !app ? 'app' : app && !web ? 'web' : 'other side'}: ${nameOf(s.parity.partner)}`, COL.cyan);
     } else if (s.parity && s.parity.missing) row(tip, 'parity', `changed one side only: no ${s.parity.missing} change yet`, s.parity.missing === 'app' ? COL.mint : COL.cyan);
     if (s.pickedUpFrom && s.pickedUpFrom.id) row(tip, 'picked up from', s.pickedUpFrom.name || s.pickedUpFrom.id, COL.dim);
+    // a fork with its own name (one still under its source's name says "fork of …" in its title already)
+    if (s.forkOf && s.forkOf.named) row(tip, 'fork of', s.forkOf.name || s.forkOf.id, COL.dim);
     if (s.context && s.context.limit && Number(s.context.handoff) > 0 && s.context.handoff < s.context.limit) {
       row(tip, 'handoff at', `${fmtTokens(s.context.handoff)} (the tick on its gauge)`, COL.dim);
     }

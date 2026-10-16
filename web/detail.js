@@ -644,7 +644,9 @@ export function renderDetail(el, s, ui, gone = false, extras = []) {
   if (el._renaming && el._renaming !== s.id) { el._renaming = null; sl.head._html = null; }
   if (!el._renaming) {
     const ren = s.pending ? '' : `<button type="button" class="d-ren" data-rename title="Rename (F2)" aria-label="rename the conversation">${icon('edit', 13)}</button>`;
-    setHTML(sl.head, `<span class="d-name-row"><span class="name"${s.pending ? '' : ' title="double-click to rename"'}>${esc(s.name)}</span>${ren}</span><span class="d-sub">${acctTag(s.account)}${badge(s)}</span>`);
+    // a fork with a name of its own says where it came from (one still under its source's name reads "fork of …")
+    const fork = s.forkOf && s.forkOf.named ? `<span class="d-fork dim" title="forked from ${esc(s.forkOf.id)}">fork of ${esc(s.forkOf.name || s.forkOf.id)}</span>` : '';
+    setHTML(sl.head, `<span class="d-name-row"><span class="name"${s.pending ? '' : ' title="double-click to rename"'}>${esc(s.name)}</span>${ren}</span><span class="d-sub">${acctTag(s.account)}${badge(s)}${fork}</span>`);
   }
   setHTML(sl.meta, metaRows(s));
   setText(sl.meta, '.d-turn', turnOf(s, now));
