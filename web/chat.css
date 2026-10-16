@@ -500,6 +500,17 @@ details.ci-note[open] > .cn-row svg { transform: rotate(90deg); }
   background: rgba(255, 255, 255, 0.08); border: 1px solid var(--glass-edge); color: var(--text);
 }
 .chat-lightbox-x:hover { background: rgba(255, 255, 255, 0.14); }
+/* "Copied" after the right-click menu's Copy image */
+.chat-lightbox-note {
+  position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); padding: 6px 14px; border-radius: 15px; pointer-events: none;
+  background: #141826; border: 1px solid var(--glass-edge); color: var(--mint, var(--text)); font: 500 12.5px/1.2 var(--font-ui);
+  animation: chat-fade 160ms var(--ease);
+}
+.chat-lightbox-note[hidden] { display: none; }
+.chat-lightbox-note.bad { color: var(--red, #ff6b6b); }
+/* the right-click menu over the image: above it (it sits under the overlay otherwise) */
+body:has(> .chat-lightbox) .ctx-frost { z-index: 1001; }
+body:has(> .chat-lightbox) .menu.ctx-menu { z-index: 1002; }
 
 /* ---------- what runs in the background (above the compose box) ---------- */
 .chat-bg { flex: none; min-width: 0; margin: 6px 14px 0; border: 1px solid var(--glass-edge); border-radius: 10px; background: var(--glass-bg); overflow: hidden; }

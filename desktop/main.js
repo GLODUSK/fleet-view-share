@@ -427,10 +427,12 @@ if (!app.requestSingleInstanceLock()) {
       guard(e, url);
     });
     wc.on('will-attach-webview', (e) => e.preventDefault());
-    // only the microphone, for the chat box's mic (web/voice.js), and only for the local page; nothing else
+    // only the microphone, for the chat box's mic (web/voice.js), and writing to the clipboard (Copy image on an
+    // opened chat image, web/chat.js), and only for the local page; nothing else (no reading the clipboard)
     wc.session.setPermissionRequestHandler((_wc, perm, cb, details) => {
       let local = false;
       try { local = new URL(details.requestingUrl).origin === ORIGIN; } catch {}
+      if (perm === 'clipboard-sanitized-write') { cb(local); return; }
       const types = (details && details.mediaTypes) || [];
       cb(perm === 'media' && local && types.length > 0 && types.every((t) => t === 'audio'));
     });

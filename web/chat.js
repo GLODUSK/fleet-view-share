@@ -81,6 +81,7 @@ import { icon } from './icons.js';
 import { mountCompose } from './compose.js';
 import { handToChat } from './handto.js';
 import { onRekey, termApi } from './term.js';
+import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { openViewer, openInCode } from './viewer.js';
 import { botFeed, fvFeed, switchNote } from './chats-model.js';
 import { recommendationsOf } from './recommend.js';
@@ -1464,19 +1465,61 @@ function wireReply(c) {
 }
 
 // ---------- the image overlay (one for the page; Esc or a click closes it) ----------
+// Right-click on the image: the page's menu with Copy image. A click or Esc while that menu is open closes the
+// menu only, not the image.
 function showImage(src) {
   const ov = document.createElement('div');
   ov.className = 'chat-lightbox';
   ov.setAttribute('role', 'dialog');
   ov.setAttribute('aria-label', 'image');
-  ov.innerHTML = `<img alt="attached image"><button type="button" class="chat-lightbox-x" aria-label="close" title="close (Esc)">${icon('close', 18)}</button>`;
-  ov.querySelector('img').src = src;
-  const close = () => { ov.remove(); window.removeEventListener('keydown', onKey, true); };
-  // Esc closes the image only, not the panel behind it
-  const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } };
-  ov.addEventListener('click', close);
+  ov.innerHTML = `<img alt="attached image"><button type="button" class="chat-lightbox-x" aria-label="close" title="close (Esc)">${icon('close', 18)}</button>`
+    + '<div class="chat-lightbox-note" role="status" aria-live="polite" hidden></div>';
+  const img = ov.querySelector('img');
+  img.src = src;
+  let menuWas = false;
+  const close = () => { ov.remove(); window.removeEventListener('keydown', onKey, true); window.removeEventListener('pointerdown', onDown, true); };
+  // Esc closes the image only, not the panel behind it (the menu's own Esc goes first)
+  const onKey = (e) => { if (e.key === 'Escape' && !ctxMenuOpen()) { e.preventDefault(); e.stopPropagation(); close(); } };
+  // before the menu's own pointerdown closes it: was it open? (window capture runs first)
+  const onDown = (e) => { menuWas = ctxMenuOpen() && ov.contains(e.target); };
+  ov.addEventListener('click', () => { if (menuWas) { menuWas = false; return; } close(); });
+  ov.addEventListener('contextmenu', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (e.target !== img) { if (ctxMenuOpen()) closeCtxMenu(false); return; }
+    openCtxMenu({ x: e.clientX, y: e.clientY, items: [{ label: 'Copy image', icon: 'copy', run: () => copyImage(img, ov) }] });
+  });
   window.addEventListener('keydown', onKey, true);
+  window.addEventListener('pointerdown', onDown, true);
   document.body.appendChild(ov);
+}
+// the image onto the clipboard as a PNG (the only image type the clipboard takes): a PNG as it is, another type
+// drawn onto a canvas first (a GIF gives its first frame); a short "Copied" or why not under it
+async function copyImage(img, ov) {
+  const note = ov.querySelector('.chat-lightbox-note');
+  const say = (text, bad) => {
+    if (!note) return;
+    note.textContent = text;
+    note.classList.toggle('bad', !!bad);
+    note.hidden = false;
+    clearTimeout(note._t);
+    note._t = setTimeout(() => { note.hidden = true; }, 1800);
+  };
+  try {
+    const png = (async () => {
+      const b = await fetch(img.src).then((r) => r.blob());
+      if (b.type === 'image/png') return b;
+      const cv = document.createElement('canvas');
+      cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+      cv.getContext('2d').drawImage(img, 0, 0);
+      return new Promise((res, rej) => cv.toBlob((x) => (x ? res(x) : rej(new Error('no image'))), 'image/png'));
+    })();
+    // the promise itself, so the write starts while this click still counts as one
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+    say('Copied');
+  } catch (e) {
+    console.warn('copy image', e);
+    say('Could not copy the image', true);
+  }
 }
 
 // ---------- loading ----------
