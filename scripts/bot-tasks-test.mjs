@@ -228,12 +228,12 @@ function harness(o = {}) {
   let list = [];
   let down = !!o.down;
   const calls = { deliver: [], startBot: [], openBot: [], log: [] };
-  const h = { fail: false };
+  const h = { fail: false, gate: null }; // gate: a promise each delivery waits for (a run in flight)
   let saved = o.saved || [];
   let seq = 0;
   const api = {
     hostList: async () => (down ? null : list),
-    deliverText: async (to, text, opts) => { calls.deliver.push({ to, text, opts }); return h.fail ? [500, { ok: false, message: 'the box was busy' }] : [200, { ok: true, id: to }]; },
+    deliverText: async (to, text, opts) => { calls.deliver.push({ to, text, opts }); if (h.gate) await h.gate; return h.fail ? [500, { ok: false, message: 'the box was busy' }] : [200, { ok: true, id: to }]; },
     startBot: async (b) => {
       calls.startBot.push(b);
       const nid = `${String(++seq).padStart(8, '0')}-0000-4000-8000-000000000000`;
@@ -249,7 +249,7 @@ function harness(o = {}) {
   });
   let bots = make();
   return {
-    get bots() { return bots; }, calls, base, get fail() { return h.fail; }, set fail(v) { h.fail = v; },
+    get bots() { return bots; }, calls, base, get fail() { return h.fail; }, set fail(v) { h.fail = v; }, set gate(v) { h.gate = v; },
     restart: () => { bots = make(); }, // a server restart: the registry from what was saved, nothing in memory
     setDown: (v) => { down = v; }, endAll: () => { list = list.map((x) => ({ ...x, alive: false })); },
   };
@@ -386,6 +386,64 @@ await (async () => {
     assert.equal((await h.bots.taskAction('ffffffffffff', 'r', { action: 'pause' }))[0], 404);
     assert.equal(h.bots.tasks(bid)[1].tasks.length, 1);
     n++; console.log('ok pause, resume (nothing caught up), run now (the schedule kept), delete');
+  }
+  // delete from the profile: any kind and status; the rest of the file as it was (version, other tasks, extra
+  // fields); what the bot wrote just before is kept; a run in flight ends cleanly and the task never fires again
+  {
+    let t = L(2026, 10, 11, 8, 20);
+    clock(t);
+    const h = harness();
+    const [, made] = await h.bots.create({ name: 'Panchito' });
+    const bid = made.bot.id, folder = made.bot.folder;
+    const file = path.join(folder, 'tasks.json');
+    const hourly = (id, m) => ({ id, title: `Watch :${m}`, kind: 'recurring', schedule: { every: 'hourly', at: `:${m}` }, status: 'open' });
+    writeTasks(folder, [hourly('t-w-00', '00'), hourly('t-w-30', '30'), { id: 't-done', title: 'Old', kind: 'once', status: 'done' },
+      { id: 't-p', title: 'Paused one', kind: 'recurring', schedule: { every: 'daily', at: '09:00' }, status: 'paused', note: 'kept' }]);
+    await h.bots.schedule(); // settled once, as Fleet View reads it
+    // the bot adds a task after Fleet View's last read: the delete reads the file again, so it stays
+    const now1 = JSON.parse(fs.readFileSync(file, 'utf8'));
+    now1.extra = { mine: true };
+    now1.tasks.push({ id: 't-new', title: 'Just added', kind: 'once' });
+    fs.writeFileSync(file, JSON.stringify(now1));
+    const before = JSON.parse(fs.readFileSync(file, 'utf8'));
+    h.endAll(); // the bot is not running
+    for (const id of ['t-done', 't-p']) assert.equal((await h.bots.taskAction(bid, id, { action: 'delete' }))[0], 200, id);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(h.calls.deliver.length, 0); // not running: nobody to tell, it reads the file fresh when it starts
+    const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(after.version, 1);
+    assert.deepEqual(after.extra, { mine: true });
+    assert.deepEqual(after.tasks, before.tasks.filter((x) => x.id !== 't-done' && x.id !== 't-p')); // the rest exactly as they were
+    assert.equal(fs.existsSync(`${file}.fv-tmp`), false); // written through a temp file and a rename
+    // a run in flight: t-w-30 is being delivered when it is deleted; the run ends, nothing throws, the file stays without it
+    let open;
+    h.gate = new Promise((r) => { open = r; });
+    clock(t = L(2026, 10, 11, 8, 30) + 1000);
+    const pass = h.bots.schedule();
+    for (let i = 0; i < 50 && !h.calls.deliver.length; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(h.calls.deliver.length, 1);
+    assert.equal((await h.bots.taskAction(bid, 't-w-30', { action: 'delete' }))[0], 200); // answered while the run is held
+    for (let i = 0; i < 50 && h.calls.deliver.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+    // the running bot is told (queued, its chat not opened), by id only, so it does not write the task back
+    const told = h.calls.deliver[1];
+    assert.equal(told.to, h.calls.deliver[0].to);
+    assert.match(told.text, /^\[Fleet View\] Henry deleted the task t-w-30 from your tasks\.json\. Leave it out: don't add it back/);
+    assert.doesNotMatch(told.text, /Watch :30/);
+    assert.deepEqual(told.opts, { kind: 'message', queue: true, open: false, via: 'server' });
+    open();
+    await pass;
+    h.gate = null;
+    assert.deepEqual(readTasks(folder).map((x) => x.id), ['t-w-00', 't-new']);
+    // never delivered again, at its next times or after a restart
+    for (const k of [1, 2]) { clock(t = L(2026, 10, 11, 8 + k, 30) + 1000); await h.bots.schedule(); }
+    h.restart();
+    clock(t = L(2026, 10, 11, 11, 30) + 1000);
+    await h.bots.schedule();
+    assert.equal(h.calls.deliver.filter((x) => /Watch :30/.test(x.text)).length, 1);
+    assert.equal(h.calls.deliver.filter((x) => /deleted the task/.test(x.text)).length, 1);
+    assert.ok(h.calls.deliver.some((x) => /Watch :00/.test(x.text))); // the others still run
+    assert.equal(h.bots.tasks(bid)[1].tasks.some((x) => x.id === 't-w-30'), false);
+    n++; console.log('ok delete: any status, the rest of the file untouched, a fresh read, a run in flight, never fired again, a running bot told');
   }
   // the bot writes the file back from a read older than the run (no runs entry, the old nextRun): not fired again
   {

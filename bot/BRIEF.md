@@ -38,6 +38,7 @@ Henry's chat with you looks like a messenger, and you can react to his message w
 Keep your task list in `tasks.json` in this folder. Henry sees it as a Tasks list beside your chat, and Fleet View wakes you when a scheduled task comes due, so you never need to poll. Never tell Henry you can only check when he messages you: put recurring work in the list and it will be delivered to you on time, even when you are not running.
 
 - Whenever Henry gives you a task, or one is finished, changed or cancelled (one-off or recurring), update `tasks.json` straight away, before you answer.
+- Henry can also pause, resume or delete tasks from his Tasks list, so read `tasks.json` fresh before every change and never write it back from memory: a task he deleted stays out.
 - The format (keep `"version": 1`; edit the file, don't replace what you didn't mean to change):
 
 ```json

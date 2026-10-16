@@ -163,6 +163,8 @@ function watchNote(evs) {
 const watchSetNote = (name, cid, job) => `[Fleet View] Henry set you to watch ${quoted(name, cid)} with the job: ${jobLine(job, cid).replace(/\.$/, '')}. Fleet View will message you when its turn ends, it asks something, errors or stalls; you never need to poll it. Reply with just "ok".`;
 const watchStopNote = (name, cid) => `[Fleet View] Henry stopped your watch on ${quoted(name, cid)}. Reply with just "ok".`;
 const watchGoneNote = (name, cid) => `[Fleet View] ${quoted(name, cid)}, which you were watching, is gone from Fleet View; the watch ended. Reply with just "ok".`;
+// a task Henry deleted (the id only: the title is the bot's own text)
+const taskGoneNote = (taskId) => `[Fleet View] Henry deleted the task ${taskId} from your tasks.json. Leave it out: don't add it back, and read the file fresh before you next change it. Reply with just "ok".`;
 
 // ---------- checks ----------
 // C1 controls (0x80-0x9f): cleanText keeps them, and a name or a role goes into one line of the bot's prompts
@@ -728,14 +730,15 @@ function createBots(deps) {
   }
   // one task changed in the file as it is now (read fresh: the bot may have just written it): fn(task, data) changes it
   // in place and says false to leave the file alone; the file is put right (settle) and written whole. -> [code, out]
-  function changeTask(bot, taskId, fn) {
+  // keep: the other tasks are written back exactly as read, not settled (a delete touches nothing else)
+  function changeTask(bot, taskId, fn, keep = false) {
     const r = TASKS.readFile(bot.folder);
     if (r.err) return [409, { ok: false, message: `${bot.name}'s ${r.err}` }];
     const t = r.data.tasks.find((x) => x && typeof x === 'object' && x.id === taskId);
     if (!t || !TASKS.readTask(t)) return [404, { ok: false, message: `${bot.name} has no task ${taskId}` }];
     const res = fn(t, r.data);
     if (res === false) return [409, { ok: false, message: 'nothing to change' }];
-    TASKS.settle(r.data, Date.now());
+    if (!keep) TASKS.settle(r.data, Date.now());
     try { TASKS.writeFile(bot.folder, r.data); } catch (e) { return [500, { ok: false, message: `could not write ${TASKS.fileOf(bot.folder)}: ${e.code || e.message}` }]; }
     taskFiles.delete(bot.id);
     return [200, { ok: true, task: TASKS.viewTask(t), res }];
@@ -855,8 +858,13 @@ function createBots(deps) {
     const done = (r, msg) => (r[0] === 200 ? [200, { ...r[1], res: undefined, message: msg }] : r);
     if (action === 'pause') return done(changeTask(bot, taskId, (t) => { if (t.status === 'paused') return false; t.status = 'paused'; t.nextRun = null; return true; }), 'paused');
     if (action === 'resume') return done(changeTask(bot, taskId, (t) => { if (t.status === 'open') return false; t.status = 'open'; t.nextRun = null; TASKS.skipMissed(t, Date.now()); return true; }), 'resumed');
+    // delete: out of the file as it is now (re-read: what the bot just wrote stays), the rest as it was. The scheduler
+    // reads the file fresh before each run, so it never fires again; a run already on its way ends on its own (its
+    // notes find no task and are dropped). sentFor is kept: a stale rewrite by the bot can't fire its last time again
     if (action === 'delete') {
-      return done(changeTask(bot, taskId, (t, data) => { data.tasks = data.tasks.filter((x) => x !== t); return true; }), 'deleted');
+      const r = done(changeTask(bot, taskId, (t, data) => { data.tasks = data.tasks.filter((x) => x !== t); return true; }, true), 'deleted');
+      if (r[0] === 200) tellDeleted(bot, taskId);
+      return r;
     }
     return [400, { ok: false, message: 'action must be pause, resume, run or delete' }];
   }
@@ -886,6 +894,17 @@ function createBots(deps) {
   }
   // how a watch note goes in: queued behind a menu, the bot's chat not opened, as Fleet View's own text (a fresh object each time)
   const noteOpts = () => ({ kind: 'message', queue: true, open: false, via: 'server' });
+  // a running bot may hold the old task list in mind and write a deleted task back with its next edit: it is told,
+  // queued behind what it is doing (the delete's answer does not wait for it). One not running reads the file fresh
+  function tellDeleted(bot, taskId) {
+    const fail = (why) => log(`${bot.name}: not told task ${taskId} was deleted: ${why}`);
+    (async () => {
+      const to = await runningConv(bot);
+      if (!to) return;
+      const [dc, dout] = await d.api.deliverText(to, taskGoneNote(taskId), noteOpts(), d.ctx);
+      if (dc !== 200 && dc !== 202) fail((dout && dout.message) || `error ${dc}`);
+    })().catch((e) => fail((e && e.message) || e));
+  }
 
   // POST /bots/:id/map { at: { x, y } | null } (the page only): put it on the map or move it there; null takes it off,
   // and every watch of it stops (the bot is not told of each)

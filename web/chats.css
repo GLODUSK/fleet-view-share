@@ -353,6 +353,7 @@
 }
 .ch-pt .ch-tk-row { min-height: 36px; padding: 3px 6px; }
 .ch-pt .ch-tk-row:hover { background: none; }
+.ch-pt [data-tdel]:not(:disabled):hover { color: var(--red); }
 .ch-pt-none { padding: 6px 8px; color: var(--faint); font-size: 12.5px; line-height: 1.4; }
 .ch-pt-done {
   display: flex; align-items: center; gap: 7px; width: 100%; height: 28px; padding: 0 6px; border: 0; border-radius: 8px;

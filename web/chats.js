@@ -35,9 +35,12 @@
 // /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
 // A bot's role (Edit bot's Role: "Reviewer", at most 60 characters) shows under its name in its chat's header and on
 // its row under a team; its CLAUDE.md and its team briefs say it (bots.js).
-// Its profile (Edit bot) shows its tasks under the instructions, read only (Henry, 2026-10-13: "if i go into their
-// profile i can see what their tasks are"): the open and paused ones, next run soonest first, then how many are done
-// (a click shows them). They follow /state while the form is open, without touching what is typed in its fields.
+// Its profile (Edit bot) shows its tasks under the instructions (Henry, 2026-10-13: "if i go into their profile i can
+// see what their tasks are"): the open and paused ones, next run soonest first, then how many are done (a click shows
+// them). Each has a delete button, asked first (2026-10-15), and a right-click opens its menu. They follow /state while
+// the form is open, without touching what is typed in its fields.
+// The settings button beside Session in a bot's chat header opens the bot's menu (Start, Profile..., Team, Remove bot) under it,
+// from its left edge, as + New does (2026-10-15: "it should open as a menu on the left like the rest do").
 //
 // Teams are groups in the list (Henry, 2026-10-13: "if i make a team i can see them in the team ... expand take them
 // out put them in etc dynamically"): a team's row has a chevron that folds it; open, its members show under it, one
@@ -688,7 +691,9 @@ function build(el, ui) {
   el._head.addEventListener('click', (e) => {
     if (e.target.closest('.ch-back')) { if (inPanel) ui.closeBotPanel?.(); else back(ui); return; }
     if (e.target.closest('[data-start]')) { if (el._cur && el._cur.botId) startBot(ui, el._cur.botId); return; }
-    if (e.target.closest('[data-edit]')) { if (el._cur && el._cur.botId) openForm(el, ui, el._cur.botId); return; }
+    // the settings button: the bot's menu under it, from its left edge (as + New's)
+    const ed = e.target.closest('[data-edit]');
+    if (ed) { if (el._cur && el._cur.botId) { const r = ed.getBoundingClientRect(); botMenu(el, ui, el._cur.botId, r.left, r.bottom + 4); } return; }
     const b = e.target.closest('[data-pane]');
     const c = el._cur;
     if (!b || !c || !c.id) return;
@@ -736,6 +741,18 @@ function build(el, ui) {
     if (e.target.closest('[data-cancel]')) closeForm(ui);
     // the profile's "Done (N)": its done tasks shown or folded
     else if (e.target.closest('[data-tdone]') && form) { form.doneOpen = !form.doneOpen; ui.refresh(); }
+    // a task's delete button: asked first, in a menu under it
+    else if (e.target.closest('[data-tdel]') && form && form.botId) {
+      const row = e.target.closest('.ch-tk-row'), r = e.target.closest('[data-tdel]').getBoundingClientRect();
+      if (row) askDeleteTask(el, ui, form.botId, row.dataset.task, r.left, r.bottom + 4);
+    }
+  });
+  // a task's row in the profile: right-click for its whole menu (Run now, Pause or Resume, Delete task)
+  el._form.addEventListener('contextmenu', (e) => {
+    const row = e.target.closest('.ch-pt .ch-tk-row');
+    if (!row || !form || !form.botId) return;
+    e.preventDefault();
+    taskMenu(el, ui, form.botId, row.dataset.task, e.clientX, e.clientY);
   });
   // New team: a member ticked or unticked
   el._form.addEventListener('change', (e) => { if (e.target.name === 'tm') tickMember(el, e.target.value, e.target.checked); });
@@ -881,7 +898,7 @@ function drawForm(el, state) {
       // what it is for in its teams: its CLAUDE.md and team briefs say it (bots.js)
       + `<label class="ch-f"><span>Role</span><input name="role" maxlength="${ROLE_MAX}" spellcheck="true" placeholder="e.g. Reviewer, Release manager" value="${edit ? esc(bot.role || '') : ''}"></label>`
       + `<label class="ch-f"><span>${edit ? 'Instructions' : 'What it does'}</span><textarea name="brief" maxlength="4000" rows="6" placeholder="Its standing instructions: what it watches, what it does, when it tells you">${edit ? esc(bot.brief || '') : ''}</textarea></label>`
-      // its tasks, read only: drawn on every render (profileTasksHtml), so they follow /state
+      // its tasks, each with a delete button: drawn on every render (profileTasksHtml), so they follow /state
       + (edit ? `<div class="ch-f"><span id="ch-nb-tasks">Tasks</span><div class="ch-pt" role="group" aria-labelledby="ch-nb-tasks"></div></div>` : '')
       + `<div class="ch-f-row">${field('account', 'Account')}${field('model', 'Model')}${field('effort', 'Effort')}</div>`
       + `<div class="ch-f-row two">${field('shape', 'Shape')}${field('color', 'Colour')}</div>`
@@ -912,15 +929,22 @@ function drawForm(el, state) {
 }
 // a bot's tasks in its profile (chats-model.js profileTasks): the open and paused ones, next run soonest first, each
 // as the Tasks strip phrases it (taskSchedule, taskLine), then "Done (N)", whose rows show when it is clicked
+// Each row has a delete button (Henry, 2026-10-15: "make sure i can delete tasks off [a bot] if I go check on its
+// profile"), asked first; a right-click opens the task's whole menu (taskMenu). Why one failed shows above the list
 function profileTasksHtml(b, now) {
   const { live, done } = profileTasks(tasksOf(b));
-  if (!live.length && !done.length) return '<div class="ch-pt-none">No tasks yet.</div>';
-  const row = (t) => `<div class="ch-tk-row ${esc(t.status)}${t.valid === false ? ' bad' : ''}"${t.detail ? ` title="${esc(t.detail)}"` : ''}>`
-    + `<span class="ch-tk-ic" aria-hidden="true">${icon(taskIcon(t), 13)}</span>`
-    + `<div class="ch-tk-m"><div class="ch-tk-l1"><span class="ch-tk-title">${esc(t.title)}</span><span class="ch-tk-sch">${esc(taskSchedule(t))}</span></div>`
-    + `<div class="ch-tk-l2">${esc(taskLine(t, now))}</div></div></div>`;
+  const err = taskErr.botId === b.id && taskErr.text ? `<div class="ch-tk-err" role="alert">${esc(taskErr.text)}</div>` : '';
+  if (!live.length && !done.length) return `${err}<div class="ch-pt-none">No tasks yet.</div>`;
+  const row = (t) => {
+    const busy = taskBusy.get(`${b.id}:${t.id}`);
+    return `<div class="ch-tk-row ${esc(t.status)}${t.valid === false ? ' bad' : ''}" data-task="${esc(t.id)}"${t.detail ? ` title="${esc(t.detail)}"` : ''}>`
+      + `<span class="ch-tk-ic" aria-hidden="true">${icon(taskIcon(t), 13)}</span>`
+      + `<div class="ch-tk-m"><div class="ch-tk-l1"><span class="ch-tk-title">${esc(t.title)}</span><span class="ch-tk-sch">${esc(taskSchedule(t))}</span></div>`
+      + `<div class="ch-tk-l2">${esc(busy ? BUSY_TEXT[busy] || '...' : taskLine(t, now))}</div></div>`
+      + `<span class="ch-tk-b"><button type="button" class="ch-ib ch-tk-btn" data-tdel="1"${busy ? ' disabled' : ''} title="Delete this task (asks first)" aria-label="Delete ${esc(t.title)}">${icon('trash', 13)}</button></span></div>`;
+  };
   const shut = !(form && form.doneOpen);
-  return (live.length ? live.map(row).join('') : '<div class="ch-pt-none">Nothing open.</div>')
+  return err + (live.length ? live.map(row).join('') : '<div class="ch-pt-none">Nothing open.</div>')
     + (done.length ? `<button type="button" class="ch-pt-done" data-tdone="1" aria-expanded="${!shut}"><span class="ch-tk-chev">${icon('chevron', 12)}</span><span>Done (${done.length})</span></button>`
       + (shut ? '' : done.map(row).join('')) : '');
 }
@@ -1292,9 +1316,9 @@ function drawHead(el, state, c, s) {
   el._headAv.title = doingTip(c);
   // a bot that is not running: Start, nothing that would open its conversation without its role
   const u = c.botId ? bu(c.botId) : null;
-  // a bot's settings: its Edit bot panel
+  // a bot's settings: its menu (botMenu: Start, Profile..., Team, Remove bot), opened under the button
   const edit = c.kind === 'bot' && c.botId && botOf(state, c.botId)
-    ? `<button type="button" class="ch-ib ch-edit" data-edit="1" title="Profile: name, role, instructions, model, effort and look" aria-label="Profile">${icon('mode', 15)}</button>` : '';
+    ? `<button type="button" class="ch-ib ch-edit" data-edit="1" title="Settings: profile, team, remove" aria-label="Settings" aria-haspopup="menu">${icon('mode', 15)}</button>` : '';
   const start = c.kind === 'bot' && c.live === false
     ? `<button type="button" class="btn primary" data-start="1"${u.starting || u.wait ? ' disabled' : ''} title="Start it: its running conversation, else its last one, else a new one in its folder">${icon('shell', 14)}<span>${u.starting || u.wait ? 'Starting...' : 'Start'}</span></button>` : null;
   // its role under its name (its Profile's Role)
@@ -1523,6 +1547,14 @@ function taskMenu(el, ui, botId, taskId, x, y) {
       { label: 'Delete task', icon: 'trash', danger: true, disabled: busy, confirm: { text: `Delete "${t.title}" from ${b.name}'s tasks?`, yes: 'Delete' }, run: () => taskAct(ui, botId, taskId, 'delete') },
     ],
   });
+}
+// the profile's delete button: the question straight away (Delete, or Cancel), as a menu under the button
+function askDeleteTask(el, ui, botId, taskId, x, y) {
+  const b = botOf(el._state || {}, botId);
+  const t = b && tasksOf(b).find((k) => k.id === taskId);
+  if (!t || taskBusy.has(`${botId}:${taskId}`)) return;
+  openCtxMenu({ x, y, title: `Delete "${t.title}"?`, sub: `It leaves ${b.name}'s tasks and does not run again.`, items: [
+    { label: 'Delete', icon: 'trash', danger: true, run: () => taskAct(ui, botId, taskId, 'delete') }, { label: 'Cancel', icon: 'close', run: () => {} }] });
 }
 
 
