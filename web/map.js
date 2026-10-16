@@ -64,11 +64,11 @@
 // fades out where it is; one that leaves the window comes back on a new path while its agent runs. Fixed to the window
 // like the moon, on the map's clock (held at rest), still and unblinking under reduced motion, dimmer by day.
 // A deploy going live (ingestDeploys; Henry asked for it, next to the shower for a merge) sends up a rocket (ROCKET_*): a
-// small warm white-gold head climbing from the window's bottom edge under its repo's hub, leaning a little and bending
-// further as it goes, slowing all the way to about half the window's height in about 3 s, its gold trail turning orange
+// small warm white-gold head climbing out of its repo's hub (the window's bottom edge when the hub isn't on screen),
+// leaning a little and bending further as it goes, slowing all the way to well up the sky above it in about 3 s, its gold trail turning orange
 // and faint down it and wavering; at the top it flares and burns out in a tiny puff of sparks, and the trail fades.
 // Up, warm and slowing, so never taken for a meteor. Once per deploy (not for ones already live when the page opens);
-// fixed to the window like the moon; none at rest, hidden or under reduced motion.
+// it keeps to its hub when the map moves; none at rest, hidden or under reduced motion.
 // Space events (EVENT_*): every minute or two (EVENT_GAP, a pick) the director starts one more ambient sight from the
 // registry (EVENTS, by weight, never a kind already up, never the kind it started last), beside the ones still running, up to
 // EVENT_MAX at once (Henry, 2026-10-14: "make sure events can happen at the same time"), so a capital ship can cross while
@@ -867,16 +867,18 @@ const VOYAGE_ZOOM = 2.2, VOYAGE_W = 0.45, VOYAGE_PAINT = 4;
 // PLACE_CLOUDS (how many) from PLACE_TINTS, its far galaxies PLACE_GALS (how many)
 const PLACE_KEY = 'fv.skyPlace', PLACE_BAND = [[0.7, 1.45], [0.65, 1.25], [-1, 1], [0.35, 1.25]], PLACE_CLOUDS = [1, 4], PLACE_GALS = [2, 5];
 const PLACE_TINTS = [[0.62, 0.48, 1], [0.36, 0.7, 0.78], [0.86, 0.48, 0.66], [1, 0.56, 0.4], [0.5, 0.8, 0.6], [0.4, 0.52, 1], [0.95, 0.75, 0.5]];
-// a deploy's rocket (see "Look"): at most ROCKET_N at once (the sky's shader has a slot for each). It rises from just
-// below the window's bottom edge, under the hub (kept within ROCKET_X of the window's width), for ROCKET_MS (a pick),
-// slowing all the way (ease-out, ROCKET_EASE), to ROCKET_TOP of the window's height (a pick); its path leans ROCKET_TILT
+// a deploy's rocket (see "Look"): at most ROCKET_N at once (the sky's shader has a slot for each). It rises from its
+// hub's middle (following the hub while it is on screen; else from just below the window's bottom edge, kept within
+// ROCKET_X of the window's width), for ROCKET_MS (a pick), slowing all the way (ease-out, ROCKET_EASE), ROCKET_TOP (a
+// pick) of the room above its foot (to ROCKET_ROOF of the window's height from its top), at least ROCKET_MIN of it; its path leans ROCKET_TILT
 // radians (a pick, either way) and bends further that way by ROCKET_BEND of its height at the top (a pick). Its head
 // is a soft point ROCKET_HEAD_R CSS px across of ROCKET_HEAD (rgb 0-1) at ROCKET_HEAD_A, flaring and gone over
-// ROCKET_POP ms at burnout; its trail, ROCKET_TAIL of the window's height long (a pick), ROCKET_GOLD near the head
-// turning ROCKET_ORANGE and faint down it, at most ROCKET_TRAIL_A, wavers ROCKET_WAVE CSS px (more down it) and fades
+// ROCKET_POP ms at burnout; its trail, ROCKET_TAIL of the window's height long (a pick; at most half its rise),
+// ROCKET_GOLD near the head turning ROCKET_ORANGE and faint down it, at most ROCKET_TRAIL_A, wavers ROCKET_WAVE CSS px (more down it) and fades
 // over ROCKET_FADE ms after burnout, when ROCKET_PUFF_N sparks fly ROCKET_PUFF_R px out over ROCKET_PUFF_MS. A deploy
 // first seen already live goes up only if it went live in the last ROCKET_RECENT ms; ROCKET_SEEN: deploys remembered
-const ROCKET_N = 3, ROCKET_X = [0.06, 0.94], ROCKET_MS = [2600, 3400], ROCKET_EASE = 2.2, ROCKET_TOP = [0.45, 0.6];
+const ROCKET_N = 3, ROCKET_X = [0.06, 0.94], ROCKET_MS = [2600, 3400], ROCKET_EASE = 2.2, ROCKET_TOP = [0.5, 0.65];
+const ROCKET_ROOF = 0.08, ROCKET_MIN = 0.18;
 const ROCKET_TILT = [0.03, 0.12], ROCKET_BEND = [0.06, 0.14], ROCKET_HEAD_R = 1.6, ROCKET_HEAD = [1, 0.95, 0.8], ROCKET_HEAD_A = 0.95;
 const ROCKET_POP = 320, ROCKET_TAIL = [0.15, 0.25], ROCKET_GOLD = [1, 0.8, 0.42], ROCKET_ORANGE = [1, 0.46, 0.16], ROCKET_TRAIL_A = 0.75;
 const ROCKET_WAVE = 2.5, ROCKET_FADE = 1800, ROCKET_PUFF_N = 7, ROCKET_PUFF_R = 14, ROCKET_PUFF_MS = 700;
@@ -5210,15 +5212,16 @@ function drawSats(ctx) {
 }
 
 // ---------- a deploy's rocket (see "Look", ROCKET_*) ----------
-// a rocket from t (ms, the streaks' clock) under hub n (or anywhere along the bottom when null): its rise, lean, bend
-// and trail in the window frame (I.moonF); its foot is placed once the hub is on screen (rocketFoot); none at rest,
+// a rocket from t (ms, the streaks' clock) out of hub n (or anywhere along the bottom when null): its picks for its
+// rise, lean, bend and trail; its foot, and with it the rest in the window frame (I.moonF), is placed once the hub is
+// on screen (rocketFoot); none at rest,
 // hidden, under reduced motion or while ROCKET_N fly; false when none went up
 function rocketLaunch(t, n) {
   if (I.still || resting() || !I.running || document.hidden || !I.skyW || I.rockets.length >= ROCKET_N) return false;
   if (!I.moonF) moonNow();
-  const F = I.moonF, top = F.H * pickIn(ROCKET_TOP), side = Math.random() < 0.5 ? -1 : 1;
-  I.rockets.push({ at: t, T: pickIn(ROCKET_MS), hub: n ? n.id : null, x0: null, top, lean: side * Math.tan(pickIn(ROCKET_TILT)),
-    bend: (side * pickIn(ROCKET_BEND)) / top, tail: F.H * pickIn(ROCKET_TAIL), seed: 0.05 + 0.95 * Math.random() });
+  const side = Math.random() < 0.5 ? -1 : 1;
+  I.rockets.push({ at: t, T: pickIn(ROCKET_MS), hub: n ? n.id : null, x0: null, y0: null, topF: pickIn(ROCKET_TOP), lean: side * Math.tan(pickIn(ROCKET_TILT)),
+    bendF: side * pickIn(ROCKET_BEND), tailF: pickIn(ROCKET_TAIL), seed: 0.05 + 0.95 * Math.random() });
   I.rocketsN++;
   I.dirty = true;
   return true;
@@ -5233,15 +5236,24 @@ function rocketStep(t, rest) {
   for (const r of R) if (t - r.at < r.T + Math.max(ROCKET_FADE, ROCKET_PUFF_MS)) R[keep++] = r;
   if (keep < R.length) { R.length = keep; I.dirty = true; }
 }
-// rocket r's foot in the window frame F (px from its left), under its hub once a draw has put the hub on screen (a new
-// state makes new nodes, placed by the next draw), kept within ROCKET_X; anywhere when it has none or it never shows;
-// false while it waits for one (its first 200 ms, when it is barely lit)
+// rocket r's foot in the window frame F (x0, y0: px from its left and top): its hub's middle while a draw has the hub on
+// screen (a new state makes new nodes, placed by the next draw), so it follows the hub as the map moves; else where it
+// last was, or (never seen) just below the bottom edge, anywhere along it within ROCKET_X. Its rise, bend and trail are
+// set from the room above where it first stands. False while it waits for its hub (its first 200 ms, barely lit)
 function rocketFoot(r, F) {
-  if (r.x0 != null) return true;
   const n = r.hub && I.mapOn ? I.byId.get(r.hub) : null;
-  if (n && !Number.isFinite(n.sx) && performance.now() - r.at < 200) return false;
-  const sx = n && Number.isFinite(n.sx) ? n.sx + mapX() - F.x : F.W * Math.random();
-  r.x0 = clamp(sx, F.W * ROCKET_X[0], F.W * ROCKET_X[1]);
+  const hx = n && Number.isFinite(n.sx) ? n.sx + mapX() - F.x : NaN, hy = n && Number.isFinite(n.sy) ? n.sy + mapY() - F.y : NaN;
+  const on = hx >= 0 && hx <= F.W && hy >= 0 && hy <= F.H;
+  if (on) { r.x0 = hx; r.y0 = hy; }
+  if (r.top != null) return true;
+  if (!on) {
+    if (n && !Number.isFinite(n.sx) && performance.now() - r.at < 200) return false;
+    r.x0 = clamp(Number.isFinite(hx) ? hx : F.W * Math.random(), F.W * ROCKET_X[0], F.W * ROCKET_X[1]);
+    r.y0 = F.H + 2;
+  }
+  r.top = Math.max(F.H * ROCKET_MIN, r.topF * (r.y0 - F.H * ROCKET_ROOF));
+  r.bend = r.bendF / r.top;
+  r.tail = Math.min(F.H * r.tailF, 0.5 * r.top);
   return true;
 }
 // the trail's sideways waver (CSS px) at height s (CSS px above its foot), f of the way from its tail to the head: none at
@@ -5249,14 +5261,13 @@ function rocketFoot(r, F) {
 function rocketWave(r, s, f) {
   return r.wave * Math.pow(1 - f, 1.2) * (0.6 * Math.sin(s * 0.035 + r.ph * 3.1 + r.seed * 37.7) + 0.4 * Math.sin(s * 0.011 - r.ph * 1.7));
 }
-// the rockets flying now, in CSS px of the window: each one's foot (x0, yb: just below the window's bottom edge), its
+// the rockets flying now, in CSS px of the window: each one's foot (x0, yb: its hub, or just below the bottom edge), its
 // head's and its trail's tail end's heights above it (sh, st), lean and bend (x = x0 + lean s + bend s^2), the head's
 // alpha (ha: in over 200 ms, a faint flicker, a flare and gone at burnout), the trail's (ta: fading after burnout as it
 // shortens from below and wavers more), its clock (ph, s), the sparks' progress (puff, 0-1; -1: none) and seed
 function rocketsNow() {
   if (!I.rockets.length) return [];
   const F = I.moonF || (moonNow(), I.moonF), now = performance.now(), out = [];
-  const ox = F.x, yb = F.y + F.H + 2;
   for (const r of I.rockets) {
     const e = now - r.at;
     if (e < 0 || out.length >= ROCKET_N || !rocketFoot(r, F)) continue;
@@ -5265,7 +5276,7 @@ function rocketsNow() {
     const ha = e < r.T ? ROCKET_HEAD_A * Math.min(1, e / 200) * (0.9 + 0.1 * Math.sin(e * 0.05)) : ROCKET_HEAD_A * (1 - q) * (1 + 1.5 * Math.sin(Math.PI * q));
     const ta = ROCKET_TRAIL_A * Math.min(1, e / 250) * (1 - fo * fo * (3 - 2 * fo));
     if (!(ha > 0 || ta > 0 || pp < 1)) continue;
-    out.push({ x0: ox + r.x0, yb, sh, st: sh - Math.min(r.tail, sh) * (1 - 0.5 * fo), lean: r.lean, bend: r.bend, ha, ta, ph: e / 1000,
+    out.push({ x0: F.x + r.x0, yb: F.y + r.y0, sh, st: sh - Math.min(r.tail, sh) * (1 - 0.5 * fo), lean: r.lean, bend: r.bend, ha, ta, ph: e / 1000,
       wave: ROCKET_WAVE * (1 + 1.5 * fo), puff: e >= r.T && pp < 1 ? pp : -1, seed: r.seed });
   }
   return out;
