@@ -273,4 +273,4 @@ function handle(req, res, pathname, h) {
   return send(404, { ok: false, message: 'no such route' });
 }
 
-module.exports = { start, handle, check, apply, status };
+module.exports = { start, handle, check, apply, status, autoTick };
