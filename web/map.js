@@ -717,7 +717,9 @@ const LENS_SRC = [
 const LENS_SRC_A = 0.55, LENS_SWEEP = 2.6;
 // the distant capital ship (see "Look"): it crosses the window in SHIP_MS ms (a pick) at SHIP_DEPTH (the far star layer's), bow
 // first, level but for up to SHIP_TILT radians off (either way, and it may go either way round), off the window's
-// middle by up to SHIP_OFF of its height. SHIP_R: its half-length (CSS px, a pick; its whole length is twice that). It starts and ends
+// middle by up to SHIP_OFF of its height. SHIP_R: its half-length (CSS px, a pick; its whole length is twice that); one sent through a star
+// system is SHIP_IN_SYSTEM of the system's outer orbit instead (a pick; at least SHIP_IN_SYSTEM_MIN CSS px), far smaller than
+// the system it crosses (Henry, 2026-10-16: "ship is almost the size of the solar system"). It starts and ends
 // off the window and fades in and out over SHIP_FADE ms at the ends of its life (unseen). SHIP_ESCORT_P: the chance of an escort, which
 // follows SHIP_ESCORT_BACK half-lengths behind the ship's middle (a pick) and SHIP_ESCORT_SIDE to one side of its path (a pick, either
 // side), at SHIP_ESCORT_SCALE of its size (a pick). SHIP_BODY: the hull's colour (rgb 0-1, nearly black), SHIP_LIFT: the faint
@@ -734,6 +736,7 @@ const LENS_SRC_A = 0.55, LENS_SWEEP = 2.6;
 // nozzles' glows [x, y]
 const SHIP_DEPTH = EVENT_DEPTH.far;
 const SHIP_MS = [210e3, 300e3], SHIP_R = [86, 110], SHIP_TILT = 0.2, SHIP_OFF = 0.3, SHIP_FADE = 6000;
+const SHIP_IN_SYSTEM = [0.016, 0.022], SHIP_IN_SYSTEM_MIN = 8;
 const SHIP_ESCORT_P = 0.6, SHIP_ESCORT_BACK = [1.7, 2.2], SHIP_ESCORT_SIDE = [0.12, 0.4], SHIP_ESCORT_SCALE = [0.2, 0.26];
 const SHIP_BODY = [0.016, 0.02, 0.03], SHIP_LIFT = [0.03, 0.042, 0.066], SHIP_BODY_A = 0.74, SHIP_LIGHT = [-0.42, -0.91];
 const SHIP_HAZE = [0.08, 0.106, 0.13], SHIP_HAZE_A = 0.8, SHIP_HAZE_MAX = 0.95, SHIP_HAZE_GLOW = 0.13, SHIP_SOFT = 2.8;
@@ -3830,13 +3833,16 @@ function systemPos(ev, now) {
   const [x, y] = eventAt(ev.cam, ev.x0, ev.y0);
   return { x, y, R: (ev.R * Math.pow(clamp(I.zoom || 1, ZMIN, ZMAX), SYSTEM_DEPTH * STAR_ZOOM) * parkLook(ev, now).k) / ev.cam.sc };
 }
-// a patrol: a smaller capital ship laid to cruise through the star system a voyage brought
+// a capital ship's half-length (CSS px at its depth, as SHIP_R) sent through star system `sy`: SHIP_IN_SYSTEM of its outer orbit
+// (the system and the ship share the far layer, so the two stay in proportion at any zoom)
+const shipInSystem = (sy) => Math.max(SHIP_IN_SYSTEM_MIN, pickIn(SHIP_IN_SYSTEM) * sy.R);
+// a patrol: a capital ship, small against the star system a voyage brought, laid to cruise through it
 registerScene('patrol', {
   needs: ['ship'], uses: ['system'], label: 'Patrol (a ship cruises through a star system)',
   what: 'a capital ship comes out of hyperspace on a course through a far star system',
   start(t) {
     const sy = evOf('system').ev;
-    if (!eventStart(t, 'ship', { aim: (s) => systemPos(sy, t + s * 1000), scale: pickIn([0.42, 0.55]) })) return null;
+    if (!eventStart(t, 'ship', { aim: (s) => systemPos(sy, t + s * 1000), R: shipInSystem(sy) })) return null;
     const sh = evOf('ship').ev;
     return { ms: sh.ms, sy, sh };
   },
@@ -3887,7 +3893,7 @@ registerScene('pursuit', {
     if (sc.stage === 2) {
       if (!sceneEv('system', sc.sy)) return false;
       if (t < sc.wait) return true;
-      if (I.events.has('ship') || I.skyOff.has('ship') || !eventStart(t, 'ship', { aim: (s) => systemPos(sc.sy, t + s * 1000), scale: 0.5, escort: true })) return false;
+      if (I.events.has('ship') || I.skyOff.has('ship') || !eventStart(t, 'ship', { aim: (s) => systemPos(sc.sy, t + s * 1000), R: shipInSystem(sc.sy), escort: true })) return false;
       sc.sh = evOf('ship').ev; sc.stage = 3;
       return true;
     }
@@ -4078,7 +4084,7 @@ function lensNow() {
 let shipForce = null; // tests (__map.ship): whether the escort follows (null: a pick)
 registerEvent('ship', {
   start(t, o) {
-    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(SHIP_DEPTH), ms = pickIn(SHIP_MS), R = pickIn(SHIP_R) * (o.scale || 1);
+    const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(SHIP_DEPTH), ms = pickIn(SHIP_MS), R = o.R || pickIn(SHIP_R) * (o.scale || 1);
     const ang = (rnd() * 2 - 1) * SHIP_TILT, sg = rnd() < 0.5 ? -1 : 1, dx = Math.cos(ang) * sg, dy = Math.sin(ang) * sg;
     const escort = shipForce != null ? shipForce : o.escort != null ? !!o.escort : rnd() < SHIP_ESCORT_P;
     const eo = escort ? [-pickIn(SHIP_ESCORT_BACK), (rnd() < 0.5 ? -1 : 1) * pickIn(SHIP_ESCORT_SIDE), pickIn(SHIP_ESCORT_SCALE), rnd()] : null;
