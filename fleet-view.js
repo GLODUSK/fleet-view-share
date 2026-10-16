@@ -1493,27 +1493,52 @@ function repoOf(s, now) {
   let best = null, n = 0;
   for (const [r, c] of count) if (c > n) { best = r; n = c; }
   if (best) return best;
+  // no tool call in that hour (a long wait on its subagents): it stays where its own tool calls put it before,
+  // never dropping back to its folder, which for a pickup is the launcher's (Henry, 2026-10-15)
+  const mine = topVote(s.repoVotes);
+  if (mine) return mine;
   // a conversation picked up from a handoff starts in the launcher's folder (usually the home folder),
   // not the repo: until its own tool calls say otherwise it works where the one it took over worked
   const prev = pickupRepo(s);
   if (prev) return prev;
+  // the handoff folder is never a workspace: a conversation started there with nothing else to go on (a pickup
+  // started in the wrong folder) is in none, as one in the home folder (Henry, 2026-10-15)
+  if (inHandoffDir(s.cwd)) return os.homedir();
   const g = s.cwd && gitInfo(path.join(s.cwd, '_'));
   return g ? g.root : nativeAbs(s.cwd) ? s.cwd : null;
 }
 
+// the repo most of these votes name, with no time limit; null when there are none
+function topVote(votes) {
+  const count = new Map();
+  for (const v of votes) count.set(v.root, (count.get(v.root) || 0) + 1);
+  let best = null, n = 0;
+  for (const [r, c] of count) if (c > n) { best = r; n = c; }
+  return best;
+}
+// a path in the handoff folder (~/.claude-handoffs), where a launcher may start a pickup by mistake
+function inHandoffDir(p) {
+  if (!nativeAbs(p)) return false;
+  const d = P.foldCase(path.resolve(HO.dir())), x = P.foldCase(path.resolve(p));
+  return x === d || x.startsWith(d + path.sep);
+}
+
 // the repo of the conversation s picked up from: the one its tool calls pointed at most, with no time
-// limit (it may have ended hours ago), following earlier handoffs back while one has none
+// limit (it may have ended hours ago), else the one it was started in, following earlier handoffs back while one
+// has neither. One no longer listed: the repo of the folder its handoff file names (not the handoff folder)
 function pickupRepo(s) {
   const seen = new Set([s.id]);
   for (let x = s, i = 0; i < 8; i++) {
     const from = handoffOf(x, Date.now()).pickedUpFrom;
-    x = from && !seen.has(from.id) ? sessions.get(from.id) : null;
-    if (!x) return null;
+    if (!from || seen.has(from.id)) return null;
+    x = sessions.get(from.id);
+    if (!x) {
+      const cwd = (handoffLinks().bySession.get(String(from.id).toLowerCase()) || {}).cwd;
+      const g = cwd && !inHandoffDir(cwd) ? gitInfo(path.join(cwd, '_')) : null;
+      return g ? g.root : null;
+    }
     seen.add(x.id);
-    const count = new Map();
-    for (const v of x.repoVotes) count.set(v.root, (count.get(v.root) || 0) + 1);
-    let best = null, n = 0;
-    for (const [r, c] of count) if (c > n) { best = r; n = c; }
+    const best = topVote(x.repoVotes) || homeRootOf(x);
     if (best) return best;
   }
   return null;
