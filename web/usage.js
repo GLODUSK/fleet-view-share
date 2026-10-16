@@ -24,9 +24,12 @@ const hm = (t) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: 
 const dayHm = (t) => new Date(t).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
 const mins = (ms) => { const m = Math.max(1, Math.round(ms / 60e3)); return m < 90 ? `${m} min` : `${Math.round(m / 6) / 10} h`; };
 const usd = (n) => `$${(Math.round(n * 100) / 100).toFixed(2)}`;
-// "Claude C", or "Your Claude account" with only one
-const who = (a) => (singleAccount() ? 'Your Claude account' : `Claude ${a}`);
-const tag = (a) => (singleAccount() ? '' : `<span class="acct" style="background:${acctColor(a)}">${esc(a)}</span>`);
+// "Claude C", or "Your Claude account" with only one. singleAccount() also means one account on, the others turned
+// off, but those still have their usage rows here: two rows keep their letters (Henry, 2026-10-15)
+let rows = 0;
+const one = () => singleAccount() && rows <= 1;
+const who = (a) => (one() ? 'Your Claude account' : `Claude ${a}`);
+const tag = (a) => (one() ? '' : `<span class="acct" style="background:${acctColor(a)}">${esc(a)}</span>`);
 
 export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}, refreshSoon = () => {}, isHosted = () => false, endSessions = () => {} } = {}) {
   let usage = {};
@@ -327,6 +330,7 @@ export function mountUsage({ post, notifyOn = () => true, focusWindow = () => {}
   return {
     update(st) {
       usage = st && st.usage && typeof st.usage === 'object' ? st.usage : {};
+      rows = Object.keys(usage).filter((a) => isAcct(a) && usage[a]).length;
       const al = st && st.accountList;
       if (al && Array.isArray(al.list)) accts = { list: al.list.filter((x) => x && isAcct(x.a)), jobs: al.jobs && typeof al.jobs === 'object' ? al.jobs : {} };
       const sw = st && st.accountSwitch;

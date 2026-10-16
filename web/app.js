@@ -619,7 +619,6 @@ async function poll() {
   step('bot edits', () => applyBotEdits(st));
   step('renames', () => applyRenames(st));
   state = st;
-  step('accounts', () => setAccounts(st.accounts));
   step('launch defaults', () => setLaunchDefaults(st.launch));
   step('queued text', () => setServerQueued(st.queuedText));
   step('settings', () => {
@@ -634,6 +633,8 @@ async function poll() {
     if (settingsLoaded && st.settings) mergeServerHidden(st.settings.hidden);
     if (st.settings) syncForgotten(st.settings.forgotten);
   });
+  // after offAccts: with one account on, no letter tags, as with one account (Henry, 2026-10-15)
+  step('accounts', () => setAccounts(onAccounts()));
   step('first settings', () => {
     if (!settingsLoaded && st.settings) {
       settingsLoaded = true;
@@ -1609,7 +1610,8 @@ function weekPill(wk) {
   const away = acs.filter((a) => usageUi?.awayNow(a));
   const more = (away.length ? [`used somewhere else lately: ${away.join(', ')}`] : []).concat('click: plan usage, this PC vs. elsewhere');
   return `<span class="count week" role="button" tabindex="0" title="${esc([tip, ...more].join('\n'))}">`
-    + acs.map((a) => `${singleAccount() ? '' : `<span class="acct acct-${a}">${a}</span>`}<b style="color:${col(wk[a].left)}">${wk[a].left}%</b>${away.includes(a) ? '<i class="week-away" aria-label="used elsewhere"></i>' : ''}`).join('')
+    // letters whenever it lists more than one: an account turned off still has its week here (Henry, 2026-10-15)
+    + acs.map((a) => `${singleAccount() && acs.length < 2 ? '' : `<span class="acct acct-${a}">${a}</span>`}<b style="color:${col(wk[a].left)}">${wk[a].left}%</b>${away.includes(a) ? '<i class="week-away" aria-label="used elsewhere"></i>' : ''}`).join('')
     + `<span class="count-k">week left</span></span>`;
 }
 
@@ -4165,6 +4167,7 @@ function setAccountOn(a, on) {
   const next = on ? offAccts.filter((x) => x !== a) : [...new Set([...offAccts, a])].sort();
   if (!on && !allAccounts().some((x) => !next.includes(x))) { toast('Keep at least one account on', C.dim); return; }
   offAccts = next;
+  setAccounts(onAccounts()); // the letter tags go (or come back) with the next draw
   offSentAt = Date.now();
   saveSettings({ offAccounts: next });
   flushSettings();
@@ -4177,7 +4180,8 @@ function accountsMenuItem() {
   const off = all.filter((a) => offAccts.includes(a));
   // stay: the menu stays open after a click, so several can be switched in a row; it closes on a click away
   return { label: 'Accounts', icon: 'agent', badge: off.length ? `${off.join(' ')} off` : null, refresh: accountsMenuItem,
-    children: all.map((a) => ({ label: `Claude ${a}`, tag: a, icon: offAccts.includes(a) ? null : 'check', stay: true, run: () => setAccountOn(a, offAccts.includes(a)) })) };
+    // tagAlways: the letters show here even with one account on, so you can tell which to turn back on
+    children: all.map((a) => ({ label: `Claude ${a}`, tag: a, tagAlways: true, icon: offAccts.includes(a) ? null : 'check', stay: true, run: () => setAccountOn(a, offAccts.includes(a)) })) };
 }
 
 // "Layout" (the map's empty-space menu): lays every workspace out again in the picked order (map.js mapLayout)

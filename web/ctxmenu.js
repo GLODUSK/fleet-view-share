@@ -7,7 +7,7 @@
 //       icon's place: a bot's mascot), run(), disabled?, note?, tag?, danger?, confirm?: { text, yes }, children? } | { sep: true }]
 //       disabled items are a quiet line that can't be picked (note: why); confirm turns the menu into a small
 //       question ("yes" runs it, Cancel goes back) before run() is called; tag: 'A' or 'B', the account tag
-//       on the right; children: the items of a submenu (same shape; a confirm there turns the main menu into the question),
+//       on the right (hidden with one account on, unless tagAlways); children: the items of a submenu (same shape; a confirm there turns the main menu into the question),
 //       shown with a ▸ and opened to the side as a second frosted menu (an input item works there too, and
 //       turns the main menu into its box; a submenu item with children of its own opens them in the submenu's
 //       place, under a back row: ← or Esc or the back row returns); load(): instead of children, a function
@@ -189,7 +189,7 @@ function rowHtml(it, i, attr = 'data-i', on = i === sel) {
   if (it.sep) return '<div class="ctx-sep" role="separator"></div>';
   const ic = it.art ? `<span class="ctx-art">${it.art}</span>` : it.swatch ? `<span class="ctx-sw" style="background:${esc(it.swatch)}"></span>` : it.icon ? icon(it.icon, 15) : '';
   const kids = hasKids(it);
-  const tail = (it.badge ? `<span class="ctx-badge">${esc(it.badge)}</span>` : '') + (it.tag ? acctTag(it.tag) : '') + (kids ? `<span class="ctx-more" aria-hidden="true">${icon('chevron', 13) || '▸'}</span>` : '');
+  const tail = (it.badge ? `<span class="ctx-badge">${esc(it.badge)}</span>` : '') + (it.tag ? acctTag(it.tag, !!it.tagAlways) : '') + (kids ? `<span class="ctx-more" aria-hidden="true">${icon('chevron', 13) || '▸'}</span>` : '');
   const cls = `menu-item ctx-item${it.disabled ? ' off' : ''}${it.danger ? ' danger' : ''}${tail ? ' has-tail' : ''}${kids ? ' has-sub' : ''}${on ? ' sel' : ''}`;
   return `<div class="${cls}" ${attr}="${i}" role="menuitem"${it.disabled ? ' aria-disabled="true"' : ''}${kids ? ` aria-haspopup="menu" aria-expanded="${subOf === i}"` : ''}>`
     + `<span class="ctx-ic" aria-hidden="true">${ic}</span><span class="ctx-l">${esc(it.label)}`

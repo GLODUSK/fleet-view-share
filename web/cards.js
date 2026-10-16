@@ -94,7 +94,8 @@ export function leadTag(s, state) {
   const col = /^#[0-9a-f]{6}$/i.test(t.color || '') ? t.color : C.violet;
   return `<span class="lead-tag" style="--tc:${col}" title="${esc(tip)}" aria-label="${esc(tip)}">★<span>leads</span></span>`;
 }
-// with one Claude account on this machine (state.accounts), no conversation shows a letter
+// with one Claude account on this machine (state.accounts), no conversation shows a letter; the same with one
+// account on, the others turned off: app.js passes the accounts that are on (Henry, 2026-10-15)
 let oneAccount = false;
 export const setAccounts = (list) => { oneAccount = Array.isArray(list) && list.length === 1; };
 export const singleAccount = () => oneAccount;
@@ -103,7 +104,8 @@ const ACCT_COLORS = { A: C.acctA, B: C.acctB, C: C.acctC, D: '#bc8cff', E: '#e3b
 export const acctColor = (a) => ACCT_COLORS[a] || C.dim;
 // an account letter: one capital letter (A, B, C, ...)
 export const isAcct = (a) => typeof a === 'string' && /^[A-Z]$/.test(a);
-export const acctTag = (a) => (isAcct(a) && !oneAccount ? `<span class="acct acct-${a}" style="background:${acctColor(a)}" title="Claude account ${a}">${a}</span>` : '');
+// always: the letter even with one account on (the Accounts ▸ menu, where the others are turned back on)
+export const acctTag = (a, always = false) => (isAcct(a) && (always || !oneAccount) ? `<span class="acct acct-${a}" style="background:${acctColor(a)}" title="Claude account ${a}">${a}</span>` : '');
 export const ctxColor = (f) => (f > 0.9 ? C.red : f >= 0.7 ? C.gold : C.mint);
 
 // withHandoff: also the quiet "182k / 200k" against the size the session hands off at (ctx.handoff, handoff.js)
