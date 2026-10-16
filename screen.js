@@ -25,7 +25,8 @@
 //   menuDetails(lines) -> { kind, title, context, more, options: [{ n, label, desc, on }], sig, unnumbered? } | null
 //                                                   (unnumbered: options drawn without numbers, numbered 1..k here;
 //                                                   pick one with ↑/↓ and Enter, a digit does nothing)
-//   menuDetailsShown(raw, cols, rows) -> the same, from raw output (its rows unjoined)
+//   menuDetailsShown(raw, cols, rows) -> the same, from raw output (its rows unjoined, the last MENU_ROWS)
+//   MENU_ROWS                                        how many rows a menu reader gets (compose.js's, which see)
 //   menuIn(lines) -> { options: [{ n, label, on }] } | null   (menuDetails, cut down)
 //   menuShown(raw, cols, rows) -> the same, from raw output
 //   promptBox(lines), spinner(lines), effortShown(lines): ports of compose.js parsePromptBox, parseSpinner and
@@ -621,8 +622,11 @@ function menuIn(lines) {
 
 // over the rows as drawn: Claude Code pads a menu's rows to the full width, which ConPTY then marks as wrapped,
 // and joined they'd hide its options ("❯ 1. Yes      Some description   2. No" on one line)
-const menuDetailsShown = (raw, cols, rows) => menuDetails(render(raw, cols, rows, 40, false));
-const menuShown = (raw, cols, rows) => menuIn(render(raw, cols, rows, 40, false));
+// Claude Code 2.1.300 pins its prompt to the bottom of a tall screen, so a question can sit 30+ blank rows above the
+// last line; menuDetails itself looks at the last 40 non-empty lines (compose.js MENU_ROWS)
+const MENU_ROWS = 200;
+const menuDetailsShown = (raw, cols, rows) => menuDetails(render(raw, cols, rows, MENU_ROWS, false));
+const menuShown = (raw, cols, rows) => menuIn(render(raw, cols, rows, MENU_ROWS, false));
 
 // ---------- the rest of the chat's screen readers (ports of web/compose.js; keep each in step with its original) ----------
 // parsePromptBox: the prompt box at the bottom (between its two rules), over the rows as drawn: { text, lines } with
@@ -794,5 +798,5 @@ function panelDetails(lines, o = {}) {
 const PANEL_LINES = 80;
 const panelShown = (raw, cols, rows, o) => panelDetails(render(raw, cols, rows, PANEL_LINES, false, 'bg'), o);
 
-module.exports = { render, createScreen, menuIn, menuShown, menuDetails, menuDetailsShown, widthOf, promptBox, bashBox, spinner, effortShown, modeShown, bgOffered, rewindList, rewindMatches,
+module.exports = { render, createScreen, menuIn, menuShown, menuDetails, menuDetailsShown, MENU_ROWS, widthOf, promptBox, bashBox, spinner, effortShown, modeShown, bgOffered, rewindList, rewindMatches,
   panelDetails, panelShown };

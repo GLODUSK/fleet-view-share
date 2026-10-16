@@ -2911,10 +2911,13 @@ async function readActivity(key, ctx) {
     if (!p.alive) return [200, { ...base, busy: false, line: null, verb: null, detail: null, waiting: null, menu: null, effort: null, queue: [], mode: null, bg: false, prompt: null, panel: null }];
     const raw = await host.call('snapshot', p.id);
     const { cols, rows: high } = sizeOf(p);
-    const marked = SCREEN.render(typeof raw === 'string' ? raw : '', cols, high, 60, false, true);
-    const rows = marked.map((l) => l.replace(/[\x01-\x04]/g, '').replace(/\s+$/, '')).slice(-40);
+    // the menu reads further up (SCREEN.MENU_ROWS: a question can sit far above the prompt pinned to the bottom)
+    const tall = SCREEN.render(typeof raw === 'string' ? raw : '', cols, high, SCREEN.MENU_ROWS, false, true);
+    const plain = tall.map((l) => l.replace(/[\x01-\x04]/g, '').replace(/\s+$/, ''));
+    const marked = tall.slice(-60);
+    const rows = plain.slice(-40);
     const spin = SCREEN.spinner(rows);
-    let m = SCREEN.menuDetails(rows);
+    let m = SCREEN.menuDetails(plain);
     if (isSwitchConfirm(m)) m = null; // never shown (hideSwitch)
     // a command's panel (only when its top edge is on screen, as the page's tick: reading it costs another render),
     // weighed against a menu as shownFrom does

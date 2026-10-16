@@ -13,7 +13,7 @@
 // host re-keys it), text: the message as the feed shows it, nth: which of the messages with that text, counted
 // from the newest (the /rewind list has the newest at the bottom).
 import { termApi, hosts, screenMarked, screenReady, screenText, typeInto, growRows, onRekey } from './term.js';
-import { parsePromptBox, parseRewind, rewindMatches, parseMenu, parseSpinner } from './compose.js';
+import { parsePromptBox, parseRewind, rewindMatches, parseMenu, parseSpinner, MENU_ROWS } from './compose.js';
 import { handToChat } from './handto.js';
 
 const READY_MS = 1500; // its prompt shows, empty and idle, this long before /rewind goes in
@@ -35,7 +35,7 @@ async function run(j) {
   const alive = () => !!hosts.get(j.key)?.alive;
   const rows = (n = 60) => (alive() ? screenMarked(j.key, n).map((l) => l.replace(/[\x01\x02]/g, '')) : []);
   const boxRows = () => (alive() ? screenMarked(j.key, 60, { dim: true }) : []); // (parsePromptBox: dim is a suggestion)
-  const menu = () => (alive() ? parseMenu(screenText(j.key, 40, { rows: true })) : null);
+  const menu = () => (alive() ? parseMenu(screenText(j.key, MENU_ROWS, { rows: true })) : null);
   const write = (d) => {
     const t = termApi();
     if (!t || !alive()) return false;

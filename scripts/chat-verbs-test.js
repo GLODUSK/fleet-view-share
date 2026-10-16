@@ -165,6 +165,23 @@ const CHROME_RAW_YES = CHROME_RAW.replace('\x1b[2G\x1b[38;2;177;185;249m❯\x1b[
   ok('screen.js: the Claude in Chrome offer reads as kind chrome (unnumbered or numbered); trust, question and permission keep theirs');
 }
 
+// ---------- menus: a question far above the bottom (Claude Code 2.1.300 on a 103-row panel) ----------
+// the prompt is pinned to the bottom, so between the question and the last line (the rule with the chat's name) sit
+// 30+ blank rows: reading only the last 40 rows saw "3." and "4." without the ❯ and no menu
+{
+  const rows = ['● Ran 1 shell command', '', '─'.repeat(94), ' ☐ Tools home', '', ' │ Where should the Tools folder go?', '',
+    ' ❯ 1. J:\\Tools (Recommended)', '      Keep J:\\Tools as the one tools folder.', '   2. Z:\\Tools', '      Rename Z:\\Misc to Z:\\Tools.',
+    '   3. Type something.', '─'.repeat(94), '   4. Chat about this', '', ' Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ...Array(36).fill(''), `${'─'.repeat(72)} docker-disk-cleanup ─`];
+  const raw = rows.join('\r\n');
+  for (const m of [SCREEN.menuDetailsShown(raw, 94, 103), SCREEN.menuDetails(SCREEN.render(raw, 94, 103, SCREEN.MENU_ROWS, false))]) {
+    assert.equal(m?.kind, 'question');
+    assert.deepEqual(m.options.map((o) => [o.n, o.on]), [[1, true], [2, false], [3, false], [4, false]]);
+  }
+  assert.ok(SCREEN.menuShown(raw, 94, 103));
+  ok('screen.js: a question 36 blank rows above the bottom name rule still reads as the menu');
+}
+
 // ---------- menus: an MCP server's elicitation, its options on one line ----------
 // Claude Code 2.1.296 on a Supabase execute_sql with destructive SQL (issue #431); the first lines' indent is a guess
 // (pad), so 0-2 spaces are read alike. on: the ❯ before "Decline" instead, as after ↓

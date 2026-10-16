@@ -205,7 +205,7 @@ import { mountClone } from './clone.js';
 import { mountSetup } from './setup.js';
 import { mountPhone } from './phone.js';
 import { mountHousekeeping } from './housekeeping.js';
-import { MODEL_IDS, EFFORTS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults, hostOfChat } from './compose.js';
+import { MODEL_IDS, EFFORTS, MENU_ROWS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults, hostOfChat } from './compose.js';
 import { forkAt } from './forkat.js';
 import { handToChat } from './handto.js';
 import { openKeeps, setRules } from './keeps.js';
@@ -2884,12 +2884,12 @@ async function tellClaudeName(s, name) {
     await new Promise((res) => setTimeout(res, 200));
   }
   const lines = screenText(id, 40);
-  if (parseMenu(lines)) return 'Claude is asking something';
+  if (parseMenu(screenText(id, MENU_ROWS))) return 'Claude is asking something';
   if (parseSpinner(lines)) return 'Claude is busy';
   const box = parsePromptBox(screenMarked(id, 40, { dim: true }));
   if (!box) return 'something covers its prompt';
   if (box.text) return 'its prompt has text in it';
-  const w = await sendText(id, `/rename ${name}`, { beforeEnter: () => { const l = screenText(id, 40); return !l.length || !!parseMenu(l); } });
+  const w = await sendText(id, `/rename ${name}`, { beforeEnter: () => { const l = screenText(id, MENU_ROWS); return !l.length || !!parseMenu(l); } });
   return w.ok ? null : w.menu ? 'a question came up' : w.message || 'it could not be typed';
 }
 function removeFromMenu(id) {

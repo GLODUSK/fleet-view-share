@@ -54,7 +54,7 @@
 // question, a permission prompt or the trust dialog (the text would land in it, and a digit would pick an
 // option) gets its text later: it waits in the queue below and comes back as { ok: true, queued: true }.
 import { ensureLive, sendText, isHosted, openElsewhere, termApi, screenText, screenReady, onRekey, noTermMsg } from './term.js';
-import { parseMenu } from './compose.js';
+import { parseMenu, MENU_ROWS } from './compose.js';
 // a team's limits, its POST /teams body and firstWords live with the New team form's rules (pure: the phone imports them)
 import { ORDER_MAX, TEAM_MAX, firstWords, newTeamBody } from './team-form.js';
 export { firstWords };
@@ -125,7 +125,7 @@ const SCREEN_WAIT_MS = 10000, SCREEN_POLL_MS = 250;
 const menuOn = (lines) => !!parseMenu(lines);
 async function menuUp(id) {
   for (const until = Date.now() + SCREEN_WAIT_MS; ;) {
-    const lines = screenText(id, 40, { rows: true }); // the first call starts building the view
+    const lines = screenText(id, MENU_ROWS, { rows: true }); // the first call starts building the view
     if (screenReady(id) && lines.length) return menuOn(lines);
     if (Date.now() >= until) return null;
     await sleep(SCREEN_POLL_MS);
@@ -134,7 +134,7 @@ async function menuUp(id) {
 // just before the Enter: the view is built by now, so one look (a screen that went unreadable counts as a menu)
 function menuNow(id) {
   if (!screenReady(id)) return true;
-  const lines = screenText(id, 40, { rows: true });
+  const lines = screenText(id, MENU_ROWS, { rows: true });
   return !lines.length || menuOn(lines);
 }
 
@@ -224,7 +224,7 @@ function settle(q, ok, message) {
 // any menu on its screen (true), none (false), or null while its screen can't be read yet (the first look starts
 // building its view)
 function anyMenu(id) {
-  const lines = screenText(id, 40, { rows: true });
+  const lines = screenText(id, MENU_ROWS, { rows: true });
   if (!screenReady(id) || !lines.length) return null;
   return !!parseMenu(lines);
 }

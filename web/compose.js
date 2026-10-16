@@ -355,6 +355,10 @@ export function parseMode(lines) {
   return null;
 }
 
+// How many screen rows a menu reader gets. Claude Code 2.1.300 pins its prompt to the bottom of a tall panel, so a
+// question can sit 30+ blank rows above the last line (its name rule); parseMenu itself looks at the last 40
+// non-empty lines of what it is given
+export const MENU_ROWS = 200;
 // A select menu at the bottom of the screen: Claude Code's permission prompts ("Do you want to proceed?",
 // "Do you want to make this edit to x?"), AskUserQuestion, the plan approval ("Would you like to proceed?"),
 // the folder trust question, an MCP server's elicitation. Only when at least two options numbered one after another
@@ -1412,7 +1416,7 @@ export function mountCompose(slot, s) {
   }
 
   // a menu on the live screen now, not the one the last poll saw (it is up to 400 ms old)
-  const menuNow = (id) => (hosts.get(id)?.alive ? parseMenu(screenText(id, 40, { rows: true })) : null);
+  const menuNow = (id) => (hosts.get(id)?.alive ? parseMenu(screenText(id, MENU_ROWS, { rows: true })) : null);
   // the host says Claude waits on a menu (its pid file's waitingFor: a question, "approve …"), whatever the screen
   // here shows; not a panel ("dialog open": closePanel and closeHostPanel close those)
   const hostAsks = (id) => { const h = hosts.get(id); return !!h?.alive && h.status === 'waiting' && !!h.waitingFor && h.waitingFor !== 'dialog open'; };
@@ -2836,7 +2840,7 @@ export function mountCompose(slot, s) {
     let panel = alive && lines.some((l) => /▔{12}/.test(l)) ? parsePanel(screenMarked(st.id, PANEL_LINES), { loose }) : null;
     lines = lines.slice(-40);
     const spin = parseSpinner(lines);
-    let menu = alive && lines.length ? parseMenu(screenText(st.id, 40, { rows: true })) : null;
+    let menu = alive && lines.length ? parseMenu(screenText(st.id, MENU_ROWS, { rows: true })) : null;
     // a model or effort switch's question is never shown, not even for a moment (Henry, 2026-10-15): whoever asked for
     // the switch wants it. One this tab typed (its last "/command" a /model or /effort) is answered Yes at once; one the
     // phone, another machine or Dynamic asked for, the server answers (api.js watchSwitch, switchNow), so a Yes here
