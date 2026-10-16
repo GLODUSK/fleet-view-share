@@ -6,7 +6,9 @@
 // ms, where ("upper left"...), x, y, w, h }. At LOG_MAX it moves to sky-events.log.1 (replacing the older one).
 // "What was that at 3:42?": the line whose local time is just before then, and still running (ms) at it.
 // The kinds switched off live in <data>/sky-events.json ({ off: [kind] }); the map reads them (GET) every couple of minutes
-// and never shows those again; one running when it is switched off ends.
+// and never shows those again; one running when it is switched off ends. DEFAULT_OFF: kinds off until someone switches
+// them on (offRemove, or an off list without them), which the file keeps as { on: [kind] }; web/map.js SKY_OFF_DEFAULT
+// is the same list, for the moment before the map has read this.
 //
 //   createSkyEvents({ dir }) -> { log(shown), recent(n), off(), setOff(list), route(method, body) -> [code, out] }
 //   GET  /sky-events            { off, recent: the last 50 lines, newest last }
@@ -17,6 +19,9 @@ const path = require('path');
 
 const LOG_MAX = 1 << 20, OFF_MAX = 200, RECENT = 50;
 const KIND = /^[a-z0-9-]{1,40}$/;
+// (space events: the lone planet, the drifting black hole (lens), its devouring and the hunt scene that sends it; far
+// events: the black hole ones. Henry, 2026-10-16: planets and black holes only as part of a star system a voyage arrives at)
+const DEFAULT_OFF = ['planet', 'lens', 'devour', 'scene-hunt', 'runaway-bh', 'bh-merger', 'mass-gap', 'ns-bh', 'binary-smbh', 'evaporation', 'tde'];
 const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : null);
 const num = (v) => (Number.isFinite(v) ? Math.round(v) : null);
 const pad = (v) => String(v).padStart(2, '0');
@@ -27,12 +32,17 @@ function createSkyEvents({ dir, now = () => new Date() }) {
   let off = null;
   const readOff = () => {
     if (off) return off;
-    try { const j = JSON.parse(fs.readFileSync(OFF, 'utf8')); off = Array.isArray(j.off) ? j.off.filter((k) => KIND.test(k)).slice(0, OFF_MAX) : []; } catch { off = []; }
+    let j = {};
+    try { j = JSON.parse(fs.readFileSync(OFF, 'utf8')) || {}; } catch {}
+    const list = Array.isArray(j.off) ? j.off.filter((k) => typeof k === 'string' && KIND.test(k)) : [], on = Array.isArray(j.on) ? j.on : [];
+    off = [...new Set(list.concat(DEFAULT_OFF.filter((k) => !on.includes(k))))].slice(0, OFF_MAX);
     return off;
   };
+  // the list as it is to be (a DEFAULT_OFF kind left out of it is kept as switched on)
   const writeOff = (list) => {
     off = [...new Set(list.filter((k) => typeof k === 'string' && KIND.test(k)))].slice(0, OFF_MAX);
-    try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(OFF, JSON.stringify({ off }, null, 2)); } catch {}
+    const on = DEFAULT_OFF.filter((k) => !off.includes(k));
+    try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(OFF, JSON.stringify({ off, on }, null, 2)); } catch {}
     return off;
   };
   function log(shown) {
@@ -66,4 +76,4 @@ function createSkyEvents({ dir, now = () => new Date() }) {
   return { log, recent, off: readOff, setOff: writeOff, route };
 }
 
-module.exports = { createSkyEvents };
+module.exports = { createSkyEvents, DEFAULT_OFF };

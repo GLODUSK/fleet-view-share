@@ -571,6 +571,15 @@ const METEOR_N = 6;
 // straight down (a pick), at SHOWER_SPEED times METEOR_SPEED and with a SHOWER_TAIL px tail (picks)
 const SHOWER_N = [4, 6], SHOWER_MS = 1500, SHOWER_GAP = 10e3, SHOWER_Y = [0.06, 0.2], SHOWER_X = [0.12, 0.88];
 const SHOWER_FROM = [24, 120], SHOWER_FAN = 1.25, SHOWER_SPEED = [0.85, 1.25], SHOWER_TAIL = [90, 170];
+// the bloom (Henry 2026-10-15: "a glow on the brightest points only"): the brightest points' light spreads into a soft, wide,
+// faint halo round each, as a lens blooms, so they read as light; made by the sky's shader where each point is made (bloom()),
+// so nothing dim gets it and it costs no pass of its own. BLOOM_R: a point's halo's radius (CSS px; a Gaussian's 1/e), a larger
+// light's its own size and that together; per kind its light at the middle, of the point's: BLOOM_STAR the brightest field
+// stars' (from BLOOM_STAR_AB up their layer's range; their halo BLOOM_STAR_R star px, inside STAR_EDGE), BLOOM_METEOR a shooting
+// star's head, BLOOM_ENGINE an engine's core (its halo at most BLOOM_ENGINE_R of the hull's half-length, inside its box),
+// BLOOM_BOLT a bolt's, a torpedo's and an entry trail's head, BLOOM_FLASH a hit's or a blast's flash, BLOOM_FIRE a fireball while hot
+const BLOOM_R = 5, BLOOM_STAR = 0.3, BLOOM_STAR_AB = 0.35, BLOOM_STAR_R = 2, BLOOM_METEOR = 0.3, BLOOM_ENGINE = 0.45;
+const BLOOM_ENGINE_R = 0.1, BLOOM_BOLT = 0.22, BLOOM_FLASH = 0.3, BLOOM_FIRE = 0.18;
 // the moon (see "Look"): MOON_D its disc's diameter (CSS px), MOON_A its lit side's alpha, MOON_DARK the dark side's
 // alpha (it hides the stars behind it a little) and MOON_EARTH its earthshine's light (most near new moon), MOON_HALO
 // the glow's alpha at the limb at full moon (it scales with the lit share) out to MOON_HALO_R radii; MOON_LIT,
@@ -640,7 +649,10 @@ const SCENE_P = 0.4;
 // differ), then held so its reach is FAR_REACH_K of that side (Henry, 2026-10-14: "dude that is TINY ... not all of
 // them the same but nothing should be that small"); its alphas times FAR_GAIN (at most 1); its life times FAR_LIFE
 // ([slow, quick]: "events dont last long"); no caption on screen (Henry, 2026-10-14: "remove them"), sky-events.log
-// names each; SKY_OFF_MS: how often the kinds switched off are read again
+// names each; SKY_OFF_MS: how often the kinds switched off are read again; SKY_OFF_DEFAULT: the kinds off until switched
+// on, as sky-events.js DEFAULT_OFF (Henry, 2026-10-16: no lone planet and no drifting black hole; planets and black holes
+// only as part of a star system a voyage arrives at), off too before /sky-events has answered and with no server
+const SKY_OFF_DEFAULT = ['planet', 'lens', 'devour', 'scene-hunt', 'runaway-bh', 'bh-merger', 'mass-gap', 'ns-bh', 'binary-smbh', 'evaporation', 'tde'];
 const FAR_GAP = [35e3, 80e3], FAR_N = 10, FAR_CLEAR = 60, FAR_EDGE = 20, FAR_TRIES = 48, FAR_SCALE_AT = 900, FAR_SCALE_K = [0.8, 2.5];
 const FAR_SIZE = [2, 3.5], FAR_REACH_K = [0.09, 0.2], FAR_GAIN = 1.3, FAR_LIFE = [2.5, 1.5];
 const SKY_OFF_MS = 120e3;
@@ -727,6 +739,10 @@ const SHIP_HAZE = [0.08, 0.106, 0.13], SHIP_HAZE_A = 0.8, SHIP_HAZE_MAX = 0.95, 
 const SHIP_MIST = 0.35;
 const SHIP_RIM = [0.6, 0.72, 1], SHIP_RIM_WARM = [1, 0.84, 0.64], SHIP_RIM_A = 0.16;
 const SHIP_WINDOW = [1, 0.78, 0.46], SHIP_WINDOW_A = 0.32, SHIP_WINDOW_P = 0.14, SHIP_ENGINE = [0.6, 0.78, 1], SHIP_ENGINE_A = 0.3;
+// its light (see "Look"): the hull lit as a solid with rounded edges SHIP_ROUND deep (in half-lengths): SHIP_KEY, SHIP_KEY_A the
+// star's light on it (rgb 0-1, alpha, through the haze as the rim is), SHIP_SPEC_A the warm sheen on its edges, SHIP_SHADE how
+// dark the side away from it is (of the lit side's colour); SHIP_PANEL its plates' size [along, across] (half-lengths)
+const SHIP_KEY = [0.72, 0.8, 1], SHIP_KEY_A = 0.15, SHIP_SPEC_A = 0.08, SHIP_SHADE = 0.72, SHIP_ROUND = 0.028, SHIP_PANEL = [0.11, 0.05];
 // its arrival out of hyperspace (see "Look"): the jump point opens SHIP_JUMP_AT of the way across the window along its path (from
 // the side it comes in by, a pick) over SHIP_JUMP_OPEN ms, then the bow breaks out. It comes out SHIP_JUMP_B half-lengths ahead
 // of where its cruise alone would take it, the lead shrinking with time constant SHIP_JUMP_TAU ms (so it leaves the rift at
@@ -834,11 +850,14 @@ const distPick = (o) => (o && o.far != null ? o.far : Math.random() ** DIST_POW)
 // SYSTEM_LEAVE ms (shrinking to SYSTEM_GONE of its size as it fades) and is gone. Its outer orbit's long half-axis is
 // SYSTEM_SPAN of the window's width (a pick; times 1 - DIST_SHRINK far). Its orbits' plane is seen SYSTEM_OPEN open (the sine
 // of our height over it, a pick, either way: flat and wide), rolled up to SYSTEM_ROLL radians. SYSTEM_STARS: the chance of
-// one, two or three stars; SYSTEM_CLASS: per star class [rgb, radius (CSS px, times SYSTEM_STAR_K), light, look, weight]
-// (blue, white, yellow, orange, red dwarf, white dwarf, red giant, orange giant, pulsar, Wolf-Rayet, brown dwarf; look: the
-// shader's sysStar by number, 0 a plain star, 1 a giant, 2 a pulsar, 3 a Wolf-Rayet star, 4 a brown dwarf); a pair orbits at
+// one, two or three stars; SYSTEM_CLASS: per star class [rgb, radius (CSS px, times SYSTEM_STAR_K: the stars stand out
+// over the planets), light, look, weight] (blue, white, yellow, orange, red dwarf, white dwarf, red giant, orange giant,
+// pulsar, Wolf-Rayet, brown dwarf, black hole; look: the shader's sysStar by number, 0 a plain star, 1 a giant, 2 a pulsar,
+// 3 a Wolf-Rayet star, 4 a brown dwarf, 5 a black hole: its radius its shadow's, its rgb its disc's hot colour, never
+// picked by weight); a pair orbits at
 // SYSTEM_SEP of the outer orbit (a pick) every SYSTEM_PAIR s (a pick), a third star far out at SYSTEM_THIRD of it every
-// SYSTEM_THIRD_T s (a pick). A giant first with a companion
+// SYSTEM_THIRD_T s (a pick). A pair's second star is now and then a black hole (SYSTEM_HOLE_P, not a feeding pair's; the only
+// black hole in the sky). A giant first with a companion
 // feeds it (SYSTEM_FEED_P: the companion then turned into a white dwarf or a pulsar, SYSTEM_FEED_TO): they orbit close, about
 // SYSTEM_FEED_SEP giant radii (plus 3 CSS px) apart (a pick within [1, 1.2] of that), its planets kept SYSTEM_FEED_OUT
 // separations out; a single giant keeps its planets SYSTEM_GIANT_OUT of its radii out. SYSTEM_PLANETS: how many (a
@@ -846,7 +865,8 @@ const distPick = (o) => (o && o.far != null ? o.far : Math.random() ** DIST_POW)
 // SYSTEM_IN of the outer orbit out (and past a pair's reach), each orbit SYSTEM_STEP times the last (a pick); the innermost
 // goes round in SYSTEM_T0 s (a pick) and the rest by Kepler (period ~ radius^1.5).
 // SYSTEM_KINDS: per kind [its two colours and its air's (rgb 0-1), the air's thickness (share of its radius), its radius
-// (CSS px, times the window's SYSTEM_SIZE), its rings [chance, style: 1 broad and bright, 2 narrow and faint, 3 dark dust], where
+// (CSS px, times the window's SYSTEM_SIZE; Henry, 2026-10-16: "they vary in size", from a dwarf about an eighth of the
+// biggest giant through small rocks and Earths to the giants, none bigger than before so the star stays the biggest), its rings [chance, style: 1 broad and bright, 2 narrow and faint, 3 dark dust], where
 // it lives (0 innermost, 1 outermost), its look (the shader's sysSurf by number), its weight, at most how many moons]; a kind
 // already picked weighs SYSTEM_AGAIN as much again, and a system of four or more planets has at least one giant (one of
 // SYSTEM_GIANTS); SYSTEM_DWARF: the dwarf world's kind. SYSTEM_SIZE: the planets' and stars' size, the window's shorter side
@@ -858,36 +878,37 @@ const distPick = (o) => (o && o.far != null ? o.far : Math.random() ** DIST_POW)
 const SYSTEM_DEPTH = EVENT_DEPTH.far;
 const SYSTEM_AT = [0.4, 0.6], SYSTEM_ARRIVE = 5000, SYSTEM_STAY = [360e3, 600e3], SYSTEM_LEAVE = 20e3, SYSTEM_GONE = 0.3;
 const SYSTEM_SPAN = [0.2, 0.28], SYSTEM_OPEN = [0.16, 0.32], SYSTEM_ROLL = 0.18, SYSTEM_STARS = [0.55, 0.35, 0.1];
-const SYSTEM_SIZE_AT = 900, SYSTEM_SIZE_K = [0.85, 1.35], SYSTEM_STAR_K = 1.5;
+const SYSTEM_SIZE_AT = 900, SYSTEM_SIZE_K = [0.85, 1.35], SYSTEM_STAR_K = 2.1;
 const SYSTEM_CLASS = [
   [[0.66, 0.76, 1], 1.9, 1.25, 0, 0.8], [[0.9, 0.93, 1], 1.6, 1.05, 0, 1.2], [[1, 0.93, 0.78], 1.5, 0.95, 0, 1.6],
   [[1, 0.76, 0.5], 1.35, 0.85, 0, 1.4], [[1, 0.52, 0.34], 1.15, 0.7, 0, 1.2], [[0.86, 0.9, 1], 0.8, 0.8, 0, 0.35],
   [[1, 0.56, 0.32], 4.6, 0.9, 1, 0.55], [[1, 0.76, 0.48], 3.6, 0.95, 1, 0.3], [[0.72, 0.84, 1], 0.6, 1.1, 2, 0.35],
-  [[0.7, 0.86, 1], 1.8, 1.3, 3, 0.3], [[0.78, 0.36, 0.42], 2.2, 0.3, 4, 0.4],
+  [[0.7, 0.86, 1], 1.8, 1.3, 3, 0.3], [[0.78, 0.36, 0.42], 2.2, 0.3, 4, 0.4], [[1, 0.8, 0.56], 1.2, 0.9, 5, 0],
 ];
+const SYSTEM_HOLE = 11, SYSTEM_HOLE_P = 0.3, SYSTEM_PICK = SYSTEM_CLASS.filter((c) => c[4] > 0);
 const SYSTEM_SEP = [0.06, 0.1], SYSTEM_PAIR = [40, 80], SYSTEM_THIRD = [0.9, 1.1], SYSTEM_THIRD_T = [900, 1500];
 const SYSTEM_FEED_P = 0.75, SYSTEM_FEED_TO = [5, 8], SYSTEM_FEED_SEP = 2.4, SYSTEM_FEED_OUT = 2.6, SYSTEM_GIANT_OUT = 3;
 const SYSTEM_NEB_P = [0.7, 0.2], SYSTEM_NEB_A = [0.5, 0.9], SYSTEM_NEB_K = 0.55, SYSTEM_NEB_F = 0.5;
 const SYSTEM_PLANETS = [4, 8], SYSTEM_DWARF_P = 0.4, SYSTEM_IN = 0.14, SYSTEM_STEP = [1.28, 1.55], SYSTEM_T0 = [80, 140];
 const SYSTEM_KINDS = [
-  [[0.64, 0.62, 0.6], [0.36, 0.35, 0.34], [0, 0, 0], 0, 2.1, [0, 0], 0.05, 0, 1.2, 0], // cratered rock (a Mercury)
-  [[0.13, 0.1, 0.09], [1, 0.42, 0.12], [1, 0.5, 0.3], 0.02, 2.2, [0, 0], 0, 1, 0.6, 0], // a lava world, glowing cracks
-  [[0.95, 0.86, 0.62], [0.8, 0.66, 0.42], [1, 0.9, 0.7], 0.07, 2.8, [0, 0], 0.15, 2, 0.9, 0], // a cloud world (a Venus)
-  [[0.8, 0.45, 0.26], [0.5, 0.27, 0.17], [1, 0.66, 0.5], 0.025, 2.3, [0, 0], 0.3, 3, 1, 1], // a rust desert (a Mars)
-  [[0.07, 0.22, 0.5], [0.3, 0.4, 0.2], [0.45, 0.68, 1], 0.06, 2.9, [0, 0], 0.28, 4, 0.9, 1], // an Earth: seas, land, clouds
-  [[0.05, 0.24, 0.55], [0.85, 0.9, 0.95], [0.4, 0.7, 1], 0.07, 3.1, [0, 0], 0.38, 5, 0.6, 1], // an ocean world
-  [[0.88, 0.92, 0.98], [0.07, 0.2, 0.42], [0.6, 0.75, 1], 0.04, 2.7, [0, 0], 0.22, 6, 0.45, 0], // an eyeball world (tidally locked)
-  [[0.2, 0.19, 0.2], [0.1, 0.09, 0.1], [0.75, 0.6, 0.45], 0.04, 2.6, [0, 0], 0.25, 2, 0.35, 0], // a carbon world, dark and sooty
-  [[0.9, 0.86, 0.8], [0.55, 0.32, 0.22], [0, 0, 0], 0, 2, [0, 0], 0.75, 7, 0.8, 0], // a cracked ice world (a Europa)
-  [[0.78, 0.62, 0.5], [0.5, 0.36, 0.3], [0.6, 0.75, 1], 0.015, 1.5, [0, 0], 1, 0, 0.8, 1], // a dwarf world, a bright plain (a Pluto)
-  [[0.88, 0.6, 0.28], [0.66, 0.42, 0.2], [1, 0.72, 0.38], 0.12, 2.6, [0, 0], 0.6, 2, 0.6, 0], // an orange haze world (a Titan)
-  [[0.92, 0.85, 0.4], [0.85, 0.5, 0.2], [0, 0, 0], 0, 2, [0, 0], 0.45, 8, 0.45, 0], // a sulphur world dotted with volcanoes (an Io)
+  [[0.64, 0.62, 0.6], [0.36, 0.35, 0.34], [0, 0, 0], 0, 1.3, [0, 0], 0.05, 0, 1.2, 0], // cratered rock (a Mercury)
+  [[0.13, 0.1, 0.09], [1, 0.42, 0.12], [1, 0.5, 0.3], 0.02, 1.6, [0, 0], 0, 1, 0.6, 0], // a lava world, glowing cracks
+  [[0.95, 0.86, 0.62], [0.8, 0.66, 0.42], [1, 0.9, 0.7], 0.07, 2.6, [0, 0], 0.15, 2, 0.9, 0], // a cloud world (a Venus)
+  [[0.8, 0.45, 0.26], [0.5, 0.27, 0.17], [1, 0.66, 0.5], 0.025, 1.7, [0, 0], 0.3, 3, 1, 1], // a rust desert (a Mars)
+  [[0.07, 0.22, 0.5], [0.3, 0.4, 0.2], [0.45, 0.68, 1], 0.06, 2.8, [0, 0], 0.28, 4, 0.9, 1], // an Earth: seas, land, clouds
+  [[0.05, 0.24, 0.55], [0.85, 0.9, 0.95], [0.4, 0.7, 1], 0.07, 3.2, [0, 0], 0.38, 5, 0.6, 1], // an ocean world
+  [[0.88, 0.92, 0.98], [0.07, 0.2, 0.42], [0.6, 0.75, 1], 0.04, 2.4, [0, 0], 0.22, 6, 0.45, 0], // an eyeball world (tidally locked)
+  [[0.2, 0.19, 0.2], [0.1, 0.09, 0.1], [0.75, 0.6, 0.45], 0.04, 2.2, [0, 0], 0.25, 2, 0.35, 0], // a carbon world, dark and sooty
+  [[0.9, 0.86, 0.8], [0.55, 0.32, 0.22], [0, 0, 0], 0, 1.4, [0, 0], 0.75, 7, 0.8, 0], // a cracked ice world (a Europa)
+  [[0.78, 0.62, 0.5], [0.5, 0.36, 0.3], [0.6, 0.75, 1], 0.015, 0.95, [0, 0], 1, 0, 0.8, 1], // a dwarf world, a bright plain (a Pluto)
+  [[0.88, 0.6, 0.28], [0.66, 0.42, 0.2], [1, 0.72, 0.38], 0.12, 1.9, [0, 0], 0.6, 2, 0.6, 0], // an orange haze world (a Titan)
+  [[0.92, 0.85, 0.4], [0.85, 0.5, 0.2], [0, 0, 0], 0, 1.4, [0, 0], 0.45, 8, 0.45, 0], // a sulphur world dotted with volcanoes (an Io)
   [[0.93, 0.83, 0.66], [0.72, 0.46, 0.3], [1, 0.84, 0.62], 0.04, 8, [0.25, 3], 0.7, 9, 1.3, 3], // a banded gas giant and its storm
   [[0.92, 0.84, 0.62], [0.78, 0.66, 0.44], [1, 0.9, 0.7], 0.04, 7, [0.95, 1], 0.8, 9, 1.1, 2], // a ringed golden giant (a Saturn)
-  [[0.36, 0.18, 0.14], [0.16, 0.08, 0.08], [1, 0.45, 0.25], 0.06, 6.5, [0, 0], 0.02, 9, 0.45, 0], // a hot Jupiter, its night side glowing
-  [[0.62, 0.86, 0.9], [0.52, 0.78, 0.86], [0.6, 0.9, 1], 0.05, 5, [0.6, 2], 0.9, 10, 0.9, 2], // a pale ice giant (a Uranus)
-  [[0.24, 0.42, 0.86], [0.12, 0.24, 0.62], [0.45, 0.65, 1], 0.05, 4.8, [0.35, 2], 1, 10, 0.9, 1], // a deep blue ice giant (a Neptune)
-  [[0.7, 0.78, 0.9], [0.56, 0.62, 0.82], [0.7, 0.8, 1], 0.1, 3.8, [0.12, 2], 0.5, 2, 0.6, 1], // a puffy mini-Neptune
+  [[0.36, 0.18, 0.14], [0.16, 0.08, 0.08], [1, 0.45, 0.25], 0.06, 6, [0, 0], 0.02, 9, 0.45, 0], // a hot Jupiter, its night side glowing
+  [[0.62, 0.86, 0.9], [0.52, 0.78, 0.86], [0.6, 0.9, 1], 0.05, 4.6, [0.6, 2], 0.9, 10, 0.9, 2], // a pale ice giant (a Uranus)
+  [[0.24, 0.42, 0.86], [0.12, 0.24, 0.62], [0.45, 0.65, 1], 0.05, 4.4, [0.35, 2], 1, 10, 0.9, 1], // a deep blue ice giant (a Neptune)
+  [[0.7, 0.78, 0.9], [0.56, 0.62, 0.82], [0.7, 0.8, 1], 0.1, 3.2, [0.12, 2], 0.5, 2, 0.6, 1], // a puffy mini-Neptune
 ];
 const SYSTEM_AGAIN = 0.35, SYSTEM_DWARF = 9, SYSTEM_GIANTS = [12, 13, 15, 16];
 const SYSTEM_BELT_P = 0.65, SYSTEM_DISC_P = 0.12, SYSTEM_TRAIL = 0.1, SYSTEM_ORBIT = 0.07, SYSTEM_PL_N = 9;
@@ -1538,10 +1559,12 @@ if (typeof location !== 'undefined' && /[?&](fixture|debug)(=|&|$)/.test(locatio
     // a planet now of that kind (PLANET_KINDS' index; null: a pick), parked in a corner, skip seconds into its stay
     planet: (kind, skip, far) => { if (!I) return false; planetForce = kind == null ? null : Number(kind); const ok = eventStart(performance.now(), 'planet', far == null ? {} : { far: Number(far) }); planetForce = null; if (ok && skip > 0) eventSkip('planet', skip); return ok; },
     // a star system now, parked near the middle, skip seconds into its stay (past SYSTEM_ARRIVE: grown in); cls: its first star's class (SYSTEM_CLASS's index; null: a pick), feed:
-    // true for a giant feeding a companion (cls then a giant's: 6 or 7), far: its depth (0-1; null: a pick)
+    // true for a giant feeding a companion (cls then a giant's: 6 or 7), 'hole' for a black hole companion (cls null: a
+    // yellow star), far: its depth (0-1; null: a pick)
     system: (skip, cls, feed, far) => {
       if (!I) return false;
-      systemForce = cls == null && !feed ? null : { cls: cls == null ? 6 : Number(cls), feed: !!feed };
+      const hole = feed === 'hole';
+      systemForce = cls == null && !feed ? null : { cls: cls == null ? (hole ? 2 : 6) : Number(cls), feed: !hole && !!feed, hole };
       let ok;
       try { ok = eventStart(performance.now(), 'system', far == null ? {} : { far: Number(far) }); } finally { systemForce = null; }
       if (ok && skip > 0) eventSkip('system', skip);
@@ -1706,7 +1729,7 @@ function createInstance(state) {
     scene: null,
     // the far event running ({ name, at, ms, cam, x, y, parts, quick }: farStart), when the next is due (0: not yet
     // planned), the kinds still to show before any repeats (farPick), the kinds switched off (/sky-events) and when to read them again
-    far: null, farAt: 0, farBag: [], skyOff: new Set(), skyOffAt: 0,
+    far: null, farAt: 0, farBag: [], skyOff: new Set(SKY_OFF_DEFAULT), skyOffAt: 0,
     sats: new Map(), satRun: [], // the satellites (key -> satMake's), the running agents' keys (rebuild)
     // the deploys' rockets flying (rocketLaunch), how many went up, and the deploys seen (id -> state; ingestDeploys)
     rockets: [], rocketsN: 0, dpSeen: new Map(), dpInit: false,
@@ -4169,24 +4192,24 @@ function parkLook(ev, now) {
 // how its plane is seen, its stars (a pair's orbit, a third far out) and its planets (each orbit's radius in the outer one's,
 // period and phase, kind, tint, size, rings and moons), and maybe an asteroid belt between two orbits or a young system's
 // dusty disc. The director never starts one (auto: false), and it does not count against EVENT_MAX (bg: it is the backdrop)
-let systemForce = null; // tests (__map.system): its first star's class (SYSTEM_CLASS's index), and with 'feed' a feeding pair
+let systemForce = null; // tests (__map.system): its first star's class (SYSTEM_CLASS's index), and with 'feed' a feeding pair, with 'hole' a black hole companion
 registerEvent('system', {
   auto: false, bg: true,
   start(t, o) {
     const W = I.skyW || 1, H = I.skyH || 1, rnd = Math.random, cam = eventCam(SYSTEM_DEPTH), far = distPick(o), fs = 1 - DIST_SHRINK * far, sz = systemSize();
     // its stars first (a feeding pair needs room): each of a class, the brighter first (the pair goes round its middle of mass,
     // the bigger star the heavier, the third far out); a giant first with a companion often feeds it, which is then dead
-    const u = rnd(), nS = systemForce ? (systemForce.feed ? 2 : 1) : u < SYSTEM_STARS[0] ? 1 : u < SYSTEM_STARS[0] + SYSTEM_STARS[1] ? 2 : 3;
+    const u = rnd(), nS = systemForce ? (systemForce.feed || systemForce.hole ? 2 : 1) : u < SYSTEM_STARS[0] ? 1 : u < SYSTEM_STARS[0] + SYSTEM_STARS[1] ? 2 : 3;
     const star = (c) => ({ rgb: c[0], r: c[1] * SYSTEM_STAR_K * sz * pickIn([0.85, 1.15]) * fs, L: c[2], look: c[3], cls: SYSTEM_CLASS.indexOf(c) });
     const stars = [];
-    for (let i = 0; i < nS; i++) stars.push(star(i === 0 && systemForce && systemForce.cls != null ? SYSTEM_CLASS[systemForce.cls] : pickW(SYSTEM_CLASS, rnd)));
+    for (let i = 0; i < nS; i++) stars.push(star(i === 0 && systemForce && systemForce.cls != null ? SYSTEM_CLASS[systemForce.cls] : pickW(SYSTEM_PICK, rnd)));
     stars.sort((a, b) => b.r * b.L - a.r * a.L);
     const giant = stars[0].look === 1;
     let feedPx = 0;
     if (giant && nS >= 2 && (systemForce ? !!systemForce.feed : rnd() < SYSTEM_FEED_P)) {
       stars[1] = star(SYSTEM_CLASS[SYSTEM_FEED_TO[rnd() < 0.5 ? 0 : 1]]);
       feedPx = (SYSTEM_FEED_SEP * stars[0].r + 3) * pickIn([1, 1.2]);
-    }
+    } else if (nS >= 2 && (systemForce ? !!systemForce.hole : rnd() < SYSTEM_HOLE_P)) stars[1] = star(SYSTEM_CLASS[SYSTEM_HOLE]);
     // (a feeding pair's system is big enough that its planets clear it)
     const R = Math.max(pickIn(SYSTEM_SPAN) * W * fs, feedPx * 3.4);
     const arr = !!systemArrive;
@@ -4278,9 +4301,9 @@ function systemNow() {
   const stars = ev.stars.map((q, i) => { const [sx, sy, sz2] = at(sp[i][0], sp[i][1]); return { x: sx, y: sy, z: sz2, r: q.r * sz, rgb: q.rgb, L: q.L, look: q.look, cls: q.cls }; });
   const planets = ev.planets.map((q) => {
     const th = q.ph + q.w * s, [px, py, pz] = at(q.ar * Math.cos(th), q.ar * Math.sin(th));
-    // lit by the star whose light is the most there
+    // lit by the star whose light is the most there (a black hole lights nothing)
     let best = null, bw = -1;
-    for (const st of stars) { const d2 = ((st.x - px) / R) ** 2 + ((st.y - py) / R) ** 2 + (st.z - pz) ** 2 + 1e-4, w = st.L / d2; if (w > bw) { bw = w; best = st; } }
+    for (const st of stars) { if (st.look === 5) continue; const d2 = ((st.x - px) / R) ** 2 + ((st.y - py) / R) ** 2 + (st.z - pz) ** 2 + 1e-4, w = st.L / d2; if (w > bw) { bw = w; best = st; } }
     const lx = (best.x - px) / R, ly = (best.y - py) / R, lz = best.z - pz, ll = Math.hypot(lx, ly, lz) || 1;
     return { x: px, y: py, z: pz, r: q.r * sz, rgb: q.tint, kind: q.kind, ring: q.ring, moons: q.moons, L: [lx / ll, ly / ll, lz / ll], ar: q.ar, th, dir: Math.sign(q.w) };
   });
@@ -4792,7 +4815,7 @@ function battleNow() {
       streaks.push({ hx, hy, tx, ty, rgb: type === 2 ? [1, 0.86, 0.62] : white(BATTLE_SIDES[o.side], 0.2), a: type === 0 ? 0.8 : type === 2 ? 0.8 : 0.5, type });
     }
   }
-  const order = { 3: 0, 7: 0, 2: 1, 6: 2, 4: 3, 0: 4, 1: 4, 5: 4 }, blasts = [];
+  const order = { 3: 0, 7: 0, 2: 1, 6: 2, 4: 3, 0: 4, 1: 4, 5: 4, 8: 5 }, blasts = [];
   for (const b of ev.blasts) {
     const age = s - b.t0;
     if (age < 0 || age > b.life) continue;
@@ -4800,6 +4823,15 @@ function battleNow() {
     if (!pt) continue;
     const [x, y] = P(pt[0], pt[1]);
     blasts.push({ x, y, r: b.r * k, a: b.kind === 4 ? Math.min(1, age / 0.6) : 1, age, seed: b.seed, kind: b.kind, side: b.side });
+  }
+  // each gun's muzzle flash (kind 8) as a bolt or torpedo leaves, on the turret as the ship moves; last, in the slots left
+  for (const o of ev.shots) {
+    const age = s - o.t0;
+    if (o.type === 3 || age < 0 || age > 0.12) continue;
+    const pt = btPoint(ev, o.from, o.fu[0], o.fu[1], s);
+    if (!pt) continue;
+    const [x, y] = P(pt[0], pt[1]);
+    blasts.push({ x, y, r: (o.type === 2 ? 0.1 : 0.07) * ev.ships[o.from].R * k, a: 1, age, seed: 0, kind: 8, side: o.side });
   }
   blasts.sort((a, b) => order[a.kind] - order[b.kind]);
   const out = { x: cx, y: cy, hulls: hulls.slice(0, BATTLE_HULLS), streaks: streaks.slice(0, BATTLE_STREAKS), blasts: blasts.slice(0, BATTLE_BLASTS), s,
@@ -5564,6 +5596,8 @@ vec4 starField(vec2 p, vec4 l, float k, float dens, float spark, float share, ve
   float s = l.w, dd = length(d), v = a * starDisc(dd, r * s);
   if (r >= 0.8) v = 1.0 - (1.0 - v) * (1.0 - a * 0.22 * starDisc(dd, 2.4 * r * s));
   if (sp) v = 1.0 - (1.0 - v) * (1.0 - a * 0.8 * max(starLine(d, 3.2 * s, 0.6 * s), starLine(d.yx, 3.2 * s, 0.6 * s)));
+  // the brightest ones' bloom (BLOOM_STAR): a soft halo, its own size and BLOOM_STAR_R together, well inside STAR_EDGE
+  if (ab > ${glf(BLOOM_STAR_AB)}) v = 1.0 - (1.0 - v) * (1.0 - a * ${glf(BLOOM_STAR)} * smoothstep(${glf(BLOOM_STAR_AB)}, ${glf(BLOOM_STAR_AB + 0.4)}, ab) * exp(-dd * dd / ((r * r + ${glf(BLOOM_STAR_R * BLOOM_STAR_R)}) * s * s)));
   return vec4(col * v, v);
 }`;
 // the warp drift (see "Look", WARP_*), uWp (see SKY_U's comment): where the sky is looked up for the pixel at p when its stars
@@ -5609,29 +5643,82 @@ const SYSTEM_KINDS_GLSL = (() => {
     arr('vec4', ['AIR', (k) => `vec4(${[...k[2], k[3]].map(glf).join(', ')})`]), arr('float', ['LOOK', (k) => glf(k[7])])].join('\n');
 })();
 const SYSTEM_GLSL = `float sysWrap(float a) { return a - 6.2831853 * floor(a / 6.2831853); }
-// a plain star, d from its middle (CSS px), radius r (CSS px), light L: a soft core, a halo and a faint cross of spikes, shimmering
-vec4 sysPoint(vec2 d, float r, float L, vec3 rgb, float t, float i) {
+// a star's corona, d from its middle (CSS px; l its length, q in its radii): long soft streamers and finer filaments among
+// them, slowly turning and flowing out (by the clock t; i the star's number), from its limb out, fading over k radii
+float sysCorona(vec2 d, float l, float q, float k, float t, float i) {
+  if (q > 5.0 * k) return 0.0;
+  float an = t * 0.01 + i * 1.7, ca = cos(an), sa = sin(an), fl = 0.4 * log(q) - t * 0.035;
+  vec2 e = d / max(l, 1e-3);
+  e = vec2(e.x * ca - e.y * sa, e.x * sa + e.y * ca);
+  float s1 = nbN(e * 2.1 + vec2(i * 5.3, fl)), s2 = nbN(e * 6.5 + vec2(i * 3.1, 1.6 * fl));
+  return (0.35 + 0.65 * s1 * s1) * (0.8 + 0.4 * s2 * smoothstep(1.5, 3.0, q)) * exp(-max(q - 1.0, 0.0) / k) * smoothstep(0.95, 1.3, q);
+}
+// a plain star, d from its middle (CSS px), radius r (CSS px), light L: a bright disc, darker and redder at its limb, its corona
+// (co: sysCorona's, times its strength), a halo and a faint cross of spikes, shimmering
+vec4 sysPoint(vec2 d, float r, float L, vec3 rgb, float t, float i, float co) {
   float d2 = dot(d, d);
   if (d2 > 3600.0) return vec4(0.0);
-  float l = sqrt(d2), tw = 0.9 + 0.1 * sin(t * (1.7 + 0.6 * i) + i * 2.1);
-  float core = exp(-d2 / (r * r)), halo = 0.24 * exp(-l / (2.2 * r)), wide = 0.05 * exp(-l / (10.0 * r));
-  float sp = 0.16 * (exp(-abs(d.x) * 1.4) * exp(-abs(d.y) / (8.0 * r)) + exp(-abs(d.y) * 1.4) * exp(-abs(d.x) / (8.0 * r)));
-  float m = L * tw * (1.5 * core + halo + wide + sp);
-  return vec4(mix(rgb, vec3(1.0), 0.6 * core) * m, 0.6 * min(m, 1.0));
+  float l = sqrt(d2), q = l / r, tw = 0.9 + 0.1 * sin(t * (1.7 + 0.6 * i) + i * 2.1);
+  float aa = 0.8 / (r * uSize.z), cov = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, q), mu = sqrt(max(1.0 - q * q, 0.0));
+  float disc = cov * (0.5 + 0.5 * mu), ring = (1.0 - cov) * exp(-max(q - 1.0, 0.0) / 0.6);
+  // (the faintest of it fades out before its edge, 60 px)
+  float fo = 1.0 - smoothstep(36.0, 60.0, l), halo = 0.2 * exp(-l / (2.4 * r)), wide = 0.045 * exp(-l / (10.0 * r)) * fo;
+  float sp = 0.11 * (exp(-abs(d.x) * 1.4) * exp(-abs(d.y) / (8.0 * r)) + exp(-abs(d.y) * 1.4) * exp(-abs(d.x) / (8.0 * r)));
+  co *= fo;
+  vec3 dc = mix(rgb * vec3(1.0, 0.9, 0.8), vec3(1.0), 0.75 * mu);
+  vec3 c = L * tw * (1.9 * disc * dc + rgb * (0.45 * ring + halo + wide + sp) + mix(rgb, vec3(1.0), 0.3) * 0.85 * co);
+  float m = L * tw * (1.9 * disc + 0.45 * ring + halo + wide + sp + 0.85 * co);
+  return vec4(c, 0.6 * min(m, 1.0));
+}
+// a black hole (look 5; a pair's second star), d from its middle (CSS px), r its shadow's radius (CSS px), L its light, rgb
+// its disc's hot colour, sd the system's seed; as Gargantua, small and far: its black shadow, a thin bright ring round it
+// (light gone round it), a flat disc of gas round it in the system's plane (warm white inside, orange out, streaks going
+// round, the side coming our way brighter), its near half across the shadow and its far half's light bent up over the
+// shadow (a thin arc under it too), in a faint glow. All of it out to 8 shadow radii; analytic, no noise
+vec4 sysHole(vec2 d, float r, float L, vec3 rgb, float t, float i, float sd) {
+  vec4 b = uSy[1];
+  // in shadow radii, along the system's plane (x) and across it (y)
+  vec2 u = vec2(d.x * b.x + d.y * b.y, -d.x * b.y + d.y * b.x) / r;
+  float q = length(u);
+  if (q > 8.0) return vec4(0.0);
+  // the plane's tilt (e) and its far side (fy > 0); aa a device px; sp the way the disc turns
+  float e = clamp(abs(b.z), 0.14, 0.32), fy = b.z < 0.0 ? -u.y : u.y, aa = 0.7 / (r * uSize.z), sp = fract(sd * 7.3) < 0.5 ? -1.0 : 1.0;
+  // the disc in its plane: rd from the middle, an round it
+  float rd = length(vec2(u.x, u.y / e)), an = atan(u.y / e, u.x);
+  float band = smoothstep(1.55, 1.95, rd) * (1.0 - smoothstep(3.4, 4.6, rd));
+  float dm = band * (2.2 / rd) * (0.72 + 0.28 * sin(an * 3.0 + 4.0 * log(rd) - sp * t * 0.9 + i)) * (1.0 + 0.5 * sp * u.x / rd) * L;
+  vec3 hc = mix(vec3(1.0, 0.5, 0.2), mix(rgb, vec3(1.0, 0.97, 0.9), 0.5), 1.0 - smoothstep(1.8, 4.0, rd));
+  float nr = 1.0 - smoothstep(-0.12, 0.12, fy);
+  // the far half's light bent round the shadow: an arc hugging it, broad over the far side, thin under it
+  float s = fy / max(q, 1e-3), h = 0.62 * pow(max(s, 0.0), 1.3) + 0.14 * pow(max(-s, 0.0), 1.3) + 0.04;
+  float am = 0.9 * L * smoothstep(1.02, 1.1, q) * (1.0 - smoothstep(1.08 + 0.6 * h, 1.12 + h, q)) * (0.55 + 0.45 * max(s, 0.0))
+    * (0.85 + 0.15 * sin(6.0 * u.x / max(q, 1e-3) - sp * t * 0.9 + i));
+  float sh = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, q), rm = 1.1 * L * exp(-pow((q - 1.04) / max(0.06, aa), 2.0)), gl = 0.07 * L * exp(-q / 2.2);
+  vec4 o = vec4(rgb * gl, 0.4 * gl);
+  float fm = dm * (1.0 - nr), nm = dm * nr;
+  o = over(vec4(hc * fm, 0.5 * min(fm, 1.0)), o);
+  o = over(vec4(mix(hc, vec3(1.0, 0.96, 0.9), 0.4) * am, 0.5 * min(am, 1.0)), o);
+  o = over(vec4(0.0, 0.0, 0.0, 0.96 * sh), o);
+  o = over(vec4(vec3(1.0, 0.95, 0.85) * rm, 0.5 * min(rm, 1.0)), o);
+  return over(vec4(hc * nm, 0.5 * min(nm, 1.0)), o);
 }
 // a star by its look (s1.w): 0 a plain one; 1 a giant, a broad disc boiling with cells, its limb darker, breathing, in a soft
 // glow; 2 a pulsar, a point and its two beams sweeping round a tilted cone (about 0.45 of the outer orbit long), flashing as one
 // points our way; 3 a Wolf-Rayet star, a hot point blowing clumpy shells of gas out round it one after another; 4 a brown dwarf,
-// a dim banded disc. Rc: the outer orbit (CSS px), sd the system's seed
+// a dim banded disc; 5 a black hole (sysHole). Rc: the outer orbit (CSS px), sd the system's seed. A plain star, a giant and
+// a Wolf-Rayet star have a corona, taken once here (one copy of sysCorona)
 vec4 sysStar(vec2 p, vec4 s0, vec4 s1, float dp, float t, float i, float Rc, float sd) {
   vec2 d = (p - s0.xy) / dp;
-  float r = max(s0.z / dp, 0.6), look = s1.w, l = length(d);
-  if (look < 0.5) return sysPoint(d, r, s0.w, s1.rgb, t, i);
+  float r = max(s0.z / dp, 0.6), look = s1.w, l = length(d), wr = look > 2.5 && look < 3.5 ? 0.7 : 1.0;
+  // (beyond the furthest any look reaches, a pulsar's beams or a Wolf-Rayet star's shells: nothing, before the corona)
+  if (l > max(82.0, 20.0 * r + 10.0)) return vec4(0.0);
+  float co = look < 1.5 || wr < 1.0 ? sysCorona(d, l, l / (wr * r), look > 0.5 && look < 1.5 ? 1.6 : 3.0, t, i) : 0.0;
+  if (look < 0.5) return sysPoint(d, r, s0.w, s1.rgb, t, i, co);
   if (look < 1.5) {
     float br = r * (1.0 + 0.035 * sin(t * 0.55 + i * 2.3)), q = l / br;
     if (q > 9.0) return vec4(0.0);
-    float gl = 0.3 * exp(-max(q - 1.0, 0.0) / 0.5) + 0.06 * exp(-q / 2.5);
-    vec4 o = vec4(s1.rgb * gl * s0.w, 0.5 * gl * min(s0.w, 1.0));
+    float gl = 0.3 * exp(-max(q - 1.0, 0.0) / 0.5) + 0.06 * exp(-q / 2.5), gc = 0.6 * co * (1.0 - smoothstep(6.0, 9.0, q));
+    vec4 o = vec4((s1.rgb * gl + mix(s1.rgb, vec3(1.0), 0.2) * gc) * s0.w, 0.5 * (gl + gc) * min(s0.w, 1.0));
     float aa = 1.2 / br, cov = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, q);
     if (cov > 0.0) {
       vec2 u = d / br;
@@ -5651,7 +5738,7 @@ vec4 sysStar(vec2 p, vec4 s0, vec4 s1, float dp, float t, float i, float Rc, flo
     vec3 A = vec3(sin(tl) * cos(az), sin(tl) * sin(az), cos(tl)), U = normalize(vec3(A.y, -A.x, 0.0)), V = cross(A, U);
     vec3 B = cos(ca) * A + sin(ca) * (cos(ph) * U + sin(ph) * V);
     float fl = exp(-(1.0 - B.z) / 0.02);
-    vec4 o = sysPoint(d, r, s0.w * (1.0 + 2.5 * fl), s1.rgb, t, i);
+    vec4 o = sysPoint(d, r, s0.w * (1.0 + 2.5 * fl), s1.rgb, t, i, 0.0);
     for (int k = 0; k < 2; k++) {
       vec2 bd = (k == 0 ? 1.0 : -1.0) * B.xy;
       float bl = length(bd);
@@ -5677,8 +5764,9 @@ vec4 sysStar(vec2 p, vec4 s0, vec4 s1, float dp, float t, float i, float Rc, flo
       float m = 0.22 * exp(-x * x) * smoothstep(0.35, 0.75, cl) * smoothstep(0.0, 0.12, ph) * pow(1.0 - ph, 1.6);
       o = over(vec4(mix(vec3(1.0, 0.5, 0.68), vec3(0.75, 0.55, 1.0), ph) * m, 0.5 * m), o);
     }
-    return over(sysPoint(d, 0.7 * r, s0.w, s1.rgb, t, i), o);
+    return over(sysPoint(d, 0.7 * r, s0.w, s1.rgb, t, i, 0.5 * co), o);
   }
+  if (look > 4.5) return sysHole(d, r, s0.w, s1.rgb, t, i, sd);
   float q = l / r;
   if (q > 4.0) return vec4(0.0);
   float aa = 1.2 / r, cov = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, q), mu = sqrt(max(1.0 - min(q * q, 1.0), 0.0));
@@ -5725,19 +5813,64 @@ vec4 sysFeed(vec2 w, vec2 g, vec2 c, float gr, float fd, float t, float sd, floa
   float hm = 0.7 * exp(-dot(hs, hs)) * (0.8 + 0.2 * sin(t * 13.0 + sd * 5.0));
   return over(vec4(vec3(1.0, 0.95, 0.88) * hm, 0.5 * hm), o);
 }
-// the gas a system sits in (v: rolled, in the outer orbit), out to 1.7 of it: churning (warped noise, by the system's clock) with
-// dark lanes; kind 0 glowing pink round a teal heart, 1 a blue dust cloud lit by its stars; str its strength
-vec4 sysNeb(vec2 v, float t, float kind, float str, float sd) {
+// n octaves of nbN at x (n a constant, so each call keeps its own unrolled copy), the last one weighed by fw (0: skipped),
+// and s2 what the first two give; 0-1, around 0.5
+float sysFbm(vec2 x, int n, float fw, out float s2) {
+  float s = 0.0, a = 0.5, tt = 0.0;
+  s2 = 0.5;
+  for (int j = 0; j < 4; j++) {
+    if (j >= n) break;
+    float aw = a;
+    if (j == n - 1) { if (fw <= 0.0) break; aw *= fw; }
+    s += aw * nbN(x); tt += aw;
+    if (j == 1) s2 = s / tt;
+    x = mat2(0.8, 0.6, -0.6, 0.8) * x * 2.03 + 11.7;
+    a *= 0.5;
+  }
+  return s / tt;
+}
+// the gas a system sits in (v: rolled, in the outer orbit), out to 1.7 of it, lit by its stars (sc: the brightest's colour):
+// a broad faint glow under it all, clouds churning over it (warped noise, by the system's clock), brighter and whiter where
+// thickest and near the stars, crossed by dark dust lanes, the sides of them towards the stars lit; kind 0 glowing pink round
+// a teal heart, gold here and there, 1 a blue dust cloud lit by its stars, violet here and there; str its strength. The warp
+// takes two octaves, the clouds four and the dust three, their finest fading out from 0.9 to 1.15 (skipped past it); the
+// dust a step towards the stars (two) only near them on a lane's edge
+vec4 sysNeb(vec2 v, float t, float kind, float str, float sd, vec3 sc) {
   float r = length(v);
   if (r > 1.7) return vec4(0.0);
   vec2 q = v * 1.6 + sd * 17.0;
-  vec2 wv = vec2(nbF(q + vec2(t * 0.02, 0.0), 3), nbF(q + vec2(5.2, 1.3) - vec2(0.0, t * 0.017), 3));
-  float nn = nbF(q * 1.3 + 2.2 * wv + vec2(t * 0.01, -t * 0.008), 4), lane = smoothstep(0.55, 0.7, nbF(q * 2.4 - 1.7 * wv + 9.0, 3));
-  float dens = (1.0 - smoothstep(0.6, 1.7, r)) * (0.6 + 0.4 * (1.0 - smoothstep(0.0, 0.6, r))) * smoothstep(0.3, 0.75, nn) * (1.0 - 0.75 * lane);
-  vec3 col = kind < 0.5 ? mix(vec3(0.42, 0.85, 0.8), vec3(0.95, 0.36, 0.52), smoothstep(0.15, 0.8, r + 0.3 * (nn - 0.5)))
-    : mix(vec3(0.6, 0.75, 1.0), vec3(0.35, 0.5, 0.95), smoothstep(0.2, 1.2, r));
-  float m = 0.13 * str * dens;
-  return vec4(col * m * 1.5, m);
+  float fine = 1.0 - smoothstep(0.9, 1.15, r), l2, dm;
+  vec2 wv = vec2(sysFbm(q + vec2(t * 0.02, 0.0), 2, 1.0, dm), sysFbm(q + vec2(5.2, 1.3) - vec2(0.0, t * 0.017), 2, 1.0, dm));
+  float nn = sysFbm(q * 1.3 + 2.2 * wv + vec2(t * 0.01, -t * 0.008), 4, fine, dm);
+  vec2 xl = q * 2.4 - 1.7 * wv + 9.0;
+  float ln = sysFbm(xl, 3, fine, l2);
+  bool edge = r < 1.0 && r > 0.04 && ln > 0.42 && ln < 0.62;
+  float lt = edge ? sysFbm(xl - v / r * 0.17, 2, 1.0, dm) : 0.5;
+  float env = 1.0 - smoothstep(0.55, 1.7, r), heart = exp(-r / 0.45), m = 0.13 * str;
+  // (the stars clear the dust round them and light the gas there smooth)
+  float gas = max(env * smoothstep(0.32, 0.78, nn) * (0.55 + 0.85 * heart), 0.55 * exp(-r / 0.09)), clear = smoothstep(0.04, 0.16, r), dust = env * smoothstep(0.52, 0.68, ln) * clear;
+  // (a lane's edge is lit where its dust is thicker than a step towards the stars)
+  float lit = edge ? clamp((l2 - lt) * 9.0, 0.0, 1.0) * smoothstep(0.42, 0.5, ln) * (1.0 - smoothstep(0.52, 0.62, ln)) * exp(-r / 0.5) * clear : 0.0;
+  vec3 col, deep;
+  if (kind < 0.5) {
+    col = mix(vec3(0.42, 0.85, 0.8), vec3(0.95, 0.36, 0.52), smoothstep(0.15, 0.8, r + 0.3 * (nn - 0.5)));
+    col = mix(col, vec3(1.0, 0.64, 0.4), 0.5 * smoothstep(0.55, 0.75, wv.y) * smoothstep(0.25, 0.8, r));
+    deep = vec3(0.5, 0.18, 0.4);
+  } else {
+    col = mix(vec3(0.62, 0.77, 1.0), vec3(0.35, 0.5, 0.95), smoothstep(0.2, 1.2, r));
+    col = mix(col, vec3(0.58, 0.46, 0.95), 0.45 * smoothstep(0.55, 0.75, wv.y));
+    deep = vec3(0.2, 0.28, 0.66);
+  }
+  col = mix(col, vec3(1.0, 0.95, 0.9), 0.35 * smoothstep(0.68, 0.9, nn) * heart);
+  // the broad glow, the clouds (the lanes cut out of them), the dust in front (darkening what is behind) and its lit edges
+  float bg = 0.3 * env * env * (0.3 + 0.7 * wv.x);
+  vec4 o = vec4(deep * bg * m * 1.4, bg * m);
+  gas *= 1.0 - 0.85 * dust;
+  o = over(vec4(col * gas * m * 1.6, gas * m), o);
+  float da = 0.85 * m * dust * (0.45 + 0.55 * smoothstep(0.3, 0.7, nn));
+  o = over(vec4(vec3(0.05, 0.035, 0.04) * da, da), o);
+  float rim = 2.0 * m * lit;
+  return over(vec4(mix(sc, col, 0.35) * rim * 1.6, 0.5 * rim), o);
 }
 ${SYSTEM_KINDS_GLSL}
 // a planet's surface at S (a unit point on it, turned with its spin; z towards its pole) by its look (SYSTEM_KINDS: K its kind,
@@ -5749,7 +5882,11 @@ ${SYSTEM_KINDS_GLSL}
 // great storm for kind 12, softer bands for 13, its night glowing for 14); 10 an ice giant, faint bands (a dark spot and
 // white streaks for 16). The looks share their noise: besides n, each takes at most two fBm samples (u1, u2) and one
 // value-noise sample (u3), at its own scale, seed and drift (SN_*), each sample taken once whatever the look; a call of
-// pnF per look made the sky's link far too slow on D3D11 (it unrolls every one)
+// pnF per look made the sky's link far too slow on D3D11 (it unrolls every one). px: a device px in its radii. Nothing finer
+// than about three device px a cycle is drawn (sysOct: an fBm's octaves fade out finer than that; u3's spots, cracks and
+// city lights give way to their average), so a small world is smooth and nothing on it sparkles as it turns. Its clouds
+// (u2 over a ground: 4, 5, 10) and a cloud world's or a giant's whole face (u1: 2, 9, 10) turn at their own rate on
+// top of its spin (ca), a giant's and a cloud world's sheared to and fro by latitude, so their belts slide by each other
 const vec3 SN_S1[11] = vec3[11](vec3(1.6), vec3(4.0), vec3(2.0, 2.0, 6.0), vec3(0.0), vec3(2.2), vec3(1.5), vec3(0.0), vec3(3.5), vec3(0.0), vec3(1.5, 1.5, 3.0), vec3(2.0));
 const vec3 SN_D1[11] = vec3[11](vec3(5.0), vec3(7.0), vec3(0.0, 0.0, 9.0), vec3(0.0), vec3(3.0), vec3(4.0), vec3(0.0), vec3(13.0), vec3(0.0), vec3(0.0, 0.0, 5.0), vec3(5.0));
 const vec3 SN_T1[11] = vec3[11](vec3(0.0), vec3(0.0), vec3(0.02, 0.0, 0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.01, 0.0, 0.0), vec3(0.0));
@@ -5757,25 +5894,47 @@ const vec3 SN_S2[11] = vec3[11](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3
 const vec3 SN_D2[11] = vec3[11](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0, 0.0, 9.0), vec3(0.0, 7.0, 0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(3.0));
 const vec3 SN_T2[11] = vec3[11](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.015, 0.0, 0.0), vec3(0.0, 0.0, 0.01), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
 const vec2 SN_3[11] = vec2[11](vec2(9.0, 11.0), vec2(0.0), vec2(0.0), vec2(0.0), vec2(30.0, 3.0), vec2(0.0), vec2(0.0), vec2(0.0), vec2(7.0, 17.0), vec2(0.0), vec2(0.0));
-vec3 sysSurf(int look, int K, vec3 S, vec3 A, vec3 B, float lam, float t, float sd, out vec3 em) {
+// a planet's surface's fBm (the nebula's is sysFbm, in 2D): up to three octaves of pnN, the last a fraction n - 2 (and the
+// second n - 1) of its weight: 0-1, around 0.5
+float sysFbm3(vec3 x, float n) {
+  float s = 0.0, a = 0.5, t = 0.0;
+  for (int i = 0; i < 3; i++) {
+    float w = clamp(n - float(i), 0.0, 1.0);
+    if (w <= 0.0) break;
+    s += a * w * pnN(x); t += a * w;
+    x = x * 2.07 + vec3(5.3, 1.7, 9.1);
+    a *= 0.5;
+  }
+  return s / max(t, 1e-3);
+}
+// how many of an fBm's octaves from f cycles a radius show at px (a device px, in radii): its finest no finer than ~3 px
+float sysOct(float f, float px) { return clamp(1.0 + 1.45 * log2(0.33 / max(f * px, 1e-4)), 1.0, 3.0); }
+vec3 sysSurf(int look, int K, vec3 S, vec3 A, vec3 B, float lam, float t, float sd, float px, out vec3 em) {
   em = vec3(0.0);
-  float n = pnF(S * 3.0 + sd * 37.0, 3), h = S.z, u1 = 0.5, u2 = 0.5, u3 = 0.5;
+  float h = S.z, u1 = 0.5, u2 = 0.5, u3 = 0.5, n = sysFbm3(S * 3.0 + sd * 37.0, sysOct(3.0, px));
   vec3 s1 = SN_S1[look], s2 = SN_S2[look];
   vec2 s3 = SN_3[look];
-  if (s1.x > 0.0) u1 = pnF(S * s1 + SN_D1[look] * sd + SN_T1[look] * t, 3);
+  // its clouds' own turn: over a ground steady, a cloud world's or a giant's sheared by latitude, slowly to and fro (a
+  // shear that only grew would tear its face into streaks within minutes)
+  float ca = look == 4 || look == 5 ? t * 0.035 : 1.2 * sin(t * 0.011 + sd * 6.0) * (0.3 - h * h), cc = cos(ca), sc = sin(ca);
+  vec3 Sc = vec3(S.x * cc - S.y * sc, S.x * sc + S.y * cc, h);
+  if (s1.x > 0.0) u1 = sysFbm3((look == 2 || look >= 9 ? Sc : S) * s1 + SN_D1[look] * sd + SN_T1[look] * t, sysOct(s1.z, px));
   // an ocean's clouds: turned round the pole by an angle that grows with the noise, spirals
-  vec3 P = S;
-  if (look == 5) { float an = 2.5 * u1 + h * 3.0, ca = cos(an), sa = sin(an); P = vec3(S.x * ca - S.y * sa, S.x * sa + S.y * ca, h); }
-  if (s2.x > 0.0) u2 = pnF(P * s2 + SN_D2[look] * sd + SN_T2[look] * t, 3);
-  if (s3.x > 0.0) u3 = pnN(S * s3.x + s3.y * sd);
+  vec3 P = Sc;
+  if (look == 5) { float an = 2.5 * u1 + h * 3.0, ca2 = cos(an), sa = sin(an); P = vec3(Sc.x * ca2 - Sc.y * sa, Sc.x * sa + Sc.y * ca2, h); }
+  if (s2.x > 0.0) u2 = sysFbm3(P * s2 + SN_D2[look] * sd + SN_T2[look] * t, sysOct(s2.z, px));
+  // u3's spots only where a cycle of them spans 2-4 device px or more (f3), else their share on average
+  float f3 = 1.0 - smoothstep(0.25, 0.5, s3.x * px), fd = 1.0 - smoothstep(0.07, 0.2, px);
+  if (s3.x > 0.0 && f3 > 0.0) u3 = pnN(S * s3.x + s3.y * sd);
   if (look == 0) {
-    float cr = smoothstep(0.62, 0.7, u3);
+    float cr = mix(0.2, smoothstep(0.62, 0.7, u3), f3);
     vec3 c = mix(B, A, n) * (1.0 - 0.35 * cr);
     if (K == 9) c = mix(c, vec3(0.96, 0.92, 0.86), smoothstep(0.52, 0.6, u1));
     return c;
   }
   if (look == 1) {
-    float k = 1.0 - smoothstep(0.0, 0.05, abs(u1 - 0.5));
+    // (a small one's cracks wider, a tiny one's their glow on average: a thin bright one would be a dotted line)
+    float k = mix(0.18, 1.0 - smoothstep(0.0, mix(0.12, 0.05, fd), abs(u1 - 0.5)), fd);
     em = B * k * (0.8 + 0.2 * sin(t * 1.3 + n * 9.0));
     return mix(A, B * 0.5, 0.4 * k);
   }
@@ -5789,7 +5948,7 @@ vec3 sysSurf(int look, int K, vec3 S, vec3 A, vec3 B, float lam, float t, float 
     vec3 c = mix(A, B * (0.8 + 0.5 * n), land);
     c = mix(c, vec3(0.92, 0.95, 1.0), smoothstep(0.78, 0.84, abs(h) + 0.05 * (n - 0.5)));
     float cl = smoothstep(0.52, 0.68, u2);
-    em = vec3(1.0, 0.72, 0.38) * 0.5 * land * smoothstep(0.6, 0.75, u3) * (1.0 - cl);
+    em = vec3(1.0, 0.72, 0.38) * 0.5 * land * mix(0.2, smoothstep(0.6, 0.75, u3), f3) * (1.0 - cl);
     return mix(c, vec3(1.0), 0.85 * cl);
   }
   if (look == 5) return mix(A * (0.85 + 0.3 * n), B, 0.9 * smoothstep(0.5, 0.66, u2));
@@ -5797,8 +5956,8 @@ vec3 sysSurf(int look, int K, vec3 S, vec3 A, vec3 B, float lam, float t, float 
     float s = smoothstep(0.55, 0.72, lam + 0.12 * (n - 0.5));
     return mix(A * (0.9 + 0.2 * n), mix(vec3(0.42, 0.36, 0.28), B, smoothstep(0.7, 0.82, lam)), s);
   }
-  if (look == 7) return mix(A * (0.92 + 0.12 * n), B, 0.8 * (1.0 - smoothstep(0.0, 0.025, abs(u1 - 0.5))));
-  if (look == 8) return mix(mix(A, mix(A, B, 0.6), smoothstep(0.4, 0.6, n)), B * 0.45, smoothstep(0.66, 0.72, u3));
+  if (look == 7) return mix(A * (0.92 + 0.12 * n), B, mix(0.45, 0.8, fd) * (1.0 - smoothstep(0.0, mix(0.06, 0.025, fd), abs(u1 - 0.5))));
+  if (look == 8) return mix(mix(A, mix(A, B, 0.6), smoothstep(0.4, 0.6, n)), B * 0.45, mix(0.18, smoothstep(0.66, 0.72, u3), f3));
   float lon = atan(S.y, S.x);
   if (look == 9) {
     float soft = K == 13 ? 0.45 : 1.0, tb = u1;
@@ -5816,7 +5975,7 @@ vec3 sysSurf(int look, int K, vec3 S, vec3 A, vec3 B, float lam, float t, float 
   if (K == 16) {
     vec2 e = vec2(wrapA(lon - sd * 30.0) * 2.2, (h + 0.3) * 6.0);
     c = mix(c, B * 0.45, 0.8 * exp(-dot(e, e)));
-    c = mix(c, vec3(0.95), 0.6 * smoothstep(0.66, 0.74, u2));
+    c = mix(c, vec3(0.95), 0.6 * mix(0.12, smoothstep(0.66, 0.74, u2), 1.0 - smoothstep(0.35, 0.8, s2.z * px)));
   }
   return c;
 }
@@ -5829,73 +5988,111 @@ vec4 sysMoon(vec2 q, vec2 m, float mr, vec3 L, float aa) {
   vec3 N = vec3(e / max(1.0, l), sqrt(max(1.0 - r2, 0.0)));
   return vec4(vec3(0.72, 0.7, 0.68) * (0.03 + 0.9 * max(dot(N, L), 0.0)) * cov, cov);
 }
+// its rings' opacity at rr (in its radii) by their style rs (1 broad and bright: a faint inner ring, the bright one, a dark
+// gap and a lighter outer one, with ringlets where they would be some 3 device px apart or more; 2 thin and faint; 3 dark
+// dust), fw their edge's softness (in radii): what the eye sees through and the shadow they cast on it alike
+float sysRing(float rs, float rr, float fw) {
+  if (rs < 1.5) {
+    float m = 0.18 * smoothstep(1.25 - fw, 1.25 + fw, rr) + 0.37 * smoothstep(1.5 - fw, 1.5 + fw, rr) - 0.17 * smoothstep(2.0 - fw, 2.0 + fw, rr);
+    // (the gap's darkness spread over a soft edge as wide, never a wide dark band)
+    float gw = max(0.035, fw);
+    m *= (1.0 - smoothstep(2.3 - fw, 2.3 + fw, rr)) * (1.0 - 0.85 * (0.035 / gw) * exp(-pow((rr - 1.96) / gw, 2.0)));
+    return m * (1.0 + 0.3 * (1.0 - smoothstep(0.02, 0.05, fw)) * sin(rr * 40.0));
+  }
+  if (rs < 2.5) return 0.22 * smoothstep(1.65 - fw, 1.65 + fw, rr) * (1.0 - smoothstep(1.9 - fw, 1.9 + fw, rr));
+  return 0.35 * smoothstep(1.4 - fw, 1.4 + fw, rr) * (1.0 - smoothstep(1.9 - fw, 1.9 + fw, rr));
+}
 // a planet of the system (see "Look", SYSTEM_KINDS), premultiplied, at device px p: a its middle (device px), radius (device px)
 // and moons (w: ±(1 + how many), + in front of its star, - behind), b its tint (a multiplier on its kind's colours) and kind, c
 // the way to its star (unit; z towards us) and its rings' style (w: 0 none, 1 broad and bright with a gap, 2 thin and faint, 3
-// dark dust), pl the plane (uSy[1]), t the clock, fi its number, sd the system's seed. Drawn in the plane's roll: its moons
-// behind, its rings' far half, the haze of its air, its disc (sysSurf, spinning, lit with a soft terminator, its own light on
-// the night side, its air's rim), the rings' near half, the moons in front
+// dark dust), pl the plane (uSy[1]), t the clock, fi its number, sd the system's seed. Its own axis is rolled a little off
+// the plane's (rl) and tipped further towards us (ti), picks by its seed, and its rings and moons go round its equator: so its
+// star, in the plane, lights its rings' one face (the other dim, light coming through where they are thin) and they cast a
+// shadow across it, and it casts one across them. Drawn in its axis's roll: its moons behind, its rings' far half, the haze
+// of its air (a thin bright limb over a soft glow, brighter towards its star, all round when the star is behind it), its
+// disc (sysSurf, spinning, lit in its star's colour with a terminator as soft as its air is thick and reddened at dusk, its
+// own light on the night side, its air's rim), the rings' near half, the moons in front
 vec4 sysPlanet(vec2 p, vec4 a, vec4 b, vec4 c, float dp, vec4 pl, float t, float fi, float sd) {
   vec2 d = p - a.xy;
-  float r = max(a.z, 0.8 * dp), d2 = dot(d, d), e4 = 4.0 * r + 2.0 * dp;
-  // (beyond the widest it ever reaches, 4 radii, before any table is read: most of the system's pixels stop here)
+  int nm = int(abs(a.w) + 0.5) - 1;
+  float r = max(a.z, 0.8 * dp), d2 = dot(d, d), rs = c.w;
+  // (beyond the widest it can reach with its moons and rings, before any table is read: its moons' farthest orbit, else
+  // its rings, else the thickest air: most of the system's pixels stop here)
+  float e4 = r * (nm > 0 ? (rs > 0.5 ? 4.0 : 3.2) : rs > 0.5 ? 2.4 : 1.5) + 2.0 * dp;
   if (d2 > e4 * e4) return vec4(0.0);
-  int K = int(b.w + 0.5), nm = int(abs(a.w) + 0.5) - 1;
+  int K = int(b.w + 0.5);
   vec4 air = SK_AIR[K];
-  float rs = c.w, md0 = rs > 0.5 ? 2.6 : 1.8;
+  float md0 = rs > 0.5 ? 2.6 : 1.8;
   float ext = r * max(max(rs > 0.5 ? 2.4 : 1.0, 1.0 + 4.0 * air.w), nm > 0 ? md0 + 1.4 : 1.0) + 2.0 * dp;
   if (d2 > ext * ext) return vec4(0.0);
-  vec2 v = vec2(d.x * pl.x + d.y * pl.y, -d.x * pl.y + d.y * pl.x) / r; // rolled to the plane, in its radii
-  float q = length(v), aa = 1.2 * dp / r, op = pl.z, cz = sqrt(max(1.0 - op * op, 0.0)), yy = v.y / op, ps = sd * 13.0 + fi * 1.7;
-  vec3 L = normalize(vec3(c.x * pl.x + c.y * pl.y, -c.x * pl.y + c.y * pl.x, c.z) + vec3(0.0, 0.0, 1e-4));
+  float ps = sd * 13.0 + fi * 1.7, rl = 0.5 * fract(sd * 3.3 + fi * 0.727) - 0.25, ti = 0.12 + 0.35 * fract(sd * 5.7 + fi * 0.381);
+  vec2 ro = vec2(pl.x * cos(rl) - pl.y * sin(rl), pl.y * cos(rl) + pl.x * sin(rl));
+  vec2 v = vec2(d.x * ro.x + d.y * ro.y, -d.x * ro.y + d.y * ro.x) / r; // rolled to its axis, in its radii
+  float q = length(v), aa = 1.2 * dp / r, op = (pl.z < 0.0 ? -1.0 : 1.0) * sin(min(asin(abs(pl.z)) + ti, 1.2));
+  float cz = sqrt(max(1.0 - op * op, 0.0)), yy = v.y / op, fw = max(aa / abs(op), 0.02), px = dp / r;
+  vec3 L = normalize(vec3(c.x * ro.x + c.y * ro.y, -c.x * ro.y + c.y * ro.x, c.z) + vec3(0.0, 0.0, 1e-4)), Po = vec3(0.0, cz, op);
+  // its star's light, a touch of its colour; fwd: how far the star is behind it (its air's forward scatter)
+  vec3 Ls = mix(vec3(1.0), uSy[5].rgb, 0.35);
+  float fwd = pow(max(-L.z, 0.0), 3.0);
   vec4 o = vec4(0.0), rg = vec4(0.0), mf = vec4(0.0);
-  // its moons, in the plane: those beyond it (sin > 0: the far side) under it, the rest over it
+  // its moons, round its equator: those beyond it (sin > 0: the far side) under it, the rest over it
   for (int k = 0; k < 3; k++) {
     if (k >= nm) break;
     float fk = float(k), ma = ps * 2.3 + fk * 2.1 + t * (0.35 / (1.0 + fk)), md = md0 + 0.5 * fk, s = sin(ma);
     vec4 m = sysMoon(v, vec2(cos(ma), s * op) * md, max(0.2 - 0.03 * fk, 0.55 * dp / r), L, aa);
     if (s > 0.0) o = over(o, m); else mf = over(mf, m);
   }
-  // its rings, in the plane (rr, in its radii): their far half under the disc, the near one over it
+  // its rings (rr, in its radii; X the point of them here, z towards us): their far half under the disc, the near one over it
   if (rs > 0.5) {
-    float rr = length(vec2(v.x, yy)), fw = max(aa / op, 0.04), m;
-    vec3 rc;
-    if (rs < 1.5) {
-      m = 0.55 * smoothstep(1.3 - fw, 1.3 + fw, rr) * (1.0 - smoothstep(2.3 - fw, 2.3 + fw, rr)) * (0.65 + 0.35 * sin(rr * 40.0 + sd * 9.0))
-        * (1.0 - 0.85 * exp(-pow((rr - 1.95) / max(0.04, fw), 2.0)));
-      rc = mix(b.rgb * SK_A[K], vec3(0.92, 0.88, 0.8), 0.55);
-    } else if (rs < 2.5) {
-      m = 0.22 * smoothstep(1.65 - fw, 1.65 + fw, rr) * (1.0 - smoothstep(1.9 - fw, 1.9 + fw, rr));
-      rc = vec3(0.82, 0.86, 0.9);
-    } else {
-      m = 0.35 * smoothstep(1.4 - fw, 1.4 + fw, rr) * (1.0 - smoothstep(1.9 - fw, 1.9 + fw, rr)) * (0.7 + 0.3 * pnN(vec3(rr * 30.0, sd * 7.0, fi)));
-      rc = vec3(0.3, 0.26, 0.22);
-    }
-    rg = vec4(rc * 0.8 * m, m);
+    float rr = length(vec2(v.x, yy)), m = sysRing(rs, rr, fw);
+    vec3 rc = rs < 1.5 ? mix(b.rgb * SK_A[K], vec3(0.92, 0.88, 0.8), 0.55) : rs < 2.5 ? vec3(0.82, 0.86, 0.9) : vec3(0.3, 0.26, 0.22);
+    if (rs > 2.5) m *= mix(0.85, 0.7 + 0.3 * pnN(vec3(rr * 30.0, sd * 7.0, fi)), 1.0 - smoothstep(0.02, 0.06, fw));
+    vec3 X = vec3(v.x, v.y, -yy * cz);
+    float fc = dot(L, Po), bx = dot(X, L), sh = bx < 0.0 ? smoothstep(-2.0 * fw, 2.0 * fw, dot(X, X) - bx * bx - 1.0) : 1.0;
+    float lit = (fc * op > 0.0 ? 0.45 + 1.8 * abs(fc) : 0.12 + 0.9 * abs(fc) * (1.0 - m)) + fwd * (rs > 1.5 ? 1.4 : 0.7) * (1.0 - m);
+    lit *= 0.1 + 0.9 * sh;
+    rg = vec4(rc * Ls * 0.8 * lit * m, m);
     if (yy > 0.0) o = over(rg, o);
   }
   float cov = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, q);
-  // the haze of its air off the disc: brighter towards its star, all round when the star is behind it
+  // the haze of its air off the disc: a soft glow and a thin bright limb, brighter towards its star, all round when the
+  // star is behind it
   if (air.w > 0.0 && q > 1.0 - aa) {
-    float hw = max(air.w * 2.5, dp / r), side = dot(v / max(q, 1e-3), normalize(L.xy + vec2(1e-4, 0.0))) * length(L.xy);
-    float m = 0.35 * min(air.w * 12.0, 1.0) * exp(-max(q - 1.0, 0.0) / hw) * (1.0 - cov) * (0.15 + 0.85 * smoothstep(-0.4, 0.6, side) + 0.6 * max(-L.z, 0.0));
-    o = over(vec4(air.rgb * m, 0.5 * m), o);
+    float hw = max(air.w * 2.5, px), side = dot(v / max(q, 1e-3), normalize(L.xy + vec2(1e-4, 0.0))) * length(L.xy), x = max(q - 1.0, 0.0), ka = min(air.w * 12.0, 1.0);
+    float m = 0.35 * ka * exp(-x / hw) * (0.15 + 0.85 * smoothstep(-0.4, 0.6, side) + 0.6 * max(-L.z, 0.0));
+    float lm = 0.25 * ka * exp(-x / (0.35 * hw)) * (smoothstep(-0.2, 0.7, side) + 1.8 * fwd);
+    o = over(vec4((air.rgb * m + mix(air.rgb, Ls, 0.35) * lm) * (1.0 - cov), 0.5 * (m + lm) * (1.0 - cov)), o);
   }
   if (q < 1.0 + aa) {
     vec2 n2 = v / max(1.0, q);
     vec3 N = vec3(n2, sqrt(max(1.0 - dot(n2, n2), 0.0)));
     float lam = dot(N, L);
-    // the point on it: across, along the plane away from us and up its pole, turned by its spin
+    // the point on it: across, along its equator away from us and up its pole, turned by its spin
     vec3 Bd = vec3(N.x, N.y * op - N.z * cz, N.y * cz + N.z * op);
+    // its rings' shadow: where the way to its star from here crosses them, as soft as a device px here spans of them (it
+    // falls in a thin band when their star is low over them: a line finer than a px would be dotted); their band alone,
+    // each style's inner and outer edge and density, not their gap and ringlets (worked out before its surface, so
+    // the GPU holds less at once)
+    float rsh = 1.0, dn = dot(L, Po);
+    if (rs > 0.5 && abs(dn) > 1e-3) {
+      float s = -dot(N, Po) / dn, fs = max(fw, px * (1.0 + 1.0 / abs(dn)) / max(N.z, 0.15)), R = length(N + s * L);
+      vec3 rb = rs < 1.5 ? vec3(1.25, 2.3, 0.5) : rs < 2.5 ? vec3(1.65, 1.9, 0.33) : vec3(1.4, 1.9, 0.5);
+      if (s > 0.0) rsh = 1.0 - rb.z * (smoothstep(rb.x - fs, rb.x + fs, R) - smoothstep(rb.y - fs, rb.y + fs, R)) * smoothstep(0.0, fs, s);
+    }
     float sp = t * (0.06 + 0.04 * fract(sd * 7.0 + fi * 0.37)) + ps, cs = cos(sp), sn = sin(sp);
     vec3 em;
-    vec3 col = b.rgb * sysSurf(int(SK_LOOK[K] + 0.5), K, vec3(Bd.x * cs - Bd.y * sn, Bd.x * sn + Bd.y * cs, Bd.z), SK_A[K], SK_B[K], lam, t, fract(sd * 3.1 + fi * 0.618), em);
-    // its night side dim, not black (a planet between us and its star would be a hole in the stars), and a thin rim lit
-    // round it when its star is behind it
-    vec3 lc = col * (0.13 + 0.85 * smoothstep(-0.05, 0.6, lam) * max(lam, 0.0) + 0.06 * smoothstep(-0.1, 0.2, lam)) * mix(0.6, 1.0, sqrt(N.z));
-    lc += mix(col, vec3(1.0), 0.5) * pow(1.0 - N.z, 3.0) * max(-L.z, 0.0) * 0.45;
+    vec3 col = b.rgb * sysSurf(int(SK_LOOK[K] + 0.5), K, vec3(Bd.x * cs - Bd.y * sn, Bd.x * sn + Bd.y * cs, Bd.z), SK_A[K], SK_B[K], lam, t, fract(sd * 3.1 + fi * 0.618), px, em);
+    // its day side in its star's light, wrapping past the terminator as far as its air is thick and reddened there; its
+    // night side dim, not black (a planet between us and its star would be a hole in the stars); its limb darker (less
+    // so on bare rock), and a thin rim lit round it when its star is behind it
+    float w = 0.06 + 1.6 * air.w, wl = clamp((lam + w) / (1.0 + w), 0.0, 1.0), dusk = min(air.w * 10.0, 1.0) * exp(-pow(lam / (0.12 + w), 2.0));
+    vec3 lt = Ls * mix(vec3(1.0), vec3(1.0, 0.6, 0.42), 0.55 * dusk);
+    vec3 lc = col * (0.1 + 0.9 * wl * smoothstep(0.0, 0.3, wl) * rsh * lt) * mix(air.w > 0.0 ? 0.6 : 0.8, 1.0, sqrt(N.z));
+    float ka = min(air.w * 12.0, 1.0);
+    lc += mix(mix(col, Ls, 0.5), air.rgb, ka) * pow(1.0 - N.z, 3.0) * max(-L.z, 0.0) * (0.2 + 0.25 * ka);
     lc += em * mix(1.0, 0.25, smoothstep(-0.1, 0.25, lam));
-    lc += air.rgb * pow(1.0 - N.z, 2.5) * min(air.w * 6.0, 0.8) * (0.15 + 0.85 * smoothstep(-0.25, 0.4, lam)) * 0.6;
+    // its air over the limb, lit towards its star and glowing all round when the star is behind it
+    lc += mix(air.rgb, Ls, 0.25 * fwd) * pow(1.0 - N.z, 2.5) * min(air.w * 6.0, 0.8) * (0.15 + 0.85 * smoothstep(-0.25, 0.4, lam) + 1.2 * fwd) * 0.6;
     o = over(vec4(lc * cov, cov), o);
   }
   if (rs > 0.5 && yy <= 0.0) o = over(rg, o);
@@ -5910,8 +6107,12 @@ vec4 system(vec2 p) {
   vec4 b = uSy[1], n = uSy[2], ds = uSy[3], xs = uSy[${10 + 4 * SYSTEM_PL_N}];
   vec2 v = vec2(d.x * b.x + d.y * b.y, -d.x * b.y + d.y * b.x) / R, w = vec2(v.x, v.y / b.z);
   float rho = length(w), phi = atan(w.y, w.x), t = b.w, sq = length(vec2(cos(phi), sin(phi) * b.z));
+  // (beyond its nebula and over 75 px beyond 1.12 of its outer orbit, where only the box's corners are, nothing of it reaches:
+  // not a third star's glow, a planet's rings or moons)
+  vec2 nv = vec2(v.x, v.y / ${glf(SYSTEM_NEB_F)}) / ${glf(SYSTEM_NEB_K)};
+  if ((rho - 1.12) * R * sq > 75.0 * dp && (xs.z <= 0.0 || dot(nv, nv) > 2.89)) return vec4(0.0);
   // the gas it sits in, under all of it
-  vec4 o = xs.z > 0.0 ? sysNeb(vec2(v.x, v.y / ${glf(SYSTEM_NEB_F)}) / ${glf(SYSTEM_NEB_K)}, t, xs.z - 1.0, xs.w, ds.z) : vec4(0.0);
+  vec4 o = xs.z > 0.0 ? sysNeb(nv, t, xs.z - 1.0, xs.w, ds.z, uSy[5].rgb) : vec4(0.0);
   // the plane's faint dust, lit by its stars
   float zg = 0.03 * exp(-pow(rho / 0.6, 2.0)) + 0.03 * exp(-rho / 0.1);
   o = over(vec4(vec3(0.95, 0.86, 0.72) * zg, 0.5 * zg), o);
@@ -6897,27 +7098,55 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A, vec4 jp, float
   vec3 tn = vec3(1.0, 0.5, 0.35);
   float sd = shSD(u), dd = sd * R;
   float cov = 1.0 - smoothstep(-w, w, sd);
-  float plate = nbF(vec2(u.x * 36.0, u.y * 120.0) + fr.w * 71.0, 2);
-  vec3 body = ${col(SHIP_BODY)} * (0.8 + 0.5 * plate) + ${col(SHIP_LIFT)} * smoothstep(0.12, -0.14, u.y);
-  body = mix(body, ${col(SHIP_JUMP_RGB)} * 0.4, 0.7 * hot); // the blue it sheds as it slows
+  // the surface's normal: the distance's gradient (four more lookups, on the hull and just off it) bent up towards us over a
+  // rounded edge SHIP_ROUND deep (at least a px or two), flat beyond it; the light (SHIP_LIGHT, in the ship's frame) a little
+  // from in front
+  vec2 L = normalize(vec2(dot(${Ls}, e1), fr.z * dot(${Ls}, e2))), n = vec2(0.0);
+  if (abs(dd) < 16.0 * dp) {
+    float e = 1.6 / R;
+    vec2 g = vec2(shSD(u + vec2(e, 0.0)) - shSD(u - vec2(e, 0.0)), shSD(u + vec2(0.0, e)) - shSD(u - vec2(0.0, e)));
+    n = g / max(length(g), 1e-5);
+  }
   float hz = min(${glf(SHIP_HAZE_MAX)}, ${glf(SHIP_HAZE_A)} * (1.0 + 0.35 * smoothstep(-0.05, 0.15, u.y)) * (wp < 1.0 ? 1.4 : 1.0));
-  float mist = smoothstep(0.35, 0.7, nbF(p / (1.4 * R) + 3.1, 3));
+  // (its patches of mist only matter on the hull, its rim and its engines' glow)
+  float mist = dd < 16.0 * dp || u.x < -0.75 ? smoothstep(0.35, 0.7, nbF(p / (1.4 * R) + 3.1, 3)) : 0.0;
   hz = min(0.97, hz + 0.1 * mist);
-  body = mix(body, ${col(SHIP_HAZE)}, hz);
-  float ba = cov * ${glf(SHIP_BODY_A)} * (1.0 - ${glf(SHIP_MIST)} * mist) * A, lit = A * (1.0 - 0.75 * hz) * (1.0 - 0.5 * mist);
-  vec4 o = vec4(body * ba, ba);
-  // still fast out of the rift: the hull glows the jump's blue-white through the haze, fading as it slows
-  o.rgb += mix(${col(SHIP_JUMP_RGB)}, ${col(SHIP_JUMP_CORE)}, 0.5) * (${glf(SHIP_JUMP_GLOW)} * hot * hot * cov * A);
+  float lit = A * (1.0 - 0.75 * hz) * (1.0 - 0.5 * mist);
+  vec4 o = vec4(0.0);
+  // the hull itself, only where it is (the rest of its box skips this)
+  if (cov > 0.0) {
+    float rh = 1.0 - exp(min(sd, 0.0) / max(${glf(SHIP_ROUND)}, 1.8 * dp / R));
+    vec3 N = normalize(vec3(n * (1.0 - rh), rh + 1e-3)), L3 = normalize(vec3(L, 0.55));
+    float dif = max(dot(N, L3), 0.0), spec = pow(max(dot(N, normalize(L3 + vec3(0.0, 0.0, 1.0))), 0.0), 18.0);
+    // its plating: panels in staggered rows (SHIP_PANEL [along, across]), each a shade of its own, with dark seams between, only
+    // as they get big enough to see (gone on the small hulls of a battle)
+    vec2 pc = vec2(u.x / ${glf(SHIP_PANEL[0])}, u.y / ${glf(SHIP_PANEL[1])});
+    float rk = fract(floor(pc.y) * 0.618 + fr.w);
+    pc.x = pc.x / (0.75 + 0.5 * rk) + rk * 7.0;
+    vec2 pe = (0.5 - abs(fract(pc) - 0.5)) * vec2(${glf(SHIP_PANEL[0])}, ${glf(SHIP_PANEL[1])}) * R / dp; // px to the seams
+    float pv = smoothstep(2.5, 6.0, ${glf(SHIP_PANEL[1])} * R / dp);
+    float tone = (hash(uvec2(uvec2(floor(pc) + 512.0)) + uvec2(0u, uint(fr.w * 9973.0))) - 0.5) * pv;
+    float seam = pv * max((0.3 + 0.7 * fract(tone * 37.0 + 0.5)) * exp(-pe.x * pe.x / 0.5), exp(-pe.y * pe.y / 0.5)) * smoothstep(0.3, 0.8, rh);
+    float plate = nbF(vec2(u.x * 36.0, u.y * 120.0) + fr.w * 71.0, 2);
+    vec3 body = ${col(SHIP_BODY)} * (0.8 + 0.5 * plate) * (1.0 + 0.5 * tone) + ${col(SHIP_LIFT)} * smoothstep(0.12, -0.14, u.y);
+    body = mix(body, ${col(SHIP_JUMP_RGB)} * 0.4, 0.7 * hot); // the blue it sheds as it slows
+    body = mix(body, ${col(SHIP_HAZE)}, hz);
+    // the side away from the light darker, the keel darkest
+    body *= mix(${glf(SHIP_SHADE)}, 1.0, dif) * mix(1.0, 0.8, smoothstep(-0.02, 0.14, u.y)) * (1.0 - 0.25 * seam);
+    float ba = cov * ${glf(SHIP_BODY_A)} * (1.0 - ${glf(SHIP_MIST)} * mist) * A;
+    o = vec4(body * ba, ba);
+    // lit by its star: the faces as much as they turn to it, a panel catching it a little more or less, the seams not at all,
+    // and a soft warm sheen where the rounded edges turn it towards us
+    o.rgb += (${col(SHIP_KEY)} * (${glf(SHIP_KEY_A)} * dif * (1.0 + 0.6 * tone) * (1.0 - 0.6 * seam)) + ${col(SHIP_RIM_WARM)} * (${glf(SHIP_SPEC_A)} * spec * (1.0 - rh * 0.6))) * cov * lit;
+    // still fast out of the rift: the hull glows the jump's blue-white through the haze, fading as it slows
+    o.rgb += mix(${col(SHIP_JUMP_RGB)}, ${col(SHIP_JUMP_CORE)}, 0.5) * (${glf(SHIP_JUMP_GLOW)} * hot * hot * cov * A);
+  }
   if (dd > 0.0 && dd < 56.0 * dp) {
     float hg = ${glf(SHIP_HAZE_GLOW)} * exp(-dd / min(13.0 * dp, 0.13 * R)) * A;
     hg *= (1.0 - smoothstep(0.42, 0.62, abs(u.y))) * smoothstep(-1.7, -1.5, u.x) * (1.0 - smoothstep(1.15, 1.35, u.x));
     o = over(o, vec4(${col(SHIP_HAZE)} * 2.2 * hg, hg));
   }
   if (abs(dd) < 16.0 * dp) {
-    float e = 1.6 / R;
-    vec2 g = vec2(shSD(u + vec2(e, 0.0)) - shSD(u - vec2(e, 0.0)), shSD(u + vec2(0.0, e)) - shSD(u - vec2(0.0, e)));
-    vec2 n = g / max(length(g), 1e-5);
-    vec2 L = normalize(vec2(dot(${Ls}, e1), fr.z * dot(${Ls}, e2)));
     float fc = max(dot(n, L), 0.0), fb = max(-dot(n, L), 0.0);
     float vr = clamp(0.55 + 0.9 * nbF(u * 4.0 + fr.w * 30.0, 2), 0.4, 1.3);
     vec3 rc = mix(mix(${col(SHIP_RIM)}, ${col(SHIP_RIM_WARM)}, 0.6 * smoothstep(0.1, 1.0, u.x)), tn, 0.45 * xt.x);
@@ -6940,13 +7169,25 @@ vec4 shipOne(vec2 p, vec2 c, float R, vec4 fr, float wp, float A, vec4 jp, float
     float m = ${glf(SHIP_WINDOW_A)} * (exp(-q2 / (rw * rw)) + 0.12 * exp(-q2 / (6.0 * rw * rw))) * lit;
     o = over(vec4(mix(${col(SHIP_WINDOW)}, tn, 0.5 * xt.x) * m, m), o);
   }
-  // the engines
-  for (int k = 0; k < ${SHIP_ENGINES.length}; k++) {
-    vec2 q = (u - SH_ENG[k]) * R;
-    float q2 = dot(q, q), rc = max(1.1 * dp, 0.011 * R), rh = 0.035 * R;
-    float pl = q.x < 0.0 ? exp(q.x / (0.1 * R)) * exp(-pow(q.y / (0.012 * R + 0.5 * dp), 2.0)) : 0.0;
-    float m = ${glf(SHIP_ENGINE_A)} * (exp(-q2 / (rc * rc)) + 0.28 * exp(-q2 / (rh * rh)) + 0.34 * pl) * lit;
-    o = over(vec4(mix(${col(SHIP_ENGINE)}, tn, 0.7 * xt.x) * m, m), o);
+  // the engines: a white-hot core in a soft halo of their colour and a plume back from each nozzle, widening and cooling, all
+  // flickering a little; under thrust (leaving through a rift: the smear) longer and brighter; burning, they sputter
+  if (u.x < -0.75) {
+    float thr = jp.z < 0.0 ? clamp(sm / ${glf(SHIP_JUMP_STREAK)}, 0.0, 1.0) : 0.0;
+    float fn = uSize.w < 0.0 ? 0.5 : nbN(vec2(uSize.w * 13.0, fr.w * 97.0));
+    float fl = (0.86 + 0.28 * fn) * mix(1.0, smoothstep(0.25, 0.75, fn), xt.w) * (1.0 + 1.3 * thr);
+    vec3 ec = mix(${col(SHIP_ENGINE)}, tn, 0.7 * xt.x);
+    for (int k = 0; k < ${SHIP_ENGINES.length}; k++) {
+      vec2 q = (u - SH_ENG[k]) * R;
+      float q2 = dot(q, q), rc = max(0.9 * dp, 0.009 * R), rg = (0.035 + 0.02 * thr) * R, s = -q.x;
+      float wq = 0.011 * R + 0.6 * dp + 0.06 * max(s, 0.0), Lp = (0.1 + 0.16 * thr) * R;
+      float pl = s > 0.0 ? exp(-s / Lp) * exp(-q.y * q.y / (wq * wq)) * (1.0 - smoothstep(0.38 * R, 0.6 * R, s)) : 0.0;
+      float core = exp(-q2 / (rc * rc)), wh = core + 0.5 * pl * exp(-s / (0.3 * Lp));
+      float m = ${glf(SHIP_ENGINE_A)} * fl * lit, rb = min(${glf(BLOOM_R)} * dp, ${glf(BLOOM_ENGINE_R)} * R);
+      // its bloom: the core's light, a little of its colour, spread over a soft halo under it (inside the hull's box)
+      o = over(bloom(mix(ec, vec3(1.0), 0.5) * (${glf(1.8 * BLOOM_ENGINE)} * m), q2 / (rb * rb + rc * rc)), o);
+      vec3 Le = (vec3(1.0, 0.98, 0.94) * wh * 1.8 + ec * (0.45 * exp(-q2 / (rg * rg)) + 0.7 * pl)) * m;
+      o = over(vec4(Le, 0.6 * min(1.0, max(Le.r, max(Le.g, Le.b)))), o);
+    }
   }
   // burning: ember patches that flicker over the hull, and the torn edge of a broken one glowing
   if (xt.w > 0.0 || tear > 0.0) {
@@ -7127,7 +7368,9 @@ vec4 planet(vec2 p0, vec2 pl) {
       float cl = smoothstep(0.5, 0.72, pnF(Pc * 3.0 + sd + 4.0, 4));
       col = mix(col, vec3(0.96), 0.85 * cl);
       gloss = (1.0 - land) * (1.0 - ice) * (1.0 - cl);
-      night = vec3(1.0, 0.68, 0.32) * 0.55 * smoothstep(0.7, 0.8, pnN(Ps * 70.0 + sd)) * land * (1.0 - ice) * (1.0 - 0.85 * cl);
+      // (its cities a speck each only where a speck spans a few device px; smaller, their glow on average, not sparkling)
+      float ct = mix(0.12, smoothstep(0.7, 0.8, pnN(Ps * 70.0 + sd)), 1.0 - smoothstep(0.25, 0.5, 70.0 / a.z));
+      night = vec3(1.0, 0.68, 0.32) * 0.55 * ct * land * (1.0 - ice) * (1.0 - 0.85 * cl);
     } else if (kind < 2.5) {
       // an ice giant: soft bands, a dark spot and bright streaks of cloud
       float w = pnF(Ps * 2.0 + sd, 3);
@@ -7145,10 +7388,22 @@ vec4 planet(vec2 p0, vec2 pl) {
       col = mix(cB.rgb, cA.rgb, smoothstep(0.35, 0.65, h)) * (0.85 + 0.3 * cr);
       col = mix(col, vec3(0.95, 0.93, 0.9), smoothstep(0.86, 0.92, abs(sl) + 0.1 * (h - 0.5)));
     }
+    // its rings' shadow across it: where the way to its star from here crosses them (their density as planetRing's, but
+    // its ringlets), as soft as a device px here spans of them
+    float rsh = 1.0, dn = dot(L, Ax);
+    if (rg.y > 0.0 && abs(dn) > 1e-3) {
+      float s = -dot(N, Ax) / dn, w = rg.y - rg.x;
+      if (s > 0.0) {
+        float e = uSize.z / a.z * (1.0 + 1.0 / abs(dn)) / max(z, 0.15) / w + 0.01, u = (length(N + s * L) - rg.x) / w;
+        float dr = smoothstep(-e, e, u) * (1.0 - smoothstep(1.0 - e, 1.0 + e, u)) * (0.7 + 0.3 * smoothstep(0.0, 0.5, u))
+          * (1.0 - 0.92 * min(1.0, 0.025 / e) * exp(-pow((u - 0.62) / max(0.025, e), 2.0)));
+        rsh = 1.0 - 0.85 * (1.0 - exp(-dr * 0.6 / max(abs(dn), 0.05))) * smoothstep(0.0, e * w, s);
+      }
+    }
     // its star: a terminator as soft as its air is thick, reddened at dusk; its limb darker; the sea's glint
-    float day = smoothstep(-0.05 - 1.5 * th, 0.1 + th, lam), dusk = exp(-pow(lam / (0.12 + th), 2.0));
+    float day = smoothstep(-0.05 - 1.5 * th, 0.1 + th, lam) * rsh, dusk = exp(-pow(lam / (0.12 + th), 2.0));
     vec3 lc = col * day * mix(vec3(1.0), vec3(1.0, 0.52, 0.3), 0.6 * dusk) * mix(0.55, 1.0, sqrt(z));
-    lc += gloss * pow(max(dot(N, normalize(L + vec3(0.0, 0.0, 1.0))), 0.0), 60.0) * vec3(1.0, 0.92, 0.8) * step(0.0, lam);
+    lc += gloss * pow(max(dot(N, normalize(L + vec3(0.0, 0.0, 1.0))), 0.0), 60.0) * vec3(1.0, 0.92, 0.8) * step(0.0, lam) * rsh;
     lc = lc * ${glf(PLANET_LIGHT)} + col * 0.02 + night * (1.0 - smoothstep(-0.15, 0.05, lam));
     // its air at the rim of the disc, brighter on the lit side
     lc += air.rgb * pow(1.0 - z, 2.5) * (0.9 * smoothstep(-0.35, 0.4, lam) + 0.3 * max(-L.z, 0.0)) * min(1.0, th * 14.0) * ${glf(PLANET_LIGHT * 1.6)};
@@ -7174,7 +7429,7 @@ vec4 planet(vec2 p0, vec2 pl) {
 // (shipOne's xt); then BATTLE_STREAKS streaks, two each: head and tail (device px), colour and alpha + 2 x its type (0 a bolt, 1
 // a fighter, 2 a torpedo, 3 a tracer, 4 a wreck's entry trail); then BATTLE_BLASTS blasts, two each: middle, size (device px) and alpha, age (s), seed,
 // kind (0 a hit, 1 a shield's ripple, 2 an explosion, 3 a capital ship blowing apart, 4 a fire, 5 flak, 6 a fighter lost, 7 a
-// wreck's last burst) and side. The loops run to counts the compiler can't know, so it keeps one copy of each (not unrolled)
+// wreck's last burst, 8 a gun's muzzle flash) and side. The loops run to counts the compiler can't know, so it keeps one copy of each (not unrolled)
 const BATTLE_GLSL = (() => {
   const col = (v) => `vec3(${v.map(glf).join(', ')})`;
   const S = 2 + BATTLE_HULLS * 5, B = S + BATTLE_STREAKS * 2;
@@ -7191,12 +7446,16 @@ vec4 btStreak(vec2 p, vec4 s, vec4 c, float dp) {
   float d2 = btSeg(p, s.zw, s.xy, t) / (dp * dp);
   if (d2 > 200.0) return vec4(0.0);
   vec2 qh = (p - s.xy) / dp;
-  float h2 = dot(qh, qh), m;
+  float h2 = dot(qh, qh), m, bl = 0.0;
   vec3 col = c.rgb;
+  // its head's bloom (BLOOM_BOLT, bl its light): a bolt's, a torpedo's, an entry trail's
+  vec3 hc = mix(c.rgb, vec3(1.0), 0.45) * ${glf(BLOOM_BOLT)};
+  float hx = h2 / ${glf((0.8 * BLOOM_R) ** 2)};
   if (ty < 0.5) {
-    // a bolt: a hot core, brightest at its head, in a glow of its side's colour
-    m = al * t * (exp(-d2 / 0.45) + 0.22 * exp(-d2 / 6.0));
-    col = mix(c.rgb, vec3(1.0), 0.55 * exp(-d2 / 0.3));
+    // a bolt: a white-hot core, brightest at its head, in a soft glow of its side's colour, a little bloom round the head
+    float k = al * (0.25 + 0.75 * t), core = exp(-d2 / 0.35), hb = exp(-h2 / 2.2);
+    vec3 L = vec3(1.0, 0.98, 0.95) * (k * core + 0.35 * al * exp(-h2 / 0.5)) + c.rgb * (k * (0.5 * exp(-d2 / 2.2) + 0.14 * exp(-d2 / 11.0)) + 0.3 * al * hb);
+    return over(vec4(L, 0.5 * min(1.0, max(L.r, max(L.g, L.b)))), bloom(hc * al, hx));
   } else if (ty < 1.5) {
     // a fighter: a speck, its engine's short trail
     m = al * (0.9 * exp(-h2 / 0.6) + 0.35 * t * t * exp(-d2 / 0.35));
@@ -7205,67 +7464,106 @@ vec4 btStreak(vec2 p, vec4 s, vec4 c, float dp) {
     // a torpedo: a bright head, pulsing, and a soft trail
     float pu = 0.75 + 0.25 * sin(uBt[1].w * 31.0 + s.x * 0.37);
     m = al * (pu * (exp(-h2 / 1.4) + 0.3 * exp(-h2 / 14.0)) + 0.4 * t * exp(-d2 / 1.1));
-    col = mix(c.rgb, vec3(1.0), 0.5 * exp(-h2 / 0.8));
+    col = mix(c.rgb, vec3(1.0), 0.6 * exp(-h2 / 0.8));
+    bl = al * pu;
   } else if (ty < 3.5) {
-    // a tracer
-    m = al * t * exp(-d2 / 0.3);
+    // a tracer: a thin hot line in a faint glow
+    m = al * t * (exp(-d2 / 0.3) + 0.2 * exp(-d2 / 2.0));
+    col = mix(c.rgb, vec3(1.0), 0.6 * exp(-d2 / 0.2));
   } else {
     // an entry trail: a white-hot head burning into the air, its trail widening behind it and cooling to orange, flickering
     float w = 0.35 + 3.2 * (1.0 - t), fk = 0.8 + 0.2 * sin(uBt[1].w * 23.0 + t * 17.0 + s.y * 0.3);
     m = al * (1.3 * exp(-h2 / 1.1) + 0.85 * fk * pow(t, 0.8) * exp(-d2 / w));
     col = mix(vec3(0.9, 0.32, 0.1), mix(c.rgb, vec3(1.0, 0.96, 0.88), 0.6), max(exp(-h2 / 1.4), t * t * 0.7));
+    bl = al;
   }
-  return vec4(col * m, 0.5 * m);
+  return bl > 0.0 ? over(vec4(col * m, 0.5 * m), bloom(hc * bl, hx)) : vec4(col * m, 0.5 * m);
 }
 vec4 btBlast(vec2 p, vec4 b, vec4 c) {
   float R = max(b.z, 0.5), dp = uSize.z, age = c.x, kind = c.z;
+  bool big = kind > 2.5 && kind < 3.5;
+  // fly: how far its sparks and debris get before they are gone (within its box, battleNow's reach)
+  float cut = R * (big ? 8.6 : 5.6) + 6.0 * dp, fly = R * (big ? 7.0 : 4.5);
   vec2 d = p - b.xy;
   float r = length(d);
-  if (r > R * (kind > 2.5 && kind < 3.5 ? 8.6 : 5.6) + 6.0 * dp) return vec4(0.0);
-  float fbR = 0.0, T = 0.0, fbA = 0.0, ringR = 0.0, ringA = 0.0, flash = 0.0, sv = 0.0, g = 1.0 - exp(-age / 0.12);
-  int sn = 0;
-  if (kind < 0.5) { fbR = 0.5 + 0.5 * g; T = exp(-age / 0.15); fbA = pow(max(1.0 - age / 0.45, 0.0), 2.0); flash = exp(-age / 0.06); sn = 5; sv = 2.2; }
-  else if (kind < 1.5) { ringR = 0.35 + 1.3 * age / 0.7; ringA = 0.9 * pow(max(1.0 - age / 0.7, 0.0), 2.0); flash = 0.5 * exp(-age / 0.08); }
-  else if (kind < 2.5) { fbR = 0.5 + 1.1 * (1.0 - exp(-age / 0.35)); T = exp(-age / 0.55); fbA = pow(max(1.0 - age / 1.8, 0.0), 1.5); flash = 1.4 * exp(-age / 0.1); sn = 10; sv = 3.0; }
-  else if (kind < 3.5) { fbR = 0.6 + 1.5 * (1.0 - exp(-age / 1.2)); T = exp(-age / 1.6); fbA = pow(max(1.0 - age / 6.5, 0.0), 1.5);
-    ringR = 0.8 + 3.2 * (1.0 - exp(-age / 1.5)); ringA = 0.42 * exp(-age / 1.8); flash = 0.55 * exp(-age / 0.2); sn = 24; sv = 6.0; }
-  else if (kind < 4.5) { float fk = nbN(vec2(age * 9.0, c.y * 50.0)); fbR = 0.55 + 0.15 * fk; T = 0.5 + 0.3 * fk; fbA = b.w * (0.55 + 0.45 * fk); }
-  else if (kind < 5.5) { fbR = 0.4 + 0.6 * g; T = exp(-age / 0.15); fbA = pow(max(1.0 - age / 0.6, 0.0), 2.0); flash = 0.8 * exp(-age / 0.06); sn = 6; sv = 1.8; }
-  else if (kind < 6.5) { fbR = 0.5 + 0.9 * g; T = exp(-age / 0.25); fbA = pow(max(1.0 - age / 0.9, 0.0), 2.0); flash = exp(-age / 0.07); sn = 8; sv = 2.5; }
-  else { fbR = 0.6 + 1.4 * (1.0 - exp(-age / 0.6)); T = exp(-age / 0.9); fbA = pow(max(1.0 - age / 6.0, 0.0), 1.5);
-    ringR = 0.6 + 3.0 * (1.0 - exp(-age / 0.8)); ringA = 0.35 * exp(-age / 0.9); flash = 1.0 * exp(-age / 0.12); sn = 16; sv = 4.0; }
+  if (r > cut) return vec4(0.0);
+  // per kind: the fireball (its radius in R, growing on as it fades so it never holds still, its heat and alpha), the shock
+  // ring (radius in R, alpha), the flash, the sparks and the debris (how many, how fast) and its life (s)
+  float fbR = 0.0, T = 0.0, fbA = 0.0, ringR = 0.0, ringA = 0.0, flash = 0.0, sv = 0.0, dv = 0.0, life = 1.0, g = 1.0 - exp(-age / 0.12);
+  int sn = 0, dn = 0;
+  if (kind < 0.5) { fbR = 0.5 + 0.5 * g + 0.5 * age; T = exp(-age / 0.15); fbA = pow(max(1.0 - age / 0.45, 0.0), 2.0); flash = 1.7 * exp(-age / 0.05); sn = 6; sv = 2.4; life = 0.45; }
+  else if (kind < 1.5) { ringR = 0.35 + 1.3 * age / 0.7; ringA = 0.9 * pow(max(1.0 - age / 0.7, 0.0), 2.0); flash = 0.5 * exp(-age / 0.08); life = 0.7; }
+  else if (kind < 2.5) { fbR = 0.5 + 1.1 * (1.0 - exp(-age / 0.35)) + 0.25 * age; T = exp(-age / 0.55); fbA = pow(max(1.0 - age / 1.8, 0.0), 1.5); flash = 1.4 * exp(-age / 0.1);
+    ringR = 0.5 + 2.0 * (1.0 - exp(-age / 0.25)) + 0.6 * age; ringA = 0.32 * exp(-age / 0.3); sn = 10; sv = 3.0; dn = 6; dv = 2.4; life = 1.8; }
+  else if (kind < 3.5) { fbR = 0.6 + 1.5 * (1.0 - exp(-age / 1.2)) + 0.12 * age; T = exp(-age / 1.6); fbA = pow(max(1.0 - age / 6.5, 0.0), 1.5);
+    ringR = 0.8 + 3.2 * (1.0 - exp(-age / 1.5)) + 0.25 * age; ringA = 0.42 * exp(-age / 1.8); flash = 0.55 * exp(-age / 0.2); sn = 24; sv = 6.0; dn = 16; dv = 4.2; life = 6.5; }
+  else if (kind < 4.5) { float fk = nbN(vec2(age * 9.0, c.y * 50.0)); fbR = 0.55 + 0.15 * fk; T = 0.5 + 0.3 * fk; fbA = b.w * (0.55 + 0.45 * fk); life = 1e4; }
+  else if (kind < 5.5) { fbR = 0.4 + 0.6 * g + 0.4 * age; T = exp(-age / 0.15); fbA = pow(max(1.0 - age / 0.6, 0.0), 2.0); flash = 0.8 * exp(-age / 0.06); sn = 6; sv = 1.8; life = 0.6; }
+  else if (kind < 6.5) { fbR = 0.5 + 0.9 * g + 0.4 * age; T = exp(-age / 0.25); fbA = pow(max(1.0 - age / 0.9, 0.0), 2.0); flash = exp(-age / 0.07); sn = 8; sv = 2.5; dn = 4; dv = 2.2; life = 0.9; }
+  else if (kind < 7.5) { fbR = 0.6 + 1.4 * (1.0 - exp(-age / 0.6)) + 0.12 * age; T = exp(-age / 0.9); fbA = pow(max(1.0 - age / 6.0, 0.0), 1.5);
+    ringR = 0.6 + 3.0 * (1.0 - exp(-age / 0.8)) + 0.25 * age; ringA = 0.35 * exp(-age / 0.9); flash = 1.0 * exp(-age / 0.12); sn = 16; sv = 4.0; dn = 10; dv = 2.6; life = 6.0; }
+  else { flash = 1.3 * exp(-age / 0.035); life = 0.12; } // a gun's muzzle flash
   vec3 sc = btSide(c.w);
   vec4 o = vec4(0.0);
-  // the fireball: churning, white-hot to deep red as it cools, and the smoke it leaves
+  float lf = clamp(age / life, 0.0, 1.0);
+  // the fireball: churning, white-hot to deep red as it cools, and the smoke it leaves, tearing into wisps as it thins
   if (fbA > 0.0 && r < 1.6 * R * fbR) {
-    float q = r / (R * fbR), tu = nbF(d / (0.35 * R * fbR) + c.y * 40.0 + vec2(age * 0.9, -age * 0.6), 3), edge = 0.75 + 0.5 * tu;
-    float dens = 1.0 - smoothstep(edge - 0.35, edge, q), heat = T * (1.0 - 0.6 * q) * (0.6 + 0.8 * tu);
+    float q = r / (R * fbR), tu = nbF(d / (0.35 * R * fbR) + c.y * 40.0 + vec2(age * 0.9, -age * 0.6), 3), edge = 0.75 + 0.5 * tu - 0.2 * lf;
+    float dens = (1.0 - smoothstep(edge - 0.35, edge, q)) * smoothstep(0.3 * lf, 0.3 * lf + 0.25, tu), heat = T * (1.0 - 0.6 * q) * (0.6 + 0.8 * tu);
     vec3 fc = mix(vec3(0.45, 0.07, 0.02), vec3(1.0, 0.5, 0.12), smoothstep(0.1, 0.45, heat));
     fc = mix(fc, vec3(1.0, 0.93, 0.78), smoothstep(0.5, 0.9, heat));
+    fc = mix(fc, vec3(1.0, 0.99, 0.96), smoothstep(0.95, 1.3, heat));
     float e = dens * fbA * smoothstep(0.02, 0.2, heat), sa = 0.55 * dens * fbA * (1.0 - T);
-    o = over(vec4(fc * e * 1.3, 0.6 * e), vec4(vec3(0.04) * sa, sa));
+    o = over(vec4(fc * e * 1.3, 0.6 * e), vec4(vec3(0.05, 0.055, 0.065) * sa, sa));
   }
-  // the shock ring (a shield's ripple in its side's colour)
+  // while it is hot, its bloom (BLOOM_FIRE): a warm halo round it, under it
+  if (fbA > 0.0 && T > 0.05) o = over(o, bloom(vec3(1.0, 0.62, 0.28) * (${glf(BLOOM_FIRE)} * fbA * T * T), r * r / (R * R * fbR * fbR + ${glf(BLOOM_R * BLOOM_R)} * dp * dp)));
+  // the shock ring (a shield's ripple in its side's colour), running on out as it fades
   if (ringA > 0.0) {
     float x = (r - ringR * R) / (0.12 * R + 1.5 * dp);
     float m = ringA * exp(-x * x) * (0.65 + 0.5 * nbF(d / (0.4 * R) + c.y * 20.0, 2));
     vec3 rc = kind > 0.5 && kind < 1.5 ? mix(sc, vec3(1.0), 0.25) : vec3(1.0, 0.82, 0.62);
     o = over(vec4(rc * m, 0.5 * m), o);
   }
+  // the flash: a white-hot point in a glow (a hit's and a gun's tinted by the shot's side, a shield's all its side's colour)
   if (flash > 0.0) {
-    float fr = R * (kind > 2.5 && kind < 3.5 ? 1.6 : 1.0), m = flash * exp(-r * r / (fr * fr));
-    o = over(vec4((kind > 0.5 && kind < 1.5 ? sc : vec3(1.0, 0.95, 0.85)) * m, 0.5 * min(m, 1.0)), o);
+    float fr = R * (kind > 2.5 && kind < 3.5 ? 1.6 : 1.0), x2 = r * r / (fr * fr);
+    bool sh = kind > 0.5 && kind < 1.5;
+    vec3 hc = sh ? sc : (kind < 0.5 || kind > 7.5 ? mix(sc, vec3(1.0, 0.86, 0.66), 0.4) : vec3(1.0, 0.86, 0.66));
+    float gl = kind < 0.5 || kind > 7.5 ? 0.6 * exp(-abs(d.x * d.y) / (0.12 * fr * fr) - r / (1.6 * fr)) : 0.0;
+    vec3 L = flash * ((sh ? 0.0 : 1.0) * vec3(1.0, 0.98, 0.94) * (exp(-x2 * 2.5) + gl) + hc * (sh ? 1.0 : 0.6) * exp(-x2));
+    o = over(vec4(L, 0.5 * min(max(L.r, max(L.g, L.b)), 1.0)), o);
+    // its bloom (BLOOM_FLASH): its light spread over a soft halo round it, under it
+    o = over(o, bloom(mix(hc, vec3(1.0), sh ? 0.0 : 0.35) * (${glf(BLOOM_FLASH)} * flash), r * r / (1.96 * fr * fr + ${glf(BLOOM_R * BLOOM_R)} * dp * dp)));
   }
-  // sparks flung out, each a short streak, cooling as it flies
+  // sparks flung out, each a short streak, cooling as it flies, slowing but never stopping
   uint sd = uint(c.y * 65535.0);
+  if (r > fly + 0.4 * R + 2.0 * dp) { sn = 0; dn = 0; }
   for (int k = 0; k < sn; k++) {
     float h1 = hash(uvec2(uint(k) + 101u, sd)), h2 = hash(uvec2(uint(k) + 7u, sd + 3u));
-    float an = h1 * 6.2831853, spd = sv * (0.4 + 0.8 * h2), t;
-    vec2 dir = vec2(cos(an), sin(an)), hd = b.xy + dir * R * spd * (1.0 - exp(-age / 0.7));
+    float an = h1 * 6.2831853, spd = sv * (0.4 + 0.8 * h2), t, tr = R * spd * (1.0 - exp(-age / 0.7) + 0.05 * age);
+    vec2 dir = vec2(cos(an), sin(an)), hd = b.xy + dir * tr;
     float d2 = btSeg(p, hd - dir * (R * 0.25 * spd * exp(-age / 0.5) + dp), hd, t) / (dp * dp);
     if (d2 > 30.0) continue;
-    float m = exp(-age / (0.5 + 1.2 * h2 * (kind > 2.5 ? 2.0 : 1.0))) * t * exp(-d2 / 0.5);
+    float m = exp(-age / (0.5 + 1.2 * h2 * (kind > 2.5 ? 2.0 : 1.0))) * t * (exp(-d2 / 0.5) + 0.25 * t * exp(-d2 / 3.0)) * (1.0 - smoothstep(0.75 * fly, fly, tr));
     o = over(vec4(mix(vec3(1.0, 0.55, 0.2), vec3(1.0, 0.95, 0.8), exp(-age / 0.3)) * m, 0.5 * m), o);
+  }
+  // debris: chunks of hull flung out, tumbling, glowing hot at first, then dark shapes that glint as a face turns to the
+  // star; they fly on (slowing, never stopping) and thin out as they go
+  for (int k = 0; k < dn; k++) {
+    float h1 = hash(uvec2(uint(k) + 211u, sd)), h2 = hash(uvec2(uint(k) + 37u, sd + 5u));
+    float an = h1 * 6.2831853 + 0.4 * h2, tr = R * dv * (0.3 + 0.9 * h2) * (0.8 * (1.0 - exp(-age / 0.8)) + 0.1 * age);
+    vec2 q = d - vec2(cos(an), sin(an)) * tr;
+    float h3 = hash(uvec2(uint(k) + 59u, sd + 9u)), sz = R * (0.045 + 0.08 * h3) + 0.5 * dp;
+    if (dot(q, q) > 9.0 * sz * sz) continue;
+    float ang = h3 * 6.2831853 + (h1 - 0.5) * 9.0 * age, ca = cos(ang), sa = sin(ang);
+    vec2 ql = vec2(ca * q.x + sa * q.y, -sa * q.x + ca * q.y);
+    float bd = max(shB(ql, vec4(0.0, 0.0, sz, sz * (0.3 + 0.45 * h2))), 0.8 * (ql.x + (1.6 * h3 - 0.8) * ql.y) - 0.35 * sz);
+    float cv = 1.0 - smoothstep(-0.6 * dp, 0.6 * dp, bd), heat = exp(-age / (0.35 + 0.9 * h2));
+    float fade = smoothstep(0.02, 0.12, lf) * (1.0 - smoothstep(0.45, 1.0, lf)) * (1.0 - smoothstep(0.75 * fly, fly, tr)), gl = pow(max(cos(2.0 * ang + h1 * 6.0), 0.0), 8.0);
+    vec3 dc = mix(vec3(0.05, 0.055, 0.07) + ${col(SHIP_KEY)} * 0.55 * gl, vec3(1.0, 0.55, 0.2), heat);
+    vec3 hg = vec3(1.0, 0.45, 0.12) * (0.4 * heat * exp(-max(bd, 0.0) / (0.6 * sz + dp)));
+    o = over(vec4((dc * cv * 0.95 + hg * (1.0 - cv)) * fade, cv * 0.95 * fade), o);
   }
   return o * 0.72; // far off: dimmed by the haze
 }
@@ -7320,6 +7618,9 @@ float hash(uvec2 v) {
   h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12; h *= 0x297a2d39u; h ^= h >> 15;
   return float(h) / 4294967295.0;
 }
+// a bright point's bloom (BLOOM_*): light L at its middle spread over a soft halo, x2 the squared distance in the halo's
+// radii; light only (half its alpha hides what is behind, as the lights' does)
+vec4 bloom(vec3 L, float x2) { vec3 b = L * exp(-x2); return vec4(b, 0.5 * min(1.0, max(b.r, max(b.g, b.b)))); }
 ${ev ? [NEBULA_GLSL, ASTEROID_GLSL, LENS_GLSL, SHIP_GLSL, VEIL_GLSL, PLANET_GLSL, BATTLE_GLSL, SYSTEM_GLSL, VOYAGE_GLSL, WARP_GLSL, FAR_GLSL].join('\n') + '\n' : ''}void main() {
   vec2 p = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y); // the pixel's centre, device px from the top left
   vec4 t = mix(uTop, uBot, p.y / uSize.y);
@@ -7387,7 +7688,10 @@ ${ev ? [NEBULA_GLSL, ASTEROID_GLSL, LENS_GLSL, SHIP_GLSL, VEIL_GLSL, PLANET_GLSL
     float h = clamp(dot(p - mm.zw, ab) / max(dot(ab, ab), 1e-4), 0.0, 1.0), w = ${glf(METEOR_W)} * uSize.z;
     vec2 e = p - mm.zw - ab * h, o = (p - mm.xy) / (2.0 * w);
     float m = mc.a * min(1.0, h * h * exp(-dot(e, e) / (w * w)) + 0.5 * exp(-dot(o, o)));
-    c = over(vec4(mc.rgb * m, m), c);
+    // its head's bloom (BLOOM_METEOR): a soft halo of its light round the head, in the same blend (light, half its alpha)
+    vec2 hb = (p - mm.xy) / ${glf(BLOOM_R)} / uSize.z;
+    float b = ${glf(BLOOM_METEOR)} * mc.a * exp(-dot(hb, hb));
+    c = over(vec4(mc.rgb * (m + b), min(1.0, m + 0.5 * b)), c);
   }
   // the rockets (a deploy going live): each a trail up its bent path (x = foot + lean s + bend s^2, s the height above
   // its foot, uRk: the foot (x, y), the head's and the tail end's heights; uRp: lean, bend, the head's and the trail's
