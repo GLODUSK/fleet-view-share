@@ -3,13 +3,14 @@
 // checked with this, not guessed.
 //
 //   node scripts/sky-gpu-bench.js [--checkout <dir>] [--size 3840x2160] [--seconds 8] [--budget 5] [--out results.json]
-//        [--only planet,siege,...] [--prof <edge profile dir>] [--port 4797]
+//        [--only planet,siege,...] [--prof <edge profile dir>] [--port 4797] [--wait 1500]
 //   node scripts/sky-gpu-bench.js --live [--seconds 8] [--budget 5] [--out results.json]
 //
 // Bench (Windows): boots a demo server from the checkout (default: this one) on a free port with a temp LOCALAPPDATA
 // (never Henry's data; it checks /state's home is null before anything else), starts headless Edge on the real GPU
-// (--size, device scale 1) with a profile kept under B:\Temp so the sky's shader stays in its cache (a cold compile takes
-// 200-300 s; it waits for stats().sky 'webgl2'), opens the Map tab (?fixture=1, so window.__map is there), keeps the page
+// (--size, device scale 1) with a profile kept under B:\Temp (a cold compile of the sky's shader took ~17 min on D3D11 in
+// 2026-10, and headless Edge relinks it every run even with its cache written; it waits up to --wait seconds, default
+// 1500, for stats().sky 'webgl2'), opens the Map tab (?fixture=1, so window.__map is there), keeps the page
 // awake (__map.rest(false)), holds the director (__map.hold(true): nothing starts by itself), turns the GPU meter on
 // (__map.gpuMeter(true), web/map.js: the sky's passes timed with EXT_disjoint_timer_query_webgl2) and then runs, one at a
 // time: the empty sky (baseline), each space event (__map.event()), each scene (__map.scene()) and each far event
@@ -41,7 +42,7 @@ for (let i = 0; i < argv.length; i++) {
   const k = argv[i].slice(2);
   opt[k] = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true;
 }
-const SECONDS = Math.max(2, Number(opt.seconds) || 8), BUDGET = Number(opt.budget) || 5;
+const SECONDS = Math.max(2, Number(opt.seconds) || 8), BUDGET = Number(opt.budget) || 5, WAIT = Number(opt.wait) || 1500;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const r2 = (v) => (v == null || !Number.isFinite(v) ? null : Math.round(v * 100) / 100);
 const mean = (a) => { const v = a.filter((x) => x != null && Number.isFinite(x)); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null; };
@@ -195,9 +196,9 @@ async function bench() {
     await ev('__map.rest(false)');
     const c0 = Date.now();
     let sky = null;
-    while ((sky = await ev('__map.stats() && __map.stats().sky')) !== 'webgl2' && Date.now() - c0 < 420e3) await sleep(2000);
+    while ((sky = await ev('__map.stats() && __map.stats().sky')) !== 'webgl2' && Date.now() - c0 < WAIT * 1000) await sleep(2000);
     console.log(`sky: ${sky} after ${Math.round((Date.now() - c0) / 1000)} s (profile ${prof})`);
-    if (sky !== 'webgl2') throw new Error('the sky never went to WebGL2 (a cold shader compile takes minutes; try again with the same --prof)\n' + problems.join('\n'));
+    if (sky !== 'webgl2') throw new Error(`the sky never went to WebGL2 in ${WAIT} s (a cold shader compile takes many minutes; try a longer --wait)\n` + problems.join('\n'));
 
     // the headless browser's GPU process: the one with this profile on its command line
     const base = path.basename(prof).replace(/'/g, "''");
