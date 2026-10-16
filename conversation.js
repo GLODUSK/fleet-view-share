@@ -55,6 +55,11 @@ const IMG_NAME = /^[0-9a-f]{16}\.(?:png|jpg|gif|webp)$/;
 const imgType = (m) => typeof m === 'string' && Object.hasOwn(IMG_TYPES, m); // never a prototype name
 
 // ---------- small helpers ----------
+// A user record Claude Code put in the log only (queueTranscriptOnly): a resume (claude --resume, a fork with
+// --fork-session, a host restart) notes there that the background tasks of the claude before it "didn't finish before
+// the previous session ended". Nothing answers it and no turn starts: the claude waits at its prompt, so it is no
+// prompt of a turn left open (Fleet View #552: a fork made of a conversation with an agent running showed STALLED).
+const transcriptOnly = (d) => !!(d && typeof d === 'object' && d.type === 'user' && d.queueTranscriptOnly === true);
 const capStr = (s) => (s.length > CAP ? s.slice(0, CAP - 1) + '…' : s);
 // a tool's input with every string capped (deep), so one huge Write doesn't make the reply huge
 function capDeep(v, depth = 0) {
@@ -582,4 +587,4 @@ function saveImage(req, res, ctx) {
   });
 }
 
-module.exports = { conversation, conversationImage, saveImage, transcriptOf, _test: { load, build, lineReader, logs, bgList } };
+module.exports = { conversation, conversationImage, saveImage, transcriptOf, transcriptOnly, _test: { load, build, lineReader, logs, bgList } };

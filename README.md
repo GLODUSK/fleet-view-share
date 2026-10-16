@@ -541,7 +541,7 @@ Everything is served on 127.0.0.1 only, and requests from other sites are refuse
 | `GET /api/sessions/<id>/transcript?since=<n>&limit=<m>` | automation API: any conversation's transcript, compact |
 | `POST /api/sessions/<id>/stop` `{"remove"?}` | automation API: ends a hosted session (and with `remove`, hides it from the map); replies `{"ok","id"}` |
 | `POST /api/sessions/<id>/remove` | automation API: hides a conversation that is not running from the map |
-| `GET /api/conversations?state=&repo=&all=1&limit=` | automation API: every conversation Fleet View shows, hosted or not |
+| `GET /api/conversations?state=&repo=&all=1&limit=` | automation API: every conversation Fleet View shows, hosted or not; `?prefix=<8+ characters>` answers `{ ids }` instead, every conversation id starting with them, off the map too (fv's short ids) |
 | `GET /api/teams`, `POST /api/teams`, `POST /api/teams/<id>/add` \| `remove` \| `lead` \| `disband` \| `message` | automation API: the teams, as the page's menus make and change them (see **Teams** under the Automation API) |
 | `GET /api/status`, `POST /api/ask`, `GET /api/ask/<id>`, `POST /api/ask/<id>/collected` | automation API: what conversations are doing (free), and one question to several with the answers typed back into the asker (see **Teams** under the Automation API) |
 

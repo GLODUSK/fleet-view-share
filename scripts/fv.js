@@ -234,15 +234,17 @@ async function messageArg(v, flags, what) {
 
 // ---------- ids ----------
 const FULL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// a full id or a host key ("new-3") as it is; a prefix of 8+ characters against every conversation Fleet View knows
-// and every hosted session (a new one may not be in the conversation list yet)
+// a full id or a host key ("new-3") as it is; a prefix of 8+ characters against every conversation Fleet View could
+// open (GET /conversations?prefix=: the ones off the map too, Fleet View #544) and every hosted session (a new one may
+// not be in the conversation list yet). A server from before ?prefix= answers with its list: then its whole list.
 async function resolveId(call, given) {
   if (given === undefined) throw new Usage('give a conversation id');
   if (FULL_ID.test(given) || /^new-\d+$/.test(given)) return given;
-  if (!/^[0-9a-f-]{8,}$/i.test(given)) throw new Usage(`"${given}" is not a conversation id (give at least its first 8 characters)`);
+  if (!/^[0-9a-f-]{8,}$/i.test(given) || given.length > 36) throw new Usage(`"${given}" is not a conversation id (give at least its first 8 characters)`);
   const ids = new Set();
-  const [c, s] = await Promise.all([call('GET', '/conversations?all=1&limit=100000'), call('GET', '/sessions')]);
-  if (c.code === 200 && c.j.ok) for (const x of c.j.conversations || []) if (x && x.id) ids.add(x.id);
+  let [c, s] = await Promise.all([call('GET', `/conversations?prefix=${given.toLowerCase()}`), call('GET', '/sessions')]);
+  if (c.code === 200 && c.j.ok && !Array.isArray(c.j.ids)) c = await call('GET', '/conversations?all=1&limit=100000');
+  if (c.code === 200 && c.j.ok) for (const x of c.j.ids || c.j.conversations || []) { const id = typeof x === 'string' ? x : x && x.id; if (id) ids.add(id); }
   if (s.code === 200 && s.j.ok) for (const x of s.j.sessions || []) if (x && x.id) ids.add(x.id);
   if (!ids.size && c.code !== 200) throw new Refused(c.j.message || `HTTP ${c.code}`);
   const hits = [...ids].filter((id) => id.toLowerCase().startsWith(given.toLowerCase()));

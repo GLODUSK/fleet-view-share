@@ -890,7 +890,7 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
 // GET /api: what there is, for a caller (or a Claude) finding its way from the command line
 const ENDPOINTS = [
   { method: 'GET', path: '/api', does: 'this list, and fleetView: the Fleet View version (1.0.12; "" when unknown)' },
-  { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive' },
+  { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?, prefix?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive; with prefix (8+ characters of an id) only { ids }: every conversation id starting with it, off the map too' },
   { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("bot:<bot id>" or null)' },
   { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends. An account at 90% of its 5-hour or weekly limit gives way to the one with the most left (accountSwitched in the reply) while "Switch accounts when one runs low" is on' },
   { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers of the fleet, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, role, account, model, effort, folder, createdAt, convId, live' },
@@ -2989,8 +2989,24 @@ async function readTranscript(key, query, ctx) {
   return [200, { ok: true, id, ...t, queue: live && Array.isArray(t.queue) ? t.queue : [] }];
 }
 
+// the conversation ids (lowercased, sorted, each once) in any of lists (iterables of ids) that start with prefix
+function idsWithPrefix(prefix, ...lists) {
+  const p = String(prefix || '').toLowerCase(), out = new Set();
+  if (!p) return [];
+  for (const list of lists) for (const x of list || []) { const id = String(x || '').toLowerCase(); if (id.startsWith(p) && H.ID_RE.test(id)) out.add(id); }
+  return [...out].sort();
+}
 // GET /api/conversations?state=&repo=&all=1&limit=: every conversation Fleet View shows, hosted or not
+// GET /api/conversations?prefix=<the first 8+ characters of an id>: { ok, prefix, ids } instead: every conversation id
+// that starts with it, on the map or off it (any log fv open could open: ctx.idsStartingWith), for fv's short ids
 async function listConversations(query, ctx) {
+  if (query.has('prefix')) {
+    const p = String(query.get('prefix') || '').toLowerCase();
+    if (!/^[0-9a-f-]{8,36}$/.test(p)) return [400, { ok: false, message: 'prefix must be the first 8 or more characters of a conversation id' }];
+    const ids = typeof ctx.idsStartingWith === 'function' ? ctx.idsStartingWith(p)
+      : idsWithPrefix(p, ctx.conversations({ all: true, limit: Infinity }).map((r) => r.id));
+    return [200, { ok: true, prefix: p, ids: idsWithPrefix(p, ids) }];
+  }
   let limit = 100;
   if (query.has('limit')) {
     limit = Number(query.get('limit'));
@@ -3021,7 +3037,7 @@ async function listConversations(query, ctx) {
 //        turnInfo(id) -> { promptAt, turnEndT, turnOpen, asking, askAt, askText, apiError, errAt, lastReply }, or null,
 //        nameOf(id) -> a conversation's name or null, noteMessage(from, to, text, { kind }?) -> records a message
 //        between two, rename(id, name) -> [code, json], hide(id) -> off the map, markTemp(id), isTemp(id),
-//        conversations({ state, repo, all, limit }) -> [row], transcript(id, { since, limit }) -> Promise of { ..., queue },
+//        conversations({ state, repo, all, limit }) -> [row], idsStartingWith(prefix) -> [id] (off the map too), transcript(id, { since, limit }) -> Promise of { ..., queue },
 //        whereIs(id) -> { known, cwd, account }, successorOf(id) -> the one that carries on or null,
 //        openElsewhere(id) -> open in a claude outside Fleet View, opened(id) -> it was resumed or opened (on the map again), isRemoved(id) -> removed from the map, teamOf(id) -> { id, name, lead, members } or null,
 //        teamsOf(id) -> [those]: both of a mid-level lead's teams, the one above first,
@@ -3155,7 +3171,7 @@ function handle(req, res, pathname, ctx) {
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
 // relayKey: the phone relay's key (see viaOf), for fleet-view.js to hand the relay
 module.exports = { ensureToken, handle, startBot, openBot, endHosted, hostList, hostKill, hostSwitch, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
-  startQueue, queuedIds, switchModel, switchPending, launchPicks, isSwitchConfirm, TOKEN_FILE, ENDPOINTS, ROUTE, MODEL_RE, EFFORTS,
+  startQueue, queuedIds, switchModel, switchPending, launchPicks, isSwitchConfirm, idsWithPrefix, listConversations, TOKEN_FILE, ENDPOINTS, ROUTE, MODEL_RE, EFFORTS,
   askParts: { asks, summaryText, laterText, overseerAnswers, answerLines, flushAsk, settleAnswer, askJson },
   // the queued switches and their tick, for a test to age one or run a tick at once
   switchParts: { pending: pendingSwitch, tick: tickSwitches, refusals: refusalLog } };

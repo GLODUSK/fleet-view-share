@@ -2023,6 +2023,9 @@ function ingestMain(s, recs) {
       }
       continue;
     }
+    // a resume's note that the tasks of the claude before it didn't finish (its task ids are taken above): written to
+    // the log only, it starts no turn, so it leaves the last turn as it was (a fork showed STALLED, #552)
+    if (CONV.transcriptOnly(d)) continue;
     if (d.isSidechain || (d.type !== 'assistant' && d.type !== 'user')) continue;
     const t = Date.parse(d.timestamp) || Date.now();
     if (t > (s.actT || 0)) s.actT = t; // the last prompt, tool result or reply: real activity, unlike cost records
@@ -7319,6 +7322,15 @@ function conversationsFor(q) {
   }
   return out;
 }
+// GET /api/conversations?prefix=: the ids that start with prefix (lowercase hex and dashes) of every conversation fv
+// can name: the ones held here (on the map or not) and every <id>.jsonl in the projects folders, the listing findLog
+// (so fv open) uses, made again when it is 10 s old and nothing matched (a log written since). /state's list leaves out
+// a conversation that left the map, so a prefix of one fv open could open was "not found" (Fleet View #544).
+function idsStartingWith(prefix) {
+  if (DEMO) return API.idsWithPrefix(prefix, sessions.keys());
+  const ids = API.idsWithPrefix(prefix, sessions.keys(), logsById(false).keys());
+  return ids.length ? ids : API.idsWithPrefix(prefix, sessions.keys(), logsById(true).keys());
+}
 
 // what the automation API (api.js) needs from the server: the folders a new session may start in (the window's
 // rule for "New session": repos /state lists, and the conversations' repo roots and checkouts, never a bot's folder)
@@ -7362,6 +7374,8 @@ const apiCtx = {
   markTemp,
   isTemp: (id) => typeof id === 'string' && apiTemp.includes(id.toLowerCase()),
   conversations: conversationsFor,
+  // the conversation ids that start with a prefix, on the map or off it (fv's 8+ character ids)
+  idsStartingWith,
   // the conversation that carries on for one that handed off or ran /clear, or null
   successorOf,
   // open in a claude outside Fleet View (a terminal): resuming it here would run it twice
