@@ -322,6 +322,8 @@ const toolName = (name) => {
 };
 const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || String(p || '');
 const firstLine = (t) => String(t || '').split('\n').find((l) => l.trim()) || '';
+// at most n characters, cut between words with "…" (never mid-word)
+const clipWords = (s, n) => (s.length <= n ? s : `${s.slice(0, n).replace(/\s+\S*$/, '') || s.slice(0, n)}…`);
 const lineCount = (t) => (t ? String(t).replace(/\n$/, '').split('\n').length : 0);
 const str = (v) => (typeof v === 'string' ? v : '');
 
@@ -628,7 +630,7 @@ function renderItem(it, c) {
       const text = String(it.text || '');
       el.className = 'ci ci-note ci-setup';
       const k = `<span class="cs-k">Fleet View</span>`;
-      if (el.tagName === 'DETAILS') el.innerHTML = `<summary class="cn-row"${timeTitle(it.t)}>${k}<span class="cn-t">${esc(firstLine(text).slice(0, 140))}</span>${icon('chevron', 11)}</summary>${copyBox(`<div class="cn-body">${esc(text)}</div>`)}`;
+      if (el.tagName === 'DETAILS') el.innerHTML = `<summary class="cn-row"${timeTitle(it.t)}>${k}<span class="cn-t">${esc(clipWords(firstLine(text), 140))}</span>${icon('chevron', 11)}</summary>${copyBox(`<div class="cn-body">${esc(text)}</div>`)}`;
       else el.innerHTML = `<span class="cs-row"${timeTitle(it.t)}>${k}<span class="cn-t">${esc(text)}</span></span>`;
       break;
     }
@@ -647,7 +649,7 @@ function renderItem(it, c) {
       const text = String(it.text || '');
       const cls = /^\//.test(text) ? ' cmd' : /^API Error|^Error/i.test(text) ? ' bad' : '';
       el.className = `ci ci-note${cls}`;
-      if (el.tagName === 'DETAILS') el.innerHTML = `<summary class="cn-row"><span class="cn-t">${esc(firstLine(text).slice(0, 140))}</span>${icon('chevron', 11)}</summary>${copyBox(`<div class="cn-body">${esc(text)}</div>`)}`;
+      if (el.tagName === 'DETAILS') el.innerHTML = `<summary class="cn-row"><span class="cn-t">${esc(clipWords(firstLine(text), 140))}</span>${icon('chevron', 11)}</summary>${copyBox(`<div class="cn-body">${esc(text)}</div>`)}`;
       else el.innerHTML = `<span class="cn-t">${esc(text)}</span>${pickupOpen(text)}`;
     }
   }

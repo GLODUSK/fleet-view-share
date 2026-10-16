@@ -431,6 +431,33 @@ test('botFeed: Fleet View setup notes become small notes, the bare "ok" to one i
   assert.deepEqual(botFeed(null), []);
 });
 
+test('botFeed: deleted tasks are one short line of titles, never the note to the bot; its "ok" and "[quiet]" left out', () => {
+  const tail = 'Leave them out: don\'t add them back, and read the file fresh before you next change it. Reply with just "ok".';
+  const req = (m) => `- t-df-${m}: Watch DetailForge requests (:${m})`;
+  const note = (lines) => `[Fleet View] Henry deleted ${lines.length} tasks from your tasks.json:\n${lines.join('\n')}\n${tail}`;
+  // a short list: every title, a run of the same title folded into its "(…)"s
+  const short = botFeed([{ key: 1, kind: 'user', text: note([req('00'), req('10'), '- t-asc: Watch iOS 1.0.2 App Store review']) }, { key: 2, kind: 'assistant', text: 'ok' }]);
+  assert.deepEqual(short.map((it) => [it.key, it.kind, it.text]), [[1, 'setup', 'Deleted 3 tasks: Watch DetailForge requests (:00), (:10) · Watch iOS 1.0.2 App Store review']]);
+  // a long one: "and N more", the whole list behind it (a second line: the note opens to it); never the words to the bot
+  const all = ['00', '10', '20', '30', '40', '50'].map(req);
+  const long = botFeed([{ key: 1, kind: 'user', text: note([...all, '- t-x: An unrelated very long task title that will not fit on the line at all', '- t-y: Another one']) },
+    { key: 2, kind: 'thinking', text: 'fine' }, { key: 3, kind: 'assistant', text: '[quiet]' }, { key: 4, kind: 'user', text: 'thanks' }]);
+  assert.deepEqual(long.map((it) => it.key), [1, 4]);
+  const [line, ...rest] = long[0].text.split('\n');
+  assert.match(line, /^Deleted 8 tasks: Watch DetailForge requests \(:00\), \(:10\), \(:20\), \(:30\), \(:40\), \(:50\) and 2 more$/);
+  assert.deepEqual(rest, [...all.map((l) => l.replace(/^- t-df-\d+: /, '')), 'An unrelated very long task title that will not fit on the line at all', 'Another one']);
+  assert.doesNotMatch(long[0].text, /Leave them out|tasks\.json|t-df-/);
+  assert.deepEqual(long[0].gone.map((g) => g.id), [...all.map((l) => l.slice(2, 9)), 't-x', 't-y']);
+  // the old notes, one a delete with its "ok" after each (no titles: their ids): one line
+  const old = (id) => `[Fleet View] Henry deleted the task ${id} from your tasks.json. Leave it out: don't add it back, and read the file fresh before you next change it. Reply with just "ok".`;
+  const olds = botFeed([{ key: 0, kind: 'user', text: 'hi' }, { key: 1, kind: 'user', text: old('t-a') }, { key: 2, kind: 'assistant', text: 'ok' },
+    { key: 3, kind: 'user', text: old('t-b') }, { key: 4, kind: 'user', text: old('t-c') }, { key: 5, kind: 'assistant', text: 'ok' }]);
+  assert.deepEqual(olds.map((it) => [it.key, it.kind, it.text]), [[0, 'user', 'hi'], [1, 'setup', 'Deleted 3 tasks: t-a · t-b · t-c']]);
+  assert.equal(botFeed([{ key: 1, kind: 'user', text: '[Fleet View] Henry deleted a task from your tasks.json:\n- t-l: Late one\nLeave it out.' }])[0].text, 'Deleted a task: Late one');
+  // something else between two bursts: two lines
+  assert.equal(botFeed([{ key: 1, kind: 'user', text: old('t-a') }, { key: 2, kind: 'user', text: 'hi' }, { key: 3, kind: 'user', text: old('t-b') }]).filter((it) => it.kind === 'setup').length, 2);
+});
+
 test("a bot row carries its conversation's moment and the bot's own look; a bad colour is left out", () => {
   const live = S('L', { bot: B1, state: 'WORKING', turnStart: T + 5, lastAction: { t: T + 2, verb: 'read', what: 'a.md' }, running: [{ tool: 'Bash', what: 'npm test', at: T + 6 }], waitingOn: null });
   const rows = build(st({ allSessions: [live], bots: [BOT(B1, { convId: 'L', live: true, shape: 'heart', color: '#FF6B80' }), BOT(B2, { shape: 'blob', color: 'red' })] }));

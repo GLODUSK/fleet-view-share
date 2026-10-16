@@ -163,8 +163,23 @@ function watchNote(evs) {
 const watchSetNote = (name, cid, job) => `[Fleet View] Henry set you to watch ${quoted(name, cid)} with the job: ${jobLine(job, cid).replace(/\.$/, '')}. Fleet View will message you when its turn ends, it asks something, errors or stalls; you never need to poll it. Reply with just "ok".`;
 const watchStopNote = (name, cid) => `[Fleet View] Henry stopped your watch on ${quoted(name, cid)}. Reply with just "ok".`;
 const watchGoneNote = (name, cid) => `[Fleet View] ${quoted(name, cid)}, which you were watching, is gone from Fleet View; the watch ended. Reply with just "ok".`;
-// a task Henry deleted (the id only: the title is the bot's own text)
-const taskGoneNote = (taskId) => `[Fleet View] Henry deleted the task ${taskId} from your tasks.json. Leave it out: don't add it back, and read the file fresh before you next change it. Reply with just "ok".`;
+// the tasks Henry deleted in one burst ([{ id, title }]): one a line, its id (the bot's own key) and its title as the
+// file had it. web/chats-model.js goneNote reads this shape back into one short line for Henry: keep the two together
+function taskGoneNote(tasks) {
+  const one = tasks.length === 1, it = one ? 'it' : 'them';
+  return [`[Fleet View] Henry deleted ${one ? 'a task' : `${tasks.length} tasks`} from your tasks.json:`,
+    ...tasks.map((t) => `- ${t.id}${t.title ? `: ${t.title}` : ''}`),
+    `Leave ${it} out: don't add ${it} back, and read the file fresh before you next change it. Reply with just "ok".`].join('\n');
+}
+// a burst of deletes: told once no delete came for GONE_QUIET_MS (or GONE_HOLD_MS after the first), at most GONE_MAX
+const GONE_QUIET_MS = 4000, GONE_HOLD_MS = 30000, GONE_MAX = 50;
+// bot.gone as saved, checked: { tasks: [{ id, title }], first, last } or none
+function readGone(g) {
+  if (!g || typeof g !== 'object' || !Array.isArray(g.tasks)) return null;
+  const tasks = g.tasks.filter((t) => t && typeof t.id === 'string' && TASKS.ID_RE.test(t.id))
+    .map((t) => ({ id: t.id, title: OVERSEER.oneLine(typeof t.title === 'string' ? t.title : '', 200) })).slice(-GONE_MAX);
+  return tasks.length ? { tasks, first: Number.isFinite(g.first) ? g.first : 0, last: Number.isFinite(g.last) ? g.last : 0 } : null;
+}
 
 // ---------- checks ----------
 // C1 controls (0x80-0x9f): cleanText keeps them, and a name or a role goes into one line of the bot's prompts
@@ -417,7 +432,9 @@ function loadBots(saved, base = BOTS_DIR) {
       ...(SHAPES.includes(b.shape) ? { shape: b.shape } : {}), ...(typeof b.color === 'string' && COLOR_RE.test(b.color) ? { color: b.color.toLowerCase() } : {}),
       ...(Number.isFinite(b.lookAt) && b.lookAt > 0 ? { lookAt: Math.round(b.lookAt) } : {}),
       // on the map and watching (a removed bot is neither)
-      ...(b.removed !== true && mapPoint(b.map) ? { map: mapPoint(b.map) } : {}), watches: b.removed === true ? [] : readWatches(b.watches) });
+      ...(b.removed !== true && mapPoint(b.map) ? { map: mapPoint(b.map) } : {}), watches: b.removed === true ? [] : readWatches(b.watches),
+      // deleted tasks it is still to be told of
+      ...(b.removed !== true && readGone(b.gone) ? { gone: readGone(b.gone) } : {}) });
   }
   return out;
 }
@@ -863,7 +880,7 @@ function createBots(deps) {
     // notes find no task and are dropped). sentFor is kept: a stale rewrite by the bot can't fire its last time again
     if (action === 'delete') {
       const r = done(changeTask(bot, taskId, (t, data) => { data.tasks = data.tasks.filter((x) => x !== t); return true; }, true), 'deleted');
-      if (r[0] === 200) tellDeleted(bot, taskId);
+      if (r[0] === 200) tellDeleted(bot, taskId, (r[1].task && r[1].task.title) || '');
       return r;
     }
     return [400, { ok: false, message: 'action must be pause, resume, run or delete' }];
@@ -894,16 +911,35 @@ function createBots(deps) {
   }
   // how a watch note goes in: queued behind a menu, the bot's chat not opened, as Fleet View's own text (a fresh object each time)
   const noteOpts = () => ({ kind: 'message', queue: true, open: false, via: 'server' });
-  // a running bot may hold the old task list in mind and write a deleted task back with its next edit: it is told,
-  // queued behind what it is doing (the delete's answer does not wait for it). One not running reads the file fresh
-  function tellDeleted(bot, taskId) {
-    const fail = (why) => log(`${bot.name}: not told task ${taskId} was deleted: ${why}`);
-    (async () => {
-      const to = await runningConv(bot);
-      if (!to) return;
-      const [dc, dout] = await d.api.deliverText(to, taskGoneNote(taskId), noteOpts(), d.ctx);
-      if (dc !== 200 && dc !== 202) fail((dout && dout.message) || `error ${dc}`);
-    })().catch((e) => fail((e && e.message) || e));
+  // the bot may hold the old task list in mind (a running conversation, or its last one resumed) and write a deleted
+  // task back with its next edit: it is told. Deletes in a row go into one note (bot.gone, saved: a restart keeps
+  // them), sent by watchTick once they stop; the delete's answer does not wait for it
+  function tellDeleted(bot, taskId, title) {
+    const now = Date.now();
+    const g = bot.gone || { tasks: [], first: now, last: now };
+    g.tasks = [...g.tasks.filter((t) => t.id !== taskId), { id: taskId, title: OVERSEER.oneLine(title, 200) }].slice(-GONE_MAX);
+    if (now - g.last >= GONE_QUIET_MS) g.first = now; // a new burst (the last one waits for the bot to run): it waits its own
+    g.last = now;
+    bot.gone = g;
+    save();
+  }
+  // bot.gone told, once the burst is over and the bot is running (queued behind what it is doing, its chat not
+  // opened). One not running keeps it until it is; a note that did not go in is tried again next pass
+  async function deliverGone(bot) {
+    const g = bot.gone;
+    const now = Date.now();
+    if (!g || (now - g.last < GONE_QUIET_MS && now - g.first < GONE_HOLD_MS)) return;
+    const to = await runningConv(bot);
+    if (!to || bot.gone !== g) return;
+    const tasks = [...g.tasks];
+    const [dc, dout] = await d.api.deliverText(to, taskGoneNote(tasks), noteOpts(), d.ctx);
+    if (dc !== 200 && dc !== 202) { log(`${bot.name}: not told of ${tasks.length} deleted task${tasks.length === 1 ? '' : 's'} yet: ${(dout && dout.message) || `error ${dc}`}`); return; }
+    // what was deleted while it went in stays for the next note
+    const left = bot.gone ? bot.gone.tasks.filter((t) => !tasks.includes(t)) : [];
+    if (left.length) bot.gone = { ...bot.gone, tasks: left };
+    else delete bot.gone;
+    save();
+    log(`${bot.name}: told of ${tasks.length} deleted task${tasks.length === 1 ? '' : 's'} (${tasks.map((t) => t.id).join(', ')})`);
   }
 
   // POST /bots/:id/map { at: { x, y } | null } (the page only): put it on the map or move it there; null takes it off,
@@ -1061,12 +1097,13 @@ function createBots(deps) {
   }
   // every few seconds (fleet-view.js): each watched conversation looked at (d.watchFacts, read only for the watched
   // ids), and what is news delivered, one bot's after another of its own (firing: never beside one of its scheduled
-  // tasks). Nothing at all while no bot watches anything; with the desktop app down nothing is delivered (it waits).
-  // Resolves when every delivery this pass began has ended (the tests wait for that)
+  // tasks), and the tasks Henry deleted told (deliverGone). Nothing at all while no bot watches anything or has deleted
+  // tasks to hear of; with the desktop app down nothing is delivered (it waits). Resolves when every delivery this
+  // pass began has ended (the tests wait for that)
   async function watchTick() {
     if (d.demo || watching) return;
     const mine = bots.filter((b) => !b.removed && b.watches.length);
-    if (!mine.length && !pending.size) return;
+    if (!mine.length && !pending.size && !bots.some((b) => !b.removed && b.gone)) return;
     watching = true;
     const jobs = [];
     try {
@@ -1078,13 +1115,14 @@ function createBots(deps) {
         const facts = new Map(list.filter((f) => f && convId(f.id)).map((f) => [convId(f.id), f]));
         for (const bot of mine) lookAtWatches(bot, facts, now);
       }
-      const due = bots.filter((b) => !b.removed && !firing.has(b.id) && pending.has(b.id));
+      const due = bots.filter((b) => !b.removed && !firing.has(b.id) && (pending.has(b.id) || b.gone));
       if (!due.length) return;
       if ((await d.api.hostList()) === null) { if (!watchWaits) log(`watch notes wait: ${HOST_DOWN}`); watchWaits = true; return; }
       watchWaits = false;
       for (const bot of due) {
         firing.add(bot.id);
         jobs.push((async () => {
+          try { await deliverGone(bot); } catch (e) { log(`${bot.name}: deleted-tasks note failed: ${(e && e.message) || e}`); }
           try { await deliverWatch(bot); } catch (e) { log(`${bot.name}: watch note failed: ${(e && e.message) || e}`); }
           finally { firing.delete(bot.id); }
         })());
@@ -1176,6 +1214,7 @@ function createBots(deps) {
     chatIds: () => (d.demo ? [] : listView(bots, live).map((v) => v.convId).filter(Boolean)),
     // ~/.fleet-view.json's bots
     saveShape: () => bots.map((b) => ({ ...b, ids: [...b.ids], told: [...b.told], ...(b.map ? { map: { ...b.map } } : {}),
+      ...(b.gone ? { gone: { ...b.gone, tasks: b.gone.tasks.map((t) => ({ ...t })) } } : {}),
       watches: (b.watches || []).map((w) => ({ ...w, ...(w.last ? { last: { ...w.last } } : {}) })) })),
     create, start, update, remove, look, switchTo, tick,
     // on the map and watching: POST /bots/:id/map and /bots/:id/watch (the page only), and the watcher (fleet-view.js

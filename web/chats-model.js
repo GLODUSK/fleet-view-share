@@ -67,6 +67,11 @@
 //       A scheduled task's note shows as one line, "Scheduled task: <title>" ("Ran now: …" when Henry ran it), and
 //       when the bot answers it with "[quiet]" (or "Nothing new.") the note, that run's steps and answer are all left
 //       out (Henry, 2026-10-12: a row of "Scheduled task: …" notes is noise)
+//       Tasks Henry deleted (goneNote) show as one line of their titles, "Deleted 7 tasks: …" (goneLine; gone: the
+//       tasks), one for a run of such notes, never the note's words to the bot; its "ok" or "[quiet]" is left out
+//   goneNote(text) -> [{ id, title }] | null   the tasks a setup note (bots.js taskGoneNote) says Henry deleted
+//   goneLine(tasks) -> { text, full }   their line ("and N more" past ~110 characters), and full: one title a line
+//       when some were left out of it ('' otherwise)
 //   taskNote(text) -> { now, title } | null   a task's note (bot-tasks.js runText) and its title, tidied
 //   quietNote(text) -> 'ack' | 'one' | 'skip' | null   a setup note's text (setupNote) that botFeed leaves out, and
 //       what it leaves out after it: 'ack' the bare "ok", 'one' the one reply, 'skip' nothing; null: it shows
@@ -636,6 +641,41 @@ export function taskNote(text) {
   const title = m[2].replace(/\s*\((?:(?:hourly|daily|weekly|monthly|every)\b[^()]*|(?:at )?\d{0,2}:\d{2}(?:\s*[ap]m)?)\)\s*$/i, '').trim() || m[2];
   return { now: m[1] !== 'Scheduled task', title };
 }
+// tasks Henry deleted (bots.js taskGoneNote): "Henry deleted 2 tasks from your tasks.json:", then "- <id>: <title>" a
+// line; the older notes were one a task, "Henry deleted the task <id> from your tasks.json. …" (no title)
+const GONE_HEAD = /^Henry deleted (?:a task|\d+ tasks) from your tasks\.json:\s*$/;
+const GONE_OLD = /^Henry deleted the task (\S+) from your tasks\.json\./;
+const GONE_ITEM = /^- (\S+?)(?:: (.*))?$/;
+// goneNote(text) -> [{ id, title }] | null   a setup note's text (setupNote)
+export function goneNote(text) {
+  const lines = String(text == null ? '' : text).split('\n');
+  const old = GONE_OLD.exec(lines[0]);
+  if (old) return [{ id: old[1], title: '' }];
+  if (!GONE_HEAD.test(lines[0])) return null;
+  const out = [];
+  for (const l of lines.slice(1)) { const m = GONE_ITEM.exec(l); if (!m) break; out.push({ id: m[1], title: (m[2] || '').trim() }); }
+  return out.length ? out : null;
+}
+// the line Henry sees for them: "Deleted 7 tasks: Watch requests (:00), (:10), (:20) · Watch iOS review", titles (the
+// id when there is none) with a run of the same title but its last "(…)" folded into one, and past GONE_LINE
+// characters "and 4 more". full: one title a line, when some were left out (the note opens to it)
+const GONE_LINE = 110;
+export function goneLine(tasks) {
+  const list = tasks || [];
+  const labels = list.map((t) => (t && (t.title || t.id)) || '');
+  const head = `Deleted ${list.length === 1 ? 'a task' : `${list.length} tasks`}: `;
+  let line = '', shown = 0, prefix = null;
+  for (const label of labels) {
+    const m = /^(.*\S)\s+(\([^()]*\))$/.exec(label);
+    const piece = m && m[1] === prefix ? `, ${m[2]}` : `${shown ? ' · ' : ''}${label}`;
+    if (shown && line.length + piece.length > GONE_LINE) break;
+    line += piece;
+    prefix = m ? m[1] : null;
+    shown++;
+  }
+  const more = labels.length - shown;
+  return { text: `${head}${line}${more ? ` and ${more} more` : ''}`, full: more ? labels.join('\n') : '' };
+}
 // what a bot answers a task with when there is nothing to report (bot-tasks.js runText asks for "[quiet]"): the
 // whole run is left out of the chat, its note too (fleet-view.js QUIET_REPLY: no preview, no bot note for it)
 const QUIET = /^\s*(?:\[quiet\]|nothing new(?: to report)?|no(?:thing| new \w+)(?: new)?(?: to report)?(?: this (?:hour|time|run))?)[.!]?\s*$/i;
@@ -676,6 +716,18 @@ export function botFeed(items) {
         mine = -1;
         task = -1;
         if (q) { skip = q === 'skip' ? null : q; continue; }
+        // deleted tasks: one short line, never the note's words to the bot; a run of them (the older notes,
+        // one a delete, or bursts with nothing between) is one line
+        const gone = goneNote(note);
+        if (gone) {
+          const last = out[out.length - 1];
+          const all = last && last.gone ? [...last.gone, ...gone] : gone;
+          const g = goneLine(all);
+          const row = copy(last && last.gone ? last : it, { kind: 'setup', text: g.full ? `${g.text}\n${g.full}` : g.text, gone: all });
+          if (last && last.gone) out[out.length - 1] = row; else out.push(row);
+          skip = 'ack';
+          continue;
+        }
         const tn = taskNote(note);
         out.push(copy(it, { kind: 'setup', text: tn ? `${tn.now ? 'Ran now' : 'Scheduled task'}: ${tn.title}` : note }));
         if (tn) task = out.length - 1;
@@ -692,7 +744,8 @@ export function botFeed(items) {
       if (task >= 0 && QUIET.test(String(it.text || ''))) { out.length = task; task = -1; continue; }
       if (QUIET_TAG.test(String(it.text || ''))) {
         while (out.length && (out[out.length - 1].kind === 'thinking' || out[out.length - 1].kind === 'tool')) out.pop();
-        if (out.length && out[out.length - 1].kind === 'setup') out.pop();
+        // (the line of tasks Henry deleted stays: what he did, not the bot's news)
+        if (out.length && out[out.length - 1].kind === 'setup' && !out[out.length - 1].gone) out.pop();
         continue;
       }
       const r = reactionOf(it.text);

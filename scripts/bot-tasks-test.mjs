@@ -409,7 +409,10 @@ await (async () => {
     h.endAll(); // the bot is not running
     for (const id of ['t-done', 't-p']) assert.equal((await h.bots.taskAction(bid, id, { action: 'delete' }))[0], 200, id);
     await new Promise((r) => setTimeout(r, 20));
-    assert.equal(h.calls.deliver.length, 0); // not running: nobody to tell, it reads the file fresh when it starts
+    clock(t += 60e3);
+    await h.bots.watchTick();
+    assert.equal(h.calls.deliver.length, 0); // not running: it is told once it runs (it may resume the conversation that knew them)
+    h.restart(); // what it is still to be told of is saved
     const after = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.equal(after.version, 1);
     assert.deepEqual(after.extra, { mine: true });
@@ -423,27 +426,76 @@ await (async () => {
     for (let i = 0; i < 50 && !h.calls.deliver.length; i++) await new Promise((r) => setTimeout(r, 5));
     assert.equal(h.calls.deliver.length, 1);
     assert.equal((await h.bots.taskAction(bid, 't-w-30', { action: 'delete' }))[0], 200); // answered while the run is held
-    for (let i = 0; i < 50 && h.calls.deliver.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
-    // the running bot is told (queued, its chat not opened), by id only, so it does not write the task back
-    const told = h.calls.deliver[1];
-    assert.equal(told.to, h.calls.deliver[0].to);
-    assert.match(told.text, /^\[Fleet View\] Henry deleted the task t-w-30 from your tasks\.json\. Leave it out: don't add it back/);
-    assert.doesNotMatch(told.text, /Watch :30/);
-    assert.deepEqual(told.opts, { kind: 'message', queue: true, open: false, via: 'server' });
     open();
     await pass;
     h.gate = null;
+    // running now, but the burst is not over: nothing yet
+    await h.bots.watchTick();
+    assert.equal(h.calls.deliver.length, 1);
+    clock(t += 5000);
+    await h.bots.watchTick();
+    // one note for all three, the two from while it was not running too (queued, its chat not opened), ids and titles
+    assert.equal(h.calls.deliver.length, 2);
+    const told = h.calls.deliver[1];
+    assert.equal(told.to, h.calls.deliver[0].to);
+    assert.equal(told.text, '[Fleet View] Henry deleted 3 tasks from your tasks.json:\n- t-done: Old\n- t-p: Paused one\n- t-w-30: Watch :30\n'
+      + 'Leave them out: don\'t add them back, and read the file fresh before you next change it. Reply with just "ok".');
+    assert.deepEqual(told.opts, { kind: 'message', queue: true, open: false, via: 'server' });
+    await h.bots.watchTick();
+    assert.equal(h.calls.deliver.length, 2); // told once
+    const ran = (x) => x.text.startsWith('[Fleet View] Scheduled task');
     assert.deepEqual(readTasks(folder).map((x) => x.id), ['t-w-00', 't-new']);
     // never delivered again, at its next times or after a restart
     for (const k of [1, 2]) { clock(t = L(2026, 10, 11, 8 + k, 30) + 1000); await h.bots.schedule(); }
     h.restart();
     clock(t = L(2026, 10, 11, 11, 30) + 1000);
     await h.bots.schedule();
-    assert.equal(h.calls.deliver.filter((x) => /Watch :30/.test(x.text)).length, 1);
-    assert.equal(h.calls.deliver.filter((x) => /deleted the task/.test(x.text)).length, 1);
-    assert.ok(h.calls.deliver.some((x) => /Watch :00/.test(x.text))); // the others still run
+    assert.equal(h.calls.deliver.filter((x) => ran(x) && /Watch :30/.test(x.text)).length, 1);
+    assert.equal(h.calls.deliver.filter((x) => /Henry deleted/.test(x.text)).length, 1);
+    assert.ok(h.calls.deliver.some((x) => ran(x) && /Watch :00/.test(x.text))); // the others still run
     assert.equal(h.bots.tasks(bid)[1].tasks.some((x) => x.id === 't-w-30'), false);
     n++; console.log('ok delete: any status, the rest of the file untouched, a fresh read, a run in flight, never fired again, a running bot told');
+  }
+  // deletes in a row to a running bot: one note listing them all, once they stop; a note
+  // that did not go in is tried again, nothing lost; a delete after it is its own note
+  {
+    let t = L(2026, 10, 12, 8);
+    clock(t);
+    const h = harness();
+    const [, made] = await h.bots.create({ name: 'Burst' });
+    const bid = made.bot.id;
+    const ids = ['00', '10', '20', '30', '40', '50'].map((m) => `t-df-${m}`);
+    writeTasks(made.bot.folder, [...ids.map((id) => ({ id, title: `Watch DetailForge requests (:${id.slice(-2)})`, kind: 'recurring', schedule: { every: 'hourly', at: `:${id.slice(-2)}` } })),
+      { id: 't-asc', title: 'Watch iOS 1.0.2 App Store review', kind: 'once' }, { id: 't-late', title: 'Late one', kind: 'once' }]);
+    await h.bots.start(bid);
+    const told = () => h.calls.deliver.filter((x) => /Henry deleted/.test(x.text));
+    h.fail = true;
+    for (const id of [...ids, 't-asc']) {
+      assert.equal((await h.bots.taskAction(bid, id, { action: 'delete' }))[0], 200, id);
+      clock(t += 2000);
+      await h.bots.watchTick();
+    }
+    assert.equal(told().length, 0); // still coming in
+    clock(t += 4000);
+    await h.bots.watchTick(); // over: tried, did not go in
+    assert.equal(told().length, 1);
+    h.fail = false;
+    await h.bots.watchTick();
+    assert.equal(told().length, 2);
+    const text = told()[1].text;
+    assert.match(text, /^\[Fleet View\] Henry deleted 7 tasks from your tasks\.json:\n- t-df-00: Watch DetailForge requests \(:00\)\n/);
+    assert.match(text, /\n- t-asc: Watch iOS 1\.0\.2 App Store review\nLeave them out: don't add them back, and read the file fresh before you next change it\. Reply with just "ok"\.$/);
+    assert.equal(text.split('\n').filter((l) => l.startsWith('- ')).length, 7);
+    await h.bots.watchTick();
+    assert.equal(told().length, 2);
+    // one more, later: a note of its own
+    assert.equal((await h.bots.taskAction(bid, 't-late', { action: 'delete' }))[0], 200);
+    clock(t += 31000);
+    await h.bots.watchTick();
+    assert.equal(told().length, 3);
+    assert.equal(told()[2].text.split('\n')[0], '[Fleet View] Henry deleted a task from your tasks.json:');
+    assert.match(told()[2].text, /\n- t-late: Late one\nLeave it out: don't add it back,/);
+    n++; console.log('ok deletes in a row: one note listing them, retried until it goes in, a later one its own');
   }
   // the bot writes the file back from a read older than the run (no runs entry, the old nextRun): not fired again
   {
