@@ -69,6 +69,13 @@
 //       out (Henry, 2026-10-12: a row of "Scheduled task: …" notes is noise)
 //       Tasks Henry deleted (goneNote) show as one line of their titles, "Deleted 7 tasks: …" (goneLine; gone: the
 //       tasks), one for a run of such notes, never the note's words to the bot; its "ok" or "[quiet]" is left out
+//   fvFeed(items) -> items   a normal chat's items (chat.js, the phone's feedRows) with each message of Fleet
+//       View's own ("[Fleet View] …": the host's note after a restart, a sync move's note) as
+//       { ...it, kind: 'setup', text: without that header, sys: noteTone(text) }, drawn as a tinted system card, not
+//       your bubble (Henry, 2026-10-16: "they dont come from me but from the system"). What you typed after a host
+//       note before it was sent (the same message, after a blank line) stays your bubble, keyed as the message
+//       was; the card is keyed "<key>:fv". No note: the same array back
+//   noteTone(text) -> 'cut' | 'restart' | 'moved' | 'info'   a setup note's text: what its card looks like
 //   goneNote(text) -> [{ id, title }] | null   the tasks a setup note (bots.js taskGoneNote) says Henry deleted
 //   goneLine(tasks) -> { text, full }   their line ("and N more" past ~110 characters), and full: one title a line
 //       when some were left out of it ('' otherwise)
@@ -606,6 +613,36 @@ export function quietNote(text) {
   if (/^Your instructions changed\b/.test(t)) return 'one';
   if (/^You were cut off mid-turn\b/.test(t)) return 'skip';
   return null;
+}
+
+// ---------- Fleet View's notes in a normal chat (fvFeed) ----------
+// the host's notes to a resumed session (desktop/host.js): one paragraph each, so a blank line after one starts
+// what you typed before it was sent
+const HOST_NOTE = /^(?:You were cut off mid-turn\b|Your turn stopped mid-way\b|Your background tasks stopped\b|The session host restarted\b)/;
+export function noteTone(text) {
+  const t = String(text == null ? '' : text);
+  if (/^(?:You were cut off mid-turn|Your turn stopped mid-way|Your background tasks stopped)\b/.test(t)) return 'cut';
+  if (/^The session host restarted\b/.test(t)) return 'restart';
+  if (/^This chat moved from\b/.test(t)) return 'moved';
+  return 'info';
+}
+export function fvFeed(items) {
+  const list = items || [];
+  let out = null;
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i];
+    const note = it && it.kind === 'user' && !(it.images && it.images.length) ? setupNote(it.text) : null;
+    if (note == null) { if (out) out.push(it); continue; }
+    if (!out) out = list.slice(0, i);
+    // _j is chat.js's cached JSON of the item as it came: a changed copy must not reuse it
+    const { _j, ...rest } = it;
+    const gap = HOST_NOTE.test(note) ? note.search(/\n[ \t]*\n/) : -1;
+    const head = (gap > 0 ? note.slice(0, gap) : note).trim();
+    const yours = gap > 0 ? note.slice(gap).trim() : '';
+    out.push({ ...rest, kind: 'setup', key: yours ? `${it.key}:fv` : it.key, text: head, sys: noteTone(head) });
+    if (yours) out.push({ ...rest, text: yours });
+  }
+  return out || list;
 }
 // a handoff: the skill (or the command typed) that writes the summary, and the command that picks it up
 const isHandoff = (it) => (it.kind === 'tool' && it.name === 'Skill' && /(?:^|:)handoff$/.test(String((it.input && it.input.skill) || '')))

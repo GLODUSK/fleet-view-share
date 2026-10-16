@@ -6,7 +6,7 @@
 // taskWhen, taskLine, tasksHead) and its profile's list (profileTasks). Plain asserts, no dependencies:
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, rawToContactsState, previewOf, botPreview, replyLine, botFeed, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
+import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, rawToContactsState, previewOf, botPreview, replyLine, botFeed, fvFeed, noteTone, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
   sizeTask, dynamicSwitch, switchNote, noiseNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, profileTasks, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
   sameChatOrder, contactTree, teamFlags } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
@@ -401,6 +401,38 @@ test('botPreview: the question, else the last finished reply the chat shows; nev
   const st = { allSessions: [], sessions: [{ id: 'b1', bot: 'k1', state: 'WORKING', last: 5, lastAction: { verb: 'edit', what: 'dialer.py' }, lastReply: 'Now I check it.', doneReply: 'Dialer is live.' }],
     finishedSessions: [], pending: [], teams: [], bots: [{ id: 'k1', name: 'Juanito', convId: 'b1', live: true }] };
   assert.equal(buildContacts(st).find((c) => c.key === 'bot:k1').preview, 'Dialer is live.');
+});
+
+test('fvFeed: a normal chat\'s Fleet View notes become system cards, your words after a host note stay yours', () => {
+  const cut = '[Fleet View] You were cut off mid-turn: the session host stopped (the PC shut down, or the host ended). Check what finished, then carry on.';
+  const items = [
+    { kind: 'user', key: 1, t: 10, text: 'Fix the login' },
+    { kind: 'assistant', key: 2, text: 'On it.' },
+    { kind: 'user', key: 3, t: 20, text: `${cut}\n\nmake these messages prettier`, _j: '{"stale":1}' },
+    { kind: 'user', key: 4, text: '[Fleet View] The session host restarted as you asked. Check host.log, then carry on.' },
+    { kind: 'user', key: 5, text: '[Fleet View] This chat moved from BlackBox to Mac at 3:42 pm.\nIt now runs in ~/code/x.\n\nCareful: the code here is old.' },
+    { kind: 'user', key: 6, text: '[Fleet View] hi', images: [{ src: 'x' }] },
+    { kind: 'user', key: 7, text: '(quoted) [Fleet View] hi' },
+  ];
+  const out = fvFeed(items);
+  assert.deepEqual(out.map((it) => [it.kind, String(it.key), it.sys || null]), [
+    ['user', '1', null], ['assistant', '2', null], ['setup', '3:fv', 'cut'], ['user', '3', null], ['setup', '4', 'restart'],
+    ['setup', '5', 'moved'], ['user', '6', null], ['user', '7', null]]);
+  assert.equal(out[2].text, cut.replace('[Fleet View] ', ''));
+  assert.equal(out[3].text, 'make these messages prettier');
+  assert.equal(out[3].t, 20);
+  assert.ok(!('_j' in out[2]) && !('_j' in out[3]), 'a changed copy drops the cached JSON');
+  // a move note keeps its blank lines: only the host's one-paragraph notes split
+  assert.ok(out[5].text.endsWith('Careful: the code here is old.'));
+  assert.equal(items[2].kind, 'user', 'the items stay as they came');
+  // no note: the same array back
+  const plain = [{ kind: 'user', key: 1, text: 'hi' }];
+  assert.equal(fvFeed(plain), plain);
+  assert.deepEqual(fvFeed(undefined), []);
+  assert.equal(noteTone('Your turn stopped mid-way and you have been idle since.'), 'cut');
+  assert.equal(noteTone('Your background tasks stopped when the host ended.'), 'cut');
+  assert.equal(noteTone('Something else.'), 'info');
+  assert.equal(noteTone(null), 'info');
 });
 
 test('botFeed: Fleet View setup notes become small notes, the bare "ok" to one is left out', () => {

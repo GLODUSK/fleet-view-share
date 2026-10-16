@@ -53,6 +53,8 @@
 // (chats-model.js botFeed). Only the drawing changes: c.items keeps them as they came. Kept simple: no model or
 // effort switch notes (botFeed), no Fork (on a message, a selection or a queued one), and a reaction the bot gave your
 // message (botFeed: reaction) sits on its bubble's corner, like a messenger's.
+// In a normal chat Fleet View's notes ("[Fleet View] You were cut off mid-turn…", a sync move's) are a centred card
+// tinted by what they say, never your bubble; what you typed after one in the same message stays yours (fvFeed).
 // The whole chat (opts.history, the Bots tab: Henry, 2026-10-12): a bot's earlier conversations (a handoff's, a
 // /clear's) come before this one as one chat. Scrolled near the top, earlier messages load by themselves (this
 // conversation's, then the one before it, and so on: loadPast), and the handoffs between them never show (botFeed).
@@ -80,7 +82,7 @@ import { mountCompose } from './compose.js';
 import { handToChat } from './handto.js';
 import { onRekey, termApi } from './term.js';
 import { openViewer, openInCode } from './viewer.js';
-import { botFeed, switchNote } from './chats-model.js';
+import { botFeed, fvFeed, switchNote } from './chats-model.js';
 import { recommendationsOf } from './recommend.js';
 
 const params = (() => { try { return new URLSearchParams(location.search); } catch { return new URLSearchParams(); } })();
@@ -561,6 +563,9 @@ function userTextHtml(text) {
   }).join('');
 }
 
+// a system card's icon by its tone (chats-model.js noteTone)
+const SYS_TONE = { cut: 'alert', restart: 'sync', moved: 'computer', info: 'info' };
+
 // a bot's reaction to your message (opts.bubbles, botFeed): its emoji on the bubble's corner
 const reactionHtml = (it) => (it.reaction ? `<span class="cu-react" title="Reacted ${esc(it.reaction)}">${esc(it.reaction)}</span>` : '');
 
@@ -631,6 +636,15 @@ function renderItem(it, c) {
     }
     case 'setup': { // a "[Fleet View]" note to a bot (opts.bubbles): small and grey, labelled, the header dropped
       const text = String(it.text || '');
+      if (it.sys) { // the same in a normal chat (fvFeed): a centred card, tinted by what it says (noteTone)
+        const tone = SYS_TONE[it.sys] ? it.sys : 'info';
+        el.className = `ci ci-note ci-setup ci-sys sys-${tone}`;
+        const head = `<span class="sys-ic">${icon(SYS_TONE[tone], 13)}</span><span class="sys-k">Fleet View</span>`;
+        if (el.tagName === 'DETAILS') el.innerHTML = `<summary class="sys-card"${timeTitle(it.t)}>${head}<span class="sys-t one">${esc(clipWords(firstLine(text), 140))}</span>${icon('chevron', 11)}</summary>${copyBox(`<div class="cn-body">${esc(text)}</div>`)}`;
+        else el.innerHTML = `<div class="sys-card"${timeTitle(it.t)}>${head}<span class="sys-t">${esc(text)}</span></div>`;
+        el._text = text;
+        break;
+      }
       el.className = 'ci ci-note ci-setup';
       const k = `<span class="cs-k">Fleet View</span>`;
       if (el.tagName === 'DETAILS') el.innerHTML = `<summary class="cn-row"${timeTitle(it.t)}>${k}<span class="cn-t">${esc(clipWords(firstLine(text), 140))}</span>${icon('chevron', 11)}</summary>${copyBox(`<div class="cn-body">${esc(text)}</div>`)}`;
@@ -1686,7 +1700,7 @@ function draw(c, how) {
   const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
   const keys = new Set();
   const seq = []; // { it } or { steps: [...] }
-  for (const it of c.bubbles ? botFeed(c.past.length ? c.past.concat(c.items) : c.items) : c.hist.length ? chainFeed(c) : c.items) {
+  for (const it of c.bubbles ? botFeed(c.past.length ? c.past.concat(c.items) : c.items) : fvFeed(c.hist.length ? chainFeed(c) : c.items)) {
     if (it.kind === 'note' && switchNote(it.text)) continue; // a model or effort switch: never shown
     const k = String(it.key);
     if (keys.has(k)) continue; // a repeated key would fight over one element
