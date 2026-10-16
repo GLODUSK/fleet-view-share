@@ -588,7 +588,8 @@ async function main() {
   // ===== s. snapshot: the prompt box, drawn once, is still in a replay after more than 512 KB of output =====
   const SCREEN = require(path.join(__dirname, '..', 'screen.js'));
   const FL = session('flood');
-  fs.writeFileSync(path.join(FL.cwd, 'flood.txt'), '600');
+  // (ConPTY merges frames a busy host reads late, so 600 frames came to just under 512 KB at times: twice that)
+  fs.writeFileSync(path.join(FL.cwd, 'flood.txt'), '1200');
   await cl.req('open', { id: FL.id, cwd: FL.cwd, account: 'B', cols: 100, rows: 30 });
   const flooded = await waitFor(() => fs.existsSync(path.join(FL.cwd, 'flooded.txt')), 60000, 500);
   await sleep(1000); // ConPTY's last frames

@@ -51,7 +51,13 @@ const CALL_MS = 8000; // one host request
 const START_MS = 60000; // a new session reporting its conversation id and going idle (and a resumed one going idle)
 const POLL_MS = 500;
 const ENTER_DELAY_MS = 300; // between the paste and its Enter, so Claude Code takes the paste in first
-const SETTLE_MS = 1000; // after a new session first says idle, before its prompt goes in: its input box may still be drawing
+const SETTLE_MS = 1000; // after a new session first says idle: at most this long for its prompt box to be drawn (settleNew)
+const DRAWN_SETTLE_MS = 250; // then this, before the text goes in (web/term.js DRAWN_SETTLE_MS)
+const START_POLL_MS = 150; // how often a starting session is looked at, until it is idle
+// a session started less than this ago may not read keys yet though its prompt shows (web/term.js BOOT_MS): the
+// Enter after a text waits for the box to show it, ECHO_MS at most (sendText)
+const BOOT_MS = 30000, ECHO_MS = 10000, ECHO_LOOK_MS = 100;
+const TAKE_POLL_MS = 200; // how often afterSend looks whether Claude took a message up
 const TAIL_MAX = 20000;
 const TAKE_MS = 6000; // after a send: how long to wait for Claude to take the message up (busy, or in the transcript)
 const PANEL_CLOSE_MS = 4000; // a "/" panel closed before a send: the host re-reads the pid files every 800 ms
@@ -251,13 +257,35 @@ async function typePasted(host, id, text) {
   for (const w of pasteWrites(text)) await host.call('write', id, w);
 }
 // type it (typePasted), then Enter on its own. beforeEnter: an async check just before the Enter; when it answers
-// true (a menu came up) the Enter is not sent. -> { entered }
-async function sendText(host, id, text, beforeEnter) {
+// true (a menu came up) the Enter is not sent. fresh: the session's list entry when it started moments ago
+// (justStarted): Claude Code can show its prompt before it reads keys, and drops an Enter typed then (the message
+// sat in its prompt, unsent), so the Enter waits until the box shows the text, ECHO_MS at most, as the page's send
+// does (web/compose.js). Not when the box can't be read; no echo by then, the Enter goes anyway, as before. -> { entered }
+async function sendText(host, id, text, beforeEnter, fresh = null) {
+  const before = fresh ? await promptNow(host, fresh) : null;
   await typePasted(host, id, text);
   await sleep(ENTER_DELAY_MS);
+  for (const end = Date.now() + ECHO_MS; before !== null && Date.now() < end;) {
+    const now = await promptNow(host, fresh);
+    if (now === null || (now && now !== before)) break;
+    await sleep(ECHO_LOOK_MS);
+  }
   if (beforeEnter && await beforeEnter()) return { entered: false };
   await host.call('write', id, '\r');
   return { entered: true };
+}
+// the text in that session's prompt box now (boxText: '' when empty or only its hint), or null when the box can't
+// be read (not on screen: a menu or a panel over it)
+async function promptNow(host, p) {
+  try { return boxText(await rowsNow(host, p, 60, true)); } catch { return null; }
+}
+const justStarted = (p) => !!p && Number.isFinite(p.startedAt) && Date.now() - p.startedAt < BOOT_MS;
+// a session that has just said idle for the first time, before text goes in: its prompt box drawn (SETTLE_MS at
+// most: a startup question over it is the caller's to see), then DRAWN_SETTLE_MS more (sendText's echo check waits for
+// the rest, when Claude Code reads keys a moment after it draws its prompt)
+async function settleNew(host, p) {
+  for (const end = Date.now() + SETTLE_MS; Date.now() < end && (await promptNow(host, p)) === null;) await sleep(ECHO_LOOK_MS);
+  await sleep(DRAWN_SETTLE_MS);
 }
 // One typing at a time into a conversation: deliver and the queue below both paste in chunks, and two at once (a
 // team note and a teammate's queued message, say) would mix into one prompt. typeOne(id, fn) runs fn once whatever
@@ -410,7 +438,7 @@ async function afterSend(host, id, sentAt, before, ms, ctx, gone, o = {}) {
   };
   let taken = false, sawBusy = false;
   for (const until = Date.now() + TAKE_MS; Date.now() < until && !gone();) {
-    await sleep(POLL_MS);
+    await sleep(TAKE_POLL_MS);
     const { p, ti } = await look();
     if (!p || !p.alive) break;
     if (p.status === 'busy' && before !== 'busy') sawBusy = true;
@@ -582,7 +610,7 @@ async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null,
       if (bad) return { r: [409, { ok: false, id: p.id, ...extra, shell: true, message: bad }] };
     }
     const sentAt = Date.now();
-    const sent = await sendText(host, p.id, text, () => menuNow(host, cur));
+    const sent = await sendText(host, p.id, text, () => menuNow(host, cur), justStarted(cur) ? cur : null);
     if (!sent.entered) return { r: [409, { ok: false, id: p.id, ...extra, menu: true, message: MENU_LATE }] };
     const sentNow = now && status === 'busy';
     if (sentNow) { await sleep(ENTER_DELAY_MS); await pressSendNow(host, p.id); }
@@ -784,7 +812,7 @@ async function resumeIn(host, id, where, account, ctx, gone) {
       menuAt = Date.now();
       if ((await menuNow(host, p))?.kind === 'chrome' && await passChromeOffer(host, p, undefined, ctx)) chromeOffer = 'accepted';
     }
-    await sleep(POLL_MS);
+    await sleep(START_POLL_MS);
   }
   return { p, alreadyRunning, ready: p.status === 'idle', ...(chromeOffer ? { chromeOffer } : {}) };
 }
@@ -837,7 +865,7 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
       if (!r.ready) return [409, { ok: false, id: cid, ...extra, resumed: true, message: `${name} was resumed, but it was not idle within ${START_MS / 1000} s; nothing was typed` }];
       p = r.p;
       extra.resumed = !r.alreadyRunning;
-      if (extra.resumed) await sleep(SETTLE_MS);
+      if (extra.resumed) await settleNew(host, p);
     }
     const from = o.from || null, kind = o.ask ? 'question' : null;
     // a shell command runs as typed (a frame would be part of the command), and its output goes into the conversation
@@ -1006,7 +1034,7 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
     };
     let p = null, menuAt = Date.now();
     while (Date.now() < until) {
-      await sleep(POLL_MS);
+      await sleep(START_POLL_MS);
       p = byPid(await host.call('list'));
       if (!p) return reply(502, { ok: false, message: 'the session ended before it was ready' });
       if (!p.alive) { out.id = convId(p.id); return reply(502, { ok: false, message: `the session ended before it was ready (code ${p.exitCode})` }); }
@@ -1019,13 +1047,13 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
       // nothing was typed: the session is left running for a person to look at in the panel
       return reply(200, { ok: false, promptSent: false, message: 'the session did not get ready within 60 s (it may be asking whether to trust the folder); the prompt was not sent, and the session is still running in the panel' });
     }
-    await sleep(SETTLE_MS);
+    await settleNew(host, p);
     // a fresh session can open on a question (trusting the folder, a setting): nothing goes into it
     let m0 = await menuNow(host, p);
     if (await chromeOffer(m0)) { await sleep(SETTLE_MS); m0 = await menuNow(host, p); }
     if (m0) return reply(200, { ok: false, promptSent: false, menu: m0, message: `${MENU_UP}; the prompt was not sent, and the session is still running in the panel` });
     const sentAt = Date.now();
-    const sent = await sendText(host, id, typedPrompt, () => menuNow(host, p));
+    const sent = await sendText(host, id, typedPrompt, () => menuNow(host, p), p);
     if (!sent.entered) return reply(200, { ok: false, promptSent: false, menu: true, message: `${MENU_LATE}; the session is still running in the panel` });
     // a fork still under the original's id gets its own once its claude writes the first message: follow the pid
     let now = id;
@@ -2928,7 +2956,7 @@ async function openSession(key, b, ctx, gone, via = null) {
     const ready = r.ready;
     if (!prompt) return [200, { ok: true, id, alreadyRunning, ready, ...co, status: p.status || null, message: alreadyRunning ? 'it was already running' : ready ? 'opened; Claude is idle' : 'opened, but it is not idle yet' }];
     if (!ready && !alreadyRunning) return [200, { ok: false, id, alreadyRunning, ready, ...co, promptSent: false, message: `opened, but it was not idle within ${START_MS / 1000} s; the prompt was not sent` }];
-    if (!alreadyRunning) await sleep(SETTLE_MS);
+    if (!alreadyRunning) await settleNew(host, p);
     const typed = isOverseer(p.role) ? OVERSEER.frame(prompt, via === 'henry' ? 'henry' : 'unsigned') : prompt;
     const [code, out] = await deliver(host, p, typed, ms, ctx, gone, null, { alreadyRunning, ready, ...co });
     return [code, { ...out, promptSent: !!out.ok }];

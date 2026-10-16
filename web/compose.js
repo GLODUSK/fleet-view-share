@@ -79,7 +79,7 @@
 import { esc } from './cards.js';
 import { voiceSupported, startVoice, stopVoice, onVoice } from './voice.js';
 import { icon } from './icons.js';
-import { termApi, hosts, refreshHosts, closePanel as closeHostPanel, typeInto, ensureLive, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, keyNow, noTermMsg } from './term.js';
+import { termApi, hosts, refreshHosts, closePanel as closeHostPanel, typeInto, ensureLive, warmUp, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, keyNow, noTermMsg } from './term.js';
 import { uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
 import { sizeTask, dynamicSwitch, DYNAMIC } from './chats-model.js';
@@ -2985,6 +2985,9 @@ export function mountCompose(slot, s) {
       else { ta.value = ''; setShell(true); }
     }
     saveDraftSoon(); grow(); drawSend(); drawSlash();
+    // a message on its way to a chat this machine runs: its session starts now if it isn't running (term.js warmUp), so
+    // Send doesn't wait the seconds Claude Code takes to start
+    if (ta.value.trim() && st.s && planNow().how === 'local') warmUp(st.s, { sizeEl: sizeEl() });
   });
   ta.addEventListener('scroll', () => { if (!ghost.hidden) ghost.scrollTop = ta.scrollTop; }); // the mic's preview scrolls with the text
   ta.addEventListener('click', () => drawSlash()); // the caret moved: the list shows only with it at the end

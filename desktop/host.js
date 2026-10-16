@@ -17,7 +17,7 @@
 // --resume <id> --fork-session`: a new conversation with its history), keyed "new-<n>" until Claude Code
 // says which conversation it is. Every interactive claude writes <config>/sessions/<pid>.json with its
 // sessionId (~/.claude/sessions for account B, ~/.claude-<x>/sessions for the others; all are read, deduplicated by
-// their real path). While any pty runs, those files are read every 800 ms: a new file whose process descends
+// their real path). While any pty runs, those files are read every 800 ms (every 150 ms while one starts): a new file whose process descends
 // from a pending pty's shell (checked once per candidate through Win32_Process; without that check, a file
 // in the same folder started after the pty) re-keys the pty to its sessionId, and a rekey event goes out.
 // The same scan gives each hosted session its status ("busy" / "idle", from the file), and follows a session
@@ -159,6 +159,7 @@ const ID_RE = /^[0-9a-f-]{36}$/i;
 const NEW_RE = /^new-\d{1,9}$/; // a new session's key until Claude Code reports its id
 const KEY_RE = /^(?:[0-9a-f-]{36}|new-\d{1,9})$/i;
 const SCAN_MS = 800;
+const SCAN_FAST_MS = 150, SCAN_FAST_FOR_MS = 60 * 1000, SCAN_FIRST_TURN_MS = 15 * 1000; // the scan while a session starts (see startScan)
 const BUFFER_MAX = 512 * 1024; // characters of output kept per pty for snapshot()
 const KEYFRAME_LINES = 1000; // lines (scrollback and screen) the screen of what fell off that output keeps
 const FLUSH_MS = 6; // output goes out in small batches, not one message per ConPTY read
@@ -814,7 +815,7 @@ function createPtys(opts = {}) {
       id: key, pty: p, pid: p.pid, alive: true, exitCode: null, startedAt: Date.now(), chunks: [], size: 0, pending: '', timer: null, dismissed: false,
       dims: [], dim: { cols, rows }, base: null, baseOut: null,
       cwd, account: acctId(o.account), cols, rows, isNew: false, created: false, claudePid: null, status: null, known: null,
-      interrupted: false, restored: false, launchKey, pickup: null, handoffFrom: null, waitingFor: null, seenIdle: false, idleSince: 0,
+      interrupted: false, restored: false, launchKey, pickup: null, handoffFrom: null, waitingFor: null, seenIdle: false, firstIdleAt: 0, firstBusy: false, idleSince: 0,
       outAt: 0, inputAt: 0, line: '', inPaste: false, slash: null, nudge: null, restartBy: false, role: null, ...extra,
     };
     t.role = roleOf(t.role);
@@ -1037,9 +1038,16 @@ function createPtys(opts = {}) {
   }
 
   // ---------- the sessions/<pid>.json scan: re-keys new sessions, gives every hosted one its status ----------
-  let scanTimer = null, checking = false, noMapAt = 0;
+  // While a session starts (its claude has not said idle yet, or has and not taken up its first message, for up to
+  // SCAN_FAST_FOR_MS) the scan runs every SCAN_FAST_MS too, so a message waiting to go into it (the chat box, the API)
+  // hears it is ready at once, and that it was taken up, not up to SCAN_MS later; scan() stops that timer once none is
+  // starting.
+  let scanTimer = null, fastTimer = null, checking = false, noMapAt = 0;
   const verified = new Map(); // `${claudePid}:${ptyPid}` -> true | false
+  const starting = (t, now) => t.alive && now - t.startedAt < SCAN_FAST_FOR_MS &&
+    (!t.seenIdle || (!t.firstBusy && now - t.firstIdleAt < SCAN_FIRST_TURN_MS));
   function startScan() {
+    if (!fastTimer) fastTimer = setInterval(scan, SCAN_FAST_MS);
     if (scanTimer) return;
     scanTimer = setInterval(scan, SCAN_MS);
   }
@@ -1057,9 +1065,11 @@ function createPtys(opts = {}) {
   }
   function scan() {
     const live = [...terms.values()].filter((t) => t.alive);
-    if (!live.length) { clearInterval(scanTimer); scanTimer = null; return; }
+    if (!live.length) { clearInterval(scanTimer); scanTimer = null; clearInterval(fastTimer); fastTimer = null; return; }
     let files;
     try { files = readPidFiles(dirs()); } catch { return; }
+    // (this scan's news still counts: a session that says idle in it is no longer starting from the next one)
+    if (fastTimer && !live.some((t) => starting(t, Date.now()))) { clearInterval(fastTimer); fastTimer = null; }
     // status for the hosted ones: by the claude pid once known, else the newest file of that conversation
     let moved = false;
     const now = Date.now();
@@ -1082,7 +1092,8 @@ function createPtys(opts = {}) {
       const wf = st === 'waiting' ? f.waitingFor : null;
       // a file of the claude this pty started (not one left by a claude before it): only those say it has loaded
       const fresh = !!f && f.startedAt >= t.startedAt - 2000;
-      if (fresh && st === 'idle') t.seenIdle = true;
+      if (fresh && st === 'idle' && !t.seenIdle) { t.seenIdle = true; t.firstIdleAt = now; }
+      if (t.seenIdle && st === 'busy') t.firstBusy = true;
       t.idleSince = fresh && st === 'idle' ? t.idleSince || now : 0;
       if (st !== t.status || wf !== t.waitingFor) {
         // a restored, interrupted one stops being "interrupted" once Claude works again (it was told to go on);

@@ -146,6 +146,9 @@ const dismissed = new Map(); // id -> startedAt
 // yet. They end when the panel moves to another conversation or closes (endPreviews). A key or a paste in the
 // terminal, or an explicit open (a button, Enter, a double-click), makes one a normal session that stays.
 const preview = new Set();
+// warm sessions: a chat box started them for the message being typed (see warmUp)
+const warm = new Map(); // id -> { at: the draft's last change, idle: Claude has said idle since it started }
+const warming = new Map(); // id -> warmUp's start on its way (ensureLive waits for it)
 // sessions being ended from here (they take up to ~4 s to quit): hidden from the hosted list meanwhile, and a
 // few seconds after, while the server still sees their pid file ("open elsewhere" would be about ourselves)
 const ending = new Map(); // id -> { startedAt, goneAt }
@@ -184,6 +187,12 @@ function applyList(list) {
     else if (now - e.goneAt > ENDING_GRACE) ending.delete(id);
   }
   for (const id of [...preview]) if (hosts.has(id) && !hosts.get(id).alive) preview.delete(id); // it ended by itself
+  for (const [id, w] of [...warm]) {
+    const h = hosts.get(id);
+    if (!h?.alive) warm.delete(id); // it ended by itself
+    else if (h.status === 'idle') w.idle = true;
+    else if (w.idle && h.status) warm.delete(id); // at work after it was ready (a message from elsewhere): not a draft's now
+  }
   for (const id of [...views.keys()]) if (!hosts.has(id)) disposeView(id);
   followSizes();
   const key = hostKey();
@@ -313,6 +322,7 @@ export const openElsewhere = (s) => !!(s && s.openElsewhere && !hosts.has(s.id) 
 
 // the user typed or pasted into it (or opened it on purpose): it is theirs now, never ended by moving on
 function keep(id) {
+  warm.delete(id);
   if (!preview.delete(id)) return;
   hostsKey = hostKey();
   notify();
@@ -335,6 +345,47 @@ export function endPreviews(keepId = null) {
   let n = 0;
   for (const id of [...preview]) if (id !== keepId) { endHosted(id); n++; }
   if (n) { hostsKey = hostKey(); notify(); }
+}
+
+// Warm sessions: a chat box starts the session of a conversation that doesn't run here as soon as a message is
+// typed into it (compose.js), so Claude Code's few seconds of starting up pass while the message is written, not
+// after Send. Send (ensureLive), a key in the terminal or an explicit open makes it a normal session that stays;
+// so does Claude going to work once it was ready (a message from elsewhere). Otherwise it ends WARM_MS after the
+// draft last changed. Apart from the previews: the detail panel moving on never ends a chat box's warm session.
+const WARM_MS = 3 * 60e3, WARM_SWEEP_MS = 15e3;
+let warmTimer = null;
+// s: the conversation; o.sizeEl: the element to size the new pty from (as ensureLive's)
+export function warmUp(s, o = {}) {
+  const t = termApi();
+  if (!t || !s || !ID_RE.test(String(s.id || '')) || openElsewhere(s) || s.syncOwner) return;
+  const w = warm.get(s.id);
+  if (w) { w.at = Date.now(); return; }
+  if (hosts.has(s.id) || starting.has(s.id) || warming.has(s.id) || ending.has(s.id)) return;
+  const p = (async () => {
+    const r = await startPty(s, o.sizeEl ? guessSize(o.sizeEl) : sizes.get(s.id) || { cols: 120, rows: 32 });
+    // (already running: another window or the API started it meanwhile, so it is not this box's to end)
+    if (!r || !r.ok || r.message === 'already running') return;
+    warm.set(s.id, { at: Date.now(), idle: false });
+    dismissed.delete(s.id);
+    if (!warmTimer) warmTimer = setInterval(sweepWarm, WARM_SWEEP_MS);
+    await refreshHosts();
+    notify();
+    // the view that reads its screen, made now: a Send once it is idle checks the text showed before its Enter (compose.js)
+    screenText(s.id, 1, { sizeEl: o.sizeEl });
+  })().catch(() => {}).finally(() => warming.delete(s.id));
+  warming.set(s.id, p);
+}
+function sweepWarm() {
+  const now = Date.now();
+  for (const [id, w] of [...warm]) {
+    if (!hosts.get(id)?.alive) { warm.delete(id); continue; }
+    if (now - w.at < WARM_MS || starting.has(id)) continue;
+    warm.delete(id);
+    endHosted(id);
+    hostsKey = hostKey();
+    notify();
+  }
+  if (!warm.size) { clearInterval(warmTimer); warmTimer = null; }
 }
 
 // ---------- xterm.js, loaded on first use ----------
@@ -1031,17 +1082,48 @@ const REKEY_MS = 4000;
 // caller deals with those). With it, a live one started moments ago (a new chat sent to at once) is waited for too,
 // until idle, or o.ready once it has its id (REKEY_MS), at most until BOOT_MS after its start: Claude Code drops an
 // Enter typed before it reads keys, which left the message in its prompt, unsent. o.sizeEl: the element to size a
-// new pty (and the view that reads its screen) from; o.onStep(text) hears what it is doing. Resolves
-// { ok, started, message? }; the session's key may be its id by then (keyNow).
+// new pty (and the view that reads its screen) from; o.onStep(text) hears what it is doing. A chat box's warm-up
+// (warmUp) on its way is waited for first, and a warm session not idle yet is waited for as one started here (it
+// becomes a normal session that stays). Resolves { ok, started, message? }; the session's key may be its id by then (keyNow).
 export function ensureLive(s, o = {}) {
   const t = termApi();
   if (!t) return Promise.resolve({ ok: false, message: noTermMsg('Sending') });
   if (!s || !KEY_RE.test(String(s.id || ''))) return Promise.resolve({ ok: false, message: 'not a conversation' });
+  // a chat box's warm-up is starting it (warmUp): that first
+  const w = warming.get(s.id);
+  if (w) return w.then(() => ensureLive(s, o));
   const h = hosts.get(s.id);
   const drawn = () => { try { return !!o.ready?.(keyNow(s.id)); } catch { return false; } };
   const step = (x) => { try { o.onStep?.(x); } catch {} };
+  // ready when Claude reports idle (a resume says busy while it loads, prompt drawn or not), or, with waiting, shows a
+  // question or a panel (the caller deals with those); a host that reports no status at all gets 20 s to draw its
+  // prompt. Then a moment more for the prompt (see above)
+  const untilIdle = async (waiting = false) => {
+    const t0 = Date.now();
+    for (;;) {
+      const x = hosts.get(s.id);
+      if (x && !x.alive) return { ok: false, message: 'the session ended while starting' };
+      if (x?.alive && (x.status === 'idle' || (waiting && x.status === 'waiting') || (x.status == null && Date.now() - t0 > 20000))) break;
+      if (Date.now() - t0 > READY_MS) return { ok: false, message: 'the session did not get ready within 60 s' };
+      if (x?.alive && o.ready) screenText(s.id, 1, { sizeEl: o.sizeEl }); // makes the view that reads its screen, the first time
+      await sleep(READY_POLL_MS);
+      await refreshHosts();
+    }
+    step('');
+    await sleep(drawn() ? DRAWN_SETTLE_MS : SETTLE_MS);
+    return { ok: true, started: true };
+  };
   if (h?.alive) {
+    const wasWarm = warm.has(s.id);
     keep(s.id);
+    // a warm one still starting: waited for as one started here is
+    if (wasWarm && h.status !== 'idle' && h.status !== 'waiting') {
+      if (starting.has(s.id)) return starting.get(s.id);
+      step('Starting session…');
+      const p = untilIdle(true).finally(() => starting.delete(s.id));
+      starting.set(s.id, p);
+      return p;
+    }
     const keyed = () => !isNewKey(keyNow(s.id));
     if (!o.ready || h.status === 'idle' || Date.now() - h.startedAt > BOOT_MS || (drawn() && keyed())) return Promise.resolve({ ok: true, started: false });
     if (starting.has(s.id)) return starting.get(s.id);
@@ -1082,21 +1164,7 @@ export function ensureLive(s, o = {}) {
     preview.delete(s.id); // started on purpose: it stays
     await refreshHosts();
     notify();
-    // ready when Claude reports idle (a resume says busy while it loads, prompt drawn or not); a host that reports
-    // no status at all gets 20 s to draw its prompt
-    const t0 = Date.now();
-    for (;;) {
-      const x = hosts.get(s.id);
-      if (x && !x.alive) return { ok: false, message: 'the session ended while starting' };
-      if (x?.alive && (x.status === 'idle' || (x.status == null && Date.now() - t0 > 20000))) break;
-      if (Date.now() - t0 > READY_MS) return { ok: false, message: 'the session did not get ready within 60 s' };
-      if (x?.alive && o.ready) screenText(s.id, 1, { sizeEl: o.sizeEl }); // makes the view that reads its screen, the first time
-      await sleep(READY_POLL_MS);
-      await refreshHosts();
-    }
-    step('');
-    await sleep(drawn() ? DRAWN_SETTLE_MS : SETTLE_MS);
-    return { ok: true, started: true };
+    return untilIdle();
   })().finally(() => starting.delete(s.id));
   starting.set(s.id, p);
   return p;
