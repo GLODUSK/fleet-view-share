@@ -414,6 +414,7 @@ const GLASS_BOX = 'background:var(--float-bg, var(--glass-bg-strong, rgba(18,21,
 const LEGEND_TOP = 56, LEGEND_LOW = 72;
 const FADE_MS = 10 * 60e3;          // recent-work paths fade out over ten minutes
 const MAX_RECENT = 14;              // recent files drawn per conversation
+const FILE_CLEAR = 18;              // a recent file's least gap past its conversation's gauge (px at ks 1): outside its agents
 const MAX_AGENTS = 16;              // agents drawn per conversation
 const ZMIN = 0.2, ZMAX = 6;
 
@@ -8733,6 +8734,20 @@ function draw() {
       }
       ctx.fill();
     }
+  }
+
+  // recent files: their spring is in world units, so zoomed out they fell onto the orb, which shrinks much less;
+  // on screen each keeps clear of its conversation's gauge, agents and working ring, pushed straight out
+  for (const n of I.nodes) {
+    if (n.kind !== 'recent' || n.sx === undefined) continue;
+    const sn = byId.get('s:' + n.s.id);
+    if (!sn || sn.sx === undefined || sn.RG === undefined) continue;
+    const L = I.look.get(sn.id), busy = L && L.busy > 0.02 && sn.aura ? Math.max(sn.aura * 0.8, sn.RG + 4 * ks) + 5 * ks : 0;
+    const clear = Math.max(sn.RG * (sn.bs || 1) + FILE_CLEAR * ks, busy) + n.R;
+    let dx = n.sx - sn.sx, dy = n.sy - sn.sy, d = Math.hypot(dx, dy);
+    if (d >= clear) continue;
+    if (d < 0.01) { const a = hashNum(n.id) * TAU; dx = Math.cos(a); dy = Math.sin(a); d = 1; }
+    n.sx = sn.sx + (dx / d) * clear; n.sy = sn.sy + (dy / d) * clear;
   }
 
   // links: conversation -> repo (a gradient from its colour to the repo's), -> PR, -> shared file, -> agents
