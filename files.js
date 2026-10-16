@@ -101,7 +101,8 @@ const TEXT_MAX = 1 << 20;
 const RAW_MAX = 40 << 20;
 const DIR_MAX = 500;
 const IMAGES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
-const NEVER = new Set(['.credentials.json']); // sign-in tokens, even inside a known folder
+// sign-in tokens and an account's own settings (its login, MCP servers' keys), even inside a known folder
+const NEVER = new Set(['.credentials.json', '.claude.json']);
 // highlight.js's name for the extension (the page loads a few grammars; the others show as plain text)
 const LANGS = {
   js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',

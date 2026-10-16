@@ -7123,13 +7123,21 @@ function conversationLog(id) {
   return best ? { file: best } : null;
 }
 // the folders the page may read from (GET /changes, GET /file, /preview): every conversation's folder and repo, the
-// remembered repos, the ones added by hand and the handoff folder
+// remembered repos, the ones added by hand and the handoff folder; and the places chats point to outside their repo,
+// so a path that is a link in a chat opens: the temp folder (Claude's scratchpads, tool results, test output), Fleet
+// View's data folder (server.log, host.log…) and each Claude account's folder (memory, CLAUDE.md, hooks, skills;
+// files.js never serves its sign-in files)
 function knownFolders() {
   const out = new Set();
   for (const s of sessions.values()) { if (s.cwd) out.add(s.cwd); if (s.root) out.add(s.root); }
   for (const r of remembered.repos.keys()) out.add(r);
   for (const a of addedRepos) if (a && a.root) out.add(a.root);
-  if (!DEMO) out.add(HO.dir()); // the handoff summaries (a pickup's "Summary", opened in the viewer)
+  if (!DEMO) {
+    out.add(HO.dir()); // the handoff summaries (a pickup's "Summary", opened in the viewer)
+    out.add(os.tmpdir());
+    out.add(LOG_DIR);
+    for (const a of acctFolders()) out.add(acctDir(a));
+  }
   return [...out];
 }
 // remote(req): null for this PC's own page, else { name: this PC's tailnet name, login, device } (an approved browser on
