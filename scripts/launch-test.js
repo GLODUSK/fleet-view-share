@@ -115,11 +115,11 @@ const REC_REPLY = [
   '',
   '**What that means:** your current pricing already works the way I recommended.',
   '',
-  '**My recommendation:** leave it for now. It\'s leftover code, not a bug anyone can hit. If you want it gone, it\'s a small one-PR cleanup.',
+  '**My recommendation:** remove it in one small PR. It\'s leftover code, not a bug anyone can hit.',
 ].join('\n');
 {
   const R = L.recommendationsOf;
-  assert.deepEqual(R(REC_REPLY), ['leave it for now. It\'s leftover code, not a bug anyone can hit. If you want it gone, it\'s a small one-PR cleanup.']);
+  assert.deepEqual(R(REC_REPLY), ['remove it in one small PR. It\'s leftover code, not a bug anyone can hit.']);
   assert.deepEqual(R('Recommendation — ship **it** today'), ['ship it today']);
   assert.deepEqual(R('Recommended fix: guard the null'), ['guard the null']);
   assert.deepEqual(R('**My recommendation:**\n\n1. **Fix the parser** first\n   - a detail under it\n2. Then ship\n\nAnything else?'), ['Fix the parser first', 'Then ship']);
@@ -130,13 +130,13 @@ const REC_REPLY = [
   assert.deepEqual(R('Two ways:\n\n- **A**: fast\n- **B** (recommended): safe'), ['B: safe']);
   assert.deepEqual(R('### Option two (Recommended)\n\nmore'), ['Option two']);
   assert.deepEqual(R('| Plan | Cost |\n|---|---|\n| Plan A (recommended) | low |\n| Plan B | high |'), ['Plan A · low']);
-  assert.deepEqual(R('> **Recommendation:** wait a day'), ['wait a day']);
+  assert.deepEqual(R('> **Recommendation:** ship it Monday'), ['ship it Monday']);
   // a mark beats a label and a sentence
   assert.deepEqual(R('I recommend A.\n\nRecommendation: B\n\n- C (recommended)'), ['C']);
   ok('recommendationsOf: "(recommended)" on a plain item, a heading or a table row; a quote counts; the most explicit kind wins');
 
   assert.deepEqual(R('It works. I\'d strongly recommend adding a test for it. Otherwise fine.\n\nDone.'), ['I\'d strongly recommend adding a test for it. Otherwise fine.']);
-  assert.deepEqual(R('My recommendation is to wait.'), ['My recommendation is to wait.']);
+  assert.deepEqual(R('My recommendation is to ship.'), ['My recommendation is to ship.']);
   assert.deepEqual(R('We would recommend B over A.'), ['We would recommend B over A.']);
   assert.deepEqual(R('I wouldn\'t recommend that. I don\'t recommend this. I would not recommend it. I recommended it before. It\'s the recommended way. Recommendations vary.'), []);
   assert.deepEqual(R('```\nI recommend nothing\nRecommendation: none\n```\nok'), []);
@@ -158,6 +158,26 @@ const REC_REPLY = [
   assert.deepEqual(R('- `fast` mode\n- `safe` mode (recommended)'), ['safe mode']);
   assert.deepEqual(R('You asked "which one?". I recommend the second.'), ['I recommend the second.']);
   ok('recommendationsOf: a sentence from its start to its paragraph\'s end; negatives, past tense and code are not one; 400 characters, 5 at most, each once');
+
+  // advice to do nothing gets no button (2026-10-15: this one got "Launch recommendation")
+  assert.deepEqual(R('My recommendation is to leave him off for now. Getting Ember to greet callers reliably is still being worked on, and a missed or garbled greeting would reach his paying customers first. Once the greeting works reliably on the GLODUSK demo shop, adding him is a one-line change I can make.'), []);
+  for (const s of [
+    'I\'d recommend holding off until the fix lands.', 'Recommendation: hold off.', 'I recommend we wait until Monday.',
+    'My recommendation: don\'t add him yet.', 'I\'d recommend not merging this.', 'I recommend keeping it as is.',
+    'My recommendation: no change needed.', 'Recommendation: skip it for now.', 'I\'d recommend against it.',
+    '**My recommendation:** leave it for now. It\'s leftover code.', '- Leave it as is (recommended)\n- Rewrite it',
+  ]) assert.deepEqual(R(s), [], s);
+  // advice to do something still counts, even with "wait", "leave", "keep", "skip" or "not yet" in it
+  assert.deepEqual(R('My recommendation is to add him now. The greeting works.'), ['My recommendation is to add him now. The greeting works.']);
+  assert.deepEqual(R('My recommendation is to add a wait for the port.'), ['My recommendation is to add a wait for the port.']);
+  assert.deepEqual(R('I recommend leaving a comment on the PR.'), ['I recommend leaving a comment on the PR.']);
+  assert.deepEqual(R('I recommend keeping the old flag but renaming the new one.'), ['I recommend keeping the old flag but renaming the new one.']);
+  assert.deepEqual(R('If it\'s not yet merged, I\'d recommend merging it today.'), ['If it\'s not yet merged, I\'d recommend merging it today.']);
+  assert.deepEqual(R('Recommended fix: skip the cache on reload'), ['skip the cache on reload']);
+  // only the hold-off one goes when there are several
+  assert.deepEqual(R('- Fix the parser (recommended)\n- Leave the docs as is (recommended)'), ['Fix the parser']);
+  assert.equal(L.latestChoice([{ i: 0, type: 'assistant', text: 'My recommendation: hold off for now.' }]), null);
+  ok('recommendationsOf: hold-off advice (hold off, wait, leave or keep it as is, don\'t, not, skip it, no change needed) is not one');
 
   // as options: every one recommended; latestChoice falls back to it; the message has REC_LINE
   assert.equal(L.optionsOf(REC_REPLY), null);
