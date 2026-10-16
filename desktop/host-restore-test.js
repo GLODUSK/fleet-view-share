@@ -2,9 +2,10 @@
 // list), run with the system node:   node desktop/host-restore-test.js
 // Like host-test.js it starts a test host on its own pipe (every file under one temp folder, never the real host's)
 // whose sessions run a fake claude: a node script that notes when it started, with what arguments, in which folder and
-// under which account, and ends on Ctrl+C. It checks: the host answers list() while it restores; the starts go one at a
-// time, about FV_HOST_RESTORE_GAP_MS apart, in their order (the restart asker and the shown one, the busy ones, bots,
-// idle ones with background tasks still running); other idle ones are parked (never started, kept in sessions.json and
+// under which account, and ends on Ctrl+C. It checks: the host answers list() while it restores; the starts go at least
+// FV_HOST_RESTORE_GAP_MS apart, in their order (the restart asker and the shown one, then the most recently active few,
+// then the busy ones, bots, idle ones with background tasks still running; host-restore-order-test.js tests that order
+// and the pace on their own); other idle ones are parked (never started, kept in sessions.json and
 // across a host restart) until opened, then resumed in their saved folder, account and size; open of one still queued
 // starts it once, not twice; kill of a parked one forgets it; a quit mid-restore keeps the ones not started; restoreIdle
 // starts them all; a restart waits for a working one however long it takes, and for one waiting on an answer only
@@ -55,7 +56,7 @@ process.stdin.resume();
 const NODE_PATH = nodePath();
 const ENV = {
   ...process.env, FV_HOST_PIPE: PIPE, FV_HOST_DIR: DATA, FV_HOST_SESSIONS_DIR: PIDS, FV_HOST_SETTINGS: SETTINGS,
-  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_RESTORE_GAP_MS: String(GAP), FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_ASK_WAIT_MS: String(ASK_WAIT), FV_HOST_RESTORE_RETRY_MS: String(RETRY),
+  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_RESTORE_GAP_MS: String(GAP), FV_HOST_RESTORE_SLOT_MS: '1500', FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_ASK_WAIT_MS: String(ASK_WAIT), FV_HOST_RESTORE_RETRY_MS: String(RETRY),
   FV_TERM_CMD: `"${process.execPath}" "${FAKE}"`, FV_HANDOFF_DIR: path.join(ROOT, 'handoffs'),
   ...(NODE_PATH ? { NODE_PATH } : {}),
 };
@@ -78,10 +79,13 @@ const entry = (c) => ({ id: c.id, cwd: c.cwd, account: c.account || 'B', started
 const writeList = (cs, ui = null) => fs.writeFileSync(path.join(DATA, 'sessions.json'), JSON.stringify({ version: 1, savedAt: Date.now(), reason: 'change', hostPid: 1, sessions: cs.map(entry), ui }));
 const savedList = () => { try { return JSON.parse(fs.readFileSync(path.join(DATA, 'sessions.json'), 'utf8')).sessions || []; } catch { return []; } };
 const savedOf = (c) => savedList().find((x) => x.id === c.id);
-function transcript(c, lines) {
+// (ago: its mtime that long ago, the conversation's last activity)
+function transcript(c, lines, ago) {
   const dir = path.join(PROJECTS, c.cwd.replace(/[^A-Za-z0-9]/g, '-'));
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, `${c.id}.jsonl`), lines.map((o) => `${JSON.stringify(o)}\n`).join(''));
+  const f = path.join(dir, `${c.id}.jsonl`);
+  fs.writeFileSync(f, lines.map((o) => `${JSON.stringify(o)}\n`).join(''));
+  if (ago) { const at = new Date(Date.now() - ago); fs.utimesSync(f, at, at); }
 }
 const iso = (ago = 0) => new Date(Date.now() - ago).toISOString();
 const bashBg = (tool, task, ago = 60000) => [
@@ -213,9 +217,13 @@ async function main() {
   const R = conv('r', { restartBy: true }), SEL = conv('sel'), B1 = conv('b1', { busy: true }), B2 = conv('b2', { busy: true });
   const BT = conv('bt', { role: BOT }), T = conv('t'), M = conv('m');
   const T2 = conv('t2'), P1 = conv('p1', { account: 'A', cols: 111 }), P2 = conv('p2'), P3 = conv('p3'), P4 = conv('p4'), P5 = conv('p5');
-  transcript(T, [...bashBg('t1', 'bt1'), ended()]); // still running when the host stopped
-  transcript(M, bashBg('t1', 'bm1').map((e) => ({ ...e, toolUseResult: undefined }))); // saved idle, but its log ends on a tool's result: cut off mid-turn
+  transcript(T, [...bashBg('t1', 'bt1'), ended()], 40e3); // still running when the host stopped
+  transcript(M, bashBg('t1', 'bm1').map((e) => ({ ...e, toolUseResult: undefined })), 30e3); // saved idle, but its log ends on a tool's result: cut off mid-turn
   transcript(T2, [...bashBg('t1', 'bt2'), notice('bt2', 'completed')]); // finished: parked
+  // last activity: the bot 10 s ago, b2 20 s, m 30 s, t 40 s, b1 three days ago
+  transcript(BT, [ended()], 10e3);
+  transcript(B2, [ended()], 20e3);
+  transcript(B1, [ended()], 3 * 86400e3);
   const EAGER = [R, SEL, B1, B2, M, BT, T], PARKED = [T2, P1, P2, P3, P4, P5];
   // in the list's order: parked ones between the others, the shown one and the asker late
   writeList([P1, B1, T2, BT, P2, T, P3, B2, P4, SEL, P5, R, M], { selectedId: SEL.id, wide: false });
@@ -240,9 +248,9 @@ async function main() {
   const at = EAGER.map((c) => (starts(c)[0] || {}).at || 0);
   const order = EAGER.map((c, i) => ({ n: c.name, at: at[i] })).sort((a, b) => a.at - b.at);
   const gaps = order.slice(1).map((x, i) => x.at - order[i].at);
-  check(`1. starts are staggered (about ${GAP} ms apart, never two at once)`, gaps.every((g) => g >= GAP * 0.6), { order, gaps });
+  check(`1. starts are staggered (at least about ${GAP} ms apart, never two at once)`, gaps.every((g) => g >= GAP * 0.6), { order, gaps });
   const names = order.map((x) => x.n).join(',');
-  check('1. order: the restart asker and the shown one, the busy ones, the one whose log ends mid-turn, the bot, then the idle one with running tasks', /^(r,sel|sel,r),b1,b2,m,bt,t$/.test(names), names);
+  check('1. order: the restart asker and the shown one; the 3 most recently active (the bot, a busy one, the one whose log ends mid-turn); then by tier: the other busy one, the idle one with running tasks', /^(r,sel|sel,r),bt,b2,m,b1,t$/.test(names), names);
   check('1. the idle one whose transcript shows a background task running is resumed (a log line)', hostLog().includes(`restore: ${T.id} had 1 background task(s) running; it is resumed`), hostLog().split('\n').filter((l) => l.includes('restore')));
   check('1. the one saved idle whose log ends mid-turn is resumed as interrupted, a note due (log lines)', hostLog().includes(`restore: ${M.id} was saved idle but its log ends mid-turn; it is resumed`)
     && new RegExp(`restore: ${M.id} resumed \\(pid \\d+\\), was interrupted, note due \\(interrupted\\)`).test(hostLog()), hostLog().split('\n').filter((l) => l.includes(M.id)));
@@ -324,7 +332,7 @@ async function main() {
   check('3. sessions.json keeps every one: the ones not started still busy, the started ones interrupted', Q.every((c) => sq.some((x) => x.id === c.id))
     && notStarted.every((c) => sq.find((x) => x.id === c.id).busy) && Q.filter((c) => starts(c).length).every((c) => { const x = sq.find((y) => y.id === c.id); return x.busy || x.interrupted; }), sq);
 
-  // ===== 4. restoreIdle: idle ones are started too, still one at a time =====
+  // ===== 4. restoreIdle: idle ones are started too, at the same pace =====
   const I = [1, 2, 3].map((i) => conv(`i${i}`));
   writeList(I);
   settings({ restoreIdle: true });

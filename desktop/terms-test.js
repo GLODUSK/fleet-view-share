@@ -5,7 +5,8 @@
 // (a pipe server that never answers the hello, or one that lets the window in) and fakes for the process table, the
 // kill and the start of a host, and shortened times. It checks: a busy host (claudes under it) is never ended, is
 // waited on, reported after the busy time, and connected to once it answers; a pid in host.json that runs something
-// else now (or nothing) is never ended; a stuck host.js with no session under it is ended and replaced; a host the
+// else now (or nothing) is never ended; a stuck host.js with no session under it is ended and replaced, but not while
+// host.json says it started moments ago (it may still be reading a cold disk); a host the
 // window started that finds another serving the pipe (exit 0) is not a failure: the window connects to that one.
 // Exit code 0 when every case passes.
 'use strict';
@@ -19,7 +20,7 @@ const P = require(path.join(__dirname, '..', 'platform.js'));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'fv-terms-test-'));
-const TIMES = { hello: 150, stuck: 300, busy: 1500, check: 200 };
+const TIMES = { hello: 150, stuck: 300, busy: 1500, check: 200, young: 1500 };
 
 const results = [];
 function check(name, pass, detail) {
@@ -38,7 +39,7 @@ function setup(name) {
   const H = require(path.join(__dirname, 'host.js'));
   if (H.pipeName() !== pipe || H.dataDir() !== dir) throw new Error(`not on the test pipe (${H.pipeName()}): stopping`);
   const c = { pipe, dir, table: [], kills: [], spawns: 0, onSpawn: null, servers: [] };
-  c.hostJson = (pid, token) => fs.writeFileSync(path.join(dir, 'host.json'), JSON.stringify({ pid, pipe, token }));
+  c.hostJson = (pid, token, startedAt) => fs.writeFileSync(path.join(dir, 'host.json'), JSON.stringify({ pid, pipe, token, ...(startedAt ? { startedAt } : {}) }));
   c.log = () => { try { return fs.readFileSync(path.join(dir, 'window.log'), 'utf8'); } catch { return ''; } };
   // a fake host on the pipe: answers the hello with ok when c.answer is set, else never
   c.serve = (token) => new Promise((resolve) => {
@@ -130,6 +131,24 @@ async function stuckHost() {
   await c.done();
 }
 
+async function youngHost() {
+  // a host.js (pid 4545) with no session under it yet, started moments ago (host.json's startedAt): waited on, not
+  // ended; once it is older than the young time and still silent, it is stuck and replaced
+  const c = setup('young');
+  c.table = [{ pid: 4545, ppid: 1, command: hostCmd }];
+  c.hostJson(4545, 'tok-young', Date.now());
+  const old = await c.serve('tok-young');
+  const ok1 = await c.terms.connect(900);
+  check('young host with no session: not ended, nothing started', ok1 === false && !c.kills.length && !c.spawns, { kills: c.kills, spawns: c.spawns });
+  check('young host with no session: the window log says it started moments ago and waits', /pid 4545\) does not let this window in \(timeout\) but started \d+ s ago: it is busy; waiting for it, never ending it/.test(c.log()), c.log());
+  await sleep(700);
+  c.onKill = () => { old.stop(); };
+  c.onSpawn = async () => { await sleep(100); c.answer = true; c.hostJson(7201, 'tok-new2'); await c.serve('tok-new2'); };
+  const ok2 = await c.terms.connect(6000);
+  check('young host: past the young time with no session it is ended and replaced', c.kills.length === 1 && c.kills[0] === 4545 && c.spawns === 1 && ok2 === true, { kills: c.kills, spawns: c.spawns, ok2 });
+  await c.done();
+}
+
 async function lostRace() {
   // nothing on the pipe: the window starts a host, which finds another host serving the pipe and exits 0; that one
   // comes up a moment later. The window connects to it, ending nothing
@@ -154,6 +173,7 @@ async function main() {
   await busyHost();
   await notOurs();
   await stuckHost();
+  await youngHost();
   await lostRace();
 }
 

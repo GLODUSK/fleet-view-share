@@ -34,12 +34,16 @@ const HELLO_MS = 3000; // one hello unanswered this long: the attempt failed
 const STUCK_MS = 4000;
 const BUSY_MS = 120000;
 const CHECK_MS = 10000;
+// A host whose host.json says it started under YOUNG_MS ago is waited on even with no session under it yet: a host
+// started at boot reads its files from a cold disk before its first resume, and the window once took that for stuck,
+// ended it and started a second one (2026-10-16, #541)
+const YOUNG_MS = 30000;
 // a command line of a session host: <electron or node> <...>/desktop/host.js (not its --selfcheck)
 const isHostCmd = (c) => /desktop[\\/]host\.js\b/i.test(String(c || '')) && !/--selfcheck/.test(String(c));
 const isClaudeCmd = (c) => /claude/i.test(String(c || ''));
 
 // opts.sys (tests only): { spawnHost(env, out, cwd) -> child, processTable(cb), kill(pid) } in place of the real ones, and
-// opts.times: { hello, stuck, busy, check } in place of the times above
+// opts.times: { hello, stuck, busy, check, young } in place of the times above
 function createHost(opts = {}) {
   const send = opts.send || (() => {});
   const onChange = opts.onChange || (() => {});
@@ -51,7 +55,7 @@ function createHost(opts = {}) {
     kill: (pid) => process.kill(pid),
     ...(opts.sys || {}),
   };
-  const times = { hello: HELLO_MS, stuck: STUCK_MS, busy: BUSY_MS, check: CHECK_MS, ...(opts.times || {}) };
+  const times = { hello: HELLO_MS, stuck: STUCK_MS, busy: BUSY_MS, check: CHECK_MS, young: YOUNG_MS, ...(opts.times || {}) };
   let sock = null, ready = false, buf = '', seq = 0, closed = false, quitting = false;
   let info = null; // the host's hello: { pid, version, onDisk, startedAt, ui }
   let cache = []; // the host's last list()
@@ -132,7 +136,10 @@ function createHost(opts = {}) {
     // its sessions: each child that is a claude or has one under it (cmd /c or sh -c, then claude)
     const claude = (p) => isClaudeCmd((list.find((x) => x.pid === p) || {}).command);
     const sessions = list.filter((x) => x.ppid === pid && (claude(x.pid) || P.descendants(x.pid, list).some(claude))).length;
-    return sessions ? { act: 'wait', pid, sessions } : { act: 'end', pid };
+    if (sessions) return { act: 'wait', pid, sessions };
+    // just started (host.json is its own): still loading, not stuck
+    const age = hf && hf.pid === pid && Number(hf.startedAt) ? Date.now() - Number(hf.startedAt) : Infinity;
+    return age >= 0 && age < times.young ? { act: 'wait', pid, sessions: 0, young: Math.round(age / 1000) } : { act: 'end', pid };
   }
   function endHost(pid) {
     try { sys.kill(pid); wlog(`ended a stuck session host (pid ${pid}) that held the pipe, would not let this window in and ran no session`); return true; } catch (e) {
@@ -206,7 +213,7 @@ function createHost(opts = {}) {
               if (endHost(v.pid)) { await sleep(800); started = startHost(); unstuck(); } else why = quitHint;
             } else if (v.act === 'wait') {
               nextCheck = Date.now() + times.check;
-              if (busyPid !== v.pid) { busyPid = v.pid; wlog(`the session host (pid ${v.pid}) does not let this window in (${r}) but runs ${v.sessions} session(s): it is busy; waiting for it, never ending it`); }
+              if (busyPid !== v.pid) { busyPid = v.pid; wlog(`the session host (pid ${v.pid}) does not let this window in (${r}) but ${v.young != null ? `started ${v.young} s ago` : `runs ${v.sessions} session(s)`}: it is busy; waiting for it, never ending it`); }
               if (Date.now() - stuckSince < times.busy) why = `it is busy (${v.sessions} session(s) run under it) and has not answered for ${secs} s; waiting for it`;
               else {
                 if (!busyTold) { busyTold = true; wlog(`the session host (pid ${v.pid}) has not answered for ${secs} s; it is left running with its ${v.sessions} session(s)`); }

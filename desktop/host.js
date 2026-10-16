@@ -61,19 +61,25 @@
 // listed conversations back (claude --resume) and marks the ones that were busy as interrupted (list() says interrupted
 // until Claude starts work again or Enter is typed); new sessions that never got an id are dropped, and so is a
 // conversation another device has (see Away); one a live claude elsewhere has open waits (see below).
-// The restore runs after the pipe listens and never blocks it: one start, then RESTORE_GAP_MS before the next
-// (FV_HOST_RESTORE_GAP_MS in tests), so a client is let in and answered throughout and 40 sessions never start at once
-// (2026-10-13: a 12 s synchronous restore made the window take the host for stuck, kill it and start another, five
-// times in 71 s). Started straight away, in this order: the restart asker (restartBy) and the conversation the window
-// showed (ui.selectedId); the busy or interrupted ones; bots (role) and pickups; idle ones whose transcript
+// The restore runs after the pipe listens and never blocks it: its own work goes in short turns (RESTORE_SLICE_MS), the
+// handoff files are read ahead without blocking before HO.readAll() reads them (warmHandoffs), and the starts go at most
+// RESTORE_CONCURRENT loading at once (a start holds its slot until its claude first says idle, RESTORE_SLOT_MS at most),
+// two starts at least RESTORE_GAP_MS apart (each open() is ~0.3-0.5 s of synchronous work), so a client is let in and
+// answered throughout and 40 sessions never start at once (2026-10-13: a 12 s synchronous restore made the window take
+// the host for stuck, kill it and start another, five times in 71 s; 2026-10-16: 10 s of cold synchronous handoff reads
+// before the first start did it once more). Tests: FV_HOST_RESTORE_GAP_MS, FV_HOST_RESTORE_SLOT_MS,
+// FV_HOST_RESTORE_CONCURRENT. Started straight away, in restoreOrder: the restart asker (restartBy) and the conversation
+// the window showed (ui.selectedId); then the RESTORE_FIRST most recently active (their transcript's mtime) of the rest;
+// then the busy or interrupted ones; bots (role) and pickups; idle ones whose transcript
 // shows background tasks still running (runningTasks, read before the resume reports them stopped), or whose log ends
-// mid-turn (openTurn: saved idle only because claude died first, as at a shutdown; resumed as interrupted). Every other idle
+// mid-turn (openTurn: saved idle only because claude died first, as at a shutdown; resumed as interrupted). Those two
+// checks run alongside the starts, and one they find joins the queue. Every other idle
 // one is parked: not started, kept in the restore list (parked: true) across saves and hosts until it is opened, and
 // then resumed as the restore would have (its saved folder, account and role). open() or sendTo() of one still waiting
 // (parked, or its turn not come) starts it at once and takes it out of the queue; kill() of one forgets it; a quit or
 // restart mid-restore stops the queue and saves the rest as they were. parked() lists the waiting ones; list() only
 // running ones, so a parked conversation is, to every client, one not running here that opens on a click.
-// "restoreIdle": true in ~/.fleet-view.json starts the idle ones too (after the others, still one at a time).
+// "restoreIdle": true in ~/.fleet-view.json starts the idle ones too (after the others, at the same pace).
 // One a live claude elsewhere still has open (at the start or in its turn), or whose start fails, is not dropped: it
 // stays held and is tried once more RESTORE_RETRY_MS later (FV_HOST_RESTORE_RETRY_MS in tests), as a claude of a host
 // that was killed dies a few seconds after it; if that fails too it is parked until opened. One on another device
@@ -142,8 +148,8 @@
 // %LOCALAPPDATA%\fleet-view\test-<name> (or FV_HOST_DIR); only with such a pipe does it honour FV_TERM_CMD (a
 // harmless command in place of `claude`, given the same arguments), FV_HOST_SESSIONS_DIR (one more folder of pid files),
 // FV_HOST_IDLE_MS, FV_HOST_SETTINGS (another settings file), FV_HOST_PROJECTS_DIR (where transcripts are, instead
-// of ~/.claude*/projects), FV_HOST_NUDGE_GIVEUP_MS, FV_HOST_STALL_IDLE_MS, FV_HOST_STALL_LOOK_MS, FV_HOST_PANEL_CLOSE_MS, FV_HOST_RESTORE_GAP_MS, FV_HOST_RESTORE_RETRY_MS
-// and FV_HOST_TEST_END_HANG (a restart's end phase never finishes, see handOver).
+// of ~/.claude*/projects), FV_HOST_NUDGE_GIVEUP_MS, FV_HOST_STALL_IDLE_MS, FV_HOST_STALL_LOOK_MS, FV_HOST_PANEL_CLOSE_MS, FV_HOST_RESTORE_GAP_MS, FV_HOST_RESTORE_SLOT_MS,
+// FV_HOST_RESTORE_CONCURRENT, FV_HOST_RESTORE_RETRY_MS and FV_HOST_TEST_END_HANG (a restart's end phase never finishes, see handOver).
 // desktop/host-test.js and desktop/host-restore-test.js use them.
 'use strict';
 const fs = require('fs');
@@ -175,7 +181,15 @@ const NUDGE_IDLE_MS = 2500, NUDGE_QUIET_MS = 1500, NUDGE_TASKS_MS = 20000;
 // a live session idle this long, with no key typed, whose log ends mid-turn is told to carry on (see stallTick);
 // its log is looked at no more often than STALL_LOOK_MS, and a session gets at most STALL_MAX notes an hour
 const STALL_IDLE_MS = 2 * 60 * 1000, STALL_LOOK_MS = 30 * 1000, STALL_MAX = 3;
-const RESTORE_GAP_MS = 1800; // between two starts of a restore (see Restore list)
+// a restore (see Restore list): after the restart asker and the shown one, the RESTORE_FIRST most recently used ones
+// start first; at most RESTORE_CONCURRENT load at once (a start's slot is freed when its claude says idle, or
+// RESTORE_SLOT_MS after it began); two starts at least RESTORE_GAP_MS apart; its own work in turns of about
+// RESTORE_SLICE_MS at most, yielding in between
+const RESTORE_FIRST = 3;
+const RESTORE_CONCURRENT = 3;
+const RESTORE_GAP_MS = 250;
+const RESTORE_SLOT_MS = 10000;
+const RESTORE_SLICE_MS = 15;
 const RESTORE_RETRY_MS = 15000; // a restore tries one it could not start once more this much later (see Restore list)
 const END_GAP_MS = P.isWin ? 40 : 0; // between two Ctrl+Cs when every session ends at once (see endAll)
 const OUT_BUSY_MS = 3000; // a session with no status known that wrote output this recently is working (see midTurn)
@@ -275,7 +289,7 @@ function sendToMissing(id, account, cwd) {
 }
 function findTranscript(id, cwd, roots = projectRoots()) {
   const name = `${String(id).toLowerCase()}.jsonl`;
-  const at = (f) => { try { const st = fs.statSync(f); return st.isFile() ? { file: f, size: st.size } : null; } catch { return null; } };
+  const at = (f) => { try { const st = fs.statSync(f); return st.isFile() ? { file: f, size: st.size, mtimeMs: st.mtimeMs } : null; } catch { return null; } };
   const slug = typeof cwd === 'string' && cwd ? cwd.replace(/[^A-Za-z0-9]/g, '-') : '';
   for (const root of roots) { const r = slug && at(path.join(root, slug, name)); if (r) return r; }
   for (const root of roots) {
@@ -480,6 +494,75 @@ function openTurn(file) {
     return !results.some((b) => /interrupted by user|doesn't want to proceed/i.test(said(b)));
   }
   return false;
+}
+
+// ---------- the restore's order and pace (see Restore list) ----------
+// The order a restore starts its queue in. items: [{ key, tier, at }], tier 0 the restart asker and the shown one, 1 busy
+// or interrupted, 2 bots and pickups, 3 idle with background tasks running, 4 idle (restoreIdle); at: its last activity
+// (its transcript's mtime). Tier 0 first, in the list's order; then the `first` most recently active of the rest; then
+// the others by tier, the most recent first within one. A new array; the items are left as they are.
+function restoreOrder(items, first = RESTORE_FIRST) {
+  const top = items.filter((x) => x.tier === 0);
+  const rest = items.filter((x) => x.tier !== 0).sort((a, b) => (b.at || 0) - (a.at || 0));
+  const n = Math.max(0, Math.floor(Number(first) || 0));
+  return [...top, ...rest.slice(0, n), ...rest.slice(n).sort((a, b) => a.tier - b.tier || (b.at || 0) - (a.at || 0))];
+}
+
+// Starts a restore's queue. o.pending: the items to start (the caller may push more onto it meanwhile, while o.more()
+// says more may come), started in restoreOrder, its `first` going down as each one past tier 0 starts; at most o.limit
+// load at once (a start holds its slot until o.loaded(pid) or o.slotMs after it began); two starts at least o.gap ms
+// apart, never two in one turn of the event loop. One o.held(item) no longer holds (opened or closed meanwhile) leaves
+// the queue with no wait (o.gone(item)). o.start(item) -> { r: 'ok' | 'failed' | 'skipped', pid? } (skipped: not tried,
+// so no gap after it). o.stopped() ends it at once. o.now and o.sleep (a clock and a timer) are for tests.
+// Resolves { n: how many started, last: when the last one tried was, stopped }.
+async function startPool(o) {
+  const now = o.now || Date.now, sleep = o.sleep || ((ms) => new Promise((r) => setTimeout(r, ms))), poll = o.poll || 100;
+  const pending = o.pending, loading = []; // loading: [{ pid, at }]
+  let first = o.first ?? RESTORE_FIRST, n = 0, last = -Infinity;
+  for (;;) {
+    if (o.stopped()) return { n, last, stopped: true };
+    for (let i = pending.length - 1; i >= 0; i--) if (!o.held(pending[i])) { const [g] = pending.splice(i, 1); if (o.gone) o.gone(g); }
+    const t = now();
+    for (let i = loading.length - 1; i >= 0; i--) if (t - loading[i].at >= o.slotMs || o.loaded(loading[i].pid)) loading.splice(i, 1);
+    if (!pending.length) {
+      if (!o.more()) return { n, last, stopped: false };
+      await sleep(poll);
+      continue;
+    }
+    const wait = loading.length >= o.limit ? poll : last + o.gap - t;
+    if (wait > 0) { await sleep(Math.min(wait, poll)); continue; }
+    const item = restoreOrder(pending, first)[0];
+    pending.splice(pending.indexOf(item), 1);
+    if (item.tier !== 0 && first > 0) first--;
+    const res = o.start(item) || {};
+    if (res.r !== 'skipped') last = now();
+    if (res.r === 'ok') { n++; if (res.pid) loading.push({ pid: res.pid, at: now() }); }
+    await sleep(0);
+  }
+}
+
+// Reads, without blocking the event loop, what HO.readAll() then reads synchronously: each handoff file's first 4 KB
+// and its session's .state file, `n` at once. After a boot none of it is in the file cache (and an antivirus scans each
+// file on its first open): HO.readAll()'s ~1,700 synchronous reads then held a host's event loop over 10 s before its
+// first start, and the window, let in by nothing and seeing no session under it, ended it and started a second host
+// (2026-10-16 09:17). Warm, the same reads take a few hundred ms. Resolves how many handoff files there are.
+async function warmHandoffs(n = 8) {
+  const d = HO.dir(), fsp = fs.promises;
+  let names = [];
+  try { names = (await fsp.readdir(d)).filter((x) => /\.md$/i.test(x)); } catch { return 0; }
+  let i = 0;
+  const one = async (name) => {
+    let fh = null;
+    try {
+      fh = await fsp.open(path.join(d, name), 'r');
+      const b = Buffer.alloc(4096);
+      const { bytesRead } = await fh.read(b, 0, b.length, 0);
+      const s = String(HO.parseFront(b.toString('utf8', 0, bytesRead)).session || '').trim().toLowerCase();
+      if (ID_RE.test(s)) await fsp.readFile(path.join(d, '.state', `${s}.json`)).catch(() => {});
+    } catch {} finally { if (fh) await fh.close().catch(() => {}); }
+  };
+  await Promise.all(Array.from({ length: n }, async () => { while (i < names.length) await one(names[i++]); }));
+  return names.length;
 }
 
 // ---------- conversations on another device (sync's "Continue here", ../sync-move.js) ----------
@@ -1523,9 +1606,15 @@ function createPtys(opts = {}) {
     flush(t);
     return kept(t);
   }
+  // has the session in the pty with this pid loaded: its own claude said idle once (seenIdle, from the scan), or it is
+  // gone? (By the pty's pid, which a pickup's re-key keeps.) The restore frees a start's slot on it (see Restore list).
+  function loaded(pid) {
+    for (const t of terms.values()) if (t.pid === pid) return !t.alive || t.seenIdle;
+    return true;
+  }
 
   return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, workingBut, markRestartBy, markCutOff, snapshot, aliveCount, dirs,
-    hold, heldOf, take, parked, rescan: scan };
+    hold, heldOf, take, parked, loaded, rescan: scan };
 }
 
 // ---------- the host process ----------
@@ -1598,13 +1687,20 @@ function runHost() {
     stallLookMs: testMs('FV_HOST_STALL_LOOK_MS'),
   });
 
-  // On start, once the pipe listens: the conversations the last list had, one start at a time (see Restore list).
-  // Sorting them reads no transcript; the idle ones it would park are each checked for running background tasks in
-  // a turn of their own, then the starts go RESTORE_GAP apart. A client is let in and answered in between throughout.
+  // On start, once the pipe listens: the conversations the last list had (see Restore list). restore() itself reads
+  // sessions.json and holds every listed one at once, reading no other file, so a save from then on keeps them all. The
+  // rest runs in turns of its own (about RESTORE_SLICE_MS at most each), so a client is let in and answered throughout:
+  // the handoff files go into the file cache without blocking (warmHandoffs), then each listed one is sorted (the
+  // conversation a pickup started, away, a handoff nothing picked up, its last activity), then the starts begin
+  // (startPool: restoreOrder, RESTORE_CONCURRENT loading at once, RESTORE_GAP apart) while, alongside, one per turn, the
+  // idle ones it would park are checked for an open turn or running background tasks and join the queue when they have.
   const RESTORE_GAP = testMs('FV_HOST_RESTORE_GAP_MS') ?? RESTORE_GAP_MS;
+  const RESTORE_SLOT = testMs('FV_HOST_RESTORE_SLOT_MS') ?? RESTORE_SLOT_MS;
+  const RESTORE_LIMIT = Math.max(1, Math.floor(testMs('FV_HOST_RESTORE_CONCURRENT') || RESTORE_CONCURRENT));
   const RESTORE_RETRY = testMs('FV_HOST_RESTORE_RETRY_MS') ?? RESTORE_RETRY_MS;
   const restoreStopped = () => quitting || frozen || down;
   function restore() {
+    const t0 = Date.now();
     const saved = readJson(sessionsFile());
     if (!saved || typeof saved !== 'object') {
       if (fs.existsSync(sessionsFile())) log('restore: sessions.json could not be read (cut short when the PC went down?); nothing resumed');
@@ -1638,9 +1734,12 @@ function runHost() {
       }
       return { interrupted, restored: true, nudge, role };
     };
-    const queue = [], checks = []; // queue: [{ key, tier }], started by tier, in the list's order within one
-    let pickups = 0, hos = null;
-    const handoffs = () => hos || (hos = HO.readAll()); // read once, when the first one needs it
+    // the tier a conversation starts in (see restoreOrder); -1: parked, unless a check finds it should start
+    const tierOf = (id, s, pickup) => (s.restartBy || id === shown ? 0 : s.busy || s.interrupted ? 1 : s.role || pickup ? 2 : restoreIdle ? 4 : -1);
+    // held at once as it would be held once sorted (parked, or waiting for its turn with what open() gets), so an open()
+    // of one meanwhile starts it as its turn would: [{ key, s, pickup?, from? }]
+    const entries = [];
+    let pickups = 0;
     for (const s0 of list) {
       if (!s0 || typeof s0 !== 'object') continue;
       const role = roleOf(s0.role);
@@ -1649,70 +1748,113 @@ function runHost() {
         account: acctId(s0.account), startedAt: Number(s0.startedAt) || 0, busy: !!s0.busy, interrupted: !!s0.interrupted,
         cols: Number.isInteger(s0.cols) ? s0.cols : null, rows: Number.isInteger(s0.rows) ? s0.rows : null,
         ...(typeof s0.pendingKey === 'string' ? { pendingKey: s0.pendingKey } : {}), ...(s0.restartBy ? { restartBy: true } : {}), ...(role ? { role } : {}) };
-      let pickup = false;
-      // a pickup that had no id yet: the conversation it started when the handoff names it, else the pickup again
+      // a pickup that had no id yet: sorted below (the conversation it started when the handoff names it, else the pickup again)
       if (typeof s0.pickup === 'string' && !s.id) {
         const from = typeof s0.handoffFrom === 'string' && ID_RE.test(s0.handoffFrom) ? s0.handoffFrom.toLowerCase() : null;
-        const rec = from ? handoffs().bySession.get(from) : null;
-        if (rec && rec.next && ID_RE.test(rec.next)) { s.id = rec.next.toLowerCase(); pickup = true; log(`restore: the handoff of ${from} was picked up as ${rec.next}`); }
-        else if (!HO.safeFile(s0.pickup)) { log(`restore: pickup of ${s0.pickup} failed: the handoff file is gone`); continue; }
-        else {
-          const key = `pickup:${++pickups}`;
-          ptys.hold(key, { ...s, pickup: s0.pickup, handoffFrom: from }, null);
-          queue.push({ key, tier: 2 });
-          continue;
-        }
-      }
-      if (!s.id) { log(`restore: dropped a new session that never got an id (${s0.pendingKey || '?'})`); continue; }
-      const id = s.id;
-      if (ptys.heldOf(id)) continue; // listed twice
-      // another device has it now (sync, away.json): resuming it here would run it in two places
-      const away = awayOf(id);
-      if (away) { log(`restore: ${id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); continue; }
-      // its handoff was the last thing it did and nothing picked it up (its restart was lost): the pickup starts in
-      // its place, as for one saved while it waited for its id
-      const left = s.restartBy || pickup ? null : leftHandoff(id, s.cwd, handoffs());
-      if (left) {
         const key = `pickup:${++pickups}`;
-        ptys.hold(key, { ...s, id: null, busy: false, interrupted: false, pickup: left, handoffFrom: id }, null);
-        queue.push({ key, tier: 2 });
-        log(`restore: ${id} handed off to ${path.basename(left)} and nothing picked it up; the pickup starts`);
+        ptys.hold(key, { ...s, pickup: s0.pickup, handoffFrom: from }, null);
+        entries.push({ key, s, pickup: s0.pickup, from });
         continue;
       }
-      const interrupted = !!(s.busy || s.interrupted);
-      const tier = s.restartBy || id === shown ? 0 : interrupted ? 1 : role || pickup ? 2 : restoreIdle ? 4 : -1;
-      const extra = extraFor(id, s, interrupted, role);
-      if (tier < 0) { ptys.hold(id, { ...s, parked: true }, null); checks.push({ id, s, extra }); continue; }
-      ptys.hold(id, s, extra);
-      queue.push({ key: id, tier });
+      if (!s.id) { log(`restore: dropped a new session that never got an id (${s0.pendingKey || '?'})`); continue; }
+      if (ptys.heldOf(s.id)) continue; // listed twice
+      const tier = tierOf(s.id, s, false);
+      if (tier < 0) ptys.hold(s.id, { ...s, parked: true }, null);
+      else ptys.hold(s.id, s, extraFor(s.id, s, !!(s.busy || s.interrupted), role));
+      entries.push({ key: s.id, s });
     }
-    log(`restore: ${list.length} listed: ${queue.length} to resume one at a time${checks.length ? `, ${checks.length} idle to park unless their background tasks were running` : ''}`);
+    const stopped = (left) => log(`restore: stopped (${quitting ? 'quitting' : 'the host is ending'}) with ${left} not started; they stay in the restore list`);
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const turn = () => new Promise((r) => setImmediate(r));
+    const mtimeOf = (f) => { try { return fs.statSync(f).mtimeMs; } catch { return 0; } };
     (async () => {
-      for (const c of checks) {
-        await new Promise((r) => setImmediate(r));
-        if (restoreStopped()) break;
-        if (!ptys.heldOf(c.id)) continue; // opened or closed meanwhile
-        const tr = findTranscript(c.id, c.s.cwd);
-        // saved idle, but its log ends mid-turn: its claude died before the list was saved (a shutdown kills claude
-        // first, and its pid file goes with it), so it was cut off as surely as a busy one, and is told to carry on.
-        // Not one whose log has been still for a day: that turn was left long ago, and stays parked
-        if (tr && recentLog(tr.file) && openTurn(tr.file)) {
-          const s = { ...c.s, interrupted: true };
-          ptys.hold(c.id, s, extraFor(c.id, s, true, roleOf(s.role)));
-          queue.push({ key: c.id, tier: 1 });
-          log(`restore: ${c.id} was saved idle but its log ends mid-turn; it is resumed`);
+      const tw = Date.now();
+      const nHandoffs = await warmHandoffs();
+      const warmMs = Date.now() - tw;
+      if (restoreStopped()) return stopped(entries.length);
+      let hos = null;
+      const handoffs = () => hos || (hos = HO.readAll()); // read once, when the first one needs it
+      const queue = [], checks = []; // queue: [{ key, tier, at }]; checks: [{ id, s, extra }]
+      let sliceAt = Date.now(), dropped = false;
+      for (const e of entries) {
+        if (Date.now() - sliceAt >= RESTORE_SLICE_MS) { await turn(); sliceAt = Date.now(); }
+        if (restoreStopped()) return stopped(entries.length);
+        if (!ptys.heldOf(e.key)) continue; // opened or closed meanwhile
+        let { s } = e, pickup = false;
+        if (e.pickup) {
+          const rec = e.from ? handoffs().bySession.get(e.from) : null;
+          if (!(rec && rec.next && ID_RE.test(rec.next))) {
+            if (HO.safeFile(e.pickup)) { queue.push({ key: e.key, tier: 2, at: mtimeOf(e.pickup) }); continue; }
+            ptys.take(e.key); dropped = true;
+            log(`restore: pickup of ${e.pickup} failed: the handoff file is gone`);
+            continue;
+          }
+          ptys.take(e.key); dropped = true;
+          s = { ...s, id: rec.next.toLowerCase() };
+          pickup = true;
+          log(`restore: the handoff of ${e.from} was picked up as ${rec.next}`);
+          if (ptys.heldOf(s.id)) continue; // listed too
+        }
+        const id = s.id, role = roleOf(s.role);
+        // another device has it now (sync, away.json): resuming it here would run it in two places
+        const away = awayOf(id);
+        if (away) {
+          ptys.take(id); dropped = true;
+          log(`restore: ${id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`);
           continue;
         }
-        const k = tr ? runningTasks(tr.file) : 0;
-        if (!k) continue;
-        ptys.hold(c.id, c.s, c.extra);
-        queue.push({ key: c.id, tier: 3 });
-        log(`restore: ${c.id} had ${k} background task(s) running; it is resumed`);
+        // its handoff was the last thing it did and nothing picked it up (its restart was lost): the pickup starts in
+        // its place, as for one saved while it waited for its id
+        const left = s.restartBy || pickup ? null : leftHandoff(id, s.cwd, handoffs());
+        if (left) {
+          ptys.take(id); dropped = true;
+          const key = `pickup:${++pickups}`;
+          ptys.hold(key, { ...s, id: null, busy: false, interrupted: false, pickup: left, handoffFrom: id }, null);
+          queue.push({ key, tier: 2, at: mtimeOf(left) });
+          log(`restore: ${id} handed off to ${path.basename(left)} and nothing picked it up; the pickup starts`);
+          continue;
+        }
+        const interrupted = !!(s.busy || s.interrupted);
+        const tier = tierOf(id, s, pickup);
+        const extra = extraFor(id, s, interrupted, role);
+        if (tier < 0) { checks.push({ id, s, extra }); continue; } // (held parked already)
+        ptys.hold(id, s, extra);
+        const tr = findTranscript(id, s.cwd);
+        queue.push({ key: id, tier, at: tr ? tr.mtimeMs : s.startedAt });
       }
-      queue.sort((a, b) => a.tier - b.tier); // (stable: the list's order within a tier)
-      // one start: 'ok', 'failed' (it was tried) or 'skipped' (open in another claude, or away). One that could not
-      // start is held again: for the retry the first time, parked until opened (keeping what open() gets) the second
+      if (dropped) changed();
+      log(`restore: ${list.length} listed: ${queue.length} to resume, ${RESTORE_LIMIT} at a time${checks.length ? `, ${checks.length} idle to park unless their background tasks were running` : ''}`
+        + ` (sorted in ${Date.now() - t0} ms; ${nHandoffs} handoff files read ahead in ${warmMs} ms)`);
+      // the idle ones it would park, one per turn, alongside the starts: one that should run joins the queue
+      let checking = true;
+      const checked = (async () => {
+        for (const c of checks) {
+          await turn();
+          if (restoreStopped()) break;
+          if (!ptys.heldOf(c.id)) continue; // opened or closed meanwhile
+          const tr = findTranscript(c.id, c.s.cwd);
+          // not one whose log has been still for a day: no open turn counts then (recentLog), and no background task does
+          // either (runningTasks counts one at most a day after its launch, which the log's mtime is after), so the
+          // large reads are skipped for it
+          if (!tr || !recentLog(tr.file)) continue;
+          // saved idle, but its log ends mid-turn: its claude died before the list was saved (a shutdown kills claude
+          // first, and its pid file goes with it), so it was cut off as surely as a busy one, and is told to carry on
+          if (openTurn(tr.file)) {
+            const s = { ...c.s, interrupted: true };
+            ptys.hold(c.id, s, extraFor(c.id, s, true, roleOf(s.role)));
+            queue.push({ key: c.id, tier: 1, at: tr.mtimeMs });
+            log(`restore: ${c.id} was saved idle but its log ends mid-turn; it is resumed`);
+            continue;
+          }
+          const k = runningTasks(tr.file);
+          if (!k) continue;
+          ptys.hold(c.id, c.s, c.extra);
+          queue.push({ key: c.id, tier: 3, at: tr.mtimeMs });
+          log(`restore: ${c.id} had ${k} background task(s) running; it is resumed`);
+        }
+      })().catch((e) => log(`restore: checking the idle ones failed: ${e && e.stack ? e.stack : e}`)).finally(() => { checking = false; });
+      // one start: { r: 'ok' | 'failed' (it was tried) | 'skipped' (open in another claude, or away), pid }. One that could
+      // not start is held again: for the retry the first time, parked until opened (keeping what open() gets) the second
       const again = []; // [{ key, at }]: the ones to try once more
       const startOne = (key, h, retry) => {
         const s = h.s;
@@ -1725,35 +1867,34 @@ function runHost() {
         let r;
         if (!s.id) {
           try { r = ptys.startPickup(s.handoffFrom, HO.safeFile(s.pickup), { cwd: s.cwd, account: s.account, cols: s.cols, rows: s.rows }, { restored: true, handoffFrom: s.handoffFrom, role: s.role }); } catch (e) { r = { ok: false, message: e.message }; }
-          if (!r.ok) { keep(`failed: ${r.message}`); return 'failed'; }
+          if (!r.ok) { keep(`failed: ${r.message}`); return { r: 'failed' }; }
           log(`restore: pickup of ${s.pickup} started (pid ${r.pid})`);
-          return 'ok';
+          return { r: 'ok', pid: r.pid };
         }
-        if (openNow().has(s.id)) { keep('is open in another claude'); return 'skipped'; }
+        if (openNow().has(s.id)) { keep('is open in another claude'); return { r: 'skipped' }; }
         const away = awayOf(s.id);
-        if (away) { log(`restore: ${s.id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); changed(); return 'skipped'; }
+        if (away) { log(`restore: ${s.id} is on ${away.device}${away.why === 'moving' ? ' (it was moving there)' : ''}; not resumed`); changed(); return { r: 'skipped' }; }
         const x = h.extra();
         try { r = ptys.open({ id: s.id, cwd: s.cwd, account: s.account, cols: s.cols, rows: s.rows }, x); } catch (e) { r = { ok: false, message: e.message }; }
-        if (!r.ok) { keep(`failed: ${r.message}`); return 'failed'; }
+        if (!r.ok) { keep(`failed: ${r.message}`); return { r: 'failed' }; }
         log(`restore: ${s.id} resumed (pid ${r.pid})${x.role ? `, as the ${x.role}` : ''}${x.interrupted ? ', was interrupted' : ''}${x.nudge ? `, note due (${x.nudge.kind})` : ''}`);
-        return 'ok';
+        return { r: 'ok', pid: r.pid };
       };
-      const stopped = (left) => log(`restore: stopped (${quitting ? 'quitting' : 'the host is ending'}) with ${left} not started; they stay in the restore list`);
-      let n = 0, last = 0, left = queue.length;
-      for (const q of queue) {
-        if (restoreStopped()) break;
-        if (ptys.heldOf(q.key)) { const wait = last + RESTORE_GAP - Date.now(); if (wait > 0) await sleep(wait); }
-        if (restoreStopped()) break;
-        left--;
-        const h = ptys.take(q.key);
-        if (!h) { log(`restore: ${q.key} was opened or closed meanwhile`); continue; }
-        const r = startOne(q.key, h, false);
-        if (r !== 'skipped') last = Date.now();
-        if (r === 'ok') n++;
-      }
-      if (restoreStopped()) return stopped(left + again.length);
+      const pool = await startPool({
+        pending: queue, limit: RESTORE_LIMIT, gap: RESTORE_GAP, slotMs: RESTORE_SLOT, first: RESTORE_FIRST,
+        held: (q) => !!ptys.heldOf(q.key), gone: (q) => log(`restore: ${q.key} was opened or closed meanwhile`),
+        loaded: (pid) => ptys.loaded(pid), more: () => checking, stopped: restoreStopped,
+        start: (q) => {
+          const h = ptys.take(q.key);
+          if (!h) { log(`restore: ${q.key} was opened or closed meanwhile`); return { r: 'skipped' }; }
+          return startOne(q.key, h, false);
+        },
+      });
+      await checked;
+      let { last } = pool;
+      if (pool.stopped || restoreStopped()) return stopped(queue.length + again.length);
       const p = ptys.parked().filter((x) => x.parked).length;
-      log(`restore: ${n} of ${list.length} resumed${p ? `, ${p} parked until opened` : ''}${again.length ? `, ${again.length} to try again` : ''}`);
+      log(`restore: ${pool.n} of ${list.length} resumed${p ? `, ${p} parked until opened` : ''}${again.length ? `, ${again.length} to try again` : ''} (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
       if (!again.length) return;
       let n2 = 0;
       for (const [i, a] of again.entries()) {
@@ -1763,8 +1904,8 @@ function runHost() {
         const h = ptys.take(a.key);
         if (!h) { log(`restore: ${a.key} was opened or closed meanwhile`); continue; }
         const r = startOne(a.key, h, true);
-        if (r !== 'skipped') last = Date.now();
-        if (r === 'ok') n2++;
+        if (r.r !== 'skipped') last = Date.now();
+        if (r.r === 'ok') n2++;
       }
       log(`restore: tried again: ${n2} of ${again.length} resumed`);
     })().catch((e) => log(`restore failed: ${e && e.stack ? e.stack : e}`));
@@ -2082,6 +2223,7 @@ function runHost() {
 
 module.exports = {
   createPtys, sessionDirs, readPidFiles, normDir, pipeName, dataDir, hostFile, sessionsFile, logFile, fileHash, readJson, runningTasks, openTurn,
+  restoreOrder, startPool, warmHandoffs, RESTORE_FIRST, RESTORE_CONCURRENT, RESTORE_GAP_MS, RESTORE_SLOT_MS,
   HOST_JS, ID_RE, KEY_RE, NEW_RE, PROTO, FV_ALLOWED, BOT_ROLE_RE, ptyName: () => ptyName, ptyError: () => ptyError,
 };
 

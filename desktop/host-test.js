@@ -29,7 +29,8 @@ const PIPE = P.isWin ? `\\\\.\\pipe\\${TEST_TAG}` : path.join(os.tmpdir(), `${TE
 const DATA = path.join(ROOT, 'data'), PIDS = path.join(ROOT, 'sessions'), PROJECTS = path.join(ROOT, 'projects');
 const SETTINGS = path.join(ROOT, 'fleet-view.json'), FAKE = path.join(ROOT, 'fake-claude.js');
 for (const d of [DATA, PIDS, PROJECTS, path.join(ROOT, 'handoffs')]) fs.mkdirSync(d, { recursive: true });
-// restoreIdle: every idle one is resumed too, as before parking (desktop/host-restore-test.js tests parking)
+// restoreIdle: every idle one is resumed too, as before parking (desktop/host-restore-test.js tests parking). Most
+// fake claudes never write a pid file that says idle, so ENV's FV_HOST_RESTORE_SLOT_MS frees each restore slot quickly
 fs.writeFileSync(SETTINGS, JSON.stringify({ autoContinue: true, restoreIdle: true }));
 const PANEL_CLOSE_MS = 2500, STALL_IDLE_MS = 3000;
 
@@ -79,7 +80,7 @@ process.stdin.resume();
 const NODE_PATH = nodePath();
 const ENV = {
   ...process.env, FV_HOST_PIPE: PIPE, FV_HOST_DIR: DATA, FV_HOST_SESSIONS_DIR: PIDS, FV_HOST_SETTINGS: SETTINGS,
-  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_STALL_IDLE_MS: String(STALL_IDLE_MS), FV_HOST_STALL_LOOK_MS: '300', FV_HOST_PANEL_CLOSE_MS: String(PANEL_CLOSE_MS), FV_HOST_RESTORE_GAP_MS: '100',
+  FV_HOST_PROJECTS_DIR: PROJECTS, FV_HOST_NUDGE_GIVEUP_MS: '30000', FV_HOST_STALL_IDLE_MS: String(STALL_IDLE_MS), FV_HOST_STALL_LOOK_MS: '300', FV_HOST_PANEL_CLOSE_MS: String(PANEL_CLOSE_MS), FV_HOST_RESTORE_GAP_MS: '100', FV_HOST_RESTORE_SLOT_MS: '200',
   FV_TERM_CMD: `"${process.execPath}" "${FAKE}"`, FV_HANDOFF_DIR: path.join(ROOT, 'handoffs'),
   ...(NODE_PATH ? { NODE_PATH } : {}),
 };
