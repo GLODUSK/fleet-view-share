@@ -5,7 +5,8 @@
 //   read(file, { log, fallback }) -> object. Strips a UTF-8 BOM (Windows PowerShell 5.1 and old Notepad add one). A
 //     file that does not parse to an object is moved aside to <file>.corrupt-<time> and <file>.bak is used instead,
 //     else {}. A file it can't read (locked) is tried again a few times, then .bak is used. A missing file reads as
-//     the fallback file (another path to read in its place), else {}. log(text) says what happened. readOnly (a
+//     <file>.bak when that parses (said in the log), else the fallback file (another path to read in its place),
+//     else {}. log(text) says what happened. readOnly (a
 //     server that never saves, the demo): a broken file is left where it is. Never throws.
 //   peek(file) -> the object on disk now, or null (missing, unreadable, not an object). Changes nothing.
 //   write(file, obj, { log }) -> true when written, false when the file already held exactly this. Writes
@@ -73,7 +74,13 @@ function read(file, o = {}) {
   const log = o.log || (() => {});
   let text;
   try { text = readText(file); } catch (e) {
-    if (e.code === 'ENOENT') return o.fallback ? read(o.fallback, { log, readOnly: o.readOnly }) : {};
+    if (e.code === 'ENOENT') {
+      // gone with its .bak still there (a crash between saves lost it): the .bak, never the fallback's or empty
+      // settings, which the next save would make the only copy (the bots registry went that way on 2026-10-14)
+      const bak = peek(file + '.bak');
+      if (bak) { log(`${file} is missing: using ${file}.bak instead`); return bak; }
+      return o.fallback ? read(o.fallback, { log, readOnly: o.readOnly }) : {};
+    }
     log(`could not read ${file}: ${e.message}`);
     return fromBak(file, log);
   }

@@ -74,6 +74,14 @@ const logger = () => { const lines = []; const log = (t) => lines.push(t); log.l
   ok(SF.read(f, { log, fallback: old }).view === 'map', 'missing: fallback read');
   ok(!log.lines.length && ls(f).length === 1, 'missing: nothing logged or made');
   ok(SF.peek(f) === null, 'peek: missing is null');
+  // a missing file with its .bak still there (a crash lost it): the .bak, said in the log, not the fallback
+  put(f + '.bak', '{"bots":[{"id":"aaaaaaaaaaaa"}]}');
+  const log2 = logger();
+  const got = SF.read(f, { log: log2, fallback: old });
+  ok(got.bots && got.bots.length === 1 && got.view === undefined, 'missing with a .bak: .bak read, not the fallback');
+  ok(log2.lines.some((l) => l.includes('is missing')) && !fs.existsSync(f), 'missing with a .bak: logged, nothing made');
+  put(f + '.bak', '{');
+  ok(SF.read(f, { fallback: old }).view === 'map', 'missing, .bak broken: fallback read');
 }
 
 // 5. a save goes through a tmp file and leaves none behind; the same content is not written again
