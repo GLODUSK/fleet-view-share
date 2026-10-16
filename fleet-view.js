@@ -6463,6 +6463,16 @@ function hadTurn(file) {
     try { return !!typedText(JSON.parse(line)); } catch { return false; }
   });
 }
+// the first n of a list per workspace (its repo's root, any case; one with no repo counts as its own), in list order
+function newestPerRepo(list, n) {
+  const seen = new Map();
+  return list.filter((x) => {
+    const k = String((x.repo && x.repo.root) || '').toLowerCase();
+    const c = seen.get(k) || 0;
+    seen.set(k, c + 1);
+    return c < n;
+  });
+}
 function agedLive(listed, now) {
   if (DEMO) return [];
   const out = [];
@@ -6583,12 +6593,13 @@ function buildState() {
     sessions: out,
     // live conversations that had turns but aged off this list (agedLive): never drawn as new sessions
     aged: agedLive(listed, now),
-    // the "recently finished" strip: the last 10 conversations that finished their turn in the last 3 hours
-    // (one that never said or was asked anything, a conversation opened and left empty, is not listed)
     // the most recently removed conversations (settings.hidden), newest first, for the page's Continue
     removed: removedList(now),
-    finished: out.filter((x) => x.state === 'DONE' && x.endedAt && now - x.endedAt < KEEP_DONE_MS && (x.lastReply || x.goal))
-      .sort((a, b) => b.endedAt - a.endedAt).slice(0, 10)
+    // the "recently finished" strip: the last 10 conversations per workspace that finished their turn in the last 3
+    // hours (the page keeps the 10 newest of the workspaces it shows; a global 10 left a quiet workspace empty)
+    // (one that never said or was asked anything, a conversation opened and left empty, is not listed)
+    finished: newestPerRepo(out.filter((x) => x.state === 'DONE' && x.endedAt && now - x.endedAt < KEEP_DONE_MS && (x.lastReply || x.goal))
+      .sort((a, b) => b.endedAt - a.endedAt), 10)
       .map((x) => ({ id: x.id, name: x.name, account: x.account, repo: x.repo, endedAt: x.endedAt, summary: summaryOf(sessions.get(x.id)?.lastReply) || clipWords(x.goal, 140) || null })),
     clashes,
     conflicts: conflictsOf(onMap),
