@@ -96,17 +96,21 @@ test('account, model and effort: the defaults, or what POST /api/sessions takes'
   assert.deepEqual(['claude-opus-5-5', 'claude-sonnet-5-5[1m]', 'claude-haiku-5-5', 'haiku', 'claude-fable-5-1'].map(B.longModel),
     ['claude-opus-5-5[1m]', 'claude-sonnet-5-5[1m]', 'claude-haiku-5-5', 'haiku', 'claude-fable-5-1']);
 });
-test("the bot's model in its folder's .claude/settings.json: only model set, the rest kept, a file that is not JSON left alone", () => {
+test("the bot's model and auto-compact in its folder's .claude/settings.json: only those set, the rest kept, a file that is not JSON left alone", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fv-botmodel-'));
   try {
     const bot = { folder: dir, model: 'dynamic', effort: 'dynamic' };
     const file = path.join(dir, '.claude', 'settings.json');
     assert.equal(B.writeModel(bot), true);
-    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { model: `${B.DYNAMIC_START.model}[1m]` });
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { model: `${B.DYNAMIC_START.model}[1m]`, autoCompactEnabled: true });
     assert.equal(B.writeModel(bot), false); // the same: not written again
+    // a folder from before auto-compact was set: the model alone, already right, still gets it
+    fs.writeFileSync(file, JSON.stringify({ model: `${B.DYNAMIC_START.model}[1m]` }));
+    assert.equal(B.writeModel(bot), true);
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).autoCompactEnabled, true);
     fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ['Bash(ls)'] }, model: 'haiku' }));
     assert.equal(B.writeModel({ ...bot, model: 'claude-opus-5-5' }), true);
-    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { permissions: { allow: ['Bash(ls)'] }, model: 'claude-opus-5-5[1m]' });
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { permissions: { allow: ['Bash(ls)'] }, model: 'claude-opus-5-5[1m]', autoCompactEnabled: true });
     fs.writeFileSync(file, '{ not json');
     assert.equal(B.writeModel(bot), false);
     assert.equal(fs.readFileSync(file, 'utf8'), '{ not json');

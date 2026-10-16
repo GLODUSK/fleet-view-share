@@ -250,8 +250,10 @@ const longModel = (m) => (typeof m === 'string' && /^(?:claude-)?(?:opus|sonnet)
 // what a session of the bot starts on: its model (its 1M-context version) and effort, a dynamic one's base (DYNAMIC_START)
 const runOpts = (bot) => ({ model: longModel(bot.model === DYNAMIC ? DYNAMIC_START.model : bot.model), effort: bot.effort === DYNAMIC ? DYNAMIC_START.effort : bot.effort });
 // The same model in the bot's folder's .claude/settings.json, so a resume (which names no model: api.js openBot, the
-// host's restore after a restart) runs on it too and its long chat still fits. Only "model" is set; the rest of the
-// file is kept. -> true when the file was written
+// host's restore after a restart) runs on it too and its long chat still fits. Auto-compact is set on there too: a bot
+// never hands off, so with it off (Henry's ~/.claude/settings.json, for the handoff sessions) a full chat ends on
+// "Prompt is too long" and even /compact no longer fits (Panchito, 2026-10-16). Only those two keys are set; the rest
+// of the file is kept. -> true when the file was written
 function writeModel(bot) {
   const model = runOpts(bot).model;
   if (typeof model !== 'string' || !model) return false;
@@ -259,9 +261,9 @@ function writeModel(bot) {
   let j = {};
   try { j = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') return false; } // not JSON: left alone
   if (!j || typeof j !== 'object' || Array.isArray(j)) return false;
-  if (j.model === model) return false;
+  if (j.model === model && j.autoCompactEnabled === true) return false;
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ ...j, model }, null, 2) + '\n');
+  fs.writeFileSync(file, JSON.stringify({ ...j, model, autoCompactEnabled: true }, null, 2) + '\n');
   return true;
 }
 
