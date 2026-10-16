@@ -719,13 +719,15 @@ const bgOffered = (lines) => (Array.isArray(lines) ? lines : []).some((l) => /ct
 
 // parseRewind: /rewind's list ("Restore the code and/or conversation to the point before…", its entries newest at the
 // bottom, "(current)" last): the entry the ❯ is on, and a signature of where it is (the ❯'s row and the "↑ N more"
-// above it), so a press of ↑ that moved nothing shows. -> { sel, sig }, or null when the list isn't on screen
+// above it), so a press of ↑ that moved nothing shows. -> { sel, sig }, or null when the list isn't on screen. Not
+// the suggestion a typed "/rewind" shows above the prompt ("❯ /rewind  Restore the code and/or conversation to a
+// previous point", 2.1.301): it and the prompt box under it are no list (web/compose.js parseRewind)
 function rewindList(lines) {
   const L = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
-  const top = L.findLastIndex((l) => /Restore the code and\/or conversation/.test(l));
+  const top = L.findLastIndex((l) => /^\s*Restore the code and\/or conversation/.test(l));
   if (top < 0) return null;
   let sel = null, at = -1, above = 0;
-  for (let i = top + 1; i < L.length && sel == null; i++) {
+  for (let i = top + 1; i < L.length && sel == null && !isRule(L[i]); i++) {
     const u = /↑\s*(\d+)\s+more/.exec(L[i]);
     if (u) above = +u[1];
     const m = /^\s*❯\s+(.*\S)\s*$/.exec(L[i]);

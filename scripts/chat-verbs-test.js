@@ -1336,6 +1336,9 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     const LIST_HEAD = ' Restore the code and/or conversation to the point before…';
     assert.deepEqual(SCREEN.rewindList(['', ' Rewind', '', LIST_HEAD, '', '   ↑ 3 more', '   fix it', ' ❯ Reply ALPHA.', '   (current)']), { sel: 'Reply ALPHA.', sig: '4|3|Reply ALPHA.' });
     assert.equal(SCREEN.rewindList(['some output', RULE, '❯ Reply ALPHA.', RULE]), null);
+    // a typed "/rewind" whose Enter didn't take: its suggestion above the prompt is no list (2.1.301)
+    const SUGGEST = ['● ALPHA', '  ❯ /rewind                     Restore the code and/or conversation', '                                to a previous point', RULE, '❯ /rewind', RULE];
+    assert.equal(SCREEN.rewindList(SUGGEST), null);
     assert.ok(SCREEN.rewindMatches('Reply ALPHA.', 'Reply ALPHA.\nand more'));
     assert.ok(SCREEN.rewindMatches('Look at the long th…', 'Look at the long thing  here'));
     assert.ok(!SCREEN.rewindMatches('Look at the long th', 'Look at the long thing'));

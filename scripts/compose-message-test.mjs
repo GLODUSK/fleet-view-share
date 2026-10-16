@@ -3,7 +3,7 @@
 // from its bundle) splits at a space before "/" or a drive letter and at new lines, takes outer quotes off a piece,
 // and reads a piece ending in .png/.jpg/.jpeg/.gif/.webp as an image file. Run: node scripts/compose-message-test.mjs
 import assert from 'node:assert/strict';
-import { messageText } from '../web/compose.js';
+import { messageText, parseRewind } from '../web/compose.js';
 import { pasteWrites } from '../web/term.js';
 
 const IMG = /\.(png|jpe?g|gif|webp)$/i;
@@ -44,5 +44,11 @@ const typed = (msg) => pasteWrites(msg).map((w) => (w.startsWith('\x1b[200~') ? 
 assert.equal(typed('It\'s a mistake.?\\'), 'It\'s a mistake.?\\ ');
 assert.equal(typed('one\\\ntwo'), 'one\\\ntwo');
 assert.equal(typed('C:\\dir\\ next'), 'C:\\dir\\ next');
+
+// parseRewind: /rewind's list, never the suggestion a typed "/rewind" shows above the prompt (2.1.301): read as the
+// list, Esc closed only the suggestion and "/rewind" stayed in the prompt, each Edit adding one more
+const RULE = '─'.repeat(40);
+assert.equal(parseRewind(['● ALPHA', '  ❯ /rewind                     Restore the code and/or conversation', '                                to a previous point', RULE, '❯ /rewind', RULE]), null);
+assert.deepEqual(parseRewind(['', ' Rewind', '', ' Restore the code and/or conversation to the point before…', '', '   ↑ 3 more', '   fix it', ' ❯ Reply ALPHA.', '   (current)']), { sel: 'Reply ALPHA.', sig: '4|3|Reply ALPHA.' });
 
 console.log('compose-message-test: ok');

@@ -170,13 +170,16 @@ export function parsePromptBox(lines) {
   return { text: BOX_HINT.test(text) ? '' : text, lines: rows.length };
 }
 // /rewind's list ("Restore the code and/or conversation to the point before…"): the entry the ❯ is on, and a
-// signature of where it is (so a press of ↑ that moved nothing shows); null when the list isn't on screen
+// signature of where it is (so a press of ↑ that moved nothing shows); null when the list isn't on screen. Not the
+// suggestion a typed "/rewind" shows above the prompt ("❯ /rewind  Restore the code and/or conversation to a previous
+// point", 2.1.301): read as the list, with the prompt box's ❯ as its entry, ↑ moved nothing, Esc closed only the
+// suggestion, and "/rewind" stayed in the prompt for the next try to add to
 export function parseRewind(lines) {
   const L = (Array.isArray(lines) ? lines : []).map((l) => String(l ?? ''));
-  const top = L.findLastIndex((l) => /Restore the code and\/or conversation/.test(l));
+  const top = L.findLastIndex((l) => /^\s*Restore the code and\/or conversation/.test(l));
   if (top < 0) return null;
   let sel = null, at = -1, above = 0;
-  for (let i = top + 1; i < L.length && sel == null; i++) {
+  for (let i = top + 1; i < L.length && sel == null && !isRule(L[i]); i++) {
     const u = /↑\s*(\d+)\s+more/.exec(L[i]);
     if (u) above = +u[1];
     const m = /^\s*❯\s+(.*\S)\s*$/.exec(L[i]);
@@ -1347,15 +1350,27 @@ export function mountCompose(slot, s) {
     await pasteKeys(id, '/rewind');
     await sleep(ENTER_DELAY_MS);
     writeKey('\r');
+    const typedCmd = () => /^\/rewind\b/.test(boxNow(id)?.text || '');
+    // a try that stops: the list closed, and no "/rewind" left in the prompt (the next try would type another after it)
+    const backOut = async (why) => {
+      if (parseRewind(screenRows(id, PANEL_LINES))) { writeKey('\x1b'); await sleep(300); }
+      if (typedCmd() && !(await clearBox(id))) why += ' ("/rewind" is still in the session\'s prompt: clear it in the Session tab)';
+      err(why);
+      return null;
+    };
     let r = null;
-    for (let i = 0; i < 20 && !r; i++) { await sleep(150); r = parseRewind(screenRows(id, PANEL_LINES)); }
-    if (!r) { err('/rewind didn\'t open its list'); return null; }
+    for (let i = 0; i < 20 && !r; i++) {
+      await sleep(150);
+      r = parseRewind(screenRows(id, PANEL_LINES));
+      if (!r && i === 9 && typedCmd()) writeKey('\r'); // the Enter didn't take (a session just started): once more
+    }
+    if (!r) return backOut('/rewind didn\'t open its list');
     let seen = 0, last = r.sig;
     for (let i = 0; i < 500; i++) {
       if (!writeKey('\x1b[A')) return null;
       let n = null;
       for (let j = 0; j < 8; j++) { await sleep(60); n = parseRewind(screenRows(id, PANEL_LINES)); if (!n || n.sig !== last) break; }
-      if (!n) { err('The /rewind list closed'); return null; }
+      if (!n) return backOut('The /rewind list closed');
       if (n.sig === last) break; // the top, and it wasn't there
       last = n.sig;
       if (rewindMatches(n.sel, text) && seen++ === nth) {
@@ -1366,8 +1381,8 @@ export function mountCompose(slot, s) {
     }
     writeKey('\x1b');
     if (took) { await sleep(300); return 'gone'; } // (the list closes first)
-    err('That message isn\'t in /rewind\'s list');
-    return null;
+    await sleep(300);
+    return backOut('That message isn\'t in /rewind\'s list');
   }
   // after the restore Claude Code puts the message back in its prompt: cleared there, it moves to this box
   async function takeRewound() {
