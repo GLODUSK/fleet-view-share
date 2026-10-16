@@ -5,8 +5,8 @@
 // but sign-in and key files; a relative path is read against cwd) and shows it in a large frosted overlay over the
 // page: the path, the lines numbered and highlighted (highlight.js, the grammars the chat's code blocks use),
 // scrolled to `line` and marked. With `find` and no line it goes to the first line holding find's first line (an
-// edit's new text) and marks as many lines as find has. A folder lists what is in it (a click opens that one, ".."
-// goes up); a picture shows as itself; a binary file only says so. A text file over 1 MB shows its first 1 MB.
+// edit's new text) and marks as many lines as find has. A folder is not shown here: it opens in Explorer (Finder on
+// the Mac); a picture shows as itself; a binary file only says so. A text file over 1 MB shows its first 1 MB.
 //
 // The head has Copy path, Open in VS Code (a folder: Open in Explorer; POST /reveal through app.js's own link
 // handling, at the marked line) and Close. Esc or a click beside the window closes it, and the focus goes back to
@@ -86,6 +86,8 @@ export async function openViewer(o = {}) {
     note(f.missing ? `${nameOf(p)} isn't there (${f.path || p})` : `Couldn't open ${nameOf(p)}: ${f.message || 'unknown error'}`, f.missing ? C.dim : C.red);
     return f;
   }
+  // a folder opens in Explorer (Finder on the Mac) straight away, never a listing here (Henry, 2026-10-15)
+  if (f.dir) { openInCode(f.path, 0, 'folder'); return f; }
   show(f, o, my);
   return f;
 }
