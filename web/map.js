@@ -857,7 +857,7 @@ const distPick = (o) => (o && o.far != null ? o.far : Math.random() ** DIST_POW)
 // SYSTEM_NEB_P [with a hot star (blue or Wolf-Rayet) or a dusty disc, else], SYSTEM_NEB_A its strength (a pick)
 const SYSTEM_DEPTH = EVENT_DEPTH.far;
 const SYSTEM_AT = [0.4, 0.6], SYSTEM_ARRIVE = 5000, SYSTEM_STAY = [360e3, 600e3], SYSTEM_LEAVE = 20e3, SYSTEM_GONE = 0.3;
-const SYSTEM_SPAN = [0.34, 0.46], SYSTEM_OPEN = [0.16, 0.32], SYSTEM_ROLL = 0.18, SYSTEM_STARS = [0.55, 0.35, 0.1];
+const SYSTEM_SPAN = [0.2, 0.28], SYSTEM_OPEN = [0.16, 0.32], SYSTEM_ROLL = 0.18, SYSTEM_STARS = [0.55, 0.35, 0.1];
 const SYSTEM_SIZE_AT = 900, SYSTEM_SIZE_K = [0.85, 1.35], SYSTEM_STAR_K = 1.5;
 const SYSTEM_CLASS = [
   [[0.66, 0.76, 1], 1.9, 1.25, 0, 0.8], [[0.9, 0.93, 1], 1.6, 1.05, 0, 1.2], [[1, 0.93, 0.78], 1.5, 0.95, 0, 1.6],
