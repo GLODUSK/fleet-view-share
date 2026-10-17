@@ -24,7 +24,8 @@
 // into its next one over MORPH_MS (the new look settles in from 90% size over the old one); its size, aura,
 // memory gauge, link and turning ring all glide (exponential easing, see glide). Going idle, the ring of dots
 // slows to a stop while its dots shrink into the orb; starting work, they grow out and pick up speed. A new
-// conversation or repo grows in with a slight overshoot (BIRTH_MS); one that leaves shrinks as it fades.
+// repo grows in with a slight overshoot (BIRTH_MS), a new conversation buds off its repo's hub and flies out to its
+// spot (BUD_MS); one that leaves shrinks as it fades.
 // A handoff is no new conversation (Henry, 2026-10-12): the pickup's node takes over the old one's spot, look and
 // pick (state.handoffPairs, carryNode), so nothing is born next to the hub and nothing leaves; when it turns from
 // handing off to live, one violet ring spreads from it and fades (RELAY_MS).
@@ -503,6 +504,12 @@ const HUB_R = 10, SAT_RING = 2.4, SAT_MAX = 10, SAT_TURN_MS = 30e3, HUB_HALO_ALP
 const WT_RING = 3.45;               // worktree satellites: their ring, in core radii
 // transitions: a look morphs over MORPH_MS; new nodes grow in over BIRTH_MS (see "Transitions" at the top)
 const MORPH_MS = 700, BIRTH_MS = 650;
+// a new conversation buds off its workspace instead of popping in (Henry, 2026-10-16: "they just pop in, make it more
+// organic"): over BUD_MS it slips out of its hub as a small drop (the hub pulses as it lets go), flies to its spot
+// for the first BUD_FLY of that on an arc bowed BUD_ARC of the distance to one side, stretched along its path and
+// overshooting a little, then lands squashed and wobbles like jelly until it settles, a soft ring spreading from
+// where it landed over the first BUD_RING of the settle. Its name fades in as it lands.
+const BUD_MS = 1600, BUD_FLY = 0.5, BUD_ARC = 0.2, BUD_RING = 0.55;
 const FIN_R = 6.5, FIN_CHARGE_CUT = 50; // finished conversations: smaller, and they push their neighbours less
 
 const NEEDS_YOU = new Set(['ASKING', 'QUESTION', 'STALLED', 'ERROR']);
@@ -9019,7 +9026,10 @@ function draw() {
   const nowP = performance.now();
   I.nowP = nowP;
   for (const n of I.nodes) {
-    if (n.kind === 'session') { const L = lookOf(n, nowP); n.R = L.rb * ks; n.RG = n.R + (n.fin ? 2.5 : 4.5) * ks; n.bs = bumpScale(n.id, nowP) * L.grow; }
+    if (n.kind === 'session') {
+      const L = lookOf(n, nowP); n.R = L.rb * ks; n.RG = n.R + (n.fin ? 2.5 : 4.5) * ks; n.bs = bumpScale(n.id, nowP) * L.grow;
+      n.bud = L.bud ? budPlace(n, L.bud) : null;
+    }
     else if (n.kind === 'repo') {
       const H = hubOf(n, nowP);
       n.R = HUB_R * ks * (0.84 + 0.16 * H.pres + 0.04 * Math.min(H.act, 3)) * H.grow;
@@ -9905,6 +9915,7 @@ function drawGhosts(ctx, ks) {
   I.ghosts = I.ghosts.filter((g) => now - g.at < (g.to ? HANDOFF_GHOST_MS : GHOST_MS));
   for (const g of I.ghosts) {
     const n = g.n;
+    n.bud = null; // one that leaves mid-birth goes as it is, unstretched
     if (n.p) { n.sx = n.p.x * k + ox; n.sy = n.p.y * k + oy; }
     const tgt = g.to && I.byId.get(g.to);
     if (tgt && tgt.sx !== undefined) { handoffGhost(ctx, g, n, tgt, now, ks); continue; }
@@ -9986,6 +9997,9 @@ function lookOf(n, now) {
       g: gaugeOn(s) ? 1 : 0, frac, ringA: hashNum(n.id) * TAU, grow: 1,
       born: !I.still && !I.replay && I.lastDraw && now - I.lastDraw < 1500 ? now : -Infinity };
     I.look.set(n.id, L);
+    // budding off its hub: the hub pulses as it lets go
+    const hub = L.born > -Infinity && I.byId.get(n.cl);
+    if (hub && hub.kind === 'repo') { const r = reactOf(hub.id); if (now - r.bump > BUMP_GAP) { r.bump = now; r.bumps++; } }
   } else if (L.key !== key) {
     // picked up: from handing off to a live look, one violet ring spreads from it (drawSession)
     if (L.key === 'HANDOFF' && key !== 'DONE' && !I.still && !I.replay) L.relay = now;
@@ -10001,12 +10015,46 @@ function lookOf(n, now) {
   L.g = glide(L.g, gaugeOn(s) ? 1 : 0, 500);
   L.frac = glide(L.frac, frac, 600);
   if (!I.still) L.ringA = (L.ringA + ((TAU * (I.adt ?? 16)) / RING_TURN_MS) * L.busy) % TAU;
-  const u = (now - L.born) / BIRTH_MS;
-  L.grow = u >= 0 && u < 1 ? backOut(u) : 1;
+  budOf(L, now);
   // a birth, a morph or a relay ring under way: full rate
-  if (L.grow !== 1 || (L.prev && now - L.at < MORPH_MS) || (L.relay && now - L.relay < RELAY_MS)) I.quick = true;
+  if (L.bud || (L.prev && now - L.at < MORPH_MS) || (L.relay && now - L.relay < RELAY_MS)) I.quick = true;
   if (L.busy > 0.02 || key === 'HANDOFF') I.lively = true; // its ring of dots (or handing-off dashes) turns
   return L;
+}
+
+// a conversation's birth at `now` (BUD_MS): L.grow its scale, and L.bud null once it has settled, else { f: how far
+// along its flight from the hub (0 to 1, a little past it before it settles back), st: its stretch along its path
+// (+ long, - squashed), ring: the landing ring's progress (0 to 1; -1 none), al: its alpha, lab: its name's alpha }
+function budOf(L, now) {
+  const u = (now - L.born) / BUD_MS;
+  if (!(u >= 0 && u < 1)) { L.grow = 1; L.bud = null; return; }
+  if (u < BUD_FLY) {
+    const v = u / BUD_FLY;
+    L.grow = 0.3 + 0.7 * (1 - (1 - v) * (1 - v));
+    L.bud = { f: backOut(v), st: 0.35 * Math.sin(Math.PI * v), ring: -1, al: Math.min(1, v / 0.2), lab: clamp((v - 0.6) / 0.4, 0, 1) * 0.5 };
+  } else {
+    // the settle: squashed as it lands, then a jelly wobble dying away (sin: no jump from the flight's last frame)
+    const w = (u - BUD_FLY) / (1 - BUD_FLY);
+    L.grow = 1;
+    L.bud = { f: 1, st: -0.22 * Math.exp(-3 * w) * Math.sin(w * 3 * TAU) * (1 - w), ring: w < BUD_RING ? w / BUD_RING : -1, al: 1, lab: Math.min(1, 0.5 + w * 2) };
+  }
+}
+// a budding conversation on its flight from its hub: moves its drawn spot (sx, sy) along the arc, and returns what
+// drawSession needs: its heading a, stretch st, landing ring and alphas (the layout never sees any of it)
+function budPlace(n, b) {
+  let a = hashNum(n.id) * TAU;
+  const hub = I.byId.get(n.cl);
+  if (hub && hub.kind === 'repo' && hub.sx !== undefined) {
+    const dx = n.sx - hub.sx, dy = n.sy - hub.sy, d = Math.hypot(dx, dy);
+    if (d > 1) {
+      a = Math.atan2(dy, dx);
+      const f = clamp(b.f, 0, 1), side = hashNum(n.id + 'bud') < 0.5 ? -1 : 1, bow = BUD_ARC * d * Math.sin(Math.PI * f) * side;
+      n.sx = hub.sx + dx * b.f - Math.sin(a) * bow; n.sy = hub.sy + dy * b.f + Math.cos(a) * bow;
+      // heading along the arc: the chord's direction, turned by the bow's slope
+      a += Math.atan(BUD_ARC * Math.PI * Math.cos(Math.PI * f) * side);
+    }
+  }
+  return { a, st: b.st, ring: b.ring, al: b.al, lab: b.lab };
 }
 
 // one look, at (x, y) with radius R
@@ -10077,6 +10125,13 @@ function drawSession(ctx, n, ks, selected, hovered) {
   n.da = ctx.globalAlpha;
   const L = I.look.get(n.id), key = L ? L.key : lookKey(s);
   const ring = 2.5 * ks;
+  // budding (budOf): stretched along its path in flight, squashed and wobbling as it settles, its area kept
+  const bud = n.bud;
+  if (bud) {
+    ctx.save();
+    ctx.globalAlpha *= bud.al;
+    if (bud.st) { const q = 1 + bud.st; ctx.translate(x, y); ctx.rotate(bud.a); ctx.scale(q, 1 / q); ctx.rotate(-bud.a); ctx.translate(-x, -y); }
+  }
   // a change of state: the new look settles in over the old one, which fades out under it
   const u = L && L.prev ? clamp(((I.nowP || performance.now()) - L.at) / MORPH_MS, 0, 1) : 1;
   if (u < 1) {
@@ -10087,6 +10142,17 @@ function drawSession(ctx, n, ks, selected, hovered) {
   } else {
     if (L) L.prev = null;
     drawLook(ctx, key, s, x, y, R, ks);
+  }
+  if (bud) {
+    ctx.restore();
+    // just landed: a soft ring in its colour spreads from it and fades
+    if (bud.ring >= 0) {
+      const ga = ctx.globalAlpha, m = ease(bud.ring);
+      ctx.globalAlpha = ga * 0.5 * (1 - m);
+      ctx.strokeStyle = s.hue || accColor(s.account); ctx.lineWidth = 1.6 * ks;
+      circle(ctx, x, y, (n.RG || n.R) * bs + (2 + 20 * m) * ks); ctx.stroke();
+      ctx.globalAlpha = ga;
+    }
   }
   // picked up a moment ago: one violet ring spreads from it and fades
   const ru = L && L.relay ? ((I.nowP || performance.now()) - L.relay) / RELAY_MS : 1;
@@ -10179,7 +10245,7 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
       let below = n.RG + 5 * ks;
       if (showPct || lt) {
         const pf = font(10, 600, MONO), t = lt || pct + '%', c = lt ? lensColor(I.lens, s) : ctxColor(pct);
-        jobs.push({ prio: (must ? 2000 : 900) + 1, must, owner: n.id, lines: [[{ t, f: pf, c }]], lh: 11, pill: true, anchors: [(w, h) => [n.sx - w / 2, n.sy + n.RG + 2 * ks]] });
+        jobs.push({ prio: (must ? 2000 : 900) + 1, must, owner: n.id, al: n.bud ? n.bud.lab : 1, lines: [[{ t, f: pf, c }]], lh: 11, pill: true, anchors: [(w, h) => [n.sx - w / 2, n.sy + n.RG + 2 * ks]] });
         below += 17 * (I.sf || 1);
       }
       const prio = must ? 2000 : NEEDS_YOU.has(s.state) ? 950 : s.state === 'DONE' ? 300 : 800 + Math.min(50, s.calls20 || 0);
@@ -10187,7 +10253,7 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
       // just outside the ring of agents, for a conversation whose agents fill every spot next to it
       const ring = n.agents.length ? Math.max(32 * k, n.RG + 10 * ks) + (n.agents.length > 10 ? 4 * ks : 0) + 3.6 * ks + 4 : off;
       jobs.push({
-        prio, must, owner: n.id, sid: s.id, lines, lh: 15, pill: true,
+        prio, must, owner: n.id, sid: s.id, lines, lh: 15, pill: true, al: n.bud ? n.bud.lab : 1, // fading in as it lands
         anchors: [
           (w, h) => [n.sx - w / 2, n.sy + below],
           (w, h) => [n.sx - w / 2, n.sy - off - h],
@@ -10350,6 +10416,8 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
     placed.push(rect);
     if (j.owner) (I.labelRects || (I.labelRects = new Map())).set(j.owner + '|' + j.lh, rect);
     if (j.owner && j.owner.startsWith('T:')) { const tm = I.teams.find((x) => 'T:' + x.t.id === j.owner); if (tm) tm.rect = rect; }
+    const ga = ctx.globalAlpha;
+    if (j.al !== undefined && j.al < 1) ctx.globalAlpha = ga * j.al;
     if (j.pill) {
       const rr = j.lines.length > 1 ? 8 * sf : h / 2;
       ctx.fillStyle = PILL_BG;
@@ -10383,6 +10451,7 @@ function drawLabels(ctx, k, ks, clashLabels, selNode, hovNode, fileAlpha) {
         x += measure(ctx, sg.f, sg.t);
       }
     });
+    ctx.globalAlpha = ga;
   }
 }
 function roundRect(ctx, x, y, w, h, r) {
