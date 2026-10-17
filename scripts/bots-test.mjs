@@ -242,8 +242,9 @@ test('state.bots: not the removed ones, newest first, convId the running one els
   const bots = [mk(BID, T, { ids: [id(1), id(2)] }), mk(BID2, T + 1), mk('cccccccccccc', T + 2, { removed: true })];
   const v = B.listView(bots, new Map([[BID2, { id: id(7) }]]));
   assert.deepEqual(v.map((x) => x.id), [BID2, BID]);
-  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'color', 'convId', 'createdAt', 'effort', 'folder', 'id', 'ids', 'live', 'map', 'model', 'name', 'role', 'shape', 'watches']);
+  assert.deepEqual(Object.keys(v[0]).sort(), ['account', 'brief', 'bySession', 'color', 'convId', 'createdAt', 'effort', 'folder', 'id', 'ids', 'live', 'madeBy', 'madeByName', 'map', 'model', 'name', 'role', 'shape', 'watches']);
   assert.equal(v[0].role, ''); // none
+  assert.deepEqual([v[0].bySession, v[0].madeBy, v[0].madeByName], [false, null, null]); // Henry's own
   assert.equal(B.listView([mk(BID, T, { role: 'QA' })], new Map())[0].role, 'QA');
   assert.equal(v[0].map, null); assert.deepEqual(v[0].watches, []);
   assert.equal(v[0].shape, null); assert.equal(v[0].color, null);
@@ -1013,8 +1014,9 @@ await (async () => {
   }
 
   {
-    // /api/bots with the token: anyone may start a bot; making, changing or removing one takes Henry's phone (the
-    // relay's key with "via": "phone"), since every session can read the token
+    // /api/bots with the token: anyone may start a bot; a session on this machine (no relay header) may make one, marked
+    // as a session's; changing or removing one takes Henry's phone (the relay's key with "via": "phone"), since every
+    // session can read the token. A web page (an Origin) is refused whatever it carries
     API.ensureToken();
     const tok = fs.readFileSync(path.join(require('../platform.js').dataDir(), 'api-token'), 'utf8').trim();
     const did = [];
@@ -1022,7 +1024,7 @@ await (async () => {
       log: () => {}, sendJson: (res, code, out) => res.done([code, out]),
       readBody: (req, res, cb) => cb(req.body),
       bots: {
-        list: () => [200, []], create: () => (did.push('create'), [200, { ok: true }]), update: () => (did.push('update'), [200, { ok: true }]),
+        list: () => [200, []], create: (b, by) => (did.push(by && by.session ? `create ${b.name} by a session` : 'create'), [200, { ok: true }]), update: () => (did.push('update'), [200, { ok: true }]),
         start: () => (did.push('start'), [200, { ok: true }]), remove: () => (did.push('remove'), [200, { ok: true }]),
         look: (b) => (did.push(`look ${b.from}`), [200, { ok: true }]),
       },
@@ -1034,23 +1036,27 @@ await (async () => {
       API.handle(req, res, pathname, ctx);
     });
     const relay = { 'x-fleet-view-relay': API.relayKey() };
-    assert.equal((await call('/api/bots', { name: 'x' }))[0], 403);
-    assert.equal((await call(`/api/bots/${BID}`, { brief: 'new orders' }))[0], 403);
-    assert.equal((await call(`/api/bots/${BID}/remove`, {}))[0], 403);
-    assert.equal((await call('/api/bots', { name: 'x', via: 'phone' }))[0], 403); // no key
+    assert.equal((await call(`/api/bots/${BID}`, { brief: 'new orders' }))[0], 403, 'a session cannot change one');
+    assert.equal((await call(`/api/bots/${BID}/remove`, {}))[0], 403, 'nor remove one');
+    assert.equal((await call(`/api/bots/${BID}`, { brief: 'b', via: 'phone' }))[0], 403); // no key
+    assert.equal((await call('/api/bots', { name: 'x' }, { origin: 'http://evil.example' }))[0], 403, 'a web page');
+    assert.equal((await call('/api/bots', { name: 'x' }, { origin: 'http://127.0.0.1:4777' }))[0], 403, 'this PC\'s own page goes through /bots, not the API');
+    assert.equal((await call('/api/bots', { name: 'x', via: 'phone' }))[0], 403); // no key: not the phone, nor a plain session
     assert.equal((await call('/api/bots', { name: 'x', via: 'phone' }, { 'x-fleet-view-relay': 'nope' }))[0], 403);
+    assert.equal((await call('/api/bots', { name: 'x' }, { 'x-fleet-view-relay': 'nope' }))[0], 403);
     assert.equal((await call('/api/bots', { name: 'x' }, relay))[0], 403); // the key without "via": "phone"
     assert.deepEqual(did, []);
+    assert.equal((await call('/api/bots', { name: 'Abogadito', from: id(42) }))[0], 200, 'a session makes one');
     assert.equal((await call(`/api/bots/${BID}/start`, {}))[0], 200);
     assert.equal((await call('/api/bots', { name: 'x', via: 'phone' }, relay))[0], 200);
     assert.equal((await call(`/api/bots/${BID}`, { brief: 'b', via: 'phone' }, relay))[0], 200);
     assert.equal((await call(`/api/bots/${BID}/remove`, { via: 'phone' }, relay))[0], 200);
-    assert.deepEqual(did, ['start', 'create', 'update', 'remove']);
+    assert.deepEqual(did, ['create Abogadito by a session', 'start', 'create', 'update', 'remove']);
     // a bot's own look: any token caller reaches bots.look (it checks from); not a bot id, and POST only
     did.length = 0;
     assert.equal((await call('/api/bots/look', { from: 'x', shape: 'heart' }))[0], 200);
     assert.deepEqual(did, ['look x']);
-    n++; console.log('ok /api/bots: start for anyone; make, change and remove only from the phone relay; look goes to bots.look');
+    n++; console.log('ok /api/bots: start for anyone; make for a session here or the phone, never a page; change and remove only from the phone relay; look goes to bots.look');
   }
   // a session asks for a bot (POST /api/bots/requests): checked as a bot is, kept, listed; Henry makes or declines it
   {
@@ -1098,11 +1104,12 @@ await (async () => {
     assert.equal(h.calls.startBot.length, 1);
     assert.ok(!h.bots.requestsView().some((x) => x.id === rq.id));
     assert.equal((await h.bots.approveRequest(rq.id))[0], 404, 'made once');
-    // a request whose name a bot took meanwhile: refused as POST /bots refuses it, and kept
+    // a bot made meanwhile with a request's name (any case, any path): the request goes, so no stale card stays
     const b3 = h.bots.requestsView().find((x) => x.name === 'Bot 3').id;
-    await h.bots.create({ name: 'bot 3' });
-    assert.equal((await h.bots.approveRequest(b3))[0], 400);
-    assert.ok(h.bots.requestsView().some((x) => x.id === b3), 'kept after a refusal');
+    assert.equal((await h.bots.create({ name: 'bot 3' }))[0], 200);
+    assert.ok(!h.bots.requestsView().some((x) => x.id === b3), 'dropped once a bot of its name is made');
+    assert.ok(!h.savedRequests().some((x) => x.id === b3), 'and saved so');
+    assert.equal((await h.bots.approveRequest(b3))[0], 404);
     // made but not started (the desktop app is down): ok false with the bot, as POST /bots answers, and the request goes
     const b4 = h.bots.requestsView().find((x) => x.name === 'Bot 4').id;
     h.setDown(true);
@@ -1112,7 +1119,7 @@ await (async () => {
     h.setDown(false);
     // it persists: a new server with the saved requests lists the same ones; 7 days later they are gone (and saved so)
     const left = h.bots.requestsView();
-    assert.equal(left.length, 2);
+    assert.equal(left.length, 1);
     const h2 = harness({ savedRequests: h.savedRequests() });
     assert.deepEqual(h2.bots.requestsView(), left);
     clock(Date.now() + B.REQ_TTL_MS + 1);
@@ -1183,6 +1190,52 @@ await (async () => {
     assert.match(out[0], /^abcdef012345 {2}Deploy watch \(QA\) {2}asked by 00000042, /);
     assert.equal(out[1], '  why: for the release');
     n++; console.log('ok fv bot request posts the ask (brief from a file, --from resolved) and prints its id; fv bot requests lists them');
+  }
+  // fv bot new: the call it makes (to POST /api/bots, --from required), and the line it prints
+  {
+    const FV = require('./fv.js');
+    const calls = [];
+    const env = { call: async (method, p, body) => { calls.push({ method, p, body }); return p === '/bots' && method === 'POST' ? { code: 200, j: { ok: true, bot: { id: 'abcdef012345', name: body.name }, message: `made ${body.name} and started it` } }
+      : p.startsWith('/conversations') ? { code: 200, j: { ok: true, ids: [id(42)] } } : p === '/sessions' ? { code: 200, j: { ok: true, sessions: [] } } : { code: 404, j: { ok: false, message: 'no' } }; } };
+    const out = [], err = [];
+    const code = await FV.main(['bot', 'new', '--name', 'Abogadito', '--role', 'Reads contracts', '--brief', 'Read the contracts.', '--account', 'dynamic', '--from', id(42).slice(0, 8)], env, (l) => out.push(l), (l) => err.push(l));
+    assert.equal(code, 0, err.join('\n'));
+    assert.deepEqual(calls.filter((c) => c.method === 'POST'), [{ method: 'POST', p: '/bots', body: { name: 'Abogadito', role: 'Reads contracts', brief: 'Read the contracts.', account: 'dynamic', from: id(42) } }]);
+    assert.deepEqual(out, ['made Abogadito (abcdef012345) and started it: Henry gets a push and can remove it; tell him in your reply']);
+    assert.equal(await FV.main(['bot', 'new', '--name', 'x'], env, () => {}, () => {}), 2, 'no --from');
+    assert.equal(await FV.main(['bot', 'new', '--from', id(42)], env, () => {}, () => {}), 2, 'no name');
+    assert.equal(await FV.main(['bot', 'new', '--name', 'x', '--why', 'w', '--from', id(42)], env, () => {}, () => {}), 2, '--why is a request\'s');
+    n++; console.log('ok fv bot new posts to /api/bots with --from resolved and prints the bot made');
+  }
+  // a session makes a bot (bots.js create with by.session): madeBy kept through a reload, from checked, a request of
+  // its name dropped; Henry's own ignore from
+  {
+    const h = harness();
+    const from = id(42);
+    h.names.set(from, 'Release lead');
+    assert.equal(h.bots.requestBot({ name: 'Abogadito', role: 'Reads contracts' })[0], 200);
+    assert.equal(h.bots.requestBot({ name: 'Other' })[0], 200);
+    assert.equal((await h.bots.create({ name: 'x', from: 'not-an-id' }, { session: true }))[0], 400);
+    const [c, o] = await h.bots.create({ name: 'abogadito', role: 'Reads contracts', from }, { session: true });
+    assert.equal(c, 200, o.message); assert.equal(o.ok, true);
+    assert.equal(o.bot.bySession, true); assert.equal(o.bot.madeBy, from); assert.equal(o.bot.madeByName, 'Release lead');
+    assert.deepEqual(h.bots.requestsView().map((r) => r.name), ['Other'], 'the request of its name (any case) went');
+    assert.deepEqual(h.savedRequests().map((r) => r.name), ['Other']);
+    const v = h.bots.list()[1].bots.find((b) => b.name === 'abogadito');
+    assert.deepEqual([v.bySession, v.madeBy, v.madeByName], [true, from, 'Release lead'], 'GET /api/bots shows it');
+    // a later rename of the session does not change who made it
+    h.names.set(from, 'Renamed');
+    const h2 = harness({ base: h.base, saved: h.saved(), savedRequests: h.savedRequests() });
+    const v2 = h2.bots.view().find((b) => b.name === 'abogadito');
+    assert.deepEqual([v2.bySession, v2.madeBy, v2.madeByName], [true, from, 'Release lead'], 'kept through a reload');
+    // without from: a session's still, no id or name
+    const [, o3] = await h.bots.create({ name: 'Quiet' }, { session: true });
+    assert.deepEqual([o3.bot.bySession, o3.bot.madeBy, o3.bot.madeByName], [true, null, null]);
+    // Henry's (no by): not a session's, from ignored
+    const [, o4] = await h.bots.create({ name: 'Mine', from });
+    assert.deepEqual([o4.bot.bySession, o4.bot.madeBy, o4.bot.madeByName], [false, null, null]);
+    assert.ok(!('bySession' in h.saved().find((b) => b.name === 'Mine')));
+    n++; console.log('ok a session makes a bot: madeBy and its name then kept through a reload, from checked, a request of its name dropped');
   }
 })().finally(() => { Date.now = realNow; try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
 

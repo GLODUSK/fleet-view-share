@@ -94,6 +94,14 @@ const post = (p, b) => req('POST', p, b, { Origin: ORIGIN });
     eq((await req('GET', '/api/bots/requests', null, auth)).j, { ok: true, requests: [] }, 'GET /api/bots/requests');
     eq(((await req('GET', '/api/bots', null, auth)).j || {}).requests, [], 'GET /api/bots carries requests');
     eq((await req('POST', '/api/bots/requests/abcdef012345/approve', {}, auth)).code, 403, 'a session cannot approve');
+    // a session on this machine makes a bot itself (POST /api/bots, no relay header): it reaches bots.js (the demo
+    // makes none: 503); with an Origin (a web page, this PC's own too) it never does; changing or removing one is 403
+    const made = await req('POST', '/api/bots', { name: 'Abogadito', from: '00000042-0000-4000-8000-000000000000' }, auth);
+    eq([made.code, made.j && made.j.message], [503, 'the demo makes no bots'], 'POST /api/bots from a session reaches bots.js');
+    eq((await req('POST', '/api/bots', { name: 'Abogadito' }, { ...auth, Origin: 'http://evil.example' })).code, 403, 'POST /api/bots from another site: 403');
+    eq((await req('POST', '/api/bots', { name: 'Abogadito' }, { ...auth, Origin: ORIGIN })).code, 403, 'POST /api/bots with this PC\'s Origin: 403');
+    eq((await req('POST', '/api/bots/abcdef012345', { brief: 'x' }, auth)).code, 403, 'a session cannot change a bot');
+    eq((await req('POST', '/api/bots/abcdef012345/remove', {}, auth)).code, 403, 'a session cannot remove a bot');
     eq((await req('POST', '/bots/requests/abcdef012345/approve', {})).code, 403, 'the page route without an Origin: 403');
     eq((await req('POST', '/bots/requests/abcdef012345/approve', {}, { Origin: 'http://evil.example' })).code, 403, 'another site: 403');
     eq((await post('/bots/requests/abcdef012345/approve', {})).code, 404, 'the page: Make it on no such request: 404');

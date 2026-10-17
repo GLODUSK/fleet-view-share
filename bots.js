@@ -51,10 +51,14 @@
 //   when it is not running, when one's turn ends, it asks something, errors or stalls (watchEvent: held 10 s, once per
 //   situation, never for what was there at first sight, so a restart fires nothing), so a bot never polls. A handoff
 //   moves the watch to the pickup; a conversation gone from Fleet View ends it. Off the map, every watch stops.
-// - Asked for (Henry, 2026-10-17): a session never makes a bot, but may ask for one (POST /api/bots/requests, fv bot
-//   request: name, role, brief, why, what it runs on). Henry sees it in the Bots tab and on his phone (state.botRequests,
-//   a push) and makes it with one tap (approve: create below with its fields) or declines it. settings.botRequests
-//   keeps the pending ones (at most 5) for 7 days.
+// - Asked for (Henry, 2026-10-17): a session may ask for a bot (POST /api/bots/requests, fv bot request: name, role,
+//   brief, why, what it runs on). Henry sees it in the Bots tab and on his phone (state.botRequests, a push) and makes
+//   it with one tap (approve: create below with its fields) or declines it. settings.botRequests keeps the pending ones
+//   (at most 5) for 7 days.
+// - Made by a session (Henry, later that day): a session on this machine may make a bot itself when Henry directly
+//   tells it to (POST /api/bots, fv bot new: create with by.session). The bot keeps who made it (bySession, madeBy: the
+//   session's conversation id when it said, madeByName: its name then); state.bots shows it, and phone-push.js tells
+//   Henry once after the fact (kind 'bot-made'), who can remove it. Any bot made drops a pending request of its name.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -449,7 +453,9 @@ function watchView(w, nameOf) {
 function viewOf(b, l, nameOf) {
   return { id: b.id, name: b.name, brief: b.brief, role: b.role || '', account: b.account, model: b.model, effort: b.effort, folder: b.folder, createdAt: b.createdAt,
     convId: (l && l.id) || b.ids[b.ids.length - 1] || null, ids: [...b.ids], live: !!l, shape: b.shape || null, color: b.color || null,
-    map: b.map ? { x: b.map.x, y: b.map.y } : null, watches: (b.watches || []).map((w) => watchView(w, nameOf)) };
+    map: b.map ? { x: b.map.x, y: b.map.y } : null, watches: (b.watches || []).map((w) => watchView(w, nameOf)),
+    // made by a session, not Henry: its conversation id (null when it did not say) and its name then
+    bySession: !!b.bySession, madeBy: b.madeBy || null, madeByName: b.madeByName || null };
 }
 // state.bots: the bots not removed, newest first (of two made the same millisecond, the later). live: bot id -> its
 // running session
@@ -471,6 +477,8 @@ function loadBots(saved, base = BOTS_DIR) {
       told: Array.isArray(b.told) ? [...new Set(b.told.map(convId).filter(Boolean))] : [], ...(b.removed === true ? { removed: true } : {}),
       ...(SHAPES.includes(b.shape) ? { shape: b.shape } : {}), ...(typeof b.color === 'string' && COLOR_RE.test(b.color) ? { color: b.color.toLowerCase() } : {}),
       ...(Number.isFinite(b.lookAt) && b.lookAt > 0 ? { lookAt: Math.round(b.lookAt) } : {}),
+      // made by a session (create's by.session)
+      ...(b.bySession === true ? { bySession: true, madeBy: convId(b.madeBy) || null, madeByName: typeof b.madeByName === 'string' && b.madeByName ? b.madeByName.slice(0, 120) : null } : {}),
       // on the map and watching (a removed bot is neither)
       ...(b.removed !== true && mapPoint(b.map) ? { map: mapPoint(b.map) } : {}), watches: b.removed === true ? [] : readWatches(b.watches),
       // deleted tasks it is still to be told of
@@ -480,8 +488,8 @@ function loadBots(saved, base = BOTS_DIR) {
 }
 
 // ---------- a session asks for a bot ----------
-// Henry, 2026-10-17: a session may ASK for a bot, never make one (a bot is a standing agent with its own folder,
-// CLAUDE.md and schedule). POST /api/bots/requests (fv bot request) keeps the ask; Henry's Make it (the page's POST
+// Henry, 2026-10-17: a session may ASK for a bot when it is unsure he wants one (a bot is a standing agent with its
+// own folder, CLAUDE.md and schedule; one he directly told it to make, it makes itself: create's by.session). POST /api/bots/requests (fv bot request) keeps the ask; Henry's Make it (the page's POST
 // /bots/requests/:id/approve, or his phone's /api/bots/requests/:id/approve through the relay) makes it the way POST
 // /bots does, Decline drops it. Pending ones are saved with the bots (settings.botRequests) and go after 7 days.
 const REQ_MAX = 5; // pending at once
@@ -584,11 +592,16 @@ function createBots(deps) {
     return p;
   }
 
-  // POST /bots, /api/bots { name, brief?, role?, account?, model?, effort?, shape?, color? }: the bot, its folder (trusted for
-  // every account) and its CLAUDE.md, then it starts. Made but not started: ok false, with bot
-  async function create(b) {
+  // POST /bots, /api/bots { name, brief?, role?, account?, model?, effort?, shape?, color?, from? }: the bot, its folder
+  // (trusted for every account) and its CLAUDE.md, then it starts. Made but not started: ok false, with bot. by.session:
+  // a session made it (api.js: POST /api/bots without the relay), from its conversation id when it says (checked);
+  // Henry's own (the page, his phone) ignore from. Any bot made drops a pending request of the same name
+  async function create(b, by = null) {
     if (d.demo) return [503, { ok: false, message: 'the demo makes no bots' }];
     b = b && typeof b === 'object' ? b : {};
+    const session = !!(by && by.session);
+    const from = !session || b.from == null || b.from === '' ? null : convId(b.from);
+    if (session && b.from != null && b.from !== '' && !from) return [400, { ok: false, message: 'from must be your conversation id' }];
     const n = checkName(b.name, bots);
     if (n.err) return [400, { ok: false, message: n.err }];
     const br = checkBrief(b.brief);
@@ -604,7 +617,8 @@ function createBots(deps) {
     do id = crypto.randomBytes(6).toString('hex'); while (byId(id));
     const folder = pickFolder(base, slugOf(n.name), bots, (p) => fs.existsSync(p));
     if (!folder) return [409, { ok: false, message: `no free folder for ${n.name} in ${base}` }];
-    const bot = { id, name: n.name, brief: br.brief, role: rl.role, account: o.account, model: o.model, effort: o.effort, folder, createdAt: Date.now(), ids: [], told: [], watches: [] };
+    const bot = { id, name: n.name, brief: br.brief, role: rl.role, account: o.account, model: o.model, effort: o.effort, folder, createdAt: Date.now(), ids: [], told: [], watches: [],
+      ...(session ? { bySession: true, madeBy: from, madeByName: (from && nameOf(from)) || null } : {}) };
     applyLook(bot, lk);
     fillLook(bot, bots);
     let text;
@@ -624,8 +638,12 @@ function createBots(deps) {
     // a new folder would open on "Do you trust the files in this folder?", and the start prompt could not go in
     try { if (d.trustFolder) d.trustFolder(folder); } catch (e) { log(`could not trust ${folder}: ${e.message}`); }
     bots.push(bot);
+    // a request for a bot of this name is answered now: its card goes
+    const low = bot.name.toLowerCase(), had = requests.length;
+    requests = requests.filter((r) => r.name.toLowerCase() !== low);
     save();
-    log(`made ${bot.name} (${id}) in ${folder}`);
+    log(`made ${bot.name} (${id}) in ${folder}${session ? `: a session made it (${bot.madeByName || (from ? from.slice(0, 8) : 'it did not say which')}), Henry is told by a push` : ''}`);
+    if (requests.length !== had) log(`the request for a bot called ${bot.name} went: it is made`);
     const [code, out] = await start(id);
     return [code, { ...out, message: out.ok ? `made ${bot.name} and started it` : `made ${bot.name}, but it did not start: ${out.message}` }];
   }

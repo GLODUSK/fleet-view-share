@@ -286,6 +286,36 @@ async function main() {
   push.stop();
   delete st.botRequests;
 
+  // ---------- a bot a session made (/state bots with bySession) ----------
+  clock.t += 1000;
+  const MB = 'dddddddddddd';
+  st.bots = [{ id: MB, name: 'Abogadito', role: 'Reads contracts', createdAt: clock.t, bySession: true, madeBy: A, madeByName: 'Release lead' },
+    { id: 'eeeeeeeeeeee', name: 'Mine', role: 'x', createdAt: clock.t, bySession: false, madeBy: null, madeByName: null }];
+  push = make();
+  push.start();
+  await push.tick();
+  rgot = take();
+  eq(rgot.map((m) => [m.to, m.title, m.body || null, m.data]), [
+    [TOKEN1, 'A session made a bot', null, { kind: 'bot-made', bot: MB, machine: 'devPhone1aaaaaaa' }],
+    [TOKEN2, 'Release lead made a bot: Abogadito', 'Reads contracts', { kind: 'bot-made', bot: MB, machine: 'devPhone2bbbbbbb' }],
+  ], "a bot a session made: one push per phone after the fact (names off: only that a session made one); Henry's own pushes nothing");
+  await push.tick();
+  ok(!take().length, 'a bot a session made pushes once');
+  push.stop();
+  push = make();
+  push.start();
+  await push.tick();
+  ok(!take().length, 'and not again after a restart (madeAt in push.json)');
+  eq(JSON.parse(fs.readFileSync(path.join(dataDir, 'relay', 'push.json'), 'utf8')).madeAt, clock.t, 'push.json keeps the newest made bot seen');
+  clock.t += 1000;
+  st.bots = [...st.bots, { id: 'ffffffffffff', name: 'Quiet', role: '', createdAt: clock.t, bySession: true, madeBy: null, madeByName: null },
+    { id: '111111111111', name: 'Old', role: 'x', createdAt: clock.t - 11 * 60e3, bySession: true }];
+  await push.tick();
+  eq(take().map((m) => [m.title, m.body || null, m.data.kind, m.data.bot]), [['A session made a bot', null, 'bot-made', 'ffffffffffff'], ['A session made a bot: Quiet', null, 'bot-made', 'ffffffffffff']],
+    'a new one goes (no name for the session: A session; no role: no body), an old one never');
+  push.stop();
+  delete st.bots;
+
   // ---------- the log ----------
   const logText = logs.join('\n');
   ok(![TOKEN1, TOKEN2, 'phone1Token', 'Secret project', 'Fleet work', 'Gamma', 'old route'].some((s) => logText.includes(s)), 'the log never holds a token, a chat\'s name or its words');

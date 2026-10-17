@@ -373,12 +373,13 @@ The bots:
   takes one off the list. `model` and `effort` may each be `"dynamic"` (a new bot's default: each message is sized
   for it); `role` is what the bot does (one line, at most 60 characters, `""` for none; in its CLAUDE.md and next to its
   name in team briefs; `/state`'s `bots[].role`); `shape` is one of web/mascot.js `SHAPES` and `color` a `#rrggbb`,
-  `null` for the automatic pick. A bot id is 12 lowercase hex digits (bots.js `BOT_ID_RE`). api.js takes making,
-  changing and removing a bot only from Henry, which from the phone means the relay's marker (below); starting one
-  is open to any caller, so `/start` is not marked. A message for a bot goes through `POST /api/sessions/:id/message` to its conversation (`convId` in
+  `null` for the automatic pick. A bot id is 12 lowercase hex digits (bots.js `BOT_ID_RE`). api.js takes changing
+  and removing a bot only from Henry, which from the phone means the relay's marker (below); making one from Henry
+  or from a session on the PC (no relay header; `/state`'s `bots[]` then carry `bySession`, `madeBy`, `madeByName`);
+  starting one is open to any caller, so `/start` is not marked. A message for a bot goes through `POST /api/sessions/:id/message` to its conversation (`convId` in
   `/state`'s `bots`), as for any session. `POST /api/bots/look` (a bot changing its own look) is the bot's alone,
   never the phone's.
-- **A bot a session asked for** (bots.js `requestBot`): a session never makes a bot, it asks (`POST
+- **A bot a session asked for** (bots.js `requestBot`): a session unsure Henry wants a bot asks (`POST
   /api/bots/requests`, `fv bot request`; never through the relay: 403). `/state`'s `botRequests` (always there, `[]`
   when none; `GET /api/bots/requests` has the same) lists the ones waiting, newest first: `{ id (12 hex), name, role,
   brief, account, model, effort, why, from, fromName, at }`. `POST /api/bots/requests/:id/approve {}` (**Make it**)
@@ -688,6 +689,11 @@ Apple). No new dependency on the PC: `phone-push.js`, started by the relay, call
   session> asks to make a bot: <name>" with its role (else its why) as the body; with Show what chats say off, "A
   session asks to make a bot" alone. Data `{ kind: 'bot-request', machine, request: <its id> }`: a tap opens the Bots
   tab. The newest one seen is kept in `push.json` as `reqAt`, so a restart sends nothing twice.
+- **A bot a session made** (`/state`'s `bots` with `bySession`: a session made it with `fv bot new` because Henry
+  told it to) pushes once, after the fact: "<the session's name then, or A session> made a bot: <name>" with its
+  role as the body; with Show what chats say off, "A session made a bot" alone. Data `{ kind: 'bot-made', machine,
+  bot: <its id> }`: a tap opens the Bots tab, where Henry can remove it. The newest one seen is kept in `push.json`
+  as `madeAt`, the same way.
 - **The token.** The phone asks iOS for permission once, not on a first launch: after a minute in front while paired
   and a machine is online, an alert says what notifications say (and that Settings can leave a chat's words out), and only its "Turn on" brings up iOS's question
   (Settings' **Notifications** switch asks too). It then sends its Expo push token to every machine it is paired with:

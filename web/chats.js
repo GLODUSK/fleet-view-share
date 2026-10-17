@@ -357,7 +357,8 @@ function listHtml(state, nodes, now, noBots) {
 }
 
 // ---------- a bot a session asked for (bots.js requestBot) ----------
-// A session never makes a bot; it asks (fv bot request), and the ask shows as a card on top of the list: its name and
+// A session makes a bot only when Henry tells it to (fv bot new); unsure, it asks (fv bot request), and the ask
+// shows as a card on top of the list: its name and
 // role, who asked and why, its instructions (folded to three lines: Read it all), what it would run on, and Make it
 // (POST /bots/requests/:id/approve: made and started as New bot makes one, then picked) or Decline (/decline). His
 // phone has the same two (relay: /api/bots/requests/:id/...). state.botRequests: { id, name, role, brief, account,
@@ -1025,7 +1026,10 @@ function drawForm(el, state) {
     el._form.innerHTML = `<form class="ch-nb" novalidate autocomplete="off">`
       + `<div class="ch-nb-h"><span class="ch-nb-av"></span><div><div class="ch-nb-t">${edit ? `${esc(bot.name)}'s profile` : 'New bot'}</div>`
       + `<div class="ch-nb-s">${edit ? 'Its name, role, instructions and look change at once (a running bot reads its instructions again), and so does Dynamic: each message you send is sized for it. Account, and a fixed model or effort, apply from its next new conversation.'
-        : 'An overseer you give standing tasks. It works in a folder of its own (~/Bots), never on the map, and starts once it is made.'}</div></div></div>`
+        : 'An overseer you give standing tasks. It works in a folder of its own (~/Bots), never on the map, and starts once it is made.'}</div>`
+      // a bot a session made (bots.js create, bySession): which one, by its name then
+      + (edit && bot.bySession ? `<div class="ch-nb-s">Made by ${esc(bot.madeByName || 'a session')}</div>` : '')
+      + `</div></div>`
       + `<label class="ch-f"><span>Name</span><input name="name" maxlength="40" spellcheck="false" placeholder="e.g. Deploy watch" value="${edit ? esc(bot.name) : ''}"></label>`
       // what it is for in its teams: its CLAUDE.md and team briefs say it (bots.js)
       + `<label class="ch-f"><span>Role</span><input name="role" maxlength="${ROLE_MAX}" spellcheck="true" placeholder="e.g. Reviewer, Release manager" value="${edit ? esc(bot.role || '') : ''}"></label>`

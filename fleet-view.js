@@ -7735,7 +7735,7 @@ function botWatchFacts(ids) {
     // watching (bots.js watchTick): the watched conversations' facts, and the checks and names POST /bots/:id/watch needs
     watchFacts: botWatchFacts, known: (id) => sessions.has(id) || !!conversationLog(id), nameOf: (id) => { const n = nameNow(id, null); return typeof n === 'string' && n ? n : null; },
   });
-  apiCtx.bots = { list: () => BOTS.list(), create: (b) => BOTS.create(b), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id), look: (b) => BOTS.look(b),
+  apiCtx.bots = { list: () => BOTS.list(), create: (b, by) => BOTS.create(b, by), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id), look: (b) => BOTS.look(b),
     // a session asks for a bot; Henry makes or declines it (bots.js requestBot, approveRequest, declineRequest)
     requests: () => BOTS.requestList(), request: (b) => BOTS.requestBot(b), approve: (id) => BOTS.approveRequest(id), decline: (id) => BOTS.declineRequest(id) };
   apiCtx.botOf = (id) => BOTS.vouch(id);

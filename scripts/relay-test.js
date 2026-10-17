@@ -832,7 +832,8 @@ async function main() {
     ok(r && r.s === 403 && /takes no role/.test(r.b.message) && seenFor('/api/sessions').length === n0, `POST /api/sessions ${JSON.stringify(b)}: 403, nothing reached the server (${r && r.s})`);
   }
 
-  // the bots, as api.js and bots.js take them: create, update and remove marked (Henry's alone), start not
+  // the bots, as api.js and bots.js take them: create, update and remove marked (Henry's: a session on the PC makes one
+  // without the relay, api.js), start not
   await tick(A.timers, 1001, ws);
   const botCases = [
     ['/api/bots', { name: 'Scout', brief: 'watch the PRs', account: 'B', model: 'sonnet', effort: 'low' }, 200, null, true],

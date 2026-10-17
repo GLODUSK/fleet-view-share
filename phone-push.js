@@ -29,6 +29,10 @@
 //             names off, "A session asks to make a bot". data { kind: 'bot-request', request: <its id>, machine }: the
 //             phone opens its Bots tab. The newest one seen (its at) is kept in push.json as reqAt, so a restart never
 //             sends again; the first read without one takes it and sends nothing
+//             a bot a session made itself (/state's bots with bySession, bots.js create) pushes once, after the fact:
+//             names on, "<madeByName, or A session> made a bot: <name>" with its role as the body; names off, "A
+//             session made a bot". data { kind: 'bot-made', bot: <its id>, machine }: the phone opens its Bots tab.
+//             The newest one seen (its createdAt) is kept in push.json as madeAt, the same way as reqAt
 //   tokens    one Expo answers DeviceNotRegistered for (the app was deleted, or its notifications turned off) is
 //             dropped (opts.drop); a revoked device's goes with it (relay.js)
 //
@@ -58,6 +62,7 @@ const TITLE = {
   merged: (n) => (n > 1 ? `${n} PRs merged` : 'A PR merged'),
 };
 const REQ_TITLE = 'A session asks to make a bot';
+const MADE_TITLE = 'A session made a bot';
 const clip = (s, n = 200) => String(s == null ? '' : s).replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, n);
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
@@ -185,6 +190,17 @@ function requestMessage(target, r, machine) {
   return m;
 }
 
+// the push for a bot a session made (/state bots: { id, name, role, bySession, madeByName, createdAt }), for one phone
+function madeMessage(target, b, machine) {
+  const data = { kind: 'bot-made', bot: b.id, machine };
+  const m = { to: target.token, title: MADE_TITLE, data, sound: 'default', priority: 'high', ttl: TTL_S };
+  if (!target.names) return m;
+  m.title = clip(`${clip(b.madeByName, 60) || 'A session'} made a bot: ${clip(b.name, 40)}`, 120);
+  const body = clip(b.role, 80);
+  if (body) m.body = body;
+  return m;
+}
+
 function writeAtomic(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
@@ -213,11 +229,13 @@ function createPush(o = {}) {
   let sent = new Map(); // '<key>|<kind>' -> when it was pushed
   let idle = false; // no phone had a token at the last tick: the next read with one takes the cursor anew
   let reqAt = null; // the newest bot request seen (its at), or null: the next read takes it and sends nothing
+  let madeAt = null; // the newest bot a session made seen (its createdAt), or null: as reqAt
   function load() {
     try {
       const j = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (j && Number.isFinite(j.n)) cursor = j.n;
       if (j && Number.isFinite(j.reqAt)) reqAt = j.reqAt;
+      if (j && Number.isFinite(j.madeAt)) madeAt = j.madeAt;
       const t = now();
       for (const [k, at] of Object.entries(j && typeof j.sent === 'object' && j.sent ? j.sent : {})) if (Number.isFinite(at) && t - at < COALESCE_MS) sent.set(k, at);
     } catch (e) { if (e.code !== 'ENOENT') note(`push.json could not be read: ${e.message}`); }
@@ -225,7 +243,7 @@ function createPush(o = {}) {
   function save() {
     const t = now();
     for (const [k, at] of sent) if (t - at >= COALESCE_MS) sent.delete(k);
-    try { writeAtomic(file, `${JSON.stringify({ v: 1, n: cursor, sent: Object.fromEntries(sent), ...(reqAt != null ? { reqAt } : {}) })}\n`); } catch (e) { note(`push.json could not be saved: ${e.message}`); }
+    try { writeAtomic(file, `${JSON.stringify({ v: 1, n: cursor, sent: Object.fromEntries(sent), ...(reqAt != null ? { reqAt } : {}), ...(madeAt != null ? { madeAt } : {}) })}\n`); } catch (e) { note(`push.json could not be saved: ${e.message}`); }
   }
 
   // ---------- reading /state ----------
@@ -291,11 +309,15 @@ function createPush(o = {}) {
     // the bots sessions ask for (bots.js requestBot): the ones newer than reqAt
     const reqs = (Array.isArray(st.botRequests) ? st.botRequests : []).filter((r) => r && typeof r.id === 'string' && typeof r.name === 'string' && Number.isFinite(r.at));
     const reqTop = reqs.reduce((m, r) => Math.max(m, r.at), t);
+    // the bots sessions made (bots.js create, bySession): the ones newer than madeAt
+    const made = (Array.isArray(st.bots) ? st.bots : []).filter((b) => b && b.bySession === true && typeof b.id === 'string' && typeof b.name === 'string' && Number.isFinite(b.createdAt));
+    const madeTop = made.reduce((m, b) => Math.max(m, b.createdAt), t);
     if (cursor == null || idle) {
       // catching up: everything there now is old news
       idle = false;
       cursor = Number.isFinite(top) ? top : 0;
       reqAt = reqTop;
+      madeAt = madeTop;
       save();
       return;
     }
@@ -303,6 +325,10 @@ function createPush(o = {}) {
     const reqFresh = reqAt == null ? [] : reqs.filter((r) => r.at > reqAt && t - r.at <= MAX_AGE_MS).sort((a, b) => a.at - b.at);
     const reqMoved = reqAt == null || reqs.some((r) => r.at > reqAt);
     if (reqMoved) reqAt = reqAt == null ? reqTop : Math.max(reqAt, ...reqs.map((r) => r.at));
+    // (likewise a push.json from before bots sessions made)
+    const madeFresh = madeAt == null ? [] : made.filter((b) => b.createdAt > madeAt && t - b.createdAt <= MAX_AGE_MS).sort((a, b) => a.createdAt - b.createdAt);
+    const madeMoved = madeAt == null || made.some((b) => b.createdAt > madeAt);
+    if (madeMoved) madeAt = madeAt == null ? madeTop : Math.max(madeAt, ...made.map((b) => b.createdAt));
     const fresh = alerts.filter((a) => a.n > cursor && t - (Number(a.t) || 0) <= MAX_AGE_MS);
     const moved = top > cursor;
     if (moved) cursor = top;
@@ -330,7 +356,7 @@ function createPush(o = {}) {
     // (a merge per PR: two PRs merged by one chat are two pieces of news)
     const sentKey = (x) => `${x.key}|${x.kind}${x.pr ? `#${x.pr}` : ''}`;
     const items = [...best.values()].filter((x) => !(sent.get(sentKey(x)) > t - WINDOW_MS[x.kind]));
-    if (!items.length && !reqFresh.length) { if (moved || reqMoved) save(); return; }
+    if (!items.length && !reqFresh.length && !madeFresh.length) { if (moved || reqMoved || madeMoved) save(); return; }
     for (const x of items) sent.set(sentKey(x), t);
     save();
     const messages = [], owners = [];
@@ -338,8 +364,10 @@ function createPush(o = {}) {
       const peers = new Set((Array.isArray(target.peers) ? target.peers : []).map((p) => String(p).toLowerCase()));
       // a chat another machine runs, which this phone hears from there too
       const mine = items.filter((x) => !(x.host && peers.has(x.host)));
-      for (const m of [...reqFresh.map((r) => requestMessage(target, r, target.dev)), ...messagesFor(target, mine, target.dev)]) { messages.push(m); owners.push(target); }
+      for (const m of [...reqFresh.map((r) => requestMessage(target, r, target.dev)), ...madeFresh.map((b) => madeMessage(target, b, target.dev)), ...messagesFor(target, mine, target.dev)]) { messages.push(m); owners.push(target); }
     }
+    // (the log names no bot: it says what happened only)
+    if (madeFresh.length) log(`push: ${madeFresh.length} bot(s) a session made, to ${list.length} phone(s)`);
     for (let i = 0; i < messages.length; i += BATCH_MAX) {
       const part = messages.slice(i, i + BATCH_MAX);
       const tickets = await send(part);
@@ -370,4 +398,4 @@ function createPush(o = {}) {
   return { start, stop, tick };
 }
 
-module.exports = { createPush, kindOf, messagesFor, requestMessage, namesText, detailOf, gist, askOf, SEND_URL, POLL_MS, WINDOW_MS, COALESCE_MS, MAX_AGE_MS };
+module.exports = { createPush, kindOf, messagesFor, requestMessage, madeMessage, namesText, detailOf, gist, askOf, SEND_URL, POLL_MS, WINDOW_MS, COALESCE_MS, MAX_AGE_MS };

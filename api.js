@@ -894,7 +894,7 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("bot:<bot id>" or null)' },
   { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends. An account at 90% of its 5-hour or weekly limit gives way to the one with the most left (accountSwitched in the reply) while "Switch accounts when one runs low" is on' },
   { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers of the fleet, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, role, account, model, effort, folder, createdAt, convId, live; and requests, the ones sessions asked for' },
-  { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), role? (what it does, one line, up to 60 characters; "" none), account?: "B", model?: "dynamic" (the default: sized for each message Henry sends from the page) or a name like "claude-sonnet-5-5", effort?: "dynamic" (the default) or "medium" }', does: 'Henry only (his phone, through the relay; a session gets 403, and asks with POST /api/bots/requests instead): make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }' },
+  { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), role? (what it does, one line, up to 60 characters; "" none), account?: "B", model?: "dynamic" (the default: sized for each message Henry sends from the page) or a name like "claude-sonnet-5-5", effort?: "dynamic" (the default) or "medium", from?: your conversation id (a session) }', does: 'make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }. Henry (his phone, through the relay), or a session on this machine (fv bot new), only when Henry directly asks it to make that bot; with from?: your conversation id, kept as its madeBy. Henry is told by a push after the fact and can remove it. Never a web page (an Origin gets 403)' },
   { method: 'GET', path: '/api/bots/requests', does: 'the bots sessions asked for, waiting on Henry, newest first: { ok, requests: [{ id, name, role, brief, account, model, effort, why, from, fromName, at }] } (each goes after 7 days)' },
   { method: 'POST', path: '/api/bots/requests', body: '{ name (1-40 characters), brief? (up to 4000), role? (one line, up to 60), account?, model?, effort? (as POST /api/bots), why? (one line, up to 200: why the bot is wanted), from?: your conversation id }', does: 'ask Henry for a bot (fv bot request): he makes it with one tap in the Bots tab or on his phone, or declines it. Never through the relay. 409 when a request has that name already, or 5 wait: { ok, request }' },
   { method: 'POST', path: '/api/bots/requests/:id/approve', does: 'Henry only (his phone, through the relay; the page has /bots/requests/:id/approve): make the bot asked for and start it, as POST /api/bots; the request goes once the bot is made: { ok, bot, key, id }' },
@@ -3051,7 +3051,7 @@ async function listConversations(query, ctx) {
 //        teams: { list(), get(id) -> { id, name, lead, members } or null, make(b), add(id, member, lead),
 //        remove(id, member), lead(id, member | null), disband(id) } each -> [code, json] or a Promise of one,
 //        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,
-//        bots: { list(), create(b), start(id), update(id, b), remove(id), look(b), requests(), request(b), approve(id),
+//        bots: { list(), create(b, { session }?), start(id), update(id, b), remove(id), look(b), requests(), request(b), approve(id),
 //        decline(id) } each -> [code, json] or a Promise of one (/api/bots, /api/bots/requests, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
 const VERBS = 'message|launch|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode|rewind|fork|panel';
 const GET_VERBS = new Set(['menu', 'transcript', 'activity']);
@@ -3121,11 +3121,20 @@ function handle(req, res, pathname, ctx) {
     if (req.method === 'GET' && !bid) return answer(ctx.bots.list());
     if (req.method !== 'POST') return answer([405, { ok: false, message: 'method not allowed' }]);
     if (bverb === 'start') return run(Promise.resolve(ctx.bots.start(bid)));
-    // a bot's brief is its standing orders, and every session here can read the token: making, changing or removing a
-    // bot is Henry's (the page's /bots, or his phone through the relay: viaOf); anyone may start one
+    // a bot's brief is its standing orders, and every session here can read the token: changing or removing a bot is
+    // Henry's (the page's /bots, or his phone through the relay: viaOf); anyone may start one. Making one (Henry,
+    // 2026-10-17) is his or a session's on this machine: a caller with no relay header at all (the server listens on
+    // 127.0.0.1 only, a request with an Origin was refused above, so no web page gets here, and remote.js keeps /api
+    // off the network). A "via": "phone" or a relay header that is not the relay's own is refused. A session's bot is
+    // marked as one (bots.js create: madeBy, a push to Henry after the fact)
     return body((b) => {
       if (!b) return Promise.resolve([400, { ok: false, message: 'bad json' }]);
-      if (via(b) !== 'henry') return Promise.resolve([403, { ok: false, message: 'only Henry makes, changes or removes a bot (the Bots tab, or his phone); POST /api/bots/:id/start starts one, and POST /api/bots/requests (fv bot request) asks him for a new one' }]);
+      const v = via(b);
+      if (!bid && v !== 'henry') {
+        if (req.headers['x-fleet-view-relay'] !== undefined || b.via !== undefined) return Promise.resolve([403, { ok: false, message: 'a session makes a bot with POST /api/bots and no "via" (fv bot new); only the phone relay sends "via": "phone"' }]);
+        return Promise.resolve(ctx.bots.create(b, { session: true }));
+      }
+      if (v !== 'henry') return Promise.resolve([403, { ok: false, message: 'only Henry changes or removes a bot (the Bots tab, or his phone); POST /api/bots/:id/start starts one, and POST /api/bots (fv bot new) makes a new one when Henry asks for it' }]);
       return Promise.resolve(bverb === 'remove' ? ctx.bots.remove(bid) : bid ? ctx.bots.update(bid, b) : ctx.bots.create(b));
     });
   }
