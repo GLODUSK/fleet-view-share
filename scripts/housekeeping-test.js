@@ -19,6 +19,9 @@ const { Readable } = require('stream');
 Object.assign(process.env, { GIT_AUTHOR_NAME: 'hk test', GIT_AUTHOR_EMAIL: 'hk@test', GIT_COMMITTER_NAME: 'hk test', GIT_COMMITTER_EMAIL: 'hk@test', GIT_CONFIG_NOSYSTEM: '1' });
 const { createHousekeeping } = require(path.join(__dirname, '..', 'housekeeping.js'));
 
+// Windows only: a held file or a process's working folder stops a delete there (git's "Invalid argument"); on macOS
+// and Linux nothing does, so wt-held, wt-stuck-cwd and wt-stuck-file are plain removals and nothing holds them
+const WIN = process.platform === 'win32';
 const DAY = 24 * 3600e3;
 const NOW = Date.now() + 30 * DAY; // the test's "now": everything git made today is a month old
 const iso = (ms) => new Date(ms).toISOString();
@@ -93,8 +96,10 @@ async function main() {
   W.closed = wt('wt-closed'); pr(12, 'wt-closed', W.closed.sha, 'CLOSED');
   W.pinned = wt('wt-pinned'); pr(13, 'wt-pinned', W.pinned.sha, 'MERGED');
   W.junction = wt('wt-junction'); pr(14, 'wt-junction', W.junction.sha, 'MERGED');
-  const mk = spawnSync('cmd', ['/c', 'mklink', '/J', path.join(W.junction.path, 'node_modules'), SHARED], { encoding: 'utf8', windowsHide: true });
-  ok(mk.status === 0, `mklink /J worked (${mk.stderr || mk.stdout})`);
+  if (WIN) {
+    const mk = spawnSync('cmd', ['/c', 'mklink', '/J', path.join(W.junction.path, 'node_modules'), SHARED], { encoding: 'utf8', windowsHide: true });
+    ok(mk.status === 0, `mklink /J worked (${mk.stderr || mk.stdout})`);
+  } else fs.symlinkSync(SHARED, path.join(W.junction.path, 'node_modules'), 'dir'); // a symlink is macOS's junction
   W.race = wt('wt-race'); pr(15, 'wt-race', W.race.sha, 'MERGED');
   W.gitused = wt('wt-gitused'); pr(16, 'wt-gitused', W.gitused.sha, 'MERGED');
   W.held = wt('wt-held'); pr(17, 'wt-held', W.held.sha, 'MERGED'); write(path.join(W.held.path, '.codegraph', 'codegraph.db'), 'index');
@@ -295,10 +300,10 @@ async function main() {
     return p;
   };
   const openFile = (f) => `$f=[System.IO.File]::Open('${f}','Open','ReadWrite','None')`;
-  holder = await holdWith('held', openFile(path.join(W.held.path, '.codegraph', 'codegraph.db')));
+  if (WIN) holder = await holdWith('held', openFile(path.join(W.held.path, '.codegraph', 'codegraph.db')));
   // these two are not let go by the wait: the removal stays partial
-  const stuckCwd = await holdWith('stuck-cwd', '$null=1', W.scwd.path);
-  const stuckFile = await holdWith('stuck-file', openFile(path.join(W.sfile.path, '.codegraph', 'codegraph.db')));
+  const stuckCwd = WIN ? await holdWith('stuck-cwd', '$null=1', W.scwd.path) : null;
+  const stuckFile = WIN ? await holdWith('stuck-file', openFile(path.join(W.sfile.path, '.codegraph', 'codegraph.db'))) : null;
   // right after the run's ls-remote: rb-lease gets a new commit, rb-tagged is deleted (its tag stays)
   write(RACE, `git --git-dir="$1" update-ref refs/heads/rb-lease ${R.lease2} && git --git-dir="$1" update-ref -d refs/heads/rb-tagged\n`);
 
@@ -309,20 +314,22 @@ async function main() {
   const res = new Map(results.map((x) => [x.id, x]));
   if (holder) { holder.kill(); holder = null; }
   ok(!fs.existsSync(RACE), 'the race ran right after the run\'s ls-remote');
-  ok(sleeps === 3, `the 30 s wait happened for wt-held, wt-stuck-cwd and wt-stuck-file (${sleeps})`);
+  if (WIN) ok(sleeps === 3, `the 30 s wait happened for wt-held, wt-stuck-cwd and wt-stuck-file (${sleeps})`);
+  else ok(sleeps === 0, `nothing held: no 30 s wait (${sleeps})`);
   // the nested worktree: the outer one is refused, the inner one and its work are untouched
   ok(res.get(ids['wt:wt-outer']).done === false && /another worktree is inside it/.test(res.get(ids['wt:wt-outer']).message), `outer: ${JSON.stringify(res.get(ids['wt:wt-outer']))}`);
   ok(fs.readFileSync(path.join(W.inner.path, 'wip.txt'), 'utf8') === 'work in progress\n' && /inner/.test(git(REPO, 'worktree', 'list')), 'inner: its folder, its work and its worktree are still there');
   // the clone inside: refused by the removal itself, nothing unlinked or deleted
   ok(res.get(ids['wt:wt-clone']).done === false && /a git checkout is inside it \(\.claude[\\/]sub\)/.test(res.get(ids['wt:wt-clone']).message), `clone: ${JSON.stringify(res.get(ids['wt:wt-clone']))}`);
   ok(fs.existsSync(path.join(W.clone.path, '.claude', 'sub', 'wip.txt')) && fs.existsSync(path.join(W.clone.path, 'wt-clone.txt')), 'clone: the worktree and the clone in it are untouched');
-  // the partial ones: not removed, off git's list, logged as partial
+  // the partial ones: not removed, off git's list, logged as partial (Windows; elsewhere they went whole)
   for (const k of ['scwd', 'sfile']) {
     const x = res.get(ids[`wt:${path.basename(W[k].path)}`]);
+    if (!WIN) { ok(x.done === true && !fs.existsSync(W[k].path), `${path.basename(W[k].path)} removed (nothing holds it here): ${JSON.stringify(x)}`); continue; }
     ok(x.done === false && x.partial === true && /could not be deleted/.test(x.message), `${path.basename(W[k].path)} partial: ${JSON.stringify(x)}`);
     ok(fs.existsSync(W[k].path) && !git(REPO, 'worktree', 'list', '--porcelain').includes(path.basename(W[k].path)), `${path.basename(W[k].path)}: folder left, git no longer lists it`);
   }
-  ok(fs.readdirSync(W.scwd.path).length === 0 && fs.existsSync(path.join(W.sfile.path, '.codegraph', 'codegraph.db')), 'stuck-cwd is empty, stuck-file still has the held file');
+  if (WIN) ok(fs.readdirSync(W.scwd.path).length === 0 && fs.existsSync(path.join(W.sfile.path, '.codegraph', 'codegraph.db')), 'stuck-cwd is empty, stuck-file still has the held file');
   // no repo-wide prune: the prunable worktree the report kept is still listed
   ok(/wt-gone[\s\S]*prunable/.test(git(REPO, 'worktree', 'list', '--porcelain')), 'wt-gone: still in git\'s list (nothing pruned it)');
   // the lease: the moved branch is refused, the deleted one is "already gone", and its tag survives
@@ -354,13 +361,14 @@ async function main() {
   // ---------- the log ----------
   const entries = hk.log();
   const done = results.filter((x) => x.done);
-  ok(entries.length === done.length + 2, `one log line per removal, partial ones too (${entries.length} vs ${done.length} + 2)`);
+  const partials = WIN ? 2 : 0;
+  ok(entries.length === done.length + partials, `one log line per removal, partial ones too (${entries.length} vs ${done.length} + ${partials})`);
   const entry = (kind, name) => entries.find((e) => e.kind === kind && e.name === name);
   const ej = entries.find((e) => e.kind === 'worktree' && e.path === W.junction.path);
   ok(ej && ej.name === 'wt-junction' && ej.sha === W.junction.sha && ej.pr === 14 && ej.repo === REPO && ej.at === NOW && /^[0-9a-f]{16}$/.test(ej.id), `worktree log entry ${JSON.stringify(ej)}`);
   ok(ej && Array.isArray(ej.links) && ej.links.length === 1 && ej.links[0].path === path.join(W.junction.path, 'node_modules') && path.resolve(ej.links[0].target) === SHARED && ej.links[0].isDir === true, `the junction is in the log entry: ${JSON.stringify(ej && ej.links)}`);
   ok(!('partial' in ej), 'a full removal is not marked partial');
-  for (const k of ['scwd', 'sfile']) { const e = entry('worktree', path.basename(W[k].path)); ok(e && e.partial === true && e.sha === W[k].sha, `${path.basename(W[k].path)}: logged as partial ${JSON.stringify(e)}`); }
+  if (WIN) for (const k of ['scwd', 'sfile']) { const e = entry('worktree', path.basename(W[k].path)); ok(e && e.partial === true && e.sha === W[k].sha, `${path.basename(W[k].path)}: logged as partial ${JSON.stringify(e)}`); }
   const es = entry('branch', 'br-squash');
   ok(es && es.sha === B.squash && es.pr === 20 && es.path === null, `branch log entry ${JSON.stringify(es)}`);
   const er = entry('remote', 'rb-merged');
@@ -368,7 +376,7 @@ async function main() {
   ok(fs.readFileSync(path.join(DATA, 'housekeeping', 'log.jsonl'), 'utf8').trim().split('\n').length === entries.length, 'log.jsonl has one JSON line each');
   const prefs = JSON.parse(fs.readFileSync(path.join(DATA, 'housekeeping', 'prefs.json'), 'utf8'));
   // failed: wt-clone, the two partial ones and rb-lease ("already gone" is not a failure)
-  ok(prefs.lastRun && prefs.lastRun.removed === done.length && prefs.lastRun.failed === 4 && prefs.pins.length === 3, `prefs: ${JSON.stringify(prefs)}`);
+  ok(prefs.lastRun && prefs.lastRun.removed === done.length && prefs.lastRun.failed === 2 + partials && prefs.pins.length === 3, `prefs: ${JSON.stringify(prefs)}`);
 
   // ---------- restore ----------
   // br-squash's commit was only on its branch and GitHub's refs/pull/20/head: after a gc it is gone here
@@ -393,7 +401,7 @@ async function main() {
   ok(fs.lstatSync(nm).isSymbolicLink() && fs.readFileSync(path.join(nm, 'keep.txt'), 'utf8') === 'shared install\n' && /put back 1 link to outside folders/.test(said[W.junction.path]), `junction put back: ${said[W.junction.path]}`);
   // what the partial removal left was moved aside, not deleted
   const aside = fs.readdirSync(WTS).find((n) => n.startsWith('wt-stuck-file.leftover-'));
-  ok(aside && fs.existsSync(path.join(WTS, aside, '.codegraph', 'codegraph.db')) && said[W.sfile.path].includes(path.join(WTS, aside)), `stuck-file leftovers moved aside: ${said[W.sfile.path]}`);
+  if (WIN) ok(aside && fs.existsSync(path.join(WTS, aside, '.codegraph', 'codegraph.db')) && said[W.sfile.path].includes(path.join(WTS, aside)), `stuck-file leftovers moved aside: ${said[W.sfile.path]}`);
   await stop(stuckCwd);
   ok(git(REPO, 'rev-parse', 'refs/heads/br-squash') === B.squash, 'br-squash restored (its commit fetched from refs/pull/20/head)');
   ok(git(REPO, 'rev-parse', 'refs/heads/br-inmain') === B.inmain && git(REPO, 'rev-parse', 'refs/heads/br-closed') === B.closed, 'br-inmain and br-closed restored');

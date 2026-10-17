@@ -43,8 +43,8 @@
 // never the link). relay.log holds no body, key, token, marker key or link. The Wi-Fi way (mode 'local') is gone: a
 // pairing asking for it gets 400 (LOCAL_GONE), a bad mode 400, and a phone paired that way before (devices.json's
 // mode 'local') is dropped at start with its key, the other devices kept.
-// Last, publish-share.js's guard passes relay.js, ws-frames.js, this test, the QR library and the
-// protocol docs (in a throwaway git repo).
+// (publish-share.js's guard over relay.js, this test, the QR library and the docs: scripts/publish-guard-test.js, private
+// repo only, so this test runs in the share repo's Mac and Windows jobs too.)
 // The home folder and the app data folders are fakes inside the temp folder (USERPROFILE, HOME, APPDATA,
 // LOCALAPPDATA, PROGRAMDATA, XDG_* for this process), so the fence's cases never touch the real ones.
 // --live (only on a PC where sync S1 is set up and signed in): a throwaway v2 pairing on the real Realtime, the test
@@ -1972,19 +1972,6 @@ async function main() {
   eq((await relayL.status()).devices.map((d) => d.id), [keptDev], 'status lists only the sync phone');
   ok(L.logs.some((t) => /Wi-Fi dropped/.test(t)), 'the drop is said in the log');
   await relayL.stop();
-
-  // ---------- publish-share.js's guard, in a throwaway repo ----------
-  const G = path.join(T, 'share-guard');
-  const copy = (rel) => { fs.mkdirSync(path.dirname(path.join(G, rel)), { recursive: true }); fs.copyFileSync(path.join(ROOT, rel), path.join(G, rel)); };
-  const mine = ['relay.js', 'ws-frames.js', 'scripts/relay-test.js', 'web/vendor/qrcode/qrcode.js', 'web/vendor/qrcode/LICENSE', 'docs/phone.md', 'docs/phone-vectors.json', 'scripts/phone-vectors.js'];
-  for (const f of ['scripts/publish-share.js', 'version.js', 'platform.js', ...mine]) copy(f);
-  const gEnv = { ...ENV0, GIT_AUTHOR_NAME: 'relay test', GIT_AUTHOR_EMAIL: 'relay@test', GIT_COMMITTER_NAME: 'relay test', GIT_COMMITTER_EMAIL: 'relay@test', GIT_CONFIG_NOSYSTEM: '1' };
-  const git = (...args) => { const x = cp.spawnSync('git', ['-C', G, ...args], { encoding: 'utf8', env: gEnv, windowsHide: true }); if (x.status !== 0) throw new Error(`git ${args.join(' ')}: ${x.stderr}`); return x.stdout.trim(); };
-  git('init', '-q', '-b', 'main');
-  git('add', '-A');
-  git('commit', '-q', '-m', 'relay');
-  const p = cp.spawnSync(process.execPath, [path.join(G, 'scripts', 'publish-share.js'), '--test', 'guard-check', '--ref', 'HEAD', '--dry-run'], { encoding: 'utf8', env: gEnv, windowsHide: true });
-  ok(p.status === 0 && mine.every((f) => p.stdout.split(/\r?\n/).includes(f)), `the share guard passes relay.js, this test, the QR library and the docs: ${p.status} ${p.stderr.slice(0, 400)}`);
 }
 
 // ---------- --live: a throwaway v2 pairing on the real Realtime ----------

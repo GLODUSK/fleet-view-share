@@ -11,7 +11,9 @@
 //              never a kill) and starts it again with fleet-view.vbs. Mac: install.sh --after-update does it
 //      host    desktop/host.js or handoff.js: desktop/restart-host.js, last (PC; on the Mac install.sh runs it)
 // 4. checks the share repo publish: PC, the post-merge hook's entry in share-publish.log (runs publish-share.js
-//    itself when the hook left none); Mac, runs publish-share.js
+//    itself when the hook left none; puts scripts/post-merge-hook.sh in .git/hooks when the hook is missing or
+//    differs); Mac, runs publish-share.js
+//    and says how the share repo's CI stands (its newest finished run on main: green, or red since when; share-health.js)
 // 5. releases the lane and prints one line: the version, what it restarted, whether a host restart follows
 // 6. host restart last (it ends the session that runs this; --no-host leaves it to you). On the Mac, install.sh
 //    --after-update --from <before> runs last, detached, logging to update-install.log.
@@ -119,7 +121,7 @@ function parsePublish(text, sha) {
   let l;
   if ((l = pick(/^published: /))) return { state: 'published', line: l, entry: found };
   if ((l = pick(/the share repo already has this version/))) return { state: 'already', line: l, entry: found };
-  if ((l = pick(/^refused:|^\S*Error\b|^fatal:/))) return { state: 'failed', line: l, entry: found };
+  if ((l = pick(/^refused:|^\S*Error\b|^fatal:|^could not publish/))) return { state: 'failed', line: l, entry: found };
   return { state: 'running', line: found[found.length - 1], entry: found };
 }
 
@@ -193,7 +195,7 @@ function makeIo() {
     who: process.env.CLAUDE_CODE_SESSION_ID || `ship.js-${process.pid}`,
     say: (s) => console.log(s),
     exec(cmd, args, o = {}) {
-      const r = spawnSync(cmd, args, { cwd: o.cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 64 << 20, stdio: o.inherit ? 'inherit' : 'pipe' });
+      const r = spawnSync(cmd, args, { cwd: o.cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 64 << 20, stdio: o.inherit ? 'inherit' : 'pipe', ...(o.timeout ? { timeout: o.timeout } : {}) });
       const out = `${r.stdout || ''}${r.stderr || ''}`.replace(/^\uFEFF/, '');
       return { code: r.status === null ? 1 : r.status, out: r.error ? `${out}${r.error.message}` : out };
     },
@@ -204,6 +206,7 @@ function makeIo() {
       } catch { return ''; }
     },
     readBytes(file) { try { return fs.readFileSync(file); } catch { return null; } },
+    writeFile(file, text) { fs.writeFileSync(file, text, { mode: 0o755 }); },
     touch(file) { const t = new Date(); fs.utimesSync(file, t, t); },
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: () => Date.now(),
@@ -294,6 +297,17 @@ async function restartWindow(io) {
   return true;
 }
 
+// the share repo's CI on main, as of its newest finished run (the one this publish starts takes about 5 minutes):
+// share-health.js's line, "share CI: RED on the last 3 runs ... <url>" or "share CI: green (...)"; null when gh can't say
+// (in 30 s: the merge is done by now, so a slow or missing gh never holds the ship up)
+function shareCi(io) {
+  try {
+    const H = require(path.join(__dirname, '..', 'share-health.js'));
+    const r = io.exec('gh', ['run', 'list', '-R', H.SHARE, '--workflow', H.WORKFLOW, '--branch', 'main', '--limit', '30', '--json', H.RUN_FIELDS], { timeout: 30000 });
+    return r.code === 0 ? H.ciLine(H.ciState(JSON.parse(r.out))) : null;
+  } catch { return null; }
+}
+
 function runPublish(io) {
   const r = io.exec(io.node, [J(io, 'scripts', 'publish-share.js')], { cwd: io.main });
   const p = publishOk(r.out);
@@ -301,8 +315,23 @@ function runPublish(io) {
   return p.line;
 }
 
+// PC: the main checkout's .git/hooks/post-merge is scripts/post-merge-hook.sh (LF line endings: the working copy may
+// have CRLF, which sh can't run); put there when it is missing or differs, for the next pull (this one's publish is
+// checked below either way). Returns what it did, or null
+function ensureHook(io) {
+  const want = io.readBytes(J(io, 'scripts', 'post-merge-hook.sh'));
+  if (!want) return null;
+  const text = want.toString('utf8').replace(/\r\n/g, '\n');
+  const file = J(io, '.git', 'hooks', 'post-merge');
+  const have = io.readBytes(file);
+  if (have && have.toString('utf8') === text) return null;
+  io.writeFile(file, text);
+  return `${have ? 'updated' : 'installed'} the post-merge hook (.git/hooks/post-merge) from scripts/post-merge-hook.sh`;
+}
+
 async function checkPublish(io, sha) {
   if (io.platform === 'darwin') return runPublish(io);
+  try { const h = ensureHook(io); if (h) io.say(`publish: ${h}`); } catch (e) { io.say(`publish: could not write the post-merge hook: ${e.message}`); }
   const log = path.join(io.dataDir, 'share-publish.log');
   const t0 = io.now();
   let last = { state: 'none' };
@@ -357,6 +386,8 @@ async function ship(o, io) {
   const install = mac && !(done.host.length && noHost);
   const version = io.exec(io.node, [J(io, 'version.js')], { cwd: io.main }).out.trim();
   io.say(`publish: ${published}`);
+  const ci = shareCi(io);
+  if (ci) io.say(ci);
   for (const n of done.notes) io.say(`note: ${n}`);
   io.say(summary({ version, short: newMain.slice(0, 7), restarted, published: true, hostNext, installNext: install }));
 
@@ -436,4 +467,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { mainDir, classify, parseStart, parseStuck, parsePublish, publishOk, findWindowPid, hostHash, buildPlan, laneNote, summary, parseArgs, ship, Stop, LIMITS };
+module.exports = { mainDir, classify, parseStart, parseStuck, parsePublish, publishOk, ensureHook, findWindowPid, hostHash, buildPlan, laneNote, summary, parseArgs, ship, Stop, LIMITS };

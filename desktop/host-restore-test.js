@@ -318,21 +318,25 @@ async function main() {
   await cl.req('quitAll', {}).catch(() => null);
   cl.close();
   await waitFor(() => !pidAlive(succ.pid), 15000);
-  const Q = [1, 2, 3, 4, 5, 6, 7].map((i) => conv(`q${i}`, { busy: true }));
+  const Q = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => conv(`q${i}`, { busy: true }));
   writeList(Q);
   startHost();
   if (!await waitFor(() => hostJson(), 15000)) { check('3. the host starts', false, hostLog()); return; }
   cl = await waitFor(() => connect().catch(() => null), 10000);
   await waitFor(() => starts(Q[0]).length, 10000, 50);
-  // q3 is still queued: open it now
-  const ro = await cl.req('open', { id: Q[2].id, cwd: Q[2].cwd, account: 'B' });
-  await waitFor(() => starts(Q[2]).length, 5000, 50);
-  const ql = (await cl.req('list')).find((x) => x.id === Q[2].id);
-  check('3. open of a queued one starts it at once with its restore state (interrupted)', ro && ro.ok && starts(Q[2]).length === 1 && ql && ql.interrupted && ql.restored
-    && hostLog().includes(`open: ${Q[2].id} was waiting for its turn in the restore; it starts now`), { ro, ql });
-  // its turn comes and goes (q4 starts after it): it is not started again
-  await waitFor(() => starts(Q[3]).length, 10000, 50);
-  check('3. when its turn comes the restore skips it (a log line), so it started once only', starts(Q[2]).length === 1 && hostLog().includes(`restore: ${Q[2].id} was opened or closed meanwhile`), starts(Q[2]));
+  // one still at least two turns away (the one before it not started yet): open it now. Mostly q3; on a slow runner
+  // (the macOS one) the connect can take long enough that the first few have started already
+  const k = Q.findIndex((c, i) => i >= 2 && i < Q.length - 3 && !starts(Q[i - 1]).length);
+  if (k < 0) { check('3. a queued one is left to open', false, Q.map((c) => starts(c).length)); return; }
+  const QK = Q[k], QN = Q[k + 1];
+  const ro = await cl.req('open', { id: QK.id, cwd: QK.cwd, account: 'B' });
+  await waitFor(() => starts(QK).length, 5000, 50);
+  const ql = (await cl.req('list')).find((x) => x.id === QK.id);
+  check(`3. open of a queued one (q${k + 1}) starts it at once with its restore state (interrupted)`, ro && ro.ok && starts(QK).length === 1 && ql && ql.interrupted && ql.restored
+    && hostLog().includes(`open: ${QK.id} was waiting for its turn in the restore; it starts now`), { ro, ql });
+  // its turn comes and goes (the next one starts after it): it is not started again
+  await waitFor(() => starts(QN).length, 10000, 50);
+  check('3. when its turn comes the restore skips it (a log line), so it started once only', starts(QK).length === 1 && hostLog().includes(`restore: ${QK.id} was opened or closed meanwhile`), starts(QK));
   const hp = hostJson().pid;
   const rq = await cl.req('quitAll', {}).catch((e) => ({ err: e.message }));
   cl.close();

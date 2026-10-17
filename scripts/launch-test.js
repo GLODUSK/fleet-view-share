@@ -11,7 +11,8 @@ const path = require('path');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fv-launch-test-'));
 process.env.LOCALAPPDATA = path.join(dir, 'local');
-process.env.FV_HOST_PIPE = process.platform === 'win32' ? `\\\\.\\pipe\\fleet-view-host-launch-${process.pid}` : path.join(dir, `fleet-view-host-launch-${process.pid}.sock`);
+if (process.platform !== 'win32') process.env.HOME = path.join(dir, 'home'); // macOS: the data folder is under it
+process.env.FV_HOST_PIPE = require('./test-support.js').testPipe(`launch-${process.pid}`);
 process.env.FV_HOST_DIR = path.join(dir, 'host');
 
 const ROOT = path.join(__dirname, '..');
@@ -114,14 +115,17 @@ const ONE_REPLY = [
   assert.equal(L.launchedKeys(['[Message from "Panchito IT" (db591225). Reply with: …]\nGo with these: 1. One ship command for Fleet View on the PC (recommended) · Opus, high 2. Fix the 3 Windows-only test failures (recommended) · Opus, medium.']).size, 0);
   ok('launchText: the page\'s message; launchedKeys reads it alone and under a from line, not a one-line typed list');
 
-  // the page's and the phone's words, the same as launch.js's
+  // the page's and the phone's words, the same as launch.js's (the share repo has no phone/: the page's only there)
   const web = fs.readFileSync(path.join(ROOT, 'web', 'chat.js'), 'utf8');
-  const phone = fs.readFileSync(path.join(ROOT, 'phone', 'src', 'lib', 'chat', 'compose.ts'), 'utf8');
+  const composeTs = path.join(ROOT, 'phone', 'src', 'lib', 'chat', 'compose.ts');
   assert.equal(/const LAUNCH_LINE = '([^']+)';/.exec(web)[1], L.LAUNCH_LINE);
   assert.equal(/const LAUNCH_HEAD = '([^']+)';/.exec(web)[1], L.LAUNCH_HEAD);
-  assert.equal(/LAUNCH_LINE =\s*'([^']+)';/.exec(phone)[1], L.LAUNCH_LINE);
-  assert.equal(/LAUNCH_HEAD = '([^']+)';/.exec(phone)[1], L.LAUNCH_HEAD);
-  ok('LAUNCH_HEAD and LAUNCH_LINE: web/chat.js, phone compose.ts and launch.js agree word for word');
+  if (fs.existsSync(path.join(ROOT, 'phone', 'package.json'))) {
+    const phone = fs.readFileSync(composeTs, 'utf8');
+    assert.equal(/LAUNCH_LINE =\s*'([^']+)';/.exec(phone)[1], L.LAUNCH_LINE);
+    assert.equal(/LAUNCH_HEAD = '([^']+)';/.exec(phone)[1], L.LAUNCH_HEAD);
+    ok('LAUNCH_HEAD and LAUNCH_LINE: web/chat.js, phone compose.ts and launch.js agree word for word');
+  } else ok('LAUNCH_HEAD and LAUNCH_LINE: web/chat.js and launch.js agree word for word (no phone/ in this checkout)');
 }
 
 // ---------- the picks ----------
@@ -245,12 +249,15 @@ const REC_REPLY = [
   assert.equal(L.latestChoice(items.slice(0, 1)).rec, false);
   ok('a recommendation as options: latestChoice falls back to it (rec), launched with REC_LINE, and its launch marks it done');
 
-  // the page reads it with the same file, and says REC_LINE word for word (the phone too)
+  // the page reads it with the same file, and says REC_LINE word for word (the phone too, where phone/ is: not in the
+  // share repo)
   const web = fs.readFileSync(path.join(ROOT, 'web', 'chat.js'), 'utf8');
-  const phone = fs.readFileSync(path.join(ROOT, 'phone', 'src', 'lib', 'chat', 'compose.ts'), 'utf8');
   assert.match(web, /import \{ recommendationsOf \} from '\.\/recommend\.js';/);
   assert.equal(/const REC_LINE = '((?:[^'\\]|\\.)+)';/.exec(web)[1].replace(/\\'/g, '\''), L.REC_LINE);
-  assert.equal(/REC_LINE =\s*'((?:[^'\\]|\\.)+)';/.exec(phone)[1].replace(/\\'/g, '\''), L.REC_LINE);
+  if (fs.existsSync(path.join(ROOT, 'phone', 'package.json'))) {
+    const phone = fs.readFileSync(path.join(ROOT, 'phone', 'src', 'lib', 'chat', 'compose.ts'), 'utf8');
+    assert.equal(/REC_LINE =\s*'((?:[^'\\]|\\.)+)';/.exec(phone)[1].replace(/\\'/g, '\''), L.REC_LINE);
+  }
   ok('REC_LINE: web/chat.js, phone compose.ts and launch.js agree word for word; the page imports recommend.js');
 }
 

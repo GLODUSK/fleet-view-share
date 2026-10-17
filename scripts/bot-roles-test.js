@@ -13,7 +13,10 @@ const http = require('http');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
-const PORT = 4793, ORIGIN = `http://127.0.0.1:${PORT}`;
+const TS = require('./test-support.js');
+
+let PORT = 0, ORIGIN = ''; // a free port, picked at the start
+
 let pass = 0, fail = 0;
 const ok = (c, n) => { if (c) pass++; else { fail++; console.log(`FAIL ${n}`); } };
 const eq = (a, b, n) => ok(JSON.stringify(a) === JSON.stringify(b), `${n}: got ${JSON.stringify(a)}, want ${JSON.stringify(b)}`);
@@ -35,6 +38,7 @@ function req(method, p, body, headers = {}) {
 const post = (p, b) => req('POST', p, b, { Origin: ORIGIN });
 
 (async () => {
+  PORT = await TS.freePort(); ORIGIN = `http://127.0.0.1:${PORT}`;
   const data = fs.mkdtempSync(path.join(process.env.FV_TEST_TMP || os.tmpdir(), 'fv-bot-roles-'));
   const [BOTCONV, L, P1, P2] = Array.from({ length: 4 }, () => crypto.randomUUID());
   const folder = path.join(data, 'Bots', 'deploy-watch');
@@ -49,7 +53,7 @@ const post = (p, b) => req('POST', p, b, { Origin: ORIGIN });
     for (let i = 0; i < 120 && !up; i++) { try { up = (await req('GET', '/state')).code === 200; } catch {} if (!up) await new Promise((r) => setTimeout(r, 500)); }
     ok(up, 'the demo server answers /state');
     if (!up) return;
-    const token = fs.readFileSync(path.join(data, 'fleet-view', 'api-token'), 'utf8').trim();
+    const token = fs.readFileSync(path.join(TS.dataDirIn(data), 'api-token'), 'utf8').trim();
     const auth = { Authorization: `Bearer ${token}` };
     const tag = `(role: QA) (id ${BOTCONV},`;
 

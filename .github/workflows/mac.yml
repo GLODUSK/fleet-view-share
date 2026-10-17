@@ -55,6 +55,7 @@ jobs:
           mkdir -p "$HOME/.claude"
 
       - name: install.sh (from this checkout)
+        id: install
         run: bash install.sh --no-launch --no-pull 2>&1 | tee "$LOGS/install.txt"
 
       - name: What install.sh made
@@ -93,7 +94,11 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$O/Contents/Info.plist")" = com.example.other
           bash scripts/mac-app.sh --check
 
+      # From here on each step runs whatever the one before it did (a red test step no longer hides the window, the app
+      # and curl | bash), as long as what it needs went: install.sh for the app, the demo server for the window
       - name: Server (demo, and real mode on an empty ~/.claude)
+        id: server
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           node fleet-view.js --web --no-open --demo --port 4790 > "$LOGS/demo.txt" 2>&1 &
           echo $! > "$RUNNER_TEMP/demo.pid"
@@ -115,6 +120,7 @@ jobs:
           cp "$EMPTY/Library/Application Support/fleet-view/server.log" "$LOGS/real-server.log" 2>/dev/null || true
 
       - name: Every test (scripts/test-gate.js --all; the session host's on a unix socket and a pty)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           # some tests commit in throwaway repos
           git config --global user.name 'Fleet View CI'
@@ -122,6 +128,7 @@ jobs:
           node scripts/test-gate.js --all --logs "$LOGS/tests"
 
       - name: Window, hidden (the bundle's Electron, page DOM over CDP)
+        if: ${{ !cancelled() && steps.server.outcome == 'success' }}
         env:
           FV_TEST_HIDDEN: '1'
           FV_HOST_PIPE: ${{ runner.temp }}/fleet-view-host-win.sock
@@ -166,6 +173,7 @@ jobs:
           node desktop/quit-all.js || true
 
       - name: Window self-test (live sessions through the page, hidden)
+        if: ${{ !cancelled() && steps.server.outcome == 'success' }}
         env:
           FV_TEST_HIDDEN: '1'
           FV_TERM_SELFTEST: '1'
@@ -182,6 +190,7 @@ jobs:
           node -e 'const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const r = j.results || []; const bad = r.filter((x) => !x.pass); console.log(`${r.length - bad.length}/${r.length} passed`); if (j.error || !r.length || bad.length) { console.log(JSON.stringify(bad.length ? bad : j, null, 2)); process.exit(1); }' "$FV_TERM_SELFTEST_OUT"
 
       - name: open -a Fleet View.app
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           kill "$(cat "$RUNNER_TEMP/demo.pid")" || true
           open -a "$APP"
@@ -212,6 +221,7 @@ jobs:
           echo 'quit-all.js ended the session host; nothing of Fleet View.app runs'
 
       - name: curl | bash (the README's line, into an empty home)
+        if: ${{ !cancelled() }}
         env:
           REF: ${{ github.ref_name }}
         run: |
@@ -295,7 +305,10 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    # both platforms green: a red on the Mac or on Windows holds back the release friends update from
+    # both platforms green: a red on the Mac or on Windows holds back the GitHub release (its notes page with the install
+    # line). Friends' updates do not wait on it: updater.js pulls the share repo's main, and a red run is shown on
+    # Henry's machines instead (share-health.js: the header's red "Share CI" pill, a desktop notification, ship.js's
+    # summary line)
     needs: [smoke, windows]
     if: github.repository == 'GLODUSK/fleet-view-share' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest

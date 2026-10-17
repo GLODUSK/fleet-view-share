@@ -178,7 +178,8 @@ function findLog(prefix) {
 }
 
 // ---------- a --demo server ----------
-const PORT = 4798;
+const TS = require('./test-support.js');
+let PORT = 0; // a free port, picked when the server starts
 function req(p, headers = {}) {
   return new Promise((resolve, reject) => {
     const r = http.request({ host: '127.0.0.1', port: PORT, method: 'GET', path: p, headers }, (res) => {
@@ -192,6 +193,7 @@ function req(p, headers = {}) {
   });
 }
 async function demo() {
+  PORT = await TS.freePort();
   const data = fs.mkdtempSync(path.join(process.env.FV_TEST_TMP || os.tmpdir(), 'fv-forks-'));
   const env = { ...process.env, LOCALAPPDATA: data, HOME: data, USERPROFILE: data, XDG_STATE_HOME: data };
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'fleet-view.js'), '--demo', '--port', String(PORT), '--no-open'], { env, stdio: 'ignore', windowsHide: true });
@@ -214,7 +216,7 @@ async function demo() {
     assert.strictEqual(f2[0].forkOf.named, true);
     ok('/state: a fork under its copied name shows as "fork of <source>" with forkOf; one with its own name keeps it, forkOf named');
 
-    const token = fs.readFileSync(path.join(data, 'fleet-view', 'api-token'), 'utf8').trim();
+    const token = fs.readFileSync(path.join(TS.dataDirIn(data), 'api-token'), 'utf8').trim();
     const r = await req('/api/conversations?all=1', { Authorization: `Bearer ${token}` });
     assert.strictEqual(r.code, 200);
     const c1 = r.j.conversations.find((x) => x.id === f1[0].id);

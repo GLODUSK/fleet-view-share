@@ -113,7 +113,8 @@ async function resolve() {
 }
 
 // ---------- a --demo server routes ?prefix= ----------
-const PORT = 4794;
+const TS = require('./test-support.js');
+let PORT = 0; // a free port, picked when the server starts
 function req(p, headers = {}) {
   return new Promise((resolve, reject) => {
     const r = http.request({ host: '127.0.0.1', port: PORT, method: 'GET', path: p, headers }, (res) => {
@@ -127,6 +128,7 @@ function req(p, headers = {}) {
   });
 }
 async function demo() {
+  PORT = await TS.freePort();
   const data = fs.mkdtempSync(path.join(process.env.FV_TEST_TMP || os.tmpdir(), 'fv-ids-'));
   const env = { ...process.env, LOCALAPPDATA: data, HOME: data, USERPROFILE: data, XDG_STATE_HOME: data };
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'fleet-view.js'), '--demo', '--port', String(PORT), '--no-open'], { env, stdio: 'ignore', windowsHide: true });
@@ -134,7 +136,7 @@ async function demo() {
     let up = false;
     for (let i = 0; i < 120 && !up; i++) { try { up = (await req('/state')).code === 200; } catch {} if (!up) await new Promise((r) => setTimeout(r, 500)); }
     assert.ok(up, 'the demo server answers /state');
-    const token = fs.readFileSync(path.join(data, 'fleet-view', 'api-token'), 'utf8').trim();
+    const token = fs.readFileSync(path.join(TS.dataDirIn(data), 'api-token'), 'utf8').trim();
     const auth = { Authorization: `Bearer ${token}` };
     let r = await req('/api/conversations?prefix=deadbeef', auth);
     assert.deepStrictEqual([r.code, r.j], [200, { ok: true, prefix: 'deadbeef', ids: [] }]);

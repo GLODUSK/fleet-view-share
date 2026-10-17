@@ -18,8 +18,8 @@
 // remote, not cross-site); /sync/passphrase is gone. The key with no passphrase: signed out, sync-run.js waits; the
 // first machine's sign-in makes the key in Blackbox's settings, a second machine's sign-in fetches the same one and
 // starts at once (no minute wait); the key never reaches a log.
-// Last, publish-share.js's guard, in a throwaway git repo: a planted Supabase key, project URL or sync config stops
-// its dry run, and sync-api.js, this test and docs/sync.md pass it.
+// (publish-share.js's guard over sync-api.js, this test and docs/sync.md, and the planted secrets it must stop:
+// scripts/publish-guard-test.js, private repo only, so this test runs in the share repo's Mac and Windows jobs too.)
 // Everything happens in a temp folder (SYNC_TEST_DIR, or the system temp folder), deleted at the end
 // (SYNC_TEST_KEEP=1 keeps it). Exit 0 = all pass.
 'use strict';
@@ -781,37 +781,6 @@ async function main() {
     ok((await keys.read()) === null && (await signIn.read()) === 'the sign-in', 'DPAPI: clearing it leaves the sign-in');
     await signIn.clear();
   } else console.log('skip: the DPAPI store (Windows only)');
-
-  // ---------- publish-share.js's guard, in a throwaway repo ----------
-  const G = path.join(T, 'share-guard');
-  const copy = (rel) => { fs.mkdirSync(path.dirname(path.join(G, rel)), { recursive: true }); fs.copyFileSync(path.join(ROOT, rel), path.join(G, rel)); };
-  for (const f of ['scripts/publish-share.js', 'version.js', 'platform.js', 'sync-api.js', 'scripts/sync-api-test.js', 'docs/sync.md']) copy(f);
-  const gEnv = { ...process.env, GIT_AUTHOR_NAME: 'sync test', GIT_AUTHOR_EMAIL: 'sync@test', GIT_COMMITTER_NAME: 'sync test', GIT_COMMITTER_EMAIL: 'sync@test', GIT_CONFIG_NOSYSTEM: '1' };
-  const git = (...args) => { const x = cp.spawnSync('git', ['-C', G, ...args], { encoding: 'utf8', env: gEnv, windowsHide: true }); if (x.status !== 0) throw new Error(`git ${args.join(' ')}: ${x.stderr}`); return x.stdout.trim(); };
-  git('init', '-q', '-b', 'main');
-  const commitAll = (msg) => { git('add', '-A'); git('commit', '-q', '--allow-empty', '-m', msg); };
-  const dry = () => cp.spawnSync(process.execPath, [path.join(G, 'scripts', 'publish-share.js'), '--test', 'guard-check', '--ref', 'HEAD', '--dry-run'], { encoding: 'utf8', env: gEnv, windowsHide: true });
-  commitAll('clean');
-  p = dry();
-  ok(p.status === 0, `the guard passes sync-api.js, its test and docs/sync.md: ${p.stderr}`);
-  ok(['sync-api.js', 'scripts/sync-api-test.js', 'docs/sync.md'].every((f) => p.stdout.split(/\r?\n/).includes(f)), 'the dry run lists them as published');
-  const planted = [
-    ['planted-key.js', `const key = '${KEY}';\n`, 'a Supabase API key'],
-    ['planted-url.md', `See ${'https://' + 'abcdefghij0123456789' + '.supabase.co'} for it.\n`, 'a Supabase project URL'],
-    ['planted-jwt.js', `const t = '${jwt({ role: 'anon', ref: 'abcdefghij0123456789' })}';\n`, 'a JWT'],
-    ['sync/config.json', `${JSON.stringify({ url: 'https://<project>.supabase.co' })}\n`, 'a secrets file'],
-  ];
-  for (const [file, text, what] of planted) {
-    fs.mkdirSync(path.dirname(path.join(G, file)), { recursive: true });
-    fs.writeFileSync(path.join(G, file), text);
-    commitAll(`plant ${file}`);
-    p = dry();
-    ok(p.status === 2 && p.stderr.includes(file) && p.stderr.includes(what) && /Nothing was published/.test(p.stderr), `the guard refuses ${file} (${what}): exit ${p.status} ${p.stderr.slice(0, 300)}`);
-    fs.rmSync(path.join(G, file));
-    commitAll(`unplant ${file}`);
-  }
-  p = dry();
-  ok(p.status === 0, 'clean again: the guard passes');
 }
 
 // A store that stands for the one on disk across restarts (each createSync() over it is a new start). failWrites:

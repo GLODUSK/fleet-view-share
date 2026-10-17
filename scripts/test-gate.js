@@ -21,15 +21,24 @@
 //   - every changed .js/.mjs: `node --check` (web/*.js as an .mjs copy: the page's modules are ES modules)
 //   - anything fleet-view.js loads: a boot of `fleet-view.js --demo --snapshot` (every module loads, one frame, exit 0)
 //   - phone/: `tsc --noEmit` in phone/ and `vitest related --run` on the changed files (all of phone's tests for its
-//     package files); web/ modules and fixtures the phone app imports go to `vitest related` too
+//     package files); web/ modules and fixtures the phone app imports go to `vitest related` too. Without
+//     phone/node_modules that is a FAIL when a phone/ file changed, else a SKIP whose note gives the link to the main
+//     checkout's packages (a worktree made for a web/ change seldom has them)
+//   - web/*.js, *.html, *.css: scripts/page-load-test.js (the pages served, their scripts and stylesheets there, every
+//     module linked with its imports, the stylesheets' braces)
 //   - relay.js, scripts/phone-vectors.js, docs/phone-vectors.json: `node scripts/phone-vectors.js --check`
-//   - .sh files and fv: `bash -n`; .ps1/.psm1: PowerShell's parser (Windows only)
+//   - .sh files and fv: `bash -n`; .ps1/.psm1: PowerShell's parser (Windows only); .yml/.yaml (with --all, the
+//     workflows): parsed with phone/'s yaml package (here or in the main checkout; a note where there is none), and a
+//     workflow must have `on` and `jobs`
+// A changed file nothing covers is no failure: the last line names it.
 // Never run here: scripts/sync-contract.js (the real `claude` on real projects folders) and scripts/codegraph-contract.js
 // (the real CodeGraph and its settings). A change to what they check gets a note to run them by hand.
 //
 // Safety: nothing here talks to the live server or session host. Every test runs with FV_HOST_PIPE at a pipe of its own
 // (a test pipe no host listens on, unless the test starts one), FV_HOST_DIR, FV_MERGE_LANE_DIR and, on Windows,
-// LOCALAPPDATA in a temp folder, so a test that forgets to set them still never reaches the real ones. The tests that
+// LOCALAPPDATA in a temp folder, so a test that forgets to set them still never reaches the real ones (and TEMP/TMP at
+// the temp folder's long name, see TMPDIR). Tests that start a demo server take a free port (scripts/test-support.js),
+// so two gates at once never share one. The tests that
 // start a session host with a fake claude (HOST_LANE) run one at a time: their checks time a host's restore steps
 // to the second, and two hosts plus their fakes at once on a busy machine made them miss.
 'use strict';
@@ -72,8 +81,7 @@ const HOST_LANE = new Set(['desktop/host-test.js', 'desktop/host-restore-test.js
 // tests that need a file the share repo leaves out (publish-share.js LEAVE_OUT): skipped where it is missing
 const NEEDS = {
   'scripts/sync-setup-test.js': ['private.json'],
-  'scripts/relay-test.js': ['scripts/publish-share.js'],
-  'scripts/sync-api-test.js': ['scripts/publish-share.js'],
+  'scripts/publish-guard-test.js': ['scripts/publish-share.js'],
 };
 // pairs the name rule and the source scan miss: [changed file (a RegExp on its path), tests that cover it]
 const COVERS = [
@@ -82,6 +90,8 @@ const COVERS = [
   [/^bot\//, ['scripts/bot-tasks-test.mjs', 'scripts/bots-test.mjs']],
   [/^mod\/fleet-view-feed\//, ['scripts/feed-mod-update-test.js']],
   [/^web\/[^/]+\.js$/, ['scripts/html-escape-test.js']], // it reads every web/*.js, naming none
+  // the page served and its modules linked (a missing file, script tag or export blanks it), the stylesheets' braces
+  [/^web\/[^/]+\.(?:m?js|html|css)$/, ['scripts/page-load-test.js']],
   [/^web\/vendor\//, ['scripts/vendor-versions-test.js']], // the bundled libraries against web/vendor/VERSIONS.json
 ];
 
@@ -168,9 +178,13 @@ const phoneBin = (pkg, bin) => path.join(ROOT, 'phone', 'node_modules', pkg, bin
 const phoneFiles = new Set();
 let phoneAll = false;
 
+// the temp folder by its long name on Windows: GitHub's runners set TEMP to C:\Users\RUNNER~1\..., an 8.3 short name,
+// while git, realpath and the code under test give C:\Users\runneradmin\..., and the tests compare such paths. Every
+// check gets TEMP and TMP at the long form (envFor).
+const TMPDIR = (() => { if (!P.isWin) return os.tmpdir(); try { return fs.realpathSync.native(os.tmpdir()); } catch { return os.tmpdir(); } })();
 // a parse check of one file: node --check, a web/ module through an .mjs copy (an ES module in a .js file)
 let tmpRoot = null;
-const tmp = () => tmpRoot || (tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fv-test-gate-')));
+const tmp = () => tmpRoot || (tmpRoot = fs.mkdtempSync(path.join(TMPDIR, 'fv-test-gate-')));
 function wantParse(f) {
   if (!/^web\//.test(f)) return want(`parse:${f}`, () => ({ name: `node --check ${f}`, ...node('--check', f) }));
   want(`parse:${f}`, () => {
@@ -186,6 +200,24 @@ function bashPath() {
     return [path.join(top, 'bin', 'bash.exe'), path.join(top, 'usr', 'bin', 'bash.exe')].find((b) => fs.existsSync(b)) || null;
   } catch { return null; }
 }
+
+// the main checkout when this one is a worktree of it, else null
+function mainCheckout() {
+  try { const m = path.resolve(ROOT, git('rev-parse', '--git-common-dir').trim(), '..'); return P.foldCase(m) !== P.foldCase(ROOT) ? m : null; } catch { return null; }
+}
+// a YAML parser (the yaml package) from phone/'s packages, here or in the main checkout; null when there is none (the
+// share repo has no phone/)
+function yamlParser() {
+  const main = mainCheckout();
+  return [ROOT, main].filter(Boolean).map((d) => path.join(d, 'phone', 'node_modules', 'yaml')).find((d) => fs.existsSync(path.join(d, 'package.json'))) || null;
+}
+// parses a YAML file (argv: the parser, the file); a workflow must have `on` and `jobs`
+const YAML_CHECK = `const Y = require(process.argv[1]), f = process.argv[2];
+const docs = Y.parseAllDocuments(require('fs').readFileSync(f, 'utf8'));
+const errs = docs.flatMap((d) => d.errors.map((e) => e.message));
+if (!errs.length && /[\\\\/]\\.github[\\\\/]workflows[\\\\/]/.test(f)) { const j = docs[0] && docs[0].toJS(); for (const k of ['on', 'jobs']) if (!j || !(k in j)) errs.push('a workflow without ' + k); }
+for (const e of errs) console.log(e);
+process.exit(errs.length ? 1 : 0);`;
 
 // what covers one changed file; returns true when anything does
 function mapFile(f) {
@@ -205,6 +237,13 @@ function mapFile(f) {
     const bash = bashPath();
     if (bash) want(`bash:${f}`, () => ({ name: `bash -n ${f}`, args: [bash, '-n', f] }));
     else notes.add(`${f}: no Git Bash found, its syntax was not checked`);
+    any = true;
+  }
+  // YAML (the share repo's workflow: one error there turns its CI off with no signal)
+  if (/\.ya?ml$/.test(f) && !deleted) {
+    const parser = yamlParser();
+    if (parser) want(`yaml:${f}`, () => ({ name: `YAML parse ${f}`, args: [process.execPath, '-e', YAML_CHECK, parser, path.join(ROOT, f)] }));
+    else notes.add(`${f}: no YAML parser here (phone/node_modules/yaml), its syntax was not checked`);
     any = true;
   }
   if (/\.ps(?:m?1)$/.test(f) && !deleted) {
@@ -244,14 +283,23 @@ function wantPhone() {
   if (!phoneAll && !phoneFiles.size) return;
   if (!PHONE) { notes.add('phone/ is not in this checkout: its typecheck and tests were not run'); return; }
   const tsc = phoneBin('typescript', path.join('bin', 'tsc')), vitest = phoneBin('vitest', 'vitest.mjs');
-  const missing = !fs.existsSync(tsc) || !fs.existsSync(vitest) ? 'phone/node_modules is missing or incomplete (no typescript or vitest in it: npm ci in phone/)' : null;
+  let missing = !fs.existsSync(tsc) || !fs.existsSync(vitest) ? 'phone/node_modules is missing or incomplete (no typescript or vitest in it: npm ci in phone/)' : null;
   const cwd = path.join(ROOT, 'phone');
   const onlyPhoneSrc = [...phoneFiles].every((f) => /^phone\//.test(f));
+  // a worktree made for a web/ change seldom has phone/'s packages: with no phone/ file changed that is a skip with a
+  // note (how to link the main checkout's), not a red; a phone/ change still needs them
+  let skip = null;
+  if (missing && !phoneAll && ![...phoneFiles].some((f) => /^phone\//.test(f))) {
+    const main = mainCheckout();
+    const shared = main && fs.existsSync(path.join(main, 'phone', 'node_modules', 'vitest')) ? path.join(main, 'phone', 'node_modules') : null;
+    skip = `phone/node_modules is missing: the phone app's tests of these web/ files were not run${shared ? ` (to run them, link the main checkout's: ${P.isWin ? `mklink /J "${path.join(cwd, 'node_modules')}" "${shared}"` : `ln -s "${shared}" "${path.join(cwd, 'node_modules')}"`})` : ' (npm ci in phone/ to run them)'}`;
+    missing = null;
+  }
   if (phoneAll || [...phoneFiles].some((f) => /^phone\//.test(f))) want('phone:tsc', () => ({ name: 'phone: tsc --noEmit', args: [process.execPath, tsc, '--noEmit'], cwd, missing }));
   const rel = [...phoneFiles].map((f) => path.join(ROOT, f));
   if (phoneAll) want('phone:vitest', () => ({ name: 'phone: vitest run', args: [process.execPath, vitest, 'run'], cwd, missing }));
   else want('phone:vitest', () => ({ name: `phone: vitest related (${phoneFiles.size} file${phoneFiles.size === 1 ? '' : 's'})`,
-    args: [process.execPath, vitest, 'related', '--run', ...(onlyPhoneSrc ? [] : ['--passWithNoTests']), ...rel], cwd, missing, passWithNone: true }));
+    args: [process.execPath, vitest, 'related', '--run', ...(onlyPhoneSrc ? [] : ['--passWithNoTests']), ...rel], cwd, missing, skip, passWithNone: true }));
 }
 
 // ---------- what changed ----------
@@ -271,7 +319,7 @@ if (ALL) {
   for (const t of tests) wantTest(t, 'all');
   if (exists('scripts/phone-vectors.js')) want('vectors', () => ({ name: 'node scripts/phone-vectors.js --check', ...node('scripts/phone-vectors.js', '--check') }), 'all');
   mapFile('fleet-view.js');
-  for (const f of tracked) if (/(?:\.sh|^fv|\.psm?1)$/.test(f)) mapFile(f);
+  for (const f of tracked) if (/(?:\.sh|^fv|\.psm?1)$/.test(f) || /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f)) mapFile(f);
   phoneAll = PHONE;
   if (!PHONE) notes.add('phone/ is not in this checkout: its typecheck and tests were not run');
 } else {
@@ -290,7 +338,7 @@ function envFor(c) {
   const tag = `fleet-view-host-gate${process.pid}-${n}`;
   const env = { ...process.env, FV_HOST_PIPE: P.isWin ? `\\\\.\\pipe\\${tag}` : path.join(os.tmpdir(), `${tag}.sock`), FV_HOST_DIR: path.join(dir, 'host'),
     FV_MERGE_LANE_DIR: path.join(dir, 'merge-lane') };
-  if (P.isWin) env.LOCALAPPDATA = path.join(dir, 'local');
+  if (P.isWin) { env.LOCALAPPDATA = path.join(dir, 'local'); env.TEMP = env.TMP = TMPDIR; }
   else if (!P.isMac) env.XDG_STATE_HOME = path.join(dir, 'state');
   delete env.CLAUDE_CODE_SESSION_ID;
   return { ...env, ...(c.env || {}) };
@@ -307,6 +355,7 @@ function runOne(c) {
   return new Promise((resolve) => {
     const gone = (c.needs || []).filter((f) => !exists(f));
     if (gone.length) return resolve({ c, status: 'SKIP', detail: `needs ${gone.join(', ')}, not in this checkout` });
+    if (c.skip) return resolve({ c, status: 'SKIP', detail: c.skip });
     if (c.missing) return resolve({ c, status: 'FAIL', detail: c.missing, out: '' });
     try { if (c.before) c.before(); } catch (e) { return resolve({ c, status: 'FAIL', detail: e.message, out: '' }); }
     const t0 = Date.now();
@@ -367,17 +416,19 @@ async function runAll() {
   }
   for (const n of notes) console.log(`  note: ${n}`);
   if (has('--list')) {
-    for (const c of list) console.log(`  ${c.name}${c.lane === 'host' ? ' [one at a time]' : ''}${c.why.length ? `  <- ${c.why.slice(0, 4).join('; ')}${c.why.length > 4 ? ` (+${c.why.length - 4})` : ''}` : ''}`);
+    for (const c of list) console.log(`  ${c.name}${c.lane === 'host' ? ' [one at a time]' : ''}${c.skip ? ` [skipped: ${c.skip}]` : ''}${c.why.length ? `  <- ${c.why.slice(0, 4).join('; ')}${c.why.length > 4 ? ` (+${c.why.length - 4})` : ''}` : ''}`);
     console.log(`test-gate: ${list.length} check${list.length === 1 ? '' : 's'} would run`);
     return;
   }
-  if (!list.length) { console.log('test-gate: nothing to run'); return; }
+  // what nothing covers is no failure, but it is said on the last line too
+  const unchecked = uncovered.length ? ` (no test covers ${uncovered.length} changed file${uncovered.length === 1 ? '' : 's'}: ${uncovered.slice(0, 6).join(', ')}${uncovered.length > 6 ? ', …' : ''})` : '';
+  if (!list.length) { console.log(`test-gate: nothing to run${unchecked}`); return; }
   console.log(`test-gate: ${list.length} check${list.length === 1 ? '' : 's'}, ${JOBS} at a time`);
   const results = await runAll();
   const bad = results.filter((r) => r.status === 'FAIL' || r.status === 'TIME');
   for (const r of bad) console.log(`\n--- ${r.c.name}: ${r.detail}\n${tail(r.out || '', 30) || '      (no output)'}`);
   const count = (s) => results.filter((r) => r.status === s).length;
-  console.log(`\ntest-gate: ${count('PASS')} passed, ${count('FAIL')} failed, ${count('TIME')} timed out, ${count('SKIP')} skipped in ${secs(Date.now() - t0)}${bad.length ? ': RED, do not merge' : ''}`);
+  console.log(`\ntest-gate: ${count('PASS')} passed, ${count('FAIL')} failed, ${count('TIME')} timed out, ${count('SKIP')} skipped in ${secs(Date.now() - t0)}${bad.length ? ': RED, do not merge' : ''}${unchecked}`);
   if (tmpRoot) { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {} }
   process.exitCode = bad.length ? 1 : 0;
 })().catch((e) => { console.error(`test-gate: ${e.stack || e}`); process.exit(1); });

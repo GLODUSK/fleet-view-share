@@ -13,7 +13,10 @@ const http = require('http');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
-const PORT = 4797, ORIGIN = `http://127.0.0.1:${PORT}`;
+const TS = require('./test-support.js');
+
+let PORT = 0, ORIGIN = ''; // a free port, picked at the start
+
 let pass = 0, fail = 0;
 const ok = (c, n) => { if (c) pass++; else { fail++; console.log(`FAIL ${n}`); } };
 const eq = (a, b, n) => ok(JSON.stringify(a) === JSON.stringify(b), `${n}: got ${JSON.stringify(a)}, want ${JSON.stringify(b)}`);
@@ -40,6 +43,7 @@ const byId = (ts, id) => ts.find((t) => t.id === id) || null;
 const uuid = () => crypto.randomUUID();
 
 (async () => {
+  PORT = await TS.freePort(); ORIGIN = `http://127.0.0.1:${PORT}`;
   const data = fs.mkdtempSync(path.join(process.env.FV_TEST_TMP || os.tmpdir(), 'fv-teams-nest-'));
   const env = { ...process.env, LOCALAPPDATA: data, HOME: data, XDG_STATE_HOME: data };
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'fleet-view.js'), '--demo', '--port', String(PORT), '--no-open'], { env, stdio: 'ignore', windowsHide: true });
@@ -48,7 +52,7 @@ const uuid = () => crypto.randomUUID();
     for (let i = 0; i < 120 && !up; i++) { try { up = (await req('GET', '/state')).code === 200; } catch {} if (!up) await new Promise((r) => setTimeout(r, 500)); }
     ok(up, 'the demo server answers /state');
     if (!up) return;
-    const token = fs.readFileSync(path.join(data, 'fleet-view', 'api-token'), 'utf8').trim();
+    const token = fs.readFileSync(path.join(TS.dataDirIn(data), 'api-token'), 'utf8').trim();
     auth = { Authorization: `Bearer ${token}` };
     const [T, A, B, a1, a2, b1] = Array.from({ length: 6 }, uuid);
 

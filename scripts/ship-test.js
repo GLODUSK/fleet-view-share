@@ -124,6 +124,18 @@ check('hostHash: SHA-1, 12 hex', S.hostHash(Buffer.from('abc')) === crypto.creat
   const mac = S.buildPlan({ pr: 9, cls: S.classify(['desktop/main.js', 'desktop/icon.js'], 'darwin'), platform: 'darwin', main: '/m', noHost: false, merged: false }).join('\n');
   check('plan Mac: install.sh last with what it restarts', /install\.sh --after-update/.test(mac) && /window, app rebuild/.test(mac) && /publish-share\.js/.test(mac), mac);
   check('laneNote', S.laneNote(9, cls, 'win32') === 'PR #9, ship.js: restarts server, window, host');
+  {
+    // the post-merge hook: the tracked copy, LF only, written when missing or different, left when the same
+    const files = { [path.join('M', 'scripts', 'post-merge-hook.sh')]: Buffer.from('#!/bin/sh\r\nexit 0\r\n') };
+    const io = { main: 'M', readBytes: (f) => files[f] || null, writeFile: (f, t) => { files[f] = Buffer.from(t); } };
+    const hook = path.join('M', '.git', 'hooks', 'post-merge');
+    check('hook: installed when missing, LF', /^installed/.test(S.ensureHook(io) || '') && files[hook].toString() === '#!/bin/sh\nexit 0\n');
+    check('hook: the same one is left', S.ensureHook(io) === null);
+    files[hook] = Buffer.from('#!/bin/sh\nold\n');
+    check('hook: a different one is updated', /^updated/.test(S.ensureHook(io) || '') && files[hook].toString() === '#!/bin/sh\nexit 0\n');
+    delete files[path.join('M', 'scripts', 'post-merge-hook.sh')];
+    check('hook: no tracked copy, nothing done', S.ensureHook(io) === null);
+  }
   check('summary', S.summary({ version: '1.0.322', short: 'abc1234', restarted: ['server', 'window'], published: true, hostNext: true })
     === '1.0.322 (abc1234) live and published; restarted: server, window; host restart next');
 }
@@ -162,6 +174,7 @@ function world(o = {}) {
       if (/publish-share\.js/.test(line)) return ok('origin/main 1.0.322: 9 files\npublished: 1.0.322 (ccccccc) on X');
       if (/version\.js/.test(line)) return ok('1.0.322\n');
       if (/restart-host\.js/.test(line)) return ok('asked');
+      if (/^gh run list -R GLODUSK\/fleet-view-share --workflow Mac --branch main /.test(line)) return o.runs ? ok(JSON.stringify(o.runs)) : { code: 1, out: 'gh: not logged in' };
       return { code: 1, out: `unexpected: ${line}` };
     },
     readTail(file) {
@@ -194,6 +207,19 @@ const idx = (calls, re) => calls.findIndex((c) => re.test(c));
     check('PC run: restart-host is the last call', /restart-host\.js/.test(c[c.length - 1]), c[c.length - 1]);
     check('PC run: the summary line', w.said.includes('1.0.322 (ccccccc) live and published; restarted: server, window; host restart next'), w.said.join('\n'));
     check('PC run: says the host version to expect', w.said.some((s) => s.includes(S.hostHash(Buffer.from('host')))));
+  }
+  {
+    // the share repo's CI: its newest finished run on main decides (the one this publish started is still going)
+    const run = (id, conclusion, at, status = 'completed') => ({ databaseId: id, conclusion, status, displayTitle: `Fleet View 1.0.${id}`, url: `https://github.com/GLODUSK/fleet-view-share/actions/runs/${id}`, createdAt: at, headBranch: 'main', event: 'push' });
+    const red = world({ files: ['web/app.js'], runs: [run(5, '', '2026-10-17T10:00:00Z', 'in_progress'), run(4, 'failure', '2026-10-17T09:00:00Z'), run(3, 'failure', '2026-10-16T09:00:00Z'), run(2, 'success', '2026-10-15T09:00:00Z')] });
+    await S.ship({ pr: 9, noHost: true }, red.io);
+    check('share CI red: ship says so, since when, and the run', red.said.includes('share CI: RED on the last 2 runs on main since 2026-10-16 09:00 UTC (Fleet View 1.0.4): https://github.com/GLODUSK/fleet-view-share/actions/runs/4'), red.said.join('\n'));
+    const green = world({ files: ['web/app.js'], runs: [run(7, 'success', '2026-10-17T11:00:00Z')] });
+    await S.ship({ pr: 9, noHost: true }, green.io);
+    check('share CI green: one plain line', green.said.includes('share CI: green (Fleet View 1.0.7)'), green.said.join('\n'));
+    const none = world({ files: ['web/app.js'] });
+    const code = await S.ship({ pr: 9, noHost: true }, none.io);
+    check('share CI unknown (gh fails): no line, the ship goes on', code === 0 && !none.said.some((s) => /share CI/.test(s)), none.said.join('\n'));
   }
   {
     const w = world({ files: ['desktop/host.js'] });

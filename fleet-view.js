@@ -21,6 +21,8 @@ const CHANGES = require(path.join(__dirname, 'changes.js'));
 const { endsOnQuestion } = require(path.join(__dirname, 'ends-on-question.js'));
 const PREVIEW = require(path.join(__dirname, 'preview.js'));
 const UPDATER = require(path.join(__dirname, 'updater.js'));
+// the share repo's CI and last publish (Henry's checkouts only): GET /share-health, the header's red pill
+const SHARE_HEALTH = require(path.join(__dirname, 'share-health.js')).createShareHealth({ root: __dirname, dataDir: P.dataDir(), log: (t) => logLine(t) });
 const HOUSEKEEPING = require(path.join(__dirname, 'housekeeping.js'));
 const SYNC_API = require(path.join(__dirname, 'sync-api.js'));
 const RELAY_JS = require(path.join(__dirname, 'relay.js'));
@@ -8807,6 +8809,7 @@ function handleRequest(req, res) {
   if (pathname === '/folders') return void Promise.resolve(FILES.folders(req, res, pageCtx)).catch((e) => requestFailed(req, res, e));
   if (pathname === '/upload') return FILES.upload(req, res, pageCtx);
   if (pathname === '/update' || pathname.startsWith('/update/')) return UPDATER.handle(req, res, pathname, pageCtx);
+  if (pathname === '/share-health') return SHARE_HEALTH.handle(req, res, pathname, pageCtx);
   if (pathname === '/housekeeping' || pathname.startsWith('/housekeeping/')) return HK.handle(req, res, pathname, pageCtx);
   if (SYNC_SETUP.handle(req, res, pathname, pageCtx)) return;
   if (pathname === '/sync/activity' && (req.method === 'GET' || req.method === 'HEAD')) {
@@ -9299,6 +9302,7 @@ function startWeb() {
     // updates from the folder's git upstream (updater.js): the page's "Update available" pill. Busy counts only the
     // chats this machine runs: one another device runs (s.remote, its state copied from there) never holds it back
     if (!DEMO) bootStep('updater', () => UPDATER.start({ log: logLine, busy: () => [...sessions.values()].filter((s) => inState(s) && !s.remote && (s.state === 'WORKING' || s.state === 'AGENTS')).length }));
+    if (!DEMO) SHARE_HEALTH.start();
     if (process.env.FV_TEST_CRASH === '1') setTimeout(() => { throw new Error('FV_TEST_CRASH: test crash 3 s after start'); }, 3000);
     const every = (ms, name, fn) => setInterval(() => { try { fn(); } catch (e) { logOnce(name + ':' + (e && e.message), `${name} failed\n${errorText(e)}`); } }, ms);
     if (DEMO) {

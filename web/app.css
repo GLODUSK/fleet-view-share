@@ -809,6 +809,12 @@ html.titlebar .top.fit-3 .hdr-tools { display: none; }
 /* "Updates !": the upstream can't be fetched; quiet, not green */
 .update-pill.unreachable { color: var(--dim); border-color: var(--line); }
 .update-pill.unreachable b { color: var(--gold); }
+/* the share repo's CI or publish failed (share-health.js) */
+.share-health-pill { cursor: pointer; text-decoration: none; color: var(--red); border-color: rgba(255, 77, 94, 0.4); }
+.share-health-pill b { color: var(--red); }
+.share-health-pill .count-k { color: var(--dim); }
+.share-health-pill:hover .count-k { color: var(--text); }
+.share-health-pill:not([href]) { cursor: default; }
 /* the footer's "v1.0.12" (update.js): quiet text; a click opens the update card above it; mint while an update waits */
 .ver-btn {
   background: none; border: 0; padding: 0 2px; cursor: pointer; color: var(--dim); opacity: 0.7; font: 500 11.5px/1 var(--font-ui);

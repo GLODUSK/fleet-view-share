@@ -199,6 +199,7 @@ import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued, onTeamJoin, setServerQueued, sendWhenUp } from './orders.js';
 import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
+import { mountShareHealth } from './share-health.js';
 import { mountUsage } from './usage.js';
 import { mountSync } from './sync.js';
 import { mountClone, cloneWorkspaceItem } from './clone.js';
@@ -4038,6 +4039,8 @@ if (!SOLO) mountHousekeeping({ button: $('hk-btn') });
 
 // ---------- "Update available" (update.js; updater.js on the server) ----------
 if (!FIXTURE && !SOLO) mountUpdate({ pill: $('update-pill'), verBtn: $('ver-btn'), getJson });
+// the share repo's CI and last publish (share-health.js; share-health.js on the server): a red pill when either failed
+if (!FIXTURE && !SOLO) mountShareHealth({ pill: $('share-health-pill'), getJson, notifyOn: () => local.notify !== false, focusWindow: () => window.fleetDesktop?.focus?.() });
 
 // ---------- desktop notifications ----------
 // New entries in state.alerts (n only grows) of these kinds raise a Notification while the window is not
