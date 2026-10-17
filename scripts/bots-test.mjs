@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { SHAPES as MASCOT_SHAPES } from '../web/mascot.js';
+import { SHAPES as MASCOT_SHAPES, shapeFor as MASCOT_SHAPE_FOR } from '../web/mascot.js';
 
 const require = createRequire(import.meta.url);
 const B = require('../bots.js');
@@ -254,6 +254,43 @@ test("a look: a shape from mascot.js's list, a #rrggbb colour; null or blank cle
   for (const bad of [{ shape: 'blob' }, { shape: 3 }, { color: 'red' }, { color: '#fff' }, { color: '#12345g' }, { color: 'ff6b80' }, { color: '#ff6b80;x' }]) assert.ok(B.checkLook(bad).err, JSON.stringify(bad));
   // the server's list and the page's are one list
   assert.deepEqual(B.SHAPES, MASCOT_SHAPES);
+});
+test('a bot without a look of its own is given one and keeps it: the shape it showed, a colour no other bot wears', () => {
+  const page = fs.readFileSync(new URL('../web/chats.js', import.meta.url), 'utf8');
+  const palette = [...(/const PALETTE = \[([\s\S]*?)\];/.exec(page) || [])[1].matchAll(/'(#[0-9a-f]{6})'/g)].map((m) => m[1]);
+  assert.deepEqual(B.LOOK_COLORS, palette); // the server's colours are the page's
+  const bots = [{ id: 'a00000000001', createdAt: 1 }, { id: 'a00000000002', createdAt: 2 }, { id: 'a00000000003', createdAt: 3 }];
+  for (const b of bots) assert.equal(B.fillLook(b, bots, T), true);
+  assert.equal(bots[0].shape, MASCOT_SHAPE_FOR(`bot:${bots[0].id}`)); // the shape the page drew it in
+  assert.equal(new Set(bots.map((b) => b.color)).size, 3); // three bots, three colours
+  assert.equal(new Set(bots.map((b) => b.shape)).size, 3);
+  assert.ok(bots.every((b) => b.lookAt === T));
+  const kept = bots.map((b) => `${b.shape}${b.color}`);
+  for (const b of bots) assert.equal(B.fillLook(b, bots, T + 1), false); // kept: nothing changes again
+  assert.deepEqual(bots.map((b) => `${b.shape}${b.color}`), kept);
+  // half a look: only the missing half is given
+  const half = { id: 'a00000000004', shape: 'heart', createdAt: 4 };
+  B.fillLook(half, bots, T);
+  assert.equal(half.shape, 'heart');
+  assert.ok(!bots.some((b) => b.color === half.color));
+  // a removed bot's colour is free again
+  const gone = [{ id: 'b00000000001', color: '#58a6ff', shape: 'hex', removed: true }, { id: 'b00000000002' }];
+  B.fillLook(gone[1], gone, T);
+  assert.equal(gone[1].color, '#58a6ff');
+});
+test('the bots made before looks were kept get theirs when the registry loads, saved once', () => {
+  let saves = 0;
+  const saved = [1, 2].map((n) => ({ id: `c0000000000${n}`, name: `B${n}`, folder: path.join(dir, `old${n}`), createdAt: T + n, ids: [], told: [] }));
+  saved.push({ ...saved[0], id: 'c00000000009', name: 'Kept', folder: path.join(dir, 'old9'), shape: 'star', color: '#ff6b80' });
+  const reg = B.createBots({ saved, base: dir, save: () => saves++, api: {} }).saveShape();
+  assert.equal(saves, 1);
+  assert.ok(reg.every((b) => B.SHAPES.includes(b.shape) && /^#[0-9a-f]{6}$/.test(b.color)));
+  assert.deepEqual([reg[2].shape, reg[2].color], ['star', '#ff6b80']); // one with its own look keeps it
+  assert.equal(new Set(reg.map((b) => b.color)).size, 3);
+  assert.equal(reg[0].shape, MASCOT_SHAPE_FOR(`bot:${reg[0].id}`)); // the oldest keeps the shape it showed
+  // loaded again: nothing to give, nothing saved
+  B.createBots({ saved: reg, base: dir, save: () => saves++, api: {} });
+  assert.equal(saves, 1);
 });
 test('the registry as saved keeps a valid look and drops a bad one', () => {
   const one = (o) => B.loadBots([{ id: BID, name: 'Web', folder: path.join(dir, 'w'), createdAt: T, ids: [], told: [], ...o }], dir)[0];
@@ -533,9 +570,11 @@ await (async () => {
     assert.equal(h.calls.deliver.length, 0); // a look is not in CLAUDE.md: nothing to tell it
     assert.equal(fs.readFileSync(path.join(made.bot.folder, 'CLAUDE.md'), 'utf8'), md);
     assert.equal((await h.bots.update(bid, { color: 'pink' }))[0], 400);
+    // cleared ("Pick for me"): one is given at once and kept, the first colour no other bot wears
     const [, cleared] = await h.bots.update(bid, { color: null });
-    assert.equal(cleared.bot.color, null);
-    assert.ok(!('color' in h.saved().find((x) => x.id === bid)));
+    assert.equal(cleared.bot.color, '#58a6ff');
+    assert.equal(h.saved().find((x) => x.id === bid).color, '#58a6ff');
+    await h.bots.update(bid, { color: '#f78fd0' });
     // the bot itself: from its own conversation
     assert.equal(h.bots.look({ shape: 'star' })[0], 400); // no from
     assert.equal(h.bots.look({ from: id(999), shape: 'star' })[0], 403); // not a bot's conversation
@@ -546,11 +585,17 @@ await (async () => {
     assert.equal(lc, 200); assert.deepEqual([lo.bot.shape, lo.bot.color], ['star', '#58a6ff']);
     assert.equal(lo.bot.name, 'Petal');
     assert.deepEqual([h.saved()[0].shape, h.saved()[0].color], ['star', '#58a6ff']);
-    assert.equal(h.bots.look({ from: conv, shape: null })[1].bot.shape, null);
+    assert.ok(B.SHAPES.includes(h.bots.look({ from: conv, shape: null })[1].bot.shape)); // given one again, never none
+    // made with no look: given its own, unlike the other bot's, and kept
+    const [, plain] = await h.bots.create({ name: 'Plain' });
+    assert.ok(B.SHAPES.includes(plain.bot.shape) && /^#[0-9a-f]{6}$/.test(plain.bot.color));
+    assert.notEqual(plain.bot.color, '#58a6ff');
+    assert.notEqual(plain.bot.shape, h.saved().find((x) => x.id === bid).shape);
+    assert.deepEqual([h.saved()[1].shape, h.saved()[1].color], [plain.bot.shape, plain.bot.color]);
     // a removed bot's conversation changes nothing
     await h.bots.remove(bid);
     assert.equal(h.bots.look({ from: conv, shape: 'heart' })[0], 403);
-    assert.deepEqual(h.bots.lookItems([]), []); // removed: its look leaves the other machines
+    assert.deepEqual(h.bots.lookItems([]).map((x) => x.slug), ['plain']); // removed: its look leaves the other machines
     n++; console.log('ok a look: made with one, changed by the page, and by the bot itself from its own conversation only');
   }
   // start: the running one is taken; else the newest conversation resumed; else a new one. Two at once start one
@@ -713,7 +758,7 @@ await (async () => {
     assert.equal(cl.bot.role, '');
     assert.ok(fs.readFileSync(md, 'utf8').includes('Henry has not given you a role'));
     assert.equal(h.bots.roleFor(made.id), '');
-    assert.equal(h.bots.lookItems([]).length, 0); // no look and no role: no item
+    assert.ok(!('role' in h.bots.lookItems([])[0])); // no role: its look goes on alone
     n++; console.log('ok role: made with one, changed, cleared, refused; CLAUDE.md, the note, state.bots, botLooks, roleFor');
   }
   // remove: its session ended, off state.bots, its ids still tagged, its folder kept; its name is free again

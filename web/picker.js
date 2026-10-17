@@ -12,7 +12,8 @@
 //     (the button's text when no choice matches)
 // Keyboard: ↓ ↑ Enter or Space on the button opens it on the current choice; ↑↓ (←→ and rows of the grid) move,
 // Home/End, Enter or Space picks, Esc closes back on the button (and goes no further: the form stays), Tab closes.
-// A click outside, or the focus moving elsewhere, closes it. The menu opens below the button, or above when the form's scroll box has no room below.
+// A click outside, or the focus moving elsewhere, closes it. The menu opens below the button, or above when the form's scroll box has no room below,
+// and lines up with the button's right edge when there is no room on the right.
 import { esc } from './cards.js';
 import { icon } from './icons.js';
 
@@ -53,12 +54,14 @@ export function mountPicker(host, o) {
     isOpen = true;
     drawMenu();
     menu.hidden = false;
-    menu.classList.remove('up');
+    menu.classList.remove('up', 'end');
     btn.setAttribute('aria-expanded', 'true');
     // no room below in the form's scroll box (or the window) but room above: it opens upwards
     const box = (host.closest('.ch-form') || document.documentElement).getBoundingClientRect();
-    const b = btn.getBoundingClientRect(), h = menu.offsetHeight;
+    const b = btn.getBoundingClientRect(), h = menu.offsetHeight, w = menu.offsetWidth;
     if (b.bottom + h + 8 > Math.min(box.bottom, innerHeight) && b.top - h - 8 > Math.max(box.top, 0)) menu.classList.add('up');
+    // no room on the right (a narrow box: a bot's profile column) but room on the left: it lines up with the button's right edge
+    if (b.left + w + 8 > Math.min(box.right, innerWidth) && b.right - w - 8 > Math.max(box.left, 0)) menu.classList.add('end');
     (menu.querySelector('.pk-mi.on') || menu.querySelector('.pk-mi'))?.focus();
     document.addEventListener('pointerdown', outside, true);
   }

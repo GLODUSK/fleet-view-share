@@ -589,6 +589,16 @@ export function ownColorOf(c) {
   if (!c || c.kind === 'team') return null;
   return typeof c.color === 'string' && /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : null;
 }
+// of list, the one fewest of worn are, the first such from first on (first itself when nothing wears it): a bot's
+// shape or colour that no other bot has (bots.js leastWorn, the same pick)
+export function leastWorn(list, worn, first) {
+  const n = new Map(list.map((k) => [k, 0]));
+  for (const w of worn || []) if (n.has(w)) n.set(w, n.get(w) + 1);
+  const at = Math.max(0, list.indexOf(first));
+  let best = null;
+  for (let i = 0; i < list.length; i++) { const k = list[(at + i) % list.length]; if (best === null || n.get(k) < n.get(best)) best = k; }
+  return best;
+}
 
 // ---------- a bot's chat as the Bots tab shows it (botFeed) ----------
 // Only Fleet View starts a message with "[Fleet View]": anyone else's is framed ("[Fleet View · unsigned…") or

@@ -9,7 +9,8 @@
 //   in its CLAUDE.md (bot/BRIEF.md {{role}}) and next to its name in the team briefs and notes (fleet-view.js memberOf).
 //   A removed bot keeps its folder, its logs and its ids: they stay tagged in /state, so its conversations never show on
 //   the map. shape and color are its avatar's look (web/mascot.js), set when it is made or changed, or by the bot
-//   itself (look below: POST /api/bots/look, fv look); left out, the page picks them. lookAt: when they last changed
+//   itself (look below: POST /api/bots/look, fv look); left out or cleared, one is given and kept (fillLook), so a bot
+//   looks the same everywhere and for good, and no two look alike while there are enough. lookAt: when they last changed
 //   (lookItems below: the look, and the role, go to Henry's other machines, sync-prefs.js botLooks; lookAt moves when
 //   either changes). model and effort may each be 'dynamic' (a new bot's are): its sessions start on DYNAMIC_START,
 //   and the page sizes each message Henry sends it and switches first when needed (switchTo below: POST
@@ -280,7 +281,7 @@ function checkLook(b) {
   if (b && 'color' in b) {
     if (b.color === null || b.color === '') out.color = null;
     else if (typeof b.color === 'string' && COLOR_RE.test(b.color)) out.color = b.color.toLowerCase();
-    else return { err: 'color must be a colour like #58a6ff (or null: its account\'s)' };
+    else return { err: 'color must be a colour like #58a6ff (or null: picked for it)' };
   }
   return out;
 }
@@ -293,6 +294,37 @@ function applyLook(bot, look, now = Date.now()) {
     else bot[k] = look[k];
   }
   if (`${bot.shape || ''}|${bot.color || ''}` !== was) bot.lookAt = now;
+}
+// The colours a bot is given, web/chats.js PALETTE's in its order (scripts/bots-test.mjs checks the two agree)
+const LOOK_COLORS = ['#58a6ff', '#3fd8ff', '#4eba65', '#7ee0a1', '#ffc857', '#ff9f5a', '#ff6b80', '#f78fd0', '#af87ff', '#c9d1d9'];
+// web/mascot.js hash and shapeFor: the shape the page drew a bot in while it had none of its own
+function seedHash(s) {
+  let h = 2166136261;
+  for (const c of String(s || '')) { h ^= c.codePointAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+const seededShape = (id) => SHAPES[seedHash(`bot:${id}`) % 7];
+// of list, the one fewest of worn are, the first such from first on (first itself when it is free)
+function leastWorn(list, worn, first) {
+  const n = new Map(list.map((k) => [k, 0]));
+  for (const w of worn) if (n.has(w)) n.set(w, n.get(w) + 1);
+  const at = Math.max(0, list.indexOf(first));
+  let best = null;
+  for (let i = 0; i < list.length; i++) { const k = list[(at + i) % list.length]; if (best === null || n.get(k) < n.get(best)) best = k; }
+  return best;
+}
+// Henry, 2026-10-16: a bot keeps its shape and colour (made, put in a team, taken out: the same), and three bots never
+// all wear their account's colour. A bot with no shape or no colour of its own is given one and keeps it: the shape the
+// page drew it in, unless another bot (not a removed one) has it, else the least worn; a colour no other bot wears,
+// else the least worn. -> true when it changed
+function fillLook(bot, bots, now = Date.now()) {
+  if (!bot || (bot.shape && bot.color)) return false;
+  const others = (bots || []).filter((x) => x && x !== bot && !x.removed);
+  const look = {};
+  if (!bot.shape) look.shape = leastWorn(SHAPES, others.map((x) => x.shape), seededShape(bot.id));
+  if (!bot.color) look.color = leastWorn(LOOK_COLORS, others.map((x) => String(x.color || '').toLowerCase()), LOOK_COLORS[0]);
+  applyLook(bot, look, now);
+  return true;
 }
 // a bot's folder's name, lower case: its key on every machine (sync-prefs.js botLooks, chatOrder's bots:<slug>)
 const slugKey = (folder) => path.basename(String(folder)).toLowerCase();
@@ -453,6 +485,9 @@ function createBots(deps) {
   const d = deps || {};
   const base = d.base || BOTS_DIR, templateFile = d.template || TEMPLATE_FILE;
   const bots = loadBots(d.saved, base);
+  // the bots made before every bot had a look of its own get theirs, oldest first (so the oldest keep the shape they showed)
+  let filled = false;
+  for (const b of [...bots].sort((x, y) => x.createdAt - y.createdAt)) if (!b.removed && fillLook(b, bots)) filled = true;
   let live = new Map(); // bot id -> { id, key, status, pending } of its running session, from the host's list
   const chains = new Map(); // bot id -> its starts and its removal, one after another
   const starting = new Set(); // bots whose start may be typing its prompt: no id note meanwhile
@@ -467,6 +502,7 @@ function createBots(deps) {
   let scheduling = false, briefsChecked = false;
   const log = (t) => { try { if (d.log) d.log(`bots: ${t}`); } catch {} };
   const save = () => { try { if (d.save) d.save(); } catch {} };
+  if (filled) { save(); log('gave the bots without one a shape and colour of their own'); }
   const byId = (id) => bots.find((b) => b.id === id) || null;
   const nameOf = (cid) => { try { return d.nameOf ? d.nameOf(cid) : null; } catch { return null; } };
   const view1 = (b) => viewOf(b, live.get(b.id), nameOf);
@@ -527,6 +563,7 @@ function createBots(deps) {
     if (!folder) return [409, { ok: false, message: `no free folder for ${n.name} in ${base}` }];
     const bot = { id, name: n.name, brief: br.brief, role: rl.role, account: o.account, model: o.model, effort: o.effort, folder, createdAt: Date.now(), ids: [], told: [], watches: [] };
     applyLook(bot, lk);
+    fillLook(bot, bots);
     let text;
     try { text = fillBrief(template(), bot); } catch (e) { return [500, { ok: false, message: `could not read ${templateFile}: ${e.code || e.message}` }]; }
     try { fs.mkdirSync(base, { recursive: true }); } catch (e) { return [500, { ok: false, message: `could not make ${base}: ${e.code || e.message}` }]; }
@@ -630,6 +667,7 @@ function createBots(deps) {
     const reroled = next.role !== undefined && next.role !== (bot.role || '');
     Object.assign(bot, next);
     applyLook(bot, lk);
+    fillLook(bot, bots);
     if (reroled) bot.lookAt = Date.now(); // its role goes to the other machines with its look (botLooks)
     save();
     try { writeModel(bot); } catch (e) { log(`could not write ${bot.name}'s .claude/settings.json: ${e.code || e.message}`); }
@@ -691,9 +729,10 @@ function createBots(deps) {
     const lk = checkLook(b);
     if (lk.err) return [400, { ok: false, message: lk.err }];
     applyLook(bot, lk);
+    fillLook(bot, bots);
     save();
-    log(`${bot.name} changed its look (${bot.shape || 'shape picked for it'}, ${bot.color || "its account's colour"})`);
-    return [200, { ok: true, bot: view1(bot), message: `${bot.name} looks like this now: ${bot.shape || 'shape picked for it'}, ${bot.color || "its account's colour"}` }];
+    log(`${bot.name} changed its look (${bot.shape}, ${bot.color})`);
+    return [200, { ok: true, bot: view1(bot), message: `${bot.name} looks like this now: ${bot.shape}, ${bot.color}` }];
   }
 
   // POST /bots/:id/remove, /api/bots/:id/remove: its running session ended (Ctrl+C, as the page's Remove conversation
@@ -1242,5 +1281,5 @@ function createBots(deps) {
   };
 }
 
-module.exports = { createBots, watchEvent, watchNote, checkAt, readWatches, WATCH_JOBS, WATCH_SETTLE_MS, WATCHES_MAX, WATCH_TRIES, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkRole, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, roleLine, tagger, tagState, viewOf, listView, loadBots,
+module.exports = { createBots, watchEvent, watchNote, checkAt, readWatches, WATCH_JOBS, WATCH_SETTLE_MS, WATCHES_MAX, WATCH_TRIES, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkRole, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, LOOK_COLORS, fillLook, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, roleLine, tagger, tagState, viewOf, listView, loadBots,
   startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX, ROLE_MAX };

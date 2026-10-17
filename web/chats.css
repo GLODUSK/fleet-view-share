@@ -6,12 +6,24 @@
 .view-chats { padding: 4px 18px 18px; overflow: hidden; }
 .ch { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: var(--gap); height: 100%; min-height: 0; position: relative; }
 .ch[hidden] { display: none; }
-.ch-side, .ch-main {
+.ch-side, .ch-main, .ch-pf {
   min-height: 0; background: var(--glass-bg); border: 1px solid var(--glass-edge); border-radius: var(--radius);
   box-shadow: inset 0 1px 0 var(--glass-highlight), 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 .ch-side { display: flex; flex-direction: column; overflow: hidden; }
 .ch-main { display: flex; flex-direction: column; overflow: hidden; position: relative; }
+/* a bot's profile (Edit bot), from its picture or Profile...: a column on the left of its chat, which stays (Henry,
+   2026-10-16), the list beside it when there is room (.ch-wide), else in the list's place */
+.ch-pf { display: flex; flex-direction: column; overflow: hidden; position: relative; }
+.ch-pf[hidden] { display: none; }
+.ch.ch-pf-on { grid-template-columns: 320px minmax(340px, 420px) minmax(0, 1fr); }
+:not(.ch-wide) > .ch.ch-pf-on { grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); }
+:not(.ch-wide) > .ch.ch-pf-on > .ch-side { display: none; }
+.ch-pf-x { position: absolute; top: 10px; right: 10px; z-index: 1; }
+.ch-pf > .ch-form { padding: 20px 20px 22px; }
+.ch-pf .ch-nb-h { padding-right: 30px; }
+/* a bot's picture opens its profile */
+[data-pbot] { cursor: pointer; }
 
 /* ---- the list's top bar: title, account dots, pop-out, + ---- */
 .ch-top { flex: none; display: flex; align-items: center; gap: 8px; height: 52px; padding: 0 10px 0 16px; }
@@ -272,6 +284,7 @@
 }
 .pk-menu { top: calc(100% + 6px); bottom: auto; min-width: 100%; max-height: 320px; overflow-y: auto; }
 .pk-menu.up { top: auto; bottom: calc(100% + 6px); }
+.pk-menu.end { left: auto; right: 0; }
 .pk-menu[hidden] { display: none; }
 .pk-l { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .pk-note { color: var(--faint); font: 11px/1.3 var(--font-ui); font-weight: 400; }

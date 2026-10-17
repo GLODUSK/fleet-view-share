@@ -6,7 +6,8 @@
 // taskWhen, taskLine, tasksHead) and its profile's list (profileTasks). Plain asserts, no dependencies:
 // node scripts/chats-model-test.mjs
 import assert from 'node:assert/strict';
-import { buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, rawToContactsState, previewOf, botPreview, replyLine, botFeed, fvFeed, noteTone, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
+import { createRequire } from 'node:module';
+import { leastWorn, buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, rawToContactsState, previewOf, botPreview, replyLine, botFeed, fvFeed, noteTone, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
   sizeTask, dynamicSwitch, switchNote, noiseNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, profileTasks, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
   sameChatOrder, contactTree, teamFlags } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
@@ -506,6 +507,18 @@ test("ownColorOf: a bot wears its look's colour whatever conversation it is in",
   assert.equal(ownColorOf({ ...r1, id: 'N', ids: ['L', 'N'] }), '#ff6b80'); // a new conversation keeps it
   assert.equal(ownColorOf(r2, picked), null); // no look colour: the page's fallbacks (account)
   assert.equal(ownColorOf({ kind: 'team', id: 'K', key: 'team:k' }), null);
+});
+test('leastWorn: the first nothing wears from first on, else the least worn (bots.js gives the same pick)', () => {
+  const L = ['a', 'b', 'c'];
+  assert.equal(leastWorn(L, [], 'b'), 'b');
+  assert.equal(leastWorn(L, ['b'], 'b'), 'c');
+  assert.equal(leastWorn(L, ['b', 'c'], 'b'), 'a');
+  assert.equal(leastWorn(L, ['a', 'b', 'c', 'a', 'c'], 'a'), 'b');
+  assert.equal(leastWorn(L, ['x', undefined], 'zz'), 'a'); // first not in the list: from the start
+  const B = createRequire(import.meta.url)('../bots.js');
+  const bots = [{ id: 'd00000000001', createdAt: 1 }, { id: 'd00000000002', createdAt: 2, color: '#58a6ff' }];
+  B.fillLook(bots[0], bots, 1);
+  assert.equal(bots[0].color, leastWorn(B.LOOK_COLORS, ['#58a6ff'], B.LOOK_COLORS[0]));
 });
 test("doingOf: what the avatar's hover says, per face", () => {
   const bot = (o) => ({ kind: 'bot', id: 'x', live: true, preview: '', ...o });

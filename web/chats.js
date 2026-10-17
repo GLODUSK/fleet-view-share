@@ -98,11 +98,11 @@ import { icon } from './icons.js';
 import { renderChatPane } from './chat.js';
 import { onRekey, hosts, termApi } from './term.js';
 import { openCtxMenu } from './ctxmenu.js';
-import { mascotSVG, mascotState, mascotAck, SHAPES } from './mascot.js';
+import { mascotSVG, mascotState, mascotAck, SHAPES, shapeFor } from './mascot.js';
 import { MODEL_IDS, EFFORTS, modelLabel, setDynamicBots } from './compose.js';
 import { handToChat } from './handto.js';
 import { buildContacts, sortContacts, teamThread, unread, asksYou, ownColorOf, doingOf, botChoices, botEdits, DYNAMIC, taskSchedule, taskLine, tasksHead, profileTasks, setupNote,
-  fullChatOrder, moveInChatOrder, pinInChatOrder, sameChatOrder, contactTree, teamFlags, ROLE_MAX } from './chats-model.js';
+  fullChatOrder, moveInChatOrder, pinInChatOrder, sameChatOrder, contactTree, teamFlags, ROLE_MAX, leastWorn } from './chats-model.js';
 import { mountPicker } from './picker.js';
 // New team's rules (who can be ticked, the lead and team above choices, the small lines), shared with the phone app,
 // and the list's team groups' (a member in or out)
@@ -241,12 +241,28 @@ const colorOf = (c) => {
 const sessionsOf = (state) => (state.allSessions || []).concat(state.finishedSessions || [], state.pending || []);
 const findSession = (state, id) => (id ? sessionsOf(state).find((x) => x.id === id) || null : null);
 const inState = (state, id) => !!id && (state.allSessions || []).some((x) => x.id === id);
-// a member's mascot: its own state and colour (the one picked for it, else from the conversation when it is listed)
+// the bot a conversation is one of (its /state tag, else the bot whose ids hold it), or null
+function botTagOf(state, id) {
+  if (!id) return null;
+  const s = findSession(state, id);
+  if (s && typeof s.bot === 'string' && s.bot) return s.bot;
+  const b = (state.bots || []).find((x) => x && Array.isArray(x.ids) && x.ids.includes(id));
+  return b ? b.id : null;
+}
+// a member's mascot (a team's avatar, its members in the head, a message's sender): a bot's is its own shape and
+// colour exactly as its row draws it (botLook; Henry, 2026-10-16: the same in a team as out of it), in the face of
+// the conversation; anything else in the colour picked for it, else from the conversation when it is listed
 function memberMascot(state, m, size) {
   const s = findSession(state, m.id);
+  const tag = botTagOf(state, m.id);
+  const look = tag ? botLook(state, tag) : null;
+  if (look) return look.svg(size, s ? mascotState(s) : 'idle');
   const col = pickedColor(m.id) || (s && s.repo && HEX.test(String(s.repo.color || '')) ? s.repo.color : s && isAcct(s.account) ? acctColor(s.account) : C.violet);
   return mascotSVG(m.id, { state: s ? mascotState(s) : 'idle', color: col, size });
 }
+// on a bot's picture: a click opens its profile (Henry, 2026-10-16); a bot of this machine's only (another machine's
+// is changed there)
+const profileAttr = (state, botId) => (botId && botOf(state, botId) ? ` data-pbot="${esc(botId)}"` : '');
 // a team's avatar: 2-3 member mascots, overlapping
 function cluster(state, c, box = 40) {
   const ms = (c.members || []).slice(0, 3);
@@ -313,7 +329,7 @@ function rowHtml(state, c, now, node) {
     + ` data-depth="${depth}"${node && node.parent ? ` data-parent="${esc(node.parent)}" data-path="${esc(node.path.join(' '))}"` : ''}${mem ? ` data-member="${esc(mem.memberId)}"` : ''}`
     + ` style="--rc:${esc(colorOf(c))};--dep:${depth}" title="${esc(c.name || '')}${mem && mem.lead ? ` leads ${esc(par.name)}` : ''}${team ? ` · ${n} member${n === 1 ? '' : 's'}` : ''}">`
     + fold
-    + `<span class="ch-av"${team ? '' : ` title="${esc(doingTip(c))}"`}>${avatar(state, c, depth ? 32 : 40)}</span>`
+    + `<span class="ch-av"${team ? '' : ` title="${esc(doingTip(c))}"`}${profileAttr(state, c.botId)}>${avatar(state, c, depth ? 32 : 40)}</span>`
     + `<span class="ch-body"><span class="ch-l1"><span class="ch-name">${mem && mem.lead ? '<span class="ch-star" aria-label="lead">★</span>' : ''}${esc(c.name || 'bot')}</span>${depth ? role : ''}`
     + `<span class="ch-time">${pin}${esc(when(c.at, now))}</span></span>`
     + `<span class="ch-l2">${shut ? `<span class="ch-cnt">${n} member${n === 1 ? '' : 's'}</span>` : ''}<span class="ch-prev">${esc(previewOf(c))}</span>${ask ? '<span class="ch-flag" title="needs you">!</span>' : un ? '<span class="ch-dot" aria-label="unread"></span>' : ''}</span>`
@@ -575,6 +591,8 @@ function build(el, ui) {
     + `<button type="button" class="ch-ib ch-new" title="New bot or team" aria-label="New bot or team" aria-haspopup="menu">${icon('plus', 16)}</button></div>`
     + `<label class="ch-search">${icon('search', 14)}<input type="search" spellcheck="false" autocomplete="off" placeholder="Search bots" aria-label="Search bots"></label>`
     + `<div class="ch-list" role="listbox" aria-label="bots"></div></nav>`
+    // a bot's profile: a column on the left of its chat (renderChats moves the form into it)
+    + `<aside class="ch-pf" aria-label="profile" hidden><button type="button" class="ch-ib ch-pf-x" title="Close (Esc)" aria-label="Close">${icon('close', 15)}</button></aside>`
     + `<section class="ch-main"><header class="ch-head" hidden><button type="button" class="ch-ib ch-back" title="Back to the bots (Esc)" aria-label="Back">${icon('chevron', 16)}</button>`
     + `<span class="ch-head-av"></span><div class="ch-head-t"></div><div class="ch-head-b"></div></header>`
     + `<div class="ch-tasks" hidden></div><div class="ch-chat" hidden></div>`
@@ -594,7 +612,7 @@ function build(el, ui) {
     _chat: q('.ch-chat'), _team: q('.ch-team'), _thread: q('.ch-thread'), _ta: q('.ch-team textarea'), _send: q('.ch-team .ch-send'),
     _tnote: q('.ch-team .ch-tnote'), _blank: q('.ch-blank'), _popped: q('.ch-popped'), _onTop: q('.ch-ontop'),
     _bot: q('.ch-bot'), _bchat: q('.ch-bot-chat'), _bintro: q('.ch-bot-intro'), _bta: q('.ch-bcomp textarea'), _bsend: q('.ch-bcomp .ch-send'),
-    _bnote: q('.ch-bcomp .ch-tnote'), _form: q('.ch-form'), _tasks: q('.ch-tasks'),
+    _bnote: q('.ch-bcomp .ch-tnote'), _form: q('.ch-form'), _tasks: q('.ch-tasks'), _pf: q('.ch-pf'), _mainEl: q('.ch-main'),
   });
   el._built = true;
   el._ui = ui;
@@ -614,6 +632,7 @@ function build(el, ui) {
       const w = es[es.length - 1].contentRect.width;
       const n = inPanel || (w > 0 && w < NARROW);
       el.classList.toggle('ch-mid', w >= NARROW && w < 1000); // the chat's buttons drop their words
+      el.classList.toggle('ch-wide', w >= 1180); // room for the list, a bot's profile and its chat side by side
       if (n !== el.classList.contains('ch-narrow')) { el.classList.toggle('ch-narrow', n); ui.refresh(); }
     }).observe(el);
   } catch {}
@@ -623,6 +642,9 @@ function build(el, ui) {
     if (e.target.closest('[data-newbot]')) { openForm(el, ui); return; }
     const r = e.target.closest('.ch-row');
     if (!r) return;
+    // a bot's picture: its chat and its profile beside it (again: the profile closes)
+    const pb = e.target.closest('[data-pbot]');
+    if (pb) { const again = form && form.mode === 'edit' && form.botId === pb.dataset.pbot; pick(r.dataset.key, ui, true); if (!again) openForm(el, ui, pb.dataset.pbot); return; }
     // a team's chevron folds or opens it, and picks nothing
     if (e.target.closest('[data-fold]')) { setFold(r.dataset.key, !folded.has(r.dataset.key), ui); return; }
     pick(r.dataset.key, ui, true);
@@ -689,6 +711,9 @@ function build(el, ui) {
     else if (e.target.closest('[data-show]')) desk()?.popChats?.();
   });
   el._head.addEventListener('click', (e) => {
+    // a bot's picture (its own, or a team member's): its profile
+    const pb = e.target.closest('[data-pbot]');
+    if (pb) { openProfile(el, ui, pb.dataset.pbot); return; }
     if (e.target.closest('.ch-back')) { if (inPanel) ui.closeBotPanel?.(); else back(ui); return; }
     if (e.target.closest('[data-start]')) { if (el._cur && el._cur.botId) startBot(ui, el._cur.botId); return; }
     // the settings button: the bot's menu under it, from its left edge (as + New's)
@@ -712,6 +737,9 @@ function build(el, ui) {
     else if (e.key === 'Escape') { e.preventDefault(); el._ta.blur(); if (el.classList.contains('ch-narrow')) back(ui); }
   });
   el._send.addEventListener('click', () => sendTeam(el, ui));
+  // a member's picture by its message: its profile
+  el._thread.addEventListener('click', (e) => { const pb = e.target.closest('[data-pbot]'); if (pb) openProfile(el, ui, pb.dataset.pbot); });
+  el._pf.addEventListener('click', (e) => { if (e.target.closest('.ch-pf-x')) closeForm(ui); });
   // a bot that is not running: its box starts it, then sends (Enter), Shift+Enter starts a new line; its draft is kept per bot
   const growB = () => { const t = el._bta; t.style.height = 'auto'; t.style.height = `${Math.min(160, t.scrollHeight)}px`; };
   el._growB = growB;
@@ -837,6 +865,11 @@ function openForm(el, ui, botId = null, mode = null) {
   if (el.classList.contains('ch-narrow')) open = true;
   ui.refresh();
 }
+// a bot's picture clicked: its profile, beside the chat; clicked again, it closes
+function openProfile(el, ui, botId) {
+  if (form && form.mode === 'edit' && form.botId === botId) closeForm(ui);
+  else openForm(el, ui, botId);
+}
 function closeForm(ui) {
   if (!form) return;
   const edit = form.mode === 'edit';
@@ -847,6 +880,13 @@ function closeForm(ui) {
   ui.refresh();
 }
 // the colour the form's bot wears as picked: its own pick, else its account's
+// a shape or colour for the form's bot (botId: the one edited, else a new one) that no other bot wears, else the least
+// worn: bots.js fillLook's pick, which gives one to a bot made or cleared without
+function formPick(state, k, botId = null) {
+  const others = (state.bots || []).filter((b) => b && b.id !== botId);
+  if (k === 'shape') return leastWorn(SHAPES, others.map((b) => b.shape), botId ? shapeFor(`bot:${botId}`) : SHAPES[others.length % SHAPES.length]);
+  return leastWorn(PALETTE.map((x) => x[0]), others.map((b) => String(b.color || '').toLowerCase()), PALETTE[0][0]);
+}
 const formColor = () => form.v.color || (isAcct(form.v.account) ? acctColor(form.v.account) : C.cyan);
 const effortHtml = (x) => `<span class="eff eff-${esc(x.value)}">${esc(x.label)}</span>`;
 const acctHtml = (a) => (a === DYNAMIC ? '<span class="ch-acct ch-acct-dyn">~</span>' : `<span class="ch-acct" style="background:${esc(acctColor(a))}">${esc(a)}</span>`);
@@ -868,13 +908,13 @@ function formChoices(state, bot) {
         ...SHAPES.map((k) => ({ value: k, label: SHAPE_NAMES[k] || k, art: art(k, 28), btn: `${art(k, 20)}<span>${esc(SHAPE_NAMES[k] || k)}</span>` }))];
     },
     color: () => {
-      const auto = isAcct(form.v.account) ? acctColor(form.v.account) : C.cyan;
       const sw = (hex, cls = '') => `<span class="pk-sw${cls}"${hex ? ` style="--sw:${esc(hex)}"` : ''}></span>`;
       const named = PALETTE.map(([hex, name]) => ({ value: hex, label: name, art: sw(hex), btn: `${sw(hex)}<span>${esc(name)}</span>` }));
       // a colour from the dialog (or a bot's own one not in the palette) is a choice too, after the palette
       const own = form.v.color && !PALETTE.some((x) => x[0] === form.v.color)
         ? [{ value: form.v.color, label: `Custom ${form.v.color}`, art: sw(form.v.color), btn: `${sw(form.v.color)}<span class="pk-mono">${esc(form.v.color)}</span>` }] : [];
-      return [{ value: '', label: "Its account's colour", wide: true, art: `${sw(auto, ' sm')}<span class="pk-auto">Auto</span>`, btn: `${sw(auto)}<span>Auto${isAcct(form.v.account) ? ` (account ${esc(form.v.account)})` : ''}</span>` },
+      // "Pick for me" picks one no other bot wears at once (formPick), so the button never stays on it
+      return [{ value: '', label: 'Pick for me', wide: true, art: `${sw('', ' sm any')}<span class="pk-auto">Auto</span>`, btn: `${sw('', ' any')}<span>Auto</span>` },
         ...named, ...own, { custom: true, label: 'Any colour...', wide: true, art: `${sw('', ' sm any')}<span class="pk-auto">Any...</span>` }];
     },
   };
@@ -886,9 +926,11 @@ function drawForm(el, state) {
   if (form.fresh) {
     form.fresh = false;
     const accts = formAccounts(state);
+    // a new bot starts on a shape and colour no other bot wears, so it is made looking as the form showed it
     form.v = edit
-      ? { account: bot.account || DEF.account, model: bot.model || DEF.model, effort: bot.effort || DEF.effort, shape: bot.shape || '', color: COLOR6.test(String(bot.color || '')) ? bot.color.toLowerCase() : '' }
-      : { account: accts.includes(DEF.account) ? DEF.account : accts[0], model: DEF.model, effort: DEF.effort, shape: '', color: '' };
+      ? { account: bot.account || DEF.account, model: bot.model || DEF.model, effort: bot.effort || DEF.effort, shape: bot.shape || formPick(state, 'shape', bot.id),
+        color: COLOR6.test(String(bot.color || '')) ? bot.color.toLowerCase() : formPick(state, 'color', bot.id) }
+      : { account: accts.includes(DEF.account) ? DEF.account : accts[0], model: DEF.model, effort: DEF.effort, shape: formPick(state, 'shape'), color: formPick(state, 'color') };
     const field = (k, label) => `<div class="ch-f"><span id="ch-nb-${k}">${label}</span><div data-pk="${k}"></div></div>`;
     el._form.innerHTML = `<form class="ch-nb" novalidate autocomplete="off">`
       + `<div class="ch-nb-h"><span class="ch-nb-av"></span><div><div class="ch-nb-t">${edit ? `${esc(bot.name)}'s profile` : 'New bot'}</div>`
@@ -910,7 +952,13 @@ function drawForm(el, state) {
     for (const k of ['account', 'model', 'effort', 'shape', 'color']) {
       form.pk[k] = mountPicker(el._form.querySelector(`[data-pk="${k}"]`), {
         options: ch[k], value: form.v[k], labelId: `ch-nb-${k}`, grid: grid[k] || 0,
-        onChange: (v) => { if (!form || !form.v) return; form.v[k] = v; if (k !== 'model' && k !== 'effort') drawLook(el); },
+        onChange: (v) => {
+          if (!form || !form.v) return;
+          // "Pick for me": one no other bot wears, picked now and shown as picked
+          if ((k === 'shape' || k === 'color') && !v) { v = formPick(el._state || state, k, form.botId); form.pk[k].set(v); }
+          form.v[k] = v;
+          if (k !== 'model' && k !== 'effort') drawLook(el);
+        },
       });
     }
     drawLook(el);
@@ -968,7 +1016,7 @@ async function submitForm(el, ui) {
   const body = { name: vals.name.trim(), brief: vals.brief.trim(), account: vals.account, model: vals.model, effort: vals.effort };
   const role = vals.role.replace(/\s+/g, ' ').trim().slice(0, ROLE_MAX);
   if (role) body.role = role;
-  // the look only when picked: else the server leaves it out and the page picks one from the bot's id
+  // its look as the form showed it (formPick gave one); left out, bots.js gives one
   if (vals.shape) body.shape = vals.shape;
   if (vals.color) body.color = vals.color;
   form.busy = true;
@@ -1307,13 +1355,16 @@ function drawHead(el, state, c, s) {
   if (c.kind === 'team') {
     setHTML(el._headAv, cluster(state, c, 36));
     el._headAv.title = '';
-    const ms = (c.members || []).map((m) => `<span class="ch-mem${m.lead ? ' lead' : ''}" title="${esc([m.lead ? `${m.name} leads the team` : m.name, m.role].filter(Boolean).join(' · '))}">${memberMascot(state, m, 16)}<span>${m.lead ? '★ ' : ''}${esc(m.name)}</span>${m.role ? `<span class="ch-mrole">${esc(m.role)}</span>` : ''}</span>`).join('');
+    delete el._headAv.dataset.pbot;
+    const ms = (c.members || []).map((m) => `<span class="ch-mem${m.lead ? ' lead' : ''}"${profileAttr(state, botTagOf(state, m.id))} title="${esc([m.lead ? `${m.name} leads the team` : m.name, m.role].filter(Boolean).join(' · '))}">${memberMascot(state, m, 16)}<span>${m.lead ? '★ ' : ''}${esc(m.name)}</span>${m.role ? `<span class="ch-mrole">${esc(m.role)}</span>` : ''}</span>`).join('');
     setHTML(el._headT, `<div class="ch-head-n"><span class="name">${esc(c.name)}</span><span class="state" style="color:${esc(colorOf(c))}">GROUP</span></div><div class="ch-head-m ch-mems">${ms}</div>`);
     setHTML(el._headB, '');
     return;
   }
   setHTML(el._headAv, avatar(state, c, 36));
   el._headAv.title = doingTip(c);
+  // its picture opens its profile
+  if (c.botId && botOf(state, c.botId)) el._headAv.dataset.pbot = c.botId; else delete el._headAv.dataset.pbot;
   // a bot that is not running: Start, nothing that would open its conversation without its role
   const u = c.botId ? bu(c.botId) : null;
   // a bot's settings: its menu (botMenu: Start, Profile..., Team, Remove bot), opened under the button
@@ -1361,7 +1412,7 @@ function bubbles(state, c, team) {
     prevFrom = m.from;
     const who = mine ? (m.fromName || 'You') : `${lead && lead.id === m.from ? '★ ' : ''}${nameOf(m.from, m.fromName)}`;
     const to = m.to && !mine ? `<span class="ch-to"> → ${esc(nameOf(m.to, m.toName))}</span>` : '';
-    const av = mine ? '' : `<span class="ch-bav">${first ? memberMascot(state, { id: m.from }, 26) : ''}</span>`;
+    const av = mine ? '' : `<span class="ch-bav"${first ? profileAttr(state, botTagOf(state, m.from)) : ''}>${first ? memberMascot(state, { id: m.from }, 26) : ''}</span>`;
     return `${sep}<div class="ch-msg${mine ? ' mine' : ''}${first ? ' first' : ''}">${av}<div class="ch-bub">`
       + `${first ? `<div class="ch-from">${esc(who)}${to}</div>` : ''}<div class="ch-text">${esc(m.text || '')}</div>`
       + `<div class="ch-at">${esc(m.t ? new Date(m.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : '')}</div></div></div>`;
@@ -1690,22 +1741,31 @@ export function renderChats(el, view, ui) {
   }
 
   const c = contacts.find((x) => x.key === selKey) || null;
-  // the open chat stays read: new activity in it is not "unread"
-  if (c && !form && (!el.classList.contains('ch-narrow') || open)) markSeen(c);
-  el._cur = form ? null : c;
   const narrow = el.classList.contains('ch-narrow');
-  el.classList.toggle('ch-open', narrow && open && (!!c || !!form));
-  if (!c && !form) open = false;
-
   // Edit bot for a bot that is gone (removed elsewhere): it closes
   if (form && form.mode === 'edit' && !botOf(state, form.botId)) form = null;
-  // + New bot and Edit bot: the form in place of the chat
+  // A bot's profile (Edit bot) opens in a column on the left of the chat, which stays (Henry, 2026-10-16: "it should
+  // open like session menu to the left, not cover replace that whole window with the chat"); in the narrow layout,
+  // and for + New bot and New team, the form takes the chat's place
+  const side = !!form && form.mode === 'edit' && !narrow;
+  const over = !!form && !side;
+  // the open chat stays read: new activity in it is not "unread"
+  if (c && !over && (!narrow || open)) markSeen(c);
+  el._cur = over ? null : c;
+  el.classList.toggle('ch-open', narrow && open && (!!c || !!form));
+  if (!c && !form) open = false;
+  el._ch.classList.toggle('ch-pf-on', side);
+  el._pf.hidden = !side;
+  if (side ? el._form.parentNode !== el._pf : el._form.parentNode !== el._mainEl) {
+    if (side) el._pf.appendChild(el._form); else el._mainEl.insertBefore(el._form, el._blank);
+  }
   el._form.hidden = !form;
-  if (form) {
+  if (over) {
     for (const x of [el._head, el._chat, el._team, el._bot, el._blank, el._tasks]) x.hidden = true;
     drawForm(el, state);
     return;
   }
+  if (side) drawForm(el, state);
   let s = c && c.kind !== 'team' ? findSession(state, c.id) : null;
   if (c && c.kind !== 'team' && !s && selLast && selLast.id === c.id) s = selLast;
   if (s) selLast = s;
