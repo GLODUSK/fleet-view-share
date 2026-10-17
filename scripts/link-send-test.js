@@ -35,7 +35,7 @@ function setup(o = {}) {
   let answer = o.answer || ((d, m, p, x) => ({ s: 200, b: { ok: true, echo: { m, p, b: x.b, q: x.q } } }));
   let online = o.online === undefined ? true : o.online;
   const link = {
-    call: async (d, m, p, x = {}) => { calls.push({ d, m, p, b: x.b, q: x.q, timeoutMs: x.timeoutMs }); return answer(d, m, p, x); },
+    call: async (d, m, p, x = {}) => { calls.push({ d, m, p, b: x.b, q: x.q, timeoutMs: x.timeoutMs, id: x.id, t0: x.t0 }); return answer(d, m, p, x); },
     online: () => online,
     status: () => ({ running: true, machines: [{ id: PC, name: 'BlackBox', linked: true }] }),
   };
@@ -49,9 +49,10 @@ function setup(o = {}) {
   ]);
   let ownersOn = true;
   const away = new Map(o.away || []);
-  const ls = LS.createLinkSend({ link: () => (linkOn ? link : null), owners: () => (ownersOn ? owners : null), away: (id) => away.get(id) || null, rootOut: (f) => roots.get(f) || null });
+  const logs = [];
+  const ls = LS.createLinkSend({ link: () => (linkOn ? link : null), owners: () => (ownersOn ? owners : null), away: (id) => away.get(id) || null, rootOut: (f) => roots.get(f) || null, log: (l) => logs.push(l) });
   return {
-    ls, calls,
+    ls, calls, logs,
     set answer(f) { answer = f; },
     set online(v) { online = v; },
     set linkOn(v) { linkOn = v; },
@@ -252,6 +253,38 @@ async function main() {
     eq(await t.ls.conversation(ID, {}), null, 'no link: this machine\'s copy');
     eq(t.ls.hostOf(ID), { device: PC, name: 'BlackBox', moving: null }, 'hostOf: the device lower-case, its name');
     eq(t.ls.hostOf('nope'), null, 'hostOf: a bad id');
+  }
+
+  // ---------- a send tried again: the page's own id, maybeSent, the log ----------
+  {
+    const t = setup();
+    const t0 = Date.now() - 40e3;
+    let r = await t.ls.route('POST', '/link/send', null, { id: ID, text: 'run the tests', cid: 'pageSend-0123456789ab', t0 });
+    eq(r[0], 200, 'send with cid and t0: 200');
+    eq([t.calls[0].id, t.calls[0].t0, t.calls[0].b], ['pageSend-0123456789ab', t0, { text: 'run the tests', queue: true, open: true }], 'send: the link call goes under the page\'s id and first try\'s time, the body as before');
+    ok(/^link: send to 3cc58c32 on BlackBox \(send pageSend\): 200$/.test(t.logs[0]), `send: one log line, no text (${t.logs[0]})`);
+    r = await t.ls.route('POST', '/link/send', null, { id: ID, text: 'run the tests', cid: 'pageSend-0123456789ab', t0 });
+    ok(/\(send pageSend, again\): 200$/.test(t.logs[1]), `the same id again: logged as again (${t.logs[1]})`);
+    ok(!t.logs.some((l) => l.includes('run the tests')), 'the text never goes in the log');
+    for (const bad of [{ cid: 'short' }, { cid: 'has spaces in it ok', t0 }, { cid: 'pageSend-0123456789ab' }, { cid: 'pageSend-0123456789ab', t0: 'x' }, { t0 }]) {
+      r = await t.ls.route('POST', '/link/send', null, { id: ID, text: 'x', ...bad });
+      ok(r[0] === 400 && r[1].code === 'bad_request', `a bad cid or t0 is 400 (${JSON.stringify(bad)})`);
+    }
+    eq(t.calls.length, 2, 'no bad one reached the link');
+    // no answer to a POST: it may have gone in (maybeSent, said in its words); never for a GET or what never went
+    for (const [code, maybe] of [['timeout', true], ['pc-restarted', true], ['weird', true], ['offline', false], ['not_linked', false], ['stopped', false]]) {
+      t.answer = () => ({ s: 0, b: { ok: false, code } });
+      const x = await t.ls.route('POST', '/link/send', null, { id: ID, text: 'x', cid: 'pageSend-0123456789ab', t0 });
+      ok(!!x[1].maybeSent === maybe && /may still arrive/.test(x[1].message) === maybe, `send ${code}: maybeSent ${maybe} (${x[1].message})`);
+    }
+    t.answer = () => ({ s: 0, b: { ok: false, code: 'timeout' } });
+    const g = await t.ls.route('GET', '/link/activity', { id: ID }, null);
+    ok(g[0] === 504 && !g[1].maybeSent && !/may still arrive/.test(g[1].message), 'a GET with no answer: timeout, nothing about going in');
+    // (the start's probe answers: the start itself is what gets no answer)
+    t.answer = (d, m, p) => (p === '/peer/status' ? { s: 200, b: { ok: true } } : { s: 0, b: { ok: false, code: 'timeout' } });
+    const s = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B', cid: 'pageStart-0123456789', t0 });
+    ok(s[1].maybeSent === true && t.calls.at(-1).id === 'pageStart-0123456789' && t.calls.at(-1).t0 === t0, 'start: under the page\'s id too, and maybeSent with no answer');
+    ok(/^link: start on BlackBox \(send pageStar\): 504 timeout BlackBox didn't answer in time: it may still arrive/.test(t.logs.at(-1)), `start: logged (${t.logs.at(-1)})`);
   }
 
   console.log(`${passed} passed, ${failed} failed`);

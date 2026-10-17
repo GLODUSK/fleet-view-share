@@ -253,6 +253,12 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
   is gone: the phone shows it as "may have gone in", never offers Retry, and lets the transcript settle it. A GET is
   a plain no-answer, which the pollers try again. A link that only drops sends no notice, and a resend with the same
   `id` still gets the relay's kept answer.
+- **No answer is not "not sent".** A POST that left the phone and got no answer in its time fails with the code
+  `no-answer` ("No answer from the PC: it may have gone in. Retry sends it at most once."), never `not-sent`, which
+  is only for one that never left (not connected, the PC offline, not paired yet). The chat keeps such a message in
+  its bubble with Retry under the same `id` (the relay's kept answer, or its 409 when it can't tell), and never hands
+  its text back to the box, where Send would make a new `id` and type it twice. A bot's message goes to its chat as
+  "may have gone in" for the transcript to settle.
 - **The transcript settles any bubble.** A message the phone sent goes from the chat once the transcript shows its
   text, whatever its state, even one still "Sending..." or "Not sent yet": the answer can be lost while the message
   went in. Only a message the PC answered may also be matched another way (the oldest sent before the transcript

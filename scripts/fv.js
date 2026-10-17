@@ -14,11 +14,17 @@
 // A text argument given as "-" is read from stdin. Ids may be shortened to their first 8+ hex characters.
 // fv.ps1 (PowerShell) hands the arguments over as base64 of UTF-8 JSON in FV_ARGS_B64, not on the command line,
 // which cmd.exe would cut at a newline; FV_DRY_RUN=1 prints the calls fv would make and makes none (for tests).
+//
+// The server restarts for every update (~30 times a day). A call caught by one is tried again (retrying, below) when
+// that is safe: one that reached nothing, a read, a wait (with the time it has left), and fv send and fv start, which
+// give the server a clientId so a repeat is answered from its receipt and never typed twice. Any other call cut off
+// on its way says it may have been done, so the caller looks before trying again.
 'use strict';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 
 const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation API")
 
@@ -180,6 +186,9 @@ function count(v, what, min, max) {
 }
 
 // ---------- the API ----------
+// A call that got no answer rejects with an error that says how: refused (nothing listens: the server is down or
+// restarting, and nothing reached it), timedOut (it took longer than the call may), or else cut (the connection broke
+// after the request went: the server may have done it)
 function makeClient(port, token) {
   // one call with node's http module (no Origin header: the API refuses any request that has one)
   return function call(method, p, body, timeoutMs = 30000) {
@@ -194,15 +203,60 @@ function makeClient(port, token) {
           try { j = JSON.parse(Buffer.concat(parts).toString('utf8')); } catch {}
           resolve({ code: res.statusCode, j: j || { ok: false, message: `HTTP ${res.statusCode}` } });
         });
-        res.on('error', reject);
+        res.on('error', (e) => reject(Object.assign(e, { cut: true })));
       });
-      req.on('timeout', () => req.destroy(new Error('Fleet View did not answer in time')));
-      req.on('error', (e) => reject(e.code === 'ECONNREFUSED' ? new Error(`Fleet View is not running on port ${port}`) : e));
+      req.on('timeout', () => req.destroy(Object.assign(new Error('Fleet View did not answer in time'), { timedOut: true })));
+      req.on('error', (e) => reject(e.timedOut ? e : e.code === 'ECONNREFUSED' ? Object.assign(new Error(`Fleet View is not running on port ${port}`), { refused: true }) : Object.assign(e, { cut: true })));
       if (data) req.write(data);
       req.end();
     });
   };
 }
+
+// The calls a server restart catches (see the top), tried again for up to RETRY_MS after the first failure: one that
+// reached nothing (refused, or 503 draining: the server waits for sends in flight before it restarts, and does nothing
+// new meanwhile) whatever it is; one cut off on its way only when doing it twice is safe: a read (GET), a wait (POST
+// .../wait, given the seconds it has left; collected), a send or start with a clientId (the server's receipt answers the
+// repeat). One line on stderr says so (say). A cut call that is not safe, or one that took too long, fails saying it
+// may have been done: the caller looks before trying again.
+const RETRY_MS = 30000, RETRY_GAPS_MS = [500, 1000, 2000, 3000];
+const WAIT_DEFAULT_S = 1800; // the API's wait without a timeout (api.js WAIT_DEFAULT_S)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const repeatable = (method, p, body) => method === 'GET' || /\/(?:wait|collected)$/.test(p) || !!(body && body.clientId);
+function retrying(call, say = () => {}) {
+  return async function again(method, p, body, timeoutMs) {
+    const t0 = Date.now();
+    let told = false;
+    for (let i = 0; ; i++) {
+      // a wait goes on for the time it has left
+      let b = body;
+      if (i && b && /\/wait$/.test(p)) b = { ...b, timeout: Math.max(1, (b.timeout || WAIT_DEFAULT_S) - Math.floor((Date.now() - t0) / 1000)) };
+      let r = null, err = null;
+      try { r = await call(method, p, b, timeoutMs); } catch (e) { err = e; }
+      const draining = !err && r && r.code === 503 && r.j && r.j.draining === true;
+      if (!err && !draining) return r;
+      // (an error that is none of makeClient's kinds is no restart: it goes as it is)
+      const safe = draining || !!err.refused || (!!err.cut && repeatable(method, p, body));
+      if (!safe || Date.now() - t0 >= RETRY_MS) {
+        if (draining) return r;
+        throw lostCall(err, method, p, body, !!(err.cut || err.timedOut));
+      }
+      if (!told) { told = true; say(`fv: Fleet View ${draining ? 'is restarting for an update' : err.refused ? 'is not answering (restarting?)' : 'broke off the call (restarting?)'}; trying again for up to ${RETRY_MS / 1000} s`); }
+      await sleep(RETRY_GAPS_MS[Math.min(i, RETRY_GAPS_MS.length - 1)]);
+    }
+  };
+}
+// a call that got no answer -> the error to show: a POST that may have been done says so (went: it reached the server)
+function lostCall(err, method, p, body, went) {
+  if (!went || method === 'GET' || /\/(?:wait|collected)$/.test(p)) return err;
+  const what = /\/message$/.test(p) ? 'the message may have gone in' : p === '/sessions' ? 'the session may have started' : 'it may have been done';
+  const look = /^\/sessions\/[^/]+\//.test(p) ? ` (fv read ${decodeURIComponent(p.split('/')[2])})` : p === '/sessions' ? ' (fv hosted)' : '';
+  const why = err.timedOut ? 'Fleet View did not answer in time' : 'Fleet View broke off the call (it may have restarted)';
+  const e = new Refused(`${why}: ${what}. Look${look} before trying again`);
+  return e;
+}
+// fv send's and fv start's own id for that one call (api.js receipts: a repeat under it is never done twice)
+const newClientId = () => crypto.randomBytes(12).toString('base64url');
 
 // FV_DRY_RUN: each call printed as one line of JSON (non-ASCII as \u escapes, so any console reads it back) and
 // answered ok, so a test can see what would be sent without sending anything
@@ -452,8 +506,9 @@ async function versionReply(env, port) {
 }
 
 // ---------- commands ----------
-// each: (ctx) -> { j, lines } (lines printed unless --json); a non-ok reply throws Refused with the server's message
-async function run(argv, env) {
+// each: (ctx) -> { j, lines } (lines printed unless --json); a non-ok reply throws Refused with the server's message.
+// say: a line for stderr (that fv tries a call again)
+async function run(argv, env, say) {
   const { pos, flags } = parseArgs(argv);
   const cmd = pos.shift();
   if (flags.help || cmd === 'help' || (!cmd && !flags.version)) return { usage: true, ok: !!(cmd || flags.help) };
@@ -463,7 +518,7 @@ async function run(argv, env) {
     if (pos.length) throw new Usage(`unexpected argument "${pos[0]}"`);
     return versionReply(env, Number(port));
   }
-  const call = client(env, Number(port));
+  const call = retrying(client(env, Number(port)), say);
   const need = async (method, p, body, ms) => {
     const r = await call(method, p, body, ms);
     // 202: queued behind a menu
@@ -516,7 +571,8 @@ async function run(argv, env) {
       const prompt = await textArg(pos[1], 'prompt');
       noMore(2);
       if (flags.chrome && flags['no-chrome']) throw new Usage('--chrome or --no-chrome, not both');
-      const body = { repo: path.resolve(repo), account: acct(flags.account) || 'B', prompt };
+      // (clientId: asked again after a restart, the server never starts it twice)
+      const body = { repo: path.resolve(repo), account: acct(flags.account) || 'B', prompt, clientId: newClientId() };
       if (flags.name !== undefined) body.name = flags.name;
       if (flags.model !== undefined) body.model = flags.model;
       if (flags.effort !== undefined) {
@@ -536,7 +592,8 @@ async function run(argv, env) {
       const sid = await id();
       const text = await messageArg(pos[1], flags, 'text');
       noMore(2);
-      const body = { text };
+      // (clientId: asked again after a restart, the server never types it twice)
+      const body = { text, clientId: newClientId() };
       // from another conversation: it waits behind a menu and resumes one not running (the server's default)
       if (flags.from !== undefined) body.from = await resolveId(call, flags.from);
       if (flags['no-open']) body.open = false;
@@ -870,7 +927,7 @@ async function run(argv, env) {
 async function main(argv, env = process.env, out = console.log, err = console.error) {
   let json = argv.includes('--json');
   try {
-    const r = await run(argv, env);
+    const r = await run(argv, env, err);
     if (r.usage) { (r.ok ? out : err)(USAGE); return r.ok ? 0 : 2; }
     if (json) out(JSON.stringify(r.j, null, 2));
     else for (const l of r.lines) out(l);
@@ -895,4 +952,4 @@ if (require.main === module) {
   if (process.env.FV_DRY_RUN) process.stdout.write(`fv dry run: ${asciiJson({ argv, via })}\n`);
   main(argv).then((code) => { process.exitCode = code; });
 }
-module.exports = { main, parseArgs, shimArgs, resolveId, resolveTeam, menuLines, waitLines, transcriptLines, statusLines };
+module.exports = { main, parseArgs, shimArgs, resolveId, resolveTeam, menuLines, waitLines, transcriptLines, statusLines, retrying, RETRY_MS };

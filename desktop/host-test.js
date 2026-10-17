@@ -250,7 +250,11 @@ async function main() {
     ld2 && ld2.alive && ld2.role === null && sameSet(allowedFv(argsOf(D2)[0]), FV_BASE) && sameSet(deniedFv(argsOf(D2)[0]), []), { ld2, args: argsOf(D2) });
 
   // b: a key typed before it is ready cancels its note
-  await cl.req('write', B.id, 'x');
+  const wrote = await cl.req('write', B.id, 'x');
+  // a write says when nothing was typed, so a sender says "not sent" at once (api.js notWritten)
+  const nowhere = await cl.req('write', '0000dead-0000-4000-8000-000000000000', 'x');
+  check('write: true for a live session, { ok: false, reason: "not found" } for one the host does not have',
+    wrote === true && !!nowhere && nowhere.ok === false && nowhere.reason === 'not found', { wrote, nowhere });
   // what each resume "writes" to its transcript: d1 a killed background task (and Claude Code's filler line),
   // d2 the same but answered
   fs.appendFileSync(transcript(D1), userLine([{ type: 'text', text: STOPPED }]) + asstLine('No response requested.'));

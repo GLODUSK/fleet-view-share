@@ -23,7 +23,9 @@
 // the model as <pasted_content>, not the user's words), 300 ms, then Enter on its own. A
 // conversation that isn't running here is started first (term.js ensureLive: like the Session tab's explicit
 // open, then wait until Claude is idle), and one started moments ago (a new chat) is waited for until its prompt is
-// drawn (Claude Code drops an Enter typed before that). Images go to the server first (POST /chat/image saves them under
+// drawn (Claude Code drops an Enter typed before that). Text typed from here and left in Claude's prompt (sent, then put
+// back by an Esc; or its Enter held back by a question, or by a reload) is cleared before the next send, so a message
+// never goes in twice glued to itself (sentTexts, typedTexts). Images go to the server first (POST /chat/image saves them under
 // %LOCALAPPDATA%\fleet-view\chat-images and answers the path); the message then carries their paths after the
 // text, each on a line of its own (messageText), and Claude Code turns a pasted image path into [Image #N]. Any other file (dropped, picked with the clip,
 // or pasted from Explorer) goes in as its own path, which the desktop window knows (fleetDesktop.pathForFile). A
@@ -689,6 +691,8 @@ onRekey((oldKey, id) => {
   if (d && !drafts.has(id)) { drafts.delete(oldKey); drafts.set(id, d); }
   const h = sentTexts.get(oldKey);
   if (h && !sentTexts.has(id)) { sentTexts.delete(oldKey); sentTexts.set(id, h); }
+  const typed = loadTyped();
+  if (typed[oldKey]) { if (!typed[id]) typed[id] = typed[oldKey]; delete typed[oldKey]; saveTyped(typed); }
   try {
     const t = localStorage.getItem(draftKey(oldKey));
     if (t && !localStorage.getItem(draftKey(id))) localStorage.setItem(draftKey(id), t);
@@ -710,6 +714,54 @@ function rememberSent(id, text) {
   l.push(text);
   if (l.length > HIST_MAX) l.shift();
   sentTexts.set(id, l);
+}
+// What was typed into a session's prompt from here, Enter or not: a question that comes up before the Enter (which then
+// stays back), or a reload before it (every server restart reloads the page), leaves the text in Claude's prompt while
+// the draft is back in the box, and the next Send clears it first when it is one of these (as one of sentTexts), so it
+// never goes in twice, glued to itself. Kept for this window in sessionStorage (fv.typedTexts: { id: [text] }, the
+// last TYPED_KEEP of each), so a reload keeps them
+const TYPED_KEY = 'fv.typedTexts', TYPED_KEEP = 5;
+function loadTyped() {
+  try { const j = JSON.parse(sessionStorage.getItem(TYPED_KEY) || '{}'); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch { return {}; }
+}
+function saveTyped(all) {
+  try { if (Object.keys(all).length) sessionStorage.setItem(TYPED_KEY, JSON.stringify(all)); else sessionStorage.removeItem(TYPED_KEY); } catch {}
+}
+export function rememberTyped(id, text) {
+  if (!id || !text) return;
+  const all = loadTyped();
+  all[id] = [...(Array.isArray(all[id]) ? all[id] : []).filter((t) => t !== text), text].slice(-TYPED_KEEP);
+  const ids = Object.keys(all);
+  if (ids.length > 50) delete all[ids[0]];
+  saveTyped(all);
+}
+export const typedTexts = (id) => { const l = loadTyped()[id]; return Array.isArray(l) ? l.filter((t) => typeof t === 'string') : []; };
+
+// ---------- a send to the machine that runs a chat (POST /link/send), tried again ----------
+// Each one goes under an id of the page's own and its first try's time (cid, t0: link-send.js), kept for this window in
+// sessionStorage (fv.linkSends: { id: { cid, t0, text } }) until that machine answers. One that got no answer (it, or
+// this server, restarted; the link timed out) may have gone in there; the same text sent again goes under the same id,
+// so the relay there gives the first run's answer instead of running it twice (or says it can't tell: look at the chat
+// first). A new text, or any answer from that machine, takes a new id. (These and the typed texts' helpers are exported
+// for scripts/compose-sends-test.mjs.)
+const LINK_SENDS_KEY = 'fv.linkSends', LINK_SEND_MS = 30 * 60e3;
+const CALL_GET_MS = 20e3, CALL_POST_MS = 120e3; // the page routes' answer times (call)
+function linkSends() {
+  try { const j = JSON.parse(sessionStorage.getItem(LINK_SENDS_KEY) || '{}'); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch { return {}; }
+}
+// the send of text to id: the one waiting for an answer, or a new one
+export function linkSendOf(id, text) {
+  const had = linkSends()[id];
+  if (had && had.text === text && /^[A-Za-z0-9_-]{16,32}$/.test(had.cid) && Date.now() - had.t0 < LINK_SEND_MS) return had;
+  const cid = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return { cid, t0: Date.now(), text };
+}
+// keep it waiting for an answer (op), or let it go (null)
+export function keepLinkSend(id, op) {
+  const all = linkSends();
+  for (const [k, v] of Object.entries(all)) if (!v || Date.now() - v.t0 >= LINK_SEND_MS) delete all[k];
+  if (op) all[id] = op; else delete all[id];
+  try { if (Object.keys(all).length) sessionStorage.setItem(LINK_SENDS_KEY, JSON.stringify(all)); else sessionStorage.removeItem(LINK_SENDS_KEY); } catch {}
 }
 // the feed's user messages and slash commands, oldest first, then what was sent and isn't there yet; repeats in
 // a row once. A bash command (the transcript's <bash-input>) is "!<command>"; what it printed isn't a message.
@@ -1731,11 +1783,12 @@ export function mountCompose(slot, s) {
         const why = await closeHostPanel(id);
         if (why) { err(why); return; }
       }
-      // a message sent from here left in Claude Code's prompt (a Stop or Rewind's Esc put it back there): cleared
-      // first, so the new one doesn't go in glued onto it. Before the dynamic switch too: the switch is refused while
-      // anything is typed in the prompt. Only text that is one of ours goes; anything else typed there stays
+      // a message sent from here left in Claude Code's prompt (a Stop or Rewind's Esc put it back there), or typed from
+      // here with its Enter held back (a question came up first, or the page reloaded: typedTexts): cleared first, so
+      // the new one doesn't go in glued onto it. Before the dynamic switch too: the switch is refused while anything is
+      // typed in the prompt. Only text that is one of ours goes; anything else typed there stays
       let before = screenReady(id) ? boxNow(id) : null;
-      if (before && before.text && st.id === id && (sentTexts.get(id) || []).some((m) => bare(m) === bare(before.text))) {
+      if (before && before.text && st.id === id && [...(sentTexts.get(id) || []), ...typedTexts(id)].some((m) => bare(m) === bare(before.text))) {
         if (!(await clearBox(id))) { err('Couldn\'t clear the prompt: an earlier message is in it (Session tab)'); return; }
       }
       // a dynamic bot: its model and effort sized for this message, switched first when they need to be
@@ -1752,6 +1805,7 @@ export function mountCompose(slot, s) {
         await sleep(BANG_MS);
       }
       await typeInto((w) => t.write(id, w), typed.replace(/\r\n?/g, '\n'));
+      rememberTyped(id, typed);
       await sleep(ENTER_DELAY_MS);
       // Claude Code draws the text once it reads keys. Starting up, it can show its prompt seconds before it does,
       // and drops an Enter typed then (the message sat in its prompt, unsent): the Enter waits for the text, ECHO_MS
@@ -1764,7 +1818,8 @@ export function mountCompose(slot, s) {
       if (st.id === id && st.step) { st.step = ''; drawNotes(); }
       // (still not there: the keys went astray. No Enter then, and the draft stays for another try)
       if (before && echoed(id, typed, before.text) === false) { err('Claude Code didn\'t get the text: send it again'); return; }
-      if (blocked()) { err('A question came up before Enter: the text is in Claude\'s prompt, not sent'); return; }
+      // (the draft stays: once it is answered, Send types it afresh in place of what is in the prompt, never twice)
+      if (blocked()) { err('A question came up before Enter: the text is in Claude\'s prompt, not sent. Answer it, then send again'); return; }
       const seen = inPrompt(id, typed);
       t.write(id, '\r');
       keepSession(id);
@@ -1817,15 +1872,21 @@ export function mountCompose(slot, s) {
   // as the phone does), the card's answers, Stop, and the queue's Interrupt and Unsend go there (/link/answer,
   // /link/interrupt, /link/now, /link/unsend), and images too (/link/image, saved there). Rewind and Edit, bash mode,
   // a "/" command that opens a panel and the mode are its session's: a chip says they only work in a chat this machine
-  // runs. fleet-view.js and link-send.js serve the routes.
+  // runs. A send that got no answer says it may have gone in and keeps the draft; sending it again goes under the same id
+  // (linkSendOf), which that machine never runs twice. fleet-view.js and link-send.js serve the routes.
   function remoteOn() { return !hosts.get(st.id)?.alive && !!hostOfChat(st.s); }
   function planNow() { return followPlan(st.s, { local: !!hosts.get(st.id)?.alive, act: st.rem.act, online: st.rem.online, linked: st.rem.linked }); }
-  // one of this machine's page routes -> its JSON with status and ok (a 2xx that didn't say ok: false), message
+  // one of this machine's page routes -> its JSON with status and ok (a 2xx that didn't say ok: false), message. No
+  // answer within CALL_GET_MS (a read) or CALL_POST_MS (longer than any /link/ route waits on the other machine:
+  // /link/start's 95 s and the link's 5 s) gives up: status 0, noAnswer
   async function call(method, url, body) {
     let r, j = null;
-    const init = method === 'GET' ? { cache: 'no-store' } : { method, cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) };
-    try { r = await fetch(url, init); } catch { return { ok: false, status: 0, message: 'Fleet View did not answer' }; }
-    try { j = await r.json(); } catch {}
+    const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), method === 'GET' ? CALL_GET_MS : CALL_POST_MS);
+    const init = method === 'GET' ? { cache: 'no-store', signal: ctl.signal } : { method, cache: 'no-store', signal: ctl.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) };
+    try {
+      try { r = await fetch(url, init); } catch { return { ok: false, status: 0, ...(ctl.signal.aborted ? { noAnswer: true, message: 'Fleet View did not answer in time' } : { message: 'Fleet View did not answer' }) }; }
+      try { j = await r.json(); } catch {}
+    } finally { clearTimeout(timer); }
     const o = j && typeof j === 'object' && !Array.isArray(j) ? j : {};
     return { ...o, status: r.status, ok: r.ok && o.ok !== false, message: o.message || o.error || (r.ok ? '' : `Fleet View answered ${r.status}`) };
   }
@@ -1951,11 +2012,23 @@ export function mountCompose(slot, s) {
       if (st.id === id && st.step) { st.step = ''; drawNotes(); }
       const msg = messageText(text, paths);
       if (!msg) return false;
-      const r = await call('POST', '/link/send', { id, text: msg });
-      if (!r.ok) { err(r.message || `Couldn't send it to ${n}`); return false; }
+      // under its own id (linkSendOf): sent again after no answer, it is never run twice there
+      const op = linkSendOf(id, msg);
+      keepLinkSend(id, op);
+      const r = await call('POST', '/link/send', { id, text: msg, cid: op.cid, t0: op.t0 });
+      if (!r.ok) {
+        // no answer (that machine's, r.maybeSent, or this server's, status 0): it may have gone in, and the draft stays
+        // under the same id; any answer from there lets the id go
+        if (r.maybeSent) err(r.message || `${n} didn't answer: it may still arrive, so look at the chat before sending it again`);
+        else if (r.status === 0) err(`${r.message || 'Fleet View did not answer'}: it may have gone in, so look at the chat before sending it again`);
+        else { keepLinkSend(id, null); err(r.message || `Couldn't send it to ${n}`); }
+        return false;
+      }
+      keepLinkSend(id, null);
       const shots = list.filter((a) => !a.file).map((a) => { try { return URL.createObjectURL(a.blob); } catch { return null; } }).filter(Boolean);
       const shown = messageText(text, []);
-      pane.dispatchEvent(new CustomEvent('fv-chat-sent', { detail: { id, text: shown, images: shots, busy: st.busy || plan.why === 'busy', pick: null } }));
+      // remote: the chat runs on the other machine, which is slower to show it (chat.js waits longer before "Not sent")
+      pane.dispatchEvent(new CustomEvent('fv-chat-sent', { detail: { id, text: shown, images: shots, busy: st.busy || plan.why === 'busy', pick: null, remote: true } }));
       rememberSent(id, shown);
       st.rem.at = 0;
       if (fromBox) clearSent(id, raw, quote, list, false);

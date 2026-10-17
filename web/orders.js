@@ -176,7 +176,12 @@ async function deliver(s, text) {
 // localStorage (fv.orderQueue), so a reload (every update restarts the page) carries on with them, and they follow
 // a new session's re-key to its id. One still waiting after WAIT_MAX_MS, or whose session stopped running here
 // for WAIT_GONE_MS, is dropped. Several for one conversation go in oldest first, one per tick.
-//   onQueueDone(cb)   cb({ id, name, text, at }, { ok, message }) once each one is sent, fails or is dropped
+// Every window of the page loads this (the Bots pop-out too), from the same storage: what storage holds is the queue,
+// read again before each change and each tick (reread), and the tick runs in one window at a time (the 'fv-orders'
+// lock), so an order another window sent is never sent again here. One is marked sending in storage while it is typed:
+// found so later (the page reloaded mid-send), it may have gone in, so it is dropped saying so, never typed again.
+//   onQueueDone(cb)   cb({ id, name, text, at }, { ok, message, maybe? }) once each one is sent, fails or is dropped
+//                     (maybe: it was being typed when the page reloaded, so it may have gone in)
 //   queuedFor(id)     its waiting orders [{ id, name, text, at }]
 //   cancelQueued(id)  drops them -> how many
 //   setServerQueued(ids)  /state's queuedText: conversations the server has text waiting for; their orders here wait
@@ -186,22 +191,32 @@ let queue = loadQueue(), queueTimer = 0, ticking = false, serverQueued = new Set
 export function setServerQueued(ids) { serverQueued = new Set(Array.isArray(ids) ? ids : []); }
 const doneL = new Set();
 export function onQueueDone(cb) { doneL.add(cb); return () => doneL.delete(cb); }
-function loadQueue() {
+// the stored queue, or null when storage can't be read
+function storedQueue() {
   try {
     const list = JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]');
     return Array.isArray(list) ? list.filter((q) => q && typeof q.id === 'string' && typeof q.text === 'string' && Number.isFinite(q.at)) : [];
-  } catch { return []; }
+  } catch { return null; }
 }
+function loadQueue() { return storedQueue() || []; }
 function saveQueue() {
   try {
-    if (queue.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(queue.map(({ id, name, text, at, why }) => ({ id, name, text, at, why }))));
+    if (queue.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(queue.map(({ id, name, text, at, why, sending }) => ({ id, name, text, at, why, ...(sending ? { sending } : {}) }))));
     else localStorage.removeItem(QUEUE_KEY);
   } catch { /* storage blocked: it still waits while the page is open */ }
 }
+const sameOrder = (a, b) => a.id === b.id && a.text === b.text && a.at === b.at;
+// the queue as storage holds it now (another window may have sent, dropped or added one): an entry this window holds
+// keeps its own object and its timers (clearAt, goneAt). Storage that can't be read leaves this window's as it is
+function reread() {
+  const list = storedQueue();
+  if (list) queue = list.map((s) => { const m = queue.find((q) => sameOrder(q, s)); return m ? Object.assign(m, { sending: s.sending || 0 }) : s; });
+}
+// a change to the queue, on what storage holds now, written back
+function changeQueue(fn) { reread(); fn(); saveQueue(); }
 // why: what it is for, handed back to onQueueDone ('start': a new conversation's first message, sendWhenUp)
 function enqueue(s, text, why = null) {
-  if (!queue.some((q) => q.id === s.id && q.text === text)) queue.push({ id: s.id, name: s.name || 'conversation', text, at: Date.now(), ...(why ? { why } : {}) });
-  saveQueue();
+  changeQueue(() => { if (!queue.some((q) => q.id === s.id && q.text === text)) queue.push({ id: s.id, name: s.name || 'conversation', text, at: Date.now(), ...(why ? { why } : {}) }); });
   wake();
 }
 // a conversation just started here (a fork, a new chat): text goes in once its screen is up with no menu on it,
@@ -210,16 +225,16 @@ export function sendWhenUp(s, text) { if (s && s.id && String(text || '').trim()
 function wake() { if (!queueTimer && queue.length) queueTimer = setInterval(tick, WAIT_TICK_MS); }
 export const queuedFor = (id) => queue.filter((q) => q.id === id).map(({ name, text, at }) => ({ id, name, text, at }));
 export function cancelQueued(id) {
-  const n = queue.length;
-  queue = queue.filter((q) => q.id !== id);
-  saveQueue();
-  return n - queue.length;
+  let n = 0;
+  changeQueue(() => { n = queue.length; queue = queue.filter((q) => q.id !== id); n -= queue.length; });
+  return n;
 }
-function settle(q, ok, message) {
-  if (!queue.includes(q)) return; // cancelled meanwhile
-  queue = queue.filter((x) => x !== q);
-  saveQueue();
-  for (const f of doneL) { try { f({ id: q.id, name: q.name, text: q.text, at: q.at, why: q.why || null }, { ok, message }); } catch (e) { console.error(e); } }
+// maybe: not known to have gone in, nor known not to (onQueueDone's r.maybe)
+function settle(q, ok, message, maybe = false) {
+  let had = false;
+  changeQueue(() => { had = queue.some((x) => sameOrder(x, q)); queue = queue.filter((x) => !sameOrder(x, q)); });
+  if (!had) return; // cancelled meanwhile, or another window settled it
+  for (const f of doneL) { try { f({ id: q.id, name: q.name, text: q.text, at: q.at, why: q.why || null }, { ok, message, ...(maybe ? { maybe: true } : {}) }); } catch (e) { console.error(e); } }
 }
 // any menu on its screen (true), none (false), or null while its screen can't be read yet (the first look starts
 // building its view)
@@ -228,15 +243,26 @@ function anyMenu(id) {
   if (!screenReady(id) || !lines.length) return null;
   return !!parseMenu(lines);
 }
+// one window's tick at a time (see the top); a browser without locks ticks in each window, as before
+const ORDERS_LOCK = 'fv-orders', SENDING_STALE_MS = 60e3;
+const oneWindow = (fn, wait = false) => (navigator.locks ? navigator.locks.request(ORDERS_LOCK, wait ? {} : { ifAvailable: true }, (lock) => (lock ? fn() : null)) : fn());
 async function tick() {
   if (ticking) return;
-  if (!queue.length) { clearInterval(queueTimer); queueTimer = 0; return; }
+  if (!queue.length) { reread(); if (!queue.length) { clearInterval(queueTimer); queueTimer = 0; return; } }
   ticking = true;
+  try { await oneWindow(tickNow); } finally { ticking = false; }
+}
+async function tickNow() {
   try {
+    reread();
     const now = Date.now(), seen = new Set();
     for (const q of [...queue]) {
       if (seen.has(q.id)) continue;
       seen.add(q.id);
+      // marked sending by a tick that never finished (the page reloaded mid-send; with the lock, no other window is
+      // typing it now): it may have gone in, so it goes saying so, and is never typed twice
+      if (q.sending && (navigator.locks || now - q.sending > SENDING_STALE_MS)) { settle(q, false, 'the page reloaded while it was being typed, so look at the chat before sending it again', true); continue; }
+      if (q.sending) continue;
       if (now - q.at > WAIT_MAX_MS) { settle(q, false, 'still waiting after 2 hours, so it was dropped'); continue; }
       if (!termApi() || !isHosted(q.id)) {
         q.clearAt = 0;
@@ -250,16 +276,18 @@ async function tick() {
       if (anyMenu(q.id) !== false) { q.clearAt = 0; continue; }
       if (!q.clearAt) { q.clearAt = now; continue; }
       if (now - q.clearAt < WAIT_CLEAR_MS) continue;
+      // marked in storage while it is typed (see the top); gone from there meanwhile: another window had it
+      let mine = false;
+      changeQueue(() => { const m = queue.find((x) => sameOrder(x, q)); if (m && !m.sending) { m.sending = Date.now(); mine = true; } });
+      if (!mine) continue;
       const w = await sendText(q.id, q.text, { beforeEnter: () => anyMenu(q.id) !== false });
       settle(q, !!w.ok, w.ok ? 'sent' : w.message || 'not sent');
     }
-  } catch (e) { console.error(e); } finally { ticking = false; }
+  } catch (e) { console.error(e); }
 }
 // a new session's order follows it from new-<n> to its id; so does a team it is to join, and sendOrder waiting on it
 onRekey((oldKey, id) => {
-  let hit = false;
-  for (const q of queue) if (q.id === oldKey) { q.id = id; hit = true; }
-  if (hit) saveQueue();
+  if (queue.some((q) => q.id === oldKey) || (storedQueue() || []).some((q) => q.id === oldKey)) changeQueue(() => { for (const q of queue) if (q.id === oldKey) q.id = id; });
   rekeyed.set(oldKey, id);
   if (rekeyed.size > 50) rekeyed.delete(rekeyed.keys().next().value);
   for (const f of idWaits.get(oldKey) || []) f(id);
@@ -267,6 +295,8 @@ onRekey((oldKey, id) => {
   joinLater(oldKey, id);
 });
 wake();
+// another window changed the stored queue: this one looks again (it takes over what a closed window left waiting)
+window.addEventListener('storage', (e) => { if (e.key === QUEUE_KEY) { reread(); wake(); } });
 // the trust dialog (a new session in a folder Claude hasn't been told to trust), not another question
 function trustAsked(id) {
   return screenText(id, 40, { rows: true }).some((l) => /\btrust\b.*\b(folder|files|project)\b|\b(folder|files|project)\b.*\btrust\b/i.test(l));
@@ -311,16 +341,23 @@ function idOf(key, ms) {
 let joins = loadJoins(), joinPost = defaultPost;
 const joinL = new Set();
 export function onTeamJoin(cb) { joinL.add(cb); return () => joinL.delete(cb); }
-function loadJoins() {
+// the stored joins, or null when storage can't be read
+function storedJoins() {
   try {
     const list = JSON.parse(localStorage.getItem(JOINS_KEY) || '[]');
     return Array.isArray(list) ? list.filter((j) => j && typeof j.key === 'string' && typeof j.team === 'string' && Date.now() - j.at < JOIN_MAX_MS) : [];
-  } catch { return []; }
+  } catch { return null; }
 }
+function loadJoins() { return storedJoins() || []; }
 function saveJoins() {
   try { if (joins.length) localStorage.setItem(JOINS_KEY, JSON.stringify(joins)); else localStorage.removeItem(JOINS_KEY); } catch { /* storage blocked */ }
 }
-async function joinLater(key, id) {
+// (the re-key reaches every window: each claims its joins under the orders lock, from what storage holds then, so one
+// window posts each join, once)
+function joinLater(key, id) { return oneWindow(() => claimJoins(key, id), true); }
+async function claimJoins(key, id) {
+  const stored = storedJoins();
+  if (stored) joins = stored;
   const mine = joins.filter((j) => j.key === key);
   if (!mine.length) return;
   joins = joins.filter((j) => j.key !== key);
@@ -381,6 +418,9 @@ export async function sendOrder(sessions, text, o = {}) {
     // still keyed: it joins once it has its id (joinLater), and gets the brief then; the lead joins as the lead
     if (keyed.length) {
       joinPost = post;
+      // (onto what storage holds now: another window may have claimed some since this one read them)
+      const stored = storedJoins();
+      if (stored) joins = stored;
       joins.push(...keyed.map((s) => ({ key: s.id, name: s.name || 'new session', team: team.id, teamName: team.name, at: Date.now(), ...(s.id === leadKey ? { lead: true } : {}) })));
       saveJoins();
       for (const s of keyed) { const id = rekeyed.get(s.id); if (id) joinLater(s.id, id); }

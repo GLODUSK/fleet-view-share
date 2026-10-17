@@ -359,6 +359,17 @@ async function main() {
   hub.drop = null;
   ok(dropped === 1 && r.s === 200 && r.b.text === 'once', `the answer lost once: asked again, it came (${r.s})`);
   eq(A.seen.filter((x) => x.path === `/api/sessions/${SID}/message`).length - before, 1, 'the server got that message once');
+  // every answer lost until the call gives up (timeout, not offline: it went), then a second call under the caller's
+  // own id and first try's time (the page's Send again, link-send.js cid and t0): the kept answer, the server ran it once
+  hub.drop = (f, sock) => sock.kind === 'relay:PC';
+  const before2 = A.seen.filter((x) => x.path === `/api/sessions/${SID}/message`).length;
+  const mine2 = { id: 'pageSend-0123456789ab', t0: clock.t };
+  r = await pass(R.link.call(A.id, 'POST', `/api/sessions/${SID}/message`, { b: { text: 'twice?' }, timeoutMs: 20e3, ...mine2 }));
+  hub.drop = null;
+  ok(r.s === 0 && r.b.code === 'timeout', `no answer at all: timeout (${r.s} ${r.b && r.b.code})`);
+  r = await pass(R.link.call(A.id, 'POST', `/api/sessions/${SID}/message`, { b: { text: 'twice?' }, ...mine2 }));
+  ok(r.s === 200 && r.b.text === 'twice?', `the same id again: the first run's answer (${r.s})`);
+  eq(A.seen.filter((x) => x.path === `/api/sessions/${SID}/message`).length - before2, 1, 'the server got it once across the two calls');
 
   // ---------- a phone on the PC's relay: never the /peer/ routes ----------
   const [pc, po] = await A.relay.pair('Test iPhone');

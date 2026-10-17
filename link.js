@@ -55,11 +55,13 @@
 // again (a new nonce and at, the same t0) every 8 s and after every rejoin, which the relay answers from what it kept
 // (a POST never runs twice; one it can't tell about gets 409 restarted or expired), for the route's time on the relay
 // plus 5 s. The notice 'pc-closing' fails what is in flight (code 'pc-restarted': a POST may have gone in); 'revoked'
-// unlinks.
+// unlinks. A caller that sends the same thing again after one of those (the page's Send once more, link-send.js) gives
+// it the id and t0 of its first call (opt.id, opt.t0), so the relay answers that call's run instead of running it twice;
+// a second call under an id still waiting here gets the first one's answer.
 //
 //   createLink({ api, key, dataDir, log, relay, device, now, timing, name, version, WebSocketImpl, timers, keyStore,
 //                readConfig })
-//     -> { start(), stop(), tick(), status(), peers(), online(deviceId), call(deviceId, m, p, { q, b, etag, timeoutMs }),
+//     -> { start(), stop(), tick(), status(), peers(), online(deviceId), call(deviceId, m, p, { q, b, etag, timeoutMs, id, t0 }),
 //          request(deviceId), unlink(deviceId) }
 //   api: sync-api.js createSync()'s object (rest, uid, accessToken); key: the 32-byte sync key (the rows); relay:
 //   relay.js createRelay()'s object (addComputer, removeComputer); device() -> this machine's sync device id (or
@@ -110,6 +112,8 @@ const OFF_RE = /^link-off:([0-9a-f-]{36}):([0-9a-f-]{36})$/;
 const offKey = (a, b) => (a < b ? `link-off:${a}:${b}` : `link-off:${b}:${a}`);
 const SKEW_MS = 5 * 60e3, NONCE_MS = 10 * 60e3, ASSEMBLY_MS = 60e3, ASSEMBLIES_MAX = 4, INFLATE_MAX = 64 << 20;
 const WAIT_CAP_S = 50;
+// a caller's own call id (the relay takes 1 to 32 of these), and how old its first try's time may be (older: a new one)
+const CALL_ID_RE = /^[A-Za-z0-9_-]{16,32}$/, CALL_T0_MAX_MS = 24 * 3600e3;
 const FINAL = new Set(['linked', 'declined', 'failed', 'expired', 'cancelled']);
 const INCOMING_MAX = 3; // pairings another machine asked for, at once
 
@@ -376,12 +380,13 @@ function createLink(o = {}) {
     cancel(r.timer); cancel(r.again);
     r.resolve(res || linkFail(code, conn.peer));
   }
-  // (not joined: nothing goes now; the next resend, the join or the other machine's presence sends it)
+  // (not joined: nothing goes now; the next resend, the join or the other machine's presence sends it). went: it left
+  // at least once, so a call that times out may have run there (code 'timeout', never 'offline')
   function resend(conn, r) {
     if (conn.pending.get(r.id) !== r) return;
     cancel(r.again);
     r.msg.at = now();
-    sendText(conn, r.id, JSON.stringify(r.msg));
+    if (sendText(conn, r.id, JSON.stringify(r.msg))) r.went = true;
     r.again = later(() => resend(conn, r), tm.resendMs);
   }
   function call(deviceId, m, p, opt = {}) {
@@ -390,8 +395,13 @@ function createLink(o = {}) {
     if (!running || !peers.has(peer)) return Promise.resolve(linkFail(running ? 'not_linked' : 'stopped', peer));
     if (!conn) return Promise.resolve(linkFail('offline', peer));
     if (conn.ch && conn.ch.present('pc') === false) return Promise.resolve(linkFail('offline', peer));
-    const id = b64u(crypto.randomBytes(16)), t0 = now();
-    const msg = { t: 'req', id, at: t0, m, p, t0 };
+    // the caller's id and first try's time when it sends the same thing again (see the top), else new ones
+    const id = typeof opt.id === 'string' && CALL_ID_RE.test(opt.id) ? opt.id : b64u(crypto.randomBytes(16));
+    const had = conn.pending.get(id);
+    if (had) return had.done;
+    // (an old t0 goes as it is: the relay then answers 409 expired rather than run it again)
+    const at = now(), t0 = Number.isFinite(opt.t0) && opt.t0 <= at && at - opt.t0 < CALL_T0_MAX_MS ? opt.t0 : at;
+    const msg = { t: 'req', id, at, m, p, t0 };
     if (opt.q && typeof opt.q === 'object') msg.q = opt.q;
     if (m === 'POST') msg.b = opt.b && typeof opt.b === 'object' ? opt.b : {};
     if (typeof opt.etag === 'string') msg.etag = opt.etag;
@@ -399,14 +409,16 @@ function createLink(o = {}) {
     const b = msg.b;
     if (b && typeof p === 'string' && p.startsWith('/api/') && 'wait' in b && b.wait !== false && b.wait !== null && b.wait !== 0) waitS = typeof b.wait === 'number' && b.wait > 0 ? Math.min(WAIT_CAP_S, Math.ceil(b.wait)) : WAIT_CAP_S;
     const ms = Number(opt.timeoutMs) > 0 ? Number(opt.timeoutMs) : R.routeTimeout(m, p, waitS) + tm.callExtraMs;
-    return new Promise((resolve) => {
-      const r = { id, msg, resolve, timer: null, again: null };
+    let r = null;
+    const done = new Promise((resolve) => {
+      r = { id, msg, resolve, timer: null, again: null };
       const text = JSON.stringify(msg);
-      if (text.length > R.PART_MAX && R.slices(text).length > R.PARTS_MAX) return resolve(linkFail('too_large', peer));
+      if (text.length > R.PART_MAX && R.slices(text).length > R.PARTS_MAX) { r = null; return resolve(linkFail('too_large', peer)); }
       conn.pending.set(id, r);
-      r.timer = later(() => finishCall(conn, r, null, conn.ch && conn.ch.present('pc') === false ? 'offline' : 'timeout'), ms);
-      resend(conn, r);
+      r.timer = later(() => finishCall(conn, r, null, !r.went && conn.ch && conn.ch.present('pc') === false ? 'offline' : 'timeout'), ms);
     });
+    if (r) { r.done = done; resend(conn, r); }
+    return done;
   }
   function online(deviceId) {
     const conn = conns.get(lower(deviceId));

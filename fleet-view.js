@@ -8646,7 +8646,7 @@ function awayEntry(id) {
 // Stop, activity, menu and images go to that machine through the link; GET /conversation reads it there while the
 // link is up (conversationRoute)
 // (and POST /link/start: a new chat on the main computer, in its own checkout of the repo: PREFS_ROOTS names the repo)
-const LINK_SEND = LINK_SEND_JS.createLinkSend({ link: () => (DEMO ? null : SYNC_RUNNER.link()), owners: () => syncOwners(), away: awayEntry, rootOut: (root) => PREFS_ROOTS.out(root) });
+const LINK_SEND = LINK_SEND_JS.createLinkSend({ link: () => (DEMO ? null : SYNC_RUNNER.link()), owners: () => syncOwners(), away: awayEntry, rootOut: (root) => PREFS_ROOTS.out(root), log: logLine });
 const LINK_CHAT = new Set(['/link/send', '/link/answer', '/link/interrupt', '/link/now', '/link/unsend', '/link/activity', '/link/menu', '/link/image', '/link/start']);
 // a JSON body of at most max bytes -> done(json | null); past max: 413 and nothing more is read
 function readBodyMax(req, res, max, done) {
@@ -9168,6 +9168,21 @@ function exitWith(code, reason) {
   const t = setTimeout(() => process.exit(code), SYNC_STOP_MS);
   Promise.allSettled(stops.map((f) => Promise.resolve().then(f))).then(() => { clearTimeout(t); process.exit(code); });
 }
+// An update's reload (exit 75) first lets what the automation API is typing into a session finish (api.js drain: a
+// message half pasted would stay in its prompt, and its caller would never hear whether it went), DRAIN_MS at most;
+// meanwhile the API turns new changes away (503, Retry-After) and fv sends them again to the next server. Once only.
+const DRAIN_MS = 10e3;
+let reloading = false;
+function reloadAfterDrain(server) {
+  if (reloading || exiting) return;
+  reloading = true;
+  let wait = null;
+  try { wait = API.drain(DRAIN_MS); } catch (e) { logLine(`update: the API's drain failed: ${e.message}`); }
+  Promise.resolve(wait).then((d) => {
+    if (d && d.left) logLine(`update: ${d.left} send${d.left === 1 ? '' : 's'} still in flight after ${Math.round(d.ms / 1000)} s; reloading anyway`);
+    else if (d && d.ms >= 500) logLine(`update: waited ${(d.ms / 1000).toFixed(1)} s for the API's sends in flight`);
+  }, () => {}).then(() => { server.close(); exitWith(EXIT_UPDATE, 'update'); });
+}
 // The desktop window's supervisor (desktop/server.js) hands the server a pipe (FV_EXIT_NOTICE_FD) and reads
 // "exiting <code>" from it, written synchronously as the last JS of every exit: when the process then stays alive
 // (something native holding teardown after the exit handlers, GLODUSK/fleet-view#574), the window ends it after a
@@ -9279,7 +9294,7 @@ function startWeb() {
     else if (!NO_OPEN) openWindow();
     // Ctrl+C, a kill, or the console window closing (SIGHUP on Windows): a clean stop, so the loop ends
     for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => exitWith(0, sig));
-    watchForUpdates((names) => { console.log(`${names} changed: reloading`); logLine(`${names} changed on disk: reloading (exit 75)`); server.close(); exitWith(EXIT_UPDATE, 'update'); });
+    watchForUpdates((names) => { console.log(`${names} changed: reloading`); logLine(`${names} changed on disk: reloading (exit 75)`); reloadAfterDrain(server); });
     // test only: FV_TEST_CRASH=1 throws an exception nothing catches 3 s after start, to check the crash log and restart
     // updates from the folder's git upstream (updater.js): the page's "Update available" pill. Busy counts only the
     // chats this machine runs: one another device runs (s.remote, its state copied from there) never holds it back

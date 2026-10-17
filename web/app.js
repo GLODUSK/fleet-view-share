@@ -3251,12 +3251,14 @@ async function runOrder(list, text, o) {
 // an order waiting for a conversation's question or trust prompt to be answered (orders.js) goes in by itself:
 // a toast says when, or why it didn't; its right-click menu can cancel it
 onQueueDone((q, r) => {
+  // (maybe: the page reloaded while it was typed: it may have gone in)
+  const not = r.maybe ? 'may have gone in' : 'not sent';
   if (q.why === 'start') {
-    if (!r.ok) toast(`Your message for ${q.name} was not sent: ${r.message}`, C.red, null, 9000);
+    if (!r.ok) toast(`Your message for ${q.name} ${r.maybe ? not : `was ${not}`}: ${r.message}`, C.red, null, 9000);
     render();
     return;
   }
-  toast(r.ok ? `Order sent to ${q.name} after it was answered` : `Order for ${q.name} not sent: ${r.message}`, r.ok ? C.mint : C.red, null, r.ok ? 0 : 9000);
+  toast(r.ok ? `Order sent to ${q.name} after it was answered` : `Order for ${q.name} ${not}: ${r.message}`, r.ok ? C.mint : C.red, null, r.ok ? 0 : 9000);
   render();
 });
 function waitingOrderItem(s) {

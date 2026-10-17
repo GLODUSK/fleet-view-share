@@ -36,6 +36,8 @@
 //   ops: open(o), create(o) (o.chrome, o.forkFrom, o.model, o.effort, o.role: see create below), write(id, data), resize(id, cols, rows), kill(id), list(), snapshot(id),
 //        endAll(graceMs), killAll(), setUi(ui), quitAll({ ui }), restart({ now, by }) (see Restart), log(text), parked(),
 //        sendTo(o), switchAccount({ id, account, rescue }) (see Switching accounts)
+//   write answers true, or { ok: false, reason } when nothing (or not all of it) was typed: 'not found', 'ended',
+//   'ending' (a restart, a quit or a close is ending it), 'truncated' (past 1 MB in one write)
 //   events: { t: 'ev', e: 'data', id, d } / { e: 'exit', id, code } / { e: 'rekey', from, id } / { e: 'sessions', list }
 // list() gives each session: id, pid, alive, exitCode, startedAt, pending, created, forkFrom, cwd, handoffFrom,
 // pickingUp, account, status, waitingFor (what its pid file says it waits for, while waiting), claudePid,
@@ -1260,9 +1262,14 @@ function createPtys(opts = {}) {
     });
   }
 
+  // -> null when it went in, else why not: 'not found', 'ended', 'ending' (a restart, a quit or a close is ending it:
+  // the keys would go into a claude on its way out), 'truncated' (past 1 MB in one write: the rest is cut off)
   function write(id, data) {
     const t = terms.get(id);
-    if (!t || !t.alive || typeof data !== 'string' || !data) return;
+    if (typeof data !== 'string' || !data) return null;
+    if (!t) return 'not found';
+    if (!t.alive) return 'ended';
+    if (t.dismissed) return 'ending';
     if (t.interrupted && data.includes('\r')) { t.interrupted = false; changed(); }
     if (!AUTO_REPLY_RE.test(data)) {
       t.inputAt = Date.now();
@@ -1270,7 +1277,8 @@ function createPtys(opts = {}) {
       if (t.nudge) { log(`auto-continue: ${t.id} cancelled (typed into)`); t.nudge = null; changed(); }
       track(t, data.length > 4096 ? data.slice(0, 4096) : data);
     }
-    try { t.pty.write(data.length > 1 << 20 ? data.slice(0, 1 << 20) : data); } catch {}
+    try { t.pty.write(data.length > 1 << 20 ? data.slice(0, 1 << 20) : data); } catch { return 'ended'; }
+    return data.length > 1 << 20 ? 'truncated' : null;
   }
 
   // Roughly what is typed into the prompt since the last Enter (t.line, at most 200 characters), across writes:
@@ -2174,7 +2182,11 @@ function runHost() {
             model: typeof o.model === 'string' && MODEL_RE.test(o.model) ? o.model : undefined, effort: EFFORT_LEVELS.has(o.effort) ? o.effort : undefined,
             role: roleOf(o.role) || undefined }));
         }
-        case 'write': if (typeof a[0] === 'string' && KEY_RE.test(a[0])) ptys.write(a[0], a[1]); return reply(true);
+        // true, or { ok: false, reason } when it could not be typed (ptys.write), so a sender can say "not sent" at once
+        case 'write': {
+          const why = typeof a[0] === 'string' && KEY_RE.test(a[0]) ? ptys.write(a[0], a[1]) : 'not found';
+          return reply(why ? { ok: false, reason: why } : true);
+        }
         case 'resize': if (typeof a[0] === 'string' && KEY_RE.test(a[0])) ptys.resize(a[0], Number(a[1]), Number(a[2])); return reply(true);
         case 'kill': if (typeof a[0] === 'string' && KEY_RE.test(a[0])) ptys.kill(a[0]); return reply(true);
         case 'list': return reply(ptys.list());

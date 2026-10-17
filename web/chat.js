@@ -30,7 +30,9 @@
 // and queues the others again; the reply's `queue` says what is queued). Fork and New chat take it out the same way
 // and hand it to a new conversation instead ('fv-chat-fork' on window, app.js): a fork of this one (its history) or
 // a fresh one in its folder, which gets the message once it is up. One Claude Code kept in its prompt after the
-// Enter ('fv-chat-stuck' from compose.js) says "Not sent", with Send it ('fv-chat-enter': Enter once more).
+// Enter ('fv-chat-stuck' from compose.js) says "Not sent", with Send it ('fv-chat-enter': Enter once more). One that
+// never reached Claude (not in the transcript nor in Claude Code's queue after a while; a queued one once it fell out of
+// that queue) says "Not sent" too, with Send again (markLost).
 // A long message (yours, sent or shown) folds to a few lines behind a "Show all N lines" pill (or a click on its
 // faded text), like Claude Code's pasted text; open, its "Show less" stays at the feed's bottom while it scrolls by.
 // Rewind on one of your messages ('fv-chat-rewind') runs Claude Code's /rewind back to just before it; the
@@ -1072,7 +1074,8 @@ function addSent(c, d) {
   // used: the user messages and notes already in the feed (or matched to another sent one), which can't be this one
   const used = new Set(c.items.filter((it) => it.kind === 'user' || it.kind === 'note').map((it) => String(it.key)));
   const text = norm(d.text), cmd = /^\/[^\s/]+/.exec(text)?.[0] || null;
-  c.sent.push({ at: Date.now(), text, raw: String(d.text || ''), cmd, images: d.images || [], el, used, queued: !!d.busy });
+  // remote: sent to the machine that runs the chat (compose.js sendRemote), which markLost judges more slowly
+  c.sent.push({ at: Date.now(), text, raw: String(d.text || ''), cmd, images: d.images || [], el, used, queued: !!d.busy, remote: !!d.remote });
   c.outbox.appendChild(el);
   if (!d.busy) c.wake?.(); // the transcript is looked for at once, and often (see loop)
   syncPicks(c); // a launch typed by hand greys its options at once
@@ -1207,13 +1210,21 @@ function settleSent(c) {
   }
   markLost(c, now);
 }
-// a message still unmatched after LOST_MS, not queued and not in Claude Code's queue, never reached Claude: say so,
-// with Send again, rather than leave it looking sent until SENT_MAX_MS
-const LOST_MS = 30 * 1000;
+// a message still unmatched after LOST_MS and not in Claude Code's queue never reached Claude: say so, with Send again,
+// rather than leave it looking sent until SENT_MAX_MS. One sent while Claude worked (queued) is judged once Claude Code's
+// queue has held it (inQueueAt), from the last time it did: one that fell out of that queue (a Stop, or Claude Code let
+// it go) and never reached the transcript is lost too; one that went in with others as one message (the transcript has
+// a message holding it) is taken as sent. One sent to the machine that runs the chat (remote) waits REMOTE_LOST_MS (that
+// machine may resume the chat first), and only while the feed is read there (c.src): this machine's copy can't tell
+const LOST_MS = 30 * 1000, REMOTE_LOST_MS = 3 * 60 * 1000;
 function markLost(c, now) {
   const queued = new Set((c.queue || []).map((q) => norm(typeof q === 'string' ? q : q?.text)));
   for (const s of c.sent) {
-    if (s.cmd || s.queued || s.lost || now - s.at < LOST_MS || queued.has(s.text)) continue;
+    if (queued.has(s.text)) s.inQueueAt = now;
+    // (one being taken out of the queue, Unsend, is its own to settle)
+    if (s.cmd || s.lost || s.unsending || queued.has(s.text) || (s.queued && !s.inQueueAt) || (s.remote && (!c.src || c.src === 'local'))) continue;
+    if (now - (s.queued ? s.inQueueAt : s.at) < (s.remote ? REMOTE_LOST_MS : LOST_MS)) continue;
+    if (s.queued && c.items.some((it) => it.kind === 'user' && (Number(it.t) || 0) >= s.at - 5000 && norm(userShown(it.text)).includes(s.text.slice(0, 60)))) { dropSent(c, s); continue; }
     const stEl = s.el.querySelector('.cu-status');
     if (!stEl || stEl.classList.contains('stuck')) continue;
     s.lost = true;

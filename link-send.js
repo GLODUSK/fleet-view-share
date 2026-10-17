@@ -6,7 +6,7 @@
 // runs; nothing is written into its log here. fleet-view.js serves the routes (this machine's own page only, as the
 // other /link/* routes) and asks conversation() before it answers GET /conversation from this machine's copy.
 //
-//   createLinkSend({ link, owners, away, rootOut })
+//   createLinkSend({ link, owners, away, rootOut, log })
 //     link()     -> link.js's object while sync runs, else null
 //     owners()   -> sync-run.js owners(): Map<id, { device, name, live, moving, bound? }> (the chats another device
 //                   owns, and the ones moving between it and this one), or null
@@ -14,13 +14,18 @@
 //                   host still refuses it as another machine's (sync-run.js keeps away.json on a lost sign-in)
 //     rootOut(folder) -> the repo a folder here is, as every machine knows it: { origin, name } (sync-prefs.js
 //                   makeTranslate's out), or null
+//     log(line)  -> how each send and start went, one line (never the text)
 //   -> { route(m, pathname, q, b) -> Promise<[status, json]> | null (null: not one of these routes), hostOf(id),
 //        conversation(id, q) -> Promise<json | null> }
 //
 // The routes ([method path] { what the page sends } -> the host's route, through the link):
-//   POST /link/send      { id, text }                                  POST /api/sessions/:id/message { text, queue,
+//   POST /link/send      { id, text, cid?, t0? }                       POST /api/sessions/:id/message { text, queue,
 //                                                                      open }: queued behind a menu there, resumed
 //                                                                      there when it isn't running
+// cid and t0 (on /link/send and /link/start): the page's own id for that send (16 to 32 of A-Z a-z 0-9 _ -) and the time
+// of its first try. The page sends the same ones when it sends that text again after no answer, and the link's call goes
+// under them (link.js call opt.id, opt.t0), so the relay answers the first run's answer rather than running it twice
+// (or 409 restarted or expired when it can't tell: check the chat first).
 //   POST /link/answer    { id, option, sig?, text?, allowPermission? }  POST /api/sessions/:id/answer
 //   POST /link/interrupt { id }                                        POST /api/sessions/:id/interrupt (Esc once)
 //   POST /link/now       { id }                                        POST /api/sessions/:id/now
@@ -35,6 +40,8 @@
 //   not_running 409 (sync isn't running here, so the link isn't either), not_linked 409 ("<host> isn't linked with
 //   this machine yet: …"), revoked 409, pc-restarted 409 (the host restarted mid-request: a POST may have gone in),
 //   offline 503, stopped 503, timeout 504, and bad_answer 502 (the host answered with something that isn't JSON).
+//   A POST that went and got no answer (timeout, pc-restarted, unreached) also has maybeSent: true, and its message
+//   says it may still arrive: look at the chat before sending it again.
 // Only the routes' own fields go on, and never a body field the page did not set here: a page can't reach any other
 // route of the host's through these.
 //
@@ -70,18 +77,28 @@ const CONV_MS = 15000; // a feed read from the host: the page asks again a secon
 const PROBE_MS = 12000; // /link/start's GET /peer/status first: an awake machine answers in a second or two (link.js
 // sends a waiting request again every 8 s, so this gives it a second try)
 
-// what a call that reached no answer means for the page -> [status, code, message]
-function unreached(code, name) {
+// what a call that reached no answer means for the page -> [status, code, message, maybeSent]. post: a POST, which
+// may have been done there when it went and no answer came (timeout, pc-restarted, unreached): its words say so
+const MAYBE = ': it may still arrive, so look at the chat before sending it again';
+function unreached(code, name, post = false) {
   switch (code) {
-    case 'not_linked': return [409, 'not_linked', `${name} isn't linked with this machine yet: they link by themselves while both are online (press Link in the Sync card if you unlinked it)`];
-    case 'revoked': return [409, 'revoked', `${name} unlinked this machine: press Link in the Sync card to link them again`];
-    case 'offline': return [503, 'offline', `${name} is offline`];
-    case 'timeout': return [504, 'timeout', `${name} didn't answer in time`];
-    case 'pc-restarted': return [409, 'pc-restarted', `${name} restarted while this was being sent: check before sending it again`];
-    case 'stopped': return [503, 'stopped', 'Sync stopped on this machine'];
-    case 'too_large': return [413, 'too_large', `That is too large to send to ${name}`];
-    default: return [502, code || 'unreached', `${name} could not be reached`];
+    case 'not_linked': return [409, 'not_linked', `${name} isn't linked with this machine yet: they link by themselves while both are online (press Link in the Sync card if you unlinked it)`, false];
+    case 'revoked': return [409, 'revoked', `${name} unlinked this machine: press Link in the Sync card to link them again`, false];
+    case 'offline': return [503, 'offline', `${name} is offline`, false];
+    case 'timeout': return [504, 'timeout', `${name} didn't answer in time${post ? MAYBE : ''}`, post];
+    case 'pc-restarted': return [409, 'pc-restarted', `${name} restarted while this was being sent${post ? MAYBE : ''}`, post];
+    case 'stopped': return [503, 'stopped', 'Sync stopped on this machine', false];
+    case 'too_large': return [413, 'too_large', `That is too large to send to ${name}`, false];
+    default: return [502, code || 'unreached', `${name} could not be reached${post ? MAYBE : ''}`, post];
   }
+}
+// the page's own id for a send and its first try's time (see cid and t0 at the top) -> link.js call's { id, t0 }, or
+// {} when it gave none; a string when one is not right
+function sendOnce(b) {
+  if (b.cid == null && b.t0 == null) return {};
+  if (typeof b.cid !== 'string' || !/^[A-Za-z0-9_-]{16,32}$/.test(b.cid)) return 'cid must be 16 to 32 letters, digits, - or _';
+  if (!Number.isFinite(b.t0) || b.t0 <= 0) return 't0 must be the time of the first try (ms)';
+  return { id: b.cid, t0: b.t0 };
 }
 
 const isText = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
@@ -143,7 +160,22 @@ function createLinkSend(o = {}) {
   const ownersOf = typeof o.owners === 'function' ? o.owners : () => null;
   const awayOf = typeof o.away === 'function' ? o.away : () => null;
   const rootOutOf = typeof o.rootOut === 'function' ? o.rootOut : () => null;
-  const no = (s, code, message) => [s, { ok: false, code, message }];
+  const log = typeof o.log === 'function' ? o.log : () => {};
+  const no = (s, code, message, maybeSent = false) => [s, { ok: false, code, message, ...(maybeSent ? { maybeSent: true } : {}) }];
+  // one line for a send or a start (never its text): to which machine, under which id, and how it went
+  const said = (what, id, name, once, r) => {
+    try { log(`link: ${what}${id ? ` ${id.slice(0, 8)}` : ''} on ${name}${once.id ? ` (send ${once.id.slice(0, 8)}${once.retry ? ', again' : ''})` : ''}: ${r[0]}${r[1] && r[1].ok === false ? ` ${r[1].code || ''} ${r[1].message || ''}`.trimEnd() : ''}`); } catch {}
+    return r;
+  };
+  const sent = new Map(); // the page's send ids seen lately -> when, so the log says "again" (at most 200)
+  const onceOf = (b) => {
+    const once = sendOnce(b);
+    if (typeof once === 'string' || !once.id) return once;
+    const retry = sent.has(once.id);
+    sent.set(once.id, Date.now());
+    if (sent.size > 200) sent.delete(sent.keys().next().value);
+    return { ...once, retry };
+  };
 
   // POST /link/start (see the top): a new chat on that machine, in its own checkout of the repo
   async function start(m, b) {
@@ -153,6 +185,8 @@ function createLinkSend(o = {}) {
     if (!UUID_RE.test(device)) return no(400, 'bad_device', 'device must be a sync device id');
     const body = startBody(x);
     if (typeof body === 'string') return no(400, 'bad_request', body);
+    const once = onceOf(x);
+    if (typeof once === 'string') return no(400, 'bad_request', once);
     let r = null;
     try { r = rootOutOf(x.repo); } catch {}
     const origin = r && typeof r.origin === 'string' && r.origin ? r.origin : null;
@@ -181,16 +215,16 @@ function createLinkSend(o = {}) {
       return no(s, code, message);
     }
     let res;
-    try { res = await link.call(device, 'POST', '/api/sessions', { b: { ...body, repoOf: { origin, name: rname } } }); } catch (e) { res = { s: 0, b: { code: 'unreached', message: String((e && e.message) || e) } }; }
+    try { res = await link.call(device, 'POST', '/api/sessions', { b: { ...body, repoOf: { origin, name: rname } }, id: once.id, t0: once.t0 }); } catch (e) { res = { s: 0, b: { code: 'unreached', message: String((e && e.message) || e) } }; }
     if (!res || !res.s) {
       // it went off while the start was on its way (see the top): it may have started there, so a time-out
       const rc = res && res.b && res.b.code;
-      if (rc === 'offline') return no(504, 'timeout', `${name} went offline before it answered`);
-      const [s, code, message] = unreached(rc, name);
-      return no(s, code, message);
+      if (rc === 'offline') return said('start', null, name, once, no(504, 'timeout', `${name} went offline before it answered${MAYBE}`, true));
+      const [s, code, message, maybe] = unreached(rc, name, true);
+      return said('start', null, name, once, no(s, code, message, maybe));
     }
-    if (res.b === undefined || res.b === null || typeof res.b !== 'object' || Array.isArray(res.b)) return no(502, 'bad_answer', `${name} answered ${res.s} without the expected JSON`);
-    return [res.s, { ...res.b, host: { device, name } }];
+    if (res.b === undefined || res.b === null || typeof res.b !== 'object' || Array.isArray(res.b)) return said('start', null, name, once, no(502, 'bad_answer', `${name} answered ${res.s} without the expected JSON`));
+    return said('start', null, name, once, [res.s, { ...res.b, host: { device, name } }]);
   }
 
   // the machine another device's chat runs on: { device, name, moving } or null
@@ -215,6 +249,9 @@ function createLinkSend(o = {}) {
       body = r.body(b && typeof b === 'object' ? b : {});
       if (typeof body === 'string') return no(400, 'bad_request', body);
     }
+    // a send's own id and first try's time (see cid and t0 at the top)
+    const once = pathname === '/link/send' ? onceOf(b && typeof b === 'object' ? b : {}) : {};
+    if (typeof once === 'string') return no(400, 'bad_request', once);
     const h = hostOf(id);
     if (!h) {
       let a = null;
@@ -227,16 +264,18 @@ function createLinkSend(o = {}) {
     try { link = linkOf(); } catch {}
     if (!link || typeof link.call !== 'function') return no(409, 'not_running', `Sync isn't running on this machine, so it can't reach ${h.name}`);
     let res;
-    try { res = await link.call(h.device, r.m, r.path(id), r.m === 'POST' ? { b: body } : {}); } catch (e) { res = { s: 0, b: { code: 'unreached', message: String((e && e.message) || e) } }; }
+    try { res = await link.call(h.device, r.m, r.path(id), r.m === 'POST' ? { b: body, id: once.id, t0: once.t0 } : {}); } catch (e) { res = { s: 0, b: { code: 'unreached', message: String((e && e.message) || e) } }; }
+    // (a send's outcome goes in the log, never its text)
+    const out = pathname === '/link/send' ? (x) => said('send to', id, h.name, once, x) : (x) => x;
     if (!res || !res.s) {
-      const [s, code, message] = unreached(res && res.b && res.b.code, h.name);
-      return no(s, code, message);
+      const [s, code, message, maybe] = unreached(res && res.b && res.b.code, h.name, r.m === 'POST');
+      return out(no(s, code, message, maybe));
     }
     if (res.b === undefined || res.b === null || typeof res.b !== 'object') {
-      if (res.s === 204) return [200, { ok: true }];
-      return no(502, 'bad_answer', `${h.name} answered ${res.s} without the expected JSON`);
+      if (res.s === 204) return out([200, { ok: true }]);
+      return out(no(502, 'bad_answer', `${h.name} answered ${res.s} without the expected JSON`));
     }
-    return [res.s, res.b];
+    return out([res.s, res.b]);
   }
 
   // GET /conversation for a chat another machine hosts, read there (see the top)

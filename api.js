@@ -28,6 +28,16 @@
 // So the session's screen is read before the paste and again just before the Enter (its output played into a
 // small terminal grid, screen.js), and a menu there turns the send down with 409. A menu is answered only on
 // purpose (POST .../answer), and any menu but a question (a permission prompt, the plan approval) only with allowPermission.
+// Nor after text someone else typed into its prompt (Henry's half-written line): the two would go as one message, so
+// that turns it down too (boxReady); what this server typed there itself and left (a menu came up before its Enter) is
+// cleared first. A write the session host could not make (the session ended, or is ending in a restart) says so: the
+// send answers "not sent" at once rather than "sent".
+//
+// Sends that are asked for again: a caller gives a message or a start a clientId, and gives it again when the answer
+// never came (fv, when the server restarted under it). Its receipt (receipts below, kept on disk for ten minutes)
+// answers the repeat: the first one's answer, a wait for the turn it started, or 409 maybeSent when a restart left it
+// unknown; the text is never typed twice. A restart for an update first lets what is being typed finish (drain), and
+// turns new changes away (503 draining, Retry-After) until the next server takes them.
 'use strict';
 const fs = require('fs');
 const net = require('net');
@@ -253,17 +263,31 @@ function pasteWrites(text) {
 // 10 to 100 lines, typed then sent): every write arrives, as plain text, in no time. The Alt+Enter (ESC CR) used
 // before needed 40 ms around it, and even then a long text now and then had one read as Enter, sending the
 // message half typed; Ctrl+J is one byte with no such race. Kept in step with web/term.js typeInto.
+// -> null, or why the session host could not type it (notWritten), at the first write it refused
 async function typePasted(host, id, text) {
-  for (const w of pasteWrites(text)) await host.call('write', id, w);
+  for (const w of pasteWrites(text)) {
+    const why = notWritten(await host.call('write', id, w));
+    if (why) return why;
+  }
+  return null;
 }
+// a host write's answer -> null when it went in (true, as an older host always answers), else why it did not: the
+// host's reason ('not found', 'ended', 'ending': a restart or quit is ending it, 'truncated': past its 1 MB a write)
+const notWritten = (r) => (r && typeof r === 'object' && r.ok === false ? String(r.reason || 'not typed') : null);
+const LOST_WHY = { 'not found': 'the session host has no such session', ended: 'that session has ended',
+  ending: 'that session is ending (the desktop app is restarting or quitting)', truncated: 'the session host cut the text short' };
+const lostText = (why) => `not sent: ${LOST_WHY[why] || why}`;
 // type it (typePasted), then Enter on its own. beforeEnter: an async check just before the Enter; when it answers
 // true (a menu came up) the Enter is not sent. fresh: the session's list entry when it started moments ago
 // (justStarted): Claude Code can show its prompt before it reads keys, and drops an Enter typed then (the message
 // sat in its prompt, unsent), so the Enter waits until the box shows the text, ECHO_MS at most, as the page's send
-// does (web/compose.js). Not when the box can't be read; no echo by then, the Enter goes anyway, as before. -> { entered }
+// does (web/compose.js). Not when the box can't be read; no echo by then, the Enter goes anyway, as before.
+// -> { entered, lost? }: lost, why the session host could not type it or its Enter (notWritten)
 async function sendText(host, id, text, beforeEnter, fresh = null) {
   const before = fresh ? await promptNow(host, fresh) : null;
-  await typePasted(host, id, text);
+  const lost = await typePasted(host, id, text);
+  if (lost) return { entered: false, lost };
+  typedHere(id, text);
   await sleep(ENTER_DELAY_MS);
   for (const end = Date.now() + ECHO_MS; before !== null && Date.now() < end;) {
     const now = await promptNow(host, fresh);
@@ -271,9 +295,38 @@ async function sendText(host, id, text, beforeEnter, fresh = null) {
     await sleep(ECHO_LOOK_MS);
   }
   if (beforeEnter && await beforeEnter()) return { entered: false };
-  await host.call('write', id, '\r');
-  return { entered: true };
+  const why = notWritten(await host.call('write', id, '\r'));
+  return why ? { entered: false, lost: why } : { entered: true };
 }
+// What this server typed into each session lately (sendText), so the prompt box can tell its own leftover (a send a
+// menu stopped before its Enter, one Claude Code put back after an Esc) from what someone typed there: id -> [{ bare,
+// at }], the last TYPED_KEEP within TYPED_MS. Compared with no spaces at all (bare, below): the box wraps a long word anywhere
+const TYPED_MS = 30 * 60e3, TYPED_KEEP = 5;
+const typedLately = new Map();
+function typedHere(id, text) {
+  const l = (typedLately.get(id) || []).filter((x) => Date.now() - x.at < TYPED_MS);
+  l.push({ bare: bare(text), at: Date.now() });
+  typedLately.set(id, l.slice(-TYPED_KEEP));
+  if (typedLately.size > 200) typedLately.delete(typedLately.keys().next().value);
+}
+// is the box's text one this server typed there? Equal, or (a box too tall for the screen shows only its end) a long
+// enough piece of one
+const sameTyped = (typed, b) => typed === b || (b.length >= 40 && typed.includes(b));
+function typedByUs(id, text) {
+  const b = bare(text);
+  return (typedLately.get(id) || []).some((x) => Date.now() - x.at < TYPED_MS && sameTyped(x.bare, b));
+}
+// The prompt box before text goes in: empty, or holding only what this server typed there (typedByUs) or ours, the text
+// about to go in (a queued one a menu stopped before its Enter: typedLately is gone after a restart), which is cleared
+// first (clearPrompt). -> false when something else is typed there: pasted after it, Enter would send both as one
+// message. A box that can't be read (a menu or a panel over it) counts as empty, as before.
+async function boxReady(host, p, ours = null) {
+  const box = await promptNow(host, p);
+  if (!box) return true;
+  if (!typedByUs(p.id, box) && !(ours && sameTyped(bare(ours), bare(box)))) return false;
+  return clearPrompt(host, p);
+}
+const PROMPT_TYPED = 'something is typed in its prompt and not sent: it would go out glued to this (send or clear it in its terminal first)';
 // the text in that session's prompt box now (boxText: '' when empty or only its hint), or null when the box can't
 // be read (not on screen: a menu or a panel over it)
 async function promptNow(host, p) {
@@ -429,8 +482,10 @@ function menuEnd(m, ti, since = 0) {
 // is not taken for this one's. o.cont: nothing new went into the transcript (a menu was answered): the turn that
 // was open goes on, and its end after sentAt is the one. Every MENU_EVERY_MS the screen is read too: a select menu
 // there (a permission prompt mid-turn, a question) ends the wait with endedBy 'menu' (or 'question') and the menu.
+// From here the request only waits, so it no longer holds a restart (gone.waiting, see drain).
 // -> { taken, done, endedBy?, reply?, question?, menu? }; done is false when it timed out or the caller went away
 async function afterSend(host, id, sentAt, before, ms, ctx, gone, o = {}) {
+  if (typeof gone.waiting === 'function') gone.waiting();
   const since = sentAt - SKEW_MS;
   const look = async () => {
     const p = hosted(await host.call('list'), id);
@@ -585,7 +640,9 @@ const watchSwitch = (id, text, status, ctx) => {
 // q: { from, original, onSent?, onDrop? } to keep it in the queue (see below) instead of refusing it while a menu or a
 // panel is up; it goes in later. now: one that went in while Claude was busy (into Claude Code's queue) is sent at
 // once, as the page's Interrupt on a queued message does (pressSendNow). A typed /model or /effort has its switch
-// question answered (watchSwitch). shell: text is a shell command for bash mode (typeShell), never queued. -> [code, json]
+// question answered (watchSwitch). shell: text is a shell command for bash mode (typeShell), never queued. Something
+// typed in its prompt that is not this server's (boxReady) turns it down too (with q: it waits in the queue). A write
+// the session host refused (lost: it ended, or a restart is ending it) answers 409 "not sent". -> [code, json]
 async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null, now = false, shell = false) {
   const later = (more, why = 'is showing a question or a prompt; it goes in once that is answered') => {
     enqueue(p.id, text, q);
@@ -608,9 +665,12 @@ async function deliver(host, p, text, ms, ctx, gone, note, extra = {}, q = null,
     if (shell) {
       const bad = await typeShell(host, cur);
       if (bad) return { r: [409, { ok: false, id: p.id, ...extra, shell: true, message: bad }] };
+    } else if (!(await boxReady(host, cur))) {
+      return { r: q ? later({ typed: true }, 'has something typed in its prompt; it goes in once that is sent or cleared') : [409, { ok: false, id: p.id, ...extra, typed: true, message: PROMPT_TYPED }] };
     }
     const sentAt = Date.now();
     const sent = await sendText(host, p.id, text, () => menuNow(host, cur), justStarted(cur) ? cur : null);
+    if (sent.lost) return { r: [409, { ok: false, id: p.id, ...extra, lost: sent.lost, message: lostText(sent.lost) }] };
     if (!sent.entered) return { r: [409, { ok: false, id: p.id, ...extra, menu: true, message: MENU_LATE }] };
     const sentNow = now && status === 'busy';
     if (sentNow) { await sleep(ENTER_DELAY_MS); await pressSendNow(host, p.id); }
@@ -664,8 +724,10 @@ function doneText(w, ms, sent) {
 // ---------- text that waits for a menu to be answered ----------
 // A conversation showing a question, a permission prompt or the plan approval can't be typed into (Enter would
 // answer it), so text for it from deliverText waits here, by the same rules as the page's orders (web/orders.js):
-// every Q_TICK_MS each waiting one is looked at, and it goes in once no menu has been on that screen for Q_CLEAR_MS,
-// oldest first, one per conversation per tick. One still waiting after Q_MAX_MS, or whose conversation has not run
+// every Q_TICK_MS each waiting one is looked at, and it goes in once no menu has been on that screen for Q_CLEAR_MS
+// and nothing someone else typed is in its prompt (boxReady), oldest first, one per conversation per tick; one a menu
+// stopped just before its Enter stays and goes again. Text waits here too when deliverText finds something typed in
+// that prompt. One still waiting after Q_MAX_MS, or whose conversation has not run
 // in the session host for Q_GONE_MS, is dropped (and logged). It is kept in msg-queue.json, so a restart (every
 // update) carries on with it, and follows a conversation that hands off to the one that carries on.
 const QUEUE_FILE = path.join(DATA_DIR, 'msg-queue.json');
@@ -687,7 +749,7 @@ function loadQueue() {
 function saveQueue() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(QUEUE_FILE + '.tmp', JSON.stringify(queue.map(({ id, text, at, from, original, kind }) => ({ id, text, at, ...(from ? { from, original } : {}), ...(kind ? { kind } : {}) }))));
+    fs.writeFileSync(QUEUE_FILE + '.tmp', JSON.stringify(queue.map(({ id, text, at, from, original, kind, leftAt }) => ({ id, text, at, ...(from ? { from, original } : {}), ...(kind ? { kind } : {}), ...(leftAt ? { leftAt } : {}) }))));
     fs.renameSync(QUEUE_FILE + '.tmp', QUEUE_FILE);
   } catch (e) { if (qCtx) qCtx.log(`api: could not save the message queue: ${e.message}`); }
 }
@@ -724,7 +786,8 @@ function unqueue(q, why) {
   if (why) runHooks(q, 'onDrop', why);
 }
 async function tickQueue() {
-  if (qTicking) return;
+  // a restart is waiting for what is being typed (drain): nothing new starts typing (the next server goes on with it)
+  if (qTicking || draining) return;
   if (!loadQueue().length) { clearInterval(qTimer); qTimer = null; return; }
   qTicking = true;
   const now = Date.now();
@@ -750,8 +813,24 @@ async function tickQueue() {
         // something is typing into it now (a note, a message): next tick
         if (typingInto(p.id)) continue;
         let sentAt = 0;
-        const sent = await typeOne(p.id, () => { sentAt = Date.now(); return sendText(host, p.id, q.text, () => menuNow(host, p)); });
-        if (!sent.entered) { unqueue(q, 'a menu came up just before Enter (the text is in its prompt box, not sent)'); continue; }
+        // something someone typed in its prompt (boxReady: what this server left there is cleared): it waits until that
+        // is sent or cleared. An earlier try a menu stopped before its Enter (leftAt) left its text in the prompt: gone
+        // from there since, and in the transcript or Claude Code's queue, someone pressed Enter on it in the terminal,
+        // so it counts as sent and is never typed again
+        const sent = await typeOne(p.id, async () => {
+          if (q.leftAt && qCtx && (await promptNow(host, p)) === '' && await landed(p.id, flat(q.original || q.text).slice(0, 80), q.leftAt, qCtx)) return { entered: true, byHand: true };
+          if (!(await boxReady(host, p, q.text))) return { typed: true };
+          sentAt = Date.now();
+          return sendText(host, p.id, q.text, () => menuNow(host, p));
+        });
+        // a menu came up just before Enter: the text is in its prompt box, and the next try clears it (boxReady) and
+        // types it again once the menu is answered; one the host refused (it ended) waits as one not running does
+        if (sent.typed || sent.lost || !sent.entered) {
+          if (!sent.typed && !sent.lost && !q.leftAt) { q.leftAt = Date.now(); saveQueue(); }
+          q.clearAt = 0;
+          continue;
+        }
+        if (sent.byHand) { sentAt = q.leftAt; qCtx.log(`api: a message waiting for ${q.id} was sent from its prompt by hand; not typed again`); }
         unqueue(q);
         watchSwitch(p.id, q.text, p.status || null, qCtx);
         if (q.from && qCtx && qCtx.noteMessage) qCtx.noteMessage(q.from, convId(p.id) || p.id, q.original || q.text, q.kind ? { kind: q.kind } : undefined);
@@ -886,13 +965,146 @@ async function deliverText(key, text, o, ctx, gone = () => false) {
   });
 }
 
+// ---------- receipts: a send asked for again ----------
+// POST /api/sessions/:id/message and POST /api/sessions take a clientId (CLIENT_ID_RE): the caller's own id for that one
+// send, which it gives again when it asks again because the answer never came (fv does, when the server restarted
+// under it or the connection broke). Its receipt is kept in memory and in send-receipts.json (a restart is the usual
+// reason to ask again) for RECEIPT_MS after the send, plus its wait, and answers the repeat (repeat: true) instead of
+// typing the text a second time:
+//   - still running here: the repeat gets the first one's answer when it comes (one that ended: that answer);
+//   - from before a restart, it went in (sent: typed and Enter pressed, or a start's prompt): nothing is typed; with
+//     wait, the repeat waits for the turn it started (afterSend from when it went in), as the first would have;
+//   - from before a restart, it had not said (started), or waited in the queue and is not there now: the
+//     conversation's transcript and Claude Code's queue are read for its text since then; there, it counts as sent;
+//     not there, 409 { maybeSent } and nothing is typed (it may be in its prompt, or going in): the caller looks
+//     (fv read) before sending it again. A start that had made its session and not said more gets the same (a blank
+//     one that answered is done);
+//   - one refused before anything went in is not kept, so asking again tries again.
+const RECEIPTS_FILE = path.join(DATA_DIR, 'send-receipts.json');
+const RECEIPT_MS = 10 * 60e3;
+const CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+let receipts = null; // clientId -> { cid, kind, key, at, until, state, snip, id?, sentAt?, status?, made?, run? (here) }
+function loadReceipts() {
+  if (receipts) return receipts;
+  receipts = new Map();
+  try {
+    const j = JSON.parse(fs.readFileSync(RECEIPTS_FILE, 'utf8'));
+    for (const r of Array.isArray(j) ? j : []) {
+      if (r && typeof r.cid === 'string' && CLIENT_ID_RE.test(r.cid) && Number.isFinite(r.at) && Number.isFinite(r.until) && Date.now() < r.until) receipts.set(r.cid, r);
+    }
+  } catch {}
+  return receipts;
+}
+function saveReceipts() {
+  for (const [k, r] of receipts) if (Date.now() >= r.until && !(r.run && !r.done)) receipts.delete(k);
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const keep = [...receipts.values()].map(({ cid, kind, key, at, until, state, snip, id, sentAt, status, made }) => ({ cid, kind, key, at, until, state, snip,
+      ...(id ? { id } : {}), ...(sentAt ? { sentAt, status } : {}), ...(made ? { made } : {}) }));
+    fs.writeFileSync(RECEIPTS_FILE + '.tmp', JSON.stringify(keep));
+    fs.renameSync(RECEIPTS_FILE + '.tmp', RECEIPTS_FILE);
+  } catch (e) { if (qCtx) qCtx.log(`api: could not save the send receipts: ${e.message}`); }
+}
+// The request (kind 'message' to key, or 'start') under its receipt: run(rc) does it, and tells the receipt
+// rc.created(key) (a start made its session) and rc.sent(id, sentAt, status) (the text went in) -> [code, json]
+async function withReceipt(b, kind, key, run, ctx, gone) {
+  const cid = b && typeof b === 'object' ? b.clientId : undefined;
+  if (cid === undefined || cid === null) return run(null);
+  if (typeof cid !== 'string' || !CLIENT_ID_RE.test(cid)) return [400, { ok: false, message: 'clientId must be 8 to 64 letters, digits, - or _' }];
+  const list = loadReceipts();
+  const had = list.get(cid);
+  if (had && Date.now() < had.until) {
+    if (had.kind !== kind || had.key !== key) return [409, { ok: false, clientId: cid, message: 'that clientId went with another request' }];
+    // (the first holds a restart while it types; this one only waits for its answer: drain)
+    if (had.run) { if (typeof gone.waiting === 'function') gone.waiting(); const [c, o] = await had.run; return [c, { ...o, clientId: cid, repeat: true }]; }
+    return repeatOld(had, b, ctx, gone);
+  }
+  const at = Date.now();
+  const rc = { cid, kind, key, at, until: at + (waitMs(b.wait) || 0) + RECEIPT_MS, state: 'started', snip: flat(kind === 'start' ? b.prompt : b.text).slice(0, 80) };
+  rc.created = (made) => { rc.state = 'created'; rc.made = made; saveReceipts(); };
+  rc.sent = (id, sentAt, status) => { Object.assign(rc, { state: 'sent', id: String(id), sentAt, status: status || null }); saveReceipts(); };
+  list.set(cid, rc);
+  saveReceipts();
+  const settled = (r) => {
+    const [code, out] = r;
+    const ok = code < 300 && !!out && out.ok !== false;
+    if (rc.state === 'started' && ok && out.queued) { rc.state = 'queued'; rc.id = out.id || null; } // the queue types it later (rc.sent then)
+    else if (rc.state === 'started') { if (ok) rc.state = 'done'; else list.delete(cid); } // a switch alone; or refused: try again
+    else if (rc.state === 'created' && ok) { rc.state = 'done'; rc.id = out.id || null; } // a start with nothing to type (blank)
+    rc.done = true;
+    saveReceipts();
+    return [code, { ...out, clientId: cid }];
+  };
+  rc.run = Promise.resolve().then(() => run(rc)).then(settled, (e) => { if (rc.state === 'started') list.delete(cid); rc.done = true; saveReceipts(); throw e; });
+  return rc.run;
+}
+// did text starting snip go into conversation id since `since`? Its transcript's user messages, and Claude Code's queue
+async function landed(id, snip, since, ctx) {
+  const cid = convId(id);
+  if (!cid || !snip || !ctx.transcript) return false;
+  let t = null;
+  try { t = await ctx.transcript(cid, { limit: 50 }); } catch {}
+  if (!t) return false;
+  const has = (s) => flat(s).includes(snip);
+  return (t.items || []).some((it) => it && it.type === 'user' && (it.t || 0) >= since - SKEW_MS && has(it.text))
+    || (t.queue || []).some((q) => has(typeof q === 'string' ? q : q && q.text));
+}
+// a repeat of a receipt from before a restart (see the top of receipts)
+async function repeatOld(rc, b, ctx, gone) {
+  const ms = waitMs(b.wait);
+  if (ms === null) return [400, { ok: false, message: WAIT_BAD }];
+  const head = { clientId: rc.cid, repeat: true };
+  const id = rc.id || (rc.kind === 'message' ? resolveKey(rc.key) : null);
+  if (rc.state === 'queued' && rc.id && loadQueue().some((q) => q.id === rc.id && (!rc.snip || flat(q.original || q.text).includes(rc.snip)))) {
+    return [202, { ok: true, ...head, id: rc.id, queued: true, message: `queued already (before Fleet View restarted): ${nameFor(rc.id, ctx)} gets it once its question or prompt is answered` }];
+  }
+  if ((rc.state === 'started' || rc.state === 'queued') && rc.kind === 'message' && await landed(id, rc.snip, rc.at, ctx)) {
+    Object.assign(rc, { state: 'sent', id: convId(id) || id, sentAt: rc.at, status: null });
+    saveReceipts();
+  }
+  if (rc.state === 'done') return [200, { ok: true, ...head, id: id || null, ...(rc.made ? { key: rc.made } : {}), message: 'done already, before Fleet View restarted' }];
+  if (rc.state !== 'sent') {
+    const what = rc.kind === 'start' ? `starting it${rc.made ? ` (it runs as ${rc.made})` : ''}: it may be running, with or without its prompt` : 'sending it, and its transcript does not show it: it may be in its prompt, or still going in';
+    return [409, { ok: false, ...head, maybeSent: true, ...(id ? { id } : {}), ...(rc.made ? { key: rc.made } : {}), message: `Fleet View restarted while ${what}. Look at it (fv read, fv hosted) before sending it again` }];
+  }
+  const sent = rc.kind === 'start' ? 'started, and the prompt was sent, before Fleet View restarted' : 'sent before Fleet View restarted (not typed again)';
+  const more = rc.kind === 'start' ? { promptSent: true } : { status: rc.status || null };
+  if (!ms) return [200, { ok: true, ...head, id: rc.id, ...more, message: sent }];
+  const w = await withHost((host) => afterSend(host, rc.id, rc.sentAt, rc.status, ms, ctx, gone));
+  return [200, { ok: true, ...head, id: rc.id, ...more, ...w, message: doneText(w, ms, sent) }];
+}
+
+// ---------- a restart lets what is being typed finish ----------
+// An update restarts the server (exit 75, fleet-view.js), which ends this process wherever it is: a text half pasted
+// stays in a session's prompt, and its caller never hears whether it went. So drain(ms) holds that exit until nothing is
+// being typed into a session (typeOne: sends, the queue, team notes) and no request that changes something is short of
+// its waiting part (afterSend: a wait never holds it; its caller asks the next server, under its clientId), ms at most.
+// From then on every POST gets 503 { draining } with Retry-After, which fv sends again once the next server is up.
+// -> a Promise of { ms (how long it waited), left (still busy when it stopped waiting) }
+const DRAIN_LOOK_MS = 100, DRAIN_RETRY_S = 3;
+const held = new Set(); // the POSTs in flight that have not reached their waiting part
+let draining = false;
+const busyNow = () => held.size + typing.size;
+function drain(ms) {
+  draining = true;
+  const t0 = Date.now();
+  return new Promise((resolve) => {
+    const look = () => {
+      const left = busyNow();
+      if (!left || Date.now() - t0 >= ms) return resolve({ ms: Date.now() - t0, left });
+      setTimeout(look, DRAIN_LOOK_MS);
+    };
+    look();
+  });
+}
+
 // ---------- the requests ----------
 // GET /api: what there is, for a caller (or a Claude) finding its way from the command line
 const ENDPOINTS = [
   { method: 'GET', path: '/api', does: 'this list, and fleetView: the Fleet View version (1.0.12; "" when unknown)' },
   { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?, prefix?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive, forkOf (a fork: { id, name, named } of the one it came from; its name reads "fork of <that one>" until it has its own); with prefix (8+ characters of an id) only { ids }: every conversation id starting with it, off the map too' },
   { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("bot:<bot id>" or null)' },
-  { method: 'POST', path: '/api/sessions', body: '{ repo | repoOf: { origin, name }, account: "A"|"B"|"C"…, prompt | blank: true, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (repoOf: this machine\'s checkout of that repo, 404 no_checkout when it has none; forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt (blank: none, the reply comes once it has its id); temp: hidden from the map once it ends. An account at 90% of its 5-hour or weekly limit gives way to the one with the most left (accountSwitched in the reply) while "Switch accounts when one runs low" is on' },
+  { method: 'POST', path: '/api/sessions', body: '{ repo | repoOf: { origin, name }, account: "A"|"B"|"C"…, prompt | blank: true, name?, model?, effort?, forkFrom?, temp?, chrome?, wait?, clientId? }', does: 'start a session in a repo (repoOf: this machine\'s checkout of that repo, 404 no_checkout when it has none; forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt (blank: none, the reply comes once it has its id); temp: hidden from the map once it ends. An account at 90% of its 5-hour or weekly limit gives way to the one with the most left (accountSwitched in the reply) while "Switch accounts when one runs low" is on. clientId: as .../message (a repeat never starts a second session)' },
   { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers of the fleet, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, role, account, model, effort, folder, createdAt, convId, live; and requests, the ones sessions asked for' },
   { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), role? (what it does, one line, up to 60 characters; "" none), account?: "B", model?: "dynamic" (the default: sized for each message Henry sends from the page) or a name like "claude-sonnet-5-5", effort?: "dynamic" (the default) or "medium", from?: your conversation id (a session) }', does: 'make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }. Henry (his phone, through the relay), or a session on this machine (fv bot new), only when Henry directly asks it to make that bot; with from?: your conversation id, kept as its madeBy. Henry is told by a push after the fact and can remove it. Never a web page (an Origin gets 403)' },
   { method: 'GET', path: '/api/bots/requests', does: 'the bots sessions asked for, waiting on Henry, newest first: { ok, requests: [{ id, name, role, brief, account, model, effort, why, from, fromName, at }] } (each goes after 7 days)' },
@@ -904,7 +1116,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/bots/look', body: '{ from: your conversation id, shape?: "hex"|"drop"|"round"|"pill"|"tri"|"square"|"star"|"clover"|"flower"|"heart", color?: "#rrggbb" }', does: 'a bot changes its own avatar (null: picked for it); only from a bot\'s own conversation, and only its look (fv look)' },
   { method: 'POST', path: '/api/bots/:id/remove', body: '{ from: your conversation id (a session; required) }', does: 'end a bot\'s session and take it off the list (its folder and conversations are kept). Henry (his phone, through the relay), or a session on this machine (fv bot remove), ONLY when Henry\'s own message directly tells it to remove that bot: one named bot, never itself or the bot it runs in; from is kept as its removedBy. Henry is told by a push after the fact. Never a web page (an Origin gets 403)' },
   { method: 'GET', path: '/api/sessions/:id', query: 'tail?', does: 'one hosted session: status, state, latest reply, role, its turn; tail: the last characters of its screen' },
-  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now?, shell? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. With from, leading /effort <level> and /model <name> lines switch the receiver (as POST .../model with queue: true; a bare command typed under the from line would be read as text) and the rest is sent: switch { ok, queued?, model?, effort?, message }. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow). shell (not with from or now): text is a shell command, run in bash mode ("!" typed as a key of its own into an empty prompt, then the command; a leading "!" in text is dropped); 409 when its prompt is not empty or a menu is up, never queued' },
+  { method: 'POST', path: '/api/sessions/:id/message', body: '{ text, wait?, from?, queue?, open?, now?, shell?, clientId? }', does: 'send a message; wait: until the turn ends. from: your conversation id (a message between conversations). queue: while a menu is up it waits and goes in once answered (202), else refused; open: one not running here is resumed first. Both default to true with from. With from, leading /effort <level> and /model <name> lines switch the receiver (as POST .../model with queue: true; a bare command typed under the from line would be read as text) and the rest is sent: switch { ok, queued?, model?, effort?, message }. now (not with from): sent while Claude works, it goes at once, stopping the step Claude is on (sentNow). shell (not with from or now): text is a shell command, run in bash mode ("!" typed as a key of its own into an empty prompt, then the command; a leading "!" in text is dropped); 409 when its prompt is not empty or a menu is up, never queued. Something typed in its prompt that Fleet View did not type: 409 typed (with queue it waits). clientId (8-64 of A-Z a-z 0-9 _ -, yours for this one send): the same request again under it (the answer was lost) never types it twice: the first answer, a wait for the turn it started, or 409 maybeSent when a restart left it unknown (look before sending again); repeat: true' },
   { method: 'POST', path: '/api/sessions/:id/launch', body: '{ picks?: "recommended" | [n…], from?, wait?, dry? }', does: 'the chat\'s Launch button from outside the page: the conversation\'s newest reply offering options (a task list, every box unticked; else a recommendation however it is written, "My recommendation: …", "I\'d recommend …", "(recommended)" on a plain item, each one an option marked recommended and sent with a launch line that has the session work out model and effort: recommendation: true) gives them; picks (default the ones marked "(recommended)"; numbers from 1 as the list stands) are sent as the button sends them ("Go with these:", the numbered options, the launch line), so the page and the phone show them Launched; ones launched already are left out (skipped). A session below high effort, or not known, is switched to high first, as the button does. from, wait: as .../message. dry: nothing sent: { options: [{ n, text, rec, done }], picked, text }. 409 when there is no such reply or nothing left to launch' },
   { method: 'POST', path: '/api/sessions/:id/now', does: 'the page\'s Interrupt on a queued message: Claude stops the step it is on and takes every message queued in Claude Code now (only while it works with some queued): { sent: [texts] }' },
   { method: 'POST', path: '/api/sessions/:id/unsend', body: '{ text }', does: 'take a message back before Claude reads it: out of Fleet View\'s menu queue (where: "fleetView"), else out of Claude Code\'s queue as the page\'s Unsend does (where: "claude", requeued: the others put back); 409 taken when Claude has read it already' },
@@ -938,7 +1150,7 @@ const ENDPOINTS = [
 ];
 function describeApi() {
   return [200, { ok: true, version: 2, fleetView: VERSION.current().version, auth: `Authorization: Bearer <${P.isWin ? '%LOCALAPPDATA%\\fleet-view\\api-token' : TOKEN_FILE}>`, endpoints: ENDPOINTS,
-    notes: 'ids: a conversation id, or the new-<n> key POST /api/sessions gave. wait: true (30 min), false, or seconds 1..3600. A reply is { ok, message?, ... }; 400 bad input, 401 token, 403 refused, 404 no such session, 409 state conflict, 503 the desktop app is not running.' }];
+    notes: 'ids: a conversation id, or the new-<n> key POST /api/sessions gave. wait: true (30 min), false, or seconds 1..3600. A reply is { ok, message?, ... }; 400 bad input, 401 token, 403 refused, 404 no such session, 409 state conflict, 503 the desktop app is not running, or (draining: true, Retry-After) Fleet View is restarting for an update and did nothing: send it again in a few seconds.' }];
 }
 
 // POST /api/sessions { repo | repoOf, account, prompt | blank, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }
@@ -950,8 +1162,9 @@ const acctsOf = (ctx) => { try { const a = typeof ctx.accounts === 'function' ? 
 const acctOk = (a, ctx) => typeof a === 'string' && acctsOf(ctx).includes(a);
 // origin: 'server' (startBot), 'henry' (the phone relay, viaOf) or null: an overseer's prompt from anyone
 // else is marked unsigned (overseer.js frame). vouched: the folder startBot vouches for (a bot's own, not a listed repo);
-// only with it may role be a bot's ("bot:<id>", one live session each, 409)
-async function startSession(b, ctx, gone, origin = null, vouched = null) {
+// only with it may role be a bot's ("bot:<id>", one live session each, 409). rc: the request's receipt (withReceipt),
+// told once the session is made (created) and once its prompt went in (sent)
+async function startSession(b, ctx, gone, origin = null, vouched = null, rc = null) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
   // repoOf { origin, name }: the repo as another machine names it (its new chat runs here, the main computer: Henry,
   // 2026-10-17; link-send.js /link/start), started in this machine's checkout of it (ctx.rootIn); 404 no_checkout
@@ -1019,6 +1232,7 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
     const r = await host.call('create', o);
     if (!r || !r.ok || typeof r.key !== 'string') return [502, { ok: false, message: (r && r.message) || 'the session host could not start it' }];
     const key = r.key;
+    if (rc) rc.created(key);
     // an older host ignores forkFrom, model, effort and role: a fresh conversation without the history, on the default
     // model, or without a bot's role, so it goes again (typing /model or /effort instead would
     // save them as the default for every session)
@@ -1082,6 +1296,7 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
     if (m0) return reply(200, { ok: false, promptSent: false, menu: m0, message: `${MENU_UP}; the prompt was not sent, and the session is still running in the panel` });
     const sentAt = Date.now();
     const sent = await sendText(host, id, typedPrompt, () => menuNow(host, p), p);
+    if (sent.lost) return reply(200, { ok: false, promptSent: false, lost: sent.lost, message: `the prompt was ${lostText(sent.lost)}` });
     if (!sent.entered) return reply(200, { ok: false, promptSent: false, menu: true, message: `${MENU_LATE}; the session is still running in the panel` });
     // a fork still under the original's id gets its own once its claude writes the first message: follow the pid
     let now = id;
@@ -1094,6 +1309,7 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
       }
       out.id = now; keyToId.set(key, now); label(now);
     }
+    if (rc) rc.sent(now, sentAt, 'idle');
     const w = await afterSend(host, now, sentAt, 'idle', ms, ctx, gone);
     return reply(200, { ok: true, promptSent: true, ...w, message: doneText(w, ms, `started${out.chromeOffer ? ' (its Claude in Chrome offer answered Yes)' : ''}, and the prompt was sent`) });
   });
@@ -1138,9 +1354,11 @@ function endHosted(key) {
 // running here, and a menu turns it down (409), as before.
 // now: sent while Claude works, it goes at once (deliver), not after the step Claude is on; only a message of your own
 // (no from): one conversation never cuts another's step short.
-// via: 'henry' when the phone relay sent it (viaOf), for a bot's framing; never read from the body here
-async function sendMessage(key, b, ctx, gone, via = null) {
+// via: 'henry' when the phone relay sent it (viaOf), for a bot's framing; never read from the body here. rc: the
+// request's receipt (withReceipt), told when the text went in (deliverText's onSent: now, or later from the queue)
+async function sendMessage(key, b, ctx, gone, via = null, rc = null) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
+  const onSent = rc ? rc.sent : undefined;
   const text = cleanText(b.text);
   if (!text) return [400, { ok: false, message: 'text must be text, without control characters other than new lines and tabs' }];
   const ms = waitMs(b.wait);
@@ -1153,7 +1371,7 @@ async function sendMessage(key, b, ctx, gone, via = null) {
     if (b.now === true) return [400, { ok: false, message: 'shell and now do not go together' }];
     const cmd = text.replace(/^\s*!/, '');
     if (!cmd.trim()) return [400, { ok: false, message: 'a shell command must say what to run' }];
-    return deliverText(key, cmd, { kind: 'message', wait: ms, queue: false, open: b.open === true, via, shell: true }, ctx, gone);
+    return deliverText(key, cmd, { kind: 'message', wait: ms, queue: false, open: b.open === true, via, shell: true, onSent }, ctx, gone);
   }
   let from = null;
   if (b.from !== undefined && b.from !== null) {
@@ -1164,7 +1382,7 @@ async function sendMessage(key, b, ctx, gone, via = null) {
   }
   const queue = 'queue' in b ? b.queue : !!from, open = 'open' in b ? b.open : !!from;
   if (from && b.now === true) return [400, { ok: false, message: 'now goes only with a message of your own (no from)' }];
-  if (!from) return deliverText(key, text, { kind: 'message', wait: ms, queue, open, via, now: b.now === true }, ctx, gone);
+  if (!from) return deliverText(key, text, { kind: 'message', wait: ms, queue, open, via, now: b.now === true, onSent }, ctx, gone);
   // "/effort <level>" or "/model <name>" on the first lines: under the header line below Claude reads it as text, never
   // as the command, so it is taken off and made the receiver's switch (switchModel with queue: one working switches
   // when it finishes this step). The rest, if any, goes on as the message
@@ -1176,7 +1394,7 @@ async function sendMessage(key, b, ctx, gone, via = null) {
     const said = `${Object.entries(sw.want).map(([k, v]) => `${k} ${v}`).join(', ')}: ${done ? so.message : `not switched (${so.message})`}`;
     const sent = { switch: { ok: !!(done && so.ok), ...(so.queued ? { queued: true } : {}), ...sw.want, message: so.message } };
     if (!sw.rest) return [sc, { ...so, ...sent, message: said }];
-    const [c, o] = await sendMessage(key, { ...b, text: sw.rest }, ctx, gone, via);
+    const [c, o] = await sendMessage(key, { ...b, text: sw.rest }, ctx, gone, via, rc);
     return [c, { ...o, ...sent, message: `${said}; ${o.message || 'the rest sent'}` }];
   }
   const name = headName(from, ctx);
@@ -1187,7 +1405,7 @@ async function sendMessage(key, b, ctx, gone, via = null) {
     const who = rel === 'lead' ? 'your lead ' : rel === 'mate' ? 'teammate ' : '';
     return `[Message from ${who}"${name}" (${from}). Reply with: fv send ${from} "message" --from ${convId(to) || to}]\n${text}`;
   };
-  return deliverText(key, head, { kind: 'message', from, original: text, wait: ms, queue, open }, ctx, gone);
+  return deliverText(key, head, { kind: 'message', from, original: text, wait: ms, queue, open, onSent }, ctx, gone);
 }
 // POST /api/sessions/:id/launch { picks?: "recommended" | [n…], from?, wait?, dry? }: the chat's Launch button, from
 // outside the page (launch.js). The conversation's newest reply that offers a choice (a task list, every box
@@ -3083,15 +3301,20 @@ const BOT_ROUTE = /^\/api\/bots(?:\/([^/]+))?(?:\/(start|remove))?\/?$/;
 const BOT_REQ_ROUTE = /^\/api\/bots\/requests(?:\/([^/]+)\/(approve|decline))?\/?$/;
 function handle(req, res, pathname, ctx) {
   const what = `${req.method} ${pathname}`;
+  // a POST holds a restart (drain) until it is answered or only waits (gone.waiting, from afterSend)
+  const hold = {};
+  const release = () => { held.delete(hold); };
   const answer = ([code, out]) => {
+    release();
     // one line per failed call, never the token or the text
     if (code >= 400 && !(out && quietOuts.has(out))) ctx.log(`api: ${what} -> ${code} ${out && out.message ? out.message : ''}`.trim());
     if (!res.destroyed) ctx.sendJson(res, code, out);
   };
   // a caller that hung up while it waited for a reply: stop waiting
   let hungUp = false;
-  res.on('close', () => { if (!res.writableFinished) hungUp = true; });
+  res.on('close', () => { release(); if (!res.writableFinished) hungUp = true; });
   const gone = () => hungUp;
+  gone.waiting = release;
   const run = (p) => p.then(answer, (e) => answer(e instanceof HostDown ? [503, { ok: false, message: e.message }] : [500, { ok: false, message: String((e && e.message) || e) }]));
   // a POST's body: {} when there is none
   const body = (fn) => ctx.readBody(req, res, (b) => run(fn(b)));
@@ -3103,6 +3326,14 @@ function handle(req, res, pathname, ctx) {
   };
   if (req.headers.origin !== undefined) return answer([403, { ok: false, message: 'the API is for local scripts, not web pages' }]);
   if (!authorized(req)) return answer([401, { ok: false, message: 'missing or wrong API token' }]);
+  if (req.method === 'POST') {
+    // a restart is waiting for what is being typed (drain): nothing new starts; fv sends it again to the next server
+    if (draining) {
+      if (typeof res.setHeader === 'function') res.setHeader('Retry-After', String(DRAIN_RETRY_S));
+      return answer([503, { ok: false, draining: true, retryAfter: DRAIN_RETRY_S * 1000, message: 'Fleet View is restarting for an update: nothing was done; send it again in a few seconds' }]);
+    }
+    held.add(hold);
+  }
   const query = () => new URL(req.url, 'http://x').searchParams;
   if (pathname === '/api' || pathname === '/api/') {
     return req.method === 'GET' ? answer(describeApi()) : answer([405, { ok: false, message: 'method not allowed' }]);
@@ -3207,14 +3438,15 @@ function handle(req, res, pathname, ctx) {
     return answer([405, { ok: false, message: 'method not allowed' }]);
   }
   if (req.method === 'POST' && !GET_VERBS.has(verb)) {
-    if (!key) return body((b) => startSession(b, ctx, gone, via(b)));
+    // (a clientId: the send under its receipt, so asking again never types it twice)
+    if (!key) return body((b) => withReceipt(b, 'start', '', (rc) => startSession(b, ctx, gone, via(b), null, rc), ctx, gone));
     switch (verb) {
-      case 'message': return body((b) => sendMessage(k, b, ctx, gone, via(b)));
+      case 'message': return body((b) => withReceipt(b, 'message', k, (rc) => sendMessage(k, b, ctx, gone, via(b), rc), ctx, gone));
       case 'launch': return body((b) => launchPicks(k, b, ctx, gone, via(b)));
       case 'stop': return body((b) => stopSession(k, b, ctx));
       case 'remove': return run(removeConversation(k, ctx));
       case 'answer': return body((b) => answerMenu(k, b, ctx, gone, via(b)));
-      case 'wait': return body((b) => waitSession(k, b, ctx, gone));
+      case 'wait': release(); return body((b) => waitSession(k, b, ctx, gone)); // (only waits: never holds a restart)
       case 'interrupt': return run(interruptSession(k));
       case 'open': return body((b) => openSession(k, b, ctx, gone, via(b)));
       case 'now': return run(sendNowSession(k, ctx));
@@ -3234,8 +3466,12 @@ function handle(req, res, pathname, ctx) {
 
 // askParts: the ask's text builders and collection steps, for a test to drive without a session host
 // relayKey: the phone relay's key (see viaOf), for fleet-view.js to hand the relay
+// drain: an update's restart waits on it (fleet-view.js)
 module.exports = { ensureToken, handle, startBot, openBot, endHosted, hostList, hostKill, hostSwitch, relayKey, viaOf, isOverseer, plainText, cleanText, pasteWrites, deliverText,
-  startQueue, queuedIds, switchModel, switchPending, launchPicks, isSwitchConfirm, idsWithPrefix, listConversations, TOKEN_FILE, ENDPOINTS, ROUTE, MODEL_RE, EFFORTS,
+  startQueue, queuedIds, switchModel, switchPending, launchPicks, isSwitchConfirm, idsWithPrefix, listConversations, drain, TOKEN_FILE, ENDPOINTS, ROUTE, MODEL_RE, EFFORTS,
   askParts: { asks, summaryText, laterText, overseerAnswers, answerLines, flushAsk, settleAnswer, askJson },
   // the queued switches and their tick, for a test to age one or run a tick at once
-  switchParts: { pending: pendingSwitch, tick: tickSwitches, refusals: refusalLog } };
+  switchParts: { pending: pendingSwitch, tick: tickSwitches, refusals: refusalLog },
+  // for a test: the receipts as a restarted server finds them (forget: read send-receipts.json again), the queue's file
+  // and tick, and the drain's state (undrain: take POSTs again; busy: what holds a restart now)
+  sendParts: { RECEIPTS_FILE, QUEUE_FILE, forget: () => { receipts = null; }, tickQueue, undrain: () => { draining = false; }, busy: busyNow } };
