@@ -685,6 +685,7 @@ Apple). No new dependency on the PC: `phone-push.js`, started by the relay, call
   `merged`; `machine` the pairing's `dev`; `team` when the chat is a team member). A phone from before the switch
   was on by default (it kept `names: false` without a choice) gets it on; one Henry turned off stays off
   (`namesSet`).
+- **A bot a session removed** (`/state`'s `botRemovals`, newest first: `id`, `name`, `removedBy`, `removedByName`, `removedAt`) pushes once, after the fact: names on, "<the session's name, or A session> removed a bot: <name>"; names off, "A session removed a bot". `data { kind: 'bot-removed', bot, machine }`. The newest `removedAt` seen is kept in `push.json`, as `madeAt` is.
 - **A bot a session asks for** (`/state`'s `botRequests`) pushes once, as it arrives: "<the session's name, or A
   session> asks to make a bot: <name>" with its role (else its why) as the body; with Show what chats say off, "A
   session asks to make a bot" alone. Data `{ kind: 'bot-request', machine, request: <its id> }`: a tap opens the Bots

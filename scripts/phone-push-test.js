@@ -316,6 +316,34 @@ async function main() {
   push.stop();
   delete st.bots;
 
+  // ---------- a bot a session removed (/state botRemovals) ----------
+  clock.t += 1000;
+  const RB = 'abababababab';
+  st.botRemovals = [{ id: RB, name: 'Scout', removedBy: A, removedByName: 'Release lead', removedAt: clock.t }];
+  push = make();
+  push.start();
+  await push.tick();
+  rgot = take();
+  eq(rgot.map((m) => [m.to, m.title, m.data]), [
+    [TOKEN1, 'A session removed a bot', { kind: 'bot-removed', bot: RB, machine: 'devPhone1aaaaaaa' }],
+    [TOKEN2, 'Release lead removed a bot: Scout', { kind: 'bot-removed', bot: RB, machine: 'devPhone2bbbbbbb' }],
+  ], 'a bot a session removed: one push per phone after the fact (names off: only that a session removed one)');
+  await push.tick();
+  ok(!take().length, 'a removal pushes once');
+  push.stop();
+  push = make();
+  push.start();
+  await push.tick();
+  ok(!take().length, 'and not again after a restart (removedAt in push.json)');
+  eq(JSON.parse(fs.readFileSync(path.join(dataDir, 'relay', 'push.json'), 'utf8')).removedAt, clock.t, 'push.json keeps the newest removal seen');
+  clock.t += 1000;
+  st.botRemovals = [{ id: 'cdcdcdcdcdcd', name: 'Quiet', removedBy: null, removedByName: null, removedAt: clock.t }, { id: '111111111111', name: 'Old', removedAt: clock.t - 11 * 60e3 }, ...st.botRemovals];
+  await push.tick();
+  eq(take().map((m) => [m.title, m.data.kind, m.data.bot]), [['A session removed a bot', 'bot-removed', 'cdcdcdcdcdcd'], ['A session removed a bot: Quiet', 'bot-removed', 'cdcdcdcdcdcd']],
+    'a new one goes (no name for the session: A session), an old one never');
+  push.stop();
+  delete st.botRemovals;
+
   // ---------- the log ----------
   const logText = logs.join('\n');
   ok(![TOKEN1, TOKEN2, 'phone1Token', 'Secret project', 'Fleet work', 'Gamma', 'old route'].some((s) => logText.includes(s)), 'the log never holds a token, a chat\'s name or its words');

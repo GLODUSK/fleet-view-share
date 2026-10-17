@@ -461,6 +461,11 @@ function viewOf(b, l, nameOf) {
 // running session
 const listView = (bots, live, nameOf) => (bots || []).filter((b) => b && !b.removed).reverse().sort((a, b) => b.createdAt - a.createdAt)
   .map((b) => viewOf(b, live && live.get(b.id), nameOf));
+// state.botRemovals: the bots a session removed, newest first, the last REMOVALS_MAX (phone-push.js tells Henry once)
+const REMOVALS_MAX = 20;
+const removalsView = (bots) => (bots || []).filter((b) => b && b.removed && b.removedBySession === true && Number.isFinite(b.removedAt))
+  .sort((a, b) => b.removedAt - a.removedAt).slice(0, REMOVALS_MAX)
+  .map((b) => ({ id: b.id, name: b.name, removedBy: b.removedBy || null, removedByName: b.removedByName || null, removedAt: b.removedAt }));
 // the registry as saved, checked (an entry that makes no sense is dropped)
 function loadBots(saved, base = BOTS_DIR) {
   const out = [];
@@ -479,6 +484,9 @@ function loadBots(saved, base = BOTS_DIR) {
       ...(Number.isFinite(b.lookAt) && b.lookAt > 0 ? { lookAt: Math.round(b.lookAt) } : {}),
       // made by a session (create's by.session)
       ...(b.bySession === true ? { bySession: true, madeBy: convId(b.madeBy) || null, madeByName: typeof b.madeByName === 'string' && b.madeByName ? b.madeByName.slice(0, 120) : null } : {}),
+      // removed by a session (remove's by.session)
+      ...(b.removed === true && b.removedBySession === true && Number.isFinite(b.removedAt) ? { removedBySession: true, removedAt: Math.round(b.removedAt), removedBy: convId(b.removedBy) || null,
+        removedByName: typeof b.removedByName === 'string' && b.removedByName ? b.removedByName.slice(0, 120) : null } : {}),
       // on the map and watching (a removed bot is neither)
       ...(b.removed !== true && mapPoint(b.map) ? { map: mapPoint(b.map) } : {}), watches: b.removed === true ? [] : readWatches(b.watches),
       // deleted tasks it is still to be told of
@@ -879,19 +887,35 @@ function createBots(deps) {
 
   // POST /bots/:id/remove, /api/bots/:id/remove: its running session ended (Ctrl+C, as the page's Remove conversation
   // ends one; the host drops it from its restore list), then it leaves the list. Its folder, logs and ids are kept
-  function remove(id) {
+  // by.session (api.js: POST /api/bots/:id/remove without the relay, fv bot remove): a session on this machine removed it,
+  // from its conversation id (required, checked), never the bot it runs in; Henry gets a push after the fact (removals)
+  function remove(id, by = null, from = null) {
     const bot = byId(id);
     if (!bot || bot.removed) return Promise.resolve(noBot());
+    const session = !!(by && by.session);
+    let who = null;
+    if (session) {
+      who = convId(from);
+      if (!who) return Promise.resolve([400, { ok: false, message: 'give from: your conversation id (Fleet View told it to you: "Your id: ...")' }]);
+      if (bot.ids.includes(who)) return Promise.resolve([403, { ok: false, message: 'a bot cannot remove itself, nor can its own session: only Henry, or another session he told to' }]);
+    }
     return inTurn(id, async () => {
       if (bot.removed) return noBot();
+      if (session) {
+        // the bot's running session may not be listed in its ids yet: the host knows its role
+        const list = await d.api.hostList();
+        if ((list || []).some((p) => p && convId(p.id) === who && p.role === roleOf(bot.id))) return [403, { ok: false, message: 'a bot cannot remove itself, nor can its own session: only Henry, or another session he told to' }];
+      }
       const ended = await endSessions(bot);
       bot.removed = true;
+      if (session) Object.assign(bot, { removedBySession: true, removedAt: Date.now(), removedBy: who, removedByName: nameOf(who) });
       // off the map, and nothing watched any more
       delete bot.map;
       bot.watches = [];
       forgetAll(bot);
       live.delete(bot.id);
       save();
+      if (session) log(`${bot.removedByName || who.slice(0, 8)} removed ${bot.name}: a session did it, Henry is told by a push`);
       log(`removed ${bot.name}${ended ? ` (ended ${ended} session${ended === 1 ? '' : 's'})` : ''}`);
       return [200, { ok: true, bot: viewOf(bot, null), message: `removed ${bot.name}; its folder ${bot.folder} and its conversations are kept` }];
     });
@@ -1390,6 +1414,8 @@ function createBots(deps) {
   }
 
   return {
+    // state.botRemovals: the bots a session removed (a push to Henry after the fact)
+    removalsView: () => (d.demo ? [] : removalsView(bots)),
     // state.bots, and GET /api/bots
     view: () => (d.demo ? [] : listView(bots, live, nameOf).map(withTasks)),
     list: () => [200, { ok: true, bots: d.demo ? [] : listView(bots, live, nameOf).map(withTasks), requests: requestsView() }],
@@ -1428,6 +1454,6 @@ function createBots(deps) {
   };
 }
 
-module.exports = { createBots, watchEvent, watchNote, checkAt, readWatches, WATCH_JOBS, WATCH_SETTLE_MS, WATCHES_MAX, WATCH_TRIES, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkRole, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, LOOK_COLORS, fillLook, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, roleLine, tagger, tagState, viewOf, listView, loadBots,
+module.exports = { createBots, watchEvent, watchNote, checkAt, readWatches, WATCH_JOBS, WATCH_SETTLE_MS, WATCHES_MAX, WATCH_TRIES, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkRole, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, LOOK_COLORS, fillLook, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, roleLine, tagger, tagState, viewOf, listView, loadBots, removalsView,
   startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX, ROLE_MAX,
   checkWhy, loadRequests, REQ_MAX, REQ_TTL_MS, WHY_MAX };

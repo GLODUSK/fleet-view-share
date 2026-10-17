@@ -1025,7 +1025,7 @@ await (async () => {
       readBody: (req, res, cb) => cb(req.body),
       bots: {
         list: () => [200, []], create: (b, by) => (did.push(by && by.session ? `create ${b.name} by a session` : 'create'), [200, { ok: true }]), update: () => (did.push('update'), [200, { ok: true }]),
-        start: () => (did.push('start'), [200, { ok: true }]), remove: () => (did.push('remove'), [200, { ok: true }]),
+        start: () => (did.push('start'), [200, { ok: true }]), remove: (x, by, from) => (did.push(by && by.session ? `remove ${x} by a session ${from}` : 'remove'), [200, { ok: true }]),
         look: (b) => (did.push(`look ${b.from}`), [200, { ok: true }]),
       },
     };
@@ -1037,7 +1037,11 @@ await (async () => {
     });
     const relay = { 'x-fleet-view-relay': API.relayKey() };
     assert.equal((await call(`/api/bots/${BID}`, { brief: 'new orders' }))[0], 403, 'a session cannot change one');
-    assert.equal((await call(`/api/bots/${BID}/remove`, {}))[0], 403, 'nor remove one');
+    assert.equal((await call(`/api/bots/${BID}/remove`, { via: 'phone' }))[0], 403, 'a "via" with no relay key is not the phone');
+    assert.equal((await call(`/api/bots/${BID}/remove`, { from: id(42) }, { origin: 'http://evil.example' }))[0], 403, 'a web page cannot remove one');
+    assert.equal((await call(`/api/bots/${BID}/remove`, { from: id(42) }, { origin: 'http://127.0.0.1:4777' }))[0], 403, "nor this PC's own page through the API");
+    assert.equal((await call(`/api/bots/${BID}/remove`, { from: id(42) }, { 'x-fleet-view-relay': 'nope' }))[0], 403, 'nor a wrong relay key');
+    assert.equal((await call('/api/bots/remove', { from: id(42) }))[0], 400, 'not a bot id');
     assert.equal((await call(`/api/bots/${BID}`, { brief: 'b', via: 'phone' }))[0], 403); // no key
     assert.equal((await call('/api/bots', { name: 'x' }, { origin: 'http://evil.example' }))[0], 403, 'a web page');
     assert.equal((await call('/api/bots', { name: 'x' }, { origin: 'http://127.0.0.1:4777' }))[0], 403, 'this PC\'s own page goes through /bots, not the API');
@@ -1051,12 +1055,13 @@ await (async () => {
     assert.equal((await call('/api/bots', { name: 'x', via: 'phone' }, relay))[0], 200);
     assert.equal((await call(`/api/bots/${BID}`, { brief: 'b', via: 'phone' }, relay))[0], 200);
     assert.equal((await call(`/api/bots/${BID}/remove`, { via: 'phone' }, relay))[0], 200);
-    assert.deepEqual(did, ['create Abogadito by a session', 'start', 'create', 'update', 'remove']);
+    assert.equal((await call(`/api/bots/${BID}/remove`, { from: id(42) }))[0], 200, 'a session removes one (bots.remove checks from)');
+    assert.deepEqual(did, ['create Abogadito by a session', 'start', 'create', 'update', 'remove', `remove ${BID} by a session ${id(42)}`]);
     // a bot's own look: any token caller reaches bots.look (it checks from); not a bot id, and POST only
     did.length = 0;
     assert.equal((await call('/api/bots/look', { from: 'x', shape: 'heart' }))[0], 200);
     assert.deepEqual(did, ['look x']);
-    n++; console.log('ok /api/bots: start for anyone; make for a session here or the phone, never a page; change and remove only from the phone relay; look goes to bots.look');
+    n++; console.log('ok /api/bots: start for anyone; make for a session here or the phone, never a page; change only from the phone relay; remove from it, or from a session here, never a page; look goes to bots.look');
   }
   // a session asks for a bot (POST /api/bots/requests): checked as a bot is, kept, listed; Henry makes or declines it
   {
@@ -1236,6 +1241,63 @@ await (async () => {
     assert.deepEqual([o4.bot.bySession, o4.bot.madeBy, o4.bot.madeByName], [false, null, null]);
     assert.ok(!('bySession' in h.saved().find((b) => b.name === 'Mine')));
     n++; console.log('ok a session makes a bot: madeBy and its name then kept through a reload, from checked, a request of its name dropped');
+  }
+  // a session removes a bot (bots.js remove with by.session): from required and checked, never the bot's own session,
+  // kept through a reload, listed in removalsView
+  {
+    const h = harness();
+    const from = id(42);
+    h.names.set(from, 'Release lead');
+    const [, made] = await h.bots.create({ name: 'Scout' });
+    const [, other] = await h.bots.create({ name: 'Other' });
+    const bid = made.bot.id;
+    assert.equal((await h.bots.remove(bid, { session: true }))[0], 400, 'no from');
+    assert.equal((await h.bots.remove(bid, { session: true }, 'nope'))[0], 400, 'a bad from');
+    assert.equal((await h.bots.remove(bid, { session: true }, made.id))[0], 403, 'the bot\'s own session');
+    assert.equal((await h.bots.remove(other.bot.id, { session: true }, made.id))[0], 200, 'another bot\'s session may remove a different bot');
+    assert.equal((await h.bots.remove('ffffffffffff', { session: true }, from))[0], 404, 'unknown bot');
+    // a session the host lists with the bot's role is the bot's own, though its id is not in ids yet
+    const [, m2] = await h.bots.create({ name: 'Third' });
+    h.setList([...h.list(), { id: from, alive: true, role: `bot:${m2.bot.id}`, status: 'idle', pending: false }]);
+    assert.equal((await h.bots.remove(m2.bot.id, { session: true }, from))[0], 403, 'the host says it runs in that bot');
+    h.setList(h.list().filter((x) => x.id !== from));
+    assert.deepEqual(h.bots.removalsView().map((x) => x.name), ['Other'], 'only the done ones are listed');
+    clock(T + 5000);
+    const [code, out] = await h.bots.remove(bid, { session: true }, from);
+    assert.equal(code, 200); assert.equal(out.ok, true);
+    assert.deepEqual(h.bots.view().map((x) => x.name), ['Third']);
+    const rv = h.bots.removalsView();
+    assert.deepEqual(rv.map((x) => [x.id, x.name, x.removedBy, x.removedByName, x.removedAt]), [[bid, 'Scout', from, 'Release lead', T + 5000], [other.bot.id, 'Other', made.id, null, rv[1].removedAt]]);
+    const h2 = harness({ base: h.base, saved: h.saved() });
+    assert.deepEqual(h2.bots.removalsView().map((x) => [x.id, x.removedBy, x.removedByName]), [[bid, from, 'Release lead'], [other.bot.id, made.id, null]], 'kept through a reload');
+    // Henry's own removal (no by) is not a session's: no push, not listed
+    const [, mine] = await h.bots.create({ name: 'Mine' });
+    assert.equal((await h.bots.remove(mine.bot.id))[0], 200);
+    assert.ok(!h.bots.removalsView().some((x) => x.name === 'Mine'));
+    assert.ok(!('removedBySession' in h.saved().find((b) => b.name === 'Mine')));
+    n++; console.log('ok a session removes a bot: from required, not the bot\'s own session, kept through a reload, listed in removalsView');
+  }
+  // fv bot remove: one bot by id or exact name, --from required, no wildcards, an ambiguous name asks for the id
+  {
+    const FV = require('./fv.js');
+    const calls = [];
+    const list = [{ id: 'abcdef012345', name: 'Scout' }, { id: 'abcdef012346', name: 'Twin' }, { id: 'abcdef012347', name: 'twin' }];
+    const env = { call: async (method, p, body) => { calls.push({ method, p, body }); return method === 'GET' && p === '/bots' ? { code: 200, j: { ok: true, bots: list } }
+      : method === 'POST' && /^\/bots\/[0-9a-f]{12}\/remove$/.test(p) ? { code: 200, j: { ok: true, message: 'removed' } }
+      : p.startsWith('/conversations') ? { code: 200, j: { ok: true, ids: [id(42)] } } : p === '/sessions' ? { code: 200, j: { ok: true, sessions: [] } } : { code: 404, j: { ok: false, message: 'no' } }; } };
+    const out = [];
+    assert.equal(await FV.main(['bot', 'remove', 'scout', '--from', id(42).slice(0, 8)], env, (l) => out.push(l), () => {}), 0);
+    assert.deepEqual(calls.filter((c) => c.method === 'POST'), [{ method: 'POST', p: '/bots/abcdef012345/remove', body: { from: id(42) } }]);
+    assert.match(out[0], /^removed Scout \(abcdef012345\)/);
+    calls.length = 0;
+    assert.equal(await FV.main(['bot', 'remove', 'abcdef012347', '--from', id(42)], env, () => {}, () => {}), 0, 'by id');
+    assert.equal(calls.filter((c) => c.method === 'POST')[0].p, '/bots/abcdef012347/remove');
+    calls.length = 0;
+    for (const bad of [['Scout'], ['--from', id(42)], ['*', '--from', id(42)], ['all', '--from', id(42)], ['Sc?ut', '--from', id(42)], ['twin', '--from', id(42)], ['nobody', '--from', id(42)], ['abcdef01', '--from', id(42)], ['Scout', 'Twin', '--from', id(42)]]) {
+      assert.equal(await FV.main(['bot', 'remove', ...bad], env, () => {}, () => {}), 2, `refused: ${bad.join(' ')}`);
+    }
+    assert.equal(calls.filter((c) => c.method === 'POST').length, 0, 'none of them reached a POST');
+    n++; console.log('ok fv bot remove posts one bot\'s remove with --from resolved; wildcards, all, prefixes, ambiguous names and a missing --from are bad usage');
   }
 })().finally(() => { Date.now = realNow; try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
 

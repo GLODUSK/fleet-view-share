@@ -7241,6 +7241,8 @@ function buildState() {
     // the bots sessions asked for, newest first, waiting on Henry's Make it or Decline (bots.js requestBot): { id, name,
     // role, brief, account, model, effort, why, from, fromName, at }
     botRequests: BOTS ? BOTS.requestsView() : [],
+    // the bots a session removed, newest first (bots.js removalsView): { id, name, removedBy, removedByName, removedAt }; Henry's phone is pushed once
+    botRemovals: BOTS ? BOTS.removalsView() : [],
   }, tagOf);
 }
 
