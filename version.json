@@ -1,5 +1,7 @@
 {
-  "version": "1.0.408",
-  "commit": "389f1ab7b7e6da52e5288fed5cc63d8db952de88",
-  "published": "2026-10-17"
+  "version": "1.0.409",
+  "commit": "58a73d76b4b5c3ca4b95ecb32c9d8cd76044cb1f",
+  "published": "2026-10-17",
+  "test": "macfix",
+  "note": "a pre-merge test build (mac-test/macfix), not a release"
 }

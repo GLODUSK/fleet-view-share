@@ -20,7 +20,7 @@ fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
 process.env.LOCALAPPDATA = path.join(dir, 'local');
 process.env.USERPROFILE = home;
 process.env.HOME = home;
-process.env.FV_HOST_PIPE = process.platform === 'win32' ? `\\\\.\\pipe\\fleet-view-host-receipts-${process.pid}` : path.join(dir, `fv-receipts-${process.pid}.sock`);
+process.env.FV_HOST_PIPE = require('./test-support.js').testPipe(`receipts-${process.pid}`);
 process.env.FV_HOST_DIR = path.join(dir, 'host');
 
 const H = require('../desktop/host.js');

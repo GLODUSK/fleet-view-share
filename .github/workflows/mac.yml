@@ -180,8 +180,9 @@ jobs:
           FV_TERM_SELFTEST_OUT: ${{ runner.temp }}/selftest.json
           FV_HOST_PIPE: ${{ runner.temp }}/fleet-view-host-st.sock
           FV_HOST_DIR: ${{ runner.temp }}/fvh-st
+          # the host puts claude's arguments after it: the last command, ':', takes them (sleep refused them, exit 1)
           FV_TERM_CMD: >-
-            printf 'Columns: %s\n' "$(tput cols)"; echo "CFG=$CLAUDE_CONFIG_DIR FVX=${FV_TERM_SELFTEST:-%FV_TERM_SELFTEST%} CT=$COLORTERM"; sleep 4; printf 'Columns: %s\n' "$(tput cols)"; sleep 600
+            printf 'Columns: %s\n' "$(tput cols)"; echo "CFG=$CLAUDE_CONFIG_DIR FVX=${FV_TERM_SELFTEST:-%FV_TERM_SELFTEST%} CT=$COLORTERM"; sleep 4; printf 'Columns: %s\n' "$(tput cols)"; sleep 600; :
         run: |
           # it quits by itself when done; 4 minutes at most
           perl -e 'alarm shift; exec @ARGV' 240 "$APP/Contents/MacOS/Electron" --url=http://127.0.0.1:4790/ 2>&1 | tee "$LOGS/selftest.txt" || true

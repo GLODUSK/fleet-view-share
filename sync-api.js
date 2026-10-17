@@ -339,7 +339,8 @@ function keychainStore(dir, name) {
       writeAtomic(marker, `This Fleet View secret is in the login Keychain (service ${KEYCHAIN_SERVICE}, account ${account}).\n`);
     },
     async clear() {
-      await new Promise((resolve) => execFile(SECURITY, ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account], { timeout: 15e3 }, () => resolve()));
+      // with no marker nothing is kept (read() says null), so no `security` process: a sign-out with sync off starts none
+      if (fs.existsSync(marker)) await new Promise((resolve) => execFile(SECURITY, ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account], { timeout: 15e3 }, () => resolve()));
       fs.rmSync(marker, { force: true });
     },
   };

@@ -265,6 +265,10 @@ async function workTree(root, stay = null, index = false) {
     // no index yet (nothing ever added): an empty one; one that is there but did not copy fails the pack, never an
     // empty tree that looks like every file was deleted
     try { fs.copyFileSync(idx, copy); } catch (e) { if (fs.existsSync(idx)) throw new WorkError(`the index could not be read (${clip(e && e.message)})`, 'git'); }
+    // the copy keeps the index's mtime (to the ms, never later): git trusts a file's stat only when the file is older
+    // than the index file (racy git), and a copy stamped now took a file edited in the index's own second, the same
+    // size, for unchanged where git's diff saw the edit (git without nanosecond times, as on macOS)
+    try { const st = fs.statSync(idx); fs.utimesSync(copy, st.atime, st.mtime); } catch {}
     const env = { GIT_INDEX_FILE: copy };
     if (stay) await git(root, ['reset', '-q', 'HEAD', '--', ...stay.pick], { env });
     if (!index) await git(root, ['add', '-u', '--', ':/', ...(stay ? stay.skip : [])], { env });
