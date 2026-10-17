@@ -1445,17 +1445,26 @@ function createRelay(opts = {}) {
       changed = true;
       note(`${dv.id} (${dv.name}) is paired: its first message under its own key finishes it`);
       removePairPage();
+      replaced(dv);
     }
     saw(dv, msg, changed);
     logLine(dv.id, 'HELLO', '-', 200, 0, 0);
     sendRes(dv, msg.id, { s: 200, b: { ...helloBody(), epk: b64u(mine.pub) } }, down);
+  }
+  // a phone's new pairing by sign-in is paired: that phone's older pairings here go now (pair(), o.phone), not before
+  function replaced(dv) {
+    if (!dv.phone) return;
+    for (const x of [...devices.values()]) {
+      if (x === dv || isComputer(x) || x.phone !== dv.phone) continue;
+      forgetDevice(x, 'was paired again by the same phone: the older pairing is dropped').catch((e) => note(`the older pairing ${x.id} could not be dropped: ${e.message}`));
+    }
   }
   // the first envelope under one of the K' (c) a handshake made: it is the device's key now, the QR's K and the other
   // K' open nothing (K still answers "already paired" until its time is up, from memory only)
   function finish(dv, c) {
     dv.old = { up: dv.keys.up, down: dv.keys.down, until: dv.until };
     Object.assign(dv, { k: c.k, keys: { up: c.up, down: c.down }, qr: false, cands: [], until: 0 });
-    if (dv.state === 'pending') { Object.assign(dv, { state: 'paired', pairedAt: now(), exp: undefined }); saveDevices(); removePairPage(); }
+    if (dv.state === 'pending') { Object.assign(dv, { state: 'paired', pairedAt: now(), exp: undefined }); saveDevices(); removePairPage(); replaced(dv); }
     if (keys && !dv.gone) { keys.set(dv.id, entryOf(dv)); saveKeys().catch((e) => note(`the key of ${dv.id} could not be saved: ${e.message}`)); }
     note(`${dv.id} (${dv.name}) finished pairing: the pairing code opens nothing now`);
   }
@@ -1788,8 +1797,10 @@ function createRelay(opts = {}) {
 
   // ---------- pairing, revoking, status ----------
   // mode 'relay' only (through Supabase: sync set up and signed in): pairing on this PC's Wi-Fi ('local') is gone.
-  // o.phone: the asking phone's install id (pairing by sign-in, relay-lobby.js): that phone's earlier pairings here
-  // are dropped first, so pairing again never piles devices up
+  // o.phone: the asking phone's install id (pairing by sign-in, relay-lobby.js): that phone's unfinished pairings here
+  // are dropped first, and its paired ones once the new one finishes (replaced), so pairing again never piles devices
+  // up, and a pairing the phone never finishes (Google sign-in cancelled, the app closed) leaves the one it has working
+  // (Henry, 2026-10-17: the phone read "PC offline" after a re-pair at 15:37 dropped its working pairing and stalled)
   async function pair(name, mode = 'relay', o = {}) {
     if (!started || stopped) return [503, { ok: false, message: 'the relay is not running' }];
     if (mode === 'local') return [400, { ok: false, message: LOCAL_GONE }];
@@ -1803,12 +1814,11 @@ function createRelay(opts = {}) {
     if (name != null && typeof name !== 'string') return [400, { ok: false, message: 'name must be text' }];
     await sweep();
     const phone = o && typeof o.phone === 'string' && PHONE_RE.test(o.phone) ? o.phone : undefined;
-    if (phone) {
-      const older = [...devices.values()].filter((dv) => !isComputer(dv) && dv.phone === phone);
-      for (const dv of older) await forgetDevice(dv, 'was paired again by the same phone: the older pairing is dropped');
-    }
+    const samePhone = (dv) => !!phone && !isComputer(dv) && dv.phone === phone;
+    for (const dv of [...devices.values()].filter((x) => samePhone(x) && x.state === 'pending')) await forgetDevice(dv, 'was asked for again by the same phone: the unfinished pairing is dropped');
     if ([...devices.values()].filter((dv) => dv.state === 'pending').length >= PENDING_MAX) return [429, { ok: false, message: `${PENDING_MAX} pairings are waiting already: use one, or wait 10 minutes` }];
-    if (devices.size >= DEVICES_MAX) return [409, { ok: false, message: `${DEVICES_MAX} devices are paired: revoke one first` }];
+    // (the same phone's paired one goes once this one finishes, so it doesn't count here)
+    if ([...devices.values()].filter((dv) => !samePhone(dv)).length >= DEVICES_MAX) return [409, { ok: false, message: `${DEVICES_MAX} devices are paired: revoke one first` }];
     const dev = b64u(crypto.randomBytes(12)), K = crypto.randomBytes(32), t = now(), exp = t + PENDING_MS;
     try {
       await loadKeys();

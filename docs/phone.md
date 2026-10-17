@@ -676,7 +676,10 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   `/state` names its host, and so does one taken over with Continue on; at most 10 minutes.
 - **Per machine:** a machine that revokes the phone, or no longer takes its pairing, drops that one pairing, with a
   note naming it; the last one gone is the same as Unpair. The same machine paired again (the same sync device id)
-  drops the older pairing. Settings lists the machines (online or last seen, the Fleet View version); a tap
+  drops the older pairing. Pairing again by sign-in: the machine drops the phone's older pairing only once the new
+  one finishes (its first hello), so a re-pair cut short (Google sign-in cancelled, the app closed) leaves the old one
+  working. A machine offline on its pairing for 90 s while the lobby lists it (it is on, so it forgot the pairing) is
+  paired again from the lobby by itself, at most every 10 minutes (Henry, 2026-10-17). Settings lists the machines (online or last seen, the Fleet View version); a tap
   unpairs that one only.
 
 ## Notifications

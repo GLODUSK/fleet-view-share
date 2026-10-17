@@ -1696,6 +1696,33 @@ async function main() {
   st4 = (await relay.status()).devices.find((d) => d.id === ph4.dev);
   ok(!st4 && !(ph4.dev in JSON.parse(A.keyStore.peek())) && (ph3.dev in JSON.parse(A.keyStore.peek())), 'the sweep dropped the unfinished pairing, key and all (and kept the finished one)');
   ok(ws.frames('phx_leave', ph4.wire).length === 1, 'and left its channel');
+  // the same phone paired again by sign-in (o.phone): its working pairing stays until the new one finishes; one it
+  // never finishes leaves the old one working (Henry, 2026-10-17)
+  [code, out] = await relay.pair('Same phone', 'relay', { phone: 'install-same-01' });
+  const ps1 = makePhone(out.link);
+  await settle(); acceptJoins(ws); await settle();
+  const hsS1 = await ps1.handshake(ws, 'ps1-h');
+  ps1.use(hsS1.k);
+  ps1.send(ws, { t: 'hello', id: 'ps1-b', at: clock.t, app: '1.0.0', device: 'iPhone' });
+  ok((await ps1.answer(ws, 'ps1-b')).s === 200, 'a phone pairs by sign-in');
+  [code, out] = await relay.pair('Same phone', 'relay', { phone: 'install-same-01' });
+  ok(code === 200, `the same phone asks again (${code})`);
+  let devsS = (await relay.status()).devices;
+  ok(devsS.some((d) => d.id === ps1.dev && d.state === 'paired'), 'its working pairing stays while the new one is unfinished');
+  [code, out] = await relay.pair('Same phone', 'relay', { phone: 'install-same-01' });
+  const ps2 = makePhone(out.link);
+  devsS = (await relay.status()).devices;
+  ok(devsS.filter((d) => d.state === 'pending').length === 1 && devsS.some((d) => d.id === ps1.dev), 'asking again drops its unfinished one, never the working one');
+  await settle(); acceptJoins(ws); await settle();
+  ps1.send(ws, { t: 'hello', id: 'ps1-c', at: clock.t, app: '1.0.0', device: 'iPhone' });
+  ok((await ps1.answer(ws, 'ps1-c')).s === 200, 'the old pairing still answers');
+  const hsS2 = await ps2.handshake(ws, 'ps2-h');
+  ok(hsS2.r && hsS2.r.s === 200, 'the new pairing\'s handshake');
+  await settle();
+  devsS = (await relay.status()).devices;
+  ok(!devsS.some((d) => d.id === ps1.dev) && devsS.some((d) => d.id === ps2.dev && d.state === 'paired'), 'once the new one is paired, the older one goes');
+  await relay.revoke(ps2.dev);
+  await settle();
   // revoked while a request is still being checked (its narrower check waits for /state): it never goes on
   await tick(A.timers, 16e3, ws);
   holdPaths.add('/state');
