@@ -77,6 +77,30 @@ function parseStart(text) {
   return null;
 }
 
+// server.log's newest "stop: exit code N" line when no "start: port" line came after it: the server that logged its
+// exit, { pid, code, at (ms, local time as logged; 0 when unreadable), line }, or null. With that pid still alive the
+// server is stuck in its exit (#574).
+function parseStuck(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/\bstart: port \d+/.test(lines[i])) return null;
+    const m = /^(?:(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d{3}) )?\[node (\d+)\] stop: exit code (-?\d+)/.exec(lines[i]);
+    if (m) return { pid: Number(m[8]), code: Number(m[9]), at: m[1] ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6], +m[7]).getTime() : 0, line: lines[i] };
+  }
+  return null;
+}
+
+// the Stop for a server that did not start: names the old one when it is still running after its stop line
+function notStarted(io, text, last) {
+  const s = parseStuck(text);
+  if (s && io.alive(s.pid)) {
+    const ago = s.at ? Math.round((io.now() - s.at) / 1000) : -1;
+    const end = io.platform === 'win32' ? `Stop-Process -Id ${s.pid} -Force` : `kill -9 ${s.pid}`;
+    return new Stop(`the old server (pid ${s.pid}) is still running${ago >= 0 && ago < 86400 ? ` ${ago} s` : ''} after it logged its exit (${s.code}): #574; the window ends it after 5 s, or end it with ${end}`);
+  }
+  return new Stop(`the server did not start on the merge within ${LIMITS.serverMs / 1000} s; newest start line: ${last ? last.line : '(none)'}`);
+}
+
 // share-publish.log's newest entry ("--- <date> after pull to <sha>" and the lines below it) for the main commit sha:
 // { state: 'none' | 'running' | 'published' | 'already' | 'failed', line, entry }
 function parsePublish(text, sha) {
@@ -245,12 +269,12 @@ async function restartServer(io, merge) {
   const log = path.join(io.dataDir, 'server.log');
   io.touch(J(io, 'fleet-view.js'));
   io.say('server: touched fleet-view.js; waiting for it to start again');
-  let last = null;
+  let last = null, text = '';
   const ok = await waitFor(io, LIMITS.serverMs, () => {
-    last = parseStart(io.readTail(log));
+    last = parseStart(text = io.readTail(log));
     return last && last.commit && isAncestor(io, merge, last.commit) ? last : null;
   });
-  if (!ok) throw new Stop(`the server did not start on the merge within ${LIMITS.serverMs / 1000} s; newest start line: ${last ? last.line : '(none)'}`);
+  if (!ok) throw notStarted(io, text, last);
   io.say(`server: started, version ${ok.version || '?'} (${ok.commit})`);
 }
 
@@ -412,4 +436,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { mainDir, classify, parseStart, parsePublish, publishOk, findWindowPid, hostHash, buildPlan, laneNote, summary, parseArgs, ship, Stop, LIMITS };
+module.exports = { mainDir, classify, parseStart, parseStuck, parsePublish, publishOk, findWindowPid, hostHash, buildPlan, laneNote, summary, parseArgs, ship, Stop, LIMITS };

@@ -8921,6 +8921,16 @@ function exitWith(code, reason) {
   const t = setTimeout(() => process.exit(code), SYNC_STOP_MS);
   Promise.allSettled(stops.map((f) => Promise.resolve().then(f))).then(() => { clearTimeout(t); process.exit(code); });
 }
+// The desktop window's supervisor (desktop/server.js) hands the server a pipe (FV_EXIT_NOTICE_FD) and reads
+// "exiting <code>" from it, written synchronously as the last JS of every exit: when the process then stays alive
+// (something native holding teardown after the exit handlers, GLODUSK/fleet-view#574), the window ends it after a
+// few seconds and does what the code says. Taken out of the environment at once, so nothing this starts gets it.
+const EXIT_NOTICE_FD = Number(process.env.FV_EXIT_NOTICE_FD) > 2 ? Number(process.env.FV_EXIT_NOTICE_FD) : 0;
+delete process.env.FV_EXIT_NOTICE_FD;
+function exitNotice(code) {
+  if (!EXIT_NOTICE_FD) return;
+  try { fs.writeSync(EXIT_NOTICE_FD, `exiting ${code}\n`); } catch {} // (the window went: nobody to tell)
+}
 function guardProcess() {
   process.on('uncaughtException', (e) => {
     logLine(`crash: uncaught exception, exiting with ${EXIT_CRASH} so the launcher restarts it\n${errorText(e)}`);
@@ -8928,7 +8938,7 @@ function guardProcess() {
     exitWith(EXIT_CRASH, 'crash');
   });
   process.on('unhandledRejection', (e) => logOnce('rejection:' + (e && e.message), `unhandled promise rejection (still running)\n${errorText(e)}`));
-  process.on('exit', (code) => logLine(`stop: exit code ${code}${exitReason ? ` (${exitReason})` : ''}`));
+  process.on('exit', (code) => { logLine(`stop: exit code ${code}${exitReason ? ` (${exitReason})` : ''}`); exitNotice(code); });
   // a console that went away must not turn a status line into a crash
   for (const out of [process.stdout, process.stderr]) out.on('error', () => {});
 }

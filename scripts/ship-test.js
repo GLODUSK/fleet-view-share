@@ -57,6 +57,20 @@ check('mainDir: else the shared .git\'s folder', S.mainDir({ env: {}, platform: 
   const u = S.parseStart('x start: port 4777, version unknown, node v24');
   check('parseStart: unknown version, no commit', u && u.commit === '', JSON.stringify(u));
   check('parseStart: none', S.parseStart('nothing here') === null);
+
+// ---------- parseStuck (#574) ----------
+{
+  const log = [
+    '2026-10-16 21:33:01.000 [node 20820] start: port 4777, version 1.0.387 (29eccaf), node v24; loaded in 120 ms',
+    '2026-10-17 01:06:46.145 [node 20820] fleet-view.js changed on disk: reloading (exit 75)',
+    '2026-10-17 01:06:46.153 [node 20820] sync: stopped (stopped)',
+    '2026-10-17 01:06:46.154 [node 20820] stop: exit code 75 (update)',
+  ].join('\r\n');
+  const s = S.parseStuck(log);
+  check('parseStuck: the stop line after the last start', s && s.pid === 20820 && s.code === 75 && s.at === new Date(2026, 9, 17, 1, 6, 46, 154).getTime(), JSON.stringify(s));
+  check('parseStuck: a start after the stop is no stuck server', S.parseStuck(`${log}\n2026-10-17 01:08:30.636 [node 32916] start: port 4777, version 1.0.389 (f5e5426)`) === null);
+  check('parseStuck: no stop line', S.parseStuck(log.split('\r\n')[0]) === null && S.parseStuck('') === null);
+}
 }
 
 // ---------- parsePublish / publishOk ----------
@@ -151,14 +165,14 @@ function world(o = {}) {
       return { code: 1, out: `unexpected: ${line}` };
     },
     readTail(file) {
-      if (/server\.log$/.test(file)) return `x start: port 4777, version 1.0.3 (${serverCommit}), node v24`;
+      if (/server\.log$/.test(file)) return o.serverLog || `x start: port 4777, version 1.0.3 (${serverCommit}), node v24`;
       if (/share-publish\.log$/.test(file)) return publishLog;
       if (/update-install\.log$/.test(file)) return 'Desktop window ready';
       return '';
     },
     readBytes: () => Buffer.from('host'),
     touch(file) { calls.push(`touch ${file}`); touched = true; serverCommit = MERGE.slice(0, 7); },
-    alive: (pid) => (pid === 100 ? windowAlive : true),
+    alive: (pid) => (pid === 100 ? windowAlive : o.dead ? !o.dead.includes(pid) : true),
     windows: () => [{ pid: windowPid, command: `"M\\desktop\\node_modules\\electron\\dist\\Fleet View.exe" M\\desktop --url=http://x` }],
     closeWindow(pid) { calls.push(`close ${pid}`); windowAlive = !!o.stuck; return true; },
     detached(cmd, args) { calls.push(`detached ${[cmd, ...args].join(' ')}`); if (cmd === 'wscript.exe') windowPid = 200; return { pid: 1, exited: Promise.resolve(0) }; },
@@ -205,6 +219,22 @@ const idx = (calls, re) => calls.findIndex((c) => re.test(c));
     try { await S.ship({ pr: 9 }, w.io); } catch (e) { err = e; }
     check('a window that will not close: stops, never killed, no vbs, lane released', err instanceof S.Stop && /not killed/.test(err.message)
       && idx(w.calls, /wscript/) < 0 && idx(w.calls, /merge-lane\.js release/) > idx(w.calls, /^close/), err && err.message);
+  }
+  {
+    const stuckLog = 'x [node 1] start: port 4777, version 1.0.3 (0b0b0b0), node v24\n2026-10-17 01:06:46.154 [node 20820] stop: exit code 75 (update)';
+    for (const platform of ['win32', 'darwin']) {
+      const w = world({ platform, files: ['web/app.js'], serverLog: stuckLog });
+      let err = null;
+      try { await S.ship({ pr: 9 }, w.io); } catch (e) { err = e; }
+      const end = platform === 'win32' ? 'Stop-Process -Id 20820 -Force' : 'kill -9 20820';
+      check(`a server stuck in its exit (${platform}): names its pid, #574 and how to end it`, err instanceof S.Stop
+        && /^the old server \(pid 20820\) is still running after it logged its exit \(75\): #574; the window ends it after 5 s/.test(err.message) && err.message.endsWith(end), err && err.message);
+      check(`... and the lane is released (${platform})`, idx(w.calls, /merge-lane\.js release/) > idx(w.calls, /^touch/));
+    }
+    const w = world({ files: ['web/app.js'], serverLog: stuckLog, dead: [20820] });
+    let err = null;
+    try { await S.ship({ pr: 9 }, w.io); } catch (e) { err = e; }
+    check('a stop line whose server is gone: the plain "did not start" message', err instanceof S.Stop && /^the server did not start on the merge within 60 s/.test(err.message), err && err.message);
   }
   {
     const w = world({ files: ['web/app.js'], laneHeld: true });
