@@ -442,7 +442,7 @@ details.ci-note { flex-direction: column; align-items: center; }
 .cn-row .cn-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cn-row svg { flex: none; transition: transform 180ms var(--ease); }
 details.ci-note[open] > .cn-row svg { transform: rotate(90deg); }
-/* a teammate's message (chat.js mateOf): the slash command's pill, who sent it, the text under it */
+/* a teammate's message (chats-model.js mateOf): the slash command's pill, who sent it, the text under it */
 .ci-mate > .cn-row { color: var(--dim); background: rgba(255, 255, 255, 0.04); }
 .ci-mate > .cn-row:hover { background: rgba(255, 255, 255, 0.07); }
 .ci-mate .cm-ic { display: inline-flex; opacity: 0.8; }

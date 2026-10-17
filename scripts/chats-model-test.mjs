@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { leastWorn, buildContacts, sortContacts, teamThread, createChainStore, unread, asksYou, ownColorOf, rawToContactsState, previewOf, botPreview, replyLine, botFeed, fvFeed, noteTone, setupNote, quietNote, taskNote, doingOf, botChoices, botEdits,
   sizeTask, dynamicSwitch, switchNote, noiseNote, reactionOf, DYNAMIC, taskSchedule, taskWhen, taskLine, tasksHead, profileTasks, fullChatOrder, moveInChatOrder, pinInChatOrder, stepInChatOrder,
-  sameChatOrder, contactTree, teamFlags } from '../web/chats-model.js';
+  sameChatOrder, contactTree, teamFlags, mateOf } from '../web/chats-model.js';
 import { SHAPES, shapeFor, mascotState, mascotSVG } from '../web/mascot.js';
 
 const KEY = 'fv.chats.chains';
@@ -861,6 +861,16 @@ test("profileTasks: a bot's profile lists the open ones (next run soonest first)
   assert.deepEqual(done.map((x) => x.id), ['d2', 'd1'], 'the last run newest first');
   assert.deepEqual(profileTasks(undefined), { live: [], done: [] });
   assert.deepEqual(profileTasks('x'), { live: [], done: [] });
+});
+
+test('mateOf: a message another conversation sent (fv send) says who sent it; the head line only at the start', () => {
+  const ID = 'e47e9a3e-1111-2222-3333-444455556666';
+  assert.deepEqual(mateOf(`[Message from teammate "Pablito" (${ID}). Reply with: fv send ${ID} "message" --from db59]\nThanks`), { name: 'Pablito', ask: false, lead: false, text: 'Thanks' });
+  assert.deepEqual(mateOf(`[Question from your lead "Mateo" (${ID}). Reply with: fv send ${ID} "answer"]\r\nWhich branch?\r\n`), { name: 'Mateo', ask: true, lead: true, text: 'Which branch?' });
+  assert.equal(mateOf('[Message from "" (id). Reply]')?.name, 'Another chat');
+  assert.equal(mateOf(`look:\n[Message from teammate "P" (${ID}). Reply]\nhi`), null);
+  assert.equal(mateOf('hello'), null);
+  assert.equal(mateOf(undefined), null);
 });
 
 console.log(`${n} tests passed`);

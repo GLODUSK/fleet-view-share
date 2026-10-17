@@ -3,7 +3,7 @@
 // from its bundle) splits at a space before "/" or a drive letter and at new lines, takes outer quotes off a piece,
 // and reads a piece ending in .png/.jpg/.jpeg/.gif/.webp as an image file. Run: node scripts/compose-message-test.mjs
 import assert from 'node:assert/strict';
-import { messageText, parseRewind, parsePanel } from '../web/compose.js';
+import { messageText, parseRewind, parsePanel, pastMessages } from '../web/compose.js';
 import { pasteWrites } from '../web/term.js';
 
 const IMG = /\.(png|jpe?g|gif|webp)$/i;
@@ -57,5 +57,10 @@ const EDGE = '▔'.repeat(60);
 assert.equal(parsePanel(['● ok', EDGE, '', ''], { loose: true }), null);
 assert.equal(parsePanel(['● ok', EDGE, '  Usage', '  ███ 40%'], { loose: true }).title, 'Usage');
 assert.equal(parsePanel(['● ok', EDGE, '', '   Esc to cancel'], { loose: true }).keys, 'Esc to cancel');
+
+// pastMessages (the chat box's Up arrow): your messages and slash commands, never a teammate's (fv send) or what a "!"
+// command printed
+const MATE = '[Message from teammate "Pablito" (e47e). Reply with: fv send e47e "message" --from db59]\nThanks';
+assert.deepEqual(pastMessages([{ kind: 'user', text: 'one' }, { kind: 'user', text: MATE }, { kind: 'user', text: '<bash-stdout>x</bash-stdout>' }, { kind: 'note', text: '/model opus' }], ['two']), ['one', '/model opus', 'two']);
 
 console.log('compose-message-test: ok');

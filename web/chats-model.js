@@ -605,6 +605,12 @@ export function leastWorn(list, worn, first) {
 // marked "(quoted)" by the server, so this header alone says it is a setup note
 const SETUP = /^\[Fleet View\][ \t]*/;
 export const setupNote = (text) => { const t = String(text == null ? '' : text); return SETUP.test(t) ? t.replace(SETUP, '') : null; };
+// a message another conversation sent this one (api.js sendMessage's head line, then its text) -> { name, ask, lead,
+// text }, else null. Not yours: chat.js draws it as a note, and it never settles a sent bubble or goes in ↑'s list
+export function mateOf(text) {
+  const m = /^\[(Message|Question) from (your lead |teammate )?"([^"\n]*)" \([^)\n]*\)\.[^\n]*\](?:\r?\n|$)/.exec(String(text || ''));
+  return m ? { name: m[3] || 'Another chat', ask: m[1] === 'Question', lead: m[2] === 'your lead ', text: String(text).slice(m[0].length).trim() } : null;
+}
 // what a bot answers a setup note with when it asks for "ok" (bots.js startPrompt, idNote)
 const ACK = /^\s*(?:ok(?:ay)?|ready|got it)[.!]?\s*$/i;
 // a reaction a bot puts at the very start of a reply (bot/BRIEF.md): "[react:👍]", then the reply or nothing

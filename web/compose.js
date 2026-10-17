@@ -82,7 +82,7 @@ import { icon } from './icons.js';
 import { termApi, hosts, refreshHosts, closePanel as closeHostPanel, typeInto, ensureLive, warmUp, screenText, screenMarked, screenReady, growRows, keepSession, openElsewhere, quoteSelection, onRekey, keyNow, noTermMsg } from './term.js';
 import { uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
-import { sizeTask, dynamicSwitch, DYNAMIC } from './chats-model.js';
+import { sizeTask, dynamicSwitch, DYNAMIC, mateOf } from './chats-model.js';
 import { pinText, setPin } from './keeps.js';
 
 const POLL_MS = 400;
@@ -726,7 +726,7 @@ export function pastMessages(items, sent) {
   for (const it of items || []) {
     const t = String(it.text || '');
     if (it.kind === 'user') {
-      if (/^\s*<bash-(?:stdout|stderr)>/.test(t)) continue;
+      if (/^\s*<bash-(?:stdout|stderr)>/.test(t) || mateOf(t)) continue; // a teammate's message (fv send) isn't yours
       const b = /^\s*<bash-input>([\s\S]*?)<\/bash-input>\s*$/.exec(t);
       push(b ? `!${b[1]}` : t);
     } else if (it.kind === 'note' && /^\/\S/.test(t)) push(t);

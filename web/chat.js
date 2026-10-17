@@ -83,7 +83,7 @@ import { handToChat } from './handto.js';
 import { onRekey, termApi } from './term.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { openViewer, openInCode } from './viewer.js';
-import { botFeed, fvFeed, switchNote } from './chats-model.js';
+import { botFeed, fvFeed, switchNote, mateOf } from './chats-model.js';
 import { recommendationsOf } from './recommend.js';
 
 const params = (() => { try { return new URLSearchParams(location.search); } catch { return new URLSearchParams(); } })();
@@ -569,13 +569,6 @@ const SYS_TONE = { cut: 'alert', restart: 'sync', moved: 'computer', info: 'info
 
 // a bot's reaction to your message (opts.bubbles, botFeed): its emoji on the bubble's corner
 const reactionHtml = (it) => (it.reaction ? `<span class="cu-react" title="Reacted ${esc(it.reaction)}">${esc(it.reaction)}</span>` : '');
-
-// a message another conversation sent this one (api.js sendMessage's head line, then its text) -> { name, ask, lead,
-// text }, else null
-function mateOf(text) {
-  const m = /^\[(Message|Question) from (your lead |teammate )?"([^"\n]*)" \([^)\n]*\)\.[^\n]*\](?:\r?\n|$)/.exec(String(text || ''));
-  return m ? { name: m[3] || 'Another chat', ask: m[1] === 'Question', lead: m[2] === 'your lead ', text: String(text).slice(m[0].length).trim() } : null;
-}
 
 function renderItem(it, c) {
   const L = libsReady;
@@ -1201,6 +1194,7 @@ function settleSent(c) {
     if (it.kind !== 'user') continue;
     const b = bashOf(it.text);
     if (b && b.cmd == null) continue; // what a "!" command printed, not a message
+    if (mateOf(it.text)) continue; // another conversation's message (fv send), not one sent from here
     const k = String(it.key), t = Number(it.t) || 0, text = norm(userShown(it.text));
     const open = c.sent.filter((x) => !x.cmd && !x.used.has(k));
     // the same text (the latest: after a Send again the first one is the lost copy), else (the log wrote it
