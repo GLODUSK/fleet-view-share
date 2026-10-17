@@ -153,6 +153,15 @@ async function main() {
   eq(skipped.map((s) => s.split(':')[0]), ['bad name.txt'], 'conversationFiles: a bad name is skipped and reported');
   eq(C.conversationFiles(slug, '11111111-2222-3333-4444-555555555555'), [], 'conversationFiles: nothing there');
   throws(() => C.conversationFiles(slug, '../x'), 'conversationFiles: a bad id');
+  // the async walk sync-up.js scans with: the same files, fields, order and skips
+  const skippedA = [];
+  const filesA = await C.conversationFilesAsync(slug, ID, { onSkip: (p, why) => skippedA.push(path.basename(p) + ': ' + why) });
+  eq(filesA, files, 'conversationFilesAsync: the same result as conversationFiles');
+  eq(skippedA, skipped, 'conversationFilesAsync: the same skips and reasons');
+  eq(await C.conversationFilesAsync(slug, '11111111-2222-3333-4444-555555555555'), [], 'conversationFilesAsync: nothing there');
+  let badA = null;
+  try { await C.conversationFilesAsync(slug, '../x'); } catch (e) { badA = e; }
+  ok(badA instanceof S.SyncError, 'conversationFilesAsync: a bad id rejects');
 
   // ---------- lastMeta ----------
   const L = (o) => JSON.stringify(o) + '\n';

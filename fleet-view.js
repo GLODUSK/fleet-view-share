@@ -1056,9 +1056,10 @@ const ago = (ms) => (ms < 60e3 ? `${Math.max(0, Math.round(ms / 1e3))}s` : ms < 
 
 // ---------- tailing jsonl files ----------
 const tails = new Map(); // file -> { off, skip, rest }
-function readNew(file, initialTail) {
-  let size;
-  try { size = fs.statSync(file).size; } catch { return []; }
+// size: statAhead's answer for the server's poll (null: missing), so a round asks the disk once; left out, asked here
+function readNew(file, initialTail, size) {
+  if (size === undefined) { try { size = fs.statSync(file).size; } catch { return []; } }
+  if (size == null) return [];
   let st = tails.get(file);
   if (!st) { st = { off: Math.max(0, size - initialTail), skip: size > initialTail, rest: Buffer.alloc(0) }; tails.set(file, st); }
   if (size < st.off) { st.off = 0; st.rest = Buffer.alloc(0); }
@@ -1084,6 +1085,68 @@ function readNew(file, initialTail) {
 const mtime = (f) => { try { return fs.statSync(f).mtimeMs; } catch { return 0; } };
 const ls = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+// ---------- the poll's stats, asked ahead off the event loop ----------
+// One fs.statSync in pollOne took 2,092 ms on 2026-10-17 01:11 (a slow disk: other stats took 30-57 ms), and the page
+// gives /state 4 s before it shows "reconnecting…". So the server's poll asks first with fs.promises (statAhead),
+// waits STAT_WAIT_MS at most, and pollOne reads the answers here: one not in yet keeps its last value, or waits for a
+// later round, never a sync stat (that is the freeze). poll() without it (start-up, the terminal) stats as before.
+const STAT_WAIT_MS = 500;
+const statKnown = new Map(); // file -> { mtimeMs, size }, or null when missing
+const statFlying = new Map(); // file -> its stat still out: one at a time, however slow, and it lands here when it does
+const subKnown = new Map(); // session dir -> { files, wfs }: its subagent logs (as pollOne lists them) and workflow runs
+const subFlying = new Map(); // session dir -> its listing still out
+const knownM = (k) => (k ? k.mtimeMs : 0);
+const knownSize = (k) => (k ? k.size : null);
+function statOnce(f) {
+  let p = statFlying.get(f);
+  if (!p) {
+    p = fs.promises.stat(f).then((st) => { statKnown.set(f, { mtimeMs: st.mtimeMs, size: st.size }); }, () => { statKnown.set(f, null); })
+      .finally(() => statFlying.delete(f));
+    statFlying.set(f, p);
+  }
+  return p;
+}
+// subagents/*.jsonl and subagents/workflows/<w>/agent-*.jsonl, in ls's order, and the wf_ runs loadWorkflow reads
+async function listSubs(dir) {
+  const rd = (d) => fs.promises.readdir(d).catch(() => []);
+  const sub = path.join(dir, 'subagents'), wroot = path.join(sub, 'workflows');
+  const [top, ws] = await Promise.all([rd(sub), rd(wroot)]);
+  const files = top.filter((f) => f.endsWith('.jsonl')).map((f) => path.join(sub, f));
+  const inWs = await Promise.all(ws.map((w) => rd(path.join(wroot, w))));
+  ws.forEach((w, i) => { for (const f of inWs[i]) if (f.startsWith('agent-') && f.endsWith('.jsonl')) files.push(path.join(wroot, w, f)); });
+  return { files, wfs: ws.filter((w) => w.startsWith('wf_')) };
+}
+function listOnce(dir) {
+  let p = subFlying.get(dir);
+  if (!p) {
+    p = listSubs(dir).then((l) => { subKnown.set(dir, l); return l; }).finally(() => subFlying.delete(dir));
+    subFlying.set(dir, p);
+  }
+  return p;
+}
+// every file a session's round stats past its own log: its subagent logs, each run's journal and summary
+const subStatFiles = (dir, l) => [...l.files, ...l.wfs.flatMap((id) => [path.join(dir, 'subagents', 'workflows', id, 'journal.jsonl'), path.join(dir, 'workflows', id + '.json')])];
+// one round's stats and listings for every held conversation, concurrently; resolves once all are in or after
+// STAT_WAIT_MS, whichever is first. Files and folders no longer polled are forgotten, so the maps stay small.
+async function statAhead() {
+  const files = new Set(), dirs = new Set(), out = [];
+  const ask = (list) => Promise.all(list.map((f) => { files.add(f); return statOnce(f); }));
+  for (const s of sessions.values()) {
+    if (s.demo || !s.file) continue;
+    out.push(statOnce(s.file)); files.add(s.file);
+    if (!s.dir) continue;
+    dirs.add(s.dir);
+    const was = subKnown.get(s.dir), old = new Set(was ? subStatFiles(s.dir, was) : []);
+    if (was) out.push(ask([...old]));
+    // a log the new listing found is asked as soon as it is in; the ones already asked above are not asked twice
+    out.push(listOnce(s.dir).then((l) => ask(subStatFiles(s.dir, l).filter((f) => !old.has(f)))));
+  }
+  let timer;
+  await Promise.race([Promise.all(out), new Promise((r) => { timer = setTimeout(r, STAT_WAIT_MS); })]);
+  clearTimeout(timer);
+  for (const f of statKnown.keys()) if (!files.has(f)) statKnown.delete(f);
+  for (const d of subKnown.keys()) if (!dirs.has(d)) subKnown.delete(d);
+}
 // the model a new conversation starts on: `model` in its account's settings.json (null when unset), read at most every 10 s
 const defModels = new Map(); // config folder -> { at, model }
 function defaultModelOf(projRoot) {
@@ -1954,11 +2017,13 @@ let spentAll = 0;
 
 // Usage is read from the start of every log the conversation owns (its own and all its agents'),
 // separately from the live tail, a few MB per poll so a long history doesn't stall the screen.
-function scanUsage(s, files, budget) {
+// ahead: sizes from statAhead's answers (one missing or not in yet is passed over this round, like a failed stat)
+function scanUsage(s, files, budget, ahead) {
   for (const file of files) {
     if (budget.left <= 0) { s.usagePending = true; return; }
     let size;
-    try { size = fs.statSync(file).size; } catch { continue; }
+    if (ahead) { size = knownSize(statKnown.get(file)); if (size == null) continue; }
+    else try { size = fs.statSync(file).size; } catch { continue; }
     let st = s.usageScan.get(file);
     if (!st) s.usageScan.set(file, (st = { off: 0, rest: '' }));
     if (size < st.off) { st.off = 0; st.rest = ''; }
@@ -2405,19 +2470,25 @@ function ingestAgent(s, a, recs) {
   }
 }
 
-function loadWorkflow(s, sdir) {
+function loadWorkflow(s, sdir, ahead) {
   // every run gets a journal dir as soon as it launches; the summary json only appears when it ends
   const jroot = path.join(sdir, 'subagents', 'workflows');
   const wdir = path.join(sdir, 'workflows');
+  // ahead: the runs and their stats from statAhead; one not in yet leaves s.wf as it was this round (NaN)
+  const known = ahead ? subKnown.get(sdir) : null;
+  if (ahead && !known) return;
+  const mt = ahead ? (f) => { const k = statKnown.get(f); return k === undefined ? NaN : knownM(k); } : mtime;
   let best = null, bestM = 0;
-  for (const id of ls(jroot)) {
+  for (const id of ahead ? known.wfs : ls(jroot)) {
     if (!id.startsWith('wf_')) continue;
-    const m = mtime(path.join(jroot, id, 'journal.jsonl'));
+    const m = mt(path.join(jroot, id, 'journal.jsonl'));
+    if (Number.isNaN(m)) return;
     if (m > bestM) { bestM = m; best = id; }
   }
   if (!best) { s.wf = null; return; }
   const summaryFile = path.join(wdir, best + '.json');
-  const summaryM = mtime(summaryFile);
+  const summaryM = mt(summaryFile);
+  if (Number.isNaN(summaryM)) return;
   if (!s.wf || s.wf.runId !== best || (summaryM && !s.wf.summary)) {
     const j = summaryM ? readJson(summaryFile) || {} : {};
     let script = String(j.script || '');
@@ -3176,14 +3247,15 @@ function discover() {
   }
 }
 
-function poll() {
+// ahead: statAhead has just asked this round's stats and listings (the server's poll); without it, they are asked here
+function poll(ahead = false) {
   const now = Date.now();
   UPTIME.tick(now); // the heartbeat (uptime.json every minute), and a wake from sleep noted before the age rules
   const budget = { left: 8 << 20 }; // bytes of history read for token counts per poll, across sessions
   pollRemote = syncRemote();
   for (const s of [...sessions.values()]) {
     // one conversation whose log trips something must not stop the others, or the server
-    try { pollOne(s, now, budget); } catch (e) { logOnce('poll:' + (e && e.message), `poll: skipped ${s.id} this round\n${errorText(e)}`); }
+    try { pollOne(s, now, budget, ahead && !s.demo); } catch (e) { logOnce('poll:' + (e && e.message), `poll: skipped ${s.id} this round\n${errorText(e)}`); }
   }
   feedLive = true;
   feed.sort((a, b) => a.t - b.t);
@@ -3197,16 +3269,20 @@ function afterPoll(now) {
   try { tlTick(now); } catch (e) { logOnce('timeline:' + (e && e.message), `timeline failed\n${errorText(e)}`); }
   try { leftTick(now); } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: could not save on-map.json\n${errorText(e)}`); }
 }
-function pollOne(s, now, budget) {
+function pollOne(s, now, budget, ahead) {
   // a record at a time: a log line that trips the reader is skipped, not the rest of what was read
   const ingest = (fn, recs) => {
     for (const r of recs) {
       try { fn([r]); } catch (e) { logOnce('ingest:' + (e && e.message), `skipped a log line of ${s.id}\n${errorText(e)}`); }
     }
   };
-  s.mtime = mtime(s.file);
+  // ahead: the stats statAhead got (its last answer when this round's is still out). Never answered yet: this one
+  // waits for a round that has it, as it was, rather than a sync stat
+  const k = ahead ? statKnown.get(s.file) : undefined;
+  if (ahead && k === undefined) return;
+  s.mtime = ahead ? knownM(k) : mtime(s.file);
   if (!tails.has(s.file)) headPickup(s);
-  ingest((r) => ingestMain(s, r), readNew(s.file, LOG_TAIL));
+  ingest((r) => ingestMain(s, r), readNew(s.file, LOG_TAIL, ahead ? knownSize(k) : undefined));
   forkHeadScan(s); // once, after the first read (it knows then whether that read found the source's id)
   // old by this copy, but another device runs it: on the list exactly while it is on that device's, whatever this
   // copy's tail says (laid down mid-turn, it can look unfinished here)
@@ -3220,10 +3296,16 @@ function pollOne(s, now, budget) {
   if (s.late && (s.turnOpen || s.asking || s.apiError || s.endedOnQuestion || runAge(endedAtOf(s), now) >= KEEP_DONE_MS)) { dropSession(s, 'late-unfinished'); return; }
   // subagents: plain Agent calls and workflow agents, tailed while they are fresh
   const sub = path.join(s.dir, 'subagents');
-  const files = ls(sub).filter((f) => f.endsWith('.jsonl')).map((f) => path.join(sub, f));
-  for (const w of ls(path.join(sub, 'workflows'))) for (const f of ls(path.join(sub, 'workflows', w))) if (f.startsWith('agent-') && f.endsWith('.jsonl')) files.push(path.join(sub, 'workflows', w, f));
+  let files;
+  if (ahead) files = (subKnown.get(s.dir) || { files: [] }).files; // listSubs lists them the same way
+  else {
+    files = ls(sub).filter((f) => f.endsWith('.jsonl')).map((f) => path.join(sub, f));
+    for (const w of ls(path.join(sub, 'workflows'))) for (const f of ls(path.join(sub, 'workflows', w))) if (f.startsWith('agent-') && f.endsWith('.jsonl')) files.push(path.join(sub, 'workflows', w, f));
+  }
   for (const f of files) {
-    const m = mtime(f);
+    const fk = ahead ? statKnown.get(f) : undefined;
+    if (ahead && fk === undefined) continue; // not answered yet: a later round
+    const m = ahead ? knownM(fk) : mtime(f);
     if (now - m > 5 * 60e3 && !s.agents.has(f)) continue;
     let a = s.agents.get(f);
     if (!a) {
@@ -3232,11 +3314,11 @@ function pollOne(s, now, budget) {
       s.agents.set(f, a);
     }
     a.mtime = m;
-    ingest((r) => ingestAgent(s, a, r), readNew(f, 256 << 10));
+    ingest((r) => ingestAgent(s, a, r), readNew(f, 256 << 10, ahead ? knownSize(fk) : undefined));
   }
-  scanUsage(s, [s.file, ...files], budget);
+  scanUsage(s, [s.file, ...files], budget, ahead);
   for (const [f, a] of s.agents) if (now - a.mtime > 10 * 60e3) s.agents.delete(f);
-  loadWorkflow(s, s.dir);
+  loadWorkflow(s, s.dir, ahead);
   // written in the last 90 s, or mid-step while its claude still runs (a quiet render or think is still work)
   const lpAlive = liveProcs.has(s.id);
   s.liveAgents = [...s.agents.values()].filter((a) => now - a.mtime < 90e3 || (a.open && lpAlive && now - a.mtime < AGENT_STEP_MS)).length;
@@ -9063,7 +9145,16 @@ function startWeb() {
     bootSteps('the list is ready');
     every(250, 'history', historyStep);
     every(1500, 'procs', scanLiveProcs);
-    every(1500, 'poll', poll);
+    // the poll on stats asked ahead (statAhead: a 2 s statSync froze the server on 2026-10-17 01:11); a round still
+    // out when the next tick comes skips that tick rather than run two at once
+    let polling = false;
+    every(1500, 'poll', () => {
+      if (polling) return;
+      polling = true;
+      statAhead().then(() => poll(true))
+        .catch((e) => logOnce('poll:' + (e && e.message), `poll failed\n${errorText(e)}`))
+        .finally(() => { polling = false; });
+    });
     every(8000, 'discover', discover);
     const prs = () => refreshGithub().catch((e) => logOnce('github:' + (e && e.message), `GitHub lookup failed\n${errorText(e)}`));
     const deploys = () => refreshDeploys().catch((e) => logOnce('deploys:' + (e && e.message), `deploy lookup failed\n${errorText(e)}`));

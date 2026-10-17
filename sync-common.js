@@ -18,6 +18,7 @@
 //   checkFileKey(k), fileKeyB64(k), fileKeyFromB64(s), objectPath(id, fileKey, generation, seq)
 //                                      file keys and the 't/<id>/<b64>/<gen>/<seq>' object paths
 //   conversationFiles(slugDir, id, o)  [{ fileKey, path, appendOnly, size, mtimeMs }]: what of a conversation syncs
+//   conversationFilesAsync(slugDir, id, o)  the same as a Promise, from fs.promises (never blocks on a slow disk)
 //   lastMeta(mainPath, o)              { cwd, branch, title } from the end of a log
 //   homeCwd(mainPath, lastCwd, o)      the cwd of the folder a log lives in (where it resumes), or null
 //   ensureDevice(api, dataDir), touchDevice(api, id, o)   this machine's devices row
@@ -509,6 +510,48 @@ function conversationFiles(slugDir, id, o = {}) {
   side.sort((x, y) => (x.fileKey < y.fileKey ? -1 : x.fileKey > y.fileKey ? 1 : 0));
   return out.concat(side);
 }
+// conversationFiles without blocking: the same result, skips and order, from fs.promises. A slow disk held the server
+// for seconds on lstatSync here (30-57 ms a call, 2026-10-17), so sync-up.js's scan walks with this one. A folder's
+// files are lstat'ed at once; folders are walked in readdir order, so onSkip hears the same paths in the same order.
+// -> Promise<[{ fileKey, path, appendOnly, size, mtimeMs }]>; rejects on a bad id.
+async function conversationFilesAsync(slugDir, id, o = {}) {
+  if (typeof id !== 'string' || !UUID_RE.test(id)) throw new S.SyncError('not a conversation id', 400, 'bad_request');
+  const skip = typeof o.onSkip === 'function' ? o.onSkip : () => {};
+  const fsp = fs.promises;
+  const lst = (p) => fsp.lstat(p).catch(() => null);
+  const out = [];
+  const main = path.join(slugDir, `${id}.jsonl`);
+  const st = await lst(main);
+  if (st && st.isFile()) out.push({ fileKey: 'main', path: main, appendOnly: true, size: st.size, mtimeMs: st.mtimeMs });
+  const side = [];
+  const walk = async (dir, key, depth) => {
+    let ents;
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    // every good file's lstat starts now, together; the loop below only waits on them in order
+    const stats = ents.map((e) => (e.isFile() && checkFileKey(`${key}/${e.name}`) ? lst(path.join(dir, e.name)) : null));
+    for (let i = 0; i < ents.length; i++) {
+      const e = ents[i];
+      const p = path.join(dir, e.name), k = `${key}/${e.name}`;
+      if (e.isDirectory()) {
+        if (depth >= SIDE_DEPTH) { skip(p, 'too deep'); continue; }
+        if (!KEY_SEG_RE.test(e.name) || e.name === '.' || e.name === '..') { skip(p, 'a folder name a file key cannot hold'); continue; }
+        await walk(p, k, depth + 1);
+      } else if (e.isFile()) {
+        if (!stats[i]) { skip(p, 'a name a file key cannot hold'); continue; }
+        const fst = await stats[i];
+        if (!fst) continue;
+        side.push({ fileKey: k, path: p, appendOnly: e.name.endsWith('.jsonl'), size: fst.size, mtimeMs: fst.mtimeMs });
+      } else skip(p, 'not a plain file');
+    }
+  };
+  for (const d of SIDE_DIRS) {
+    const p = path.join(slugDir, id, d);
+    const dst = await lst(p);
+    if (dst && dst.isDirectory()) await walk(p, d, 1);
+  }
+  side.sort((x, y) => (x.fileKey < y.fileKey ? -1 : x.fileKey > y.fileKey ? 1 : 0));
+  return out.concat(side);
+}
 
 // ---------- a log's last cwd, branch and title ----------
 // From the end of a conversation log, cheaply: the last line with a cwd, the last gitBranch ('HEAD' counts as none,
@@ -746,6 +789,6 @@ const isLive = (id, o = {}) => typeof id === 'string' && !!id && liveIds(o).has(
 module.exports = {
   slugOf, projectsDirs, normalizeOrigin, HOME_ORIGIN, rowOrigin, homeSkipped, repoOf, forgetRepos, checkFileKey, fileKeyB64, fileKeyFromB64, objectPath,
   workspaceKind, classifyFolder, checkoutAt, gitUnreadAt, inTemp, perforceAt, p4ClientRoots, p4RootsNow, BOUND_WHY, nativeAbs, boundOrigin, boundDeviceOf, boundRel, boundRelOk, boundNative, boundBase, boundPlaceholder, isBoundPlaceholder,
-  conversationFiles, lastMeta, homeCwd, ensureDevice, touchDevice, devicePath, isLive, pidAlive, readState, writeState, sessionDirs,
+  conversationFiles, conversationFilesAsync, lastMeta, homeCwd, ensureDevice, touchDevice, devicePath, isLive, pidAlive, readState, writeState, sessionDirs,
   SIDE_DIRS, TOUCH_MS,
 };

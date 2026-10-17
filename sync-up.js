@@ -683,7 +683,7 @@ function createUploader(opts = {}) {
     if (settled && main0 && main0.size === c.size && main0.mtimeMs === c.mtimeMs && idle > IDLE_MS && t - mem.listedAt < (idle > OLD_MS ? OLD_LIST_MS : IDLE_LIST_MS)) {
       tally.synced++; return 'synced';
     }
-    const files = C.conversationFiles(c.slugDir, c.name, { onSkip: (p, why) => {
+    const files = await C.conversationFilesAsync(c.slugDir, c.name, { onSkip: (p, why) => {
       if (skipLogged.has(p)) return;
       skipLogged.add(p);
       log(`${short(id)}: not synced: ${path.basename(p)} (${why})`);
@@ -829,26 +829,33 @@ function createUploader(opts = {}) {
   }
 
   // ---------- the scan ----------
-  // every conversation in the projects folders (want: only that id, whatever only() says), newest first
-  function listConversations(want) {
+  // every conversation in the projects folders (want: only that id, whatever only() says), newest first.
+  // -> Promise: from fs.promises, a slug folder's logs lstat'ed together and the loop handed back between folders
+  // (~1,600 sync lstats ran as one block, 12-25 ms each on a slow disk, 2026-10-17)
+  async function listConversations(want) {
     const only = !want && typeof opts.only === 'function' ? opts.only : null;
     const byId = new Map();
     for (const { account, dir } of projectsList()) {
       let slugs;
-      try { slugs = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      try { slugs = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { continue; }
       for (const s of slugs) {
         if (!s.isDirectory()) continue;
+        await breathe();
         const slugDir = path.join(dir, s.name);
         let names;
-        try { names = fs.readdirSync(slugDir); } catch { continue; }
+        try { names = await fs.promises.readdir(slugDir); } catch { continue; }
+        const logs = [];
         for (const n of names) {
           const m = LOG_ID.exec(n);
           if (!m) continue;
           const lid = m[1].toLowerCase();
           if (want ? lid !== want : only && !only(lid)) continue;
-          let fst;
-          try { fst = fs.lstatSync(path.join(slugDir, n)); } catch { continue; }
-          if (!fst.isFile()) continue;
+          logs.push({ n, m, lid });
+        }
+        const stats = await Promise.all(logs.map(({ n }) => fs.promises.lstat(path.join(slugDir, n)).catch(() => null)));
+        for (let i = 0; i < logs.length; i++) {
+          const { n, m, lid } = logs[i], fst = stats[i];
+          if (!fst || !fst.isFile()) continue;
           const c = { id: lid, name: m[1], account, slugDir, mainPath: path.join(slugDir, n), size: fst.size, mtimeMs: fst.mtimeMs };
           const had = byId.get(c.id);
           if (!had || c.mtimeMs > had.mtimeMs) byId.set(c.id, c); // the same conversation in two folders: the newer copy
@@ -873,7 +880,7 @@ function createUploader(opts = {}) {
       scanFailed(e);
       return;
     }
-    const list = listConversations();
+    const list = await listConversations();
     counts.conversations = list.length;
     const ids = new Set(list.map((c) => c.id));
     for (const id of [...pendingOf.keys()]) if (!ids.has(id)) pendingOf.delete(id);
@@ -975,7 +982,7 @@ function createUploader(opts = {}) {
       loadState(device);
       const tally = Object.fromEntries(Object.keys(counts).map((k) => [k, 0])); // a flush is not a scan's count
       for (let pass = 0; ; pass++) {
-        const c = listConversations(id)[0];
+        const c = (await listConversations(id))[0];
         if (!c) throw new S.SyncError('this machine has no log for that conversation', 0, 'missing');
         const mem = memo.get(id);
         if (mem) { mem.backoffUntil = 0; mem.skip = null; mem.listedAt = 0; }
