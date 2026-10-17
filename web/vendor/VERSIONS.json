@@ -1,0 +1,84 @@
+{
+  "about": "The page's bundled libraries: each one's version, where its files came from, and the SHA-384 (base64) of every file here, taken with CRLF line endings turned into LF (git keeps these files LF; a Windows checkout may write them CRLF). scripts/vendor-versions-test.js fails when a file here is not listed, a listed one is missing, or one no longer matches its hash. Updating a library: replace its files with the package's own, unchanged, check its security advisories (DOMPurify and marked above all: they guard the chat's markdown), then write the new version, source and hashes here (node scripts/vendor-versions-test.js --print shows the hashes of what is on disk).",
+  "libraries": [
+    {
+      "name": "marked",
+      "version": "18.1.0",
+      "license": "MIT",
+      "source": "https://cdn.jsdelivr.net/npm/marked@18.1.0/",
+      "checked": "2026-10-17",
+      "files": {
+        "marked/marked.esm.js": { "from": "lib/marked.esm.js", "sha384": "snMBC5fa3uu2TE5nbJfoysnXEnXn+BPEHkzGLpV/ptEaRtamTgxGuWQvm0LUGEP1" },
+        "marked/LICENSE": { "from": "LICENSE", "sha384": "61EZB/aHzoKVT71zYfgKtxFiu+RWPSi9UH34kVJPMyzaTcFdbvH0liFiUwpiBNqY" }
+      }
+    },
+    {
+      "name": "dompurify",
+      "version": "3.4.16",
+      "license": "Apache-2.0 OR MPL-2.0",
+      "source": "https://cdn.jsdelivr.net/npm/dompurify@3.4.16/",
+      "checked": "2026-10-17",
+      "files": {
+        "dompurify/purify.es.mjs": { "from": "dist/purify.es.mjs", "sha384": "a/XFwrpeq88LPRbyWBWlLnv0sUPkA6mAADSFODl/XWtg+PHClcleY9DmdjDED9+Z" },
+        "dompurify/LICENSE": { "from": "LICENSE", "sha384": "II9e1ieUDl5AxyiVq3/FflTua1Sr0kMJ25e6imG7rXg7SiAsA2VemsvEqVsLqM7/" }
+      }
+    },
+    {
+      "name": "@highlightjs/cdn-assets",
+      "version": "11.11.1",
+      "license": "BSD-3-Clause",
+      "source": "https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.11.1/",
+      "checked": "2026-10-17",
+      "files": {
+        "highlight/core.min.js": { "from": "es/core.min.js", "sha384": "PJ1psNJ2XMc5He8b6/c5li+Z35sYk63xdRPFwmN0ARHXTgBmeii7cFdSRKs7/hEZ" },
+        "highlight/languages/bash.min.js": { "from": "es/languages/bash.min.js", "sha384": "Pg7b9hYE6kefjcNqAabhv8jOLCVoZubUaM4bZFjUJd0CaaQ14ksDI0GVllMtAF4S" },
+        "highlight/languages/css.min.js": { "from": "es/languages/css.min.js", "sha384": "1D7DbOic0Z5nM2ldSO9O/EsBfsg/5x7X7So1qnMgscI2ucDevptcg7cTvrD9rL0D" },
+        "highlight/languages/diff.min.js": { "from": "es/languages/diff.min.js", "sha384": "joI34L4jMJOgkz6zOb3sqraHH5tmocRfXvs9HkdHfUpD3ceSxAqKlubpBT/4Q/sV" },
+        "highlight/languages/javascript.min.js": { "from": "es/languages/javascript.min.js", "sha384": "f7huPivS1dV2T5V+g0aJpgsY7WBHWCsioIq30tpNoXGizD65fWJYGuXXVPNI52VB" },
+        "highlight/languages/json.min.js": { "from": "es/languages/json.min.js", "sha384": "UHzaYxI/rAo84TEK3WlG15gVfPk49XKax76Ccn9qPWYbUxePCEHxjGkV+xp9HcS/" },
+        "highlight/languages/markdown.min.js": { "from": "es/languages/markdown.min.js", "sha384": "E7UvgBH6skA1FIOcn3B2c68GtJzrmZlOOC5p/fsxwihTZG/bBedJZu5PC1+kGX7q" },
+        "highlight/languages/powershell.min.js": { "from": "es/languages/powershell.min.js", "sha384": "GZl3J+HUi40wO5QngTvTpHXB0M2gGDnn9E/MyHRRS4VEWDNCS96bODclYTX3/JId" },
+        "highlight/languages/python.min.js": { "from": "es/languages/python.min.js", "sha384": "ZV5sgX70bBgLkDR5Mtox5UsbJedBc39hRKPdvTw6miK4lSkE/wv94cLY2iyZb/sB" },
+        "highlight/languages/sql.min.js": { "from": "es/languages/sql.min.js", "sha384": "y25cn06synxhYnlKVprZdpakuFWVrm2jvn8pqiF4L85a05CI/6bNeT2+qXbUYIyW" },
+        "highlight/languages/typescript.min.js": { "from": "es/languages/typescript.min.js", "sha384": "Tv4mr9B7b+x2IynRXW/xcAxUj1+AoN9zyp0n9BWE1Nle3Zfm/zUeEztNLhIRjgE7" },
+        "highlight/languages/xml.min.js": { "from": "es/languages/xml.min.js", "sha384": "PQrsaWeWrBiE1CFRw8K335CaJuQRTjDGm73vn8bXvlwaw6RyqWObdvMTBS8B75NN" },
+        "highlight/languages/yaml.min.js": { "from": "es/languages/yaml.min.js", "sha384": "4smueUtgWTorlNLbaQIawnVCcIAuw82NetPOGWN5PbZT/pMr0rjvZXj0EUzJV1nr" },
+        "highlight/LICENSE": { "from": "LICENSE", "sha384": "PdMCsAZNy5AH7gGEL6XVxHEXIrtvn5oA704FTocp7whxdzCQ+AuammKPDLS1ubFV" }
+      }
+    },
+    {
+      "name": "@xterm/xterm",
+      "version": "6.0.0",
+      "license": "MIT",
+      "source": "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/",
+      "checked": "2026-10-17",
+      "files": {
+        "xterm/xterm.mjs": { "from": "lib/xterm.mjs", "sha384": "8Xik+BkzF4UFDtZa8HkUiQ0FE/Xl+03xMuv69uQB3ichDzm8dWs4kPRihQxSZDiY" },
+        "xterm/xterm.css": { "from": "css/xterm.css", "sha384": "n2n7twoohnW+d3myBKaUgl7DSiwidw6MkQy9oesGzkPpMjejKRR3XlnD+5yCdtBD" },
+        "xterm/LICENSE-xterm": { "from": "LICENSE", "sha384": "leMU5q3wxWpTpzcIAd9qvhx7xbWkMZxhy0Lqtjb0C8hqFQ2AGF2jt0HpKPGzHovt" }
+      }
+    },
+    {
+      "name": "@xterm/addon-fit",
+      "version": "0.11.0",
+      "license": "MIT",
+      "source": "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/",
+      "checked": "2026-10-17",
+      "files": {
+        "xterm/addon-fit.mjs": { "from": "lib/addon-fit.mjs", "sha384": "0/1EW6dUPoaun7dgdlOtb5Wk8x5UQRW6hYM3ihuCCnaA2Xd4HwMFcn378RpxmoAc" },
+        "xterm/LICENSE-addon-fit": { "from": "LICENSE", "sha384": "tWhllTtK/zz3AqVMIrnZ2P6fCxA4hV3PnYoUEeZSqfWK//RePt5zGYqu4nB/t7VD" }
+      }
+    },
+    {
+      "name": "qrcode-generator",
+      "version": "1.4.4",
+      "license": "MIT",
+      "source": "https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/",
+      "checked": "2026-10-17",
+      "files": {
+        "qrcode/qrcode.js": { "from": "qrcode.js", "sha384": "8FWZA6BGMXhsfO+BLtrJK0We6gg5o1JyO8xQm6peWDEUs17ACA5ziE/NIAkl9z2k" },
+        "qrcode/LICENSE": { "from": null, "note": "written here: the package ships no LICENSE file (its package.json says MIT)", "sha384": "QVL9MZkdO3X7R/PBw4U31PQtbIJzpymlBcPQpwA09zFT0TvcRhVvCQuGu5G4Vuob" }
+      }
+    }
+  ]
+}

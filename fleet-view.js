@@ -51,6 +51,8 @@ const FORKS = require(path.join(__dirname, 'forks.js'));
 const UPTIME_MOD = require(path.join(__dirname, 'uptime.js'));
 // the mic's speech library: downloaded once, checked against pinned hashes, served from here (/vendor-cache/...)
 const VENDOR = require(path.join(__dirname, 'vendor-cache.js')).createVendorCache({ dir: path.join(P.dataDir(), 'vendor'), log: (k, t) => logOnce(k, t) });
+// the page's Content-Security-Policy (scripts only from web/, data only to here)
+const { pageCsp } = require(path.join(__dirname, 'page-csp.js'));
 
 // ---------- options ----------
 const argv = process.argv.slice(2);
@@ -9011,14 +9013,13 @@ function handleRequest(req, res) {
     const headers = { 'Content-Type': type, 'Cache-Control': 'no-cache', ETag: tag };
     // the page itself may only be framed by itself (the pairing page by nothing), on this PC too: another site open in
     // its browser could otherwise frame it and steer clicks (the remote access switch, Allow); the preview frames and
-    // chat images are other routes and keep their own headers. Scripts only from these files (web/): no inline script,
-    // no on...= handler, no javascript: link, no plugin, so markup slipped into a name can't run anything.
-    // 'wasm-unsafe-eval' (WebAssembly, not script) is for the voice worker in a browser that gives workers the page's
-    // policy (Chromium gives them their own, so Edge and the desktop window don't need it). Styles are left as they are.
+    // chat images are other routes and keep their own headers. Scripts only from these files (web/), and fetches,
+    // images, form posts and frames only to here (and the Preview tab's dev servers), so markup slipped into a name
+    // can neither run anything nor send anything out (page-csp.js says what each part allows).
     if (type.startsWith('text/html')) {
       const self = path.basename(file) !== 'pair.html';
       headers['X-Frame-Options'] = self ? 'SAMEORIGIN' : 'DENY';
-      headers['Content-Security-Policy'] = `script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'self'; frame-ancestors ${self ? "'self'" : "'none'"}`;
+      headers['Content-Security-Policy'] = pageCsp({ framed: self, host: req.headers.host });
     }
     if (etagMatches(req, tag)) { res.writeHead(304, { ETag: tag, 'Cache-Control': 'no-cache' }); return res.end(); }
     sendBody(res, 200, headers, buf, req.method === 'HEAD');

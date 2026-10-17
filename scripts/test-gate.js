@@ -82,6 +82,7 @@ const COVERS = [
   [/^bot\//, ['scripts/bot-tasks-test.mjs', 'scripts/bots-test.mjs']],
   [/^mod\/fleet-view-feed\//, ['scripts/feed-mod-update-test.js']],
   [/^web\/[^/]+\.js$/, ['scripts/html-escape-test.js']], // it reads every web/*.js, naming none
+  [/^web\/vendor\//, ['scripts/vendor-versions-test.js']], // the bundled libraries against web/vendor/VERSIONS.json
 ];
 
 // ---------- the checkout's files and who loads what ----------
