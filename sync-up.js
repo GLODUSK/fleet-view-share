@@ -100,6 +100,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const util = require('util');
 const P = require(path.join(__dirname, 'platform.js'));
 const S = require(path.join(__dirname, 'sync-api.js'));
 const K = require(path.join(__dirname, 'sync-crypto.js'));
@@ -116,6 +117,10 @@ const LIVE_GAP_MS = 45e3; // a conversation mid-turn (busy) goes up at most this
 const SKIP_RECHECK_MS = 10 * 60e3; // one with no repo, the same
 const IDLE_MS = 60 * 60e3; // a conversation whose log is older than this has its side files listed at most...
 const IDLE_LIST_MS = 60e3; // ...this often (a background subagent can still write while the log sleeps)
+const OLD_MS = 24 * 60 * 60e3, OLD_LIST_MS = 15 * 60e3; // and one older than a day this often (there are thousands)
+// the scan gives the event loop back at least this often, so the server answers between its reads (Henry, 2026-10-16:
+// a take-over of every conversation held it up to 17 s at a time, "fleet view server isnt working")
+const BREATH_MS = 20;
 const PAGE = 1000; // chunk rows per GET
 const REMOVE_MAX = 1000; // storage.remove takes at most this many paths
 const HASHES_KEPT = 200; // running sha256s of 'main' kept in memory, so an append does not read the log again
@@ -175,13 +180,31 @@ function hasWholeLine(file) {
   } catch { return false; } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} }
 }
 const tailShaAt = (fd, end) => K.sha256(end > 0 ? readExact(fd, Math.max(0, end - TAIL_BYTES), Math.min(end, TAIL_BYTES)) : Buffer.alloc(0));
-// sha256 of [0, end), and fn(buf, pos) for each block on the way when given
-function hashRange(fd, end, fn) {
+// The big reads (whole files, chunks) and the opens (thousands of small side files, slow under an antivirus) go to the
+// thread pool, not the event loop; breathe() hands the loop back between pieces of work once BREATH_MS has gone by
+const openAsync = util.promisify(fs.open), closeAsync = util.promisify(fs.close), readAsync = util.promisify(fs.read);
+let breathAt = 0;
+async function breathe() {
+  if (Date.now() - breathAt < BREATH_MS) return;
+  await new Promise((r) => setImmediate(r));
+  breathAt = Date.now();
+}
+async function readExactAsync(fd, pos, len) {
+  const buf = Buffer.alloc(len);
+  let got = 0;
+  while (got < len) {
+    const { bytesRead } = await readAsync(fd, buf, got, len - got, pos + got);
+    if (!bytesRead) throw new S.SyncError('the file got shorter while it was read', 0, 'changed');
+    got += bytesRead;
+  }
+  return buf;
+}
+// sha256 of [0, end)
+async function hashRange(fd, end) {
   const h = crypto.createHash('sha256');
   for (let pos = 0; pos < end; pos += MAX_CHUNK) {
-    const buf = readExact(fd, pos, Math.min(MAX_CHUNK, end - pos));
-    h.update(buf);
-    if (fn) fn(buf, pos);
+    h.update(await readExactAsync(fd, pos, Math.min(MAX_CHUNK, end - pos)));
+    await breathe();
   }
   return h;
 }
@@ -307,7 +330,8 @@ function createUploader(opts = {}) {
     const s = C.readState(statePath, null);
     if (s && s.v === 1 && s.device === device && s.conversations && typeof s.conversations === 'object') state = s;
     else {
-      if (s) log('up-state.json is from another device or damaged: starting again from what the server has');
+      // (a file there that can't be read is damaged too: a crash can leave it empty or full of NULs)
+      if (s || fs.existsSync(statePath)) log('up-state.json is from another device or damaged: starting again from what the server has');
       state = { v: 1, device, conversations: {} };
       trimmed.clear();
       dirty = true;
@@ -315,10 +339,12 @@ function createUploader(opts = {}) {
   }
   // once a scan (at its end), and after a flush, a forget and a stop: never per conversation or chunk (it is MBs).
   // A crash loses at most one scan's progress, which is safe: the server is then ahead of the file, a pass takes over
-  // what the row and the chunk rows say (adopt), and an append first drops the rows past where the file says (trimTail)
+  // what the row and the chunk rows say (adopt), and an append first drops the rows past where the file says (trimTail).
+  // Flushed to the disk before its rename (sync): a power cut right after once left it unreadable, and every
+  // conversation was taken over again from the server (thousands of files read and hashed: 2026-10-16)
   function saveState() {
     if (!dirty || !state) return;
-    try { C.writeState(statePath, state, { compact: true }); dirty = false; } catch (e) { log(`up-state.json could not be saved: ${clip(e.message)}`); }
+    try { C.writeState(statePath, state, { compact: true, sync: true }); dirty = false; } catch (e) { log(`up-state.json could not be saved: ${clip(e.message)}`); }
   }
   const setError = (e) => { totals.lastError = { at: new Date(now()).toISOString(), message: clip(e && e.message ? e.message : e) }; };
   const health = S.createScanHealth({ now }); // the scan-level back-off and what /sync/activity says of this loop
@@ -451,10 +477,10 @@ function createUploader(opts = {}) {
   const untrim = (id) => { for (const k of trimmed) if (k.startsWith(`${id}|`)) trimmed.delete(k); };
 
   // ---------- the running sha256 of 'main' ----------
-  function mainHash(id, fd, generation, offset) {
+  async function mainHash(id, fd, generation, offset) {
     const h = hashes.get(id);
     if (h && h.generation === generation && h.offset === offset) { hashes.delete(id); hashes.set(id, h); return h; }
-    const nh = { generation, offset, hash: hashRange(fd, offset) };
+    const nh = { generation, offset, hash: await hashRange(fd, offset) };
     keepHash(id, nh);
     return nh;
   }
@@ -474,7 +500,7 @@ function createUploader(opts = {}) {
     do {
       await guard(w);
       const len = Math.min(chunkBytes, end - pos);
-      const buf = readExact(fd, pos, len);
+      const buf = await readExactAsync(fd, pos, len);
       const objectPath = C.objectPath(w.id, f.fileKey, generation, seq);
       const sealed = K.sealChunk(buf, key, objectPath);
       await pace(sealed.length);
@@ -492,8 +518,9 @@ function createUploader(opts = {}) {
   }
 
   // The server's rows for a file with no state here: taken over when its newest generation runs from byte 0 with no
-  // gap and every chunk's sha256 matches the local bytes. -> a file state, or null (then maxGen says where to go on)
-  function adopt(w, f, fd, size) {
+  // gap and every chunk's sha256 matches the local bytes. -> a file state, or null (then maxGen says where to go on).
+  // What it took over is counted in w.took, said once for the conversation (a line a file was thousands of lines)
+  async function adopt(w, f, fd, size) {
     const mine = w.listing.filter((r) => r.file === f.fileKey);
     if (!mine.length) return null;
     const gen = Math.max(...mine.map((r) => Number(r.generation)));
@@ -504,10 +531,11 @@ function createUploader(opts = {}) {
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i], o = Number(r.byte_offset), l = Number(r.byte_length);
       if (Number(r.seq) !== i || o !== off || o + l > size) return null;
-      const buf = readExact(fd, o, l);
+      const buf = await readExactAsync(fd, o, l);
       if (K.sha256(buf) !== r.sha256) return null;
       h.update(buf);
       off += l;
+      await breathe();
     }
     if (!f.appendOnly && off !== size) return null;
     if (f.appendOnly && off > 0 && readExact(fd, off - 1, 1)[0] !== 10) return null;
@@ -516,7 +544,8 @@ function createUploader(opts = {}) {
     if (!f.appendOnly) fst.sha = h.copy().digest('hex');
     trimmed.add(`${w.id}|${f.fileKey}|${gen}`); // every row of its newest generation, taken over
     if (f.fileKey === 'main') keepHash(w.id, { generation: gen, offset: off, hash: h });
-    log(`${short(w.id)} ${f.fileKey}: took over ${rows.length} chunk(s) already on the server`);
+    w.took.files++;
+    w.took.chunks += rows.length;
     return fst;
   }
 
@@ -526,11 +555,11 @@ function createUploader(opts = {}) {
     let fst = files[f.fileKey] || null;
     if (fst && fst.size === f.size && fst.mtimeMs === f.mtimeMs) return;
     let fd;
-    try { fd = fs.openSync(f.path, 'r'); } catch { return; } // gone since it was listed
+    try { fd = await openAsync(f.path, 'r'); } catch { return; } // gone since it was listed
     try {
       const st = fs.fstatSync(fd);
       const size = st.size, mtimeMs = st.mtimeMs;
-      if (!fst && w.listing) fst = adopt(w, f, fd, size);
+      if (!fst && w.listing) fst = await adopt(w, f, fd, size);
       const commit = (o) => { files[f.fileKey] = { ...o, size, mtimeMs }; trimmed.add(`${w.id}|${f.fileKey}|${o.generation}`); w.changed = true; dirty = true; };
       if (f.appendOnly && fst && size >= fst.offset && tailShaAt(fd, fst.offset) === fst.tailSha) {
         // rule 2: it grew (or not), the bytes we have are still there: append whole lines
@@ -539,7 +568,7 @@ function createUploader(opts = {}) {
           await trimTail(w, f.fileKey, fst.generation, fst.seq);
           pendingOf.set(w.id, (pendingOf.get(w.id) || 0) + end - fst.offset);
           const isMain = f.fileKey === 'main';
-          const h = isMain ? mainHash(w.id, fd, fst.generation, fst.offset) : null;
+          const h = isMain ? await mainHash(w.id, fd, fst.generation, fst.offset) : null;
           let cur = { ...fst };
           await send(w, f, fd, { generation: fst.generation, seq: fst.seq, from: fst.offset, end, done: (row, buf) => {
             cur = { generation: cur.generation, seq: row.seq + 1, offset: row.byte_offset + row.byte_length, tailSha: null };
@@ -555,7 +584,7 @@ function createUploader(opts = {}) {
       // a whole file: unchanged bytes (only the time moved) need nothing
       let sha = null;
       if (!f.appendOnly) {
-        sha = hashRange(fd, size).digest('hex');
+        sha = (await hashRange(fd, size)).digest('hex');
         if (fst && fst.sha === sha) { commit(fst); return; }
       }
       const end = f.appendOnly ? lastLineEnd(fd, 0, size) : size;
@@ -598,7 +627,7 @@ function createUploader(opts = {}) {
       w.st.rowStale = true;
       if (gen > 0) w.st.deletes.push({ file: f.fileKey, below: gen });
       if (fst || gen > 0) log(`${short(w.id)} ${f.fileKey}: generation ${gen} (${fst ? 'the file was rewritten' : 'what the server had did not match'})`);
-    } finally { try { fs.closeSync(fd); } catch {} }
+    } finally { try { await closeAsync(fd); } catch {} }
   }
 
   // rule 6: old generations go once the conversation row points at the new ones: rows first, then objects
@@ -648,9 +677,10 @@ function createUploader(opts = {}) {
     const account = accountOfRow(c);
     // settled: the row has it all, the account too (one accountOf learnt since goes up even while the log sleeps)
     const settled = st && !st.rowStale && !(st.deletes && st.deletes.length) && !!st.meta && st.meta.account === account;
-    // cheap: an idle conversation whose log is as it was is listed again only now and then
+    // cheap: an idle conversation whose log is as it was is listed again only now and then, one asleep a day rarer still
     const main0 = st && st.files && st.files.main;
-    if (settled && main0 && main0.size === c.size && main0.mtimeMs === c.mtimeMs && Date.now() - c.mtimeMs > IDLE_MS && t - mem.listedAt < IDLE_LIST_MS) {
+    const idle = Date.now() - c.mtimeMs;
+    if (settled && main0 && main0.size === c.size && main0.mtimeMs === c.mtimeMs && idle > IDLE_MS && t - mem.listedAt < (idle > OLD_MS ? OLD_LIST_MS : IDLE_LIST_MS)) {
       tally.synced++; return 'synced';
     }
     const files = C.conversationFiles(c.slugDir, c.name, { onSkip: (p, why) => {
@@ -746,7 +776,7 @@ function createUploader(opts = {}) {
     // this device's checkout of the repo, only once the conversation is this device's: a copy laid down here from
     // another device names that device's folders, which must not become this device's repo_paths row
     if (!repo.bound && !repo.fromRow) await repoPath(device, rid, repo.mainRoot);
-    const w = { id, st, rowExisted, listing: null, maxGen: {}, changed: false, device, mem, epoch, urgent: !!how.urgent };
+    const w = { id, st, rowExisted, listing: null, maxGen: {}, changed: false, device, mem, epoch, urgent: !!how.urgent, took: { files: 0, chunks: 0 } };
     // a row on the server but no state here (a lost up-state.json, or one that disagreed): one look at the server's
     // chunk rows, so what is already there is taken over and not sent again
     if (rowExisted && freshState) w.listing = await chunkRows(id);
@@ -754,8 +784,10 @@ function createUploader(opts = {}) {
     try {
       for (const f of files) {
         if (stopping) throw new S.SyncError('stopped', 0, 'stopped');
+        await breathe();
         await syncFile(w, f);
       }
+      if (w.took.files) log(`${short(id)}: took over ${w.took.files} file(s), ${w.took.chunks} chunk(s), already on the server`);
       await guard(w, false);
       // rule 4: the row last, and only while it is still ours
       const metaChanged = JSON.stringify(st.meta) !== JSON.stringify(metaNow) || st.titleSha !== titleSha;
@@ -768,9 +800,9 @@ function createUploader(opts = {}) {
         if (m) {
           let fd;
           try {
-            fd = fs.openSync(c.mainPath, 'r');
-            Object.assign(body, { size: m.offset, sha256: mainHash(id, fd, m.generation, m.offset).hash.copy().digest('hex'), generation: m.generation });
-          } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} }
+            fd = await openAsync(c.mainPath, 'r');
+            Object.assign(body, { size: m.offset, sha256: (await mainHash(id, fd, m.generation, m.offset)).hash.copy().digest('hex'), generation: m.generation });
+          } finally { if (fd !== undefined) try { await closeAsync(fd); } catch {} }
         }
         const got = await api.rest('PATCH', 'conversations', { query: { id: `eq.${id}`, owner_device: `eq.${device}` }, body, prefer: 'return=representation' });
         if (!Array.isArray(got) || !got.length) { log(`${short(id)}: another device owns it now: stopped uploading it`); return lose(); }
@@ -848,6 +880,7 @@ function createUploader(opts = {}) {
     let rowFailed = false, ended = null; // ended: the error that ended the scan (Supabase out of reach, signed out)
     for (const c of list) {
       if (stopping) break;
+      await breathe(); // (the lock is a resolved promise when free: without this, thousands of settled ones ran as one block)
       await lock(false); // a flush() waiting goes first
       try {
         if (stopping) break;

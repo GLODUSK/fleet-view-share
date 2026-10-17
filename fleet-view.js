@@ -904,14 +904,24 @@ const LOG_DIR = P.dataDir();
 const LOG_FILE = path.join(LOG_DIR, 'server.log');
 const LOG_MAX = 2 << 20;
 const errorText = (e) => (e && e.stack) || String(e);
+// The folder is made once and the size read again only every LOG_RESTAT lines (other processes write here too):
+// a mkdir and a stat per line cost more than the line itself (a sync burst of 1,500 lines a minute held the server)
+const LOG_RESTAT = 100;
+const logAt = { dir: false, size: -1, lines: 0 };
 function logLine(text) {
   try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
-    try { if (fs.statSync(LOG_FILE).size >= LOG_MAX) fs.renameSync(LOG_FILE, LOG_FILE + '.1'); } catch {}
+    if (!logAt.dir) { fs.mkdirSync(LOG_DIR, { recursive: true }); logAt.dir = true; }
+    if (logAt.size < 0 || ++logAt.lines >= LOG_RESTAT) {
+      logAt.lines = 0;
+      try { logAt.size = fs.statSync(LOG_FILE).size; } catch { logAt.size = 0; }
+    }
+    if (logAt.size >= LOG_MAX) { try { fs.renameSync(LOG_FILE, LOG_FILE + '.1'); } catch {} logAt.size = 0; }
     const d = new Date(), p = (n, w = 2) => String(n).padStart(w, '0');
     const at = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
-    fs.appendFileSync(LOG_FILE, `${at} [node ${process.pid}] ${String(text).replace(/\r?\n/g, '\n    ')}\n`);
-  } catch {}
+    const line = `${at} [node ${process.pid}] ${String(text).replace(/\r?\n/g, '\n    ')}\n`;
+    fs.appendFileSync(LOG_FILE, line);
+    logAt.size += Buffer.byteLength(line);
+  } catch { logAt.dir = false; logAt.size = -1; } // (the folder went: made again next time)
 }
 // ---------- start-up timing (server.log, a few lines per start; GLODUSK/fleet-view#541) ----------
 // ms since the process started (performance.now() counts from there), each start-up step's time, the first answers
@@ -947,14 +957,36 @@ function watchBootStalls() {
   tick.unref();
   setTimeout(() => { clearInterval(tick); logLine(`startup: the event loop's longest stall in the first minute: ${boot.stall} ms (from +${boot.stallAt} ms)`); }, 60e3).unref();
 }
+// after that, a minute whose longest stall passed STALL_LOG_MS gets a line: the page, the phone and the API all wait
+// on this loop ("fleet view server isnt working", Henry, 2026-10-16: sync-up held it up to 17 s at a time)
+const STALL_LOG_MS = 2000;
+function watchStalls() {
+  let last = performance.now(), worst = 0, worstAt = 0, n = 0;
+  const tick = setInterval(() => {
+    const now = performance.now(), late = now - last - 250;
+    last = now;
+    if (late >= STALL_LOG_MS) n++;
+    if (late > worst) { worst = Math.round(late); worstAt = Date.now() - worst; }
+  }, 250);
+  tick.unref();
+  setInterval(() => {
+    if (worst >= STALL_LOG_MS) logLine(`the event loop was held up ${worst} ms at ${new Date(worstAt).toTimeString().slice(0, 8)} (${n} stall(s) over ${STALL_LOG_MS / 1000} s in the last minute)`);
+    worst = 0; n = 0;
+  }, 60e3).unref();
+}
 // an error that can repeat every poll is written once a minute at most, with how many were left out
 const logSeen = new Map(); // key -> { at, skipped }
+let logSeenSwept = 0;
 function logOnce(key, text) {
   const now = Date.now(), seen = logSeen.get(key);
   if (seen && now - seen.at < 60e3) { seen.skipped++; return; }
   logLine(seen && seen.skipped ? `${text}\n(${seen.skipped} more like it in the last minute)` : text);
-  // keys carry the error's message, so a long run can collect many: forget the ones older than a minute
-  if (logSeen.size > 200) for (const [k, v] of logSeen) if (now - v.at >= 60e3) logSeen.delete(k);
+  // keys carry the error's message, so a long run can collect many: forget the ones older than a minute, at most
+  // every 10 s (a sweep each line went through thousands of keys a line when sync-up said thousands of things)
+  if (logSeen.size > 200 && now - logSeenSwept >= 10e3) {
+    logSeenSwept = now;
+    for (const [k, v] of logSeen) if (now - v.at >= 60e3) logSeen.delete(k);
+  }
   logSeen.set(key, { at: now, skipped: 0 });
 }
 
@@ -8935,6 +8967,7 @@ function startWeb() {
   const loaded = bootMs(), version = bootStep('version', versionOf);
   logLine(`start: port ${PORT}, version ${version}, node ${process.version}${DEMO ? ', demo' : ''}${NO_OPEN ? ', --no-open' : ''}${process.env.FLEET_VIEW_LOOP === '1' ? '' : ', no restart loop'}${after}; loaded in ${loaded} ms`);
   watchBootStalls();
+  setTimeout(watchStalls, 60e3).unref(); // (the first minute is watchBootStalls')
   setTimeout(registerLauncher, 5000);
   const server = http.createServer(handle);
   // POST /upload takes up to 200 MB from a browser on another computer, which over Tailscale can take longer than
