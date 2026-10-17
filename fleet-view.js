@@ -53,6 +53,11 @@ const LEFT_MAP = require(path.join(__dirname, 'left-map.js'));
 const FORKS = require(path.join(__dirname, 'forks.js'));
 // when Fleet View was not running (uptime.json), so the 3-hour rule counts only the time it ran
 const UPTIME_MOD = require(path.join(__dirname, 'uptime.js'));
+// what held the event loop up (stalls.js), the projects folders listed off the loop (log-sweep.js), and how far the
+// usage scan read each log, kept across restarts (scan-cache.js)
+const STALLS_JS = require(path.join(__dirname, 'stalls.js'));
+const LOG_SWEEP = require(path.join(__dirname, 'log-sweep.js'));
+const SCAN_CACHE_JS = require(path.join(__dirname, 'scan-cache.js'));
 // the mic's speech library: downloaded once, checked against pinned hashes, served from here (/vendor-cache/...)
 const VENDOR = require(path.join(__dirname, 'vendor-cache.js')).createVendorCache({ dir: path.join(P.dataDir(), 'vendor'), log: (k, t) => logOnce(k, t) });
 // the page's Content-Security-Policy (scripts only from web/, data only to here)
@@ -937,18 +942,33 @@ function logLine(text) {
 }
 // ---------- start-up timing (server.log, a few lines per start; GLODUSK/fleet-view#541) ----------
 // ms since the process started (performance.now() counts from there), each start-up step's time, the first answers
-// to /state and /api/conversations, and the event loop's longest stall in the first minute
+// to /state and /api/conversations, and the event loop's longest stall in the first minute (with what ran in it).
+// boot.lines keeps them for GET /health
 const bootMs = () => Math.round(performance.now());
-const boot = { steps: [], first: new Set(['/state', '/api/conversations']), stall: 0, stallAt: 0 };
+const boot = { steps: [], first: new Set(['/state', '/api/conversations']), stall: 0, stallAt: 0, span: null, lines: [] };
 function bootStep(name, fn) {
   const t = performance.now();
   try { return fn(); } finally { boot.steps.push(`${name} ${Math.round(performance.now() - t)}`); }
 }
 function bootSteps(what) {
   if (!boot.steps.length) return;
-  logLine(`startup: ${what} at +${bootMs()} ms (ms each: ${boot.steps.join(', ')})`);
+  bootLine(`${what} at +${bootMs()} ms (ms each: ${boot.steps.join(', ')})`);
   boot.steps = [];
 }
+function bootLine(text) {
+  if (boot.lines.length < 20) boot.lines.push(text);
+  logLine(`startup: ${text}`);
+}
+// ---------- what held the event loop up (stalls.js) ----------
+// The timers (every), the poll, discover, the start's later steps and each request's synchronous part run through
+// STALLS.timed with a label; the watchers below name, with each stall, the labelled runs inside it, the requests open
+// across it, and how much of it was this thread's CPU and the garbage collector's (BI3, 2026-10-17). loopNow: the
+// latest tick's lateness and the last minute's worst, for GET /health
+const STALLS = STALLS_JS.createStalls();
+const loopNow = { lag: 0, worst: 0, worstAt: 0 };
+// a run of SLOW_LOG_MS or more in a minute with no stall line gets a line of its own (every run of 200 ms or more is
+// in GET /health)
+const SLOW_LOG_MS = 1000;
 // the first answer to each of boot.first's paths: when, its status, how long it took
 function bootServed(req, res) {
   if (!boot.first.size) return;
@@ -960,30 +980,46 @@ function bootServed(req, res) {
 }
 // a 100 ms tick for the first minute: how late it ran is how long the event loop was held up
 function watchBootStalls() {
-  let last = performance.now();
+  let last = performance.now(), cpu = STALLS.cpuMs();
   const tick = setInterval(() => {
-    const now = performance.now(), late = now - last - 100;
-    last = now;
-    if (late > boot.stall) { boot.stall = Math.round(late); boot.stallAt = Math.round(now - late); }
+    const now = performance.now(), late = now - last - 100, c = STALLS.cpuMs();
+    if (late > boot.stall) { boot.stall = Math.round(late); boot.stallAt = Math.round(now - late); boot.span = [last, now, c - cpu]; }
+    loopNow.lag = Math.max(0, Math.round(late));
+    last = now; cpu = c;
   }, 100);
   tick.unref();
-  setTimeout(() => { clearInterval(tick); logLine(`startup: the event loop's longest stall in the first minute: ${boot.stall} ms (from +${boot.stallAt} ms)`); }, 60e3).unref();
+  setTimeout(() => {
+    clearInterval(tick);
+    const why = boot.span && boot.stall >= STALLS_JS.SLOW_MS ? `: ${STALLS.explain(...boot.span)}` : '';
+    bootLine(`the event loop's longest stall in the first minute: ${boot.stall} ms (from +${boot.stallAt} ms)${why}`);
+  }, 60e3).unref();
 }
-// after that, a minute whose longest stall passed STALL_LOG_MS gets a line: the page, the phone and the API all wait
-// on this loop ("fleet view server isnt working", Henry, 2026-10-16: sync-up held it up to 17 s at a time)
+// after that, a minute whose longest stall passed STALL_LOG_MS gets a line, with what held it up: the page, the phone
+// and the API all wait on this loop ("fleet view server isnt working", Henry, 2026-10-16: sync-up held it up to 17 s
+// at a time)
 const STALL_LOG_MS = 2000;
 function watchStalls() {
-  let last = performance.now(), worst = 0, worstAt = 0, n = 0;
+  let last = performance.now(), cpu = STALLS.cpuMs(), worst = 0, worstAt = 0, span = null, n = 0;
   const tick = setInterval(() => {
-    const now = performance.now(), late = now - last - 250;
-    last = now;
+    const now = performance.now(), late = now - last - 250, c = STALLS.cpuMs();
     if (late >= STALL_LOG_MS) n++;
-    if (late > worst) { worst = Math.round(late); worstAt = Date.now() - worst; }
+    if (late > worst) { worst = Math.round(late); worstAt = Date.now() - worst; span = [last, now, c - cpu]; }
+    loopNow.lag = Math.max(0, Math.round(late));
+    last = now; cpu = c;
   }, 250);
   tick.unref();
   setInterval(() => {
-    if (worst >= STALL_LOG_MS) logLine(`the event loop was held up ${worst} ms at ${new Date(worstAt).toTimeString().slice(0, 8)} (${n} stall(s) over ${STALL_LOG_MS / 1000} s in the last minute)`);
-    worst = 0; n = 0;
+    const at = (t) => new Date(t).toTimeString().slice(0, 8);
+    if (worst >= STALL_LOG_MS && span) {
+      const why = STALLS.explain(...span);
+      STALLS.noteStall({ at: worstAt, ms: worst, text: why });
+      logLine(`the event loop was held up ${worst} ms at ${at(worstAt)} (${n} stall(s) over ${STALL_LOG_MS / 1000} s in the last minute): ${why}`);
+    } else {
+      const slow = STALLS.slowSince(Date.now() - 60e3, SLOW_LOG_MS);
+      if (slow.length) logLine(`slow work in the last minute: ${slow.slice(0, 4).map((r) => `${r.label} ${r.ms} ms (cpu ${r.cpuMs} ms) at ${at(r.at)}`).join(', ')}`);
+    }
+    loopNow.worst = worst; loopNow.worstAt = worst ? worstAt : 0;
+    worst = 0; n = 0; span = null;
   }, 60e3).unref();
 }
 // an error that can repeat every poll is written once a minute at most, with how many were left out
@@ -1101,7 +1137,8 @@ const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); }
 // One fs.statSync in pollOne took 2,092 ms on 2026-10-17 01:11 (a slow disk: other stats took 30-57 ms), and the page
 // gives /state 4 s before it shows "reconnecting…". So the server's poll asks first with fs.promises (statAhead),
 // waits STAT_WAIT_MS at most, and pollOne reads the answers here: one not in yet keeps its last value, or waits for a
-// later round, never a sync stat (that is the freeze). poll() without it (start-up, the terminal) stats as before.
+// later round, never a sync stat (that is the freeze). The start's first poll waits for all of them (startList);
+// poll() without it (the terminal, --snapshot) stats as before.
 const STAT_WAIT_MS = 500;
 const statKnown = new Map(); // file -> { mtimeMs, size }, or null when missing
 const statFlying = new Map(); // file -> its stat still out: one at a time, however slow, and it lands here when it does
@@ -1139,8 +1176,9 @@ function listOnce(dir) {
 // every file a session's round stats past its own log: its subagent logs, each run's journal and summary
 const subStatFiles = (dir, l) => [...l.files, ...l.wfs.flatMap((id) => [path.join(dir, 'subagents', 'workflows', id, 'journal.jsonl'), path.join(dir, 'workflows', id + '.json')])];
 // one round's stats and listings for every held conversation, concurrently; resolves once all are in or after
-// STAT_WAIT_MS, whichever is first. Files and folders no longer polled are forgotten, so the maps stay small.
-async function statAhead() {
+// `wait` ms (STAT_WAIT_MS; Infinity: once all are in, the start's first poll), whichever is first. Files and folders
+// no longer polled are forgotten, so the maps stay small.
+async function statAhead(wait = STAT_WAIT_MS) {
   const files = new Set(), dirs = new Set(), out = [];
   const ask = (list) => Promise.all(list.map((f) => { files.add(f); return statOnce(f); }));
   for (const s of sessions.values()) {
@@ -1154,7 +1192,7 @@ async function statAhead() {
     out.push(listOnce(s.dir).then((l) => ask(subStatFiles(s.dir, l).filter((f) => !old.has(f)))));
   }
   let timer;
-  await Promise.race([Promise.all(out), new Promise((r) => { timer = setTimeout(r, STAT_WAIT_MS); })]);
+  await (wait === Infinity ? Promise.all(out) : Promise.race([Promise.all(out), new Promise((r) => { timer = setTimeout(r, wait); })]));
   clearTimeout(timer);
   for (const f of statKnown.keys()) if (!files.has(f)) statKnown.delete(f);
   for (const d of subKnown.keys()) if (!dirs.has(d)) subKnown.delete(d);
@@ -1959,32 +1997,16 @@ function addPr(s, n, repo, t) {
   if (t >= (s.lastPrT || 0)) { s.lastPr = n; s.lastPrT = t; s.repo = repo; }
 }
 
-// pr-link records name every PR a session opened or touched; read the whole log once for them,
-// since the live tail only starts a few MB from the end. While the server starts (prsLater a Set) a log is put by
-// for a later step instead (prsStep, one log per turn of the event loop): reading every whole log at once held up
-// the first list by a second or more.
-let prsLater = null;
-function prsFor(s) {
-  if (prsLater) prsLater.add(s);
-  else scanPrs(s);
-}
-// one put-by log read; true while more are left
-function prsStep() {
-  if (!prsLater) return false;
-  const s = prsLater.values().next().value;
-  if (!s) { prsLater = null; return false; }
-  prsLater.delete(s);
-  if (sessions.get(s.id) === s) scanPrs(s);
-  if (prsLater.size) return true;
-  prsLater = null;
-  return false;
-}
-function scanPrs(s) {
-  let text = '';
-  try { text = fs.readFileSync(s.file, 'utf8'); } catch { return; }
-  for (const m of text.matchAll(/\{"type":"pr-link"[^\n]*/g)) {
-    try { const d = JSON.parse(m[0]); addPr(s, d.prNumber, d.prRepository, Date.parse(d.timestamp) || 0); } catch {}
-  }
+// pr-link records name every PR a session opened or touched. The live tail only starts a few MB from the end, so the
+// usage scan (scanUsage), which reads every log from the start a few MB a poll, takes them as it goes, and the scan
+// cache keeps them across restarts. (A whole-log read for them, at every start, held up the first list, and the bots'
+// logs, which never hand off and grow about 4 MB a day, were heading for the longest string V8 can hold.)
+function usagePr(s, st, d) {
+  const n = d.prNumber, repo = d.prRepository, t = Date.parse(d.timestamp) || 0;
+  if (!n || !repo) return;
+  addPr(s, n, repo, t);
+  const o = st.prs.get(n);
+  st.prs.set(n, [n, repo, o ? Math.max(o[2], t) : t]);
 }
 
 // ---------- tokens and cost ----------
@@ -2003,7 +2025,8 @@ const priceOf = (model) => { const k = PRICE_KEYS.find((p) => String(model || ''
 
 // A streamed reply is logged once per content block with the same message id, and the
 // usage on the last copy is the final one: keep the latest per id and count the difference.
-function addUsage(s, msg, at) {
+// st: the scan state of the log it came from (scanUsage), which keeps it for the scan cache
+function addUsage(s, msg, at, st) {
   const u = msg && msg.usage;
   if (!u || !msg.id) return;
   const c5 = u.cache_creation ? u.cache_creation.ephemeral_5m_input_tokens || 0 : u.cache_creation_input_tokens || 0;
@@ -2012,51 +2035,105 @@ function addUsage(s, msg, at) {
   const p = priceOf(msg.model), k = u.speed === 'fast' ? 2 : 1;
   const tok = inp + out + rd + c5 + c1;
   const cost = p ? (k * (inp * p[0] + out * p[1] + rd * p[2] + c5 * p[0] * 1.25 + c1 * p[0] * 2)) / 1e6 : 0;
-  const old = s.msgUsage.get(msg.id);
+  countUsage(s, st, msg.id, tok, cost, Date.parse(at));
+}
+// one reply's tokens and cost into its conversation, the header's total and this PC's spend; t: the reply's time in ms
+// (the start of its minute for one the scan cache gives back; NaN when its log gave none)
+function countUsage(s, st, id, tok, cost, t) {
+  const old = s.msgUsage.get(id);
   s.tokens += tok - (old ? old[0] : 0);
   s.cost += cost - (old ? old[1] : 0);
-  s.msgUsage.set(msg.id, [tok, cost]);
+  s.msgUsage.set(id, [tok, cost]);
+  // the scan cache keeps its minute too, so after a restart this PC's spend comes back through the same dedupe as a
+  // read of the log (whichever log on the map counts it first, as here)
+  if (st) { const was = st.u.get(id); st.u.set(id, [tok, cost, Number.isFinite(t) ? Math.floor(t / 60e3) * 60e3 : was ? was[2] : null]); }
   // forked and resumed conversations copy earlier messages into their own log: each card keeps
   // everything in its log, but the header total counts every message once
-  const g = allUsage.get(msg.id);
+  const g = allUsage.get(id);
   spentAll += cost - (g || 0);
-  allUsage.set(msg.id, cost);
+  allUsage.set(id, cost);
   // this PC's spend per account at the reply's own time, for telling usage from elsewhere (usage-watch.js)
-  if (cost !== (g || 0)) USAGE.addLocal(accountFor(s), Date.parse(at), cost - (g || 0));
+  if (cost !== (g || 0)) USAGE.addLocal(accountFor(s), t, cost - (g || 0));
 }
 const allUsage = new Map(); // message id -> cost, across every conversation seen this run
 let spentAll = 0;
 
 // Usage is read from the start of every log the conversation owns (its own and all its agents'),
-// separately from the live tail, a few MB per poll so a long history doesn't stall the screen.
+// separately from the live tail, a few MB per poll so a long history doesn't stall the screen; its PR links too
+// (usagePr). Each log's state: { off (bytes read), rest (the bytes past the last whole line), tail (the bytes before
+// it, for the scan cache's check), u and prs (what was counted from it), size and m (its last stat) }.
 // ahead: sizes from statAhead's answers (one missing or not in yet is passed over this round, like a failed stat)
+const NO_BYTES = Buffer.alloc(0);
+// how far the usage scan read each log, kept across restarts (scan-cache.js): the server's only, not the demo's,
+// --tui's or --snapshot's. A log it holds as it is starts where the last run left it (usageStart). Its counts were
+// made with PRICES and addUsage's rules: a cache made with others is not used (USAGE_RULES: bump it when addUsage
+// counts tokens or cost another way)
+const USAGE_RULES = 1;
+const SCAN = WEB && !DEMO ? SCAN_CACHE_JS.createScanCache({ file: path.join(P.dataDir(), 'scan-cache.json'), sig: JSON.stringify({ rules: USAGE_RULES, prices: PRICES }) }) : null;
+function scanCacheSave(sync) {
+  if (!SCAN) return false;
+  const live = [];
+  for (const s of sessions.values()) if (!s.demo) for (const [f, st] of s.usageScan) live.push([f, { ...st, off: st.off - st.rest.length }]);
+  return SCAN.save(live, { sync });
+}
+// len bytes of a file at pos (the scan cache's check that a log is the one it read)
+function readAt(file, pos, len) {
+  const fd = fs.openSync(file, 'r');
+  try { const b = Buffer.alloc(len); return b.subarray(0, fs.readSync(fd, b, 0, len, pos)); } finally { fs.closeSync(fd); }
+}
+// a log's first scan state: the scan cache's when it holds this log as it is (grown or not), with what it counted put
+// back (tokens and cost, the header's dedupe, this PC's spend by minute, the PR links); else a read from the start
+function usageStart(s, file, size, m) {
+  const st = { off: 0, rest: NO_BYTES, tail: NO_BYTES, u: new Map(), prs: new Map(), size, m };
+  const c = SCAN ? SCAN.take(file) : null;
+  if (!c || !SCAN_CACHE_JS.fits(c, size, m, (pos, len) => readAt(file, pos, len))) return st;
+  for (const [id, v] of c.u) countUsage(s, st, id, v[0], v[1], v[2] == null ? NaN : v[2]);
+  for (const p of c.prs.values()) { addPr(s, p[0], p[1], p[2]); st.prs.set(p[0], p); }
+  st.off = c.off;
+  st.tail = c.tail;
+  return st;
+}
+// A log the scan cache can take up is taken up even when this poll's budget is spent (that reads nothing), so after a
+// restart every card and the header have their cost at the first poll.
 function scanUsage(s, files, budget, ahead) {
+  const TAIL = SCAN_CACHE_JS.TAIL_BYTES;
+  let pending = false;
   for (const file of files) {
-    if (budget.left <= 0) { s.usagePending = true; return; }
-    let size;
-    if (ahead) { size = knownSize(statKnown.get(file)); if (size == null) continue; }
-    else try { size = fs.statSync(file).size; } catch { continue; }
     let st = s.usageScan.get(file);
-    if (!st) s.usageScan.set(file, (st = { off: 0, rest: '' }));
-    if (size < st.off) { st.off = 0; st.rest = ''; }
+    if (budget.left <= 0 && (st || !SCAN)) { pending = true; continue; }
+    let size, m;
+    if (ahead) { const k = statKnown.get(file); size = knownSize(k); if (size == null) continue; m = knownM(k); }
+    else try { const t = fs.statSync(file); size = t.size; m = t.mtimeMs; } catch { continue; }
+    if (!st) s.usageScan.set(file, (st = usageStart(s, file, size, m)));
+    if (size < st.off) { st.off = 0; st.rest = NO_BYTES; st.tail = NO_BYTES; }
+    st.size = size; st.m = m;
     if (size === st.off) continue;
+    if (budget.left <= 0) { pending = true; continue; }
     const len = Math.min(size - st.off, budget.left);
     const buf = Buffer.alloc(len);
     const fd = fs.openSync(file, 'r');
     try { fs.readSync(fd, buf, 0, len, st.off); } finally { fs.closeSync(fd); }
     st.off += len;
     budget.left -= len;
-    const text = st.rest + buf.toString('utf8');
-    const cut = text.lastIndexOf('\n');
-    st.rest = cut < 0 ? text : text.slice(cut + 1);
-    if (cut < 0) continue;
-    for (const line of text.slice(0, cut).split('\n')) {
+    // whole lines only, cut as bytes: a character split across two reads is joined again, not lost
+    const all = st.rest.length ? Buffer.concat([st.rest, buf]) : buf;
+    const cut = all.lastIndexOf(0x0a);
+    if (cut < 0) { st.rest = all; if (st.off < size) pending = true; continue; }
+    st.rest = Buffer.from(all.subarray(cut + 1)); // a copy: a slice would keep the whole read alive
+    const piece = all.subarray(Math.max(0, cut + 1 - TAIL), cut + 1);
+    st.tail = Buffer.from(piece.length >= TAIL ? piece : Buffer.concat([st.tail, piece]).subarray(-TAIL));
+    for (const line of all.toString('utf8', 0, cut).split('\n')) {
+      if (line.includes('{"type":"pr-link"')) {
+        let d = null;
+        try { d = JSON.parse(line); } catch {}
+        if (d && d.type === 'pr-link') { usagePr(s, st, d); continue; }
+      }
       if (!line.includes('"usage"') || !line.includes('"assistant"')) continue;
-      try { const d = JSON.parse(line); if (d.type === 'assistant') addUsage(s, d.message, d.timestamp); } catch {}
+      try { const d = JSON.parse(line); if (d.type === 'assistant') addUsage(s, d.message, d.timestamp, st); } catch {}
     }
-    if (st.off < size) { s.usagePending = true; return; }
+    if (st.off < size) pending = true;
   }
-  s.usagePending = false;
+  s.usagePending = pending;
 }
 const fmtTok = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`);
 // plain ASCII with thousands separators: an approximately-equal sign comes from a fallback font and sits oddly
@@ -2072,7 +2149,7 @@ const fmtCost = (c) => '$' + (c >= 100 ? Math.round(c).toLocaleString('en-US') :
 // An account with no .credentials.json (an API key, or not logged in) is skipped quietly at the 5-minute pace.
 // Each read also goes to usage-watch.js, which compares the climb with what this PC spent to tell when an account is
 // being used somewhere else; while something looks off it is read every 2 minutes.
-const weekLeft = {}; // account -> { left: 0-100, resets: ms }
+const weekLeft = {}; // account -> { left: 0-100, resets: ms, five, at: when it was read (/state's week: a frozen number shows as an old at) }
 const UW = require(path.join(__dirname, 'usage-watch.js'));
 const USAGE = UW.createWatch({
   file: DEMO ? null : path.join(P.dataDir(), 'usage-watch.json'),
@@ -2082,11 +2159,12 @@ const USAGE = UW.createWatch({
 // the first read after a start fails (it often does: "fetch failed", or HTTP 429 after a few quick restarts).
 for (const [a, v] of Object.entries(DEMO ? {} : USAGE.view())) {
   const left = (x) => (x && x.pct != null ? { left: Math.max(0, Math.round(100 - x.pct)), resets: x.resets } : null);
-  if (v.week && v.week.resets) weekLeft[a] = { ...left(v.week), five: v.five && v.five.resets ? left(v.five) : null };
+  if (v.week && v.week.resets) weekLeft[a] = { ...left(v.week), five: v.five && v.five.resets ? left(v.five) : null, at: v.at || null };
 }
 // Each account on its own clock: a miss retries that account in 30 s, an HTTP 429 backs off (Retry-After, else 1, 2,
 // 4 ... 15 minutes), so one failing account neither re-reads the others every 30 s nor keeps the limit tripped.
 const weekDue = {}, week429 = {};
+const weekRead = {}; // account -> { okAt, failAt, error }: the last read that worked and the last that failed (GET /health)
 async function readWeekLeft() {
   for (const a of accountsHere()) {
     if (weekDue[a] > Date.now()) continue;
@@ -2109,13 +2187,15 @@ async function readWeekLeft() {
       const j = await r.json(), w = j.seven_day, f = j.five_hour;
       const left = (x) => ({ left: Math.max(0, Math.round(100 - x.utilization)), resets: Date.parse(x.resets_at) || null });
       // five: the 5-hour session limit, which can run out with week left
-      if (w && typeof w.utilization === 'number') weekLeft[a] = { ...left(w), five: f && typeof f.utilization === 'number' ? left(f) : null };
+      if (w && typeof w.utilization === 'number') weekLeft[a] = { ...left(w), five: f && typeof f.utilization === 'number' ? left(f) : null, at: Date.now() };
       const u = UW.fromEndpoint(j, Date.now());
       if (u) USAGE.read(a, u, { pending: [...sessions.values()].some((x) => x.usagePending), login: loginOf(a) });
       // every 2 minutes too while switching accounts is on and an account is at 80% or more, so one can't go past its
       // limit between reads
       weekDue[a] = Date.now() + (USAGE.suspicious() || (autoSwitch && SWITCH.nearLimit(onlyListed(USAGE.view()))) ? 2 * 60e3 : 5 * 60e3);
+      weekRead[a] = { ...weekRead[a], okAt: Date.now() };
     } catch (e) {
+      weekRead[a] = { ...weekRead[a], failAt: Date.now(), error: String((e && e.message) || e).slice(0, 300) };
       weekDue[a] = Date.now() + (next || 30e3);
       logOnce('week:' + a + ':' + (e && e.message), `weekly limit read for account ${a} failed: ${e && e.message}`);
     }
@@ -2248,10 +2328,10 @@ const LOG_TAIL = 3 << 20; // a log is first read from its last 3 MB (readNew)
 // a log longer than that is first read without its head, where a pickup's HANDOFF text is: look there on its own
 // (HO.summaryFromLog reads only the head), so a long picked-up conversation links on the machine without the handoff
 // file too. The tail's user records are not its first ones, so ingestMain looks at none of them.
-function headPickup(s) {
-  let size = 0;
-  try { size = fs.statSync(s.file).size; } catch { return; }
-  if (size <= LOG_TAIL) return;
+// size: statAhead's answer for the server's poll (null: missing); left out, asked here
+function headPickup(s, size) {
+  if (size === undefined) { try { size = fs.statSync(s.file).size; } catch { return; } }
+  if (size == null || size <= LOG_TAIL) return;
   s.userSeen = Math.max(s.userSeen || 0, 8);
   const p = s.pickupFrom ? null : HO.summaryFromLog(s.file);
   if (p && p.from !== String(s.id).toLowerCase()) { s.pickupFrom = p.from; s.pickupFile = p.file; s.pickupAt = p.at || p.created || null; pickupGen++; }
@@ -2538,9 +2618,11 @@ function loadWorkflow(s, sdir, ahead) {
 const ships = new Map(); // "owner/repo#123" -> { at, state, checks, merged, live }
 const mergedToday = new Map(); // repo -> Set of PR numbers merged since local midnight
 let ghBusy = false, ghMergedAt = 0;
+const ghHealth = { okAt: 0, failAt: 0, fails: 0, error: '' }; // GET /health: gh's last answer and last failure
 const gh = (args) => new Promise((res) => {
   execFile('gh', args, { timeout: 25000, windowsHide: true, maxBuffer: 8 << 20 }, (err, out) => {
-    if (err) return res(null);
+    if (err) { ghHealth.failAt = Date.now(); ghHealth.fails++; ghHealth.error = String(err.message || err).split('\n')[0].slice(0, 300); return res(null); }
+    ghHealth.okAt = Date.now();
     try { res(JSON.parse(out)); } catch { res(null); }
   });
 });
@@ -3158,7 +3240,7 @@ function showLeftAgain(b) {
   }
   if (shown.length) {
     saveShownAgain();
-    if (!undo) setImmediate(() => { try { discover(); } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: discover after Show again failed\n${errorText(e)}`); } });
+    if (!undo) discoverSoon('Show again');
   }
   if (!unknown.length) return [200, { ok: true, shown }];
   return [shown.length ? 200 : 404, { ok: false, shown, unknown, message: `no transcript here for ${unknown.length === 1 ? 'that conversation' : `${unknown.length} of them`}` }];
@@ -3173,7 +3255,7 @@ function markOpened(id) {
   shownAgain.set(id, Date.now());
   passed.delete(id);
   try { saveShownAgain(); } catch {}
-  if (!sessions.has(id)) setImmediate(() => { try { discover(); } catch (e) { logOnce('left-map:' + (e && e.message), `left-map: discover after an open failed\n${errorText(e)}`); } });
+  if (!sessions.has(id)) discoverSoon('an open');
 }
 // a claude that started on a log made before it (a resume, never a new conversation, whose log comes after)
 function resumedLog(id, p) {
@@ -3214,7 +3296,51 @@ function dropSession(s, rule) {
   for (let i = feed.length - 1; i >= 0; i--) if (feed[i].sid === s.id) feed.splice(i, 1);
 }
 
-function discover() {
+// ---------- the server's sweep of the projects folders (log-sweep.js) ----------
+// discover, the history index and findLog work from what LOGS knows: the folders listed and the logs stat'd off the
+// event loop, a round per discover (every 8 s). These synchronous sweeps held the loop 144 ms a round warm, and for
+// 46 s after a cold boot. The log of a conversation held, run by a claude, remembered, shown again or kept for a bot
+// is stat'd every round however old.
+const LOGS = LOG_SWEEP.createSweep({
+  roots: () => roots(),
+  want: (id) => sessions.has(id) || liveProcs.has(id) || remembered.sessions.has(id) || shownAgain.has(String(id).toLowerCase()) || overseerKeep.has(id),
+});
+let sweepOn = false; // the server's sweep runs (startWeb); --tui and --snapshot list the folders in place
+let sweepRun = null, sweepAgain = false;
+// discover on a fresh round of the sweep; one asked for while a round runs runs once that is done. why: what asked
+// for it, for the log when it fails. Before the start's first list, nothing (startList runs a round right after it)
+function discoverSoon(why) {
+  const failed = (e) => logOnce('discover:' + (e && e.message), `discover${why ? ` after ${why}` : ''} failed\n${errorText(e)}`);
+  if (!sweepOn) return void setImmediate(() => { try { discover(); } catch (e) { failed(e); } });
+  if (!listReady) return;
+  if (sweepRun) { sweepAgain = true; return; }
+  sweepRun = LOGS.round().then(() => STALLS.timed('discover:rules', () => discover(LOGS.list()))).catch(failed)
+    .finally(() => { sweepRun = null; if (sweepAgain) { sweepAgain = false; discoverSoon(); } });
+}
+// a log's mtime as the sweep last saw it (a log quiet for an hour is up to a minute behind), with no stat of its own;
+// in place when there is no sweep yet
+const knownMtime = (file) => (sweepOn && LOGS.full ? LOGS.mtimeOf(file) || 0 : mtime(file));
+// every log in both accounts' projects folders, as discover takes them: [{ file, name, proj, pdir, account, root, m }],
+// listed and stat'd here, synchronously (--tui and --snapshot: the server's come from its sweep, LOGS above)
+function logsNow() {
+  const out = [];
+  for (const r of roots()) {
+    for (const proj of ls(r.dir)) {
+      const pdir = path.join(r.dir, proj);
+      for (const name of ls(pdir)) if (name.endsWith('.jsonl')) { const file = path.join(pdir, name); out.push({ file, name, proj, pdir, account: r.account, root: r.dir, m: mtime(file) }); }
+    }
+  }
+  return out;
+}
+// is this projects folder a bot's (botsProjKey + the slug of a bot this machine or the other still has)
+function botProjTest() {
+  const botsKey = botsProjKey(), awaySlugs = new Set(botLooks.map((x) => x.slug));
+  return (proj) => !!botsKey && proj.toLowerCase().startsWith(botsKey) && awaySlugs.has(proj.toLowerCase().slice(botsKey.length));
+}
+
+// logs: every log there is (logsNow), or what the server's sweep knows (LOGS.list(): every log once it has listed
+// the folders; at start, before that, the ones startList picked)
+function discover(logs = logsNow()) {
   const now = Date.now();
   UPTIME.tick(now); // a wake from sleep is a gap before the age rules below run
   const horizon = Math.max(WINDOW_MS, KEEP_DONE_MS);
@@ -3225,26 +3351,18 @@ function discover() {
   // every log in both accounts' projects folders; a conversation moved between accounts (/swap) can have
   // a log in each, and the one written last is the live one
   const found = new Map(); // id -> { file, pdir, m, account, root }
-  const botsKey = botsProjKey(), awaySlugs = new Set(botLooks.map((x) => x.slug));
-  for (const r of roots()) {
-    for (const proj of ls(r.dir)) {
-      const pdir = path.join(r.dir, proj);
-      if (botsKey && proj.toLowerCase().startsWith(botsKey) && awaySlugs.has(proj.toLowerCase().slice(botsKey.length))) {
-        let top = null;
-        for (const f of ls(pdir)) if (f.endsWith('.jsonl')) { const m = mtime(path.join(pdir, f)); if (!top || m > top.m) top = { id: f.slice(0, -6), m }; }
-        if (top) overseerKeep.add(top.id);
-      }
-      for (const f of ls(pdir)) {
-        if (!f.endsWith('.jsonl')) continue;
-        const file = path.join(pdir, f), m = mtime(file), id = f.slice(0, -6);
-        if (setAside.size && setAside.has(id.toLowerCase()) && !setAsideBack(id.toLowerCase(), file, m)) continue;
-        // shown again from "Left the map" (keepShown): read again however old its log, as one kept is
-        const rem = (remembered.sessions.has(id) && now - m < REMEMBER_MS * 7) || overseerKeep.has(id) || keepShown(id, now);
-        if (!sessions.has(id) && !rem && !liveWaiting(id) && (pastRun(m, now, horizon) || passed.get(id) === m) && !ownerView(id)?.listed) continue;
-        const old = found.get(id);
-        if (!old || m > old.m) found.set(id, { file, pdir, m, account: r.account, root: r.dir });
-      }
-    }
+  // the newest log in each bot's projects folder is kept (overseerKeep), before the rules below look at any log
+  const isBot = botProjTest(), tops = new Map(); // pdir -> { id, m }
+  for (const x of logs) if (isBot(x.proj)) { const t = tops.get(x.pdir); if (!t || x.m > t.m) tops.set(x.pdir, { id: x.name.slice(0, -6), m: x.m }); }
+  for (const t of tops.values()) overseerKeep.add(t.id);
+  for (const x of logs) {
+    const { file, m } = x, id = x.name.slice(0, -6);
+    if (setAside.size && setAside.has(id.toLowerCase()) && !setAsideBack(id.toLowerCase(), file, m)) continue;
+    // shown again from "Left the map" (keepShown): read again however old its log, as one kept is
+    const rem = (remembered.sessions.has(id) && now - m < REMEMBER_MS * 7) || overseerKeep.has(id) || keepShown(id, now);
+    if (!sessions.has(id) && !rem && !liveWaiting(id) && (pastRun(m, now, horizon) || passed.get(id) === m) && !ownerView(id)?.listed) continue;
+    const old = found.get(id);
+    if (!old || m > old.m) found.set(id, { file, pdir: x.pdir, m, account: x.account, root: x.root });
   }
   for (const [id, x] of found) {
     let s = sessions.get(id);
@@ -3253,9 +3371,9 @@ function discover() {
       s = { id, file: x.file, dir: path.join(x.pdir, id), account: x.account, projRoot: x.root, events: [], calls: [], lastReply: '', prs: new Map(), finished: new Map(), bg: new Map(), bgUse: new Map(), agents: new Map(), shipSeen: new Map(), files: new Map(), repoVotes: [], msgUsage: new Map(), usageScan: new Map(), tokens: 0, cost: 0, shownPlan: 0, shownShip: 0, turnOpen: false, seenFails: 0 };
       const ct = readJson(path.join(s.dir, 'custom-title.json'));
       if (ct?.customTitle) s.custom = ct.customTitle;
-      // older than the window: kept only if it is a finished turn, so its PRs are read once that is known
+      // older than the window: kept only if it is a finished turn
       s.late = now - x.m > WINDOW_MS && !remembered.sessions.has(id) && !liveWaiting(id) && !overseerKeep.has(id) && !keepShown(id, now);
-      if (!s.late) { prsFor(s); forkSweepSoon(); } // a fork the session host made: its list says so
+      if (!s.late) forkSweepSoon(); // a fork the session host made: its list says so
       sessions.set(id, s);
     }
     if (s.file === x.file) s.mtime = x.m;
@@ -3272,18 +3390,108 @@ function discover() {
 
 // ahead: statAhead has just asked this round's stats and listings (the server's poll); without it, they are asked here
 function poll(ahead = false) {
-  const now = Date.now();
-  UPTIME.tick(now); // the heartbeat (uptime.json every minute), and a wake from sleep noted before the age rules
-  const budget = { left: 8 << 20 }; // bytes of history read for token counts per poll, across sessions
-  pollRemote = syncRemote();
+  const now = Date.now(), budget = pollBegin(now);
+  for (const s of [...sessions.values()]) pollSafe(s, now, budget, ahead && !s.demo);
+  pollEnd(now);
+}
+// the start's first poll: poll(true), but it lets the event loop go once POLL_SLICE_MS went by, between two
+// conversations (the first read of each log's last 3 MB is most of a start's work: a request that came in meanwhile is
+// answered between them), and reads less history for token counts (bytes)
+const POLL_SLICE_MS = 50;
+async function pollSpread(bytes) {
+  const now = Date.now(), budget = pollBegin(now, bytes);
+  let t = performance.now();
   for (const s of [...sessions.values()]) {
-    // one conversation whose log trips something must not stop the others, or the server
-    try { pollOne(s, now, budget, ahead && !s.demo); } catch (e) { logOnce('poll:' + (e && e.message), `poll: skipped ${s.id} this round\n${errorText(e)}`); }
+    if (performance.now() - t >= POLL_SLICE_MS) { await new Promise((r) => setImmediate(r)); t = performance.now(); }
+    if (sessions.get(s.id) === s) STALLS.timed('poll:first', () => pollSafe(s, now, budget, !s.demo));
   }
+  pollEnd(now);
+}
+function pollBegin(now, bytes = 8 << 20) {
+  UPTIME.tick(now); // the heartbeat (uptime.json every minute), and a wake from sleep noted before the age rules
+  pollRemote = syncRemote();
+  return { left: bytes }; // bytes of history read for token counts per poll, across sessions
+}
+// one conversation whose log trips something must not stop the others, or the server
+function pollSafe(s, now, budget, ahead) {
+  try { pollOne(s, now, budget, ahead); } catch (e) { logOnce('poll:' + (e && e.message), `poll: skipped ${s.id} this round\n${errorText(e)}`); }
+}
+function pollEnd(now) {
   feedLive = true;
   feed.sort((a, b) => a.t - b.t);
   if (feed.length > 400) feed.splice(0, feed.length - 400);
   if (WEB) afterPoll(now);
+}
+// The server's first read of the logs, the list, without blocking the event loop. It was synchronous: 1,683 stats
+// and a 3 MB read of each conversation's log held the server 5 to 62 s on 8 of 30 restarts (2026-10-16/17), and the
+// launcher, getting no answer, started a second server. Now only the logs likely on the map are stat'd at first
+// (firstLogs: no folder is listed before the list is out; discoverSoon lists them all right after), the handoffs read
+// and the scan cache loaded meanwhile, what the first poll reads is read ahead (warmFirstPoll), and that poll lets the
+// loop go between conversations (pollSpread). Each step's time goes in server.log's "the list is ready" line.
+const START_LIST_MAX_MS = 60e3;
+async function startList() {
+  let t = performance.now();
+  const took = (name) => { const n = performance.now(); boot.steps.push(`${name} ${Math.round(n - t)}`); t = n; };
+  bootStep('scan-cache', () => { if (SCAN) SCAN.load(); });
+  t = performance.now();
+  await Promise.all([LOGS.statFiles(firstLogs(Date.now()), botProjTest()), handoffsRead()]);
+  took('first-logs');
+  STALLS.timed('discover:rules', () => discover(LOGS.list()));
+  took('discover');
+  await statAhead(Infinity);
+  await warmFirstPoll();
+  took('read-ahead');
+  await pollSpread(1 << 20);
+  took('poll');
+}
+// the logs the first read stats: the ones on the map at the last run (on-map.json), the ones the history index has as
+// written within the window, and every log of a conversation remembered, shown again, a bot's or a claude's (by the
+// index, and where Claude Code puts a running claude's log, which the index may not have yet). A bot's whole projects
+// folder is listed too (startList: discover keeps the newest log in each)
+function firstLogs(now) {
+  const ids = new Set(), files = new Set(), horizon = Math.max(WINDOW_MS, KEEP_DONE_MS), rs = roots();
+  const want = (id) => ids.add(String(id).toLowerCase());
+  // a log at its place in every account's projects folder (one moved between accounts, /swap, has a copy in each)
+  const everyRoot = (file) => {
+    files.add(file);
+    const top = P.foldCase(path.resolve(path.dirname(path.dirname(file)))), r = rs.find((x) => P.foldCase(path.resolve(x.dir)) === top);
+    if (r) for (const o of rs) if (o !== r) files.add(path.join(o.dir, path.relative(r.dir, file)));
+  };
+  for (const id of remembered.sessions.keys()) want(id);
+  for (const id of liveProcs.keys()) want(id);
+  for (const id of shownAgain.keys()) want(id);
+  for (const id of overseerIds()) want(id);
+  for (const [id, e] of leftPrev || []) { want(id); if (e && typeof e.file === 'string' && e.file) everyRoot(e.file); }
+  for (const [file, e] of histIndex) if (ids.has(e.id)) everyRoot(file); else if (!pastRun(e.m, now, horizon)) files.add(file);
+  for (const [id, p] of liveProcs) if (p.cwd) for (const r of rs) files.add(path.join(r.dir, p.cwd.replace(/[^a-zA-Z0-9]/g, '-'), id + '.jsonl'));
+  return [...files];
+}
+// Reads ahead, without blocking, what the first poll then reads synchronously: each conversation's last LOG_TAIL
+// bytes (readNew), its first MB when it is longer (headPickup and forkHeadScan look there) and its agents' logs written
+// in the last 5 minutes (their last 256 KB). After a boot none of it is in the file cache; the next reads are then
+// copies from memory. A few at a time, so libuv's pool keeps room.
+async function warmFirstPoll() {
+  const jobs = [], now = Date.now();
+  for (const s of sessions.values()) {
+    if (s.demo || !s.file) continue;
+    const size = knownSize(statKnown.get(s.file));
+    if (!size) continue;
+    jobs.push([s.file, Math.max(0, size - LOG_TAIL), Math.min(size, LOG_TAIL)]);
+    if (size > LOG_TAIL) jobs.push([s.file, 0, Math.min(FORK_HEAD_MAX, size - LOG_TAIL)]);
+    for (const f of (subKnown.get(s.dir) || { files: [] }).files) {
+      const k = statKnown.get(f);
+      if (k && k.size && now - k.mtimeMs <= 5 * 60e3) jobs.push([f, Math.max(0, k.size - (256 << 10)), Math.min(k.size, 256 << 10)]);
+    }
+  }
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, async () => {
+    const buf = Buffer.alloc(LOG_TAIL);
+    while (i < jobs.length) {
+      const [file, pos, len] = jobs[i++];
+      let fh = null;
+      try { fh = await fs.promises.open(file, 'r'); await fh.read(buf, 0, Math.min(len, buf.length), pos); } catch {} finally { if (fh) await fh.close().catch(() => {}); }
+    }
+  }));
 }
 // after every poll (and demo tick): conflict alerts, team upkeep, and a timeline frame when one is due
 function afterPoll(now) {
@@ -3304,7 +3512,7 @@ function pollOne(s, now, budget, ahead) {
   const k = ahead ? statKnown.get(s.file) : undefined;
   if (ahead && k === undefined) return;
   s.mtime = ahead ? knownM(k) : mtime(s.file);
-  if (!tails.has(s.file)) headPickup(s);
+  if (!tails.has(s.file)) headPickup(s, ahead ? knownSize(k) : undefined);
   ingest((r) => ingestMain(s, r), readNew(s.file, LOG_TAIL, ahead ? knownSize(k) : undefined));
   forkHeadScan(s); // once, after the first read (it knows then whether that read found the source's id)
   // old by this copy, but another device runs it: on the list exactly while it is on that device's, whatever this
@@ -3313,7 +3521,6 @@ function pollOne(s, now, budget, ahead) {
   if (ov) {
     if (!ov.listed) { dropSession(s, 'other-device'); return; }
     s.late = false;
-    prsFor(s);
   }
   // an old log that doesn't end on a finished turn: drop it before reading its agents and history
   if (s.late && (s.turnOpen || s.asking || s.apiError || s.endedOnQuestion || runAge(endedAtOf(s), now) >= KEEP_DONE_MS)) { dropSession(s, 'late-unfinished'); return; }
@@ -3390,7 +3597,6 @@ function pollOne(s, now, budget, ahead) {
   if (s.late) {
     if (!keepDone(s, now)) { dropSession(s, s.state === 'DONE' ? 'finished-3h' : 'late-unfinished'); return; }
     s.late = false;
-    prsFor(s);
   }
   // finished hours ago and its log only touched since: gone before it shows or raises an alert
   if (endedLongAgo(s, now)) { dropSession(s, 'finished-3h'); return; }
@@ -5381,19 +5587,30 @@ function waitingOf(s) {
 const fileAbs = (f) => f.abs || (f.root ? path.join(f.root, ...f.rel.split('/')) : f.rel);
 
 // ---------- handoffs (handoff.js): who handed off to whom ----------
-// The handoff folder is read at most every 3 s (each file once per mtime).
-let hoCache = null, hoAt = 0, hoLimit = HO.DEFAULT_LIMIT;
+// The handoff folder is read at most every 3 s (each file once per mtime). The server reads it without blocking
+// (HO.readAllAsync: ~600 synchronous stats and reads held its event loop about 100 ms every 3 s), answering from the
+// last read meanwhile; its first read is in startList, before the first poll. --tui and --snapshot read it in place.
+let hoCache = null, hoAt = 0, hoLimit = HO.DEFAULT_LIMIT, hoReading = null;
 function handoffLinks(now = Date.now()) {
   if (DEMO) return { bySession: new Map(), byNext: new Map() };
   if (!hoCache || now - hoAt > 3000) {
     hoAt = now;
-    try {
-      hoCache = HO.readAll(); hoLimit = HO.limit();
-      // a pickup named in a recent handoff that the list doesn't have yet: look for its log now, not at the next 8 s sweep
-      if ([...hoCache.byNext].some(([id, r]) => now - r.created < 10 * 60e3 && !sessions.has(id) && !passed.has(id))) setImmediate(() => { try { discover(); } catch {} });
-    } catch (e) { hoCache = hoCache || { bySession: new Map(), byNext: new Map() }; logOnce('handoffs:' + (e && e.message), `handoffs: could not read\n${errorText(e)}`); }
+    if (WEB && hoCache) handoffsRead(now);
+    else try { handoffsGot(HO.readAll(), now); } catch (e) { hoCache = hoCache || { bySession: new Map(), byNext: new Map() }; logOnce('handoffs:' + (e && e.message), `handoffs: could not read\n${errorText(e)}`); }
   }
   return hoCache;
+}
+function handoffsRead(now = Date.now()) {
+  if (!hoReading) {
+    hoReading = HO.readAllAsync().then((c) => handoffsGot(c, now), (e) => { hoCache = hoCache || { bySession: new Map(), byNext: new Map() }; logOnce('handoffs:' + (e && e.message), `handoffs: could not read\n${errorText(e)}`); })
+      .finally(() => { hoReading = null; });
+  }
+  return hoReading;
+}
+function handoffsGot(links, now) {
+  hoCache = links; hoLimit = HO.limit();
+  // a pickup named in a recent handoff that the list doesn't have yet: look for its log now, not at the next 8 s sweep
+  if ([...hoCache.byNext].some(([id, r]) => now - r.created < 10 * 60e3 && !sessions.has(id) && !passed.has(id))) discoverSoon('a handoff');
 }
 const titleOf = (id) => { const x = sessions.get(id); return x ? plain(shownName(x) || x.name || '') || null : null; };
 // { handoff: { next, nextName, at } | null, pickedUpFrom: { id, name, file } | null } for /state (file: the handoff summary)
@@ -6741,10 +6958,25 @@ const removedLogs = new Map(); // id -> { file, account, root, m, info } | { mis
 // of <id>.jsonl in every project folder for each id looked up: /state's removed list looks up every removed
 // conversation, and with hundreds removed and a few hundred project folders that was ~200,000 stats, which held the
 // event loop for 20 s and more (#541), again each minute.
+// The server takes it from its sweep (LOGS, every 8 s off the event loop) once that has listed every folder: an id
+// not on it asks for a round soon, for the next look.
 const LOG_NAMES_MS = 30e3, LOG_NAMES_MISS_MS = 10e3;
-let logNames = null, logNamesAt = 0;
+let logNames = null, logNamesAt = 0, logNamesGen = -1;
 function logsById(fresh) {
   const now = Date.now();
+  if (sweepOn && LOGS.full) {
+    if (fresh && now - LOGS.at >= LOG_NAMES_MISS_MS) discoverSoon();
+    if (logNamesGen === LOGS.gen && logNames) return logNames;
+    const map = new Map();
+    for (const x of LOGS.list()) {
+      const id = x.id.toLowerCase();
+      let list = map.get(id);
+      if (!list) map.set(id, (list = []));
+      list.push({ file: x.file, pdir: x.pdir, account: x.account, root: x.root });
+    }
+    logNames = map; logNamesAt = now; logNamesGen = LOGS.gen;
+    return map;
+  }
   if (logNames && now - logNamesAt < (fresh ? LOG_NAMES_MISS_MS : LOG_NAMES_MS)) return logNames;
   const map = new Map();
   for (const r of roots()) {
@@ -6770,7 +7002,7 @@ function findLog(id) {
   if (!list) list = logsById(true).get(key);
   let best = null;
   for (const x of list || []) {
-    const m = mtime(x.file);
+    const m = knownMtime(x.file);
     if (m && (!best || m > best.m)) best = { file: x.file, m, account: x.account, root: x.root, pdir: x.pdir };
   }
   return best;
@@ -6858,8 +7090,11 @@ function removedOne(h, now, budget, hist) {
   }
   let c = removedLogs.get(h.id);
   if (c && c.missing && now - c.at < 60e3) return null;
-  // the log's time now: one stat (findLog's own when it had to be looked for)
-  let cur = c && !c.missing ? mtime(c.file) : 0;
+  // the server's sweep has not listed the folders yet (its first minute): on a later /state, rather than a listing of
+  // every folder here, or "missing" for a minute
+  if (sweepOn && !LOGS.full && (!c || c.missing)) return undefined;
+  // the log's time now: as the sweep saw it (in place without one), findLog's own when it had to be looked for
+  let cur = c && !c.missing ? knownMtime(c.file) : 0;
   if (!c || c.missing || !cur) {
     const f = findLog(h.id);
     if (!f) { removedLogs.set(h.id, { missing: true, at: now }); return null; }
@@ -6962,21 +7197,18 @@ function saveHistory() {
     fs.renameSync(tmp, HISTORY_FILE);
   } catch (e) { logOnce('history-save', `could not save ${HISTORY_FILE}: ${e.message}`); }
 }
-// every <id>.jsonl in the projects folders: the ones not indexed yet, or changed since, go on the queue
+// every <id>.jsonl in the projects folders: the ones not indexed yet, or changed since, go on the queue. The server's
+// list is its sweep's (LOGS), once that has listed every folder, and nothing before (no listing of its own here)
 function listHistory() {
+  const logs = sweepOn ? (LOGS.full ? LOGS.list() : null) : logsNow();
+  if (!logs) return;
   const seen = new Set(), queue = [];
-  for (const r of roots()) {
-    for (const proj of ls(r.dir)) {
-      const pdir = path.join(r.dir, proj);
-      for (const f of ls(pdir)) {
-        if (!f.endsWith('.jsonl') || !UUID_RE.test(f.slice(0, -6))) continue;
-        const file = path.join(pdir, f), m = mtime(file);
-        if (!m) continue;
-        seen.add(file);
-        const e = histIndex.get(file);
-        if (!e || e.m !== m) queue.push({ file, pdir, m, account: r.account, projRoot: r.dir, id: f.slice(0, -6).toLowerCase() });
-      }
-    }
+  for (const x of logs) {
+    const id = x.name.slice(0, -6);
+    if (!UUID_RE.test(id) || !x.m) continue;
+    seen.add(x.file);
+    const e = histIndex.get(x.file);
+    if (!e || e.m !== x.m) queue.push({ file: x.file, pdir: x.pdir, m: x.m, account: x.account, projRoot: x.root, id: id.toLowerCase() });
   }
   for (const file of [...histIndex.keys()]) if (!seen.has(file)) { histIndex.delete(file); histDirty = true; }
   histQueue = queue.sort((a, b) => b.m - a.m);
@@ -7209,8 +7441,10 @@ function buildState() {
     alert: al ? { t: al.t, sid: al.s.id, name: nameNow(al.s.id, al.s.name), text: al.text, color: toHex(al.color) } : null,
     hiddenDone: onMap.filter((s) => (s.state === 'DONE' || s.state === 'IDLE') && inWindow(s, now)).length,
     sessions: out,
-    // live conversations that had turns but aged off this list (agedLive): never drawn as new sessions
-    aged: agedLive(listed, now),
+    // live conversations that had turns but aged off this list (agedLive): never drawn as new sessions. Not before the
+    // first list is ready (only a check that a server runs is answered then): every live claude would count as aged
+    // off, and looking up their logs then lists every projects folder synchronously, the start's freeze again
+    aged: listReady ? agedLive(listed, now) : [],
     // the most recently removed conversations (settings.hidden), newest first, for the page's Continue
     removed: removedList(now),
     // the conversations the age rules took off the map lately, newest first, for the menus' "Left the map" (leftMapList):
@@ -7426,6 +7660,30 @@ function sendState(req, res) {
   sendBody(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ETag: tag }, body);
 }
 const etagMatches = (req, tag) => String(req.headers['if-none-match'] || '').split(',').some((t) => t.trim().replace(/^W\//, '') === tag);
+// GET /health: what the server is doing to itself, for "why is it slow" (2026-10-17): nothing is read for it, every
+// number is one the server keeps anyway. Times are Date.now() ms unless named Ms.
+//   { ok, pid, node, version, upMs, list: { ready, readyAtMs (since the process started) },
+//     loop: { lagMs (the latest tick's), worstMs and worstAt (the last whole minute's), slowMs, cpu ('thread', or
+//             'process' where Node cannot tell one thread's CPU), labels: [{ label, runs, avgMs, maxMs, lastMs, slow,
+//             lastSlowAt }], runs: [{ label, ms, cpuMs, at }] (the newest slow runs), stalls: [{ at, ms, text }] },
+//     startup: [the start's lines in server.log], sweep: { files, rounds, lastMs, lastStats, lastLists, full, on, at },
+//     scan: { pending (conversations whose history is still being read for cost), files, cached (scan-cache entries) },
+//     github: { okAt, failAt, fails, error }, week: { <account>: { okAt, failAt, error, dueAt } } }
+let versionNow = null; // the start line's version (versionOf), once it is known
+function healthOut() {
+  let pending = 0, files = 0;
+  for (const s of sessions.values()) { if (s.usagePending) pending++; if (s.usageScan) files += s.usageScan.size; }
+  return {
+    ok: true, pid: process.pid, node: process.version, version: versionNow, upMs: bootMs(),
+    list: { ready: listReady, readyAtMs: listReadyAt || null },
+    loop: { lagMs: loopNow.lag, worstMs: loopNow.worst, worstAt: loopNow.worstAt || null, ...STALLS.view() },
+    startup: boot.lines.slice(),
+    sweep: { ...LOGS.stats(), on: sweepOn, at: LOGS.at || null },
+    scan: { pending, files, cached: SCAN ? SCAN.size() : 0 },
+    github: { ...ghHealth },
+    week: Object.fromEntries(Object.entries(weekRead).map(([a, w]) => [a, { ...w, dueAt: weekDue[a] || null }])),
+  };
+}
 function readBody(req, res, done) {
   let size = 0, called = false;
   const parts = [];
@@ -8761,7 +9019,7 @@ const liveCtx = {
     if (who.kind === 'local') return origin === `http://127.0.0.1:${PORT}` || origin === `http://localhost:${PORT}`;
     return who.kind === 'remote' && !!who.device && origin === `https://${who.name}`;
   },
-  state: () => buildState(),
+  state: () => (listReady ? buildState() : new Promise((done) => afterList(() => done(buildState())))),
   log: (t) => logOnce('live:' + t, 'live: ' + t),
   remote: remoteOf,
 };
@@ -8773,9 +9031,44 @@ const convCtx = { sendJson, find: conversationLog, live: (id) => !DEMO && livePr
 // The one other way in is remote access (remote.js): a request tailscale serve passed on from another device of the
 // tailnet owner's, with remote access on. It never reaches the API; until its browser is approved on the PC it only
 // gets the pairing page, and after that the page's routes like this PC's own page, with its own Origin checks.
+// Each request's synchronous part is timed under its route (stalls.js), and it counts as open until its answer is out.
 function handle(req, res) {
+  if (!listReady && !req.fvHeld && holdForList(req, res)) return;
+  // held for the list, and its caller gave up meanwhile (a page that reloaded, a timed-out call): nobody to answer, and
+  // one that changes something must not happen after its caller was told it failed
+  if (req.fvHeld && res.destroyed) return;
   if (boot.first.size) bootServed(req, res);
-  try { handleRequest(req, res); } catch (e) { requestFailed(req, res, e); }
+  const name = STALLS_JS.label(req.method, req.url);
+  res.once('close', STALLS.request(name));
+  STALLS.timed(name, () => { try { handleRequest(req, res); } catch (e) { requestFailed(req, res, e); } });
+}
+// ---------- the start's first list (startList) ----------
+// Until it is ready, the page's /state and the API wait for it, LIST_HOLD_MS at most: an answer with nothing read yet
+// would empty the map for a moment, or tell `fv` a conversation is not there. A /state with no browser headers (another
+// launch's and the window's checks that a server runs) is answered at once, so a slow start never looks like no
+// server: the launcher took one for none after 60 s and started a second server (2026-10-16 20:50).
+const LIST_HOLD_MS = 15e3;
+let listReady = false, listReadyAt = 0;
+const listWaiters = [];
+// fn once the first list is ready, or after ms, whichever comes first
+function afterList(fn, ms = LIST_HOLD_MS) {
+  if (listReady) return void fn();
+  let timer = null;
+  const go = () => { if (!timer) return; clearTimeout(timer); timer = null; fn(); };
+  timer = setTimeout(go, ms);
+  listWaiters.push(go);
+}
+function holdForList(req, res) {
+  const p = String(req.url || '').split('?')[0];
+  if (!(p === '/state' && req.headers['sec-fetch-mode']) && p !== '/api' && !p.startsWith('/api/')) return false;
+  req.fvHeld = true;
+  afterList(() => handle(req, res));
+  return true;
+}
+function listIsReady() {
+  listReady = true;
+  listReadyAt = bootMs();
+  for (const go of listWaiters.splice(0)) go();
 }
 function handleRequest(req, res) {
   const who = REMOTE.classify(req);
@@ -9003,6 +9296,11 @@ function handleRequest(req, res) {
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { ok: false, message: 'method not allowed' });
   if (pathname === '/state') return sendState(req, res);
+  // what the server is doing to itself, for "why is it slow" (healthOut): on the PC only
+  if (pathname === '/health') {
+    if (who.kind !== 'local') return sendJson(res, 403, { ok: false, message: 'health can only be seen on the PC' });
+    return sendJson(res, 200, healthOut());
+  }
   if (pathname === '/timeline') return sendJson(res, 200, timelineOut(new URL(req.url, 'http://x').searchParams));
   if (pathname === '/since') return sendJson(res, 200, sinceOut(new URL(req.url, 'http://x').searchParams));
   // the Accounts list alone (accounts.js view(), as /state's accountList): the phone's Claude accounts screen reads it
@@ -9131,13 +9429,14 @@ function probeFleetView(answer) {
 // the code's version for the log: "1.0.12 (02dddec), file <time> UTC": the version number (version.js), the git
 // commit in parentheses when git can say (a restart check compares it with git merge-base), and fleet-view.js's own time
 // (version.js has the full commit already when it counted the version: its first 7 characters, with no git call of
-// its own; git is asked only when version.js could not say)
-function versionOf() {
-  const cur = VERSION.current(), v = cur.version;
+// its own; git is asked only when version.js could not say). Worked out without blocking: its git calls (up to four)
+// took 4.4 s of a start on a busy disk (2026-10-17), with the server not listening yet
+async function versionOf() {
+  const cur = await VERSION.currentAsync(), v = cur.version;
   let hash = /^[0-9a-f]{40}$/.test(cur.commit || '') ? cur.commit.slice(0, 7) : '';
-  if (!hash) try { hash = require('child_process').execFileSync('git', ['-C', __dirname, 'rev-parse', '--short', 'HEAD'], { timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch {}
+  if (!hash) hash = await new Promise((done) => execFile('git', ['-C', __dirname, 'rev-parse', '--short', 'HEAD'], { timeout: 3000, windowsHide: true }, (e, out) => done(e ? '' : String(out).trim())));
   let at = '';
-  try { at = fs.statSync(__filename).mtime.toISOString().slice(0, 19).replace('T', ' '); } catch {}
+  try { at = (await fs.promises.stat(__filename)).mtime.toISOString().slice(0, 19).replace('T', ' '); } catch {}
   return [v && hash ? `${v} (${hash})` : v || hash, at && `file ${at} UTC`].filter(Boolean).join(', ') || 'unknown';
 }
 
@@ -9165,6 +9464,8 @@ function exitWith(code, reason) {
   try { LOBBY.stop(); } catch {}
   try { RELAY.stop('pc-closing'); } catch {}
   try { if (histOn) saveHistory(); } catch {}
+  // how far the usage scan read each log, so the next start takes each up there (scan-cache.js)
+  try { if (listReady) scanCacheSave(true); } catch {}
   try { tlFlushSync(); } catch {}
   if (DEMO) return void process.exit(code);
   const stops = [() => SYNC_RUNNER.stop(), () => (typeof SYNC.settled === 'function' ? SYNC.settled() : null)];
@@ -9239,8 +9540,13 @@ function startWeb() {
   // the automation API's token (api.js): made on the first start, never logged
   try { API.ensureToken(); } catch (e) { logLine(`api: could not make the API token: ${e.message}`); }
   const after = process.env.FV_RESTART_REASON ? `, restarted after ${process.env.FV_RESTART_REASON}` : '';
-  const loaded = bootMs(), version = bootStep('version', versionOf);
-  logLine(`start: port ${PORT}, version ${version}, node ${process.version}${DEMO ? ', demo' : ''}${NO_OPEN ? ', --no-open' : ''}${process.env.FLEET_VIEW_LOOP === '1' ? '' : ', no restart loop'}${after}; loaded in ${loaded} ms`);
+  // the start line once the version is known: its git calls run without blocking (versionOf) while the server starts
+  // listening, so this line can come after the first startup: lines
+  const loaded = bootMs();
+  versionOf().catch(() => 'unknown').then((version) => {
+    versionNow = version;
+    logLine(`start: port ${PORT}, version ${version}, node ${process.version}${DEMO ? ', demo' : ''}${NO_OPEN ? ', --no-open' : ''}${process.env.FLEET_VIEW_LOOP === '1' ? '' : ', no restart loop'}${after}; loaded in ${loaded} ms, the version read by +${bootMs()} ms`);
+  });
   watchBootStalls();
   setTimeout(watchStalls, 60e3).unref(); // (the first minute is watchBootStalls')
   setTimeout(registerLauncher, 5000);
@@ -9286,9 +9592,11 @@ function startWeb() {
       }
     });
   });
+  const listenAt = performance.now();
   server.listen(PORT, '127.0.0.1');
   server.once('listening', () => {
     listening = true;
+    boot.steps.push(`listen ${Math.round(performance.now() - listenAt)}`);
     bootSteps('listening');
     console.log(`Fleet View on http://127.0.0.1:${PORT}/  (${DEMO ? 'demo data' : rootLabel()}${GITHUB ? '' : ', github off'})`);
     console.log('Close this window, or press Ctrl+C, to stop it.');
@@ -9304,8 +9612,14 @@ function startWeb() {
     if (!DEMO) bootStep('updater', () => UPDATER.start({ log: logLine, busy: () => [...sessions.values()].filter((s) => inState(s) && !s.remote && (s.state === 'WORKING' || s.state === 'AGENTS')).length }));
     if (!DEMO) SHARE_HEALTH.start();
     if (process.env.FV_TEST_CRASH === '1') setTimeout(() => { throw new Error('FV_TEST_CRASH: test crash 3 s after start'); }, 3000);
-    const every = (ms, name, fn) => setInterval(() => { try { fn(); } catch (e) { logOnce(name + ':' + (e && e.message), `${name} failed\n${errorText(e)}`); } }, ms);
+    // each timer's run is timed under its name (stalls.js); none runs before the first list is ready (startList), as
+    // they all came after it when that read was synchronous
+    const every = (ms, name, fn) => setInterval(() => {
+      if (!listReady) return;
+      STALLS.timed(name, () => { try { fn(); } catch (e) { logOnce(name + ':' + (e && e.message), `${name} failed\n${errorText(e)}`); } });
+    }, ms);
     if (DEMO) {
+      listIsReady();
       // remote access: the demo keeps its devices in memory
       REMOTE.start();
       FEED_MOD.start({ log: logLine, off: 'a demo' });
@@ -9313,20 +9627,33 @@ function startWeb() {
       every(1500, 'demo', demoTick);
       return;
     }
-    // First the list, at once: the history index (history.json as it is; the rest is built in the background), the
-    // live claudes and the logs, which is what /state and /api/conversations answer from. Nothing here waits on the
-    // network, the sign-in or the session host.
+    // First the list: the history index (history.json as it is; the rest is built in the background), the live claudes
+    // and the logs, which is what /state and /api/conversations answer from. The logs are read without blocking
+    // (startList), and until the list is ready the page's /state and the API wait for it (holdForList). Nothing here
+    // waits on the network, the sign-in or the session host.
     histOn = true;
     bootStep('history', loadHistory);
-    prsLater = new Set(); // each log's PR links: read by the 'prs' step below, after the list is out
     // left-map.js: what the map showed at the last run, before the first read drops any of it; then the ones that left
     // while Fleet View was off
     leftLoad();
     // uptime.js: the time since the last run's heartbeat was off, before the first read judges any conversation's age
     try { UPTIME.start(); } catch (e) { logLine(`uptime: could not start\n${errorText(e)}`); }
-    try { bootStep('procs', scanLiveProcs); bootStep('discover', discover); bootStep('poll', poll); } catch (e) { console.error(e.stack); logLine(`first read of the logs failed\n${errorText(e)}`); }
-    leftAtStart();
-    bootSteps('the list is ready');
+    sweepOn = true;
+    try { bootStep('procs', scanLiveProcs); } catch (e) { logLine(`first scan of the live claudes failed\n${errorText(e)}`); }
+    // (a read that never comes back, a disk gone to sleep for good, holds the list back START_LIST_MAX_MS at most).
+    // The ones on the map at the last run that are not here now are logged as gone (leftAtStart) only once the first
+    // read is done, however long it takes: before that, most of them are just not read yet
+    let capped = null;
+    const cap = new Promise((r) => { capped = setTimeout(() => { logLine(`startup: the first read of the logs is still going after ${START_LIST_MAX_MS / 1000} s; the list goes out as it is`); r(); }, START_LIST_MAX_MS); });
+    const first = startList().catch((e) => { console.error(e.stack); logLine(`first read of the logs failed\n${errorText(e)}`); }).finally(leftAtStart);
+    Promise.race([first, cap]).finally(() => {
+      clearTimeout(capped);
+      bootSteps('the list is ready');
+      listIsReady();
+      // now every folder is listed (the first read took only the logs likely on the map), then the later steps
+      discoverSoon();
+      setImmediate(next);
+    });
     every(250, 'history', historyStep);
     every(1500, 'procs', scanLiveProcs);
     // the poll on stats asked ahead (statAhead: a 2 s statSync froze the server on 2026-10-17 01:11); a round still
@@ -9335,20 +9662,21 @@ function startWeb() {
     every(1500, 'poll', () => {
       if (polling) return;
       polling = true;
-      statAhead().then(() => poll(true))
+      statAhead().then(() => STALLS.timed('poll:read', () => poll(true)))
         .catch((e) => logOnce('poll:' + (e && e.message), `poll failed\n${errorText(e)}`))
         .finally(() => { polling = false; });
     });
-    every(8000, 'discover', discover);
+    // discover on a round of the sweep (log-sweep.js): the folders listed and the logs stat'd off the event loop
+    every(8000, 'discover', () => discoverSoon());
+    // how far the usage scan read each log (scan-cache.js), every 5 minutes and at exit
+    every(5 * 60e3, 'scan-cache', () => { scanCacheSave(false); });
     const prs = () => refreshGithub().catch((e) => logOnce('github:' + (e && e.message), `GitHub lookup failed\n${errorText(e)}`));
     const deploys = () => refreshDeploys().catch((e) => logOnce('deploys:' + (e && e.message), `deploy lookup failed\n${errorText(e)}`));
     const github = () => { prs(); deploys(); };
-    // Then the rest, one step per turn of the event loop (setImmediate), so a request that came in meanwhile is
-    // answered between steps rather than after all of them. Sync, the relay and the lobby (the sign-in's DPAPI read)
-    // come after the list, and nothing local waits on them.
+    // Then the rest, once the list is ready, one step per turn of the event loop (setImmediate), so a request that came
+    // in meanwhile is answered between steps rather than after all of them. Sync, the relay and the lobby (the
+    // sign-in's DPAPI read) come after the list, and nothing local waits on them.
     const later = [
-      // the PR links in each conversation's whole log (prsStep: one log a turn, true while more are left)
-      ['prs', prsStep],
       // the timeline (the last 24 hours, read back and rewritten compacted): tlTick takes no frame before it
       ['timeline', () => { try { tlLoad(); } catch (e) { tl.loaded = true; logLine(`timeline: could not read ${TL_FILE}\n${errorText(e)}`); } }],
       ['accounts', accountsFromProcesses],
@@ -9373,12 +9701,11 @@ function startWeb() {
       }
       const t = performance.now();
       let again = false;
-      try { again = step[1]() === true; } catch (e) { logOnce('startup:' + step[0], `startup: ${step[0]} failed\n${errorText(e)}`); }
+      try { again = STALLS.timed('startup:' + step[0], step[1]) === true; } catch (e) { logOnce('startup:' + step[0], `startup: ${step[0]} failed\n${errorText(e)}`); }
       took.set(step[0], (took.get(step[0]) || 0) + performance.now() - t);
       if (!again) later.shift();
       setImmediate(next);
     };
-    setImmediate(next);
     // the fleet-view-feed mod in each Claude login: refreshed when this folder's version differs (feed-mod.js), 20 s on
     FEED_MOD.start({ log: logLine, off: null });
     every(3600e3, 'feeds', pruneFeeds);

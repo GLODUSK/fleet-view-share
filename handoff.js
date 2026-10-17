@@ -49,12 +49,28 @@ function parseFront(text) {
 // every handoff, linked both ways. Files are read once per mtime (only their first 4 KB: the frontmatter).
 //   { bySession: Map(old id -> rec), byNext: Map(new id -> rec) }
 //   rec = { file, session, next, account, cwd, title, created, handedOffAt }
+// readAllAsync() is the same read with fs.promises, JOBS files at a time: Fleet View's server reads the folder every
+// 3 s, and the ~600 synchronous stats and reads held its event loop about 100 ms each time (seconds on a cold disk)
 const fileCache = new Map(); // path -> { m, front }
+// one handoff file's record, from its frontmatter and its session's .state file ({} when there is none), into the maps
+function addRec(links, file, m, front, st) {
+  const f = front, session = lowId(f.session);
+  if (!session) return;
+  const rec = {
+    file, session, next: lowId(f.next_session) || lowId(st.next), account: typeof f.account === 'string' && /^[a-z]$/i.test(f.account) ? f.account.toUpperCase() : null,
+    cwd: f.cwd || null, title: f.title ? String(f.title).slice(0, 200) : null, created: Date.parse(f.created) || Math.round(m),
+    handedOffAt: Date.parse(st.handedOffAt) || null,
+  };
+  // a session handed off more than once (it was resumed after a handoff): the newest one wins
+  const old = links.bySession.get(session);
+  if (!old || rec.created >= old.created) links.bySession.set(session, rec);
+  if (rec.next) links.byNext.set(rec.next, rec);
+}
 function readAll() {
   const d = dir();
-  const bySession = new Map(), byNext = new Map();
+  const links = { bySession: new Map(), byNext: new Map() };
   let names = [];
-  try { names = fs.readdirSync(d); } catch { return { bySession, byNext }; }
+  try { names = fs.readdirSync(d); } catch { return links; }
   const seen = new Set();
   for (const n of names) {
     if (!/\.md$/i.test(n)) continue;
@@ -69,21 +85,47 @@ function readAll() {
       c = { m, front: parseFront(text) };
       fileCache.set(file, c);
     }
-    const f = c.front, session = lowId(f.session);
+    const session = lowId(c.front.session);
     if (!session) continue;
-    const st = readJson(path.join(d, '.state', `${session}.json`)) || {};
-    const rec = {
-      file, session, next: lowId(f.next_session) || lowId(st.next), account: typeof f.account === 'string' && /^[a-z]$/i.test(f.account) ? f.account.toUpperCase() : null,
-      cwd: f.cwd || null, title: f.title ? String(f.title).slice(0, 200) : null, created: Date.parse(f.created) || Math.round(m),
-      handedOffAt: Date.parse(st.handedOffAt) || null,
-    };
-    // a session handed off more than once (it was resumed after a handoff): the newest one wins
-    const old = bySession.get(session);
-    if (!old || rec.created >= old.created) bySession.set(session, rec);
-    if (rec.next) byNext.set(rec.next, rec);
+    addRec(links, file, m, c.front, readJson(path.join(d, '.state', `${session}.json`)) || {});
   }
   for (const f of fileCache.keys()) if (!seen.has(f)) fileCache.delete(f);
-  return { bySession, byNext };
+  return links;
+}
+const JOBS = 8;
+async function readAllAsync(jobs = JOBS) {
+  const d = dir(), fsp = fs.promises;
+  const links = { bySession: new Map(), byNext: new Map() };
+  let names = [];
+  try { names = (await fsp.readdir(d)).filter((n) => /\.md$/i.test(n)); } catch { return links; }
+  const seen = new Set(), recs = new Array(names.length);
+  const one = async (i) => {
+    const file = path.join(d, names[i]);
+    seen.add(file);
+    let m = 0;
+    try { m = (await fsp.stat(file)).mtimeMs; } catch { return; }
+    let c = fileCache.get(file);
+    if (!c || c.m !== m) {
+      let fh = null;
+      try {
+        fh = await fsp.open(file, 'r');
+        const b = Buffer.alloc(4096), { bytesRead } = await fh.read(b, 0, 4096, 0);
+        c = { m, front: parseFront(b.toString('utf8', 0, bytesRead)) };
+      } catch { return; } finally { if (fh) await fh.close().catch(() => {}); }
+      fileCache.set(file, c);
+    }
+    const session = lowId(c.front.session);
+    if (!session) return;
+    let st = {};
+    try { st = JSON.parse(await fsp.readFile(path.join(d, '.state', `${session}.json`), 'utf8')) || {}; } catch {}
+    recs[i] = [file, m, c.front, st];
+  };
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(jobs, names.length) }, async () => { while (next < names.length) await one(next++); }));
+  // in the folder's order, as readAll adds them (the newest of a session's handoffs wins either way; a tie goes to the later)
+  for (const r of recs) if (r) addRec(links, ...r);
+  for (const f of fileCache.keys()) if (!seen.has(f)) fileCache.delete(f);
+  return links;
 }
 
 // The handoff a conversation picked up, from its own log. `/pickup` runs `handoff.py pickup`, whose output lands in
@@ -300,4 +342,4 @@ function pickupCommand(file) {
   return `claude ${EFFORTS.has(effort) ? `--effort ${effort} ` : ''}"/pickup ${file}"`;
 }
 
-module.exports = { dir, limit, parseFront, readAll, pickupOf, pickupIn, successorsFromLogs, linksOf, localFile, summaryFromFile, summaryBody, summaryFromLog, newLaunchKey, safeFile, takeRestart, peekRestart, restartKeys, pickupCommand, DEFAULT_LIMIT };
+module.exports = { dir, limit, parseFront, readAll, readAllAsync, pickupOf, pickupIn, successorsFromLogs, linksOf, localFile, summaryFromFile, summaryBody, summaryFromLog, newLaunchKey, safeFile, takeRestart, peekRestart, restartKeys, pickupCommand, DEFAULT_LIMIT };

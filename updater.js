@@ -121,7 +121,8 @@ function check() {
   checking = (async () => {
     const at = Date.now();
     const inside = await git(['rev-parse', '--is-inside-work-tree'], 5000);
-    const currentVersion = VERSION.refresh().version;
+    // (the version's own git calls without blocking too: synchronous, each check held the server's loop up to 4 s)
+    const currentVersion = (await VERSION.refreshAsync()).version;
     if (!inside.ok || inside.out !== 'true') { state = { ...state, currentVersion, enabled: false, checkedAt: at, error: 'not a git checkout' }; return; }
     const up = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], 5000);
     if (!up.ok) { state = { ...state, currentVersion, enabled: false, checkedAt: at, error: 'this branch has no upstream to update from' }; return; }
@@ -136,7 +137,7 @@ function check() {
     const current = (await git(['rev-parse', '--short', 'HEAD'], 5000)).out;
     const upstream = (await git(['rev-parse', '--short', '@{u}'], 5000)).out;
     const behind = +(await git(['rev-list', '--count', 'HEAD..@{u}'], 5000)).out || 0;
-    const upstreamVersion = behind ? VERSION.versionAt(DIR, '@{u}').version : currentVersion;
+    const upstreamVersion = behind ? (await VERSION.versionAtAsync(DIR, '@{u}')).version : currentVersion;
     const changed = behind ? (await git(['diff', '--name-only', 'HEAD', '@{u}'], 10e3)).out.split(/\r?\n/).filter(Boolean) : [];
     // files changed here; a changed desktop/package-lock.json (an `npm install` in desktop/ rewrites it) only gets in
     // the way when the update changes it too
@@ -157,7 +158,8 @@ function check() {
 }
 
 const busyNow = () => { try { return ctx ? ctx.busy() : 0; } catch { return 0; } };
-const status = () => ({ ok: true, version: VERSION.current().version, ...state, auto: autoOn(), busy: busyNow(), applying, ...(last ? { last } : {}) });
+// v: the version as version.js has it (current(), which works it out synchronously when nothing has yet)
+const status = (v = VERSION.current()) => ({ ok: true, version: v.version, ...state, auto: autoOn(), busy: busyNow(), applying, ...(last ? { last } : {}) });
 
 // opts.confirm: the user agreed that Fleet View quits and opens again (an update that restartsAll)
 async function apply(opts = {}) {
@@ -178,11 +180,11 @@ async function apply(opts = {}) {
       return { ok: false, confirm: true, busy, message: `${working}This update changes the desktop window's packages, so Fleet View quits to put them in and opens again in a minute or two. Every open session ends for that time and resumes after (one that was mid-turn is told to carry on).` };
     }
     const from = (await git(['rev-parse', 'HEAD'], 5000)).out;
-    const fromVersion = VERSION.refresh().version;
+    const fromVersion = (await VERSION.refreshAsync()).version;
     const pull = await git(['pull', '--ff-only', '--quiet']);
     if (!pull.ok) return { ok: false, message: `git pull failed: ${pull.err.split(/\r?\n/)[0].slice(0, 300)}` };
     const to = (await git(['rev-parse', 'HEAD'], 5000)).out;
-    const toVersion = VERSION.refresh().version;
+    const toVersion = (await VERSION.refreshAsync()).version;
     const changed = (await git(['diff', '--name-only', from, to], 10e3)).out.split(/\r?\n/).filter(Boolean);
     let hostRestart = changed.some((x) => HOST_FILES.test(x));
     let relaunch = changed.some((x) => /^desktop\//.test(x) && !HOST_FILES.test(x));
@@ -254,7 +256,12 @@ function start(c) {
 // the page's routes (fleet-view.js has already checked the Host and Origin)
 function handle(req, res, pathname, h) {
   const send = (code, o) => h.sendJson(res, code, o);
-  if (pathname === '/update' && req.method === 'GET') return send(200, { ...status(), ...(readPrefs().relaunchWanted ? { relaunchWanted: readPrefs().relaunchWanted } : {}) });
+  // the page asks as it loads, which after a restart is while the server's start is still working the version out
+  // (version.js currentAsync): it waits for that rather than run the same git calls synchronously
+  if (pathname === '/update' && req.method === 'GET') {
+    const out = (v) => send(200, { ...status(v), ...(readPrefs().relaunchWanted ? { relaunchWanted: readPrefs().relaunchWanted } : {}) });
+    return void VERSION.currentAsync().then(out, () => out(undefined));
+  }
   if (req.method !== 'POST') return send(405, { ok: false, message: 'POST' });
   if (pathname === '/update/check') return void check().then(() => send(200, status()), (e) => send(500, { ok: false, message: e.message }));
   if (pathname === '/update/apply') {

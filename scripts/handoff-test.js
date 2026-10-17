@@ -3,6 +3,7 @@
 // read in the command's message or the next one, with \ or / paths (the Mac's /Users/...), and links both ways
 // with no handoff file (the other machine); a file, when there is one, wins; nothing links to itself. The summary
 // (GET /handoff-summary) comes from the file, or from that HANDOFF text in the log's head (summaryFromLog).
+// readAllAsync (the server's read of the folder every 3 s) gives the same links as readAll, without blocking.
 // Run: node scripts/handoff-test.js   (exit 0 = all pass)
 'use strict';
 const fs = require('fs');
@@ -156,5 +157,45 @@ try {
 } finally {
   fs.rmSync(T, { recursive: true, force: true });
 }
-console.log(`handoff-test: ${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+
+// ---------- readAllAsync: the same links as readAll, read without blocking (the server's every-3-s read) ----------
+(async () => {
+  const D = fs.mkdtempSync(path.join(os.tmpdir(), 'handoff-test-all-'));
+  process.env.FV_HANDOFF_DIR = D;
+  try {
+    const id = (n) => `cccccccc-0000-4000-8000-${String(n).padStart(12, '0')}`;
+    const md = (name, front) => fs.writeFileSync(path.join(D, name), `---\n${Object.entries(front).map(([k, v]) => `${k}: ${v}`).join('\n')}\n---\n# Title\n`);
+    fs.mkdirSync(path.join(D, '.state'));
+    md('2026-10-17_100000_aaaa.md', { session: id(1), next_session: id(2), account: 'a', cwd: 'Z:\\x', title: '"First"', created: '2026-10-17T10:00:00Z' });
+    md('2026-10-17_110000_bbbb.md', { session: id(3), account: 'B', created: '2026-10-17T11:00:00Z' });
+    fs.writeFileSync(path.join(D, '.state', `${id(3)}.json`), JSON.stringify({ next: id(4), handedOffAt: '2026-10-17T11:00:05Z' }));
+    // handed off twice: the newer wins; a broken .state file counts as none; no session id, or not a .md: skipped
+    md('2026-10-17_120000_cccc.md', { session: id(5), created: '2026-10-17T12:00:00Z' });
+    md('2026-10-17_130000_cccc.md', { session: id(5), next_session: id(6), created: '2026-10-17T13:00:00Z' });
+    fs.writeFileSync(path.join(D, '.state', `${id(5)}.json`), '{ not json');
+    md('2026-10-17_140000_dddd.md', { title: 'no session' });
+    fs.writeFileSync(path.join(D, 'config.json'), '{}');
+    const flat = (l) => JSON.stringify([[...l.bySession].sort(), [...l.byNext].sort()]);
+    const want = HO.readAll(), got = await HO.readAllAsync(2);
+    eq(flat(got), flat(want), 'readAllAsync: the same links as readAll');
+    eq([...got.bySession.keys()].sort(), [id(1), id(3), id(5)], 'readAllAsync: one record per session, none without a session id');
+    eq(got.bySession.get(id(5)).next, id(6), 'readAllAsync: handed off twice, the newer file wins');
+    eq([got.bySession.get(id(3)).next, got.bySession.get(id(3)).handedOffAt], [id(4), Date.parse('2026-10-17T11:00:05Z')], 'readAllAsync: next and the handoff time from the .state file');
+    eq(got.bySession.get(id(1)).account, 'A', 'readAllAsync: the account letter, upper case');
+    // a file changed since: read again (each file is read once per mtime)
+    const f = path.join(D, '2026-10-17_110000_bbbb.md');
+    md('2026-10-17_110000_bbbb.md', { session: id(3), next_session: id(7), created: '2026-10-17T11:00:00Z' });
+    fs.utimesSync(f, new Date(), new Date(Date.now() + 5000));
+    eq((await HO.readAllAsync()).bySession.get(id(3)).next, id(7), 'readAllAsync: a changed file is read again');
+    fs.rmSync(D, { recursive: true, force: true });
+    const none2 = await HO.readAllAsync();
+    ok(none2.bySession.size === 0 && none2.byNext.size === 0, 'readAllAsync: no handoff folder, no links');
+  } catch (e) {
+    fail++;
+    console.log(`FAIL readAllAsync threw: ${e && e.stack}`);
+  } finally {
+    fs.rmSync(D, { recursive: true, force: true });
+  }
+  console.log(`handoff-test: ${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+})();
