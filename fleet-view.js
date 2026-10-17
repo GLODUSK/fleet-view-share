@@ -881,6 +881,8 @@ function flushSettings() {
     dynamicChats: [...dynamicChats.values()], botLooks,
     chief: undefined, // the Chief is gone (2026-10-13): an older file's chief key is dropped
     bots: BOTS ? BOTS.saveShape() : saved.bots,
+    // the bots sessions asked for, waiting on Henry (bots.js requestBot)
+    botRequests: BOTS ? BOTS.requestsShape() : saved.botRequests,
     remote: { ...(saved.remote && typeof saved.remote === 'object' ? saved.remote : {}), enabled: REMOTE.enabled() },
     moved: [...moved.values()],
     names: Object.fromEntries(names),
@@ -7217,6 +7219,9 @@ function buildState() {
     // and another machine's, elsewhere: true (bots.js elsewhereView)
     // wearing the look its machine gave it (botLooks)
     bots: BOTS ? [...BOTS.view(), ...away.map((e) => BOTS_JS.elsewhereView(e, botLooks.find((x) => x.slug === e.slug)))] : [],
+    // the bots sessions asked for, newest first, waiting on Henry's Make it or Decline (bots.js requestBot): { id, name,
+    // role, brief, account, model, effort, why, from, fromName, at }
+    botRequests: BOTS ? BOTS.requestsView() : [],
   }, tagOf);
 }
 
@@ -7707,7 +7712,7 @@ function botWatchFacts(ids) {
   const HOSTJS = require(path.join(__dirname, 'desktop', 'host.js'));
   // the bots (bots.js): /api/bots from a token caller, and a bot's own folder for resuming its conversations
   BOTS = BOTS_JS.createBots({
-    api: API, ctx: apiCtx, saved: saved.bots, save: saveSettings, demo: DEMO,
+    api: API, ctx: apiCtx, saved: saved.bots, savedRequests: saved.botRequests, save: saveSettings, demo: DEMO,
     log: (t) => logOnce(t, t),
     exists: (id) => !!conversationLog(id),
     turnInfo: (id) => apiCtx.turnInfo(id),
@@ -7715,7 +7720,9 @@ function botWatchFacts(ids) {
     // watching (bots.js watchTick): the watched conversations' facts, and the checks and names POST /bots/:id/watch needs
     watchFacts: botWatchFacts, known: (id) => sessions.has(id) || !!conversationLog(id), nameOf: (id) => { const n = nameNow(id, null); return typeof n === 'string' && n ? n : null; },
   });
-  apiCtx.bots = { list: () => BOTS.list(), create: (b) => BOTS.create(b), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id), look: (b) => BOTS.look(b) };
+  apiCtx.bots = { list: () => BOTS.list(), create: (b) => BOTS.create(b), start: (id) => BOTS.start(id), update: (id, b) => BOTS.update(id, b), remove: (id) => BOTS.remove(id), look: (b) => BOTS.look(b),
+    // a session asks for a bot; Henry makes or declines it (bots.js requestBot, approveRequest, declineRequest)
+    requests: () => BOTS.requestList(), request: (b) => BOTS.requestBot(b), approve: (id) => BOTS.approveRequest(id), decline: (id) => BOTS.declineRequest(id) };
   apiCtx.botOf = (id) => BOTS.vouch(id);
 }
 
@@ -8780,6 +8787,16 @@ function handleRequest(req, res) {
         if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
         if (!liveCtx.authorize(req)) return sendJson(res, 403, { ok: false, message: "only the Bots tab changes a bot's tasks" });
         BOTS.taskAction(taskRoute[1], taskRoute[2], b).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
+      });
+    }
+    // a bot a session asked for (bots.js requestBot): POST /bots/requests/:id/approve makes it as POST /bots does (its
+    // answer), /decline drops it. Only the page itself (Henry's Make it and Decline; his phone has the /api ones)
+    const reqRoute = /^\/bots\/requests\/([0-9a-f]{12})\/(approve|decline)$/.exec(pathname);
+    if (reqRoute) {
+      return readBody(req, res, (b) => {
+        if (!b) return sendJson(res, 400, { ok: false, message: 'bad json' });
+        if (!liveCtx.authorize(req)) return sendJson(res, 403, { ok: false, message: 'only Henry makes or declines a bot a session asked for' });
+        Promise.resolve(reqRoute[2] === 'approve' ? BOTS.approveRequest(reqRoute[1]) : BOTS.declineRequest(reqRoute[1])).then(([code, out]) => sendJson(res, code, out), (e) => requestFailed(req, res, e));
       });
     }
     const botRoute = /^\/bots(?:\/([0-9a-f]{12})(?:\/(start|remove|switch|map|watch))?)?$/.exec(pathname);

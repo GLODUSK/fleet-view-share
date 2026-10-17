@@ -460,6 +460,8 @@ async function main() {
     ['POST', '/teams'], ['POST', '/teams/add'], ['POST', '/teams/remove'], ['POST', '/teams/leave'], ['POST', '/teams/lead'], ['POST', '/teams/rename'],
     ['POST', '/api/bots'], ['POST', `/api/bots/${BOT}`], ['POST', '/api/bots/0123456789ab'],
     ['POST', `/api/bots/${BOT}/start`], ['POST', `/api/bots/${BOT}/remove`],
+    // a bot a session asked for: the list, and Henry's Make it and Decline
+    ['GET', '/api/bots/requests'], ['POST', `/api/bots/requests/${BOT}/approve`], ['POST', `/api/bots/requests/${BOT}/decline`],
     // a dynamic bot's switch, its map spot, its watches and its tasks' actions (page routes)
     ['POST', `/bots/${BOT}/switch`], ['POST', `/bots/${BOT}/map`], ['POST', `/bots/${BOT}/watch`], ['POST', `/bots/${BOT}/tasks/t-deploys`], ['POST', `/bots/${BOT}/tasks/a.b_c-1`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(63)}`],
     // the chat's verbs
@@ -493,6 +495,10 @@ async function main() {
     ['GET', `/bots/${BOT}/tasks/t1`], ['POST', `/bots/${BOT}/tasks/-t1`], ['POST', `/bots/${BOT}/tasks/.t1`], ['POST', `/bots/${BOT}/tasks/t..1`],
     ['POST', `/bots/${BOT}/tasks/t1/run`], ['POST', `/bots/${BOT}/tasks/t 1`], ['POST', `/bots/${BOT}/tasks/t%31`], ['POST', `/bots/${BOT}/tasks/T${'x'.repeat(64)}`],
     ['POST', `/api/bots/${BOT}/tasks/t1`], ['POST', `/api/bots/${BOT}/switch`], ['POST', '/api/bots/look'], ['POST', '/bots/look'],
+    // a bot request is a session's to make, never the phone's; near misses of Make it and Decline; the page's own forms
+    ['POST', '/api/bots/requests'], ['POST', '/api/bots/requests/'], ['GET', `/api/bots/requests/${BOT}`], ['GET', `/api/bots/requests/${BOT}/approve`],
+    ['POST', `/api/bots/requests/${BOT}`], ['POST', `/api/bots/requests/${BOT}/start`], ['POST', '/api/bots/requests/b1/approve'], ['POST', `/api/bots/requests/${BOT}/approve/`],
+    ['POST', `/bots/requests/${BOT}/approve`], ['POST', `/bots/requests/${BOT}/decline`], ['GET', '/bots/requests'],
     ['GET', `/bots/${BOT}/map`], ['GET', `/bots/${BOT}/watch`], ['POST', `/bots/${BOT}/watch/`], ['POST', `/bots/${BOT}/watches`], ['POST', `/bots/${BOT}/map/x`],
     ['POST', '/bots/b1/watch'], ['POST', '/bots/map'], ['POST', '/bots/watch'], ['POST', `/api/bots/${BOT}/watch`], ['POST', `/api/bots/${BOT}/map`],
     // near misses of the chat's verbs
@@ -518,17 +524,17 @@ async function main() {
   // the marked routes (api.js viaOf reads the marker on exactly these) and the route timeouts
   const marked = ['/api/sessions', `/api/sessions/${SID}/message`, `/api/sessions/${SID}/answer`, `/api/sessions/${SID}/open`, '/api/sessions/new-3/message', '/api/teams/t0a1b2c3d/message',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/remove`, `/api/sessions/${SID}/model`, `/api/sessions/${SID}/mode`, `/api/sessions/${SID}/rewind`, `/api/sessions/${SID}/fork`,
-    `/api/sessions/${SID}/panel`, '/api/sessions/new-3/panel'];
+    `/api/sessions/${SID}/panel`, '/api/sessions/new-3/panel', `/api/bots/requests/${BOT}/approve`, `/api/bots/requests/${BOT}/decline`];
   const unmarked = [`/api/sessions/${SID}/interrupt`, `/api/sessions/${SID}/stop`, `/api/sessions/${SID}/remove`, '/api/teams', '/api/teams/t0a1b2c3d/add',
     `/api/bots/${BOT}/start`, '/api/bots/b1', '/settings', '/rename', '/teams', `/api/sessions/${SID}`, `/api/sessions/${SID}/message/`,
     `/api/sessions/${SID}/now`, `/api/sessions/${SID}/unsend`, `/api/sessions/${SID}/activity`, `/bots/${BOT}/switch`, `/bots/${BOT}/tasks/t1`,
-    `/bots/${BOT}/map`, `/bots/${BOT}/watch`, `/api/sessions/${SID}/enter`, `/api/sessions/${SID}/background`];
+    `/bots/${BOT}/map`, `/bots/${BOT}/watch`, `/api/sessions/${SID}/enter`, `/api/sessions/${SID}/background`, '/api/bots/requests'];
   for (const p of marked) ok(R.MARKED.test(p), `marked: ${p}`);
   for (const p of unmarked) ok(!R.MARKED.test(p), `not marked: ${p}`);
   eq(R.TIMES, { ROUTE_MS: 30e3, WAIT_ROUTE_MS: 60e3, WAIT_CAP_S: 50, START_ROUTE_MS: 95e3, RESUME_ROUTE_MS: 75e3, ACTIVITY_MS: 5e3, NOW_MS: 10e3, MODEL_MS: 20e3, REWIND_MS: 60e3 }, 'the timeouts');
   const times = [
     ['POST', '/api/sessions', 0, 95e3], ['POST', '/api/sessions', 50, 145e3], ['POST', `/api/bots/${BOT}/start`, 0, 95e3],
-    ['POST', '/api/bots', 0, 95e3], ['POST', `/api/bots/${BOT}`, 0, 30e3],
+    ['POST', '/api/bots', 0, 95e3], ['POST', `/api/bots/${BOT}`, 0, 30e3], ['POST', `/api/bots/requests/${BOT}/approve`, 0, 95e3], ['POST', `/api/bots/requests/${BOT}/decline`, 0, 30e3],
     ['GET', `/api/sessions/${SID}/activity`, 0, 5e3], ['POST', `/api/sessions/${SID}/now`, 0, 10e3], ['POST', `/api/sessions/${SID}/model`, 0, 20e3],
     ['POST', `/api/sessions/${SID}/unsend`, 0, 30e3], ['GET', `/api/sessions/${SID}/transcript`, 0, 30e3],
     ['POST', `/api/sessions/${SID}/enter`, 0, 10e3], ['POST', `/api/sessions/${SID}/background`, 0, 10e3], ['POST', `/api/sessions/${SID}/mode`, 0, 20e3],
@@ -557,6 +563,8 @@ async function main() {
     ['POST', `/bots/${BOT}/switch`, { id: SID, model: 'sonnet' }, 0],
     // a new watch or job starts its bot when it is not running; a stop and the map start nothing
     ['POST', `/bots/${BOT}/watch`, { id: SID, job: 'report' }, 1], ['POST', `/bots/${BOT}/watch`, { id: SID, job: null }, 0], ['POST', `/bots/${BOT}/map`, { at: null }, 0],
+    // Make it makes and starts the bot; Decline starts nothing
+    ['POST', `/api/bots/requests/${BOT}/approve`, {}, 1], ['POST', `/api/bots/requests/${BOT}/decline`, {}, 0],
   ];
   for (const [m, p, b, w] of weights) eq(R.startWeight(m, p, b), w, `the start weight of ${m} ${p} ${JSON.stringify(b)}`);
   // a message weighs what it may resume: what /state says is not running (openElsewhere), when it opens one
@@ -847,6 +855,12 @@ async function main() {
     [`/api/bots/${BOT}/remove`, {}, 200, {}, true],
     [`/api/bots/${BOT}/remove`, { via: 'phone' }, 200, {}, true],
     [`/api/bots/${BOT}/remove`, { wait: true }, 403],
+    // Make it and Decline on a bot a session asked for: an empty body, marked (Henry's)
+    [`/api/bots/requests/${BOT}/approve`, {}, 200, {}, true],
+    [`/api/bots/requests/${BOT}/approve`, { via: 'phone' }, 200, {}, true],
+    [`/api/bots/requests/${BOT}/approve`, { name: 'Other' }, 403],
+    [`/api/bots/requests/${BOT}/decline`, {}, 200, {}, true],
+    [`/api/bots/requests/${BOT}/decline`, { why: 'no' }, 403],
   ];
   for (const [p, b, want, body, marked] of botCases) {
     const sent = JSON.parse(JSON.stringify(b));
@@ -869,6 +883,12 @@ async function main() {
     const { via, ...rest } = seenFor(p).pop().body;
     ok(r && r.s === 200 && via === 'phone', `POST ${p} with a look: 200, marked (${r && r.s})`);
     eq(rest, b, `POST ${p} with a look: the body that went on`);
+  }
+  // asking for a bot is a session's (fv bot request), never the phone's: refused before the server, whatever it carries
+  for (const b of [{ name: 'Scout' }, { name: 'Scout', via: 'phone' }, {}]) {
+    const n0 = seenFor('/api/bots/requests').length;
+    r = await ph.ask(ws, 'POST', '/api/bots/requests', { b });
+    ok(r && r.s === 403 && seenFor('/api/bots/requests').length === n0, `POST /api/bots/requests ${JSON.stringify(b)}: 403, nothing reached the server (${r && r.s})`);
   }
   // a dynamic bot's switch, its map spot, its watches and its tasks' actions: page routes (fleet-view.js lets in only this
   // PC's Origin), never marked

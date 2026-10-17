@@ -122,6 +122,34 @@
 /* no bot yet: what bots are for, and New bot */
 .ch-intro { display: flex; flex-direction: column; align-items: center; gap: 12px; line-height: 1.5; }
 .ch-newbot { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; }
+/* a bot a session asked for (chats.js reqHtml): a card on top of the list, with Make it and Decline */
+.ch-req {
+  flex: none; display: flex; flex-direction: column; gap: 6px; margin: 2px 0 6px; padding: 10px 12px; border-radius: 12px;
+  background: rgba(255, 194, 74, 0.05); border: 1px solid rgba(255, 194, 74, 0.28);
+}
+.ch-req.busy { opacity: 0.8; }
+.ch-req-h { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.ch-req-av { flex: none; display: inline-grid; place-items: center; }
+.ch-req-n { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ch-req-t { color: var(--text); font-size: 13.5px; font-weight: 650; overflow-wrap: anywhere; }
+.ch-req-tag {
+  flex: none; padding: 1px 7px; border-radius: 999px; background: rgba(255, 194, 74, 0.14); color: var(--gold);
+  font: 650 10.5px/1.6 var(--font-ui); letter-spacing: 0.04em; text-transform: uppercase;
+}
+.ch-req-by { color: var(--dim); font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.ch-req-by b { color: var(--text); font-weight: 600; }
+.ch-req-brief {
+  padding: 6px 9px; border-radius: 8px; background: rgba(255, 255, 255, 0.035); border: 1px solid var(--glass-edge);
+  color: var(--dim); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden;
+}
+.ch-req-brief.open { display: block; -webkit-line-clamp: unset; line-clamp: none; max-height: 40vh; overflow-y: auto; }
+.ch-req-more { align-self: flex-start; padding: 0; background: none; border: 0; color: var(--cyan); font: 600 12px/1.4 var(--font-ui); cursor: pointer; }
+.ch-req-more:hover { text-decoration: underline; }
+.ch-req-f { display: flex; min-width: 0; }
+.ch-req-b { display: flex; justify-content: flex-end; gap: 8px; }
+.ch-req-b .btn { height: 30px; padding: 0 13px; margin-top: 0; }
+.ch-req-b .btn:disabled { opacity: 0.6; cursor: default; }
 
 /* a team's avatar: 2-3 member mascots on small round tiles, overlapping */
 .ch-cluster { position: relative; display: block; width: var(--cb); height: var(--cb); flex: none; }

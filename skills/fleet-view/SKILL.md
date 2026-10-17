@@ -48,6 +48,8 @@ fv team say <team> <text> [--from <id>]  a message to every member
 fv status [<team>|<id>...] [--from <id>] what each is doing, last reply, branch, PR, context (free)
 fv ask <team>|<id>... <question> --from <id> [--within s] [--wait [s]]   ask each one; answers come back to you
 fv look --from <id> [--shape S] [--color rrggbb]   a bot of Henry's changes its own avatar (auto: picked for it)
+fv bot request --name N [--role R] [--brief-file F] [--why W] [--from <id>]   ask Henry for a bot (he makes it)
+fv bot requests                          the bot requests waiting on Henry
 fv api                                   every endpoint
 fv version                               Fleet View's version (1.0.12), here and on the running server
 ```
@@ -132,6 +134,17 @@ Don't `--remove` a conversation you didn't start; just stop it if you opened it 
 - Give each child a complete prompt: the goal, the files, what "done" means, and what to report back. It knows nothing of your conversation.
 - **Changing effort or model:** `fv effort high` raises your own (it takes effect from your next turn: Fleet View switches it as soon as this turn ends), `fv effort <id> high` another session's (one that is working switches when it finishes its step). Typing `/effort high` into your reply does nothing. With `fv send --from`, a message whose first line is `/effort <level>` or `/model <name>` switches the receiver and sends the rest. The default for new sessions stays as it was. A bot's is only Henry's to change.
 - A plain `fv send` to a session that shows a menu is refused (an Enter would answer it): answer the menu first. With `--from` it waits instead and goes in once the menu is answered ("queued").
+
+## Asking for a bot
+
+A bot is a standing agent of Henry's (its own folder, CLAUDE.md and schedule), so a session never makes one: `POST /api/bots` is Henry's alone and answers you 403. Never try it. When the work needs a bot (something to watch or do on a schedule after you are gone), ask Henry for one:
+
+```
+fv bot request --name "Deploy watch" --role "Watches web deploys" --brief-file brief.md --why "the release needs its deploys watched for a week" --from <my id>
+```
+
+- `--name` (at most 40 characters, no other bot's), `--role` (one line, at most 60), the brief (its standing instructions, at most 4000 characters: write it to a file and pass `--brief-file`), `--why` (one line, at most 200: what Henry reads first). `--account`, `--model`, `--effort` only if it needs something other than the default (account B, Dynamic model and effort).
+- It prints the request's id and `waiting on Henry`. Henry makes it with one tap (**Make it** in the Bots tab or on his phone) or declines it; nothing to wait for. Say in your reply that you asked. `fv bot requests` lists the ones waiting; a request nobody answered goes after 7 days.
 
 ## Teammates
 

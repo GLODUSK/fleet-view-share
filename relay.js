@@ -49,7 +49,7 @@
 //             b + ct, anything else as standard base64 b64 + ct; etag <-> If-None-Match / ETag (304: no body).
 //   time      30 s a route, 60 s when the body asks to wait (wait capped at 50 s). Longer where the server starts or
 //             resumes a Claude before it answers (api.js START_MS, 60 s, then it settles and types): 95 s for POST
-//             /api/sessions, /api/bots (it makes the bot and starts it), /api/bots/:id/start and the page's /bots/:id/watch (a
+//             /api/sessions, /api/bots and /api/bots/requests/:id/approve (they make the bot and start it), /api/bots/:id/start and the page's /bots/:id/watch (a
 //             new watch or job starts the bot first, then tells it); 75 s for POST /api/sessions/:id/message and
 //             /open and the team routes that send a brief or an order (deliverText resumes one not running): POST
 //             /api/teams, /api/teams/:id/add, /lead and /message, the page's /teams, /teams/add and /teams/lead. Those
@@ -61,7 +61,7 @@
 //             from his phone, which a bot takes as his, and what makes, changes or removes a bot or switches an
 //             overseer's model) on the routes api.js reads it on (MARKED): POST /api/sessions,
 //             /api/sessions/:id/message, /answer, /open, /model, /mode, /panel, /rewind and /fork, /api/teams/:id/message, /api/bots,
-//             /api/bots/:id and /api/bots/:id/remove. Set only once every check
+//             /api/bots/:id, /api/bots/:id/remove and /api/bots/requests/:id/approve and /decline. Set only once every check
 //             above and the allowlist's passed; a via the phone sent is dropped from every body first. No
 //             opts.relayKey (or a bad one): no marker, said in the log once.
 //   id        the retry key: each id's answer is kept 10 minutes, so a repeat gets it again and a repeat of one still
@@ -110,7 +110,9 @@
 //                       400 for a bad one)
 //   POST /api/bots, /api/bots/:id   only name, brief, role, account, model, effort, shape and color, as bots.js
 //                       reads (anything else: 403);  POST /api/bots/:id/start and /remove  no fields at all (403). A
-//                       bot id: 12 hex digits
+//                       bot id: 12 hex digits.  POST /api/bots/requests/:id/approve and /decline  (Make it and
+//                       Decline on a bot a session asked for; marked) no fields at all (403); POST /api/bots/requests
+//                       itself (the ask) is a session's and not on the list
 //   POST /bots/:id/map  (the page's map) only at, null (off the map: its watches stop) or { x, y } finite numbers
 //                       (403 for any other field, 400 for a bad at);  POST /bots/:id/watch  only id, a conversation
 //                       id, and job, one of report, answer, review or null (stop watching) (403, 400)
@@ -369,12 +371,12 @@ const TASK = '[A-Za-z0-9][A-Za-z0-9._-]{0,63}';
 const ALLOW = {
   GET: ['/state', '/conversation', '/conversation/image', '/repo-history', '/chat/commands', '/chat/files', '/chat/kind', '/file',
     '/since', '/api/sessions', `/api/sessions/${KEY}`, `/api/sessions/${KEY}/(?:menu|transcript|activity)`, '/api/conversations',
-    '/api/teams', '/api/status', '/accounts', '/sync/move'],
+    '/api/teams', '/api/status', '/accounts', '/sync/move', '/api/bots/requests'],
   POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model|enter|background|mode|panel|rewind|fork)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
     '/repos/remove', '/repos/add', '/chat/image', '/upload', '/teams', '/teams/(?:add|remove|leave|lead|rename)',
     '/api/bots', `/api/bots/${BOT}`, `/api/bots/${BOT}/(?:start|remove)`, `/bots/${BOT}/(?:switch|map|watch)`, `/bots/${BOT}/tasks/${TASK}`,
-    '/accounts/(?:add|login|code|cancel)', '/sync/move', '/chat/dynamic'],
+    `/api/bots/requests/${BOT}/(?:approve|decline)`, '/accounts/(?:add|login|code|cancel)', '/sync/move', '/chat/dynamic'],
 };
 const ALLOW_RE = Object.fromEntries(Object.entries(ALLOW).map(([m, list]) => [m, new RegExp(`^(?:${list.join('|')})$`)]));
 // what only a linked computer may call besides (docs/link.md): the /peer/... routes, which fleet-view.js serves to the
@@ -399,6 +401,9 @@ const SETTINGS_KEYS = new Set(['repo', 'repos', 'hidden', 'hiddenRepos', 'finish
 // bots.js checks; shape and color are its avatar's look)
 const BOT_KEYS = new Set(['name', 'brief', 'role', 'account', 'model', 'effort', 'shape', 'color']);
 const BOT_ONE = new RegExp(`^/api/bots/${BOT}$`), BOT_ACT = new RegExp(`^/api/bots/${BOT}/(?:start|remove)$`);
+// Make it and Decline on a bot a session asked for (bots.js approveRequest, declineRequest): Henry's, so marked; the
+// ask itself (POST /api/bots/requests) is a session's and never goes through here
+const BOT_REQ_ACT = new RegExp(`^/api/bots/requests/${BOT}/(?:approve|decline)$`);
 // a dynamic bot's switch before a message (bots.js switchTo: { id, model?, effort? }), and an action on one of its
 // tasks (bots.js taskAction: { action }; run sends it to the bot now, starting the bot first when it is not running)
 const BOT_SWITCH = new RegExp(`^/bots/${BOT}/switch$`), BOT_TASK = new RegExp(`^/bots/${BOT}/tasks/${TASK}$`);
@@ -432,17 +437,17 @@ const b64Bytes = (s) => (typeof s === 'string' && s.length % 4 === 0 && /^[A-Za-
 // overseer's session too), and making, changing or removing a bot, switching a conversation's model or permission mode,
 // driving a command's panel in it (/permissions, /config: as its mode) or rewinding or forking it (Henry's alone for an
 // overseer)
-const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|open|model|mode|panel|rewind|fork)|teams/${TEAM}/message|bots|bots/${BOT}|bots/${BOT}/remove)$`);
+const MARKED = new RegExp(`^/api/(?:sessions|sessions/${KEY}/(?:message|answer|open|model|mode|panel|rewind|fork)|teams/${TEAM}/message|bots|bots/${BOT}|bots/${BOT}/remove|bots/requests/${BOT}/(?:approve|decline))$`);
 // POST routes that start a Claude before they answer (api.js startSession waits up to 60 s for it, settles, types;
 // POST /api/bots makes the bot and starts it; a bot's watch starts it before it tells it; a fork from a message answers
 // once the fork started, and goes back to the message after), and ones that may resume a stopped conversation first (up to 60 s
 // too) before they type into it
-const START_ROUTES = new RegExp(`^(?:/api/(?:sessions|sessions/${KEY}/fork|bots|bots/${BOT}/start)|/bots/${BOT}/(?:tasks/${TASK}|watch))$`);
+const START_ROUTES = new RegExp(`^(?:/api/(?:sessions|sessions/${KEY}/fork|bots|bots/${BOT}/start|bots/requests/${BOT}/approve)|/bots/${BOT}/(?:tasks/${TASK}|watch))$`);
 const RESUME_ROUTES = new RegExp(`^(?:/api/sessions/${KEY}/(?:message|open)|/api/teams(?:/${TEAM}/(?:add|lead|message))?|/teams(?:/add|/lead)?)$`);
 // the routes that start or resume a Claude, as the per-device start limits count them: one each, a team one per
 // member (POST /api/teams and the page's /teams), a lead only when there is one (it gets its brief). A message to a
 // conversation or a team weighs what it may resume (resumeWeight), not this
-const STARTS_ONE = new RegExp(`^(?:/api/(?:sessions|sessions/${KEY}/(?:open|fork)|bots|bots/${BOT}/start|teams/${TEAM}/add)|/teams/add)$`);
+const STARTS_ONE = new RegExp(`^(?:/api/(?:sessions|sessions/${KEY}/(?:open|fork)|bots|bots/${BOT}/start|bots/requests/${BOT}/approve|teams/${TEAM}/add)|/teams/add)$`);
 const STARTS_LEAD = new RegExp(`^(?:/api/teams/${TEAM}/lead|/teams/lead)$`);
 function startWeight(m, p, b) {
   if (m !== 'POST') return 0;
@@ -874,6 +879,7 @@ function createRelay(opts = {}) {
       return bad.length ? no(`the phone may not set a bot's ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`) : null;
     }
     if (BOT_ACT.test(p)) return Object.keys(b).length ? no('starting or removing a bot takes nothing else from the phone') : null;
+    if (BOT_REQ_ACT.test(p)) return Object.keys(b).length ? no('making or declining a bot a session asked for takes nothing else from the phone') : null;
     if (BOT_TASK.test(p)) {
       const bad = Object.keys(b).filter((k) => k !== 'action');
       if (bad.length) return no(`a task's action takes only action, not ${bad.slice(0, 3).map((k) => clip(k, 30)).join(', ')}`);

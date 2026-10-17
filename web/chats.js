@@ -33,6 +33,8 @@
 // Henry, 2026-10-13: "remove shape color rename from right click options all of that in their profile only"), Put in
 // team ▸ (or, under a team: Take out of team, Make lead, Move to team ▸), Team ▸, Remove bot (asks first; POST
 // /bots/:id/remove). With no bot yet, the list says what bots are for, with a New bot button.
+// A bot a session asked for (Henry, 2026-10-17: sessions ask, Henry approves with one tap; bots.js requestBot) shows
+// as a card on top of the list (state.botRequests): Make it makes and starts it as New bot does, Decline drops it.
 // A bot's role (Edit bot's Role: "Reviewer", at most 60 characters) shows under its name in its chat's header and on
 // its row under a team; its CLAUDE.md and its team briefs say it (bots.js).
 // Its profile (Edit bot) shows its tasks under the instructions (Henry, 2026-10-13: "if i go into their profile i can
@@ -339,17 +341,96 @@ function rowHtml(state, c, now, node) {
 // with no bot yet: what bots are for, and the New bot button
 const BOTS_FOR = 'Bots are overseers you give standing tasks, away from the map.';
 const newBotBtn = () => `<button type="button" class="btn primary ch-newbot" data-newbot="1">${icon('plus', 14)}<span>New bot</span></button>`;
-// nodes: the rows as drawn (contactTree; a search: the matches, flat)
+// nodes: the rows as drawn (contactTree; a search: the matches, flat). The bots sessions asked for go on top (not while
+// searching)
 function listHtml(state, nodes, now, noBots) {
+  const reqs = query ? '' : requestsOf(state).map(reqHtml).join('');
   const intro = noBots && !query ? `<div class="ch-none ch-intro"><div>${esc(BOTS_FOR)}</div>${newBotBtn()}</div>` : '';
-  if (!nodes.length) return query ? `<div class="ch-none">No bots match “${esc(query)}”.</div>` : intro || '<div class="ch-none">No bots yet. Make one with +.</div>';
+  if (!nodes.length) return reqs + (query ? `<div class="ch-none">No bots match “${esc(query)}”.</div>` : intro || '<div class="ch-none">No bots yet. Make one with +.</div>');
   // a hairline under the pinned rows, when the rest follow (rows under a team go with it)
   let lastTop = null;
-  return nodes.map((x) => {
+  return reqs + nodes.map((x) => {
     const sep = !x.depth && lastTop && lastTop.pinned && !x.c.pinned ? '<div class="ch-pinsep" aria-hidden="true"></div>' : '';
     if (!x.depth) lastTop = x.c;
     return sep + rowHtml(state, x.c, now, x);
   }).join('') + intro;
+}
+
+// ---------- a bot a session asked for (bots.js requestBot) ----------
+// A session never makes a bot; it asks (fv bot request), and the ask shows as a card on top of the list: its name and
+// role, who asked and why, its instructions (folded to three lines: Read it all), what it would run on, and Make it
+// (POST /bots/requests/:id/approve: made and started as New bot makes one, then picked) or Decline (/decline). His
+// phone has the same two (relay: /api/bots/requests/:id/...). state.botRequests: { id, name, role, brief, account,
+// model, effort, why, from, fromName, at }
+const reqUi = new Map(); // request id -> { busy: '' | 'make' | 'decline', err, more (its instructions unfolded) }
+const ru = (id) => { let u = reqUi.get(id); if (!u) reqUi.set(id, (u = { busy: '', err: '', more: false })); return u; };
+const reqDone = new Map(); // request id -> when Make it or Decline went through here: hidden until /state drops it (MADE_MS at most)
+const BRIEF_FOLD = 180; // characters: a longer brief (or one of several lines) folds to three lines
+function requestsOf(state) {
+  const list = (Array.isArray(state.botRequests) ? state.botRequests : []).filter((r) => r && typeof r.id === 'string' && typeof r.name === 'string');
+  const now = Date.now();
+  for (const [id, at] of reqDone) if (!list.some((r) => r.id === id) || (!FIXTURE && now - at > MADE_MS)) reqDone.delete(id);
+  for (const id of [...reqUi.keys()]) if (!list.some((r) => r.id === id)) reqUi.delete(id);
+  return list.filter((r) => !reqDone.has(r.id));
+}
+// what a bot runs on, in short: "Dynamic model and effort · account B"
+function runsOn(b) {
+  const dynBoth = b.model === DYNAMIC && b.effort === DYNAMIC;
+  return [dynBoth ? 'Dynamic model and effort' : b.model === DYNAMIC ? 'Dynamic model' : b.model ? modelLabel(b.model) : '',
+    dynBoth ? '' : b.effort === DYNAMIC ? 'dynamic effort' : b.effort || '',
+    b.account === DYNAMIC ? 'the account with most left' : b.account ? `account ${b.account}` : ''].filter(Boolean).join(' · ');
+}
+function reqHtml(r) {
+  const u = ru(r.id);
+  const brief = r.brief || '';
+  const long = brief.length > BRIEF_FOLD || brief.split('\n').length > 3;
+  const busy = u.busy ? ' disabled' : '';
+  return `<div class="ch-req${u.busy ? ' busy' : ''}" data-key="req:${esc(r.id)}" data-req="${esc(r.id)}">`
+    + `<div class="ch-req-h"><span class="ch-req-av">${mascotSVG(`req:${r.id}`, { state: 'new', color: HEX.test(r.color || '') ? r.color : C.gold, size: 30, shape: r.shape || undefined })}</span>`
+    + `<span class="ch-req-n"><span class="ch-req-t">${esc(r.name)}</span>${r.role ? `<span class="ch-role">${esc(r.role)}</span>` : ''}</span>`
+    + `<span class="ch-req-tag" title="A session asked for this bot">Asked for</span></div>`
+    + `<div class="ch-req-by">Asked by <b>${esc(r.fromName || 'a session')}</b>${r.why ? `: ${esc(r.why)}` : ''}</div>`
+    + (brief ? `<div class="ch-req-brief${u.more || !long ? ' open' : ''}">${esc(brief)}</div>`
+      + (long ? `<button type="button" class="ch-req-more" data-reqmore="1">${u.more ? 'Show less' : 'Read it all'}</button>` : '')
+      : '<div class="ch-req-by">No instructions given.</div>')
+    + `<div class="ch-req-f"><span class="ch-defaults" title="What it would run on">${esc(runsOn(r))}</span></div>`
+    + (u.err ? `<div class="ch-nb-err">${esc(u.err)}</div>` : '')
+    + `<div class="ch-req-b"><button type="button" class="btn" data-reqno="1"${busy}>${u.busy === 'decline' ? 'Declining' : 'Decline'}</button>`
+    + `<button type="button" class="btn primary" data-reqyes="1"${busy}>${u.busy === 'make' ? 'Making it' : 'Make it'}</button></div></div>`;
+}
+// Make it: made as POST /bots makes one (the server takes the request's own fields), shown at once and picked; made but
+// not started, its pane says why. A refusal stays on the card
+async function makeRequested(ui, id) {
+  const u = ru(id);
+  if (u.busy) return;
+  const r = requestsOf(pane?._state || {}).find((x) => x.id === id);
+  u.busy = 'make';
+  u.err = '';
+  ui.refresh();
+  const res = await postJson(`/bots/requests/${id}/approve`, {});
+  u.busy = '';
+  let bot = res.body && res.body.bot;
+  // ?fixture=1: nothing was made; this page keeps one for good
+  if (FIXTURE && r) bot = { id: [...crypto.getRandomValues(new Uint8Array(6))].map((x) => x.toString(16).padStart(2, '0')).join(''), name: r.name, role: r.role || '', brief: r.brief || '',
+    account: r.account, model: r.model, effort: r.effort, folder: `~/Bots/${r.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, createdAt: Date.now(), convId: null, live: false };
+  if (!bot || typeof bot.id !== 'string') { u.err = failText(res, 'Could not make the bot'); ui.refresh(); return; }
+  reqDone.set(id, Date.now());
+  made.set(bot.id, { bot, at: Date.now() });
+  if (!res.ok) bu(bot.id).err = (res.body && res.body.message) || 'It was made, but did not start.';
+  pick(`bot:${bot.id}`, ui, true);
+}
+// Decline: it goes (one gone already, made or declined elsewhere, goes here too)
+async function declineRequested(ui, id) {
+  const u = ru(id);
+  if (u.busy) return;
+  u.busy = 'decline';
+  u.err = '';
+  ui.refresh();
+  const res = await postJson(`/bots/requests/${id}/decline`, {});
+  u.busy = '';
+  if (!res.ok && res.status !== 404) { u.err = failText(res, 'Could not decline it'); ui.refresh(); return; }
+  reqDone.set(id, Date.now());
+  ui.refresh();
 }
 // The list drawn again in place: only what changed is touched, so a face whose drawing is the same keeps its motion.
 // Rewriting the list's HTML whenever any row changed (a working bot's step, a preview, the time) started every face's
@@ -640,6 +721,15 @@ function build(el, ui) {
   el._list.addEventListener('click', (e) => {
     if (Date.now() - dragEnded < 400) return; // the end of a drag
     if (e.target.closest('[data-newbot]')) { openForm(el, ui); return; }
+    // a bot a session asked for: Make it, Decline, or its instructions in full
+    const rq = e.target.closest('[data-req]');
+    if (rq) {
+      const rid = rq.dataset.req;
+      if (e.target.closest('[data-reqyes]')) makeRequested(ui, rid);
+      else if (e.target.closest('[data-reqno]')) declineRequested(ui, rid);
+      else if (e.target.closest('[data-reqmore]')) { ru(rid).more = !ru(rid).more; ui.refresh(); }
+      return;
+    }
     const r = e.target.closest('.ch-row');
     if (!r) return;
     // a bot's picture: its chat and its profile beside it (again: the profile closes)

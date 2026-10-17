@@ -51,6 +51,10 @@
 //   when it is not running, when one's turn ends, it asks something, errors or stalls (watchEvent: held 10 s, once per
 //   situation, never for what was there at first sight, so a restart fires nothing), so a bot never polls. A handoff
 //   moves the watch to the pickup; a conversation gone from Fleet View ends it. Off the map, every watch stops.
+// - Asked for (Henry, 2026-10-17): a session never makes a bot, but may ask for one (POST /api/bots/requests, fv bot
+//   request: name, role, brief, why, what it runs on). Henry sees it in the Bots tab and on his phone (state.botRequests,
+//   a push) and makes it with one tap (approve: create below with its fields) or declines it. settings.botRequests
+//   keeps the pending ones (at most 5) for 7 days.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -473,13 +477,48 @@ function loadBots(saved, base = BOTS_DIR) {
   return out;
 }
 
+// ---------- a session asks for a bot ----------
+// Henry, 2026-10-17: a session may ASK for a bot, never make one (a bot is a standing agent with its own folder,
+// CLAUDE.md and schedule). POST /api/bots/requests (fv bot request) keeps the ask; Henry's Make it (the page's POST
+// /bots/requests/:id/approve, or his phone's /api/bots/requests/:id/approve through the relay) makes it the way POST
+// /bots does, Decline drops it. Pending ones are saved with the bots (settings.botRequests) and go after 7 days.
+const REQ_MAX = 5; // pending at once
+const REQ_TTL_MS = 7 * 24 * 3600e3; // a request nobody answered goes after this
+const WHY_MAX = 200;
+const REQ_ID_RE = /^[0-9a-f]{12}$/;
+// why: one line on why the bot is wanted (line breaks and runs of spaces made one space), at most 200 characters,
+// no control characters; left out or blank is none (''). -> { why } or { err }
+function checkWhy(v) {
+  if (v == null) return { why: '' };
+  if (typeof v !== 'string') return { err: 'why must be text' };
+  const t = API.cleanText(v);
+  if ((t === null && API.cleanText(`.${v}`) === null) || (t && hasC1(t))) return { err: 'why must be text without control characters' };
+  const why = (t || '').replace(/\s+/g, ' ').trim();
+  if (why.length > WHY_MAX) return { err: `why must be at most ${WHY_MAX} characters` };
+  return { why };
+}
+// the requests as saved, checked: a known id once, a name, a time not past REQ_TTL_MS; the newest REQ_MAX
+function loadRequests(saved, now = Date.now()) {
+  const out = [];
+  const str = (v) => (typeof v === 'string' ? v : '');
+  for (const r of Array.isArray(saved) ? saved : []) {
+    if (!r || typeof r !== 'object' || !REQ_ID_RE.test(r.id) || typeof r.name !== 'string' || !r.name || !Number.isFinite(r.at) || now - r.at >= REQ_TTL_MS) continue;
+    if (out.some((x) => x.id === r.id)) continue;
+    const role = checkRole(r.role), why = checkWhy(r.why);
+    out.push({ id: r.id, name: r.name, role: role.err ? '' : role.role, brief: str(r.brief), account: str(r.account) || NEW_BOT.account, model: str(r.model) || NEW_BOT.model,
+      effort: str(r.effort) || NEW_BOT.effort, why: why.err ? '' : why.why, from: convId(r.from) || null, fromName: typeof r.fromName === 'string' && r.fromName ? r.fromName : null, at: r.at,
+      ...(SHAPES.includes(r.shape) ? { shape: r.shape } : {}), ...(typeof r.color === 'string' && COLOR_RE.test(r.color) ? { color: r.color.toLowerCase() } : {}) });
+  }
+  return out.sort((a, b) => b.at - a.at).slice(0, REQ_MAX);
+}
+
 // ---------- the server's part ----------
 // deps: { api (api.js: hostList, deliverText, startBot, openBot, endHosted), ctx (api.js's ctx), saved (settings.bots as
 //   saved), save() (the registry changed), log(text), demo, exists(id) -> its log is on disk, turnInfo(id) -> { promptAt }
 //   or null, sessionsFile, trustFolder(dir), accounts() -> the account letters, usage() -> /state's usage (a Dynamic
 //   account's pick: roomiest), rename(id, name) (its Fleet View name), and for watching: watchFacts(ids) -> [{ id,
 //   name, state, lastReply, replyAt, gone, next }] (fleet-view.js botWatchFacts), known(id) -> Fleet View lists it or
-//   its log is on disk, nameOf(id) -> its Fleet View name or null,
+//   its log is on disk, nameOf(id) -> its Fleet View name or null, savedRequests (settings.botRequests as saved),
 //   base (the Bots folder) and template (bot/BRIEF.md), which tests set }
 function createBots(deps) {
   const d = deps || {};
@@ -511,6 +550,8 @@ function createBots(deps) {
   // bot/BRIEF.md with its CRs dropped (a CRLF checkout), so every CLAUDE.md has the same line ends
   const template = () => fs.readFileSync(templateFile, 'utf8').split(String.fromCharCode(13)).join('');
   const noBot = () => [404, { ok: false, message: 'no such bot (GET /api/bots lists them)' }];
+  let requests = loadRequests(d.savedRequests); // what sessions asked for, newest first (loadRequests)
+  const approving = new Set(); // request ids whose Make it is under way: a second one waits for nothing
 
   // a conversation of the bot's: first seen now, and added to its ids (the oldest dropped past IDS_MAX)
   function follow(bot, id) {
@@ -585,6 +626,87 @@ function createBots(deps) {
     log(`made ${bot.name} (${id}) in ${folder}`);
     const [code, out] = await start(id);
     return [code, { ...out, message: out.ok ? `made ${bot.name} and started it` : `made ${bot.name}, but it did not start: ${out.message}` }];
+  }
+
+  // ---------- a session asks for a bot (Henry makes it) ----------
+  // the ones past REQ_TTL_MS go (saved when one did)
+  function pruneRequests(now = Date.now()) {
+    const n = requests.length;
+    requests = requests.filter((r) => now - r.at < REQ_TTL_MS);
+    if (requests.length !== n) { save(); log(`${n - requests.length} bot request(s) nobody answered in 7 days went`); }
+  }
+  // one as the answers, state.botRequests and GET /api/bots/requests show it: fromName its session's name now, else
+  // the one it had when it asked
+  const reqView = (r) => ({ id: r.id, name: r.name, role: r.role, brief: r.brief, account: r.account, model: r.model, effort: r.effort, why: r.why, from: r.from,
+    fromName: (r.from && nameOf(r.from)) || r.fromName || null, at: r.at, ...(r.shape ? { shape: r.shape } : {}), ...(r.color ? { color: r.color } : {}) });
+  function requestsView() {
+    if (d.demo) return [];
+    pruneRequests();
+    return requests.map(reqView);
+  }
+  // POST /api/bots/requests { name, brief?, role?, account?, model?, effort?, why?, from?, shape?, color? }: checked as
+  // POST /bots checks a bot (and the name no other request's either), then kept for Henry. from: the asking
+  // session's conversation id, when it knows it
+  function requestBot(b) {
+    if (d.demo) return [503, { ok: false, message: 'the demo makes no bots' }];
+    b = b && typeof b === 'object' ? b : {};
+    pruneRequests();
+    const n = checkName(b.name, bots);
+    if (n.err) return [400, { ok: false, message: n.err }];
+    const br = checkBrief(b.brief);
+    if (br.err) return [400, { ok: false, message: br.err }];
+    const rl = checkRole(b.role);
+    if (rl.err) return [400, { ok: false, message: rl.err }];
+    const o = checkOpts(b, NEW_BOT, accounts());
+    if (o.err) return [400, { ok: false, message: o.err }];
+    const lk = checkLook(b);
+    if (lk.err) return [400, { ok: false, message: lk.err }];
+    const w = checkWhy(b.why);
+    if (w.err) return [400, { ok: false, message: w.err }];
+    const from = b.from == null || b.from === '' ? null : convId(b.from);
+    if (b.from != null && b.from !== '' && !from) return [400, { ok: false, message: 'from must be your conversation id' }];
+    const low = n.name.toLowerCase();
+    if (requests.some((r) => r.name.toLowerCase() === low)) return [409, { ok: false, message: `Henry has a request for a bot called ${n.name} already` }];
+    if (requests.length >= REQ_MAX) return [409, { ok: false, message: `at most ${REQ_MAX} bot requests wait for Henry: ask again once he answered one` }];
+    if (bots.filter((x) => !x.removed).length >= BOTS_MAX) return [409, { ok: false, message: `at most ${BOTS_MAX} bots: Henry has to remove one first` }];
+    let id;
+    do id = crypto.randomBytes(6).toString('hex'); while (requests.some((r) => r.id === id));
+    const r = { id, name: n.name, role: rl.role, brief: br.brief, account: o.account, model: o.model, effort: o.effort, why: w.why, from, fromName: from ? nameOf(from) : null, at: Date.now(),
+      ...(lk.shape ? { shape: lk.shape } : {}), ...(lk.color ? { color: lk.color } : {}) };
+    requests = [r, ...requests];
+    save();
+    log(`${r.fromName || (from ? from.slice(0, 8) : 'a session')} asks for a bot called ${r.name} (${id})`);
+    return [200, { ok: true, request: reqView(r), message: 'asked: Henry makes it with Make it in the Bots tab or on his phone' }];
+  }
+  const noRequest = () => [404, { ok: false, message: 'no such bot request (GET /api/bots/requests lists them; it may have been made, declined or gone after 7 days)' }];
+  // POST /bots/requests/:id/approve (Henry only): made as POST /bots makes one, with the request's fields; the request
+  // goes once the bot is made (started or not). Answers what create answers; a refusal keeps the request
+  async function approveRequest(id) {
+    pruneRequests();
+    const r = requests.find((x) => x.id === id);
+    if (!r) return noRequest();
+    if (approving.has(id)) return [409, { ok: false, message: `${r.name} is being made already` }];
+    approving.add(id);
+    try {
+      const [code, out] = await create({ name: r.name, brief: r.brief, role: r.role, account: r.account, model: r.model, effort: r.effort, ...(r.shape ? { shape: r.shape } : {}), ...(r.color ? { color: r.color } : {}) });
+      if (out && out.bot) {
+        requests = requests.filter((x) => x.id !== id);
+        save();
+        log(`Henry made ${r.name}, as ${r.fromName || 'a session'} asked (${id})`);
+      }
+      return [code, out];
+    } finally { approving.delete(id); }
+  }
+  // POST /bots/requests/:id/decline (Henry only): it goes
+  function declineRequest(id) {
+    pruneRequests();
+    const r = requests.find((x) => x.id === id);
+    if (!r) return noRequest();
+    if (approving.has(id)) return [409, { ok: false, message: `${r.name} is being made already` }];
+    requests = requests.filter((x) => x.id !== id);
+    save();
+    log(`Henry declined ${r.name} (${id})`);
+    return [200, { ok: true, message: `declined ${r.name}` }];
   }
 
   // POST /bots/:id/start, /api/bots/:id/start: the conversation running already, else its newest one resumed with its
@@ -1250,7 +1372,12 @@ function createBots(deps) {
   return {
     // state.bots, and GET /api/bots
     view: () => (d.demo ? [] : listView(bots, live, nameOf).map(withTasks)),
-    list: () => [200, { ok: true, bots: d.demo ? [] : listView(bots, live, nameOf).map(withTasks) }],
+    list: () => [200, { ok: true, bots: d.demo ? [] : listView(bots, live, nameOf).map(withTasks), requests: requestsView() }],
+    // what sessions asked for (newest first): state.botRequests, GET /api/bots/requests; POST /api/bots/requests asks,
+    // approve and decline are Henry's (the page's /bots/requests/:id/..., his phone's /api/bots/requests/:id/...)
+    requestsView, requestList: () => [200, { ok: true, requests: requestsView() }], requestBot, approveRequest, declineRequest,
+    // ~/.fleet-view.json's botRequests
+    requestsShape: () => requests.map((r) => ({ ...r })),
     // the conversation each bot's row opens (its convId): fleet-view.js keeps these listed however quiet they are
     chatIds: () => (d.demo ? [] : listView(bots, live).map((v) => v.convId).filter(Boolean)),
     // ~/.fleet-view.json's bots
@@ -1282,4 +1409,5 @@ function createBots(deps) {
 }
 
 module.exports = { createBots, watchEvent, watchNote, checkAt, readWatches, WATCH_JOBS, WATCH_SETTLE_MS, WATCHES_MAX, WATCH_TRIES, elsewhereBots, elsewhereView, elsewhereId, checkName, checkBrief, checkRole, checkOpts, checkLook, applyLook, lookItem, lookItems, othersOf, slugKey, SHAPES, LOOK_COLORS, fillLook, DYNAMIC, DYNAMIC_START, runOpts, longModel, writeModel, slugOf, pickFolder, inBots, fillBrief, roleLine, tagger, tagState, viewOf, listView, loadBots,
-  startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX, ROLE_MAX };
+  startPrompt, idNote, roomiest, roleOf, botOfRole, BOTS_DIR, TEMPLATE_FILE, CHANGED_NOTE, IDS_MAX, NAME_MAX, BRIEF_MAX, ROLE_MAX,
+  checkWhy, loadRequests, REQ_MAX, REQ_TTL_MS, WHY_MAX };

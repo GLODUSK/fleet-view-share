@@ -3,7 +3,8 @@
 // Code session that orchestrates other sessions: start one, send it a message, wait for it, read its menu and
 // answer it, read its transcript, stop and remove it, make teams of them (led by one, or peers), see what they are
 // doing for free (fv status) and ask several one question (fv ask); a bot of Henry's changes its own avatar with fv
-// look. `fv help` lists the commands; `fv api` asks the server.
+// look; a session that needs a bot asks Henry for one with fv bot request (he makes it). `fv help` lists the commands;
+// `fv api` asks the server.
 //
 // Node only, no dependencies. The token comes from %LOCALAPPDATA%\fleet-view\api-token (made by the server's first
 // start), the port from --port, FLEET_VIEW_PORT or 4777. Nothing else is read (but the folder's version.json and git
@@ -74,6 +75,11 @@ const USAGE = `fv: drive Fleet View's Claude Code sessions (README: "Automation 
                                             a bot changes its own avatar in the Bots tab: shape hex, drop,
                                             round, pill, tri, square, star, clover, flower or heart; auto for
                                             either goes back to the one picked for it
+  fv bot request --name N [--role R] [--brief-file F | --brief B] [--why W] [--account A|B]
+           [--model M] [--effort E] [--from <your id>]
+                                            ask Henry for a bot (a session never makes one): he makes
+                                            it with Make it in the Bots tab or on his phone, or declines
+  fv bot requests                           the bot requests waiting on Henry
 
   --json         the raw JSON reply          --port <n>   Fleet View's port (default 4777)
   --wait         without a number: the API's default (30 minutes); with one: 1..3600 seconds
@@ -87,7 +93,7 @@ class Refused extends Error {}
 
 // ---------- arguments ----------
 const VALUE_FLAGS = new Set(['account', 'name', 'model', 'effort', 'fork', 'from', 'timeout', 'tail', 'text', 'sig',
-  'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order', 'within', 'shape', 'color', 'file']);
+  'prompt', 'since', 'limit', 'state', 'repo', 'port', 'order', 'within', 'shape', 'color', 'file', 'role', 'brief', 'brief-file', 'why']);
 const BOOL_FLAGS = new Set(['temp', 'chrome', 'no-chrome', 'all', 'remove', 'allow-permission', 'json', 'help', 'version', 'no-open', 'stdin',
   'recommended', 'list']);
 // The arguments fv.ps1 handed over in FV_ARGS_B64 (base64 of a UTF-8 JSON array of strings), taken out of env so
@@ -226,10 +232,13 @@ async function messageArg(v, flags, what) {
   if ([v !== undefined, flags.file !== undefined, !!flags.stdin].filter(Boolean).length > 1) throw new Usage(`give the ${what} once: as an argument, with --file or with --stdin`);
   if (flags.stdin) return textArg('-', what);
   if (flags.file === undefined) return textArg(v, what);
+  return cleanText(fileText(flags.file, 'file'), what);
+}
+// a file's text: UTF-8, or UTF-16 with its BOM as PowerShell 5.1's > writes it (flag: the option that named it)
+function fileText(file, flag) {
   let b;
-  try { b = fs.readFileSync(path.resolve(String(flags.file))); } catch (e) { throw new Usage(`can't read --file ${flags.file}: ${e.code || e.message}`); }
-  const t = b[0] === 0xff && b[1] === 0xfe ? b.subarray(2).toString('utf16le') : b.toString('utf8').replace(/^﻿/, '');
-  return cleanText(t, what);
+  try { b = fs.readFileSync(path.resolve(String(file))); } catch (e) { throw new Usage(`can't read --${flag} ${file}: ${e.code || e.message}`); }
+  return b[0] === 0xff && b[1] === 0xfe ? b.subarray(2).toString('utf16le') : b.toString('utf8').replace(/^﻿/, '');
 }
 
 // ---------- ids ----------
@@ -775,6 +784,36 @@ async function run(argv, env) {
       if (flags.color !== undefined) { const c = val(flags.color, 'color'); body.color = typeof c === 'string' && /^[0-9a-f]{6}$/i.test(c) ? `#${c}` : c; }
       const j = await need('POST', '/bots/look', body);
       return { j, lines: [j.message || 'done'] };
+    }
+    case 'bot': {
+      const sub = pos.shift();
+      // a session never makes a bot (POST /api/bots is Henry's): it asks, and Henry makes it with one tap
+      if (sub === 'request') {
+        noMore(0);
+        if (flags.name === undefined || flags.name === true || !String(flags.name).trim()) throw new Usage('give --name: fv bot request --name "Deploy watch" --role "..." --brief-file brief.md --why "..."');
+        if (flags.brief !== undefined && flags['brief-file'] !== undefined) throw new Usage('give the brief once: --brief or --brief-file');
+        const body = { name: String(flags.name) };
+        if (flags.role !== undefined) body.role = String(flags.role);
+        if (flags['brief-file'] !== undefined) body.brief = fileText(flags['brief-file'], 'brief-file').replace(/\r\n/g, '\n').trim();
+        else if (flags.brief !== undefined) body.brief = flags.brief === '-' ? (await readStdin()).replace(/\r\n/g, '\n').trim() : String(flags.brief);
+        if (flags.why !== undefined) body.why = String(flags.why);
+        // an account letter, or dynamic (the one with the most usage left when it starts)
+        if (flags.account !== undefined) body.account = /^dynamic$/i.test(flags.account) ? 'dynamic' : acct(flags.account);
+        if (flags.model !== undefined) body.model = flags.model;
+        if (flags.effort !== undefined) body.effort = flags.effort;
+        if (flags.from !== undefined) body.from = await resolveId(call, flags.from);
+        const j = await need('POST', '/bots/requests', body);
+        return { j, lines: [`request ${j.request.id} (${j.request.name}): waiting on Henry: Make it in the Bots tab or on his phone`] };
+      }
+      if (sub === 'requests') {
+        noMore(0);
+        const j = await need('GET', '/bots/requests');
+        const lines = (j.requests || []).flatMap((r) => [`${r.id}  ${r.name}${r.role ? ` (${r.role})` : ''}  asked by ${r.fromName || (r.from ? short(r.from) : 'a session')}, ${new Date(r.at).toLocaleString()}`,
+          ...(r.why ? [`  why: ${clip(r.why, 200)}`] : [])]);
+        if (!lines.length) lines.push('(no bot requests waiting)');
+        return { j, lines };
+      }
+      throw new Usage(sub ? `unknown bot command "${sub}" (fv help)` : 'fv bot request | requests (fv help)');
     }
     default: throw new Usage(`unknown command "${cmd}" (fv help)`);
   }

@@ -255,6 +255,37 @@ async function main() {
   eq(take().map((m) => m.data.sid), [D], 'then the new ones go');
   push.stop();
 
+  // ---------- a bot a session asks for (/state botRequests) ----------
+  clock.t += 1000;
+  const RQ = 'abcdef012345';
+  st.botRequests = [{ id: RQ, name: 'Deploy watch', role: 'QA', brief: 'b', why: 'for the release', from: A, fromName: 'Release lead', at: clock.t }];
+  targets = [{ dev: 'devPhone1aaaaaaa', token: TOKEN1, names: false, peers: [] }, { dev: 'devPhone2bbbbbbb', token: TOKEN2, names: true, peers: [] }];
+  push = make();
+  push.start();
+  await push.tick();
+  let rgot = take();
+  eq(rgot.map((m) => [m.to, m.title, m.body || null, m.data]), [
+    [TOKEN1, 'A session asks to make a bot', null, { kind: 'bot-request', request: RQ, machine: 'devPhone1aaaaaaa' }],
+    [TOKEN2, 'Release lead asks to make a bot: Deploy watch', 'QA', { kind: 'bot-request', request: RQ, machine: 'devPhone2bbbbbbb' }],
+  ], 'a bot request: one push per phone, names off says only that a session asks, names on who, which bot and its role');
+  await push.tick();
+  ok(!take().length, 'a bot request pushes once');
+  push.stop();
+  push = make();
+  push.start();
+  await push.tick();
+  ok(!take().length, 'and not again after a restart (reqAt in push.json)');
+  eq(JSON.parse(fs.readFileSync(path.join(dataDir, 'relay', 'push.json'), 'utf8')).reqAt, clock.t, 'push.json keeps the newest request seen');
+  clock.t += 1000;
+  st.botRequests = [{ id: 'bbbbbbbbbbbb', name: 'Notes', role: '', why: 'keeps the notes', from: null, fromName: null, at: clock.t }, ...st.botRequests,
+    { id: 'cccccccccccc', name: 'Old', role: 'x', at: clock.t - 11 * 60e3 }];
+  await push.tick();
+  rgot = take();
+  eq(rgot.map((m) => [m.title, m.body || null, m.data.request]), [['A session asks to make a bot', null, 'bbbbbbbbbbbb'], ['A session asks to make a bot: Notes', 'keeps the notes', 'bbbbbbbbbbbb']],
+    'a new request goes (no role: its why; no name for the session: A session), an old one never');
+  push.stop();
+  delete st.botRequests;
+
   // ---------- the log ----------
   const logText = logs.join('\n');
   ok(![TOKEN1, TOKEN2, 'phone1Token', 'Secret project', 'Fleet work', 'Gamma', 'old route'].some((s) => logText.includes(s)), 'the log never holds a token, a chat\'s name or its words');

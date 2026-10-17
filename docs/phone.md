@@ -262,7 +262,7 @@ Every message has `t` (its type), `id` and `at`. `at` is the sender's clock in m
 
   | Route | Relay | With `wait` | The phone waits |
   |---|---|---|---|
-  | `POST /api/sessions`, `/api/sessions/:id/fork`, `/api/bots`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it; a fork from a message answers once the fork started, and goes back to the message after); the page's `/bots/:id/tasks/:taskId` (Run now starts the bot first when it is not running) and `/bots/:id/watch` (a new watch or job starts the bot first, then tells it) | 95 s | 95 s + the wait | 100 s (+ the wait) |
+  | `POST /api/sessions`, `/api/sessions/:id/fork`, `/api/bots`, `/api/bots/requests/:id/approve`, `/api/bots/:id/start` (they start a Claude: the server waits up to 60 s for it to be ready, settles, then types; `POST /api/bots` makes the bot and starts it; a fork from a message answers once the fork started, and goes back to the message after); the page's `/bots/:id/tasks/:taskId` (Run now starts the bot first when it is not running) and `/bots/:id/watch` (a new watch or job starts the bot first, then tells it) | 95 s | 95 s + the wait | 100 s (+ the wait) |
   | `POST /api/sessions/:id/message` and `/open`; `POST /api/teams`, `/api/teams/:id/add`, `/lead` and `/message`; the page's `/teams`, `/teams/add` and `/teams/lead` (each may resume a stopped conversation first, up to 60 s, before it types) | 75 s | 75 s + the wait | 80 s (+ the wait) |
   | any other `/api/*` POST with `wait` (e.g. `/answer`) | 60 s | | the wait + 15 s |
   | `GET /api/sessions/:id/activity` (the chat's activity line, polled) | 5 s | | 20 s |
@@ -302,7 +302,7 @@ Per device, on the relay:
 - **30 envelopes a second and 1,200 a minute**, counting every envelope that opens: requests, their repeats, parts
   and hellos. Over that, a `req` or `hello` gets 429 with `retryAfter`, and a part is dropped.
 - **The routes that start or resume a Claude: 2 at once, and 12 in 10 minutes.** Each counts one (`POST
-  /api/sessions`, `/api/sessions/:id/open`, `/api/sessions/:id/fork`, `/api/bots`, `/api/bots/:id/start`,
+  /api/sessions`, `/api/sessions/:id/open`, `/api/sessions/:id/fork`, `/api/bots`, `/api/bots/:id/start`, `/api/bots/requests/:id/approve`,
   `/api/teams/:id/add`, the page's `/teams/add`, the page's `/bots/:id/tasks/:taskId` with `action: "run"`, and the page's `/bots/:id/watch` with a `job`), a team one per distinct member (`POST /api/teams`, the page's
   `/teams`; 12 at most), and a lead only when there is one (`/api/teams/:id/lead`, `/teams/lead`). A message counts
   what it may resume, as `/state` says it (read again when over 15 s old): `POST /api/sessions/:id/message` that
@@ -324,7 +324,7 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 **GET:** `/state`, `/conversation`, `/conversation/image`, `/repo-history`, `/chat/commands`, `/chat/files`,
 `/chat/kind`, `/file`, `/since`, `/api/sessions`, `/api/sessions/:id`, `/api/sessions/:id/menu`,
 `/api/sessions/:id/transcript` (with `queue`, the messages queued in Claude Code), `/api/sessions/:id/activity`,
-`/api/conversations`, `/api/teams`, `/api/status`, `/accounts`.
+`/api/conversations`, `/api/teams`, `/api/status`, `/accounts`, `/api/bots/requests` (the bots sessions asked for; `/state`'s `botRequests` has the same).
 
 **POST:** `/api/sessions`, `/api/sessions/:id/message`, `/api/sessions/:id/answer`, `/api/sessions/:id/interrupt`,
 `/api/sessions/:id/open`, `/api/sessions/:id/stop`, `/api/sessions/:id/remove`, `/api/sessions/:id/now`,
@@ -332,7 +332,7 @@ Another of Henry's computers, linked through `link.js` ([link.md](link.md)), may
 `/api/sessions/:id/mode`, `/api/sessions/:id/panel`, `/api/sessions/:id/rewind`, `/api/sessions/:id/fork`, `/api/teams`,
 `/api/teams/:id/add`, `/api/teams/:id/remove`, `/api/teams/:id/lead`, `/api/teams/:id/disband`,
 `/api/teams/:id/message`, `/api/bots`, `/api/bots/:id`, `/api/bots/:id/start`,
-`/api/bots/:id/remove`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
+`/api/bots/:id/remove`, `/api/bots/requests/:id/approve`, `/api/bots/requests/:id/decline`, `/settings`, `/rename`, `/sessions/move`, `/push-target`, `/repos/remove`, `/repos/add`,
 `/chat/image`, `/upload` (a file from the phone, below), and the page's `/teams` (the phone's New team sends it as the page's New team does: `{ members, order, name,
 lead, send: true }`, then `/teams/add` for a team above and `/teams/leave` with `quiet` for a member its order missed),
 `/teams/add`, `/teams/remove`, `/teams/leave`, `/teams/lead`, `/teams/rename`, `/bots/:id/switch`, `/bots/:id/map`, `/bots/:id/watch` and `/bots/:id/tasks/:taskId`,
@@ -378,6 +378,14 @@ The bots:
   is open to any caller, so `/start` is not marked. A message for a bot goes through `POST /api/sessions/:id/message` to its conversation (`convId` in
   `/state`'s `bots`), as for any session. `POST /api/bots/look` (a bot changing its own look) is the bot's alone,
   never the phone's.
+- **A bot a session asked for** (bots.js `requestBot`): a session never makes a bot, it asks (`POST
+  /api/bots/requests`, `fv bot request`; never through the relay: 403). `/state`'s `botRequests` (always there, `[]`
+  when none; `GET /api/bots/requests` has the same) lists the ones waiting, newest first: `{ id (12 hex), name, role,
+  brief, account, model, effort, why, from, fromName, at }`. `POST /api/bots/requests/:id/approve {}` (**Make it**)
+  makes and starts it as `POST /api/bots` does and answers the same (`{ ok, bot, key, id }`; made but not started: `ok`
+  false with `bot`, and the request goes all the same; refused: its error, and the request stays), `POST
+  /api/bots/requests/:id/decline {}` drops it (`{ ok }`); an unknown id is 404. Both are Henry's alone, so marked. A
+  new request pushes (Notifications). A request nobody answered goes after 7 days.
 - **A dynamic bot's switch** (bots.js `switchTo`): before a message to a bot whose model or effort is `"dynamic"`,
   the phone sizes the message from its words (web/chats-model.js `sizeTask`) and, when that differs from what its
   session runs now, asks the PC to switch first: the page's `POST /bots/:id/switch { id, model?, effort? }`, `id` its
@@ -421,7 +429,8 @@ Narrower rules:
   `chatsOpen`, `chatsOnTop`) stay off: they are desktop state.
 - `POST /api/bots` and `POST /api/bots/:id` take only `name`, `brief`, `role`, `account`, `model`, `effort`, `shape` and
   `color` (what bots.js reads; it checks the values itself); any other key, `folder` included, makes the request
-  403. `POST /api/bots/:id/start` and `/remove` take no fields at all (403 otherwise).
+  403. `POST /api/bots/:id/start` and `/remove` take no fields at all (403 otherwise), and so do
+  `/api/bots/requests/:id/approve` and `/decline`.
 - `POST /bots/:id/switch` takes only `id`, `model` and `effort` (403 otherwise): `id` a conversation id, and at
   least one of `model` (a name api.js `MODEL_RE` takes) and `effort` (`low` to `max`), else 400.
   `POST /bots/:id/tasks/:taskId` takes only `action` (403 otherwise), one of `pause`, `resume`, `run`, `delete`
@@ -608,7 +617,7 @@ key counts as unsigned.
   `/api/sessions/:id/message`, `/api/sessions/:id/answer` (a free-text answer), `/api/sessions/:id/open` (the
   prompt), `/api/sessions/:id/model`, `/api/sessions/:id/mode`, `/api/sessions/:id/panel`, `/api/sessions/:id/rewind` and
   `/api/sessions/:id/fork` (an overseer's switch, panel keys, rewind or fork is Henry's alone; so is a shell command in its session, through `/message`), `/api/teams/:id/message`, and the
-  bots' `POST /api/bots`, `/api/bots/:id` and `/api/bots/:id/remove` (whose body is then just the marker). A task sent to a bot goes through `/message`, so it is marked too.
+  bots' `POST /api/bots`, `/api/bots/:id`, `/api/bots/:id/remove` and `/api/bots/requests/:id/approve` and `/decline` (whose body is then just the marker). A task sent to a bot goes through `/message`, so it is marked too.
 - **When:** only after the envelope opened with the device's own key, its nonce and `at` passed, the route is on
   the allowlist and its narrower rules passed.
 - **Phone-sent copies:** the relay deletes `via` from every body the phone sends, on every route, before anything
@@ -675,6 +684,10 @@ Apple). No new dependency on the PC: `phone-push.js`, started by the relay, call
   `merged`; `machine` the pairing's `dev`; `team` when the chat is a team member). A phone from before the switch
   was on by default (it kept `names: false` without a choice) gets it on; one Henry turned off stays off
   (`namesSet`).
+- **A bot a session asks for** (`/state`'s `botRequests`) pushes once, as it arrives: "<the session's name, or A
+  session> asks to make a bot: <name>" with its role (else its why) as the body; with Show what chats say off, "A
+  session asks to make a bot" alone. Data `{ kind: 'bot-request', machine, request: <its id> }`: a tap opens the Bots
+  tab. The newest one seen is kept in `push.json` as `reqAt`, so a restart sends nothing twice.
 - **The token.** The phone asks iOS for permission once, not on a first launch: after a minute in front while paired
   and a machine is online, an alert says what notifications say (and that Settings can leave a chat's words out), and only its "Turn on" brings up iOS's question
   (Settings' **Notifications** switch asks too). It then sends its Expo push token to every machine it is paired with:

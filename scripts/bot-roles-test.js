@@ -3,7 +3,8 @@
 // HOME: its ~/.fleet-view.json holds one bot, Deploy watch, role QA, in a ~/Bots folder there; nothing is typed in the
 // demo, and Henry's settings and bot folders are never read or touched). A bot with a role is "Deploy watch (role: QA)"
 // in the lead's list, a led member's list of the others, a peer's list and "Your lead is ..."; a member without one is
-// as before; GET /api/teams' roster and GET /api/status carry role. Run: node scripts/bot-roles-test.js (exit 0 = all pass)
+// as before; GET /api/teams' roster and GET /api/status carry role. Then a bot request's routes (bots.js requestBot)
+// through the server: /state's botRequests, the API's, and the page's Make it and Decline only from its Origin. Run: node scripts/bot-roles-test.js (exit 0 = all pass)
 'use strict';
 const path = require('path');
 const fs = require('fs');
@@ -84,6 +85,19 @@ const post = (p, b) => req('POST', p, b, { Origin: ORIGIN });
     // the demo lists no bots (it makes none), so state.bots stays empty
     const s = await req('GET', '/state');
     eq([s.code, (s.j && s.j.bots) || null], [200, []], 'GET /state: 200, state.bots empty in the demo');
+
+    // a bot a session asks for (bots.js requestBot), through the server: /state always carries botRequests, the API's
+    // routes reach bots.js (the demo makes none: 503), and the page's Make it and Decline need the page's own Origin
+    eq((s.j && s.j.botRequests) || null, [], 'GET /state: botRequests, [] when none');
+    const ask = await req('POST', '/api/bots/requests', { name: 'Scout' }, auth);
+    eq([ask.code, ask.j && ask.j.message], [503, 'the demo makes no bots'], 'POST /api/bots/requests reaches bots.js');
+    eq((await req('GET', '/api/bots/requests', null, auth)).j, { ok: true, requests: [] }, 'GET /api/bots/requests');
+    eq(((await req('GET', '/api/bots', null, auth)).j || {}).requests, [], 'GET /api/bots carries requests');
+    eq((await req('POST', '/api/bots/requests/abcdef012345/approve', {}, auth)).code, 403, 'a session cannot approve');
+    eq((await req('POST', '/bots/requests/abcdef012345/approve', {})).code, 403, 'the page route without an Origin: 403');
+    eq((await req('POST', '/bots/requests/abcdef012345/approve', {}, { Origin: 'http://evil.example' })).code, 403, 'another site: 403');
+    eq((await post('/bots/requests/abcdef012345/approve', {})).code, 404, 'the page: Make it on no such request: 404');
+    eq((await post('/bots/requests/abcdef012345/decline', {})).code, 404, 'the page: Decline on no such request: 404');
   } catch (e) {
     fail++;
     console.log(`FAIL ${e && e.stack}`);

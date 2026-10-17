@@ -72,6 +72,24 @@ test('a role is up to 60 characters on one line, cleaned like a name; blank or l
   }
   assert.equal(B.ROLE_MAX, 60);
 });
+test("a request's why: one line (line breaks made spaces), at most 200 characters, no control characters; blank or left out is none", () => {
+  assert.deepEqual(B.checkWhy(undefined), { why: '' });
+  assert.deepEqual(B.checkWhy('   '), { why: '' });
+  assert.deepEqual(B.checkWhy('  watch the\r\ndeploys  '), { why: 'watch the deploys' });
+  assert.equal(B.checkWhy('x'.repeat(200)).why.length, 200);
+  assert.equal(B.checkWhy('x'.repeat(201)).err, 'why must be at most 200 characters');
+  assert.equal(B.checkWhy(5).err, 'why must be text');
+  assert.ok(B.checkWhy('bell\x07').err);
+  assert.ok(B.checkWhy('c1' + String.fromCharCode(0x9b) + 'x').err);
+});
+test('the requests as saved: a bad entry and one past 7 days are dropped, the newest 5 kept', () => {
+  const now = T, r = (k, at, extra = {}) => ({ id: String(k).repeat(12).slice(0, 12), name: `Bot ${k}`, at, ...extra });
+  const out = B.loadRequests([r('a', now - 1), r('b', now - B.REQ_TTL_MS), r('c', now - 5), null, { id: 'nope', name: 'x', at: now }, { ...r('d', now), name: '' },
+    r('a', now - 9), r('e', now - 2, { from: id(7).toUpperCase(), role: 'two\nlines', color: '#ABCDEF', shape: 'blob' }), r('f', now - 3), r('1', now - 4), r('2', now - 6)], now);
+  assert.deepEqual(out.map((x) => x.name), ['Bot a', 'Bot e', 'Bot f', 'Bot 1', 'Bot c']);
+  const e = out[1];
+  assert.deepEqual([e.from, e.role, e.color, 'shape' in e, e.account, e.model, e.effort], [id(7), '', '#abcdef', false, 'B', 'dynamic', 'dynamic']);
+});
 test('account, model and effort: the defaults, or what POST /api/sessions takes', () => {
   assert.deepEqual(B.checkOpts({}, DEF, ['A', 'B']), { account: 'B', model: 'claude-sonnet-5-5', effort: 'medium' });
   assert.deepEqual(B.checkOpts({ account: 'A', model: 'opus', effort: 'high' }, DEF, ['A', 'B']), { account: 'A', model: 'opus', effort: 'high' });
@@ -441,7 +459,7 @@ function harness(o = {}) {
   const base = o.base || fs.mkdtempSync(path.join(dir, 'base-'));
   let list = o.list || [];
   const calls = { deliver: [], startBot: [], openBot: [], end: [], trust: [], rename: [], switch: [], hostList: 0, facts: [] };
-  let saved = o.saved || [];
+  let saved = o.saved || [], savedReqs = o.savedRequests || [];
   const logs = new Set(o.logs || []); // conversation ids whose log is on disk
   const promptAt = new Map();
   // watching: the watched conversations' facts (id -> fact), the ones Fleet View knows, their names
@@ -479,14 +497,14 @@ function harness(o = {}) {
     },
   };
   const bots = B.createBots({
-    api, ctx: {}, saved, save: () => { saved = bots.saveShape(); }, log: () => {}, demo: !!o.demo,
+    api, ctx: {}, saved, savedRequests: savedReqs, save: () => { saved = bots.saveShape(); savedReqs = bots.requestsShape(); }, log: () => {}, demo: !!o.demo,
     exists: (x) => logs.has(x), turnInfo: (x) => ({ promptAt: promptAt.get(x) || 0 }), sessionsFile,
     trustFolder: (f) => calls.trust.push(f), accounts: () => ['A', 'B'], rename: (x, name) => calls.rename.push({ id: x, name }),
     watchFacts: (ids) => { calls.facts.push([...ids]); return ids.filter((x) => facts.has(x)).map((x) => ({ id: x, name: names.get(x) || null, ...facts.get(x) })); },
     known: (x) => known.has(x) || logs.has(x), nameOf: (x) => names.get(x) || null,
     base, template: B.TEMPLATE_FILE,
   });
-  return { bots, calls, base, logs, promptAt, facts, known, names, setList: (l) => { list = l; }, list: () => list, saved: () => saved,
+  return { bots, calls, base, logs, promptAt, facts, known, names, setList: (l) => { list = l; }, list: () => list, saved: () => saved, savedRequests: () => savedReqs,
     setDown: (v) => { down = v; }, setDeliver: (c) => { deliverCode = c; } };
 }
 const realNow = Date.now;
@@ -1030,6 +1048,138 @@ await (async () => {
     assert.equal((await call('/api/bots/look', { from: 'x', shape: 'heart' }))[0], 200);
     assert.deepEqual(did, ['look x']);
     n++; console.log('ok /api/bots: start for anyone; make, change and remove only from the phone relay; look goes to bots.look');
+  }
+  // a session asks for a bot (POST /api/bots/requests): checked as a bot is, kept, listed; Henry makes or declines it
+  {
+    const h = harness();
+    const from = id(42);
+    h.names.set(from, 'Release lead');
+    assert.equal(h.bots.requestBot({ name: '' })[0], 400);
+    assert.equal(h.bots.requestBot({ name: 'x', role: 'two\nlines' })[0], 400);
+    assert.equal(h.bots.requestBot({ name: 'x', effort: 'huge' })[0], 400);
+    assert.equal(h.bots.requestBot({ name: 'x', shape: 'blob' })[0], 400);
+    assert.equal(h.bots.requestBot({ name: 'x', why: 'w'.repeat(201) })[0], 400);
+    assert.equal(h.bots.requestBot({ name: 'x', from: 'not-an-id' })[0], 400);
+    assert.deepEqual(h.bots.requestsView(), []);
+    const [c1, o1] = h.bots.requestBot({ name: 'Deploy watch', role: 'QA', brief: 'Watch the deploys.', why: 'the release needs it\nfor a week', from });
+    assert.equal(c1, 200); assert.equal(o1.ok, true);
+    const rq = o1.request;
+    assert.match(rq.id, /^[0-9a-f]{12}$/);
+    assert.deepEqual({ ...rq, id: null, at: null }, { id: null, name: 'Deploy watch', role: 'QA', brief: 'Watch the deploys.', account: 'B', model: 'dynamic', effort: 'dynamic',
+      why: 'the release needs it for a week', from, fromName: 'Release lead', at: null });
+    assert.deepEqual(Object.keys(rq), ['id', 'name', 'role', 'brief', 'account', 'model', 'effort', 'why', 'from', 'fromName', 'at']);
+    assert.deepEqual(h.bots.requestList(), [200, { ok: true, requests: [rq] }]);
+    assert.deepEqual(h.bots.list()[1].requests, [rq]);
+    assert.equal(h.savedRequests().length, 1, 'saved with the bots');
+    assert.deepEqual(h.calls.startBot, [], 'nothing is made by asking');
+    assert.deepEqual(fs.readdirSync(h.base), []);
+    // the same name (any case) waits already: 409
+    const [c2, o2] = h.bots.requestBot({ name: 'DEPLOY WATCH' });
+    assert.equal(c2, 409); assert.match(o2.message, /already/);
+    // at most 5 wait
+    for (const k of [2, 3, 4, 5]) assert.equal(h.bots.requestBot({ name: `Bot ${k}` })[0], 200);
+    const [c6, o6] = h.bots.requestBot({ name: 'Bot 6' });
+    assert.equal(c6, 409); assert.match(o6.message, /at most 5/);
+    assert.deepEqual(h.bots.requestsView().map((x) => x.name), ['Bot 5', 'Bot 4', 'Bot 3', 'Bot 2', 'Deploy watch'], 'newest first');
+    // decline: it goes; an unknown id is 404
+    const b2 = h.bots.requestsView().find((x) => x.name === 'Bot 2').id;
+    assert.deepEqual(h.bots.declineRequest(b2), [200, { ok: true, message: 'declined Bot 2' }]);
+    assert.equal(h.bots.declineRequest(b2)[0], 404);
+    assert.equal((await h.bots.approveRequest('ffffffffffff'))[0], 404);
+    assert.ok(!h.savedRequests().some((x) => x.id === b2));
+    // approve: made and started as POST /bots makes one, with the request's fields; the request goes
+    const [ca, oa] = await h.bots.approveRequest(rq.id);
+    assert.equal(ca, 200); assert.equal(oa.ok, true);
+    assert.equal(oa.bot.name, 'Deploy watch'); assert.equal(oa.bot.role, 'QA'); assert.equal(oa.bot.brief, 'Watch the deploys.'); assert.equal(oa.id, oa.bot.convId);
+    assert.ok(fs.readFileSync(path.join(oa.bot.folder, 'CLAUDE.md'), 'utf8').includes('Watch the deploys.'));
+    assert.equal(h.calls.startBot.length, 1);
+    assert.ok(!h.bots.requestsView().some((x) => x.id === rq.id));
+    assert.equal((await h.bots.approveRequest(rq.id))[0], 404, 'made once');
+    // a request whose name a bot took meanwhile: refused as POST /bots refuses it, and kept
+    const b3 = h.bots.requestsView().find((x) => x.name === 'Bot 3').id;
+    await h.bots.create({ name: 'bot 3' });
+    assert.equal((await h.bots.approveRequest(b3))[0], 400);
+    assert.ok(h.bots.requestsView().some((x) => x.id === b3), 'kept after a refusal');
+    // made but not started (the desktop app is down): ok false with the bot, as POST /bots answers, and the request goes
+    const b4 = h.bots.requestsView().find((x) => x.name === 'Bot 4').id;
+    h.setDown(true);
+    const [, o4] = await h.bots.approveRequest(b4);
+    assert.equal(o4.ok, false); assert.equal(o4.bot.name, 'Bot 4');
+    assert.ok(!h.bots.requestsView().some((x) => x.id === b4));
+    h.setDown(false);
+    // it persists: a new server with the saved requests lists the same ones; 7 days later they are gone (and saved so)
+    const left = h.bots.requestsView();
+    assert.equal(left.length, 2);
+    const h2 = harness({ savedRequests: h.savedRequests() });
+    assert.deepEqual(h2.bots.requestsView(), left);
+    clock(Date.now() + B.REQ_TTL_MS + 1);
+    try {
+      assert.deepEqual(h2.bots.requestsView(), []);
+      assert.deepEqual(h2.savedRequests(), []);
+      assert.equal((await h2.bots.approveRequest(left[0].id))[0], 404);
+    } finally { Date.now = realNow; }
+    // the demo makes none
+    assert.equal(harness({ demo: true }).bots.requestBot({ name: 'x' })[0], 503);
+    n++; console.log('ok bot requests: checked, kept, listed newest first, 409s; approve makes it and the request goes, decline drops it; saved, gone after 7 days');
+  }
+  // the routes (api.js): any token caller asks, never the relay; approve and decline only from the phone relay (Henry)
+  {
+    API.ensureToken();
+    const tok = fs.readFileSync(path.join(require('../platform.js').dataDir(), 'api-token'), 'utf8').trim();
+    const did = [];
+    const ctx = {
+      log: () => {}, sendJson: (res, code, out) => res.done([code, out]), readBody: (req, res, cb) => cb(req.body),
+      bots: { list: () => [200, {}], requests: () => (did.push('list'), [200, { ok: true, requests: [] }]), request: (b) => (did.push(`ask ${b.name}`), [200, { ok: true }]),
+        approve: (x) => (did.push(`approve ${x}`), [200, { ok: true }]), decline: (x) => (did.push(`decline ${x}`), [200, { ok: true }]) },
+    };
+    const { EventEmitter } = await import('node:events');
+    const call = (method, pathname, body, extra = {}) => new Promise((resolve) => {
+      const req = { method, url: pathname, body, headers: { authorization: `Bearer ${tok}`, ...extra } };
+      const res = Object.assign(new EventEmitter(), { destroyed: false, writableFinished: true, done: resolve });
+      API.handle(req, res, pathname, ctx);
+    });
+    const relay = { 'x-fleet-view-relay': API.relayKey() };
+    const RID = 'abcdef012345';
+    assert.equal((await call('POST', '/api/bots/requests', { name: 'Scout' }))[0], 200);
+    assert.equal((await call('GET', '/api/bots/requests'))[0], 200);
+    assert.equal((await call('POST', '/api/bots/requests', { name: 'Scout', via: 'phone' }, relay))[0], 403, 'never through the relay');
+    assert.equal((await call('POST', '/api/bots/requests', { name: 'Scout' }, relay))[0], 403);
+    assert.equal((await call('POST', '/api/bots/requests', { name: 'Scout' }, { origin: 'http://evil.example' }))[0], 403, 'a web page');
+    assert.equal((await call('POST', `/api/bots/requests/${RID}/approve`, {}))[0], 403, 'a session cannot approve');
+    assert.equal((await call('POST', `/api/bots/requests/${RID}/decline`, {}))[0], 403);
+    assert.equal((await call('POST', `/api/bots/requests/${RID}/approve`, { via: 'phone' }))[0], 403, 'no key');
+    assert.equal((await call('POST', `/api/bots/requests/${RID}/approve`, {}, relay))[0], 403, 'the key without "via": "phone"');
+    assert.deepEqual(did, ['ask Scout', 'list']);
+    assert.equal((await call('POST', `/api/bots/requests/${RID}/approve`, { via: 'phone' }, relay))[0], 200);
+    assert.equal((await call('POST', `/api/bots/requests/${RID}/decline`, { via: 'phone' }, relay))[0], 200);
+    assert.equal((await call('POST', '/api/bots/requests/nope/approve', { via: 'phone' }, relay))[0], 400);
+    assert.equal((await call('GET', `/api/bots/requests/${RID}/approve`))[0], 405);
+    assert.deepEqual(did, ['ask Scout', 'list', `approve ${RID}`, `decline ${RID}`]);
+    const paths = API.ENDPOINTS.map((e) => `${e.method} ${e.path}`);
+    for (const p of ['GET /api/bots/requests', 'POST /api/bots/requests', 'POST /api/bots/requests/:id/approve', 'POST /api/bots/requests/:id/decline']) assert.ok(paths.includes(p), p);
+    n++; console.log('ok /api/bots/requests: any token caller asks, never the relay or a page; approve and decline only from the phone relay');
+  }
+  // fv bot request and fv bot requests: the call each makes, and the line it prints
+  {
+    const FV = require('./fv.js');
+    const calls = [];
+    const env = { call: async (method, p, body) => { calls.push({ method, p, body }); return p === '/bots/requests' && method === 'POST' ? { code: 200, j: { ok: true, request: { id: 'abcdef012345', name: body.name } } }
+      : p.startsWith('/conversations') ? { code: 200, j: { ok: true, ids: [id(42)] } } : p === '/sessions' ? { code: 200, j: { ok: true, sessions: [] } }
+      : { code: 200, j: { ok: true, requests: [{ id: 'abcdef012345', name: 'Deploy watch', role: 'QA', why: 'for the release', from: id(42), fromName: null, at: T }] } }; } };
+    const briefFile = path.join(dir, 'brief.md');
+    fs.writeFileSync(briefFile, '\ufeffWatch the deploys.\r\nTell Henry.\r\n');
+    const out = [], err = [];
+    const code = await FV.main(['bot', 'request', '--name', 'Deploy watch', '--role', 'QA', '--brief-file', briefFile, '--why', 'for the release', '--account', 'dynamic', '--from', id(42).slice(0, 8)], env, (l) => out.push(l), (l) => err.push(l));
+    assert.equal(code, 0, err.join('\n'));
+    assert.deepEqual(calls.filter((c) => c.method === 'POST'), [{ method: 'POST', p: '/bots/requests', body: { name: 'Deploy watch', role: 'QA', brief: 'Watch the deploys.\nTell Henry.', why: 'for the release', account: 'dynamic', from: id(42) } }]);
+    assert.deepEqual(out, ['request abcdef012345 (Deploy watch): waiting on Henry: Make it in the Bots tab or on his phone']);
+    assert.equal(await FV.main(['bot', 'request', '--role', 'QA'], env, () => {}, () => {}), 2, 'no name');
+    assert.equal(await FV.main(['bot', 'request', '--name', 'x', '--brief', 'a', '--brief-file', briefFile], env, () => {}, () => {}), 2, 'the brief twice');
+    out.length = 0;
+    assert.equal(await FV.main(['bot', 'requests'], env, (l) => out.push(l), () => {}), 0);
+    assert.match(out[0], /^abcdef012345 {2}Deploy watch \(QA\) {2}asked by 00000042, /);
+    assert.equal(out[1], '  why: for the release');
+    n++; console.log('ok fv bot request posts the ask (brief from a file, --from resolved) and prints its id; fv bot requests lists them');
   }
 })().finally(() => { Date.now = realNow; try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
 

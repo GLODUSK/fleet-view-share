@@ -24,6 +24,11 @@
 //   cursor    the newest n seen, kept in <dataDir>/relay/push.json with the coalescing times, so a restart never sends
 //             again. The first read with no cursor, and the first read after no phone had a token, take the cursor
 //             and send nothing (no burst of old alerts); an alert over 10 minutes old is never sent
+//   bots      a bot a session asks for (/state's botRequests, bots.js requestBot) pushes once, as it arrives: names on,
+//             "<the session's name, or A session> asks to make a bot: <name>" with its role (else its why) as the body;
+//             names off, "A session asks to make a bot". data { kind: 'bot-request', request: <its id>, machine }: the
+//             phone opens its Bots tab. The newest one seen (its at) is kept in push.json as reqAt, so a restart never
+//             sends again; the first read without one takes it and sends nothing
 //   tokens    one Expo answers DeviceNotRegistered for (the app was deleted, or its notifications turned off) is
 //             dropped (opts.drop); a revoked device's goes with it (relay.js)
 //
@@ -52,6 +57,7 @@ const TITLE = {
   finished: (n) => (n > 1 ? `${n} chats finished` : 'A chat finished'),
   merged: (n) => (n > 1 ? `${n} PRs merged` : 'A PR merged'),
 };
+const REQ_TITLE = 'A session asks to make a bot';
 const clip = (s, n = 200) => String(s == null ? '' : s).replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, n);
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
@@ -168,6 +174,17 @@ function messagesFor(target, items, machine) {
   return out;
 }
 
+// the push for a bot a session asks for (/state botRequests: { id, name, role, why, from, fromName, at }), for one phone
+function requestMessage(target, r, machine) {
+  const data = { kind: 'bot-request', request: r.id, machine };
+  const m = { to: target.token, title: REQ_TITLE, data, sound: 'default', priority: 'high', ttl: TTL_S };
+  if (!target.names) return m;
+  m.title = clip(`${clip(r.fromName, 60) || 'A session'} asks to make a bot: ${clip(r.name, 40)}`, 120);
+  const body = clip(r.role, 80) || clipWords(r.why, BODY_MAX);
+  if (body) m.body = body;
+  return m;
+}
+
 function writeAtomic(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
@@ -195,10 +212,12 @@ function createPush(o = {}) {
   let cursor = null; // the newest alert n seen, or null: the next read takes it and sends nothing
   let sent = new Map(); // '<key>|<kind>' -> when it was pushed
   let idle = false; // no phone had a token at the last tick: the next read with one takes the cursor anew
+  let reqAt = null; // the newest bot request seen (its at), or null: the next read takes it and sends nothing
   function load() {
     try {
       const j = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (j && Number.isFinite(j.n)) cursor = j.n;
+      if (j && Number.isFinite(j.reqAt)) reqAt = j.reqAt;
       const t = now();
       for (const [k, at] of Object.entries(j && typeof j.sent === 'object' && j.sent ? j.sent : {})) if (Number.isFinite(at) && t - at < COALESCE_MS) sent.set(k, at);
     } catch (e) { if (e.code !== 'ENOENT') note(`push.json could not be read: ${e.message}`); }
@@ -206,7 +225,7 @@ function createPush(o = {}) {
   function save() {
     const t = now();
     for (const [k, at] of sent) if (t - at >= COALESCE_MS) sent.delete(k);
-    try { writeAtomic(file, `${JSON.stringify({ v: 1, n: cursor, sent: Object.fromEntries(sent) })}\n`); } catch (e) { note(`push.json could not be saved: ${e.message}`); }
+    try { writeAtomic(file, `${JSON.stringify({ v: 1, n: cursor, sent: Object.fromEntries(sent), ...(reqAt != null ? { reqAt } : {}) })}\n`); } catch (e) { note(`push.json could not be saved: ${e.message}`); }
   }
 
   // ---------- reading /state ----------
@@ -268,14 +287,22 @@ function createPush(o = {}) {
     if (st === 'same' || !st) return;
     const alerts = (Array.isArray(st.alerts) ? st.alerts : []).filter((a) => a && Number.isFinite(a.n));
     const top = alerts.reduce((m, a) => Math.max(m, a.n), cursor == null ? -Infinity : cursor);
+    const t = now();
+    // the bots sessions ask for (bots.js requestBot): the ones newer than reqAt
+    const reqs = (Array.isArray(st.botRequests) ? st.botRequests : []).filter((r) => r && typeof r.id === 'string' && typeof r.name === 'string' && Number.isFinite(r.at));
+    const reqTop = reqs.reduce((m, r) => Math.max(m, r.at), t);
     if (cursor == null || idle) {
       // catching up: everything there now is old news
       idle = false;
       cursor = Number.isFinite(top) ? top : 0;
+      reqAt = reqTop;
       save();
       return;
     }
-    const t = now();
+    // a push.json from before bot requests: the ones there now are old news too
+    const reqFresh = reqAt == null ? [] : reqs.filter((r) => r.at > reqAt && t - r.at <= MAX_AGE_MS).sort((a, b) => a.at - b.at);
+    const reqMoved = reqAt == null || reqs.some((r) => r.at > reqAt);
+    if (reqMoved) reqAt = reqAt == null ? reqTop : Math.max(reqAt, ...reqs.map((r) => r.at));
     const fresh = alerts.filter((a) => a.n > cursor && t - (Number(a.t) || 0) <= MAX_AGE_MS);
     const moved = top > cursor;
     if (moved) cursor = top;
@@ -303,7 +330,7 @@ function createPush(o = {}) {
     // (a merge per PR: two PRs merged by one chat are two pieces of news)
     const sentKey = (x) => `${x.key}|${x.kind}${x.pr ? `#${x.pr}` : ''}`;
     const items = [...best.values()].filter((x) => !(sent.get(sentKey(x)) > t - WINDOW_MS[x.kind]));
-    if (!items.length) { if (moved) save(); return; }
+    if (!items.length && !reqFresh.length) { if (moved || reqMoved) save(); return; }
     for (const x of items) sent.set(sentKey(x), t);
     save();
     const messages = [], owners = [];
@@ -311,7 +338,7 @@ function createPush(o = {}) {
       const peers = new Set((Array.isArray(target.peers) ? target.peers : []).map((p) => String(p).toLowerCase()));
       // a chat another machine runs, which this phone hears from there too
       const mine = items.filter((x) => !(x.host && peers.has(x.host)));
-      for (const m of messagesFor(target, mine, target.dev)) { messages.push(m); owners.push(target); }
+      for (const m of [...reqFresh.map((r) => requestMessage(target, r, target.dev)), ...messagesFor(target, mine, target.dev)]) { messages.push(m); owners.push(target); }
     }
     for (let i = 0; i < messages.length; i += BATCH_MAX) {
       const part = messages.slice(i, i + BATCH_MAX);
@@ -343,4 +370,4 @@ function createPush(o = {}) {
   return { start, stop, tick };
 }
 
-module.exports = { createPush, kindOf, messagesFor, namesText, detailOf, gist, askOf, SEND_URL, POLL_MS, WINDOW_MS, COALESCE_MS, MAX_AGE_MS };
+module.exports = { createPush, kindOf, messagesFor, requestMessage, namesText, detailOf, gist, askOf, SEND_URL, POLL_MS, WINDOW_MS, COALESCE_MS, MAX_AGE_MS };

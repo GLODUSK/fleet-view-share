@@ -893,8 +893,12 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?, prefix?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive, forkOf (a fork: { id, name, named } of the one it came from; its name reads "fork of <that one>" until it has its own); with prefix (8+ characters of an id) only { ids }: every conversation id starting with it, off the map too' },
   { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("bot:<bot id>" or null)' },
   { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends. An account at 90% of its 5-hour or weekly limit gives way to the one with the most left (accountSwitched in the reply) while "Switch accounts when one runs low" is on' },
-  { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers of the fleet, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, role, account, model, effort, folder, createdAt, convId, live' },
-  { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), role? (what it does, one line, up to 60 characters; "" none), account?: "B", model?: "dynamic" (the default: sized for each message Henry sends from the page) or a name like "claude-sonnet-5-5", effort?: "dynamic" (the default) or "medium" }', does: 'Henry only (his phone, through the relay; a session gets 403): make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }' },
+  { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers of the fleet, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, role, account, model, effort, folder, createdAt, convId, live; and requests, the ones sessions asked for' },
+  { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), role? (what it does, one line, up to 60 characters; "" none), account?: "B", model?: "dynamic" (the default: sized for each message Henry sends from the page) or a name like "claude-sonnet-5-5", effort?: "dynamic" (the default) or "medium" }', does: 'Henry only (his phone, through the relay; a session gets 403, and asks with POST /api/bots/requests instead): make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }' },
+  { method: 'GET', path: '/api/bots/requests', does: 'the bots sessions asked for, waiting on Henry, newest first: { ok, requests: [{ id, name, role, brief, account, model, effort, why, from, fromName, at }] } (each goes after 7 days)' },
+  { method: 'POST', path: '/api/bots/requests', body: '{ name (1-40 characters), brief? (up to 4000), role? (one line, up to 60), account?, model?, effort? (as POST /api/bots), why? (one line, up to 200: why the bot is wanted), from?: your conversation id }', does: 'ask Henry for a bot (fv bot request): he makes it with one tap in the Bots tab or on his phone, or declines it. Never through the relay. 409 when a request has that name already, or 5 wait: { ok, request }' },
+  { method: 'POST', path: '/api/bots/requests/:id/approve', does: 'Henry only (his phone, through the relay; the page has /bots/requests/:id/approve): make the bot asked for and start it, as POST /api/bots; the request goes once the bot is made: { ok, bot, key, id }' },
+  { method: 'POST', path: '/api/bots/requests/:id/decline', does: 'Henry only, as approve: drop the request: { ok }' },
   { method: 'POST', path: '/api/bots/:id', body: '{ name?, brief?, role?, account?, model?, effort? }', does: 'Henry only, as POST /api/bots: change a bot: its CLAUDE.md (with its role) is written again and a running one is told to read it (account, model and effort take effect in its next new conversation)' },
   { method: 'POST', path: '/api/bots/:id/start', does: 'start a bot: the conversation running already, else its newest one resumed, else a new one: { ok, bot, key, id }' },
   { method: 'POST', path: '/api/bots/look', body: '{ from: your conversation id, shape?: "hex"|"drop"|"round"|"pill"|"tri"|"square"|"star"|"clover"|"flower"|"heart", color?: "#rrggbb" }', does: 'a bot changes its own avatar (null: picked for it); only from a bot\'s own conversation, and only its look (fv look)' },
@@ -3047,14 +3051,15 @@ async function listConversations(query, ctx) {
 //        teams: { list(), get(id) -> { id, name, lead, members } or null, make(b), add(id, member, lead),
 //        remove(id, member), lead(id, member | null), disband(id) } each -> [code, json] or a Promise of one,
 //        status({ team, ids, from }) -> [code, json], doing(id) -> what it is doing in a few words, or null,
-//        bots: { list(), create(b), start(id), update(id, b), remove(id), look(b) } each -> [code, json] or a Promise of one
-//        (/api/bots, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
+//        bots: { list(), create(b), start(id), update(id, b), remove(id), look(b), requests(), request(b), approve(id),
+//        decline(id) } each -> [code, json] or a Promise of one (/api/bots, /api/bots/requests, bots.js), botOf(id) -> { role, folder } when id is a bot's conversation, else null (resumable) }
 const VERBS = 'message|launch|stop|remove|menu|answer|wait|interrupt|open|transcript|now|unsend|model|activity|enter|background|mode|rewind|fork|panel';
 const GET_VERBS = new Set(['menu', 'transcript', 'activity']);
 const ROUTE = new RegExp(`^/api/sessions(?:/([^/]+))?(?:/(${VERBS}))?$`);
 const TEAM_ROUTE = /^\/api\/teams(?:\/([^/]+))?(?:\/(add|remove|lead|disband|message))?\/?$/;
 const ASK_ROUTE = /^\/api\/ask(?:\/([^/]+))?(?:\/(collected))?\/?$/;
 const BOT_ROUTE = /^\/api\/bots(?:\/([^/]+))?(?:\/(start|remove))?\/?$/;
+const BOT_REQ_ROUTE = /^\/api\/bots\/requests(?:\/([^/]+)\/(approve|decline))?\/?$/;
 function handle(req, res, pathname, ctx) {
   const what = `${req.method} ${pathname}`;
   const answer = ([code, out]) => {
@@ -3087,6 +3092,26 @@ function handle(req, res, pathname, ctx) {
     if (!ctx.bots || !ctx.bots.look) return answer([404, { ok: false, message: 'not found' }]);
     return body((b) => Promise.resolve(b ? ctx.bots.look(b) : [400, { ok: false, message: 'bad json' }]));
   }
+  // a bot a session asks for (bots.js requestBot): GET lists the ones waiting; POST asks (any token caller on this
+  // machine, never the phone relay: Henry makes his own with POST /api/bots); /:id/approve makes it and /:id/decline
+  // drops it, Henry's alone (his phone through the relay: viaOf; the page has /bots/requests/:id/...)
+  const rm = BOT_REQ_ROUTE.exec(pathname);
+  if (rm) {
+    const [, rid, rverb] = rm;
+    if (!ctx.bots || !ctx.bots.request) return answer([404, { ok: false, message: 'not found' }]);
+    if (rid && !/^[0-9a-f]{12}$/.test(rid)) return answer([400, { ok: false, message: 'not a bot request id (GET /api/bots/requests lists them)' }]);
+    if (req.method === 'GET' && !rid) return answer(ctx.bots.requests());
+    if (req.method !== 'POST') return answer([405, { ok: false, message: 'method not allowed' }]);
+    return body((b) => {
+      if (!b) return Promise.resolve([400, { ok: false, message: 'bad json' }]);
+      if (!rid) {
+        if (req.headers['x-fleet-view-relay'] !== undefined || via(b)) return Promise.resolve([403, { ok: false, message: 'a bot request is a session\'s: Henry makes his own with POST /api/bots' }]);
+        return Promise.resolve(ctx.bots.request(b));
+      }
+      if (via(b) !== 'henry') return Promise.resolve([403, { ok: false, message: 'only Henry makes or declines a bot a session asked for (Make it in the Bots tab, or his phone)' }]);
+      return Promise.resolve(rverb === 'approve' ? ctx.bots.approve(rid) : ctx.bots.decline(rid));
+    });
+  }
   // the bots (bots.js): GET lists them; POST makes one, /:id changes one, /:id/start starts it, /:id/remove removes it
   const bm = BOT_ROUTE.exec(pathname);
   if (bm) {
@@ -3100,7 +3125,7 @@ function handle(req, res, pathname, ctx) {
     // bot is Henry's (the page's /bots, or his phone through the relay: viaOf); anyone may start one
     return body((b) => {
       if (!b) return Promise.resolve([400, { ok: false, message: 'bad json' }]);
-      if (via(b) !== 'henry') return Promise.resolve([403, { ok: false, message: 'only Henry makes, changes or removes a bot (the Bots tab, or his phone); POST /api/bots/:id/start starts one' }]);
+      if (via(b) !== 'henry') return Promise.resolve([403, { ok: false, message: 'only Henry makes, changes or removes a bot (the Bots tab, or his phone); POST /api/bots/:id/start starts one, and POST /api/bots/requests (fv bot request) asks him for a new one' }]);
       return Promise.resolve(bverb === 'remove' ? ctx.bots.remove(bid) : bid ? ctx.bots.update(bid, b) : ctx.bots.create(b));
     });
   }
