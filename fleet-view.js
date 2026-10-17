@@ -43,6 +43,8 @@ const SWITCH = require(path.join(__dirname, 'account-switch.js'));
 const FEED_MOD = require(path.join(__dirname, 'feed-mod.js'));
 const TT = require(path.join(__dirname, 'team-tree.js'));
 const SKY = require(path.join(__dirname, 'sky-events.js')).createSkyEvents({ dir: require(path.join(__dirname, 'platform.js')).dataDir() });
+// the page's own errors (page-errors.log; web/head.js fvPageError), stamped with this server's version
+const PAGE_ERRORS = require(path.join(__dirname, 'page-errors.js')).createPageErrors({ dir: require(path.join(__dirname, 'platform.js')).dataDir(), version: () => VERSION.label(VERSION.current(), '') });
 // the log of conversations leaving the map (left-map.log) and what the map showed at the last run (on-map.json)
 const LEFT_MAP = require(path.join(__dirname, 'left-map.js'));
 // telling a fork from its log, and the name it shows (Fleet View #552)
@@ -8837,6 +8839,17 @@ function handleRequest(req, res) {
   if (pathname === '/sky-events') {
     if (req.method === 'GET') { const [code, out] = SKY.route('GET'); return sendJson(res, code, out); }
     if (req.method === 'POST') return readBody(req, res, (body) => { const [code, out] = SKY.route('POST', body); sendJson(res, code, out); });
+  }
+  // the page's own errors (page-errors.js): each one logged gets a line in server.log too, where sessions look first
+  if (pathname === '/page-errors') {
+    if (req.method === 'GET') { const [code, out] = PAGE_ERRORS.route('GET'); return sendJson(res, code, out); }
+    if (req.method === 'POST') {
+      return readBody(req, res, (body) => {
+        const [code, out] = PAGE_ERRORS.route('POST', body);
+        if (code === 200) logOnce('page-error:' + body.where, `page error (${String(body.where || 'page').slice(0, 40)}): ${String(body.message).slice(0, 200)} (page-errors.log)`);
+        sendJson(res, code, out);
+      });
+    }
   }
   if (pathname === '/relay' || pathname.startsWith('/relay/')) return RELAY.handle(req, res, pageCtx);
   // the link between Henry's machines (link.js): this machine's page; and what a linked machine asks, through the relay

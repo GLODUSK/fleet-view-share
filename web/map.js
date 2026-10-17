@@ -348,6 +348,10 @@
 // changes still draw at once, and one frame a second keeps the age fades going. Not when the window merely lost
 // focus; a hidden or minimized window stops the loop altogether. Reduced motion paces as before (every refresh, drawn
 // only on change).
+// Errors never stop the loop (review 2026-10-17): a frame that throws is logged (the console, and the server's
+// page-errors.log through window.fvPageError, the first one a minute) and the next comes a second later (frame); a
+// conversation with odd data stays off the map or has its odd entries dropped (saneSession), and one that still
+// throws in rebuild is left out of that rebuild alone; a NaN or Infinity position starts again beside its hub (healPos).
 //
 // Command center (2026-10-08). The map is also where many conversations are steered at once:
 //   Multi-select: Ctrl+click toggles a conversation (or a workspace's hub) into the selection; Ctrl+drag on empty
@@ -425,6 +429,7 @@ const FADE_MS = 10 * 60e3;          // recent-work paths fade out over ten minut
 const MAX_RECENT = 14;              // recent files drawn per conversation
 const FILE_CLEAR = 18;              // a recent file's least gap past its conversation's gauge (px at ks 1): outside its agents
 const MAX_AGENTS = 16;              // agents drawn per conversation
+const FRAME_RETRY_MS = 1000;        // after a frame that threw: the next one, a second on (see frame)
 const ZMIN = 0.2, ZMAX = 6;
 
 // world-space layout constants
@@ -1977,6 +1982,21 @@ function later(at) {
 // ---------- graph ----------
 // a repo hub's id: its root, the same for "Z:/x/" and "z:\x"
 const repoId = (root) => 'r:' + String(root).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+// A conversation the map can draw: an object with an id, and a state unless it is new (pending); anything else stays
+// off the map. The lists it carries are mended in place (left alone when sound): a null or odd agent or file is
+// dropped, agents or files that aren't a list become none, a ship step that isn't a [name, state] pair is dropped. One
+// odd entry from the server used to throw in rebuild or in every draw after it (see frame). Exported for tests.
+const isObj = (v) => !!v && typeof v === 'object';
+export function saneSession(s) {
+  if (!isObj(s) || !((typeof s.id === 'string' && s.id) || Number.isFinite(s.id))) return false;
+  if (typeof s.state !== 'string' && !s.pending) return false;
+  if (s.agents != null && !(Array.isArray(s.agents) && s.agents.every(isObj))) s.agents = Array.isArray(s.agents) ? s.agents.filter(isObj) : [];
+  if (s.files != null && !(Array.isArray(s.files) && s.files.every(isObj))) s.files = Array.isArray(s.files) ? s.files.filter(isObj) : [];
+  if (s.ship != null && !isObj(s.ship)) s.ship = null;
+  const st = s.ship && s.ship.steps;
+  if (st != null && !(Array.isArray(st) && st.every(Array.isArray))) s.ship.steps = Array.isArray(st) ? st.filter(Array.isArray) : null;
+  return true;
+}
 function visibleSessions(state) {
   const set = state.settings || {};
   // the shell (app.js) has already applied the repo menu and the / filter, with its own rules (a repo
@@ -1986,10 +2006,10 @@ function visibleSessions(state) {
   // dim nodes on their repo; other finished conversations stay off the map unless showDone
   if (Array.isArray(state.allSessions)) {
     // a handing-off stand-in whose pickup runs here comes keyed by that pickup's id (the node was re-keyed to it)
-    const out = (state.sessions || []).filter((s) => s.state !== 'DONE' || !!((I.ui && I.ui.showDone) || set.showDone));
+    const out = (state.sessions || []).filter((s) => saneSession(s) && (s.state !== 'DONE' || !!((I.ui && I.ui.showDone) || set.showDone)));
     const ids = new Set(out.map((s) => s.id));
-    for (const s of state.finishedSessions || []) if (s && !ids.has(s.id)) { ids.add(s.id); out.push(s); }
-    return out.concat(state.pending || []);
+    for (const s of state.finishedSessions || []) if (saneSession(s) && !ids.has(s.id)) { ids.add(s.id); out.push(s); }
+    return out.concat((state.pending || []).filter(saneSession));
   }
   const q = String((I.ui && I.ui.query != null ? I.ui.query : set.query) || '').trim();
   const repo = (I.ui && I.ui.repo !== undefined ? I.ui.repo : set.repo) || null;
@@ -1998,6 +2018,7 @@ function visibleSessions(state) {
   if (q) { try { re = new RegExp(q, 'i'); } catch { re = null; } }
   const ql = q.toLowerCase();
   return (state.sessions || []).filter((s) => {
+    if (!saneSession(s)) return false;
     if (s.state === 'DONE' && !showDone) return false;
     if (repo && (!s.repo || String(s.repo.root).toLowerCase() !== String(repo).toLowerCase())) return false;
     if (!q) return true;
@@ -2008,7 +2029,7 @@ function visibleSessions(state) {
 
 function rebuild() {
   const state = I.state, nowC = Date.now() - I.skew;
-  const list = visibleSessions(state);
+  let list = visibleSessions(state);
   const finIds = Array.isArray(state.finishedSessions) ? new Set(state.finishedSessions.map((s) => s && s.id)) : null;
   const visible = new Set(list.map((s) => s.id));
   const nodes = [], byId = new Map(), springs = [], paths = [];
@@ -2033,7 +2054,23 @@ function rebuild() {
     conflicts.push({ ...c, sessions: ss });
   }
 
+  // each conversation on its own: one that throws (odd data saneSession let through) is taken back out (its nodes,
+  // springs and paths, its place on its repo) and left off this rebuild, so the rest of the map still updates
+  const dropped = new Set();
   for (const s of list) {
+    const n0 = nodes.length, e0 = springs.length, p0 = paths.length;
+    try { addSession(s); } catch (err) {
+      for (const n of nodes.slice(n0)) byId.delete(n.id);
+      nodes.length = n0; springs.length = e0; paths.length = p0;
+      const rn = s.repo && s.repo.root && byId.get(repoId(s.repo.root));
+      if (rn && rn.sessions && rn.sessions[rn.sessions.length - 1] === s) rn.sessions.pop();
+      dropped.add(s);
+      console.error(err);
+      pageError(err, 'map rebuild');
+    }
+  }
+  if (dropped.size) list = list.filter((s) => !dropped.has(s));
+  function addSession(s) {
     const sn = add({ id: 's:' + s.id, kind: 'session', s, sid: s.id, agents: [], fin: !!(finIds && finIds.has(s.id) && s.state === 'DONE') });
     if (s.repo && s.repo.root) {
       const rid = repoId(s.repo.root);
@@ -2042,7 +2079,7 @@ function rebuild() {
       springs.push({ a: sn.id, b: rid, rest: REST.repo, repo: rn });
       sn.cl = rid;
     } else sn.cl = '_none';
-    if (sn.fin) continue; // a finished conversation: only its link to the repo (steady, nothing around it)
+    if (sn.fin) return; // a finished conversation: only its link to the repo (steady, nothing around it)
     // agents orbit their conversation on fixed slots, so they are placed, not simulated
     const ags = (s.agents || []).slice(-MAX_AGENTS);
     ags.forEach((a, i) => {
@@ -2740,7 +2777,32 @@ function simStep() {
     nd.p.x += nd.p.vx; nd.p.y += nd.p.vy;
   }
   separate(0.3);
+  healPos(ns, healBase);
   I.alpha *= 0.985;
+}
+// A position that went NaN or Infinity (a zero distance somewhere, a bad saved spot) would spread through the forces
+// and separate() to everything near it, and nothing ever brought it back: such a node starts again beside its repo's
+// hub (a repo at its home), at rest, and the rest of the layout eases around it. Returns how many it put back.
+// Exported for tests: base(n) gives the spot to start from, a finite { x, y }.
+export function healPos(ns, base) {
+  let n = 0;
+  for (const nd of ns || []) {
+    const p = nd && nd.p;
+    if (!p) continue;
+    if (!Number.isFinite(p.vx) || !Number.isFinite(p.vy)) { p.vx = 0; p.vy = 0; }
+    if (Number.isFinite(p.x) && Number.isFinite(p.y)) continue;
+    const b = base(nd), a = hashNum(String(nd.id)) * TAU, r = nd.kind === 'repo' ? 0 : 60;
+    p.x = b.x + Math.cos(a) * r; p.y = b.y + Math.sin(a) * r; p.vx = 0; p.vy = 0;
+    n++;
+  }
+  return n;
+}
+// where healPos puts a node back: its repo's hub when that one is sound, else the home of its group
+function healBase(nd) {
+  const hub = nd.kind !== 'repo' && I.byId && I.byId.get(nd.cl), hp = hub && hub.p;
+  if (hp && Number.isFinite(hp.x) && Number.isFinite(hp.y)) return hp;
+  const h = I.homeXY.get(nd.kind === 'repo' ? nd.id : nd.cl);
+  return h && Number.isFinite(h.x) && Number.isFinite(h.y) ? h : { x: 0, y: 0 };
 }
 
 // Push apart whatever is closer than the hard spacing above: whole repo groups first (hub and members move
@@ -2937,7 +2999,26 @@ function keepIn(ids) {
 }
 
 // ---------- frame loop ----------
+// One frame, guarded: an error in it (a draw that trips on odd data, a bug) never stops the loop for good. Unguarded,
+// a throw left I.raf at -1, so wake() and startLoop() both took the loop for running and the map and the sky froze
+// until a reload. The error goes to the console and to the server's page-errors.log (pageError), the canvas drops
+// what the broken draw left on it (its transform, alpha, saved states), and the next frame comes FRAME_RETRY_MS on
+// (not at the next refresh: a draw that throws every time must not spin); new state, or a fix, carries on from there.
 function frame(ts) {
+  try { frameRun(ts); }
+  catch (err) {
+    console.error(err);
+    pageError(err, 'map frame');
+    if (!I) return;
+    try { if (I.ctx && typeof I.ctx.reset === 'function') I.ctx.reset(); } catch { /* an older canvas: draw sets its transform */ }
+    if (I.running && I.raf === -1 && I.pace) later(performance.now() + FRAME_RETRY_MS);
+  }
+}
+// a page error to the server's log (window.fvPageError, web/head.js: the first one a minute), never throwing itself
+function pageError(err, where) {
+  try { if (typeof window !== 'undefined' && typeof window.fvPageError === 'function') window.fvPageError(err, where); } catch { /* nowhere to tell */ }
+}
+function frameRun(ts) {
   I.raf = -1; // in a frame: a change marked now needs no wake (paceNext follows)
   // the Map shown: the map and the sky; any other view: the sky alone, behind it
   I.mapOn = active();
@@ -3025,6 +3106,7 @@ function mapFrame(t0, dpr) {
   else if (separate(0.15) > 0.05) I.dirty = true; // settled: still never let anything sit too close
   if (gather() > 0.05) I.dirty = true;
   if (trailStep(t0)) I.dirty = true;
+  if (healPos(I.sim, healBase)) I.dirty = true; // settled too: a drag, a trail or a spot from another screen
   if (I.spotsMoved) { I.spotsMoved = false; saveSpotsSoon(3000); }
   if (I.spotsDue && Date.now() - I.spotsDue > 5000) sendSpots(); // no new state came (unchanged): send it anyway
   // the camera fits the map when it first shows (and on 0 or a re-arrange), then holds still: changes never pan
