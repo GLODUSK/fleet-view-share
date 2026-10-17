@@ -517,6 +517,9 @@ export function parsePanel(lines, o = {}) {
     body.splice(0, f + 1);
   }
   while (body.length && !body[0].trim()) body.shift();
+  // the edge alone: what Claude Code draws for a moment after Enter on a command that opens no panel ("/effort high",
+  // "/model x"), and as one closes. Never a card (Henry, 2026-10-16: an empty "/effort" card popped for a second)
+  if (!title && !body.length && !keys) return null;
   const squeezed = body.filter((l, x) => l.trim() || (body[x - 1] || '').trim()); // no two blank lines in a row
   const ind = Math.min(...squeezed.filter((l) => l.trim()).map((l) => l.search(/\S/)), 99);
   const out = squeezed.map((l) => l.slice(Math.min(ind, l.match(/^\s*/)[0].length)));
@@ -2867,7 +2870,7 @@ export function mountCompose(slot, s) {
       if ((mine || Date.now() - st.yes.at >= SWITCH_LATE_MS) && Date.now() - st.yes.tried >= SWITCH_RETRY_MS) {
         st.yes.tried = Date.now(); st.cmd = ''; sayYes(st.id);
       }
-      menu = null;
+      menu = null; panel = null; // (it is drawn under a panel's edge too: read as one, it was the card instead)
     }
     // the one a "/command" sent from here opened is that command's, numbered list or not (/model); else a numbered
     // menu is a question Claude asks (a permission prompt), which the menu card answers

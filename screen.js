@@ -789,6 +789,9 @@ function panelDetails(lines, o = {}) {
     body.splice(0, f + 1);
   }
   while (body.length && !body[0].trim()) body.shift();
+  // the edge alone: what Claude Code draws for a moment after Enter on a command that opens no panel ("/effort high"),
+  // and as one closes. Never a panel (as the page's parsePanel)
+  if (!title && !body.length && !keys) return null;
   const squeezed = body.filter((l, x) => l.trim() || (body[x - 1] || '').trim()); // no two blank lines in a row
   const ind = Math.min(...squeezed.filter((l) => l.trim()).map((l) => l.search(/\S/)), 99);
   const out = squeezed.map((l) => l.slice(Math.min(ind, l.match(/^\s*/)[0].length)));

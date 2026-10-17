@@ -3,7 +3,7 @@
 // from its bundle) splits at a space before "/" or a drive letter and at new lines, takes outer quotes off a piece,
 // and reads a piece ending in .png/.jpg/.jpeg/.gif/.webp as an image file. Run: node scripts/compose-message-test.mjs
 import assert from 'node:assert/strict';
-import { messageText, parseRewind } from '../web/compose.js';
+import { messageText, parseRewind, parsePanel } from '../web/compose.js';
 import { pasteWrites } from '../web/term.js';
 
 const IMG = /\.(png|jpe?g|gif|webp)$/i;
@@ -50,5 +50,12 @@ assert.equal(typed('C:\\dir\\ next'), 'C:\\dir\\ next');
 const RULE = '─'.repeat(40);
 assert.equal(parseRewind(['● ALPHA', '  ❯ /rewind                     Restore the code and/or conversation', '                                to a previous point', RULE, '❯ /rewind', RULE]), null);
 assert.deepEqual(parseRewind(['', ' Rewind', '', ' Restore the code and/or conversation to the point before…', '', '   ↑ 3 more', '   fix it', ' ❯ Reply ALPHA.', '   (current)']), { sel: 'Reply ALPHA.', sig: '4|3|Reply ALPHA.' });
+
+// parsePanel: the edge alone, drawn a moment after Enter on "/effort high" (2.1.302), is no panel: read loose (a
+// "/command" just sent) it was an empty card titled "/effort" for a moment (Henry, 2026-10-16)
+const EDGE = '▔'.repeat(60);
+assert.equal(parsePanel(['● ok', EDGE, '', ''], { loose: true }), null);
+assert.equal(parsePanel(['● ok', EDGE, '  Usage', '  ███ 40%'], { loose: true }).title, 'Usage');
+assert.equal(parsePanel(['● ok', EDGE, '', '   Esc to cancel'], { loose: true }).keys, 'Esc to cancel');
 
 console.log('compose-message-test: ok');

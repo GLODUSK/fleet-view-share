@@ -45,6 +45,12 @@ const RULE = '─'.repeat(40);
   assert.equal(SCREEN.effortShown(['…default for new sessions○xhigh·/effort']), 'xhigh');
   assert.equal(SCREEN.effortShown(['…default for new sessionshigh · /effort', RULE, '❯ ', RULE, '  ? for shortcuts']), 'high');
   ok('screen.js: promptBox, spinner and effortShown read what compose.js reads');
+  // the panel edge alone (Claude Code draws it a moment after Enter on "/effort high", 2.1.302) is no panel, even loose
+  const EDGE = '▔'.repeat(60);
+  assert.equal(SCREEN.panelDetails(['some output', EDGE, '', ''], { loose: true }), null);
+  assert.equal(SCREEN.panelDetails(['some output', EDGE, '', '   Esc to cancel'], { loose: true }).keys, 'Esc to cancel');
+  assert.equal(SCREEN.panelDetails(['some output', EDGE, '  Usage', '  ███ 40%'], { loose: true }).title, 'Usage');
+  ok('screen.js: a panel edge with nothing under it is not a panel');
   // Claude Code's grey suggestion of a next message in an empty prompt (dim, the cursor inverse on its first letter)
   // reads as empty; typed text, and a colour whose numbers include a 2, do not
   const E = '\x1b[', rule = `${E}38;2;2;2;2m${RULE}${E}39m`;

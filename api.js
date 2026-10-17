@@ -2921,10 +2921,11 @@ async function readActivity(key, ctx) {
     const rows = plain.slice(-40);
     const spin = SCREEN.spinner(rows);
     let m = SCREEN.menuDetails(plain);
-    if (isSwitchConfirm(m)) m = null; // never shown (hideSwitch)
+    const sw = isSwitchConfirm(m);
+    if (sw) m = null; // never shown (hideSwitch)
     // a command's panel (only when its top edge is on screen, as the page's tick: reading it costs another render),
-    // weighed against a menu as shownFrom does
-    let shown = marked.some((l) => /▔{12}/.test(l)) ? panelFrom(raw, p) : null;
+    // weighed against a menu as shownFrom does. A switch question sits under a panel's edge: not a panel either
+    let shown = !sw && marked.some((l) => /▔{12}/.test(l)) ? panelFrom(raw, p) : null;
     if (shown && m && !p.slashPanel) shown = null;
     else if (shown) m = null;
     const panel = panelOpen(p) || !!shown;
