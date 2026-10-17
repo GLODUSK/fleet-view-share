@@ -176,10 +176,13 @@ test('another machine\'s bots: one per ~/Bots folder no bot here owns, from its 
     { id: 'b0', root: base, name: 'in Bots itself', last: 2 },
     { id: 'r1', root: path.join(dir, 'repo'), name: 'a repo', last: 2 },
     { id: 'q1', root: path.join(base, 'quiet'), name: '', last: 1 },
+    // at work in a repo: the repo is its root, its folder is still the bot's
+    { id: 'w1', cwd: path.join(base, 'pablito'), root: path.join(dir, 'repo'), name: 'Pablito', last: 2, account: 'B' },
   ];
   const out = B.elsewhereBots(convs, base, [mine, gone]);
-  assert.equal(out.length, 2);
+  assert.equal(out.length, 3);
   const p = out.find((x) => x.folder === pan), q = out.find((x) => x.folder === path.join(base, 'quiet'));
+  assert.deepEqual(out.find((x) => x.folder === path.join(base, 'pablito')).ids, ['w1']);
   assert.deepEqual([p.name, p.ids, p.convId, p.account, p.at], ['Panchito', ['p1', 'p2'], 'p2', 'B', 3]);
   assert.match(p.id, /^[0-9a-f]{12}$/);
   assert.equal(B.elsewhereBots(convs.slice(0, 1), base, []).find((x) => x.folder === pan).id, p.id); // the same id each time
@@ -195,7 +198,7 @@ test('another machine\'s bots: one per ~/Bots folder no bot here owns, from its 
   assert.deepEqual([worn.shape, worn.color], ['heart', '#ff6b80']);
   assert.deepEqual([B.elsewhereView(p, { color: '#58a6ff' }).shape, B.elsewhereView(p, { color: '#58a6ff' }).color], [null, '#58a6ff']);
   assert.deepEqual([B.elsewhereView(p, { shape: 'blob', color: 'red' }).shape, B.elsewhereView(p, { shape: 'blob', color: 'red' }).color], [null, null]);
-  assert.deepEqual(B.elsewhereBots(convs, base, [mine, gone, { id: 'cccccccccccc', folder: pan }, { id: 'dddddddddddd', folder: path.join(base, 'quiet') }]), []);
+  assert.deepEqual(B.elsewhereBots(convs, base, [mine, gone, { id: 'cccccccccccc', folder: pan }, { id: 'dddddddddddd', folder: path.join(base, 'quiet') }, { id: 'eeeeeeeeeeee', folder: path.join(base, 'pablito') }]), []);
 });
 test('CLAUDE.md: the template with the name and the brief, in one pass', () => {
   const tpl = fs.readFileSync(B.TEMPLATE_FILE, 'utf8').split(String.fromCharCode(13)).join(''); // a CRLF checkout too

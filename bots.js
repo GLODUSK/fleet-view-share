@@ -401,7 +401,9 @@ function tagState(st, tagOf) {
   return st;
 }
 // another machine's bots, from the conversations here (each { id, root?, cwd?, name, last, account }): one per folder
-// ~/Bots/<slug> that holds some and that no bot here (bots, a removed one's too) owns. Its id is made from the slug, so
+// ~/Bots/<slug> that holds some and that no bot here (bots, a removed one's too) owns. Its folder is the cwd before the
+// root: a bot working in a repo has that repo as its root, and is still its folder's (Henry, 2026-10-17: the PC's
+// Pablito, Panchito and Rambo, at work in detailforge-web and fleet-view, missing from the Mac's Bots tab). Its id is made from the slug, so
 // it stays the same from one /state to the next; its name is its newest conversation's (a bot names its sessions
 // after itself), else the slug. -> [{ id, name, folder, slug (its folder's name, lower case), ids (oldest first), convId
 // (the newest), account, at }]
@@ -410,8 +412,8 @@ function elsewhereBots(convs, base = BOTS_DIR, bots = []) {
   const groups = new Map(); // folder key -> { folder, slug, convs }
   const b = pathKey(base);
   for (const c of convs || []) {
-    const p = c && (c.root || c.cwd);
-    if (!c || !c.id || !inBots(p, base) || pathKey(p) === b) continue;
+    const p = c && [c.cwd, c.root].find((x) => inBots(x, base) && pathKey(x) !== b);
+    if (!c || !c.id || !p) continue;
     if ((bots || []).some((x) => x && typeof x.folder === 'string' && inBots(p, x.folder))) continue;
     const slug = path.relative(path.resolve(base), path.resolve(p)).split(/[\\/]/)[0];
     const folder = path.join(base, slug), k = pathKey(folder);

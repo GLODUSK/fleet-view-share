@@ -2995,8 +2995,13 @@ const keepRemembered = (s, now) => s.state !== 'DONE' && remembered.sessions.has
 const liveWaiting = (id) => liveProcs.get(id)?.status === 'waiting';
 // the conversations the Bots tab opens, each bot's (bots.js chatIds): kept however long
 // their logs have been quiet, as the tab draws a chat and its box only for a conversation /state lists (read once per
-// discover)
+// discover). Another machine's bot (bots.js elsewhereBots) has no chatIds here: the newest log in the projects folder
+// of each ~/Bots/<slug> its machine still has a bot for (botLooks: a removed bot's look stops coming) is kept the same
+// way (discover), or the age rules take its chats off and the bot leaves the tab (Henry, 2026-10-17: the PC's bots
+// came and went on the Mac with their last turn's age). A slug is letters, digits and dashes, so its projects
+// folder's name is the Bots folder's key and the slug
 let overseerKeep = new Set();
+const botsProjKey = () => (BOTS && !DEMO ? projDirKey(BOTS_JS.BOTS_DIR) + '-' : null);
 function overseerIds() {
   const out = new Set();
   if (DEMO) return out;
@@ -3210,9 +3215,15 @@ function discover() {
   // every log in both accounts' projects folders; a conversation moved between accounts (/swap) can have
   // a log in each, and the one written last is the live one
   const found = new Map(); // id -> { file, pdir, m, account, root }
+  const botsKey = botsProjKey(), awaySlugs = new Set(botLooks.map((x) => x.slug));
   for (const r of roots()) {
     for (const proj of ls(r.dir)) {
       const pdir = path.join(r.dir, proj);
+      if (botsKey && proj.toLowerCase().startsWith(botsKey) && awaySlugs.has(proj.toLowerCase().slice(botsKey.length))) {
+        let top = null;
+        for (const f of ls(pdir)) if (f.endsWith('.jsonl')) { const m = mtime(path.join(pdir, f)); if (!top || m > top.m) top = { id: f.slice(0, -6), m }; }
+        if (top) overseerKeep.add(top.id);
+      }
       for (const f of ls(pdir)) {
         if (!f.endsWith('.jsonl')) continue;
         const file = path.join(pdir, f), m = mtime(file), id = f.slice(0, -6);
@@ -6328,8 +6339,12 @@ function handedOn(t, from, to, brief = true) {
 // Every poll: a member that handed off or ran /clear is swapped for the conversation that carries on, in each of its
 // teams (a mid-level lead's two), unless that one holds that kind of place in another team already (a plain seat,
 // or a team it leads) or the swap would loop. Teams whose members have all been gone from the session list for 24
-// hours leave; seenAt is saved every 10 minutes.
+// hours leave; seenAt is saved every 10 minutes. The 24 hours are Fleet View's running time (runAge) and count from
+// this start at the earliest: a machine that was off for days must not drop a team as it starts, before its session
+// list is read, and the drop goes to every machine (sync-prefs.js teams). Henry, 2026-10-17: the Mac, off since the
+// 14th, dropped the PC's team 1 s after its start.
 let teamsSavedAt = 0;
+const teamsSince = Date.now();
 function pruneTeams(now) {
   if (!teams.length) return;
   let changed = false;
@@ -6354,7 +6369,7 @@ function pruneTeams(now) {
   for (const [t, m, to] of swaps) if (teams.includes(t)) { handedOn(t, m, to, !briefed.has(to)); briefed.add(to); }
   for (const t of teams) if (t.members.some((m) => sessions.has(m))) { t.seenAt = now; if (!t.here) { t.here = true; changed = true; } }
   // a team whose members this machine never listed (another device's, sync-prefs.js) is that device's to let go
-  const keep = teams.filter((t) => !t.here || now - (t.seenAt || 0) < TEAM_GONE_MS);
+  const keep = teams.filter((t) => !t.here || runAge(Math.max(t.seenAt || 0, teamsSince), now) < TEAM_GONE_MS);
   if (keep.length !== teams.length) { teams = keep; changed = true; }
   if (changed || now - teamsSavedAt > 10 * 60e3) { teamsSavedAt = now; saveSettings(); }
 }
