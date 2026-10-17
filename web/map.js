@@ -597,6 +597,19 @@ const MOON_D = 26, MOON_A = 0.82, MOON_DARK = 0.32, MOON_EARTH = 0.05, MOON_HALO
 const MOON_LIT = [242, 238, 226], MOON_SHINE = [130, 145, 175], MOON_GLOW = [212, 222, 240];
 const MOON_MARIA = [[-0.36, -0.4, 0.28, 0.16], [0.2, -0.36, 0.18, 0.14], [0.36, -0.04, 0.22, 0.15], [0.7, -0.2, 0.11, 0.14],
   [-0.6, 0.06, 0.34, 0.12], [-0.16, 0.46, 0.17, 0.1], [0.55, 0.26, 0.14, 0.12]];
+// its surface (Henry 2026-10-16: the moon felt flat): lit as a ball (MOON_LAMBERT of Lambert's falloff, the rest the
+// moon's own Lommel-Seeliger, flat at full and dimming only near the terminator), the seas MOON_SEA darker at their
+// middle with ragged edges (MOON_SEA_WARP radii of noise) and tinted MOON_SEA_RGB, the highlands' grain MOON_MOTTLE.
+// MOON_CRATERS: the near side's big ones where they are, [x, y, radius (radii, y down; drawn about 1.5 times their
+// size, or they'd be under a px), depth, young (bright ejecta, 0-1; 2: Tycho's rays too)], and MOON_PITS more small
+// ones scattered (seeded); their slopes tip the light by MOON_RELIEF, so they show most near the terminator, as on the
+// real one
+const MOON_LAMBERT = 0.35, MOON_SEA = 0.36, MOON_SEA_WARP = 0.07, MOON_SEA_RGB = [0.95, 0.97, 1.02], MOON_MOTTLE = 0.1;
+const MOON_RELIEF = 0.45, MOON_PITS = 8;
+const MOON_CRATERS = [[-0.12, 0.7, 0.075, 0.3, 2], [-0.32, -0.12, 0.09, 0.32, 0.8], [-0.6, -0.1, 0.055, 0.28, 0.6],
+  [-0.72, -0.36, 0.045, 0.25, 1], [-0.1, -0.78, 0.08, 0.2, 0], [-0.15, 0.88, 0.12, 0.22, 0], [-0.03, 0.14, 0.11, 0.18, 0],
+  [0.42, 0.24, 0.07, 0.3, 0.3], [0.84, 0.14, 0.08, 0.26, 0.2], [-0.9, 0.1, 0.09, 0.15, 0], [0.12, 0.42, 0.07, 0.24, 0.1],
+  [0.3, 0.62, 0.08, 0.24, 0], [-0.44, 0.5, 0.07, 0.22, 0], [0.58, -0.56, 0.07, 0.24, 0.2]];
 // its path: it rises at MOON_SPAN of the width left of the middle, peaks MOON_TOP of the height from the top and
 // sets as far right, MOON_LOW from the top at the horizon; MOON_DAY: the hours it fades out (from, to) in the
 // morning and back in (from, to) at dusk; under MOON_MIN lit it is not shown (new moon). Reference new moon and
@@ -5149,7 +5162,54 @@ function eclipseAt(d) {
 // as a canvas keeps it) that both the sky's shader (as a texture) and the canvas use: a disc with the terminator an
 // ellipse across it (the lit side's edge, at x = cos(2 pi phase) of the half-width on each row), soft over about a
 // device px, the lit side a little darker towards the limb and over the seas, the dark side earthshine, and under it
-// all the halo
+// all the halo. The lit side is shaded as a ball under the sun (see MOON_LAMBERT), its craters' slopes tipping the light
+// (moonSurface), so it dims towards the terminator and the craters stand out there
+const moonHash = (i, j) => { let h = (Math.imul(i, 374761393) + Math.imul(j, 668265263)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+// smooth value noise, 0-1, one cell per unit
+function moonNoise(x, y) {
+  const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+  const a = moonHash(i, j), b = moonHash(i + 1, j), c = moonHash(i, j + 1), d = moonHash(i + 1, j + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+// MOON_CRATERS and MOON_PITS scattered ones (the same every time), and Tycho's ray directions
+let moonCraterList = null;
+function moonCraters() {
+  if (moonCraterList) return moonCraterList;
+  const rnd = seeded(0x6d6f6f6e), list = MOON_CRATERS.slice();
+  while (list.length < MOON_CRATERS.length + MOON_PITS) {
+    const x = rnd() * 1.8 - 0.9, y = rnd() * 1.8 - 0.9;
+    if (x * x + y * y > 0.8) continue;
+    list.push([x, y, 0.035 + 0.03 * rnd(), 0.22 + 0.1 * rnd(), rnd() < 0.15 ? 0.6 : 0]);
+  }
+  const rays = Array.from({ length: 11 }, (_, k) => (TAU * (k + 0.8 * rnd())) / 11);
+  return (moonCraterList = { list, rays });
+}
+// the surface at (x, y) (radii from the middle, y down): its albedo (alb, 1 the highlands), how much sea (sea, 0-1),
+// Tycho's rays' light (ray) and the slope of its ground (gx, gy: the craters' bowls and rims)
+function moonSurface(x, y) {
+  const { list, rays } = moonCraters();
+  const wx = MOON_SEA_WARP * (2 * moonNoise(x * 5 + 3.1, y * 5 + 7.7) - 1), wy = MOON_SEA_WARP * (2 * moonNoise(x * 5 + 11.3, y * 5 + 1.9) - 1);
+  let sum = 0;
+  for (const [mx, my, mr, md] of MOON_MARIA) sum += md * Math.exp(-((x + wx - mx) ** 2 + (y + wy - my) ** 2) / (mr * mr));
+  const q0 = clamp((sum - 0.03) / 0.11, 0, 1), sea = q0 * q0 * (3 - 2 * q0);
+  const grain = 0.55 * moonNoise(x * 9, y * 9) + 0.3 * moonNoise(x * 19 + 4.2, y * 19 + 8.4) + 0.15 * moonNoise(x * 37 + 1.7, y * 37 + 5.3);
+  let alb = (1 - MOON_SEA * sea) * (1 + MOON_MOTTLE * (grain - 0.5) * (1 - 0.5 * sea)), gx = 0, gy = 0, ray = 0;
+  for (const [cx, cy, cr, D, young] of list) {
+    const dx = x - cx, dy = y - cy, d = Math.hypot(dx, dy) || 1e-6, q = d / cr;
+    if (young === 2) {
+      // the rays: thin streaks out from it, fading over half a radius
+      const an = Math.atan2(dy, dx);
+      for (const r of rays) { const da = Math.atan2(Math.sin(an - r), Math.cos(an - r)) * d; ray += Math.exp(-(da * da) / 0.0018) * Math.exp(-d / 0.4) * clamp(q - 1, 0, 1); }
+    }
+    if (q > 2.5) continue;
+    // the slope (height's rise outwards): the bowl (h = -D cr (1 - q^2)) and its rim (a ridge at q 1, 0.3 wide)
+    const rq = (q - 1) / 0.3, g = (q < 1 ? 2 * D * q : 0) - 3 * D * rq * Math.exp(-rq * rq);
+    gx += (g * dx) / d; gy += (g * dy) / d;
+    // a young one's bright ejecta round it
+    if (young) alb += 0.32 * Math.min(1, young) * Math.exp(-((q / 1.7) ** 2));
+  }
+  return { alb, sea, ray: 0.16 * Math.min(1, ray), gx, gy };
+}
 function moonImage(phase, dpr, ecl) {
   const ph = Math.round(phase * 500) / 500, key = ph + '|' + dpr + (ecl ? '|' + ecl.key : '');
   if (I.moonImg && I.moonImg.key === key) return I.moonImg;
@@ -5158,6 +5218,8 @@ function moonImage(phase, dpr, ecl) {
   const g = c.getContext('2d'), img = g.createImageData(S, S), px = img.data;
   const cs = Math.cos(TAU * ph), frac = (1 - cs) / 2, wax = ph < 0.5, soft = Math.max(0.9 / R, 0.05);
   const earth = MOON_EARTH * (0.35 + 0.65 * (1 - frac));
+  // the sun's direction (x right, z towards us): at the terminator the ball's normal is square to it
+  const sa = Math.atan2(Math.abs(Math.sin(TAU * ph)), -cs), Lx = (wax ? 1 : -1) * Math.sin(sa), Lz = Math.cos(sa);
   let halo = MOON_HALO * Math.pow(frac, 0.8), glow = MOON_GLOW, red = 0;
   if (ecl) {
     // how deep the moon is in the umbra (0 at the first touch, 1 once all of it is in): the copper inside grows from
@@ -5177,10 +5239,14 @@ function moonImage(phase, dpr, ecl) {
       if (cov > 0) {
         const w = Math.sqrt(Math.max(0, 1 - y * y)), s = (wax ? x : -x) - w * cs;
         const l = clamp(s / (2 * soft) + 0.5, 0, 1), lit = l * l * (3 - 2 * l);
-        let sea = 0;
-        for (const [mx, my, mr, md] of MOON_MARIA) sea += md * Math.exp(-((x - mx) ** 2 + (y - my) ** 2) / (mr * mr));
-        const bright = MOON_A * (0.8 + 0.2 * Math.sqrt(Math.max(0, 1 - dd * dd))) * (1 - Math.min(0.3, sea));
-        const e = earth * (1 - 0.5 * Math.min(0.3, sea));
+        // the light the ground catches: the ball's normal tipped by the slopes; Lommel-Seeliger (2 i / (i + e), 1 at
+        // full whatever the place) with MOON_LAMBERT of Lambert's i
+        const f = moonSurface(x, y), z = Math.sqrt(Math.max(0, 1 - dd * dd));
+        const nx = x - MOON_RELIEF * f.gx, ny = y - MOON_RELIEF * f.gy, nl = Math.hypot(nx, ny, z) || 1;
+        const inc = Math.max(0, (nx * Lx + z * Lz) / nl), shade = (1 - MOON_LAMBERT) * Math.min(1.3, (2 * inc) / (inc + z + 0.02)) + MOON_LAMBERT * inc;
+        // (the rays show under a high sun, as on the real one)
+        const bright = MOON_A * shade * (f.alb + f.ray * clamp(1.6 * inc - 0.4, 0, 1));
+        const e = earth * f.alb;
         // the Earth's shadow: inside the umbra (soft over a 20th of a radius) copper, darker towards its middle; just
         // outside it the penumbra dims the lit face
         let um = 0, pen = 0, cu = 0;
@@ -5188,10 +5254,11 @@ function moonImage(phase, dpr, ecl) {
           const ds = Math.hypot(x - ecl.x, y - ecl.y), q = clamp((ECL_RU + 0.05 - ds) / 0.1, 0, 1);
           um = q * q * (3 - 2 * q);
           pen = ECL_PEN * clamp(1 - (ds - ECL_RU) / 1.2, 0, 1);
-          cu = red * (0.55 + 0.45 * clamp(ds / ECL_RU, 0, 1)) * (1 - 0.5 * Math.min(0.3, sea));
+          cu = red * (0.55 + 0.45 * clamp(ds / ECL_RU, 0, 1)) * f.alb;
         }
         for (let k = 0; k < 3; k++) {
-          const day = lit * bright * MOON_LIT[k] * (1 - pen), sh = lit * MOON_A * cu * ECL_RED[k];
+          const tint = 1 + (MOON_SEA_RGB[k] - 1) * f.sea;
+          const day = lit * bright * MOON_LIT[k] * tint * (1 - pen), sh = lit * MOON_A * cu * ECL_RED[k];
           const v = cov * (day * (1 - um) + sh * um + (1 - lit) * e * MOON_SHINE[k]) / 255;
           if (k === 0) r = v; else if (k === 1) gg = v; else b = v;
         }
