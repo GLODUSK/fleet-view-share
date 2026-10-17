@@ -382,7 +382,11 @@ function cleanMapSpots(v) {
     out.push({ id: s.id, x: Math.round(s.x), y: Math.round(s.y), pin: s.pin === true, ...(Number.isFinite(s.at) && s.at > 0 ? { at: Math.round(s.at) } : {}) });
   }
   if (out.length <= MAP_SPOTS_MAX) return out;
-  return [...out.filter((s) => s.pin), ...out.filter((s) => !s.pin)].slice(0, MAP_SPOTS_MAX);
+  // over the cap: repo spots stay (the pinned ones first), and conversations' spots go oldest first; one an op just
+  // put in has no at yet, so it counts as the newest and a fresh drag is never the one cut. The order is kept.
+  const rank = (s) => (s.id.startsWith('s:') ? 2 : s.pin ? 0 : 1), at = (s) => (Number.isFinite(s.at) ? s.at : Infinity);
+  const keep = new Set(out.map((s, i) => i).sort((a, b) => rank(out[a]) - rank(out[b]) || (at(out[b]) > at(out[a])) - (at(out[b]) < at(out[a])) || a - b).slice(0, MAP_SPOTS_MAX));
+  return out.filter((s, i) => keep.has(i));
 }
 // next's spots with at: a spot as it was keeps its at, a new or changed one is stamped now
 function stampSpots(next, prev, now = Date.now()) {

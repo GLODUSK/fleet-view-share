@@ -433,6 +433,11 @@ const REST = { repo: 115, pr: 42, clash: 85, conflict: 80, recent: 55 };
 // the ring a repo holds its conversations on (world units): wider with more of them, so their labels have room. Henry
 // kept dragging new ones out from the old 70 + 17n (a median of ~280 from the hub), so they start out there
 const ringR = (repo) => 150 + 25 * repo.sessions.length;
+// Zoomed far out the ring is a few px wide (Henry's map at scale 0.136: a new one 24 px from its hub, and he dragged
+// each out to 1200-3000 units, 160-400 px): a conversation that shows up starts at least SPAWN_PX (CSS px) from its
+// hub at the scale shown, where it is clearest of everything else (SPAWN_CLEAR px when it can), and stays there as a
+// dragged one does (Unpin puts it back on the ring)
+const SPAWN_PX = 200, SPAWN_CLEAR = 140;
 // hard spacing (Henry: removing a repo or a conversation must never leave things crowded; the canvas is big):
 // a repo's whole group keeps CLUSTER_GAP clear of every other group, nodes of different repos keep APART_OTHER,
 // conversations of one repo keep APART_SAME. Enforced by moving positions, so it holds after the layout settles.
@@ -1722,6 +1727,7 @@ function createInstance(state) {
     glowGL: false,            // the last draw's repo glows came with the sky's picture (else the canvas drew them)
     W: 0, H: 0, dpr: 1, mapDpr: 0,
     pos: new Map(),           // node id -> { x, y, vx, vy } in world units, kept between polls
+    known: new Set(),         // every conversation id a state has listed here, shown or not (spawnSpot: one not in it is new)
     ang: new Map(),           // agent node id -> current orbit angle (eases toward its slot)
     homeOrder: [],
     homeXY: loadSpots(state), // cluster id -> its spot { x, y, pin }: sticky, saved as settings.mapSpots
@@ -2149,7 +2155,7 @@ function rebuild() {
   }
   assignHomes(nodes);
   const sim = nodes.filter((n) => n.kind !== 'agent');
-  let fresh = 0;
+  let fresh = 0, spawned = false;
   // repos first, then sessions, then the rest, so each new node can find an anchor that already exists
   const order = { repo: 0, session: 1, pr: 2, clash: 3, conflict: 3, recent: 4 };
   for (const n of sim.slice().sort((a, b) => order[a.kind] - order[b.kind])) {
@@ -2178,6 +2184,10 @@ function rebuild() {
       p = { x: base.x + Math.cos(a) * r, y: base.y + Math.sin(a) * r, vx: 0, vy: 0 };
       const h = n.kind === 'session' && I.homeXY.get(n.id), hub = h && I.pos.get(n.cl);
       if (hub) { p.x = hub.x + h.x; p.y = hub.y + h.y; } // a conversation dragged before: back where it was
+      else if (n.kind === 'session' && anchor && hubN && hubN.p === anchor) {
+        const off = spawnSpot(n, anchor, sim, r);
+        if (off) { p.x = anchor.x + off.x; p.y = anchor.y + off.y; I.homeXY.set(n.id, { ...off, pin: true }); spawned = true; }
+      }
       I.pos.set(n.id, p);
       fresh++;
     }
@@ -2187,6 +2197,8 @@ function rebuild() {
     n.dr = n.fin ? null : [w('x1'), hashNum(n.id + 'px') * TAU, w('x2') * 0.62, hashNum(n.id + 'qx') * TAU,
       w('y1'), hashNum(n.id + 'py') * TAU, w('y2') * 0.62, hashNum(n.id + 'qy') * TAU];
   }
+  if (spawned) saveSpotsSoon(300, true);
+  for (const s of [state.allSessions, state.sessions, state.finishedSessions, state.pending].flatMap((l) => (Array.isArray(l) ? l : []))) if (s && s.id) I.known.add(s.id);
   // conversations that left: fade out where they were (only when the map was on screen just now)
   const tNow = performance.now();
   if (I.byId && I.lastDraw && tNow - I.lastDraw < 1500) {
@@ -2413,8 +2425,11 @@ function saveSpotsSoon(ms = 1500, force = false) {
 function sendSpots() {
   I.spotsDue = 0;
   if (I.replay) return;
-  const list = [...I.homeXY].map(([id, h]) => ({ id, x: Math.round(h.x), y: Math.round(h.y), pin: !!h.pin }))
-    .sort((a, b) => rank(a) - rank(b)).slice(0, 300);
+  // past 300, the conversations' spots that go are those of the ones not on the map, the oldest first (a Map keeps
+  // the order they came in), so a new one is never the one cut
+  const all = [...I.homeXY].map(([id, h]) => ({ id, x: Math.round(h.x), y: Math.round(h.y), pin: !!h.pin }));
+  const at = new Map(all.map((s, i) => [s.id, i])), off = (s) => (I.byId && I.byId.has(s.id) ? 0 : 1);
+  const list = all.sort((a, b) => rank(a) - rank(b) || (rank(a) === 2 ? off(a) - off(b) || at.get(b.id) - at.get(a.id) : 0)).slice(0, 300);
   const seen = I.spotsSeen, ops = [], have = new Set();
   for (const s of list) {
     have.add(s.id);
@@ -2525,6 +2540,30 @@ function dropRepo(n) {
 }
 
 // Each cluster (a repo and its conversations) gets a spot it keeps (see "Repo spots" at the top).
+// where a conversation that just showed up starts, as an offset from its hub (null: on the ring, as before): SPAWN_PX
+// from the hub on screen when the ring is narrower than that at the scale shown, in the direction (and at the distance,
+// a little nearer or further) that leaves it clearest of the other nodes. Only for one no state listed before (not one
+// back from behind a filter or the finished list), not on the map's first look (what is there then is no news), nor in
+// a replay (its spots are forgotten when it ends).
+function spawnSpot(n, hub, sim, ring) {
+  if (!I.settledOnce || !I.cam || I.replay || n.fin || I.known.has(n.sid)) return null;
+  const k = K(), want = SPAWN_PX / k;
+  if (!(want > ring)) return null;
+  const others = [];
+  for (const m of sim) { const mp = m !== n && I.pos.get(m.id); if (mp) others.push(mp); }
+  let best = null;
+  for (const f of [1, 1.3, 0.75]) {
+    for (let i = 0; i < 36; i++) {
+      const a = (i / 36 + n.h) * TAU, x = Math.cos(a) * want * f, y = Math.sin(a) * want * f;
+      let clear = Infinity;
+      for (const o of others) clear = Math.min(clear, Math.hypot(hub.x + x - o.x, hub.y + y - o.y) * k);
+      if (!best || clear > best.clear) best = { x, y, clear };
+    }
+    if (best.clear >= SPAWN_CLEAR) break;
+  }
+  return { x: Math.round(best.x), y: Math.round(best.y) };
+}
+
 function assignHomes(nodes) {
   const ids = [];
   for (const n of nodes) if (n.kind === 'repo') ids.push(n.id);
@@ -2669,6 +2708,9 @@ function simStep() {
     }
   }
   for (const e of I.springs) {
+    // a conversation held at its own spot (dragged, or placed when it showed up) follows its hub: its ring spring
+    // would only tug the hub toward it, away from its other conversations
+    if (e.repo && pinned(e.a)) continue;
     const a = I.byId.get(e.a), b = I.byId.get(e.b);
     if (!a || !b || !a.p || !b.p) continue;
     const dx = b.p.x - a.p.x, dy = b.p.y - a.p.y, d = Math.sqrt(dx * dx + dy * dy) || 0.1;
