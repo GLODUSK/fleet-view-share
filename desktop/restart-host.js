@@ -1,6 +1,6 @@
 // Fleet View desktop: asks the running session host to restart, so a changed host.js takes effect without
-// killing it by hand. The host checks the new file loads, waits until no other session is mid-turn (not with
-// --now), saves the restore list, ends the sessions and starts a new host that resumes them; the session this
+// killing it by hand. The host checks the new file loads, waits until no other session is mid-turn or idle with
+// background tasks running (not with --now), saves the restore list, ends the sessions and starts a new host that resumes them; the session this
 // runs in (its CLAUDE_LAUNCH_KEY) is told when it is done. See host.js, Restart.
 //   node desktop/restart-host.js [--now]
 // Exit codes: 0 asked (or no host is running), 1 refused or no answer, 2 the running host is too old to restart
@@ -50,8 +50,12 @@ if (!hf || typeof hf.pipe !== 'string' || typeof hf.token !== 'string') {
       const v = m.v || {};
       if (!v.ok) return finish(`Refused: ${v.message || 'no reason given'}`, 1);
       if (v.message) return finish(`The session host (pid ${hf.pid}) says: ${v.message}.`, 0);
-      const w = Array.isArray(v.waiting) ? v.waiting : [];
-      finish(`The session host (pid ${hf.pid}) restarts ${now ? 'now' : w.length ? `once ${w.length} busy session(s) finish (${w.join(', ')}; one working is never cut off, one waiting on an answer gets 10 minutes)` : 'now (no other session is busy)'}; its sessions resume in the new host.`, 0);
+      const w = Array.isArray(v.waiting) ? v.waiting : [], bg = Array.isArray(v.tasks) ? v.tasks : [];
+      const parts = [
+        ...(w.length ? [`${w.length} busy session(s) finish (${w.join(', ')}; one working is never cut off, one waiting on an answer gets 10 minutes)`] : []),
+        ...(bg.length ? [`${bg.length} idle session(s) with background tasks running finish them (${bg.join(', ')}; 10 minutes at most)`] : []),
+      ];
+      finish(`The session host (pid ${hf.pid}) restarts ${now ? 'now' : parts.length ? `once ${parts.join(', and ')}` : 'now (no other session is busy)'}; its sessions resume in the new host.`, 0);
     }
   });
 }

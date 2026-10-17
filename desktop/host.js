@@ -52,8 +52,11 @@
 // such conversations, with a log line. Every client (the window, live.js's remote browsers, api.js) gets that value.
 //
 // Restore list: %LOCALAPPDATA%\fleet-view\sessions.json is rewritten on every change:
-//   { reason, sessions: [{ id, cwd, account, startedAt, busy, interrupted, cols, rows, pendingKey?, pickup?, handoffFrom?, restartBy?, role? }],
-//     ui: { selectedId, wide } }   (pickup / handoffFrom: a handoff's pickup that had no id yet, see Handoffs)
+//   { reason, sessions: [{ id, cwd, account, startedAt, busy, interrupted, cols, rows, pendingKey?, pickup?, handoffFrom?, restartBy?, role?, draft? }],
+//     ui: { selectedId, wide } }   (pickup / handoffFrom: a handoff's pickup that had no id yet, see Handoffs; draft: its
+//     unsent text, see Unsent text)
+// Each save first copies the file it replaces to sessions.json.bak; one that does not parse when a host starts is moved
+// aside to sessions.json.corrupt-<ms> (never written over) and the .bak resumed instead.
 // busy: working, or waiting on a prompt mid-turn (anything but an open "/" panel). "Quit everything" (the tray)
 // writes it with every running session and freezes it, then ends them all and the host exits. A reboot leaves
 // the last one written (a session whose claude died first, with a non-zero
@@ -105,12 +108,22 @@
 // it requires and a pty module load in a fresh process) and refuses if that fails; else it replies at once and
 // waits (not with now) until no session but the asking one (by: its CLAUDE_LAUNCH_KEY) is busy: one working is
 // never cut off, however long it takes; one waiting on an answer (a permission, a question) gets 10 minutes, then
-// is ended, resumed and told to carry on, so its question comes back. It checks again (the self-check again, then the
+// is ended, resumed and told to carry on, so its question comes back. One idle at its prompt whose background tasks
+// still run (a subagent, a Monitor, a shell task: runningTasks of its transcript, read again at most every
+// TASKS_LOOK_MS) gets the same 10 minutes for them to finish; past that it is ended too, and resumed and told its
+// tasks stopped (Auto-continue). The reply names both kinds (waiting, tasks). It checks again (the self-check again, then the
 // pid files as they are then: one that started work meanwhile is waited for), starts the next host
 // (FV_HOST_SUCCESSOR=<pid>: it waits up to 60 s for the pipe instead of exiting, and ends a predecessor still holding it
 // after 30 s), saves the restore list (reason 'restart', the asker marked restartBy), ends every session and exits; the
 // next host then takes the pipe and resumes them. Ending never blocks the host, never takes it over END_WATCHDOG_MS,
 // and a session mid-turn gets no Ctrl+C (see endAll). "Quit everything" while it waits cancels it.
+//
+// Unsent text: Claude Code takes the Ctrl+C that ends an idle session as "clear the prompt", so text typed into its box
+// and not sent would be gone after a restart or a quit. Before either ends them, each one typed into here has its box
+// read off its screen (draftOf) and saved with it in the restore list (draft); the restore hands it to the resumed one
+// (a parked one keeps it until opened), which types it back as a bracketed paste with no Enter once it has loaded and
+// is at rest, after the note when one is due (draftTick). A key typed into it first drops the text. What Claude Code
+// draws in place of text (a long paste's "[Pasted text #1 …]", an image's "[Image #1]") comes back as those words.
 //
 // Handoffs (../handoff.js): every claude started here gets its own CLAUDE_LAUNCH_KEY. A session that checkpoints
 // itself (its Stop hook, at ~200k context tokens) writes ~/.claude-handoffs/.restart/<that key>.json and is
@@ -181,6 +194,10 @@ const NUDGE_IDLE_MS = 2500, NUDGE_QUIET_MS = 1500, NUDGE_TASKS_MS = 20000;
 // a live session idle this long, with no key typed, whose log ends mid-turn is told to carry on (see stallTick);
 // its log is looked at no more often than STALL_LOOK_MS, and a session gets at most STALL_MAX notes an hour
 const STALL_IDLE_MS = 2 * 60 * 1000, STALL_LOOK_MS = 30 * 1000, STALL_MAX = 3;
+// a restart that waits on an idle session's background tasks (see Restart) reads its transcript again at most this often
+const TASKS_LOOK_MS = 30 * 1000;
+// unsent text kept for a session across a restart or a quit (see Unsent text): at most this many characters
+const DRAFT_MAX = 20000;
 // a restore (see Restore list): after the restart asker and the shown one, the RESTORE_FIRST most recently used ones
 // start first; at most RESTORE_CONCURRENT load at once (a start's slot is freed when its claude says idle, or
 // RESTORE_SLOT_MS after it began); two starts at least RESTORE_GAP_MS apart; its own work in turns of about
@@ -435,6 +452,14 @@ function runningTasks(file, now = Date.now()) {
     }
   }
   return [...bg.values()].filter((until) => until > now).length;
+}
+
+// Unsent text as the restore list keeps it (see Unsent text): line breaks as \n, no other control characters (it goes
+// back in as a bracketed paste, which an Esc in it would end early), at most DRAFT_MAX characters; null when empty
+function cleanDraft(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '').slice(0, DRAFT_MAX).trim();
+  return s || null;
 }
 
 // Was the transcript's last turn left open: its last real entry (from the end 2 MB, the main thread only) a tool call
@@ -805,7 +830,9 @@ function createPtys(opts = {}) {
   //          outAt (its last output), inputAt (its last key), line / inPaste (what is typed into the prompt since
   //          the last Enter), slash (a "/" command sent with Enter, until its panel closes: see panelTick),
   //          nudge (the note due after a restore: see nudgeTick), restartBy (it asked for the host restart),
-  //          cutOff (a restart or a quit found it mid-turn: see markCutOff), role ('bot:<id>' or null: see Roles) }
+  //          cutOff (a restart or a quit found it mid-turn: see markCutOff), role ('bot:<id>' or null: see Roles),
+  //          draft (unsent text a restore is to type back into its prompt: see Unsent text), tasksSeen (what tasksOf
+  //          last read of its transcript) }
   const terms = new Map();
   let newSeq = 0;
   let screenLib = null;
@@ -899,9 +926,10 @@ function createPtys(opts = {}) {
       dims: [], dim: { cols, rows }, base: null, baseOut: null,
       cwd, account: acctId(o.account), cols, rows, isNew: false, created: false, claudePid: null, status: null, known: null,
       interrupted: false, restored: false, launchKey, pickup: null, handoffFrom: null, waitingFor: null, seenIdle: false, firstIdleAt: 0, firstBusy: false, idleSince: 0,
-      outAt: 0, inputAt: 0, line: '', inPaste: false, slash: null, nudge: null, restartBy: false, role: null, ...extra,
+      outAt: 0, inputAt: 0, line: '', inPaste: false, slash: null, nudge: null, restartBy: false, role: null, draft: null, tasksSeen: null, ...extra,
     };
     t.role = roleOf(t.role);
+    t.draft = cleanDraft(t.draft);
     terms.set(key, t);
     p.onData((data) => {
       if (terms.get(t.id) !== t) return;
@@ -982,7 +1010,7 @@ function createPtys(opts = {}) {
     if (h) {
       held.delete(id.toLowerCase());
       o = { ...o, cwd: h.s.cwd || o.cwd, account: h.s.account || o.account, cols: o.cols || h.s.cols, rows: o.rows || h.s.rows };
-      if (!extra) extra = h.extra ? h.extra() : { restored: true, role: h.s.role };
+      if (!extra) extra = h.extra ? h.extra() : { restored: true, role: h.s.role, draft: h.s.draft || null };
       log(`open: ${id} ${h.extra ? 'was waiting for its turn in the restore; it starts now' : 'was parked; resumed'}`);
     }
     const role = roleOf(extra && extra.role) || roleOf(o.role) || (old ? old.role : null);
@@ -1074,7 +1102,7 @@ function createPtys(opts = {}) {
     flush(t);
     const role = t.role;
     const r = spawnPty(t.id, commandFor(t.id, t.cwd), { cwd: t.cwd, account: m.account, cols: t.cols, rows: t.rows },
-      { ...carried(t), created: t.created, forkFrom: t.forkFrom || null, handoffFrom: t.handoffFrom, role,
+      { ...carried(t), created: t.created, forkFrom: t.forkFrom || null, handoffFrom: t.handoffFrom, role, draft: t.draft,
         nudge: m.rescue ? { kind: 'continue', cause: `it hit the limit of Claude ${m.from}` } : null });
     log(`switch to ${m.account}: ${t.id} ${r.ok ? `resumed under ${m.account} (pid ${r.pid})${m.rescue ? ', "continue" due once it has loaded' : ''}` : `could not start again: ${r.message}`}`);
     t.moveTo = null;
@@ -1188,7 +1216,7 @@ function createPtys(opts = {}) {
       }
     }
     if (moved) changed();
-    for (const t of live) { if (t.alive) { panelTick(t, now); stallTick(t, now); nudgeTick(t, now); } }
+    for (const t of live) { if (t.alive) { panelTick(t, now); stallTick(t, now); nudgeTick(t, now); draftTick(t, now); } }
     const pend = live.filter((t) => t.isNew);
     // resumed ones not tied to their claude yet: the file with their id whose process runs in their pty (a
     // terminal elsewhere may have the same conversation open), so a later /clear or /resume can be followed
@@ -1392,6 +1420,38 @@ function createPtys(opts = {}) {
     log(`auto-continue: ${t.id} idle ${Math.round((now - t.idleSince) / 1000)} s with its turn left open; note due (stalled)`);
   }
 
+  // Unsent text (see Unsent text): what sits in its prompt box now, for the restore list of a restart or a quit. The box
+  // as its screen shows it (screen.js promptBox: Claude Code's grey suggestion is not text; null when a menu or a panel
+  // covers it, or in bash mode), or, when it is the same text, what was typed since the last Enter (t.line), which keeps
+  // its own line breaks where the box wraps a long line into rows of its own. Only one typed into here can hold any (a
+  // screen costs some 30 ms to read); one whose text a restore still has to type back keeps that (t.draft).
+  const flatText = (s) => String(s).replace(/\s+/g, ' ').trim();
+  function draftOf(t) {
+    if (!t.alive || t.isNew || !t.inputAt) return t.draft || null;
+    let box = null;
+    try { box = screens().promptBox(screens().render(kept(t), t.cols, t.rows, 60, false, true)); } catch (e) { log(`draft: could not read the screen of ${t.id}: ${e.message}`); }
+    if (!box || !box.text) return t.draft || null;
+    const typed = !t.inPaste && t.line.length < 200 && flatText(t.line) === flatText(box.text) ? cleanDraft(t.line) : null;
+    return typed || cleanDraft(box.text);
+  }
+  // A restore's unsent text (t.draft) goes back into the prompt once it has loaded and is at rest, as the note does (idle
+  // 2.5 s by its pid file, no output for 1.5 s, no menu on screen), after the note when one is due (it waits for the turn
+  // the note starts to end): a bracketed paste with no Enter, so it sits there unsent as it did. A key typed into the
+  // session first drops it (someone is at it, and the two would mix).
+  function draftTick(t, now) {
+    if (!t.draft || t.nudge) return;
+    if (t.inputAt) { log(`draft: ${t.id} was typed into first; its unsent text (${t.draft.length} characters) is not typed back`); t.draft = null; changed(); return; }
+    if (!settled(t, now) || menuUp(t)) return;
+    const paste = `\x1b[200~${t.draft}\x1b[201~`;
+    const n = t.draft.length;
+    t.draft = null;
+    try { t.pty.write(paste); } catch {}
+    track(t, paste); // it is in the prompt now: a stall note and a switch of account hold off, as for text typed there
+    t.inputAt = now;
+    changed();
+    log(`draft: ${t.id}: its unsent text (${n} characters) typed back into its prompt`);
+  }
+
   function resize(id, cols, rows) {
     const t = terms.get(id);
     if (!t || !t.alive) return;
@@ -1567,7 +1627,9 @@ function createPtys(opts = {}) {
   // One that has asked for its handoff's restart and is still to be killed (the few seconds after its Stop hook wrote
   // the request, while it already looks idle) is saved as that pickup: the restart or quit that ends it here drops
   // the request (see Handoffs), and the next host starts the pickup in its place.
-  function restoreList() {
+  // o.drafts (a restart or a quit, before it ends them): each one's unsent text is read off its screen (draftOf) and kept as
+  // draft; any other save keeps only the text a restore has still to type back.
+  function restoreList(o = {}) {
     const asked = HO.restartKeys();
     return [...terms.values()].filter((t) => !t.dismissed && (t.alive || (!t.isNew && t.exitCode !== 0))).map((t) => {
       const ho = t.alive && asked.has(t.launchKey) ? HO.peekRestart(t.launchKey) : null;
@@ -1576,12 +1638,14 @@ function createPtys(opts = {}) {
           cols: t.cols, rows: t.rows, pendingKey: t.id, pickup: ho.file, handoffFrom: ho.session || (ID_RE.test(t.id) ? t.id.toLowerCase() : t.handoffFrom || null),
           ...(t.role ? { role: t.role } : {}) };
       }
+      const draft = o.drafts ? draftOf(t) : t.draft;
       return {
         id: t.isNew ? null : t.id, cwd: t.cwd, account: t.account, startedAt: t.startedAt, busy: isBusy(t) || !!t.cutOff,
         interrupted: !!t.interrupted, cols: t.cols, rows: t.rows, ...(t.isNew ? { pendingKey: t.id } : {}),
         ...(t.isNew && t.pickup ? { pickup: t.pickup, handoffFrom: t.handoffFrom || null } : {}),
         ...(t.restartBy ? { restartBy: true } : {}),
         ...(t.role ? { role: t.role } : {}),
+        ...(draft ? { draft } : {}),
       };
     }).concat([...held.values()].filter((h) => !(h.s.id && terms.has(h.s.id))).map((h) => h.s));
   }
@@ -1591,6 +1655,20 @@ function createPtys(opts = {}) {
   const busyBut = (launchKey) => others(launchKey, midTurn);
   // of those, the ones working (or running a shell command), not waiting on an answer
   const workingBut = (launchKey) => others(launchKey, working);
+  // How many background tasks its transcript says still run (runningTasks: a subagent, a Monitor, a shell task), for a
+  // restart that waits on an idle session's (see Restart). Read again at most every TASKS_LOOK_MS (a read is up to 8 MB),
+  // and then only when the transcript changed or last said some run; none in one still for a day (BG_MAX_MS)
+  function tasksOf(t, now) {
+    const c = t.tasksSeen;
+    if (c && now - c.at < TASKS_LOOK_MS) return c.n;
+    const tr = findTranscript(t.id, t.cwd);
+    const key = tr ? `${tr.size}:${tr.mtimeMs}` : '';
+    const n = !tr || now - tr.mtimeMs >= BG_MAX_MS ? 0 : c && c.key === key && !c.n ? 0 : runningTasks(tr.file, now);
+    t.tasksSeen = { at: now, key, n };
+    return n;
+  }
+  // the running sessions not mid-turn whose background tasks still run, but the asker's
+  const tasksBut = (launchKey) => others(launchKey, (t, now) => !t.isNew && !midTurn(t, now) && tasksOf(t, now) > 0);
   // marks the asker, so the next host tells it the restart is done; its id, or null when none is hosted here
   function markRestartBy(launchKey) {
     const t = launchKey ? [...terms.values()].find((x) => x.alive && x.launchKey === launchKey) : null;
@@ -1613,7 +1691,7 @@ function createPtys(opts = {}) {
     return true;
   }
 
-  return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, workingBut, markRestartBy, markCutOff, snapshot, aliveCount, dirs,
+  return { open, sendTo, switchAccount, create, startPickup, write, resize, kill, endAll, killAll, list, restoreList, busyBut, workingBut, tasksBut, markRestartBy, markCutOff, snapshot, aliveCount, dirs,
     hold, heldOf, take, parked, loaded, rescan: scan };
 }
 
@@ -1660,11 +1738,20 @@ function runHost() {
   }
 
   // ---------- restore list ----------
-  let ui = null, frozen = false, saveTimer = null, sessionsTimer = null;
+  // sessions.json.bak, the last good list: each save first copies the file it replaces there, while this host knows that
+  // file is whole (it read it at its start, or wrote it itself). One that does not parse at the start is moved aside and
+  // the .bak read instead (see restore), so a list cut short is never all there is, nor written over.
+  let ui = null, frozen = false, saveTimer = null, sessionsTimer = null, listWhole = true;
+  const sessionsBak = () => `${sessionsFile()}.bak`;
   function saveNow(reason) {
     clearTimeout(saveTimer); saveTimer = null;
     if (frozen && reason !== 'quit' && reason !== 'restart') return;
-    try { writeJsonAtomic(sessionsFile(), { version: 1, savedAt: Date.now(), reason, hostPid: process.pid, sessions: ptys.restoreList(), ui }); } catch (e) { log(`could not write sessions.json: ${e.message}`); }
+    try {
+      if (listWhole) { try { fs.copyFileSync(sessionsFile(), sessionsBak()); } catch {} }
+      // a restart or a quit keeps each one's unsent text too (see Unsent text), read off its screen before it is ended
+      writeJsonAtomic(sessionsFile(), { version: 1, savedAt: Date.now(), reason, hostPid: process.pid, sessions: ptys.restoreList({ drafts: reason === 'quit' || reason === 'restart' }), ui });
+      listWhole = true;
+    } catch (e) { log(`could not write sessions.json: ${e.message}`); }
   }
   function changed() {
     if (!saveTimer && !frozen) saveTimer = setTimeout(() => saveNow('change'), 250);
@@ -1701,11 +1788,18 @@ function runHost() {
   const restoreStopped = () => quitting || frozen || down;
   function restore() {
     const t0 = Date.now();
-    const saved = readJson(sessionsFile());
-    if (!saved || typeof saved !== 'object') {
-      if (fs.existsSync(sessionsFile())) log('restore: sessions.json could not be read (cut short when the PC went down?); nothing resumed');
-      return;
+    let saved = readJson(sessionsFile());
+    // one that does not parse (cut short when the PC went down?) is kept aside, never written over, and the last good
+    // list (sessions.json.bak, see saveNow) is resumed in its place
+    if ((!saved || typeof saved !== 'object') && fs.existsSync(sessionsFile())) {
+      const aside = `${sessionsFile()}.corrupt-${Date.now()}`;
+      try { fs.renameSync(sessionsFile(), aside); } catch { listWhole = false; }
+      const bak = readJson(sessionsBak());
+      saved = bak && typeof bak === 'object' && Array.isArray(bak.sessions) ? bak : null;
+      log(`restore: sessions.json could not be read (cut short when the PC went down?); ${listWhole ? `kept as ${path.basename(aside)}` : 'could not move it aside'}; `
+        + (saved ? `resuming sessions.json.bak (saved ${new Date(Number(saved.savedAt) || 0).toISOString()}) instead` : 'no sessions.json.bak to fall back on, nothing resumed'));
     }
+    if (!saved || typeof saved !== 'object') return;
     if (saved.ui && typeof saved.ui === 'object') ui = saved.ui;
     const list = Array.isArray(saved.sessions) ? saved.sessions : [];
     if (!list.length) return;
@@ -1732,7 +1826,7 @@ function runHost() {
           nudge = tr ? { ...nudge, file: tr.file, offset: tr.size } : null;
         }
       }
-      return { interrupted, restored: true, nudge, role };
+      return { interrupted, restored: true, nudge, role, draft: s.draft || null };
     };
     // the tier a conversation starts in (see restoreOrder); -1: parked, unless a check finds it should start
     const tierOf = (id, s, pickup) => (s.restartBy || id === shown ? 0 : s.busy || s.interrupted ? 1 : s.role || pickup ? 2 : restoreIdle ? 4 : -1);
@@ -1742,12 +1836,13 @@ function runHost() {
     let pickups = 0;
     for (const s0 of list) {
       if (!s0 || typeof s0 !== 'object') continue;
-      const role = roleOf(s0.role);
+      const role = roleOf(s0.role), draft = cleanDraft(s0.draft);
       // as this host keeps it in the restore list while it waits
       const s = { id: typeof s0.id === 'string' && ID_RE.test(s0.id) ? s0.id.toLowerCase() : null, cwd: typeof s0.cwd === 'string' ? s0.cwd : null,
         account: acctId(s0.account), startedAt: Number(s0.startedAt) || 0, busy: !!s0.busy, interrupted: !!s0.interrupted,
         cols: Number.isInteger(s0.cols) ? s0.cols : null, rows: Number.isInteger(s0.rows) ? s0.rows : null,
-        ...(typeof s0.pendingKey === 'string' ? { pendingKey: s0.pendingKey } : {}), ...(s0.restartBy ? { restartBy: true } : {}), ...(role ? { role } : {}) };
+        ...(typeof s0.pendingKey === 'string' ? { pendingKey: s0.pendingKey } : {}), ...(s0.restartBy ? { restartBy: true } : {}), ...(role ? { role } : {}),
+        ...(draft ? { draft } : {}) };
       // a pickup that had no id yet: sorted below (the conversation it started when the handoff names it, else the pickup again)
       if (typeof s0.pickup === 'string' && !s.id) {
         const from = typeof s0.handoffFrom === 'string' && ID_RE.test(s0.handoffFrom) ? s0.handoffFrom.toLowerCase() : null;
@@ -1949,9 +2044,10 @@ function runHost() {
   }
 
   // restart({ now, by }): replies once the self-check passed, waits until no session but the asker (by, its
-  // CLAUDE_LAUNCH_KEY) is mid-turn (now: not at all; one working as long as it takes, one waiting on an answer
-  // ASK_WAIT_MS at most), checks again, then saves the restore list, ends every session and hands over to a new
-  // host, which resumes them.
+  // CLAUDE_LAUNCH_KEY) is mid-turn or idle with background tasks running (now: not at all; one working as long as it
+  // takes, one waiting on an answer or on its tasks ASK_WAIT_MS at most), checks again, then saves the restore list, ends
+  // every session and hands over to a new host, which resumes them. The reply: { ok, waiting: [mid-turn ids], tasks:
+  // [ids idle with background tasks running] }.
   let restarting = null; // { by, now, timer, going }
   function restart(arg, reply) {
     if (quitting) return reply({ ok: false, message: 'the host is quitting' });
@@ -1961,29 +2057,34 @@ function runHost() {
     selfCheck((err) => {
       if (restarting !== r) return reply({ ok: false, message: 'cancelled' });
       if (err) { restarting = null; log(`restart: refused, the self-check failed (${err})`); return reply({ ok: false, message: `The new host.js failed its self-check: ${err}` }); }
-      const waiting = r.now ? [] : ptys.busyBut(r.by);
-      reply({ ok: true, waiting });
+      const waiting = r.now ? [] : ptys.busyBut(r.by), tasks = r.now ? [] : ptys.tasksBut(r.by);
+      reply({ ok: true, waiting, tasks });
       let loggedAt = Date.now();
-      const askingSince = new Map(); // id -> when it was first seen waiting on an answer, while still waiting
-      // what still holds it back: { held, asked }. A working one is never cut off; one waiting on an answer is given
-      // ASK_WAIT_MS (its question comes back: it is resumed and told to carry on); asked: the ones past that wait
+      const askingSince = new Map(); // id -> when it was first seen waiting on an answer or on its tasks, while still so
+      // what still holds it back: { held, asked, ran }. A working one is never cut off; one waiting on an answer is given
+      // ASK_WAIT_MS (its question comes back: it is resumed and told to carry on); asked: the ones past that wait. One idle
+      // whose background tasks still run (tasksBut) is given the same wait, so they can finish; ran: the ones past it
       const holding = () => {
-        const busy = r.now ? [] : ptys.busyBut(r.by), working = r.now ? [] : ptys.workingBut(r.by);
+        const busy = r.now ? [] : ptys.busyBut(r.by), working = r.now ? [] : ptys.workingBut(r.by), bg = r.now ? [] : ptys.tasksBut(r.by);
         const asking = busy.filter((id) => !working.includes(id)), now = Date.now();
-        for (const id of [...askingSince.keys()]) if (!asking.includes(id)) askingSince.delete(id);
-        for (const id of asking) if (!askingSince.has(id)) askingSince.set(id, now);
-        const asked = asking.filter((id) => now - askingSince.get(id) >= ASK_WAIT_MS);
-        return { held: busy.filter((id) => !asked.includes(id)), asked };
+        const capped = [...asking, ...bg];
+        for (const id of [...askingSince.keys()]) if (!capped.includes(id)) askingSince.delete(id);
+        for (const id of capped) if (!askingSince.has(id)) askingSince.set(id, now);
+        const over = (id) => now - askingSince.get(id) >= ASK_WAIT_MS;
+        const asked = asking.filter(over), ran = bg.filter(over);
+        return { held: [...busy.filter((id) => !asked.includes(id)), ...bg.filter((id) => !ran.includes(id))], asked, ran };
       };
+      const waitText = ASK_WAIT_MS >= 60000 ? `${Math.round(ASK_WAIT_MS / 60000)} min` : `${Math.round(ASK_WAIT_MS / 1000)} s`;
       const tick = () => {
         if (restarting !== r) return;
-        const { held, asked } = holding(), now = Date.now();
+        const { held, asked, ran } = holding(), now = Date.now();
         if (held.length) {
           if (now - loggedAt >= 10 * 60000) { loggedAt = now; log(`restart: still waiting on ${held.join(', ')}`); }
           r.timer = setTimeout(tick, 2000);
           return;
         }
-        if (asked.length) log(`restart: ${asked.join(', ')} waited ${ASK_WAIT_MS >= 60000 ? `${Math.round(ASK_WAIT_MS / 60000)} min` : `${Math.round(ASK_WAIT_MS / 1000)} s`} for an answer; restarting (they are told to carry on)`);
+        if (asked.length) log(`restart: ${asked.join(', ')} waited ${waitText} for an answer; restarting (they are told to carry on)`);
+        if (ran.length) log(`restart: ${ran.join(', ')} still had background tasks running after ${waitText}; restarting (they are told their tasks stopped)`);
         // host.js may have changed again while it waited
         selfCheck((err2) => {
           if (restarting !== r) return;
@@ -2001,6 +2102,7 @@ function runHost() {
         });
       };
       if (waiting.length) log(`restart: waiting on ${waiting.join(', ')}`);
+      if (tasks.length) log(`restart: waiting on ${tasks.join(', ')}: idle, with background tasks running (${waitText} at most)`);
       tick();
     });
   }

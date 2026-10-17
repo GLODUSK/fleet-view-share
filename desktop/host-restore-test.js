@@ -12,7 +12,10 @@
 // FV_HOST_ASK_WAIT_MS; one a live claude elsewhere has open is not dropped but tried again FV_HOST_RESTORE_RETRY_MS
 // later, then parked (keeping its restore state) when still open; a restart checks again right before it ends anything
 // (one that started work meanwhile is waited for); a quit ends one mid-turn without Ctrl+C and saves it busy; a restart
-// whose end phase hangs (FV_HOST_TEST_END_HANG) still hands over after its watchdog. Also runningTasks() on its own. Every process it
+// whose end phase hangs (FV_HOST_TEST_END_HANG) still hands over after its watchdog; a restart waits on an idle one whose
+// background tasks still run, FV_HOST_ASK_WAIT_MS at most; a restart keeps the unsent text in a session's prompt (the fake
+// draws a prompt box when its folder has a file "box"), a parked one keeps it, and once opened and at rest it is typed back
+// with no Enter; a sessions.json that does not parse is kept aside and sessions.json.bak resumed. Also runningTasks() on its own. Every process it
 // started is killed at the end. Exit code 0 when every case passes. FV_HOST_TEST_KEEP=1 keeps the temp folder (host.log)
 // after a pass.
 'use strict';
@@ -43,13 +46,22 @@ function nodePath() {
 }
 
 // the fake claude: one line per start in starts.txt (pid, time, arguments, account folder, launch key), in the folder it
-// runs in; every byte it receives in received.txt
+// runs in; every byte it receives in received.txt. With a file "box" in its folder it draws Claude Code's prompt box (two
+// rules, "❯ " and what was typed into it) and redraws it on each key
 fs.writeFileSync(FAKE, `'use strict';
 const fs = require('fs'), path = require('path');
 fs.appendFileSync(path.join(process.cwd(), 'starts.txt'), JSON.stringify({ pid: process.pid, at: Date.now(), args: process.argv.slice(2), config: process.env.CLAUDE_CONFIG_DIR || '-', key: process.env.CLAUDE_LAUNCH_KEY || null }) + '\\n');
-process.stdout.write('fake claude ready\\r\\n');
+const box = fs.existsSync(path.join(process.cwd(), 'box'));
+let line = '';
+const RULE = '\\u2500'.repeat(60);
+const draw = () => process.stdout.write('\\x1b[2J\\x1b[Hfake claude ready\\r\\n' + RULE + '\\r\\n\\u276f ' + line + '\\r\\n' + RULE + '\\r\\n  ? for shortcuts\\r\\n');
+if (box) draw(); else process.stdout.write('fake claude ready\\r\\n');
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
-process.stdin.on('data', (d) => { fs.appendFileSync(path.join(process.cwd(), 'received.txt'), d); if (d.includes(3)) process.exit(0); });
+process.stdin.on('data', (d) => {
+  fs.appendFileSync(path.join(process.cwd(), 'received.txt'), d);
+  if (d.includes(3)) process.exit(0);
+  if (box) { line += d.toString('utf8').replace(/\\x1b\\[20[01]~/g, '').replace(/[\\x00-\\x1f\\x7f]/g, ''); draw(); }
+});
 process.stdin.resume();
 `);
 
@@ -513,6 +525,110 @@ async function main() {
   const c9 = succ9 ? await waitFor(() => connect().catch(() => null), 10000) : null;
   if (c9) { await c9.req('quitAll', {}).catch(() => null); c9.close(); }
   if (succ9) await waitFor(() => !pidAlive(succ9.pid), 15000);
+
+  // ===== 10. a restart waits on an idle one whose background tasks still run (ASK_WAIT at most), not on one whose =====
+  // task finished; the reply names it apart from the busy ones
+  settings({ autoContinue: false });
+  const TK = conv('tk', { busy: true }), NK = conv('nk', { busy: true });
+  transcript(TK, [...bashBg('t1', 'btk'), ended()]);
+  transcript(NK, [...bashBg('t1', 'bnk'), notice('bnk', 'completed'), ended()]);
+  writeList([TK, NK]);
+  startHost();
+  if (!await waitFor(() => hostJson(), 15000)) { check('10. the host starts', false, hostLog()); return; }
+  cl = await waitFor(() => connect().catch(() => null), 10000);
+  await waitFor(() => starts(TK).length && starts(NK).length, 15000);
+  pidFile(TK, 'idle');
+  pidFile(NK, 'idle');
+  await waitFor(async () => (await cl.req('list')).filter((x) => x.status === 'idle').length === 2, 10000);
+  const hp10 = hostJson().pid, t10 = Date.now();
+  const r10 = await cl.req('restart', {});
+  check('10. restart asked: the reply names the idle one with a background task running (tasks), not the one whose task finished',
+    r10 && r10.ok && (r10.tasks || []).includes(TK.id) && !(r10.tasks || []).includes(NK.id) && !(r10.waiting || []).length
+    && hostLog().includes(`[host ${hp10}] restart: waiting on ${TK.id}: idle, with background tasks running`), r10);
+  await sleep(ASK_WAIT * 0.5);
+  check('10. it holds the restart while the task runs: nothing saved or ended yet', pidAlive(hp10) && !hostLog().includes(`[host ${hp10}] restart: saved`)
+    && !received(TK).includes('\x03'), hostLog().split('\n').filter((l) => l.includes(`[host ${hp10}] restart`)));
+  const saved10 = await waitFor(() => hostLog().includes(`[host ${hp10}] restart: saved`), 15000);
+  check('10. past ASK_WAIT the restart goes on (a log line)', saved10 && Date.now() - t10 >= ASK_WAIT
+    && hostLog().includes(`[host ${hp10}] restart: ${TK.id} still had background tasks running after ${ASK_WAIT / 1000} s`), hostLog().split('\n').filter((l) => l.includes(`[host ${hp10}] restart`)));
+  cl.close();
+  const succ10 = await waitFor(() => { const h = hostJson(); return h && h.pid !== hp10 ? h : null; }, 30000);
+  for (const c of [TK, NK]) try { fs.unlinkSync(c.pidFile); } catch {}
+  if (succ10) {
+    started.add(succ10.pid);
+    const c10 = await waitFor(() => connect().catch(() => null), 10000);
+    if (c10) { await c10.req('quitAll', {}).catch(() => null); c10.close(); }
+    await waitFor(() => !pidAlive(succ10.pid), 15000);
+  }
+
+  // ===== 11. unsent text: a restart keeps what sits in an idle session's prompt; the next host keeps it with the =====
+  // parked one (in sessions.json too); opened and at rest, it is typed back as a paste with no Enter
+  settings({ autoContinue: false });
+  const DR = conv('dr', { busy: true });
+  fs.writeFileSync(path.join(DR.cwd, 'box'), '');
+  writeList([DR]);
+  startHost();
+  if (!await waitFor(() => hostJson(), 15000)) { check('11. the host starts', false, hostLog()); return; }
+  cl = await waitFor(() => connect().catch(() => null), 10000);
+  await waitFor(() => starts(DR).length, 15000);
+  pidFile(DR, 'idle');
+  await waitFor(async () => ((await cl.req('list')).find((x) => x.id === DR.id) || {}).status === 'idle', 10000);
+  const DRAFT = 'half a thought, not sent';
+  await cl.req('write', DR.id, DRAFT);
+  const shown11 = await waitFor(async () => String(await cl.req('snapshot', DR.id) || '').includes(DRAFT), 10000);
+  const hp11 = hostJson().pid;
+  const r11 = await cl.req('restart', { now: true });
+  cl.close();
+  const succ11 = await waitFor(() => { const h = hostJson(); return h && h.pid !== hp11 ? h : null; }, 30000);
+  if (succ11) started.add(succ11.pid);
+  cl = succ11 ? await waitFor(() => connect().catch(() => null), 10000) : null;
+  if (!cl) { check('11. a successor host serves the pipe', false, hostLog().split('\n').slice(-8)); return; }
+  const done11 = await waitFor(() => hostLog().split('\n').some((l) => l.includes(`[host ${succ11.pid}]`) && / of \d+ resumed/.test(l)), 30000);
+  const s11 = await waitFor(() => { const x = savedOf(DR); return x && x.parked ? x : null; }, 5000);
+  check('11. the restart saved its unsent text; the next host keeps it with the parked one (sessions.json), not started',
+    shown11 && r11 && r11.ok && done11 && s11 && s11.draft === DRAFT && starts(DR).length === 1, { shown11, r11, s11 });
+  try { fs.unlinkSync(DR.pidFile); } catch {}
+  DR.pidFile = null;
+  const before11 = received(DR).length;
+  const ro11 = await cl.req('open', { id: DR.id, cwd: DR.cwd, account: 'B', cols: 100, rows: 30 });
+  await waitFor(() => starts(DR).length === 2, 10000);
+  pidFile(DR, 'idle');
+  // (ConPTY drops the paste's brackets for a program that never turned bracketed paste on, as the fake does not)
+  const typed11 = await waitFor(() => received(DR).slice(before11).includes(DRAFT), 15000);
+  await sleep(1500);
+  const after11 = received(DR).slice(before11);
+  check('11. opened and at rest, its unsent text is typed back as a paste, with no Enter (a log line)', ro11 && ro11.ok && typed11
+    && !/[\r\n]/.test(after11) && hostLog().includes(`[host ${succ11.pid}] draft: ${DR.id}: its unsent text (${DRAFT.length} characters) typed back`), { ro11, after11 });
+  const s11b = await waitFor(() => { const x = savedOf(DR); return x && !x.parked && !x.draft ? x : null; }, 5000);
+  check('11. once typed back it is no longer kept as a draft', !!s11b, savedOf(DR));
+  try { fs.unlinkSync(DR.pidFile); } catch {}
+  await cl.req('quitAll', {}).catch(() => null);
+  cl.close();
+  await waitFor(() => !pidAlive(succ11.pid), 15000);
+
+  // ===== 12. a sessions.json that does not parse (cut short) is kept aside, never written over; the .bak is resumed =====
+  settings({ autoContinue: false });
+  const CB = conv('cb', { busy: true });
+  const listFile = path.join(DATA, 'sessions.json');
+  writeList([CB]);
+  fs.renameSync(listFile, `${listFile}.bak`);
+  fs.writeFileSync(listFile, '{"version":1,"sessions":[{"id":"');
+  for (const f of fs.readdirSync(DATA)) if (f.startsWith('sessions.json.corrupt-')) fs.unlinkSync(path.join(DATA, f));
+  startHost();
+  if (!await waitFor(() => hostJson(), 15000)) { check('12. the host starts', false, hostLog()); return; }
+  cl = await waitFor(() => connect().catch(() => null), 10000);
+  const up12 = await waitFor(() => starts(CB).length, 15000);
+  const aside12 = fs.readdirSync(DATA).filter((f) => f.startsWith('sessions.json.corrupt-'));
+  check('12. an unreadable sessions.json is kept aside as it was (a log line) and the .bak resumed', up12 && aside12.length === 1
+    && fs.readFileSync(path.join(DATA, aside12[0]), 'utf8') === '{"version":1,"sessions":[{"id":"' && /restore: sessions\.json could not be read .*kept as sessions\.json\.corrupt-\d+; resuming sessions\.json\.bak/.test(hostLog()),
+  { aside12, log: hostLog().split('\n').filter((l) => l.includes('restore')).slice(-4) });
+  const saved12 = await waitFor(() => savedOf(CB), 5000);
+  check('12. the next save writes a whole sessions.json again', !!saved12, savedList());
+  const hp12 = cl.pid;
+  await cl.req('quitAll', {}).catch(() => null);
+  cl.close();
+  await waitFor(() => !pidAlive(hp12), 15000);
+  check('12. after more saves sessions.json.bak is a whole list too', (() => { try { return Array.isArray(JSON.parse(fs.readFileSync(`${listFile}.bak`, 'utf8')).sessions); } catch { return false; } })());
 }
 
 // a host that died mid-request leaves an answer that never comes: the event loop drains with main() still waiting
