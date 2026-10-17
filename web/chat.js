@@ -570,12 +570,29 @@ const SYS_TONE = { cut: 'alert', restart: 'sync', moved: 'computer', info: 'info
 // a bot's reaction to your message (opts.bubbles, botFeed): its emoji on the bubble's corner
 const reactionHtml = (it) => (it.reaction ? `<span class="cu-react" title="Reacted ${esc(it.reaction)}">${esc(it.reaction)}</span>` : '');
 
+// a message another conversation sent this one (api.js sendMessage's head line, then its text) -> { name, ask, lead,
+// text }, else null
+function mateOf(text) {
+  const m = /^\[(Message|Question) from (your lead |teammate )?"([^"\n]*)" \([^)\n]*\)\.[^\n]*\](?:\r?\n|$)/.exec(String(text || ''));
+  return m ? { name: m[3] || 'Another chat', ask: m[1] === 'Question', lead: m[2] === 'your lead ', text: String(text).slice(m[0].length).trim() } : null;
+}
+
 function renderItem(it, c) {
   const L = libsReady;
-  const el = document.createElement(it.kind === 'tool' || it.kind === 'thinking' || ((it.kind === 'note' || it.kind === 'setup') && isLongNote(it.text)) ? 'details' : 'div');
+  const mate = it.kind === 'user' ? mateOf(it.text) : null;
+  const el = document.createElement(mate || it.kind === 'tool' || it.kind === 'thinking' || ((it.kind === 'note' || it.kind === 'setup') && isLongNote(it.text)) ? 'details' : 'div');
   el.dataset.key = it.key;
   switch (it.kind) {
     case 'user': {
+      if (mate) {
+        // a teammate's message: a centred note saying who sent it; the text opens under it (the head line not shown)
+        const who = `${mate.lead ? 'Your lead, ' : ''}${mate.name}`;
+        el.className = 'ci ci-note ci-mate';
+        el.innerHTML = `<summary class="cn-row"${timeTitle(it.t)}><span class="cm-ic">${icon('send', 12)}</span><span class="cn-t">${esc(`${who} ${mate.ask ? 'asked you something' : 'sent you a message'}`)}</span>${icon('chevron', 11)}</summary>`
+          + (mate.text ? copyBox(`<div class="cn-body">${esc(mate.text)}</div>`) : '');
+        el._text = mate.text;
+        break;
+      }
       const bash = bashOf(it.text);
       if (bash && bash.cmd != null) {
         // a "!" command: "! <command>", in the shell's colour
