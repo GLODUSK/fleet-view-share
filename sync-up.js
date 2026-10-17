@@ -4,7 +4,13 @@
 //
 //   createUploader({ api, dataDir, key, log, now, projects, home, chunkBytes, rateBytesPerSec, only, accountOf, busy,
 //                    ownerOf })
-//     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), flush(id), forget(id), hold(id), unhold(id), held() }
+//     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), flush(id), forget(id), hold(id), unhold(id), held(),
+//          rescan() }
+//
+//   status().notSynced lists, per chat, why one did not go up ({ id, cause, why, fix, byDesign, folder, since }: noRepo
+//   split into gitUnread, otherPlatform, temp, toolFolder, unnamed, noFolder; and foreign, inactive, empty, held,
+//   backingOff), till it does (NOT_SYNCED_CAUSES); notSyncedCount is how many. rescan() asks placement again for all of
+//   them now (git afresh, skips and back-offs dropped) and starts a scan.
 //
 //   api              sync-api.js createSync()'s object (rest() and storage are all it uses)
 //   key              the 32-byte sync key (sync-crypto.js loadKey); every byte that leaves goes through it
@@ -49,7 +55,8 @@
 // folder, newest log first, one at a time. For each one whose files changed since the last scan:
 //   1. Where it belongs, by the folder its log lives in (else its last cwd): a git checkout with an origin on a host
 //      holding it gives that repo's row. A cwd that is gone (a removed worktree) counts by the nearest folder above it
-//      that is still there, as long as the checkout found holds the cwd. When no checkout with an origin holds it but
+//      that is still there, as long as the checkout found holds the cwd; a removed worktree whose folder stayed (a
+//      .git file naming a gitdir that is gone, sync-common.js staleGitFile) counts by the checkout around it. When no checkout with an origin holds it but
 //      the folder is under the home folder, it goes under the home row (sync-common.js HOME_ORIGIN) with rel_cwd
 //      relative to home, as it always has (a checkout with no origin, a Perforce workspace and home itself too, which
 //      /state calls bound: sync-common.js "portable or bound"). Outside home, or in an app data or Claude account
@@ -142,9 +149,25 @@ const NOT_SYNCED = {
   forgotten: 'this conversation was forgotten while it went up',
   backingOff: 'this conversation is backing off',
 };
+// Why one conversation is not synced, per chat (status().notSynced: /sync/activity and the Sync card's "Not synced"
+// list): noRepo split into its causes, and the other skips. why says what it means, fix what to do (null: nothing),
+// byDesign the ones that are meant not to go up from here (the card counts them in one line).
+const NOT_SYNCED_CAUSES = {
+  gitUnread: { why: 'its folder is in a git checkout git could not read', fix: 'check that git works in that folder (git status there); it goes up by itself once git reads it', byDesign: false },
+  otherPlatform: { why: 'its folder is the other machine\'s path (a copy laid down here, not resumed here)', fix: 'resume it here once, or keep using it on the machine it came from', byDesign: false },
+  noFolder: { why: 'its log names no folder yet', fix: null, byDesign: false },
+  unnamed: { why: 'its folder\'s path can\'t be synced (too long)', fix: 'start the chat in a folder with a shorter path', byDesign: false },
+  backingOff: { why: 'its last upload failed', fix: 'it tries again by itself; the uploads\' last error says why', byDesign: false },
+  temp: { why: 'it runs in the temp folder, where only throwaway chats run', fix: null, byDesign: true },
+  toolFolder: { why: 'it runs in a Claude account\'s or Fleet View\'s own folder (a tool\'s chat)', fix: null, byDesign: true },
+  foreign: { why: 'another machine owns it', fix: null, byDesign: true },
+  inactive: { why: 'the server has it as not active', fix: null, byDesign: true },
+  empty: { why: 'it has no whole line yet', fix: null, byDesign: true },
+  held: { why: 'it is held here (set aside, or mid-move)', fix: null, byDesign: true },
+};
+const NOT_SYNCED_MAX = 200; // status().notSynced: the newest causes first, at most this many (notSyncedCount: all)
 
 const clip = (s, n = 200) => { const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
-const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const short = (id) => String(id).slice(0, 8);
 
 // ---------- reading a file in pieces ----------
@@ -223,12 +246,10 @@ const ownPath = (cwd) => typeof cwd === 'string' && !!cwd && (P.isWin ? /^(?:[A-
 async function repoFor(cwd) {
   if (!ownPath(cwd)) return null;
   const want = path.resolve(cwd);
-  let dir = want;
-  while (!isDir(dir)) {
-    const up = path.dirname(dir);
-    if (up === dir) return null;
-    dir = up;
-  }
+  // the nearest folder still there; a removed worktree whose folder stayed (its .git names a gitdir that is gone)
+  // counts by the checkout around it, as one whose folder is gone does (sync-common.js staleGitFile)
+  const dir = C.pastStaleGit(want);
+  if (!dir) return null;
   const r = await C.repoOf(dir);
   if (!r || !r.origin) return null;
   let relCwd = inside(r.mainRoot, want);
@@ -320,6 +341,14 @@ function createUploader(opts = {}) {
   const repoIds = new Map(); // origin -> repos.id
   const repoPathsDone = new Set(); // `${device}|${repoId}|${root}` written in this process
   const skipLogged = new Set();
+  const notSynced = new Map(); // id -> { cause (NOT_SYNCED_CAUSES), folder, since }: why it did not go up, till it does
+  const noteWhy = (id, cause, folder) => {
+    const was = notSynced.get(id);
+    if (was && was.cause === cause) { if (folder) was.folder = folder; return; }
+    const k = NOT_SYNCED_CAUSES[cause];
+    if (k && !k.byDesign && cause !== 'backingOff') log(`${short(id)}: not synced: ${k.why}${folder ? ` (${folder})` : ''}`); // (a failure logs itself)
+    notSynced.set(id, { cause, folder: folder || (was && was.folder) || null, since: now() });
+  };
   const holds = new Set(); // ids no scan uploads (hold/unhold)
   const epochs = new Map(); // id -> how often it was forgotten: a pass that began before a forget() writes nothing more
   const counts = { conversations: 0, synced: 0, pending: 0, noRepo: 0, foreign: 0, inactive: 0, empty: 0, held: 0, backingOff: 0, throttled: 0 };
@@ -652,9 +681,11 @@ function createUploader(opts = {}) {
     }
   }
 
-  function skip(c, mem, why, ms, tally) {
+  // (cause: noRepo's, NOT_SYNCED_CAUSES; folder: where it runs, for status().notSynced)
+  function skip(c, mem, why, ms, tally, cause = why, folder = null) {
     mem.skip = { sig: `${c.size}:${c.mtimeMs}`, until: now() + ms, why };
     tally[why]++;
+    noteWhy(c.id, cause, folder);
     return why;
   }
 
@@ -710,12 +741,16 @@ function createUploader(opts = {}) {
     // itself are the home row's too, though /state calls them bound); else (outside home, or an app data or Claude
     // account folder, which were never synced before) this device's bound row. Never one in the temp folder, nor one
     // under a .git git could not read (it waits for git).
+    let cause = null; // why none (NOT_SYNCED_CAUSES), for status().notSynced
     if (!repo && ownPath(where)) {
       const h = homeFor(where, userHome);
-      if (h) { if (!(await C.gitUnreadAt(where, h.mainRoot))) repo = h; }
-      else if (!C.inTemp(where, { home: userHome, temp: tempOpt }) && !toolFolder(where) && !(await C.gitUnreadAt(where))) repo = boundFor(where, device);
+      if (h) { if (!(await C.gitUnreadAt(where, h.mainRoot))) repo = h; else cause = 'gitUnread'; }
+      else if (C.inTemp(where, { home: userHome, temp: tempOpt })) cause = 'temp';
+      else if (toolFolder(where)) cause = 'toolFolder';
+      else if (await C.gitUnreadAt(where)) cause = 'gitUnread';
+      else repo = boundFor(where, device);
     }
-    if (repo && repo.bound && (!repo.relCwd || repo.relCwd.length > 1024)) repo = null;
+    if (repo && repo.bound && (!repo.relCwd || repo.relCwd.length > 1024)) { repo = null; cause = 'unnamed'; }
     // none, and its last cwd is another machine's path (a log laid down here by a move and not prompted here yet: its
     // lines still name that machine's folders), or a flush asks: a row this device owns goes up under its own repo_id
     // and rel_cwd, so a chat moved here can always be handed back
@@ -727,7 +762,10 @@ function createUploader(opts = {}) {
       if (row && ownerOf(row) === device && row.repo_id && typeof row.rel_cwd === 'string') repo = { rid: String(row.repo_id).toLowerCase(), mainRoot: null, relCwd: row.rel_cwd, fromRow: true };
       else row = null;
     }
-    if (!repo) { pendingOf.delete(id); return skip(c, mem, 'noRepo', SKIP_RECHECK_MS, tally); }
+    if (!repo) {
+      pendingOf.delete(id);
+      return skip(c, mem, 'noRepo', SKIP_RECHECK_MS, tally, cause || (!where ? 'noFolder' : !ownPath(where) ? 'otherPlatform' : 'unnamed'), where || null);
+    }
     const rid = repo.fromRow ? repo.rid : await repoId(repo.origin);
 
     // its row
@@ -736,7 +774,7 @@ function createUploader(opts = {}) {
     const lose = () => { pendingOf.delete(id); return skip(c, mem, 'foreign', FOREIGN_RECHECK_MS, tally); };
     // forgotten or held while the row was fetched: nothing written yet, nothing will be
     if ((epochs.get(id) || 0) !== epoch) { tally.held++; return 'forgotten'; }
-    if (!how.urgent && holds.has(id)) { tally.held++; return 'held'; }
+    if (!how.urgent && holds.has(id)) { tally.held++; noteWhy(id, 'held', where); return 'held'; }
     if (row && row.owner_device && String(row.owner_device).toLowerCase() !== device) return lose();
     if (row && row.state && row.state !== 'active') { pendingOf.delete(id); return skip(c, mem, 'inactive', SKIP_RECHECK_MS, tally); }
     if (st && !row) { log(`${short(id)}: the server has no row for it any more: uploading it again`); st = null; }
@@ -884,6 +922,7 @@ function createUploader(opts = {}) {
     counts.conversations = list.length;
     const ids = new Set(list.map((c) => c.id));
     for (const id of [...pendingOf.keys()]) if (!ids.has(id)) pendingOf.delete(id);
+    for (const id of [...notSynced.keys()]) if (!ids.has(id)) notSynced.delete(id);
     let rowFailed = false, ended = null; // ended: the error that ended the scan (Supabase out of reach, signed out)
     for (const c of list) {
       if (stopping) break;
@@ -891,8 +930,9 @@ function createUploader(opts = {}) {
       await lock(false); // a flush() waiting goes first
       try {
         if (stopping) break;
-        if (holds.has(c.id)) { counts.held++; continue; } // held after the scan began: looked at at its turn
-        await syncConversation(c, device);
+        if (holds.has(c.id)) { counts.held++; noteWhy(c.id, 'held'); continue; } // held after the scan began: looked at at its turn
+        const out = await syncConversation(c, device);
+        if (out === 'synced' || out === 'throttled') notSynced.delete(c.id);
       } catch (e) {
         if (e && e.code === 'stopped') break;
         setError(e);
@@ -915,6 +955,7 @@ function createUploader(opts = {}) {
           mem.backoffUntil = now() + wait;
           log(`${short(c.id)}: failed (${clip(e && e.message)}); trying again in ${Math.round(wait / 1000)} s`);
         }
+        noteWhy(c.id, 'backingOff');
       } finally { unlock(); }
     }
     counts.pending = [...pendingOf.values()].filter((n) => n > 0).length;
@@ -987,6 +1028,7 @@ function createUploader(opts = {}) {
         const mem = memo.get(id);
         if (mem) { mem.backoffUntil = 0; mem.skip = null; mem.listedAt = 0; }
         const out = await syncConversation(c, device, { urgent: true, tally });
+        if (out === 'synced') notSynced.delete(id);
         if (out !== 'synced') throw new S.SyncError(NOT_SYNCED[out] || out, 0, out);
         const row = await getRow(id, FLUSH_COLS);
         if (!row) throw new S.SyncError('the server has no row for that conversation', 0, 'missing');
@@ -1008,7 +1050,7 @@ function createUploader(opts = {}) {
     const id = idOf(raw);
     if (!ID_RE.test(id)) return false;
     epochs.set(id, (epochs.get(id) || 0) + 1);
-    memo.delete(id); hashes.delete(id); pendingOf.delete(id); untrim(id);
+    memo.delete(id); hashes.delete(id); pendingOf.delete(id); notSynced.delete(id); untrim(id);
     forgotAt.set(id, now());
     if (state) {
       if (state.conversations[id]) { delete state.conversations[id]; dirty = true; saveState(); }
@@ -1034,9 +1076,26 @@ function createUploader(opts = {}) {
       uploadedBytes: totals.uploadedBytes, uploadedChunks: totals.uploadedChunks,
       lastError: totals.lastError ? { ...totals.lastError } : null,
       health: health.status(),
+      notSynced: notSyncedList(), notSyncedCount: notSynced.size,
     };
   }
-  return { scanOnce, start, stop, status, flush, forget, hold, unhold, held };
+  // why each chat that did not go up did not (newest first, at most NOT_SYNCED_MAX): { id, cause, why, fix, byDesign,
+  // folder, since (ISO) }
+  function notSyncedList() {
+    return [...notSynced].sort((a, b) => b[1].since - a[1].since).slice(0, NOT_SYNCED_MAX).map(([id, n]) => {
+      const k = NOT_SYNCED_CAUSES[n.cause] || { why: n.cause, fix: null, byDesign: false };
+      return { id, cause: n.cause, why: k.why, fix: k.fix, byDesign: k.byDesign, folder: n.folder, since: new Date(n.since).toISOString() };
+    });
+  }
+  // the Sync card's Rescan: placement asked again for every chat that was skipped (git asked afresh, the 10-minute
+  // skips and back-offs dropped), and a scan now (or the one under way, then the next round)
+  function rescan() {
+    C.forgetRepos();
+    for (const mem of memo.values()) { mem.skip = null; mem.backoffUntil = 0; }
+    if (started) scanOnce();
+    return { ok: true, scanning: started };
+  }
+  return { scanOnce, start, stop, status, flush, forget, hold, unhold, held, rescan };
 }
 
 module.exports = { createUploader, repoFor, homeFor, boundFor, lastLineEnd, MAX_CHUNK, TAIL_BYTES };

@@ -5,7 +5,8 @@
 // with a ring in the health's colour: ok mint, warn gold, bad rose, off dim; then the signed-in account as a row with
 // its first letter in a circle, the membership chip and a quiet Sign out), Activity (two stat tiles for the uploads,
 // then one line per loop where only an error stands out; downloads, conflicts and what was brought here stay in
-// /sync/activity and the logs, never on the card), the sync key in one row, Your machines (with the main computer),
+// /sync/activity and the logs, never on the card), Not synced (the chats that did not go up: each one to act on with
+// its folder's name, why, since when and the fix; one line counting those meant to stay off sync, and Rescan), the sync key in one row, Your machines (with the main computer),
 // Repos, Set aside, and This machine (the Claude accounts, Start clean, Work locally). Each section has a small-caps
 // heading; a confirm is an inline panel with a title line. Primary actions are filled cyan (sy-go), destructive ones
 // rose (sy-danger), the rest outlined. "This PC" / "this Mac" / "this machine" follow the platform (#580).
@@ -15,7 +16,8 @@
 //                        terminal) / signed out / signed in as <email>, on the members list or not
 //   GET /sync/activity   running or why not, and the uploads' counts in plain words (never a title, a path, a token or
 //                        the key: counts, and each loop's health: when it last went through, its last error's message
-//                        and time, and whether it is backing off)
+//                        and time, and whether it is backing off); and up.notSynced, why each chat that did not go
+//                        up did not (its folder on this machine's page only)
 //   GET /sync/setup      whether the sync key is on this machine (hasKey). No passphrase: once signed in, the server
 //                        fetches the key from Blackbox by itself (sync-run.js), and this only says so
 //   GET /sync/fresh      (this machine's own page only; 404 where sync isn't set up: then none of Start clean shows)
@@ -28,6 +30,7 @@
 //                        refuses embedded windows, and this page may be inside the Fleet View window); the card then
 //                        watches the status until it says signed in
 //   Sign out             POST /sync/signout, after a second click in the card
+//   Rescan               POST /sync/rescan: where each chat in Not synced belongs is asked again now (git afresh)
 //   Repos                clone.js cloneSection: the repos with synced chats and no checkout here, Clone, "Clone new
 //                        repos automatically" and the clone folder (this PC's own page only)
 // A remote browser (the phone, another computer) sees the same card read-only: sign-in is done on the PC.
@@ -78,6 +81,7 @@ const FINAL_STATES = new Set(['linked', 'declined', 'failed', 'expired', 'cancel
 const POLL_WAIT_MS = 1500; // while a sign-in is going on in the browser
 const HEALTH_WATCH_MS = 10e3; // GET /sync/activity while the card is closed: the pill's colour
 const ASIDE_SHOWN = 5; // Set aside rows before "Show all"
+const WHY_SHOWN = 5; // Not synced rows before "Show all"
 const SETUP_CMD = 'node sync-api.js setup --url https://<project>.supabase.co --key <the publishable key>';
 const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
 const ago = (iso) => {
@@ -115,6 +119,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
   let freshOpen = false; // Start clean's confirm is open
   let freshPrev = null; // its preview: { loading } or { preview: { setAside, kept } | null, error }
   let asideAll = false, confirmBringAll = false;
+  let whyAll = false; // Not synced: every row, not just the first WHY_SHOWN
   let main = null; // GET /sync/main (main-machine.js): { main, me, isMain, online } | null
   let pickMain = false; // the main computer's Change is open
 
@@ -313,6 +318,32 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     }
     return html;
   }
+  // Not synced: the chats that did not go up and why (sync-up.js status().notSynced), the ones to act on first with
+  // their fix, then one line counting the ones meant to stay here (another machine's, the temp folder's...); Rescan
+  // (this machine's page only) asks where each belongs again at once
+  function whyHtml() {
+    const st = status, a = activity;
+    if (!st || !st.configured || !st.signedIn || !a || !a.running) return '';
+    const up = a.up && typeof a.up === 'object' && !a.up.error ? a.up : null;
+    const list = up && Array.isArray(up.notSynced) ? up.notSynced.filter((x) => x && x.id) : [];
+    if (!list.length) return '';
+    const fix = list.filter((x) => !x.byDesign), meant = list.filter((x) => x.byDesign);
+    const shown = whyAll ? fix : fix.slice(0, WHY_SHOWN);
+    const leaf = (f) => String(f || '').split(/[\\/]/).filter(Boolean).pop() || '';
+    let html = shown.map((x) => `<div class="sy-arow"><span class="sy-at" title="${esc(x.folder || x.id)}">${esc(leaf(x.folder) || `chat ${String(x.id).slice(0, 8)}`)}</span>`
+      + `<span class="sy-as" title="${esc(x.why || '')}">${esc(cap(x.why || x.cause))}${x.since ? ` · since ${esc(ago(x.since))}` : ''}</span>`
+      + (x.fix ? `<span class="sy-as" title="${esc(x.fix)}">${esc(cap(x.fix))}</span>` : '') + '</div>').join('');
+    if (fix.length > WHY_SHOWN) html += `<div class="sy-btns">${btn('why-more', whyAll ? 'Show fewer' : `Show all ${fix.length}`, { cls: 'sy-quiet', off: false })}</div>`;
+    if (meant.length) {
+      const by = new Map();
+      for (const x of meant) by.set(x.why || x.cause, (by.get(x.why || x.cause) || 0) + 1);
+      html += `<div class="sy-line sy-dim">Meant to stay off sync: ${esc([...by].map(([w, k]) => `${k} (${w})`).join('; '))}.</div>`;
+    }
+    const total = Number(up.notSyncedCount) || list.length;
+    if (total > list.length) html += `<div class="sy-line sy-dim">The ${list.length} newest show here.</div>`;
+    const right = `<span class="sy-count">${esc(String(total))}</span>${remote() ? '' : btn('why-rescan', 'Rescan', { cls: 'sy-quiet sy-hr' })}`;
+    return head('alert', 'Not synced', right) + html;
+  }
   // what tells Henry sync works: the uploads (how many chats are up to date, when the last one went up) and the live
   // status; downloads, conflicts and what was brought here stay in /sync/activity and the logs
   function activityLines(a) {
@@ -443,6 +474,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     if (top._html !== html) { top.innerHTML = html; top._html = html; }
     put('.sy-where', whereHtml());
     put('.sy-act', activityHtml(), head('sync', 'Activity'));
+    put('.sy-why', whyHtml());
     put('.sy-key', keyHtml());
     put('.sy-link', linkHtml(), head('shield', 'Your machines'));
     put('.sy-aside', asideHtml());
@@ -558,13 +590,21 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     } else if (c === 'bring-all') { confirmBringAll = true; note = null; }
     else if (c === 'keep-aside') confirmBringAll = false;
     else if (c === 'aside-more') asideAll = !asideAll;
+    else if (c === 'why-more') whyAll = !whyAll;
+    else if (c === 'why-rescan') {
+      if (busy || remote()) return;
+      const r = await act('/sync/rescan', {});
+      if (r && r.ok) note = { text: 'Looking again where each of these belongs; the list updates as it goes.' };
+      else if (r) note = { text: r.message || 'It did not start.', bad: true };
+      await refresh();
+    }
     draw();
   }
   function open() {
     if (card) return;
     gen++;
     answered = false; status = activity = keyInfo = link = fresh = freshPrev = null; note = null; confirmOut = false; busy = false; confirmUnlink = null;
-    freshOpen = false; asideAll = false; confirmBringAll = false; confirmLocal = false; pickMain = false;
+    freshOpen = false; asideAll = false; confirmBringAll = false; confirmLocal = false; pickMain = false; whyAll = false;
     card = document.createElement('div');
     card.className = 'uw-pop sy-pop';
     card.setAttribute('role', 'dialog');
@@ -572,7 +612,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     card.tabIndex = -1;
     card.innerHTML = `<div class="uw-top"><span class="uw-title">${icon('sync', 14)}<b>Sync</b></span><span class="uw-sub">conversations across your machines</span>`
       + `<button type="button" class="uw-x" aria-label="close" title="close (Esc)">${icon('close', 13)}</button></div>`
-      + '<div class="uw-scroll"><div class="sy-sec sy-where" hidden></div><div class="sy-main"></div><div class="sy-sec sy-act" hidden></div><div class="sy-sec sy-key" hidden></div><div class="sy-sec sy-link" hidden></div>'
+      + '<div class="uw-scroll"><div class="sy-sec sy-where" hidden></div><div class="sy-main"></div><div class="sy-sec sy-act" hidden></div><div class="sy-sec sy-why" hidden></div><div class="sy-sec sy-key" hidden></div><div class="sy-sec sy-link" hidden></div>'
       + '<div class="sy-sec sy-clone" hidden></div><div class="sy-sec sy-aside" hidden></div><div class="sy-sec sy-mode" hidden></div>'
       + '<div class="sy-note" hidden aria-live="polite"></div></div>'
       + `<div class="uw-foot">${remote() ? 'Read-only here: sign-in and sign-out are done on that computer.' : `Chats sync through your Supabase project, encrypted with the sync key before they leave ${HERE}.`}</div>`;

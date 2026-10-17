@@ -614,6 +614,11 @@ async function main() {
   write(mainOf(projH, hRepo, hRep), lines(hRepo, 3));
   write(mainOf(projH, outside, hOut), lines(outside, 3));
   write(mainOf(projH, bots, hMoved), lines(bots, 2) + lines(hRepo, 2)); // began in the bot's folder, went into the repo
+  // a removed worktree whose folder stayed: its .git file names <repo>/.git/worktrees/stale-wt, which is gone
+  const staleWt = path.join(hRepo, '.claude', 'worktrees', 'stale-wt'), hStale = newId('hStale');
+  fs.mkdirSync(path.join(staleWt, 'web'), { recursive: true });
+  fs.writeFileSync(path.join(staleWt, '.git'), `gitdir: ${path.join(hRepo, '.git', 'worktrees', 'stale-wt')}\n`);
+  write(mainOf(projH, staleWt, hStale), lines(path.join(staleWt, 'web'), 3));
   eq(U.homeFor(uh, uh), { origin: C.HOME_ORIGIN, mainRoot: path.resolve(uh), relCwd: '' }, 'homeFor: the home folder itself is rel_cwd \'\'');
   eq(U.homeFor(path.join(uh, '..x', 'y'), uh) && U.homeFor(path.join(uh, '..x', 'y'), uh).relCwd, '..x/y', 'homeFor: a folder named ..x is still under home');
   eq([U.homeFor(outside, uh), U.homeFor(T, uh), U.homeFor(P.isWin ? '/Users/henry/x' : 'C:\\Users\\henry\\x', uh)], [null, null, null], 'homeFor: outside home, above it, or another platform\'s path: none');
@@ -625,7 +630,10 @@ async function main() {
   await upH.scanOnce();
   const hst = upH.status();
   eq(hst.lastError, null, 'home: no error');
-  eq([hst.synced, hst.skipped.noRepo], [7, 1], 'home: seven synced (the one outside home bound); the one under a .git git could not read skipped as noRepo');
+  eq([hst.synced, hst.skipped.noRepo], [8, 1], 'home: eight synced (the one outside home bound); the one under a .git git could not read skipped as noRepo');
+  eq(hst.notSynced.map((x) => ({ id: x.id, cause: x.cause, byDesign: x.byDesign, here: !!x.folder && same(x.folder, broken) })), [{ id: hBroken, cause: 'gitUnread', byDesign: false, here: true }],
+    'home: notSynced names the one under a .git git could not read, its cause and folder');
+  ok(hst.notSyncedCount === 1 && typeof hst.notSynced[0].why === 'string' && typeof hst.notSynced[0].fix === 'string' && !!Date.parse(hst.notSynced[0].since), 'home: with why, the fix and since when');
   const homeRow = db.repos.find((r) => r.origin === C.HOME_ORIGIN);
   const hRepoRow = db.repos.find((r) => r.origin === 'https://github.com/test/home-repo');
   ok(!!homeRow && db.repos.filter((r) => r.origin === C.HOME_ORIGIN).length === 1, 'home: one repos row with the home origin');
@@ -641,6 +649,15 @@ async function main() {
   const hOutRow = conv(hOut), hBound = db.repos.find((r) => r.origin === C.boundOrigin(dev));
   ok(hOutRow && hBound && hOutRow.repo_id === hBound.id && hOutRow.rel_cwd === C.boundRel(outside), `home: a chat outside home in no repo is bound: the bound row, its full path (${hOutRow && hOutRow.rel_cwd})`);
   ok(!conv(hBroken), 'home: a chat under a .git git could not read has no row (never the home row)');
+  const hs = conv(hStale);
+  ok(hs && hRepoRow && hs.repo_id === hRepoRow.id && hs.rel_cwd === '.claude/worktrees/stale-wt/web', `home: a removed worktree whose folder stayed goes under its main checkout's row (${hs && hs.rel_cwd})`);
+  // its .git fixed: a scan alone keeps the skip (10 min), Rescan asks again at once
+  fs.rmSync(path.join(uh, 'code', 'broken', '.git'), { force: true });
+  await upH.scanOnce();
+  ok(!conv(hBroken) && upH.status().notSynced.length === 1, 'home: a scan right after keeps the skip');
+  eq(upH.rescan(), { ok: true, scanning: false }, 'rescan: not started, so no scan of its own');
+  await upH.scanOnce();
+  ok(!!conv(hBroken) && conv(hBroken).repo_id === homeRow.id && upH.status().notSynced.length === 0 && upH.status().notSyncedCount === 0, 'rescan: the fixed one goes up (the home row) and leaves notSynced');
   sameAsLocal(hBot, 'main', mainOf(projH, bots, hBot), true, 'home: the bot\'s chat');
   rowMatchesMain(hBot, mainOf(projH, bots, hBot), 'home: the bot\'s chat');
   await upH.stop();
@@ -667,6 +684,8 @@ async function main() {
   eq(bst.lastError, null, 'bound: no error');
   eq([bst.synced, bst.skipped.noRepo], [5, 3], 'bound: five synced; the ones in the temp folder, a Claude account\'s folder and Fleet View\'s data folder skipped');
   ok(!conv(bIds.acct) && !conv(bIds.data), 'bound: a Claude account\'s folder and Fleet View\'s data folder have no row (a tool\'s chats)');
+  const bWhy = bst.notSynced.map((x) => `${x.id} ${x.cause}${x.byDesign ? '' : '!'}`).sort();
+  eq(bWhy, [`${bIds.tmp} temp`, `${bIds.acct} toolFolder`, `${bIds.data} toolFolder`].sort(), 'bound: notSynced says temp folder and tool folder, both by design');
   const bRow = db.repos.find((r) => r.origin === C.boundOrigin(dev));
   ok(bRow && db.repos.filter((r) => r.origin === C.boundOrigin(dev)).length === 1, 'bound: one bound repos row for this device, whatever the folder');
   for (const [k, what] of [['lib', 'an app data folder under home'], ['ph', 'a placeholder under home'], ['out', 'a folder outside home']]) {

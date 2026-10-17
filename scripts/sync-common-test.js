@@ -443,6 +443,18 @@ async function main() {
   write(path.join(wtDir, '.git'), `gitdir: ${wtGit}\n`);
   eq(co(wtDir), { top: 'cl-wt', origin: 'https://github.com/test/cl' }, 'checkoutAt: a worktree reads its main checkout\'s origin');
   eq(C.checkoutAt(P.isWin ? '/Users/x' : 'C:\\x'), null, 'checkoutAt: another platform\'s path');
+  // a removed worktree whose folder stayed: its .git file names <main>/.git/worktrees/<name>, which is gone
+  const staleWt = path.join(cRepo, '.claude', 'worktrees', 'gone-wt'), staleSub = path.join(staleWt, 'web');
+  fs.mkdirSync(staleSub, { recursive: true });
+  write(path.join(staleWt, '.git'), `gitdir: ${path.join(cRepo, '.git', 'worktrees', 'gone-wt')}\n`);
+  ok(C.staleGitFile(staleWt) && !C.staleGitFile(wtDir) && !C.staleGitFile(path.join(cHome, 'broken')) && !C.staleGitFile(cRepo),
+    'staleGitFile: only a worktree .git whose gitdir is gone under a main .git still there');
+  ok(same(C.pastStaleGit(staleSub), path.join(cRepo, '.claude', 'worktrees')) && same(C.pastStaleGit(path.join(staleSub, 'gone')), path.join(cRepo, '.claude', 'worktrees')),
+    'pastStaleGit: the folder above the stale worktree');
+  ok(same(C.pastStaleGit(path.join(cBroken, 'gone')), cBroken) && same(C.pastStaleGit(path.join(wtDir, 'x')), wtDir), 'pastStaleGit: any other .git is not looked past');
+  ok(!(await C.gitUnreadAt(staleSub)), 'gitUnreadAt: a stale worktree does not wait for git');
+  eq(await cl(staleSub), { kind: 'portable', why: null, git: true, origin: 'https://github.com/test/cl' }, 'classifyFolder: a stale worktree is its main checkout\'s');
+  eq(co(staleSub), { top: 'cl-repo', origin: 'https://github.com/test/cl' }, 'checkoutAt: a stale worktree reads the main checkout around it');
 }
 
 main().catch((e) => { failures++; console.log(`FAIL threw: ${e && e.stack}`); }).finally(() => {

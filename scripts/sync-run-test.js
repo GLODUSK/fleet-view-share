@@ -89,6 +89,10 @@ function fakeMover(args, made) {
     ok((await C.loadKey(S.syncDir(dir))).equals(key) && settings.join() === 'GET', 'the key came from Blackbox and is saved here');
     ok(logs.some((t) => /fetched the sync key from Blackbox/.test(t)), 'the log says it was fetched');
     ok(runner.status().running === true && runner.status().up.kind === 'up', 'status shows them running');
+    const upLoop = made.find((l) => l.kind === 'up');
+    upLoop.rescan = () => ({ ok: true, scanning: true });
+    eq(runner.rescanUp(), { ok: true, scanning: true }, 'rescanUp: the uploader\'s rescan() while running');
+    delete upLoop.rescan;
     await runner.check();
     ok(made.length === 2 && settings.join() === 'GET,GET', 'a second check with nothing changed starts nothing new (it only reads Blackbox\'s key)');
 

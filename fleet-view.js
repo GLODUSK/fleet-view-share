@@ -8811,7 +8811,18 @@ function handleRequest(req, res) {
     // a remote browser gets the conflicts without their paths on this PC
     const st = SYNC_RUNNER.status();
     if (remoteOf(req) && Array.isArray(st.conflicts)) st.conflicts = st.conflicts.map(({ path: _p, ...c }) => c);
+    // ... and why each chat is not synced without its folder (up.notSynced, sync-up.js)
+    if (remoteOf(req) && st.up && Array.isArray(st.up.notSynced)) st.up = { ...st.up, notSynced: st.up.notSynced.map(({ folder: _f, ...n }) => n) };
     return sendJson(res, 200, st);
+  }
+  // POST /sync/rescan: the Sync card's "Not synced" Rescan (sync-run.js rescanUp): placement asked again for every
+  // chat that did not go up, and an upload scan now. This machine's own page only. -> { ok, scanning } | 409
+  if (pathname === '/sync/rescan') {
+    if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'POST' });
+    if (remoteOf(req)) return sendJson(res, 403, { ok: false, message: 'only on this machine' });
+    if (site === 'cross-site' || site === 'same-site') return sendJson(res, 403, { ok: false, message: 'bad origin' });
+    const r = typeof SYNC_RUNNER.rescanUp === 'function' ? SYNC_RUNNER.rescanUp() : null;
+    return r ? sendJson(res, 200, r) : sendJson(res, 409, { ok: false, message: SYNC_RUNNER.status().reason || 'sync is not running' });
   }
   if (pathname === '/sync/move') return syncMove(req, res);
   if (pathname === '/sync/note') return syncNote(req, res);

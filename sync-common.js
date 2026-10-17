@@ -10,6 +10,7 @@
 //   homeSkipped(relCwd)                a home-row rel_cwd that is never the home row's (AppData, Library, ~/.claude-<letter>)
 //   workspaceKind(facts), classifyFolder(cwd), checkoutAt, gitUnreadAt, inTemp, perforceAt, p4ClientRoots, p4RootsNow:
 //                                      portable or bound (see "portable or bound" below)
+//   staleGitFile(dir), pastStaleGit(folder)   a removed worktree's leftover .git file, and the folder to ask git from
 //   boundOrigin(device), boundDeviceOf(origin), boundRel(folder), boundRelOk(rel), boundNative(rel)   a bound chat's
 //                                      repos row and rel_cwd
 //   boundBase(home), isBoundPlaceholder(p, home), boundPlaceholder(home, host, rel)  where another machine's bound chat
@@ -179,6 +180,14 @@ const homeSkipped = (relCwd) => /^(?:appdata|library|\.claude-[a-z])$/i.test(Str
 // checkoutAt(folder) -> { top, origin } | null: the same facts read from disk at once, no git process (below).
 // gitUnreadAt(folder, stop) -> Promise<bool>: a .git in the nearest folder still there or one above it (up to stop,
 //   when given) that git could not read: a checkout's folder that waits for git, never one taken for no checkout.
+// staleGitFile(dir) -> bool: dir/.git is a worktree's .git file naming a gitdir <main>/.git/worktrees/<name> that is
+//   gone while <main>/.git is still there (its HEAD): the worktree was removed (git worktree prune, dfweb done) and its
+//   folder stayed (a locked node_modules, a .codegraph). git can never read it again, so classifyFolder, checkoutAt,
+//   gitUnreadAt and the uploader's repoFor look past it, to the checkout around that folder (a worktree under
+//   <main>/.claude/worktrees goes under the main checkout's row, as one whose folder is gone does). Any other .git
+//   git can't read (a gitdir on a drive that is not there, a damaged file) is not stale: it waits for git as before.
+// pastStaleGit(folder) -> the nearest folder still there, or the folder above the outermost stale worktree around it;
+//   null when nothing is there.
 // inTemp(cwd, o): cwd is in the temp folder (os.tmpdir(), and /tmp and /var/folders on a Mac; o.temp in tests), where
 //   only throwaway chats run (a script's, a test's): the uploader never syncs one there. A temp folder that holds the
 //   home folder (o.home) does not count.
@@ -216,12 +225,35 @@ function workspaceKind(f = {}) {
   return { kind: 'portable', why: null };
 }
 const nearestDir = (p) => { let d = path.resolve(p); while (!isDir(d)) { const up = path.dirname(d); if (up === d) return null; d = up; } return d; };
+function staleGitFile(dir) {
+  try {
+    const dot = path.join(dir, '.git');
+    if (!fs.statSync(dot).isFile()) return false;
+    const m = /gitdir:\s*(.+)/.exec(fs.readFileSync(dot, 'utf8'));
+    if (!m) return false;
+    const gd = path.resolve(dir, m[1].trim());
+    if (fs.existsSync(gd)) return false;
+    const common = path.dirname(path.dirname(gd)); // <main>/.git, which still has its HEAD
+    return path.basename(path.dirname(gd)).toLowerCase() === 'worktrees' && fs.existsSync(path.join(common, 'HEAD'));
+  } catch { return false; }
+}
+function pastStaleGit(folder) {
+  let from = nearestDir(folder);
+  for (let dir = from; dir;) {
+    const up = path.dirname(dir);
+    if (staleGitFile(dir)) { if (up === dir) return from; from = up; }
+    else if (fs.existsSync(path.join(dir, '.git'))) return from;
+    if (up === dir) return from;
+    dir = up;
+  }
+  return from;
+}
 async function gitUnreadAt(folder, stop = null) {
   const start = nearestDir(folder);
   if (!start) return false;
   for (let dir = start; ;) {
     if (stop && under(stop, dir) === null) return false;
-    if (fs.existsSync(path.join(dir, '.git'))) return !(await repoOf(dir));
+    if (fs.existsSync(path.join(dir, '.git')) && !staleGitFile(dir)) return !(await repoOf(dir));
     const up = path.dirname(dir);
     if (up === dir) return false;
     dir = up;
@@ -230,7 +262,7 @@ async function gitUnreadAt(folder, stop = null) {
 async function classifyFolder(cwd, o = {}) {
   if (!nativeAbs(cwd)) return null;
   const home = typeof o.home === 'string' && o.home ? o.home : os.homedir();
-  const want = path.resolve(cwd), dir = nearestDir(want);
+  const want = path.resolve(cwd), dir = pastStaleGit(want);
   const r = dir ? await repoOf(dir, o) : null;
   if (!r && dir && await gitUnreadAt(dir, under(home, dir) !== null ? home : null)) return null;
   const roots = Array.isArray(o.p4Roots) ? o.p4Roots : await p4ClientRoots();
@@ -247,6 +279,7 @@ function checkoutAt(folder) {
     const dot = path.join(dir, '.git');
     let st = null;
     try { st = fs.statSync(dot); } catch {}
+    if (st && st.isFile() && staleGitFile(dir)) st = null; // a removed worktree's leftover: the checkout around it
     if (st) {
       let gd = dot, origin = null;
       try {
@@ -788,7 +821,7 @@ const isLive = (id, o = {}) => typeof id === 'string' && !!id && liveIds(o).has(
 
 module.exports = {
   slugOf, projectsDirs, normalizeOrigin, HOME_ORIGIN, rowOrigin, homeSkipped, repoOf, forgetRepos, checkFileKey, fileKeyB64, fileKeyFromB64, objectPath,
-  workspaceKind, classifyFolder, checkoutAt, gitUnreadAt, inTemp, perforceAt, p4ClientRoots, p4RootsNow, BOUND_WHY, nativeAbs, boundOrigin, boundDeviceOf, boundRel, boundRelOk, boundNative, boundBase, boundPlaceholder, isBoundPlaceholder,
+  workspaceKind, classifyFolder, checkoutAt, gitUnreadAt, staleGitFile, pastStaleGit, inTemp, perforceAt, p4ClientRoots, p4RootsNow, BOUND_WHY, nativeAbs, boundOrigin, boundDeviceOf, boundRel, boundRelOk, boundNative, boundBase, boundPlaceholder, isBoundPlaceholder,
   conversationFiles, conversationFilesAsync, lastMeta, homeCwd, ensureDevice, touchDevice, devicePath, isLive, pidAlive, readState, writeState, sessionDirs,
   SIDE_DIRS, TOUCH_MS,
 };

@@ -147,7 +147,11 @@ three are true: the config is there, a member is signed in, and the sync key is 
 a sign-out, and restarts them when another account signs in or the key changes. It looks again on every sign-in
 change and once a minute. `GET /sync/activity` shows whether they run (or why not) and their counts, never a
 title, a path inside a conversation, a token or the key. Conflicts (a local copy longer than, or different from,
-the synced one) are listed there and left alone. The wire format is `docs/sync-format.md`.
+the synced one) are listed there and left alone. So is why each chat did not go up (`up.notSynced`: its cause,
+the fix, since when, and its folder on this machine's page only), which the Sync card shows as "Not synced" with
+a Rescan button (`POST /sync/rescan`: where each belongs is asked again at once). A removed worktree whose folder
+stayed (its `.git` file names a gitdir that is gone) goes under the main checkout's row, as one whose folder is
+gone does. The wire format is `docs/sync-format.md`.
 
 **Health you can see.** Each loop (uploads, downloads, live status) keeps a record, in `/sync/activity` as
 `up.health`, `down.health` and `live.health`: `lastSuccessAt` (the last scan that ran to its end),

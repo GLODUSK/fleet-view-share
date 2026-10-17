@@ -24,7 +24,7 @@
 //                      busy, skip, beforeStart, intervalMs, checkMs, prefs, relay, version, makeUploader,
 //                      makeMaterializer, makeMover, makeLive, makePrefs, makeLink, makeCarry })
 //     -> { start(), stop(), check(), restart(reason), status(), move(id, { force, noWork }), moveStatus(id),
-//          cancelMove(id), owners(), device(), live(), prefsChanged(), link(), missing(), rescan(), note(id),
+//          cancelMove(id), owners(), device(), live(), prefsChanged(), link(), missing(), rescan(), rescanUp(), note(id),
 //          dropNote(id), peer(route, body, from), carry() }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
 //   are one (by default each side's own: ~/.claude and ~/.claude-a); accountOf(id) -> the account a conversation ran
@@ -404,6 +404,12 @@ function createSyncRunner(o = {}) {
       try { return run.down.missing(); } catch { return { at: null, repos: [] }; }
     },
     rescan() { if (run && typeof run.down.scanOnce === 'function') run.down.scanOnce().catch(() => {}); },
+    // the Sync card's "Not synced" Rescan (sync-up.js rescan()): placement asked again for every skipped chat, and an
+    // upload scan now; null while not running
+    rescanUp() {
+      if (!run || typeof run.up.rescan !== 'function') return null;
+      try { return run.up.rescan(); } catch { return null; }
+    },
     note(id) { try { return notes.get(id); } catch { return null; } },
     dropNote(id) { try { return notes.drop(id); } catch { return false; } },
     async peer(route, body, from) {
