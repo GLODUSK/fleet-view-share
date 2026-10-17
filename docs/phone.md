@@ -559,8 +559,11 @@ Narrower rules:
 
 ### What the phone may read (the fence)
 
-The server's `/file` (files.js) serves anything inside a folder Fleet View knows, and that includes the folder every
-conversation ran in, which may be the home folder or a drive's top. So the relay keeps one fence of its own for
+The server's `/file` (files.js) serves any path on the PC's own drives but secrets (for every caller: the names of
+rule 4, the keys folders `.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`, Keychains and the CLI sign-in
+folders `.expo`, `com.vercel.cli` and `configstore`, all of Fleet View's
+data folder but its logs, uploads, pictures and Housekeeping's reports, and rule 7's keys in a file's text), so the
+home folder or a drive's top would still be open to the phone. So the relay keeps one fence of its own for
 `GET /file` (its `path`, with `cwd`, read the way files.js reads it), `GET /chat/kind` (`path`), `GET /chat/files`
 (`cwd`) and `GET /chat/commands` (`cwd`):
 
@@ -584,14 +587,17 @@ conversation ran in, which may be the home folder or a drive's top. So the relay
    `*.tfvars`, `*.gpg`, `*.asc`, `*.age`, `*.keychain-db`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`,
    anything with `credential` in it, `*service-account*.json` and `*adminsdk*.json`, `google-services.json`,
    `GoogleService-Info.plist`, `.npmrc`, `.netrc`, `_netrc`, `.git-credentials`, `.pypirc`, `hosts.yml`,
-   `secrets.json`, `secrets.yml`, `secrets.yaml`, `kubeconfig` (case ignored).
+   `secrets.json`, `secrets.yml`, `secrets.yaml`, `kubeconfig`, `.claude.json` and its copies (`.claude.json.backup`,
+   `home.claude.json`) (case ignored). The list is `secret-files.js`'s, which the server's `/file` uses too.
 5. The path must pass as the phone named it and as it really is (links, junctions and short names resolved; for a
    path that does not exist, its nearest existing folder's), and may not name an alternate data stream (`:`).
 6. **Listings leave out what the phone may not open:** a folder's `entries` from `GET /file` (and its `total`
    less them), and `GET /chat/files`' `files`.
 7. **No key in a file's text, whatever its name:** a `GET /file` answer whose `text` holds `-----BEGIN ... PRIVATE
-   KEY-----`, a `"private_key":` field or `"type": "service_account"` (spaces around the colon allowed) becomes 403,
-   and none of the text goes.
+   KEY-----` (or PGP's `PRIVATE KEY BLOCK`), a `"private_key"` field (the name, then its colon) or a `"type"` of
+   `"service_account"` (spaces around the colon allowed) becomes 403, and none of the text goes. The server refuses
+   such a file itself (files.js), and the relay checks the answer again. (This rule is written so it does not match
+   itself: this page opens in the file viewer.)
 
 Outside the fence `GET /file`, `/chat/kind` and `/chat/files` are 403, and `GET /chat/commands` goes on without its
 `cwd` (the built-in commands and the phone's own). A path the server refuses anyway (not absolute, with no `cwd`)

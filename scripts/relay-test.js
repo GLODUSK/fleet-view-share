@@ -1176,7 +1176,7 @@ async function main() {
     ['GET', '/file', { q: { path: f(KNOWN, 'gh', 'hosts.yml') } }, 403], ['GET', '/file', { q: { path: f(KNOWN, 'vault.kdbx') } }, 403],
     ['GET', '/file', { q: { path: f(KNOWN, 'Credentials', 'notes.md') } }, 403], ['GET', '/file', { q: { path: f(KNOWN, 'src', 'a.ts:secret') } }, 403],
     ...['AuthKey_AB12.p8', '_netrc', 'prod.tfvars', 'prod.tfstate.backup', 'notes.gpg', 'key.asc', 'backup.age', 'login.keychain-db', 'secrets.json', 'Secrets.yml',
-      'secrets.yaml', 'kubeconfig'].map((n) => ['GET', '/file', { q: { path: f(KNOWN, 'conf', n) } }, 403]),
+      'secrets.yaml', 'kubeconfig', 'home.claude.json'].map((n) => ['GET', '/file', { q: { path: f(KNOWN, 'conf', n) } }, 403]),
     // a conversation's repo that is no git checkout (/state names the folder it ran in), and conversations in the
     // folders a home dot-folder and an app data child link to (named by the target), or around them
     ['GET', '/file', { q: { path: f(PLAIN, 'a.txt') } }, 403], ['GET', '/chat/files', { q: { cwd: PLAIN } }, 403],

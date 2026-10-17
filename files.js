@@ -88,9 +88,14 @@ module.exports = { files, kind, _test: { match, withDirs } };
 // ---------- GET /file: a file for the page's viewer (web/viewer.js) ----------
 // GET /file?path=<abs, or relative to cwd>&cwd=<folder>[&raw=1]. Any path on this machine's own drives is served, so
 // every path a chat shows as a link opens (a scratchpad, B:\Tools, a log), as GET /folders lists any folder already;
-// never a sign-in or key file or anything in a keys folder (readable: by the name asked for and the real one), a
-// network path (\\server\share makes Windows sign in to it) or an alternate data stream: those get 403, and a missing
-// file 404 { missing: true }.
+// never a secret, for any caller (readable: by the name asked for, then by the real one): no step of the path with a
+// secret's name (.env*, *.pem, *.key, id_rsa*, *credential*, a service account's key, .npmrc, hosts.yml, .claude.json:
+// secret-files.js, the list the phone's fence in relay.js uses too), nothing in a keys folder (.ssh, .aws, Keychains…),
+// and of Fleet View's own data folder only its logs, uploads, pictures and Housekeeping's reports (dataOk: never the
+// API token, host.json, the sync sign-in or the relay's and link's keys); no network path (\\server\share makes
+// Windows sign in to it) and no alternate data stream. Those get 403, and so does a text file whose text holds a
+// private key or a service account's key, whatever its name ({ secret: true }, none of its text); a missing file 404
+// { missing: true }.
 //   a folder -> { ok, dir: true, path, entries: ["sub/", "name"…], total } (folders first, at most DIR_MAX)
 //   a text file -> { ok, path, size, lines, text, lang, mtime } (its first TEXT_MAX bytes, with truncated: true past that)
 //   a binary file -> { ok, path, size, mtime, binary: true }; a picture -> { ok, path, size, mtime, image: true }
@@ -103,9 +108,11 @@ const TEXT_MAX = 1 << 20;
 const RAW_MAX = 40 << 20;
 const DIR_MAX = 500;
 const IMAGES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
-// sign-in tokens and an account's own settings (its login, MCP servers' keys), and the folders that hold keys
-const NEVER = new Set(['.credentials.json', '.claude.json']);
-const NEVER_DIRS = new Set(['.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker', 'keychains']);
+// the secrets' names, the keys folders and the keys in a file's text (one list with the phone's fence)
+const SECRETS = require('./secret-files.js');
+// what of Fleet View's own data folder is shown (dataOk): its logs at the top (*.log, *.log.1), and these folders
+const DATA_OPEN = new Set(['uploads', 'chat-images', 'housekeeping']);
+const DATA_LOG = /\.log(?:\.\d+)?$/i;
 // highlight.js's name for the extension (the page loads a few grammars; the others show as plain text)
 const LANGS = {
   js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
@@ -132,17 +139,38 @@ function inside(file, folders) {
     return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   });
 }
-// GET /file may show it: on Windows a drive's own path (no \\server\share, no device path) with no alternate data
-// stream ("x::$DATA"); no sign-in file and nothing in a keys folder. Checked by the name asked for and by the one it
-// really has (a link, another case, an 8.3 name)
-function readable(file) {
-  for (const n of [file, real(file)]) {
-    if (WIN && (!/^[a-z]:\\/i.test(n) || n.slice(2).includes(':'))) return false;
-    const parts = fold(n).split(/[\\/]/);
-    if (NEVER.has(parts[parts.length - 1]) || parts.some((x) => NEVER_DIRS.has(x))) return false;
+// Fleet View's own data folder as named and where it really is, case folded
+const dataDirs = () => { const dir = P.dataDir(); return [...new Set([fold(path.resolve(dir)), fold(real(dir))])]; };
+// p is in Fleet View's own data folder and is not one of the parts shown: the folder itself (a listing: names only),
+// a log at its top, or anything in DATA_OPEN -> false
+function dataOk(p, dirs = dataDirs()) {
+  const f = fold(p);
+  for (const d of dirs) {
+    const rel = path.relative(d, f);
+    if (rel === '') return true;
+    const steps = rel.split(/[\\/]/);
+    if (steps[0] === '..' || path.isAbsolute(rel)) continue; // outside (a name like "..x" in it is not)
+    return DATA_OPEN.has(steps[0]) || (steps.length === 1 && DATA_LOG.test(steps[0]));
   }
   return true;
 }
+// why GET /file may not show it, or '' when it may: 'path' (on Windows not a drive's own path: a \\server\share or a
+// device path, or an alternate data stream "x::$DATA"), 'secret' (a step with a secret's name or a keys folder's:
+// secret-files.js) or 'data' (in Fleet View's data folder, not a part dataOk shows). Checked by the name asked for,
+// then (only when that passes, so a network path is never touched) by the one it really has (a link or junction,
+// another case, an 8.3 name)
+function refusal(file) {
+  const why = (n) => (WIN && (!/^[a-z]:\\/i.test(n) || n.slice(2).includes(':')) ? 'path'
+    : n.split(/[\\/]/).some(SECRETS.secretStep) ? 'secret' : dataOk(n) ? '' : 'data');
+  return why(file) || why(real(file));
+}
+const readable = (file) => !refusal(file);
+// what the page shows for each refusal
+const REFUSED = {
+  path: 'Fleet View never shows network paths (\\\\server\\share) or alternate data streams',
+  secret: 'Fleet View never shows secrets: sign-in, key and .env files, or what is in a keys folder',
+  data: 'of its own data folder Fleet View shows only the logs, uploads, chat pictures and Housekeeping\'s reports, never its tokens and keys',
+};
 // the absolute path the request names, or null
 function target(p, cwd) {
   let f = String(p || '').trim().replace(/^"(.*)"$/, '$1');
@@ -168,7 +196,8 @@ function serve(req, res, ctx) {
   const q = new URL(req.url, 'http://x').searchParams;
   const file = target(q.get('path'), q.get('cwd'));
   if (!file) return ctx.sendJson(res, 400, { ok: false, message: 'give an absolute path, or a cwd for a relative one' });
-  if (!readable(file)) return ctx.sendJson(res, 403, { ok: false, path: file, message: 'Fleet View never shows sign-in or key files, or network paths' });
+  const no = refusal(file);
+  if (no) return ctx.sendJson(res, 403, { ok: false, path: file, message: REFUSED[no] });
   let st;
   try { st = fs.statSync(file); } catch { return ctx.sendJson(res, 404, { ok: false, missing: true, path: file, message: 'no such file' }); }
   const mtime = st.mtimeMs;
@@ -206,12 +235,13 @@ function serve(req, res, ctx) {
   const truncated = st.size > buf.length;
   let text = buf.toString('utf8').replace(/^\uFEFF/, '');
   if (truncated) text = text.replace(/\uFFFD$/, ''); // a character the cut split in two
+  if (SECRETS.secretText(text)) return ctx.sendJson(res, 403, { ok: false, path: file, secret: true, message: 'it holds a private key or a service account\'s key, and Fleet View never shows those' });
   const lines = text ? text.replace(/\r?\n$/, '').split(/\r?\n/).length : 0;
   return ctx.sendJson(res, 200, { ok: true, path: file, size: st.size, lines, text, lang: langOf(file), mtime, ...(truncated ? { truncated: true } : {}) });
 }
 module.exports.serve = serve;
 module.exports.readable = readable;
-Object.assign(module.exports._test, { target, inside, langOf, readable });
+Object.assign(module.exports._test, { target, inside, langOf, readable, refusal, dataOk });
 
 // ---------- GET /folders: the PC's folders, for the page's folder picker outside the desktop window ----------
 // The desktop window has the Windows folder dialog (fleetDesktop.pickFolder); a browser (Edge on this PC, or the Mac
@@ -225,7 +255,10 @@ Object.assign(module.exports._test, { target, inside, langOf, readable });
 // System Volume Information…). The path is read like GET /file's (Git Bash's /c/…, ~, quotes) and resolved, so
 // "C:\a\..\.." is C:\. Only a drive's own paths: no \\server\share (a network path makes Windows sign in to that
 // server), no device paths, no alternate data streams. Missing, a file, or unreadable: { ok: false, message } (200, so
-// the dialog shows the message; missing: true and file: true say which).
+// the dialog shows the message; missing: true and file: true say which). The secrets GET /file never shows are
+// fenced here too: a folder it would refuse (a keys folder, one with a secret's name, the parts of Fleet View's data
+// folder dataOk keeps out) answers { ok: false, secret: true, message }, and a listing leaves such folders out (by
+// their names, so a link among them is left in; opening it checks where it really leads).
 const FOLDERS_MAX = 2000;
 const LINK_STATS_MAX = 400; // links (junctions) in one folder looked through to see whether they are folders
 const DRIVE_MS = 1500; // a drive that doesn't answer in this long (a sleeping network drive) is left out
@@ -278,6 +311,8 @@ async function folders(q, ctx) {
   const dir = folderOf(raw);
   if (!dir) return [400, { ok: false, message: WIN ? 'give the full path of a folder on a drive, like C:\\Users' : 'give the full path of a folder' }];
   const parent = path.dirname(dir) === dir ? null : path.dirname(dir);
+  const no = refusal(dir);
+  if (no) return [200, { ok: false, path: dir, parent, secret: true, message: no === 'data' ? `${dir}: ${REFUSED.data}` : `${dir} holds keys or sign-ins, and Fleet View never opens those` }];
   let ents;
   try { ents = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (e) {
     const why = e.code === 'ENOENT' ? { missing: true, message: `there is no folder at ${dir}` }
@@ -287,8 +322,10 @@ async function folders(q, ctx) {
     return [200, { ok: false, path: dir, parent, ...why }];
   }
   const out = [], links = [];
+  const dd = dataDirs(), realDir = real(dir);
   for (const e of ents) {
     if (hiddenDir(e.name)) continue;
+    if (SECRETS.secretStep(e.name) || !dataOk(path.join(dir, e.name), dd) || !dataOk(path.join(realDir, e.name), dd)) continue;
     if (e.isDirectory()) out.push(e.name);
     else if (e.isSymbolicLink() && links.length < LINK_STATS_MAX) links.push(e.name);
   }

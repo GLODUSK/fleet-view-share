@@ -7448,8 +7448,8 @@ function requestFailed(req, res, e) {
 // (case folded where paths ignore case: Windows, macOS)
 const samePath = (p) => P.foldCase(path.resolve(String(p)));
 function revealAllowed(kind, p) {
-  // whatever the file viewer may show (any local path but sign-in and key files: files.js readable), so its Open in
-  // VS Code / Explorer works for every path a chat links
+  // whatever the file viewer may show (any local path but secrets: files.js readable), so its Open in VS Code /
+  // Explorer works for every path a chat links
   if (FILES.readable(path.resolve(String(p)))) return true;
   const want = samePath(p);
   // a repo added by hand (it may have no conversations yet)
@@ -7782,11 +7782,11 @@ function conversationLog(id) {
   else { if (convoMiss.size > 200) convoMiss.clear(); convoMiss.set(id, Date.now()); }
   return best ? { file: best } : null;
 }
-// the folders the page may read from (GET /changes, GET /file, /preview): every conversation's folder and repo, the
-// remembered repos, the ones added by hand and the handoff folder; and the places chats point to outside their repo,
-// so a path that is a link in a chat opens: the temp folder (Claude's scratchpads, tool results, test output), Fleet
-// View's data folder (server.log, host.log…) and each Claude account's folder (memory, CLAUDE.md, hooks, skills;
-// files.js never serves its sign-in files)
+// the folders the page may read from (GET /changes, /preview, and /reveal's files): every conversation's folder and
+// repo, the remembered repos, the ones added by hand and the handoff folder; and the places chats point to outside
+// their repo, so a path that is a link in a chat opens: the temp folder (Claude's scratchpads, tool results, test
+// output), Fleet View's data folder (server.log, host.log…) and each Claude account's folder (memory, CLAUDE.md, hooks,
+// skills). GET /file has no such list: any local path but secrets (files.js readable)
 function knownFolders() {
   const out = new Set();
   for (const s of sessions.values()) { if (s.cwd) out.add(s.cwd); if (s.root) out.add(s.root); }

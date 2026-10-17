@@ -521,14 +521,9 @@ const within = (dir, p) => below(path.relative(P.foldCase(realOf(dir)), P.foldCa
 // conversation's repo root or repo folder that is a git checkout; not just any folder a conversation ran in), never a workspace that is a
 // drive's top, the home folder or one above it, or one inside or around the app data folders; below the workspace no
 // step named with a leading '.' (but .github), and no step with a secret's name anywhere. Listings leave out what
-// the phone may not open.
-const SECRET_RES = [/^\.env(?!\.example$)/i, /\.(?:pem|key|p8|p12|pfx|ppk|jks|keystore|kdbx|tfstate|tfstate\.backup|tfvars|gpg|asc|age|keychain-db)$/i,
-  /^id_(?:rsa|dsa|ecdsa|ed25519)/i, /credential/i, /(?:service[-_]?account|adminsdk).*\.json$/i];
-const SECRET_NAMES = new Set(['google-services.json', 'googleservice-info.plist', '.npmrc', '.netrc', '_netrc', '.git-credentials', '.pypirc', 'hosts.yml',
-  'secrets.json', 'secrets.yml', 'secrets.yaml', 'kubeconfig']);
-// a file's text that holds a key whatever its name: a PEM private key, a service account's JSON
-const SECRET_TEXT_RES = [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, /"private_key"\s*:/, /"type"\s*:\s*"service_account"/];
-const secretName = (n) => SECRET_NAMES.has(n.toLowerCase()) || SECRET_RES.some((re) => re.test(n));
+// the phone may not open. The secrets' names and the keys in a file's text are secret-files.js's, the list the
+// server's GET /file uses for every caller too (so a /file the fence lets through is checked again there).
+const { secretName, SECRET_TEXT_RES } = require(path.join(__dirname, 'secret-files.js'));
 // one step below a workspace the phone may name
 const stepOk = (n) => !n || ((n[0] !== '.' || n.toLowerCase() === '.github') && !secretName(n));
 // a path relative to a workspace, in either slash: every step one the phone may name
