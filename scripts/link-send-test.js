@@ -11,8 +11,9 @@
 // machine runs it, and only since / before / limit going on. And POST /link/start (a new chat on the main computer):
 // its POST /api/sessions there with the repo by origin and name (repoOf), blank without a prompt, only the fields it
 // takes; the host's answer with host added; its refusals (method, device, repo, account, prompt, name, model, effort,
-// no repo known, offline at once, sync not running) and every way a call reaches no answer. Exit 0 = all pass. No
-// network, no files.
+// no repo known, offline at once, sync not running) and every way a call reaches no answer; the GET /peer/status probe
+// first (PROBE_MS), an unanswered probe giving no_answer with no start sent, and a start gone offline after the probe
+// answered told as a time-out. Exit 0 = all pass. No network, no files.
 'use strict';
 const path = require('path');
 const LS = require(path.join(__dirname, '..', 'link-send.js'));
@@ -148,26 +149,33 @@ async function main() {
 
   // ---------- POST /link/start: a new chat on the main computer ----------
   {
-    const t = setup({ answer: (d, m, p, x) => ({ s: 200, b: { ok: true, key: 'new-3', id: ID, promptSent: !x.b.blank } }) });
+    // the probe (GET /peer/status) answers; posts(): the starts
+    const awake = (f) => (d, m, p, x) => (p === '/peer/status' ? { s: 200, b: { ok: true } } : f(d, m, p, x));
+    const t = setup({ answer: awake((d, m, p, x) => ({ s: 200, b: { ok: true, key: 'new-3', id: ID, promptSent: !x.b.blank } })) });
+    const posts = () => t.calls.filter((c) => c.m === 'POST');
     // blank (no prompt): the repo as every machine knows it, the account, blank; nothing the page added goes on
     let r = await t.ls.route('POST', '/link/start', null, { device: PC.toUpperCase(), repo: REPO, account: 'B', role: 'bot:a1b2c3d4e5f6', forkFrom: ID, temp: true, cwd: 'C:\\x', via: 'phone' });
     eq(r, [200, { ok: true, key: 'new-3', id: ID, promptSent: false, host: { device: PC, name: 'BlackBox' } }], 'start: the host\'s answer, with host');
-    eq(t.calls[0], { d: PC, m: 'POST', p: '/api/sessions', b: { account: 'B', blank: true, repoOf: { origin: 'GLODUSK/fleet-view', name: 'fleet-view' } }, q: undefined, timeoutMs: undefined },
+    eq(t.calls[0], { d: PC, m: 'GET', p: '/peer/status', b: undefined, q: undefined, timeoutMs: LS.PROBE_MS }, 'start: is it awake? GET /peer/status first, PROBE_MS at most');
+    eq(t.calls[1], { d: PC, m: 'POST', p: '/api/sessions', b: { account: 'B', blank: true, repoOf: { origin: 'GLODUSK/fleet-view', name: 'fleet-view' } }, q: undefined, timeoutMs: undefined },
       'start: POST /api/sessions there with repoOf and blank, and only the fields it takes');
     // with a prompt, a name, a model and an effort: they go on; a repo with no origin goes by its name
     r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: LONE, account: 'A', prompt: 'look at the notes', name: 'Notes', model: 'claude-opus-5-5[1m]', effort: 'high' });
     eq(r[0], 200, 'start with a prompt: 200');
-    eq(t.calls[1].b, { account: 'A', prompt: 'look at the notes', name: 'Notes', model: 'claude-opus-5-5[1m]', effort: 'high', repoOf: { origin: null, name: 'notes' } }, 'start: prompt, name, model, effort, and the repo by its name');
+    eq(posts()[1].b, { account: 'A', prompt: 'look at the notes', name: 'Notes', model: 'claude-opus-5-5[1m]', effort: 'high', repoOf: { origin: null, name: 'notes' } }, 'start: prompt, name, model, effort, and the repo by its name');
     // the host's refusals come back as they are (no checkout there, a bad account there)
-    t.answer = () => ({ s: 404, b: { ok: false, code: 'no_checkout', message: 'this machine has no checkout of fleet-view' } });
+    t.answer = awake(() => ({ s: 404, b: { ok: false, code: 'no_checkout', message: 'this machine has no checkout of fleet-view' } }));
     r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
     ok(r[0] === 404 && r[1].code === 'no_checkout' && r[1].host.name === 'BlackBox', 'start: no checkout there passes through');
-    t.answer = () => ({ s: 200, b64: 'AAAA' });
+    t.answer = awake(() => ({ s: 200, b64: 'AAAA' }));
     r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
     ok(r[0] === 502 && r[1].code === 'bad_answer', 'start: an answer that isn\'t JSON: 502 bad_answer');
-    t.answer = () => { throw new Error('boom'); };
+    t.answer = awake(() => { throw new Error('boom'); });
     r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
     ok(r[0] === 502 && r[1].ok === false, 'start: a link that throws: 502, never an exception');
+    t.answer = () => { throw new Error('boom'); };
+    r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
+    ok(r[0] === 502 && r[1].ok === false && t.calls[t.calls.length - 1].m === 'GET', 'start: a link that throws on the probe: 502, nothing started');
     const n0 = t.calls.length;
     // refusals before anything is sent
     const code = async (b, m = 'POST') => { const x = await t.ls.route(m, '/link/start', null, b); return [x[0], x[1].code]; };
@@ -194,11 +202,28 @@ async function main() {
     eq(t.calls.length, n0, 'start: no refused request reached the link');
     t.linkOn = true;
     // every way a call reaches no answer, as for the other routes (online unknown: it is tried)
-    for (const [c, s] of [['not_linked', 409], ['offline', 503], ['timeout', 504], ['pc-restarted', 409], ['revoked', 409]]) {
-      t.answer = () => ({ s: 0, b: { ok: false, code: c } });
+    for (const [c, s] of [['not_linked', 409], ['timeout', 504], ['pc-restarted', 409], ['revoked', 409]]) {
+      t.answer = awake(() => ({ s: 0, b: { ok: false, code: c } }));
       const x = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
       ok(x[0] === s && x[1].code === c && /BlackBox/.test(x[1].message), `start: unreached ${c}: ${s} (${x[0]} ${x[1].message})`);
     }
+    // offline once the probe answered: the start went, so it may still start there: a time-out (the page then starts
+    // no second one here)
+    t.answer = awake(() => ({ s: 0, b: { ok: false, code: 'offline' } }));
+    r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B', prompt: 'hello' });
+    ok(r[0] === 504 && r[1].code === 'timeout' && /BlackBox went offline/.test(r[1].message), `start: offline after the probe answered: 504 timeout (${r[0]} ${r[1].code} ${r[1].message})`);
+    // the probe unanswered (presence still says online for a sleeping machine): no_answer at once, and no start goes
+    // (the page then starts it here, with no second one starting there late); not linked and the rest as above
+    for (const [c, s, want] of [['timeout', 503, 'no_answer'], ['pc-restarted', 503, 'no_answer'], ['not_linked', 409, 'not_linked'], ['offline', 503, 'offline'], ['revoked', 409, 'revoked']]) {
+      const n1 = posts().length;
+      t.answer = () => ({ s: 0, b: { ok: false, code: c } });
+      const x = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B', prompt: 'hello' });
+      ok(x[0] === s && x[1].code === want && /BlackBox/.test(x[1].message) && posts().length === n1, `start: the probe unreached ${c}: ${s} ${want}, nothing started (${x[0]} ${x[1].code} ${x[1].message})`);
+    }
+    // any answer to the probe will do (an older Fleet View there without the route: 404)
+    t.answer = (d, m, p) => (p === '/peer/status' ? { s: 404, b: { ok: false } } : { s: 200, b: { ok: true, key: 'new-4', id: ID, promptSent: true } });
+    r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B', prompt: 'hello' });
+    ok(r[0] === 200 && r[1].key === 'new-4', 'start: a probe answered with 404 still starts it');
     // a device the link doesn't name: words say "the main computer"
     t.answer = () => ({ s: 0, b: { ok: false, code: 'offline' } });
     const other = await t.ls.route('POST', '/link/start', null, { device: MINE, repo: REPO, account: 'B' });

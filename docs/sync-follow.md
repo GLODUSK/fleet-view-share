@@ -25,9 +25,16 @@ history; `/sync/move` stays on the server for older pages.
 - **New chats run on it.** On the other machine, New session (and an empty chat's pasted copy, and a queued message's
   New chat) starts it on the main computer: `POST /link/start` (`link-send.js`) → that machine's `POST /api/sessions
   { repoOf: { origin, name }, blank | prompt }`, in its own checkout of the repo. It shows here once sync lists it and
-  is picked then (`web/app.js` startChat, pickWhenListed). The main computer offline, not linked, or without a
-  checkout of the repo: it starts here, and a toast says why. Forks, Fork at a message, a dropped file's scratchpad
-  and a new team lead still start here (they need this machine's copy of the conversation or its files).
+  is picked then (`web/app.js` startChat, pickWhenListed). It always goes with its first message: a chat started there
+  with nothing typed has no log yet, so it would never show here nor take typing from here. New session and an
+  empty chat's pasted copy therefore turn the menu into a box for that message (`askFirstMessage`; "Start it here,
+  empty" beside it), and a "Starting it on …" toast shows at once. `link-send.js` first asks that machine
+  `GET /peer/status` (12 s at most), since its presence can still say online for a minute after it went to sleep: no
+  answer means nothing is sent (`no_answer`) and it starts here. Once that answered, a start with no answer in time
+  starts nothing here (it may still start there: the toast says so, the message on the clipboard). The main computer
+  offline, asleep, not linked, or without a checkout of the repo: it starts here, and a toast says why. Forks, Fork at
+  a message, a dropped file's scratchpad and a new team lead still start here (they need this machine's copy of the
+  conversation or its files).
 - **No chat moves.** Typing into another machine's chat goes there (below), and when that machine is off its chats
   wait for it: "BlackBox is offline. Its chats come back when it's on."
 - **Clone workspace to this machine** (a workspace's right-click menu, when the other computer has chats in it;

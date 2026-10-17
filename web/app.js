@@ -2371,7 +2371,8 @@ async function pasteCopied() {
   if (!termApi()) { toast(noTermMsg('Pasting a copy'), C.red); return; }
   const list = copied.slice(), x = mouseAt.x, y = mouseAt.y;
   const root = pasteRoot(x, y);
-  let first = null, n = 0, there = null;
+  let first = null, n = 0;
+  const asks = []; // empty ones bound for the main computer: started there once their first message is typed
   for (const [i, c] of list.entries()) {
     const here = root && normRoot(root) !== normRoot(c.root) ? root : null;
     const folder = c.empty && here ? here : c.cwd;
@@ -2380,21 +2381,29 @@ async function pasteCopied() {
     unhideRepo(natural);
     // an empty one is a new chat: on the main computer when one is picked (startChat); a fork starts here
     const r = c.empty ? await startChat({ cwd: folder, account: c.account, ...newSize() }) : await createSession({ cwd: folder, account: c.account, forkFrom: c.id, ...newSize() });
-    if (!r || !r.ok) { toast((r && r.message) || `could not copy ${c.name}`, C.red); continue; }
-    n++;
-    if (r.remote) { there = there || r; continue; } // (it shows where sync puts it)
-    first = first || r.key;
-    if (!c.empty && c.name) pasteNames.set(r.key, { name: c.name, from: c.id });
     // side by side when several land on one spot
     const px = x + i * 34, py = y;
+    // (one that ends up starting here after all sits where it was pasted, as below)
+    if (r && r.ask) { asks.push({ cwd: folder, account: c.account, name: r.ask.name, place: (key) => mapMod?.mapPlaceSession?.(key, natural, px, py) }); continue; }
+    if (!r || !r.ok) { toast((r && r.message) || `could not copy ${c.name}`, C.red); continue; }
+    n++;
+    first = first || r.key;
+    if (!c.empty && c.name) pasteNames.set(r.key, { name: c.name, from: c.id });
     if (!c.empty && normRoot(target) !== normRoot(natural)) pasteMoves.set(r.key, { root: target, x: px, y: py });
     else mapMod?.mapPlaceSession?.(r.key, natural, px, py);
   }
-  if (!n) return;
-  const where = root ? ` in ${repoName(root)}` : '';
-  toast((n === 1 ? `Pasted a copy of ${list[0].name}${where}` : `Pasted ${n} copies${where}`) + (there ? ` (new ones on ${there.remote.name}: they show here in a moment)` : ''), C.mint);
-  if (first) ui.setSelected(first, 'explicit');
-  else if (there) pickWhenListed(there.remote.id);
+  if (n) {
+    const where = root ? ` in ${repoName(root)}` : '';
+    toast(n === 1 ? `Pasted a copy of ${list[0].name}${where}` : `Pasted ${n} copies${where}`, C.mint);
+    // picked as the arrow keys pick when the box below opens: an explicit pick puts the keyboard in its chat box
+    // (detail.js focusCompose, a frame later), and the typing would go there instead of to the box
+    if (first) ui.setSelected(first, asks.length ? 'keys' : 'explicit');
+  }
+  // one box for them all (last, so it keeps the keyboard); the same first message goes to each
+  if (asks.length) {
+    askFirstMessage({ at: { x, y }, name: asks[0].name, count: asks.length,
+      go: async (text) => { for (const a of asks) await startWithFirst(a.cwd, a.account, text, a.place); }, here: () => startEmptyHere(asks) });
+  }
 }
 // a pasted fork that goes to another workspace: moved there once Claude Code gave it its id
 onRekey((oldKey, id) => {
@@ -2621,8 +2630,8 @@ function openContextMenu(target, x, y) {
       // rest off or out): a plain "New session" on it, its tag showing which (Henry, 2026-10-15)
       const all = allAccounts(), ok = onAccounts().filter((a) => !acctOut(a));
       if (!ok.length) items.push({ label: 'New session', icon: 'plus', disabled: true, note: 'every account is out of its limit' });
-      else if (ok.length === 1) items.push({ label: 'New session', icon: 'plus', ...(all.length > 1 ? { tag: ok[0] } : {}), run: () => newSession(folder, ok[0]) });
-      else items.push({ label: 'New session', icon: 'plus', children: ok.map((a) => ({ label: `Claude ${a}`, tag: a, run: () => newSession(folder, a) })) });
+      else if (ok.length === 1) items.push({ label: 'New session', icon: 'plus', ...(all.length > 1 ? { tag: ok[0] } : {}), run: () => newSession(folder, ok[0], { x, y }) });
+      else items.push({ label: 'New session', icon: 'plus', children: ok.map((a) => ({ label: `Claude ${a}`, tag: a, run: () => newSession(folder, a, { x, y }) })) });
     }
     const rIt = { root: repoRootOf({ root: folder }), name: target.name || repo.name || repoName(folder) };
     // orders for every conversation in it, idle and new ones too (one team), or the same text to each
@@ -2835,6 +2844,8 @@ window.addEventListener('fv-chat-fork', async (e) => {
   // New chat: on the main computer when one is picked (startChat), the message as its prompt; a fork starts here
   const r = why ? { ok: false, message: why } : fork ? await createSession({ cwd: s.cwd, account: s.account, forkFrom: s.id, ...newSize() })
     : await startChat({ cwd: s.cwd, account: s.account, prompt: text, ...newSize() });
+  // no text to hand it (images alone don't go along): its first message is asked for, as New session's is
+  if (r && r.ask) { askFirstMessage({ at: null, name: r.ask.name, go: (t) => startWithFirst(s.cwd, s.account, t), here: () => startEmptyHere([{ cwd: s.cwd, account: s.account }]) }); return; }
   if (r && r.ok && r.remote) {
     if (!r.sent) { try { await navigator.clipboard.writeText(text); } catch {} }
     startedThere(r.sent ? r : { ...r, message: `${r.message || 'your message did not go in'}. Your message is on the clipboard` }, 'New conversation');
@@ -2957,15 +2968,21 @@ function newSize() {
 // Henry, 2026-10-17: with a main computer picked (GET /sync/main: main-machine.js) and this machine not it, a new chat
 // starts there (POST /link/start: link-send.js, in that machine's own checkout of the repo), unless the link says it is
 // offline; it shows here as that machine's other chats do (sync) and is picked once /state lists it (pickWhenListed).
-// Offline, not linked, or no checkout of the repo there: it starts here, and a toast says why. No main computer picked,
-// or this machine is it: here, as always. The workspace's New session, an empty chat's pasted copy and a queued
-// message's New chat start this way; forks, Fork at a message, a dropped file's scratchpad and a new lead start here
-// (they need this machine's copy of the conversation, its files, or its own session).
+// It always goes with its first message: a chat started there with nothing typed has no log yet, so it would never
+// show here nor take typing from here, so the workspace's New session and an empty chat's pasted copy ask for it first
+// (askFirstMessage: the menu turns into a box; "Start it here, empty" beside it). A toast says "Starting it on …" at
+// once. Offline, asleep (no answer to link-send.js's probe), not linked, or no checkout of the repo there: it starts
+// here, and a toast says why. No main computer picked, or this machine is it: here, as always. The workspace's New
+// session, an empty chat's pasted copy and a queued message's New chat start this way; forks, Fork at a message, a
+// dropped file's scratchpad and a new lead start here (they need this machine's copy of the conversation, its files, or
+// its own session).
 // o: { cwd, account, cols, rows, prompt? } -> createSession's { ok, key, message } for one started here (note: why not
-// on the main computer, already shown), or { ok, remote: { id, name }, sent, message } for one there (id null while
-// Claude Code had not named it; sent: the prompt went in)
+// on the main computer, already shown), { ok, remote: { id, name }, sent, message } for one there (id null while
+// Claude Code had not named it; sent: the prompt went in), or { ok: false, ask: { name } } when it would go to the main
+// computer without a prompt (nothing started: ask for the first message, then call again with it)
 const HERE_WHY = {
   offline: (n) => `${n} is offline, so this chat runs here`,
+  no_answer: (n) => `${n} didn't answer (asleep?), so this chat runs here`,
   not_linked: (n) => `${n} isn't linked with this machine, so this chat runs here`,
   revoked: (n) => `${n} isn't linked with this machine, so this chat runs here`,
   not_running: () => 'Sync isn\'t running here, so this chat runs here',
@@ -2984,12 +3001,63 @@ async function startChat(o) {
   if (!main) return here(null);
   const name = main.name || 'the main computer';
   if (mm.online === false) return here(HERE_WHY.offline(name));
-  const r = await post('/link/start', { device: main.id, repo: o.cwd, account: o.account, ...(o.prompt ? { prompt: o.prompt } : {}) });
+  if (!o.prompt) return { ok: false, ask: { name } };
+  toast(`Starting it on ${name}…`, C.dim, null, 8000);
+  const r = await post('/link/start', { device: main.id, repo: o.cwd, account: o.account, prompt: o.prompt });
   // started there (ok, or a prompt held back by a question there: it still runs, with its id)
   if (r && (r.ok || (r.id && r.promptSent === false))) return { ok: true, remote: { id: r.id || null, name }, sent: !!r.promptSent, message: r.ok ? '' : r.message || '' };
   const why = r && HERE_WHY[r.code];
   if (why) return here(why(name, repoName(o.cwd)));
-  return { ok: false, message: `Could not start it on ${name}: ${(r && r.message) || 'Fleet View did not answer'}` };
+  // it was sent and no answer came back in time: it may still start there, so nothing starts here
+  const late = r && r.code === 'timeout' ? '; it may still start there, so look for it before starting another' : '';
+  return { ok: false, message: `Could not start it on ${name}: ${(r && r.message) || 'Fleet View did not answer'}${late}` };
+}
+// the box for a new chat's first message when it goes to the main computer (startChat's ask), where the menu that
+// picked it was (at: { x, y }, else the middle of the window). o: { at, name, count?, go(text), here() }: Enter calls
+// go with the message; "Start it here, empty" calls here()
+function askFirstMessage(o) {
+  const n = o.count || 1;
+  const x = Number.isFinite(o.at?.x) ? o.at.x : window.innerWidth / 2, y = Number.isFinite(o.at?.y) ? o.at.y : window.innerHeight / 3;
+  openCtxMenu({ x, y, input: {
+    label: n > 1 ? `${n} new chats on ${o.name}: their first message` : `New chat on ${o.name}: its first message`,
+    input: {
+      placeholder: 'what Claude should do first', multiline: true,
+      hint: `Enter starts ${n > 1 ? 'them' : 'it'} on ${o.name} · Shift+Enter: new line · Esc`,
+      empty: `type its first message: ${o.name} runs it, and an empty chat there can't be typed into from here`,
+      alt: { label: n > 1 ? 'Start them here, empty' : 'Start it here, empty', run: o.here },
+      submit: (text) => { o.go(text); return null; },
+    },
+  } });
+}
+// a new chat with its first message: on the main computer, or here when it can't go there (startChat), the message
+// then going in once it is up (orders.js sendWhenUp); a message that went nowhere is put on the clipboard. place(key):
+// where one started here goes on the map (a pasted copy's spot)
+async function startWithFirst(cwd, account, text, place = null) {
+  const r = await startChat({ cwd, account, prompt: text, ...newSize() });
+  if (r && r.ok && r.remote) {
+    if (!r.sent) { try { await navigator.clipboard.writeText(text); } catch {} }
+    startedThere(r.sent ? r : { ...r, message: `${r.message || 'your message did not go in'}. Your message is on the clipboard` });
+    return;
+  }
+  if (!r || !r.ok) {
+    try { await navigator.clipboard.writeText(text); } catch {}
+    toast(`${(r && r.message) || 'could not start a new session'}. Your message is on the clipboard`, C.red, null, 9000);
+    return;
+  }
+  if (place) place(r.key);
+  sendWhenUp({ id: r.key, name: 'the new conversation' }, text);
+  ui.setSelected(r.key, 'explicit');
+}
+// "Start it here, empty" in that box: blank here, as with no main computer picked. list: [{ cwd, account, place? }]
+async function startEmptyHere(list) {
+  let first = null;
+  for (const a of list) {
+    const r = await createSession({ cwd: a.cwd, account: a.account, ...newSize() });
+    if (!r || !r.ok) { toast((r && r.message) || 'could not start a new session', C.red); continue; }
+    if (a.place) a.place(r.key);
+    first = first || r.key;
+  }
+  if (first) ui.setSelected(first, 'explicit');
 }
 // a chat started on the main computer: picked here once /state lists it (sync brings it), unless Henry picked something
 // else meanwhile; given up after PICK_WAIT_MS
@@ -3010,9 +3078,14 @@ function startedThere(r, what = 'New chat') {
   toast(r.message ? `${what} on ${name}: ${r.message}` : `${what} on ${name}: it shows here in a moment`, r.message ? C.gold : C.text, null, r.message ? 9000 : 0);
   pickWhenListed(id);
 }
-async function newSession(folder, account) {
+// at: where the menu was ({ x, y }): the box for the first message opens there when it goes to the main computer
+async function newSession(folder, account, at = null) {
   unhideRepo(repoForFolder(state || {}, folder).root || folder);
   const r = await startChat({ cwd: folder, account, ...newSize() });
+  if (r && r.ask) {
+    askFirstMessage({ at, name: r.ask.name, go: (text) => startWithFirst(folder, account, text), here: () => startEmptyHere([{ cwd: folder, account }]) });
+    return;
+  }
   if (!r || !r.ok) { toast((r && r.message) || 'could not start a new session', C.red); return; }
   if (r.remote) { startedThere(r); return; }
   // its stand-in shows at once (map node, panel on Chat with the cursor in the chat box: detail.js)

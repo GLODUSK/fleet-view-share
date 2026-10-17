@@ -33,6 +33,8 @@
 //       list (Removed conversations ▸) that would otherwise run the height of the window; with eight or more rows it
 //       has a search box on top (typing filters by label, note and tag; bulk: true rows, the actions for the
 //       whole list, hide while a search is typed)
+//     input (instead of items): an input item, as above; the menu opens straight as its box (New session's first
+//       message, asked once the menu that picked New session has closed: app.js askFirstMessage)
 //   closeCtxMenu()   ctxMenuOpen()
 //
 // Frosted like the repo menu (same .menu surface and tokens). Keys while it is open: ↑↓ (and Home / End)
@@ -537,6 +539,7 @@ export function openCtxMenu(o) {
   place(o.x, o.y);
   if (frosts) startFrost();
   try { el.focus({ preventScroll: true }); } catch {}
+  if (o.input && o.input.input) startInput(o.input);
   return el;
 }
 

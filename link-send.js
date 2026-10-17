@@ -42,10 +42,17 @@
 //   POST /link/start { device, repo, account, prompt?, name?, model?, effort? }
 //     -> that machine's POST /api/sessions { repoOf: { origin, name }, account, prompt | blank: true, name?, model?,
 //        effort? }: repo is this machine's folder, sent as the repo it is (rootOut) so that machine starts it in its
-//        own checkout (api.js; 404 no_checkout when it has none); no prompt starts it blank, for Henry to type into.
-//        Its answer comes back as it is ({ ok, key, id, … }, the id once Claude Code named it) with host: { device,
-//        name } added. Refusals as above, and: bad_device 400 (not a sync device id), no_repo 409 (the folder is no
-//        repo rootOut knows), offline 503 at once when the link says that machine is off (nothing is sent).
+//        own checkout (api.js; 404 no_checkout when it has none); no prompt starts it blank (the page asks for the
+//        first message instead: a blank chat there can't be typed into from here until its log syncs).
+//        First GET /peer/status there, PROBE_MS at most: the link's presence can still say a machine that just went
+//        to sleep is online for a minute, and the start itself may take START_ROUTE_MS (95 s) to answer; a machine
+//        that doesn't answer the probe gets nothing (503 no_answer, so the page starts it here, with no chance of a
+//        second one starting there late). Its answer comes back as it is ({ ok, key, id, … }, the id once Claude
+//        Code named it) with host: { device, name } added. Refusals as above, and: bad_device 400 (not a sync device
+//        id), no_repo 409 (the folder is no repo rootOut knows), offline 503 at once when the link says that machine
+//        is off, no_answer 503 (the probe went unanswered; in both nothing was sent). Once the probe answered, the
+//        start counts as sent: a start the link then calls offline (link.js says so at the time-out when presence
+//        does) comes back as 504 timeout, since it may still start there and the page must not start a second here.
 //
 // conversation(id, q): a chat another machine hosts, read from that machine while the link to it is up (online), as
 // the phone reads it: its /conversation answer with source: '<host's name>' added; null (fleet-view.js then answers
@@ -60,6 +67,8 @@ const ANSWER_MAX = 10000; // a question's typed answer
 const IMAGE_MAX = 21000000; // an image as base64 (15 MB, the host's own limit for /chat/image)
 const IMG_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const CONV_MS = 15000; // a feed read from the host: the page asks again a second later anyway
+const PROBE_MS = 12000; // /link/start's GET /peer/status first: an awake machine answers in a second or two (link.js
+// sends a waiting request again every 8 s, so this gives it a second try)
 
 // what a call that reached no answer means for the page -> [status, code, message]
 function unreached(code, name) {
@@ -161,10 +170,23 @@ function createLinkSend(o = {}) {
     let on = null;
     try { on = typeof link.online === 'function' ? link.online(device) : null; } catch {}
     if (on === false) { const [s, code, message] = unreached('offline', name); return no(s, code, message); }
+    // is it awake? (see the top) Any answer will do; no answer in time: nothing starts there
+    let probe;
+    try { probe = await link.call(device, 'GET', '/peer/status', { timeoutMs: PROBE_MS }); } catch (e) { probe = { s: 0, b: { code: 'unreached', message: String((e && e.message) || e) } }; }
+    if (!probe || !probe.s) {
+      const pc = probe && probe.b && probe.b.code;
+      if (pc === 'timeout') return no(503, 'no_answer', `${name} didn't answer (asleep, or just gone offline), so nothing was started there`);
+      if (pc === 'pc-restarted') return no(503, 'no_answer', `Fleet View on ${name} is restarting, so nothing was started there`);
+      const [s, code, message] = unreached(pc, name);
+      return no(s, code, message);
+    }
     let res;
     try { res = await link.call(device, 'POST', '/api/sessions', { b: { ...body, repoOf: { origin, name: rname } } }); } catch (e) { res = { s: 0, b: { code: 'unreached', message: String((e && e.message) || e) } }; }
     if (!res || !res.s) {
-      const [s, code, message] = unreached(res && res.b && res.b.code, name);
+      // it went off while the start was on its way (see the top): it may have started there, so a time-out
+      const rc = res && res.b && res.b.code;
+      if (rc === 'offline') return no(504, 'timeout', `${name} went offline before it answered`);
+      const [s, code, message] = unreached(rc, name);
       return no(s, code, message);
     }
     if (res.b === undefined || res.b === null || typeof res.b !== 'object' || Array.isArray(res.b)) return no(502, 'bad_answer', `${name} answered ${res.s} without the expected JSON`);
@@ -238,4 +260,4 @@ function createLinkSend(o = {}) {
   return { route, hostOf, conversation };
 }
 
-module.exports = { createLinkSend, ROUTES, unreached, startBody, TEXT_MAX, IMAGE_MAX };
+module.exports = { createLinkSend, ROUTES, unreached, startBody, TEXT_MAX, IMAGE_MAX, PROBE_MS };

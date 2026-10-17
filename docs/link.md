@@ -219,7 +219,10 @@ link (`call()`), so its relay checks it and marks it as Henry's like the phone's
 chat another machine hosts goes through these, portable or bound, idle or busy: typing never moves it (remote by
 default, Henry 2026-10-13), and since 2026-10-17 nothing in the page moves one (the main computer:
 docs/sync-follow.md). `POST /link/start` starts a new chat on the main computer, in its own checkout of the repo
-(`POST /api/sessions` with `repoOf`).
+(`POST /api/sessions` with `repoOf`), after a `GET /peer/status` there that must answer within 12 s (else 503
+`no_answer` and nothing is sent: presence can still say a sleeping machine is online). Once that answered, a start
+that gets no answer (a time-out, or the machine gone offline meanwhile) is 504 `timeout`: it may still start there, so
+the page starts no second one here.
 
 | Route | Goes to (on the host) |
 |---|---|
