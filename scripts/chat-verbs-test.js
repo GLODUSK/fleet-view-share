@@ -940,6 +940,35 @@ const pasted = () => fake.writes.filter((w) => w.startsWith('\x1b[200~')).map((w
     assert.equal(o4.promptSent, false);
     assert.equal(o4.menu.kind, 'trust');
     assert.deepEqual(fake.writes, []);
+    // blank (a new chat the other computer started here, the main computer: link-send.js /link/start): nothing is
+    // typed, and the reply comes with its id
+    opening(screenOf(['', ...box()]), 'idle', keys);
+    const [cb, ob] = await start({ prompt: undefined, blank: true });
+    assert.equal(cb, 200, ob.message);
+    assert.equal(ob.ok, true, ob.message);
+    assert.equal(ob.blank, true);
+    assert.equal(ob.promptSent, false);
+    assert.equal(ob.id, ID);
+    assert.deepEqual(fake.writes, [], 'nothing typed into a blank one');
+    opening(screenOf(['', ...box()]), 'idle', keys);
+    assert.equal((await start({ blank: true }))[0], 400, 'blank with a prompt: 400');
+    assert.equal((await start({ blank: 'yes' }))[0], 400, 'blank must be true or false');
+    assert.equal((await start({ prompt: undefined }))[0], 400, 'no prompt and not blank: 400, as before');
+    // repoOf: the repo as the other machine names it, started in this machine's checkout (ctx.rootIn)
+    ctx.rootIn = (r) => (r.origin === 'GLODUSK/fleet-view' || (!r.origin && r.name === 'repo') ? repo : null);
+    opening(screenOf(['', ...box()]), 'idle', keys);
+    const [cr, or] = await start({ repo: undefined, repoOf: { origin: 'GLODUSK/fleet-view', name: 'fleet-view' }, prompt: undefined, blank: true });
+    assert.equal(cr, 200, or.message);
+    assert.equal(fake.opened.cwd, repo, 'started in this machine\'s checkout');
+    opening(screenOf(['', ...box()]), 'idle', keys);
+    assert.equal((await start({ repo: undefined, repoOf: { origin: null, name: 'repo' } }))[0], 200, 'repoOf by the folder\'s name alone');
+    opening(screenOf(['', ...box()]), 'idle', keys);
+    const [cn, on] = await start({ repo: undefined, repoOf: { origin: 'GLODUSK/elsewhere', name: 'elsewhere' } });
+    assert.equal(cn, 404);
+    assert.equal(on.code, 'no_checkout');
+    assert.equal(fake.opened, null, 'nothing started without a checkout');
+    for (const bad of [{ origin: 'a b' }, { name: 'a/b' }, {}, 'x', { origin: 5 }]) assert.equal((await start({ repo: undefined, repoOf: bad }))[0], 400, `repoOf ${JSON.stringify(bad)}: 400`);
+    delete ctx.rootIn;
     // a conversation resumed (open) onto the offer: answered, then ready
     opening(CHROME_RAW, 'waiting', keys);
     const [c5, o5] = await call('POST', `${S}/open`, {});

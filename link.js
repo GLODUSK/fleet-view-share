@@ -74,7 +74,7 @@
 //     version, unlinked, linking }], pairings: [{ pid, role: 'request' | 'answer', peer: { id, name }, state, message?,
 //     at }] }; unlinked: Henry unlinked it (it links again only with Link); linking: not linked, and it links by itself
 //     (a pairing under way, or it is awake); state: asking | waiting | linking | linked | declined | failed | expired |
-//     cancelled
+//     cancelled; online: whether that machine is on (seenOnline: the link's presence, else its last_seen_at)
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -116,6 +116,16 @@ const INCOMING_MAX = 3; // pairings another machine asked for, at once
 const lower = (s) => (typeof s === 'string' ? s.toLowerCase() : '');
 const short = (id) => String(id || '').slice(0, 8);
 const clip = (s, n = 100) => String(s == null ? '' : s).replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, n);
+// status()'s online for a machine: the link's own (its relay on the channel or not) while it says, else from the
+// devices table on this clock: false once its last_seen_at sat still awayMs (it is off, or its Fleet View is), true for
+// one not linked seen moving lately, null while it can't be told (the table not read lately here, a machine seen only
+// once so far, or linked with its channel not joined yet). seen: { at, changed } (when this machine saw it change)
+function seenOnline({ present, linked, readAt, seen, t, awayMs, staleMs }) {
+  if (linked && (present === true || present === false)) return present;
+  if (!(t - readAt <= staleMs)) return null;
+  if (!seen || t - seen.at > awayMs) return false;
+  return seen.changed && !linked ? true : null;
+}
 const b64u = (b) => Buffer.from(b).toString('base64url');
 const fromB64u = (s, len) => {
   if (typeof s !== 'string' || !/^[A-Za-z0-9_-]+$/.test(s)) return null;
@@ -183,7 +193,8 @@ function createLink(o = {}) {
   let me = null, uid = null, running = false, timer = null, ticking = null, again = false;
   // ---------- the machines (the devices table) ----------
   const devices = { at: -Infinity, byId: new Map() }; // id -> { name, platform, lastSeenAt }
-  const moved = new Map(); // id -> { v: its last_seen_at, at: when this machine saw it change (this clock) }
+  // id -> { v: its last_seen_at, at: when this machine saw it change (this clock), changed: seen to change, not only seen }
+  const moved = new Map();
   async function loadDevices(force) {
     if (!force && now() - devices.at < tm.devicesMs) return;
     const rows = await api.rest('GET', 'devices', { query: { select: 'id,name,platform,last_seen_at' } });
@@ -196,7 +207,7 @@ function createLink(o = {}) {
       if (!was || was.v !== seen) {
         // back after being away: ask it at once, whatever the last pairings with it did
         if (was && t - was.at > tm.awayMs) retry.delete(id);
-        moved.set(id, { v: seen, at: t });
+        moved.set(id, { v: seen, at: t, changed: !!was });
       }
     }
     devices.byId = byId;
@@ -744,17 +755,18 @@ function createLink(o = {}) {
 
   function status() {
     const t = now();
+    const on = (id, linked) => seenOnline({ present: linked ? online(id) : null, linked, readAt: devices.at, seen: moved.get(id), t, awayMs: tm.awayMs, staleMs: 3 * Math.max(tm.devicesMs, tm.pollMs) });
     const machines = [];
     for (const [id, d] of devices.byId) {
       if (id === me) continue;
       const p = peers.get(id), conn = conns.get(id), unlinked = !p && (offs.has(id) || offHere.has(id));
       machines.push({
-        id, name: d.name || 'another computer', platform: d.platform, lastSeenAt: d.lastSeenAt, linked: !!p, online: p ? online(id) : null,
+        id, name: d.name || 'another computer', platform: d.platform, lastSeenAt: d.lastSeenAt, linked: !!p, online: on(id, !!p),
         pairedAt: p ? p.pairedAt : null, version: conn ? conn.version : null, unlinked, linking: !p && !unlinked && (!!under(id) || awake(id)),
       });
     }
     // a linked machine the table no longer lists still shows (so it can be unlinked)
-    for (const p of peers.values()) if (!devices.byId.has(p.peer)) machines.push({ id: p.peer, name: p.name, platform: null, lastSeenAt: null, linked: true, online: online(p.peer), pairedAt: p.pairedAt, version: null, unlinked: false, linking: false });
+    for (const p of peers.values()) if (!devices.byId.has(p.peer)) machines.push({ id: p.peer, name: p.name, platform: null, lastSeenAt: null, linked: true, online: on(p.peer, true), pairedAt: p.pairedAt, version: null, unlinked: false, linking: false });
     const list = [...pairings.values()].filter((x) => !FINAL.has(x.state) || t - x.endedAt <= tm.keepFinalMs).map((x) => ({
       pid: x.pid, role: x.role === 'r' ? 'request' : 'answer', peer: { id: x.peer, name: x.peerName }, state: x.state, ...(x.message ? { message: x.message } : {}), at: x.startedAt,
     }));
@@ -765,4 +777,4 @@ function createLink(o = {}) {
   return { start, stop, tick, status, peers: peerList, online, call, request, unlink };
 }
 
-module.exports = { createLink, derive, commitOf, transcript, sharedSecret, offKey, TIMING };
+module.exports = { createLink, derive, commitOf, transcript, sharedSecret, offKey, seenOnline, TIMING };

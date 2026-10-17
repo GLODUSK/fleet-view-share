@@ -6,12 +6,14 @@
 // runs; nothing is written into its log here. fleet-view.js serves the routes (this machine's own page only, as the
 // other /link/* routes) and asks conversation() before it answers GET /conversation from this machine's copy.
 //
-//   createLinkSend({ link, owners, away })
+//   createLinkSend({ link, owners, away, rootOut })
 //     link()     -> link.js's object while sync runs, else null
 //     owners()   -> sync-run.js owners(): Map<id, { device, name, live, moving, bound? }> (the chats another device
 //                   owns, and the ones moving between it and this one), or null
 //     away(id)   -> away.json's entry for it ({ device: a name, why }) or null: sync isn't running here, but the session
 //                   host still refuses it as another machine's (sync-run.js keeps away.json on a lost sign-in)
+//     rootOut(folder) -> the repo a folder here is, as every machine knows it: { origin, name } (sync-prefs.js
+//                   makeTranslate's out), or null
 //   -> { route(m, pathname, q, b) -> Promise<[status, json]> | null (null: not one of these routes), hostOf(id),
 //        conversation(id, q) -> Promise<json | null> }
 //
@@ -36,11 +38,21 @@
 // Only the routes' own fields go on, and never a body field the page did not set here: a page can't reach any other
 // route of the host's through these.
 //
+// A new chat on the main computer (Henry, 2026-10-17: chats started on the other computer run on the main one):
+//   POST /link/start { device, repo, account, prompt?, name?, model?, effort? }
+//     -> that machine's POST /api/sessions { repoOf: { origin, name }, account, prompt | blank: true, name?, model?,
+//        effort? }: repo is this machine's folder, sent as the repo it is (rootOut) so that machine starts it in its
+//        own checkout (api.js; 404 no_checkout when it has none); no prompt starts it blank, for Henry to type into.
+//        Its answer comes back as it is ({ ok, key, id, … }, the id once Claude Code named it) with host: { device,
+//        name } added. Refusals as above, and: bad_device 400 (not a sync device id), no_repo 409 (the folder is no
+//        repo rootOut knows), offline 503 at once when the link says that machine is off (nothing is sent).
+//
 // conversation(id, q): a chat another machine hosts, read from that machine while the link to it is up (online), as
 // the phone reads it: its /conversation answer with source: '<host's name>' added; null (fleet-view.js then answers
 // from this machine's synced copy, with source: 'local') when it isn't another machine's, is moving, the link is down
 // or the host said no. q: { since, before, limit } (numbers, as the page sends them).
 'use strict';
+const path = require('path');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TEXT_MAX = 400000; // a message's text (the relay's part size; parts carry more, but no one types this much)
@@ -100,11 +112,64 @@ const ROUTES = {
   },
 };
 
+// POST /link/start's body as that machine's POST /api/sessions takes it (with repoOf for repo) -> the body, or a
+// string saying what is wrong. The same checks as api.js startSession, so a bad field is told here
+const NAME_MAX = 80;
+const NAME_BAD = /[\x00-\x1f\x7f-\x9f]/;
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9.\-\[\]]{0,59}$/;
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+function startBody(b) {
+  if (typeof b.repo !== 'string' || !b.repo || b.repo.length > 1024 || !path.isAbsolute(b.repo)) return 'repo must be the folder here (an absolute path)';
+  if (typeof b.account !== 'string' || !/^[A-Z]$/.test(b.account)) return 'account must be a Claude account letter';
+  const out = { account: b.account };
+  if (b.prompt != null) { if (!isText(b.prompt, TEXT_MAX)) return `prompt must be text (at most ${TEXT_MAX} characters)`; out.prompt = b.prompt; } else out.blank = true;
+  if (b.name != null) { if (typeof b.name !== 'string' || !b.name.trim() || b.name.length > NAME_MAX || NAME_BAD.test(b.name)) return `name must be text of 1 to ${NAME_MAX} characters`; out.name = b.name; }
+  if (b.model != null) { if (typeof b.model !== 'string' || !MODEL_RE.test(b.model)) return 'model must be a model name like opus or claude-opus-5-5[1m]'; out.model = b.model; }
+  if (b.effort != null) { if (!EFFORTS.includes(b.effort)) return `effort must be one of ${EFFORTS.join(', ')}`; out.effort = b.effort; }
+  return out;
+}
+
 function createLinkSend(o = {}) {
   const linkOf = typeof o.link === 'function' ? o.link : () => null;
   const ownersOf = typeof o.owners === 'function' ? o.owners : () => null;
   const awayOf = typeof o.away === 'function' ? o.away : () => null;
+  const rootOutOf = typeof o.rootOut === 'function' ? o.rootOut : () => null;
   const no = (s, code, message) => [s, { ok: false, code, message }];
+
+  // POST /link/start (see the top): a new chat on that machine, in its own checkout of the repo
+  async function start(m, b) {
+    if (m !== 'POST') return no(405, 'bad_method', 'POST');
+    const x = b && typeof b === 'object' ? b : {};
+    const device = String(x.device || '').toLowerCase();
+    if (!UUID_RE.test(device)) return no(400, 'bad_device', 'device must be a sync device id');
+    const body = startBody(x);
+    if (typeof body === 'string') return no(400, 'bad_request', body);
+    let r = null;
+    try { r = rootOutOf(x.repo); } catch {}
+    const origin = r && typeof r.origin === 'string' && r.origin ? r.origin : null;
+    const rname = r && typeof r.name === 'string' && r.name ? r.name : null;
+    if (!origin && !rname) return no(409, 'no_repo', `${x.repo} is no repo Fleet View knows`);
+    let link = null;
+    try { link = linkOf(); } catch {}
+    let name = 'the main computer';
+    try {
+      const st = link && typeof link.status === 'function' ? link.status() : null;
+      const mm = st && Array.isArray(st.machines) ? st.machines.find((y) => y && String(y.id || '').toLowerCase() === device) : null;
+      if (mm && typeof mm.name === 'string' && mm.name) name = mm.name;
+    } catch {}
+    if (!link || typeof link.call !== 'function') return no(409, 'not_running', `Sync isn't running on this machine, so it can't reach ${name}`);
+    let on = null;
+    try { on = typeof link.online === 'function' ? link.online(device) : null; } catch {}
+    if (on === false) { const [s, code, message] = unreached('offline', name); return no(s, code, message); }
+    let res;
+    try { res = await link.call(device, 'POST', '/api/sessions', { b: { ...body, repoOf: { origin, name: rname } } }); } catch (e) { res = { s: 0, b: { code: 'unreached', message: String((e && e.message) || e) } }; }
+    if (!res || !res.s) {
+      const [s, code, message] = unreached(res && res.b && res.b.code, name);
+      return no(s, code, message);
+    }
+    if (res.b === undefined || res.b === null || typeof res.b !== 'object' || Array.isArray(res.b)) return no(502, 'bad_answer', `${name} answered ${res.s} without the expected JSON`);
+    return [res.s, { ...res.b, host: { device, name } }];
+  }
 
   // the machine another device's chat runs on: { device, name, moving } or null
   function hostOf(id) {
@@ -117,6 +182,7 @@ function createLinkSend(o = {}) {
   }
 
   async function route(m, pathname, q, b) {
+    if (pathname === '/link/start') return start(m, b);
     const r = ROUTES[pathname];
     if (!r) return null;
     if (m !== r.m) return no(405, 'bad_method', r.m);
@@ -172,4 +238,4 @@ function createLinkSend(o = {}) {
   return { route, hostOf, conversation };
 }
 
-module.exports = { createLinkSend, ROUTES, unreached, TEXT_MAX, IMAGE_MAX };
+module.exports = { createLinkSend, ROUTES, unreached, startBody, TEXT_MAX, IMAGE_MAX };

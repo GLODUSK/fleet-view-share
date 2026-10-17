@@ -10,6 +10,33 @@ PC) keeps that machine as its host, and the other machine passes his messages to
 machine hosts the chat. "We gotta make sure the parity and sync is perfect and either host should transfer all the
 stuff they need to make stuff work."
 
+## The main computer (Henry, 2026-10-17)
+
+> "The whole pairing with a PC is picking a hero computer to work from… we don't move conversations left to right if
+> we're paired… but we can clone a workspace that way I pick up the work elsewhere."
+
+This replaces every **Continue on this machine** below: the page no longer offers it anywhere (right-click menu,
+Session tab, chat box chips, offline cards), with or without a main computer picked. What is left of it below is
+history; `/sync/move` stays on the server for older pages.
+
+- **The main computer** (`settings.mainMachine`, shared through `sync-prefs.js` group `mainMachine`; `GET`/`POST
+  /sync/main`, fleet-view.js syncMain) is picked in the Sync card ("Which one is the main computer?"). The card shows
+  each machine **online / offline** (with "seen X ago") from the link's presence, not from whether they are paired.
+- **New chats run on it.** On the other machine, New session (and an empty chat's pasted copy, and a queued message's
+  New chat) starts it on the main computer: `POST /link/start` (`link-send.js`) → that machine's `POST /api/sessions
+  { repoOf: { origin, name }, blank | prompt }`, in its own checkout of the repo. It shows here once sync lists it and
+  is picked then (`web/app.js` startChat, pickWhenListed). The main computer offline, not linked, or without a
+  checkout of the repo: it starts here, and a toast says why. Forks, Fork at a message, a dropped file's scratchpad
+  and a new team lead still start here (they need this machine's copy of the conversation or its files).
+- **No chat moves.** Typing into another machine's chat goes there (below), and when that machine is off its chats
+  wait for it: "BlackBox is offline. Its chats come back when it's on."
+- **Clone workspace to this machine** (a workspace's right-click menu, when the other computer has chats in it;
+  `clone-workspace.js`, `POST`/`GET /sync/clone-workspace`, `web/clone.js`): this machine gets its **own copies** of
+  that workspace's newest 20 chats, with new ids and this machine's checkout as their folder, and the other machine's
+  uncommitted work laid into worktrees here. The originals stay on the main computer, untouched.
+- Background sync still copies every log both ways, out of sight: the Sync card no longer shows downloads, conflicts
+  or "brought here".
+
 ## The rule
 
 Every chat has a **host**: the machine its Claude runs on. Only the host writes the chat's log, so the two machines

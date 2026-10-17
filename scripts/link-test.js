@@ -261,6 +261,17 @@ const machineOf = (m, other) => (m.link.status().machines || []).find((x) => x.i
 const comps = (m) => m.relay.computers();
 
 async function main() {
+  // ---------- seenOnline: the card's online/offline for a machine ----------
+  {
+    const so = (o) => L.seenOnline({ present: null, linked: true, readAt: 1000, seen: { at: 1000, changed: true }, t: 1000, awayMs: 180e3, staleMs: 180e3, ...o });
+    eq([so({ present: true }), so({ present: false })], [true, false], 'seenOnline: linked, the link\'s presence when it says');
+    eq(so({ t: 1000 + 181e3, readAt: 1000 + 181e3 }), false, 'seenOnline: linked, channel not joined, last_seen_at still for awayMs: offline (never a bare unknown)');
+    eq(so({}), null, 'seenOnline: linked, channel not joined, seen moving lately: not known yet (checking)');
+    eq(so({ t: 1000 + 200e3 }), null, 'seenOnline: the table not read lately here: not known');
+    eq(so({ linked: false, present: true }), true, 'seenOnline: not linked, seen moving lately: online (presence ignored)');
+    eq(so({ linked: false, seen: { at: 1000, changed: false } }), null, 'seenOnline: seen only once so far: not known');
+    eq(so({ linked: false, seen: undefined }), false, 'seenOnline: never seen: offline');
+  }
   beat();
   const [lo, hi] = [crypto.randomUUID(), crypto.randomUUID()].sort();
   const R = await machine('MAC', 'darwin', lo);
@@ -393,9 +404,11 @@ async function main() {
   ok(!!pcRelaySock, 'the PC\'s relay has a socket');
   kill(pcRelaySock);
   ok(await until(() => R.link.online(A.id) === false, 5e3, 50), 'the PC\'s relay drops: the Mac sees it offline at once');
+  eq(machineOf(R, A).online, false, 'status(): the card reads it offline too');
   r = await pass(R.link.call(A.id, 'GET', '/peer/status'));
   eq([r.s, r.b.code], [0, 'offline'], 'a call while it is offline: s 0, offline');
   ok(await until(() => R.link.online(A.id) === true, 30e3), 'the PC\'s relay comes back: online again');
+  eq(machineOf(R, A).online, true, 'status(): and online');
   r = await pass(R.link.call(A.id, 'GET', '/peer/status'));
   eq(r.s, 200, 'and calls go through again');
 

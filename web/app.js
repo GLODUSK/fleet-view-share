@@ -111,7 +111,7 @@
 // empty space "Add workspace", "Removed workspaces ▸" (every removed repo, to add one back) and "Removed
 // conversations ▸" (every removed conversation, its workspace in the note, those with none too). A repo's "Never continue
 // on another machine…" (in Workspace settings) opens keeps.js's sheet for its stays-on rule (settings.hostRules): the
-// chats it pins stay on that machine, Continue on this machine can't take them off it. The browser's own menu
+// chats it pins stay on that machine (no chat moves between machines anyway, Henry 2026-10-17). The browser's own menu
 // is kept only in text inputs and the live terminal (and in Edge outside those targets).
 // Bots on the map: empty space on the map has "Add bot ▸", a bot's mascot its own menu (watch a conversation with a
 // job, its watches, Open chat, Start, Remove bot) and a conversation "Have a bot watch it ▸" (see "bots on the map").
@@ -193,7 +193,7 @@ import { mountBotNotes } from './botnote.js';
 import { renderDetail, renderBotDetail, openPeek, shownTab, SPLIT_MAX } from './detail.js';
 import { setChatLookup } from './chat.js';
 import { C, esc, needsYou, ago, fmtCost, acctTag, acctColor, isAcct, repoChip, clockTime, isHttps, setAccounts, singleAccount } from './cards.js';
-import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote, requestMove, setAccountPicker } from './term.js';
+import { watchHosts, isHosted, installFakeTerm, termApi, hosts, createSession, endSession, hostStatus, onRekey, openElsewhere, isNewKey, sendToAccount, ensureLive, interruptSession, sendText, screenText, screenMarked, screenReady, noTermMsg, noTermNote, setAccountPicker } from './term.js';
 import { pickFolder, canPickFolder, uploads, upload, sizeText, droppedFolders } from './pcfiles.js';
 import { openCtxMenu, closeCtxMenu, ctxMenuOpen } from './ctxmenu.js';
 import { sendOrder, sendEach, sendNote, summary as orderSummary, firstWords, unreachable, handedOff, onQueueDone, queuedFor, cancelQueued, onTeamJoin, setServerQueued, sendWhenUp } from './orders.js';
@@ -201,14 +201,15 @@ import { mountSince, sinceFromState } from './since.js';
 import { mountUpdate } from './update.js';
 import { mountUsage } from './usage.js';
 import { mountSync } from './sync.js';
-import { mountClone } from './clone.js';
+import { mountClone, cloneWorkspaceItem } from './clone.js';
 import { mountSetup } from './setup.js';
 import { mountPhone } from './phone.js';
 import { mountHousekeeping } from './housekeeping.js';
-import { MODEL_IDS, EFFORTS, MENU_ROWS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults, hostOfChat } from './compose.js';
+import { MODEL_IDS, EFFORTS, MENU_ROWS, modelLabel, parseMenu, parsePromptBox, parseSpinner, saveImage, messageText, setLaunchDefaults } from './compose.js';
 import { forkAt } from './forkat.js';
 import { handToChat } from './handto.js';
 import { openKeeps, setRules } from './keeps.js';
+import { mainMachine } from './main-machine.js';
 
 const VIEWS = ['cards', 'map', 'wall', 'projects', 'chats'];
 // the views the tabs offer: Cards, Map, Wall, Projects, Bots (Henry, 2026-10-11: Map and Projects tabs back after #260)
@@ -2370,16 +2371,19 @@ async function pasteCopied() {
   if (!termApi()) { toast(noTermMsg('Pasting a copy'), C.red); return; }
   const list = copied.slice(), x = mouseAt.x, y = mouseAt.y;
   const root = pasteRoot(x, y);
-  let first = null, n = 0;
+  let first = null, n = 0, there = null;
   for (const [i, c] of list.entries()) {
     const here = root && normRoot(root) !== normRoot(c.root) ? root : null;
     const folder = c.empty && here ? here : c.cwd;
     // where the new session shows by itself (its folder's repo), and where the copy belongs (a moved original's too)
     const natural = repoForFolder(state || {}, folder).root || folder, target = here || c.root || natural;
     unhideRepo(natural);
-    const r = await createSession({ cwd: folder, account: c.account, ...(c.empty ? {} : { forkFrom: c.id }), ...newSize() });
+    // an empty one is a new chat: on the main computer when one is picked (startChat); a fork starts here
+    const r = c.empty ? await startChat({ cwd: folder, account: c.account, ...newSize() }) : await createSession({ cwd: folder, account: c.account, forkFrom: c.id, ...newSize() });
     if (!r || !r.ok) { toast((r && r.message) || `could not copy ${c.name}`, C.red); continue; }
-    n++; first = first || r.key;
+    n++;
+    if (r.remote) { there = there || r; continue; } // (it shows where sync puts it)
+    first = first || r.key;
     if (!c.empty && c.name) pasteNames.set(r.key, { name: c.name, from: c.id });
     // side by side when several land on one spot
     const px = x + i * 34, py = y;
@@ -2388,8 +2392,9 @@ async function pasteCopied() {
   }
   if (!n) return;
   const where = root ? ` in ${repoName(root)}` : '';
-  toast(n === 1 ? `Pasted a copy of ${list[0].name}${where}` : `Pasted ${n} copies${where}`, C.mint);
-  ui.setSelected(first, 'explicit');
+  toast((n === 1 ? `Pasted a copy of ${list[0].name}${where}` : `Pasted ${n} copies${where}`) + (there ? ` (new ones on ${there.remote.name}: they show here in a moment)` : ''), C.mint);
+  if (first) ui.setSelected(first, 'explicit');
+  else if (there) pickWhenListed(there.remote.id);
 }
 // a pasted fork that goes to another workspace: moved there once Claude Code gave it its id
 onRekey((oldKey, id) => {
@@ -2642,6 +2647,9 @@ function openContextMenu(target, x, y) {
     if (rm) items.push(rm);
     const lm = leftMapMenuItem(leftMapFor(folder), false);
     if (lm) items.push(lm);
+    // the other computer's chats in it, copied to this machine as its own (clone.js; only when that machine has some)
+    const cw = cloneWorkspaceItem({ root: rIt.root, name: rIt.name, sessions: state?.sessions || [] });
+    if (cw) items.push(cw);
     // the repo and its conversations leave every view (the workspace list too); Undo on the toast
     items.push({ sep: true }, { label: 'Remove workspace', icon: 'close', danger: true, run: () => removeRepo({ root: folder, name: target.name || repo.name }) });
     openCtxMenu({ x, y, title: target.name || repo.name || repoName(folder), dot: color, sub: folder, items });
@@ -2673,7 +2681,6 @@ function openContextMenu(target, x, y) {
   items.push(renameMenuItem(s), sessionColorItem(s));
   if (desk && !s.pending && !s.demo) items.push(forkMenuItem(s));
   if (!s.pending && !s.demo) { const mv = moveMenuItem(s); if (mv) items.push(mv); }
-  if (desk && !s.pending && !s.demo && !hosted) { const ci = continueItem(s); if (ci) items.push(ci); }
   if (desk && !s.pending && !s.demo && !singleAccount()) { const se = sendElsewhereItem(s, hosted); if (se) items.push(se); }
   items.push(...teamItems(s));
   const bw = botWatchItem(s);
@@ -2742,28 +2749,6 @@ function moveMenuItem(s) {
   if (s.moved) children.unshift({ label: 'Back to the workspace it started in', icon: 'reply', run: () => moveConversation(s, null) }, ...(children.length ? [{ sep: true }] : []));
   if (!children.length) return { label: 'Move to workspace', icon: 'folder', disabled: true, note: 'no other workspace listed' };
   return { label: 'Move to workspace', icon: 'folder', children };
-}
-// "Continue on this machine": a chat another machine runs stays there (typed here, it goes there: compose.js
-// followPlan, Henry 2026-10-13) until asked here. Only while another machine hosts it (compose.js hostOfChat, as the
-// chat box tells) and no move is under way. It opens the chat's Session tab, which starts the move (term.js
-// requestMove, POST /sync/move) and shows its phases, Cancel and the rest, as that tab's own button does. A chat
-// pinned there (workspace.pin): one Henry pinned by hand is let go first ("Unpin and continue on this machine",
-// keeps.js setPin free, in that tab); one a stays-on rule pins never continues on another machine (shown, disabled)
-function continueItem(s) {
-  const host = hostOfChat(s);
-  if (!host || !s.syncOwner || s.syncOwner.moving) return null;
-  const pin = s.workspace?.pin;
-  if (pin && !pin.manual) return { label: 'Continue on this machine', icon: 'sync', disabled: true, note: `a rule keeps it on ${pin.host || host.name}` };
-  const bound = !!s.bot || s.workspace?.kind === 'bound';
-  return {
-    label: pin ? 'Unpin and continue on this machine' : 'Continue on this machine', icon: 'sync', note: bound ? `its files stay on ${host.name}` : `from ${host.name}`,
-    run: () => {
-      requestMove(s.id, { unpin: !!pin });
-      tabWant = { id: s.id, tab: 'session' };
-      if (local.view === 'projects' || local.view === 'chats') projPanel = true;
-      ui.showDetail(s.id); // (no pick: an explicit one would start a session here first)
-    },
-  };
 }
 function moveConversation(s, root) {
   const before = s.moved && s.repo ? s.repo.root : null;
@@ -2847,7 +2832,14 @@ window.addEventListener('fv-chat-fork', async (e) => {
   if (d.how === 'quote') { forkWithQuote(s, text); return; }
   const fork = d.how !== 'new';
   const why = !s ? 'that conversation is no longer listed' : !s.cwd ? 'no folder known for it' : '';
-  const r = why ? { ok: false, message: why } : await createSession({ cwd: s.cwd, account: s.account, ...(fork ? { forkFrom: s.id } : {}), ...newSize() });
+  // New chat: on the main computer when one is picked (startChat), the message as its prompt; a fork starts here
+  const r = why ? { ok: false, message: why } : fork ? await createSession({ cwd: s.cwd, account: s.account, forkFrom: s.id, ...newSize() })
+    : await startChat({ cwd: s.cwd, account: s.account, prompt: text, ...newSize() });
+  if (r && r.ok && r.remote) {
+    if (!r.sent) { try { await navigator.clipboard.writeText(text); } catch {} }
+    startedThere(r.sent ? r : { ...r, message: `${r.message || 'your message did not go in'}. Your message is on the clipboard` }, 'New conversation');
+    return;
+  }
   if (!r || !r.ok) {
     // nothing started: the message is out of the queue, so it goes to the clipboard rather than being lost
     try { await navigator.clipboard.writeText(text); } catch {}
@@ -2961,10 +2953,68 @@ function newSize() {
   const w = Math.min(parseFloat(getComputedStyle($('work')).getPropertyValue('--detail-w')) || 504, window.innerWidth), h = window.innerHeight - 140;
   return { cols: Math.max(40, Math.min(400, Math.floor((w - 20) / 7.83))), rows: Math.max(10, Math.min(200, Math.floor(h / 17))) };
 }
+// ---------- New chats run on the main computer ----------
+// Henry, 2026-10-17: with a main computer picked (GET /sync/main: main-machine.js) and this machine not it, a new chat
+// starts there (POST /link/start: link-send.js, in that machine's own checkout of the repo), unless the link says it is
+// offline; it shows here as that machine's other chats do (sync) and is picked once /state lists it (pickWhenListed).
+// Offline, not linked, or no checkout of the repo there: it starts here, and a toast says why. No main computer picked,
+// or this machine is it: here, as always. The workspace's New session, an empty chat's pasted copy and a queued
+// message's New chat start this way; forks, Fork at a message, a dropped file's scratchpad and a new lead start here
+// (they need this machine's copy of the conversation, its files, or its own session).
+// o: { cwd, account, cols, rows, prompt? } -> createSession's { ok, key, message } for one started here (note: why not
+// on the main computer, already shown), or { ok, remote: { id, name }, sent, message } for one there (id null while
+// Claude Code had not named it; sent: the prompt went in)
+const HERE_WHY = {
+  offline: (n) => `${n} is offline, so this chat runs here`,
+  not_linked: (n) => `${n} isn't linked with this machine, so this chat runs here`,
+  revoked: (n) => `${n} isn't linked with this machine, so this chat runs here`,
+  not_running: () => 'Sync isn\'t running here, so this chat runs here',
+  stopped: () => 'Sync isn\'t running here, so this chat runs here',
+  no_checkout: (n, repo) => `${n} has no checkout of ${repo}, so this chat runs here`,
+  no_repo: (n, repo) => `${n} can't tell which repo ${repo} is, so this chat runs here`,
+};
+async function startChat(o) {
+  const mm = FIXTURE ? null : await mainMachine();
+  const main = mm && mm.main && mm.main.id && !mm.isMain ? mm.main : null;
+  const here = async (note) => {
+    const r = await createSession({ cwd: o.cwd, account: o.account, cols: o.cols, rows: o.rows });
+    if (r && r.ok && note) toast(note, C.dim, null, 7000);
+    return r && r.ok ? { ...r, note } : r;
+  };
+  if (!main) return here(null);
+  const name = main.name || 'the main computer';
+  if (mm.online === false) return here(HERE_WHY.offline(name));
+  const r = await post('/link/start', { device: main.id, repo: o.cwd, account: o.account, ...(o.prompt ? { prompt: o.prompt } : {}) });
+  // started there (ok, or a prompt held back by a question there: it still runs, with its id)
+  if (r && (r.ok || (r.id && r.promptSent === false))) return { ok: true, remote: { id: r.id || null, name }, sent: !!r.promptSent, message: r.ok ? '' : r.message || '' };
+  const why = r && HERE_WHY[r.code];
+  if (why) return here(why(name, repoName(o.cwd)));
+  return { ok: false, message: `Could not start it on ${name}: ${(r && r.message) || 'Fleet View did not answer'}` };
+}
+// a chat started on the main computer: picked here once /state lists it (sync brings it), unless Henry picked something
+// else meanwhile; given up after PICK_WAIT_MS
+const PICK_WAIT_MS = 3 * 60e3;
+function pickWhenListed(id) {
+  if (!id) return;
+  const before = ui.selectedId, until = Date.now() + PICK_WAIT_MS;
+  const look = () => {
+    if (ui.selectedId !== before) return;
+    if ((state?.sessions || []).some((x) => x.id === id)) { ui.setSelected(id, 'explicit'); return; }
+    if (Date.now() < until) setTimeout(look, 1000);
+  };
+  look();
+}
+// the toast for a chat started on the main computer, and its pick once it shows here
+function startedThere(r, what = 'New chat') {
+  const { id, name } = r.remote;
+  toast(r.message ? `${what} on ${name}: ${r.message}` : `${what} on ${name}: it shows here in a moment`, r.message ? C.gold : C.text, null, r.message ? 9000 : 0);
+  pickWhenListed(id);
+}
 async function newSession(folder, account) {
   unhideRepo(repoForFolder(state || {}, folder).root || folder);
-  const r = await createSession({ cwd: folder, account, ...newSize() });
+  const r = await startChat({ cwd: folder, account, ...newSize() });
   if (!r || !r.ok) { toast((r && r.message) || 'could not start a new session', C.red); return; }
+  if (r.remote) { startedThere(r); return; }
   // its stand-in shows at once (map node, panel on Chat with the cursor in the chat box: detail.js)
   ui.setSelected(r.key, 'explicit');
 }

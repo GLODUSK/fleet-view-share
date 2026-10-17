@@ -8,7 +8,11 @@
 // no link); every way a call reaches no answer (not linked, offline, timeout, the host restarted, revoked, stopped, too
 // large); an answer that isn't JSON; a link that throws; and the feed: read from the host with source while the link is
 // up and online, null (this machine's copy) when it is offline, unknown, the host says no, the chat is moving or this
-// machine runs it, and only since / before / limit going on. Exit 0 = all pass. No network, no files.
+// machine runs it, and only since / before / limit going on. And POST /link/start (a new chat on the main computer):
+// its POST /api/sessions there with the repo by origin and name (repoOf), blank without a prompt, only the fields it
+// takes; the host's answer with host added; its refusals (method, device, repo, account, prompt, name, model, effort,
+// no repo known, offline at once, sync not running) and every way a call reaches no answer. Exit 0 = all pass. No
+// network, no files.
 'use strict';
 const path = require('path');
 const LS = require(path.join(__dirname, '..', 'link-send.js'));
@@ -22,6 +26,8 @@ const MINE = '11111111-2222-4333-8444-555555555555';
 const MOVING = '22222222-3333-4444-8555-666666666666';
 const COMING = '33333333-4444-4555-8666-777777777777';
 const PC = '0afc6f7f-c6f1-4f46-9d69-4e6006385910';
+const REPO = path.resolve(path.sep, 'code', 'fleet-view');
+const LONE = path.resolve(path.sep, 'code', 'notes');
 
 function setup(o = {}) {
   const calls = [];
@@ -30,7 +36,10 @@ function setup(o = {}) {
   const link = {
     call: async (d, m, p, x = {}) => { calls.push({ d, m, p, b: x.b, q: x.q, timeoutMs: x.timeoutMs }); return answer(d, m, p, x); },
     online: () => online,
+    status: () => ({ running: true, machines: [{ id: PC, name: 'BlackBox', linked: true }] }),
   };
+  // this machine's folders as every machine knows them (sync-prefs.js makeTranslate's out)
+  const roots = new Map([[REPO, { origin: 'GLODUSK/fleet-view', name: 'fleet-view', known: true }], [LONE, { origin: null, name: 'notes', known: true }]]);
   let linkOn = true;
   const owners = new Map([
     [ID, { device: PC.toUpperCase(), name: 'BlackBox', live: true, moving: null }],
@@ -39,7 +48,7 @@ function setup(o = {}) {
   ]);
   let ownersOn = true;
   const away = new Map(o.away || []);
-  const ls = LS.createLinkSend({ link: () => (linkOn ? link : null), owners: () => (ownersOn ? owners : null), away: (id) => away.get(id) || null });
+  const ls = LS.createLinkSend({ link: () => (linkOn ? link : null), owners: () => (ownersOn ? owners : null), away: (id) => away.get(id) || null, rootOut: (f) => roots.get(f) || null });
   return {
     ls, calls,
     set answer(f) { answer = f; },
@@ -135,6 +144,66 @@ async function main() {
       const r = await t.ls.route('POST', '/link/send', null, { id: ID, text: 'x' });
       ok(r[0] === s && r[1].ok === false && r[1].code === (code === 'weird' ? 'weird' : code) && re.test(r[1].message), `unreached ${code}: ${s} with words (${r[0]} ${r[1].message})`);
     }
+  }
+
+  // ---------- POST /link/start: a new chat on the main computer ----------
+  {
+    const t = setup({ answer: (d, m, p, x) => ({ s: 200, b: { ok: true, key: 'new-3', id: ID, promptSent: !x.b.blank } }) });
+    // blank (no prompt): the repo as every machine knows it, the account, blank; nothing the page added goes on
+    let r = await t.ls.route('POST', '/link/start', null, { device: PC.toUpperCase(), repo: REPO, account: 'B', role: 'bot:a1b2c3d4e5f6', forkFrom: ID, temp: true, cwd: 'C:\\x', via: 'phone' });
+    eq(r, [200, { ok: true, key: 'new-3', id: ID, promptSent: false, host: { device: PC, name: 'BlackBox' } }], 'start: the host\'s answer, with host');
+    eq(t.calls[0], { d: PC, m: 'POST', p: '/api/sessions', b: { account: 'B', blank: true, repoOf: { origin: 'GLODUSK/fleet-view', name: 'fleet-view' } }, q: undefined, timeoutMs: undefined },
+      'start: POST /api/sessions there with repoOf and blank, and only the fields it takes');
+    // with a prompt, a name, a model and an effort: they go on; a repo with no origin goes by its name
+    r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: LONE, account: 'A', prompt: 'look at the notes', name: 'Notes', model: 'claude-opus-5-5[1m]', effort: 'high' });
+    eq(r[0], 200, 'start with a prompt: 200');
+    eq(t.calls[1].b, { account: 'A', prompt: 'look at the notes', name: 'Notes', model: 'claude-opus-5-5[1m]', effort: 'high', repoOf: { origin: null, name: 'notes' } }, 'start: prompt, name, model, effort, and the repo by its name');
+    // the host's refusals come back as they are (no checkout there, a bad account there)
+    t.answer = () => ({ s: 404, b: { ok: false, code: 'no_checkout', message: 'this machine has no checkout of fleet-view' } });
+    r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
+    ok(r[0] === 404 && r[1].code === 'no_checkout' && r[1].host.name === 'BlackBox', 'start: no checkout there passes through');
+    t.answer = () => ({ s: 200, b64: 'AAAA' });
+    r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
+    ok(r[0] === 502 && r[1].code === 'bad_answer', 'start: an answer that isn\'t JSON: 502 bad_answer');
+    t.answer = () => { throw new Error('boom'); };
+    r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
+    ok(r[0] === 502 && r[1].ok === false, 'start: a link that throws: 502, never an exception');
+    const n0 = t.calls.length;
+    // refusals before anything is sent
+    const code = async (b, m = 'POST') => { const x = await t.ls.route(m, '/link/start', null, b); return [x[0], x[1].code]; };
+    eq(await code({ device: PC, repo: REPO, account: 'B' }, 'GET'), [405, 'bad_method'], 'start: the wrong method');
+    eq(await code({ device: 'BlackBox', repo: REPO, account: 'B' }), [400, 'bad_device'], 'start: not a device id');
+    eq(await code({ repo: REPO, account: 'B' }), [400, 'bad_device'], 'start: no device');
+    eq(await code({ device: PC, repo: 'fleet-view', account: 'B' }), [400, 'bad_request'], 'start: a repo that isn\'t a folder path');
+    eq(await code({ device: PC, account: 'B' }), [400, 'bad_request'], 'start: no repo');
+    eq(await code({ device: PC, repo: REPO, account: 'b' }), [400, 'bad_request'], 'start: not an account letter');
+    eq(await code({ device: PC, repo: REPO, account: 'B', prompt: '  ' }), [400, 'bad_request'], 'start: an empty prompt');
+    eq(await code({ device: PC, repo: REPO, account: 'B', prompt: 'x'.repeat(LS.TEXT_MAX + 1) }), [400, 'bad_request'], 'start: a prompt too long');
+    eq(await code({ device: PC, repo: REPO, account: 'B', name: 'x'.repeat(81) }), [400, 'bad_request'], 'start: a name too long');
+    eq(await code({ device: PC, repo: REPO, account: 'B', name: 'a\nb' }), [400, 'bad_request'], 'start: a name with a new line');
+    eq(await code({ device: PC, repo: REPO, account: 'B', model: 'opus; rm' }), [400, 'bad_request'], 'start: not a model name');
+    eq(await code({ device: PC, repo: REPO, account: 'B', effort: 'huge' }), [400, 'bad_request'], 'start: not an effort');
+    eq(await code({ device: PC, repo: path.resolve(path.sep, 'nowhere'), account: 'B' }), [409, 'no_repo'], 'start: a folder no repo is known for');
+    t.online = false;
+    r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
+    ok(r[0] === 503 && r[1].code === 'offline' && /BlackBox is offline/.test(r[1].message), 'start: the main computer offline: 503 offline at once, naming it');
+    t.online = null;
+    t.linkOn = false;
+    r = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
+    ok(r[0] === 409 && r[1].code === 'not_running', 'start: sync not running here: not_running');
+    eq(t.calls.length, n0, 'start: no refused request reached the link');
+    t.linkOn = true;
+    // every way a call reaches no answer, as for the other routes (online unknown: it is tried)
+    for (const [c, s] of [['not_linked', 409], ['offline', 503], ['timeout', 504], ['pc-restarted', 409], ['revoked', 409]]) {
+      t.answer = () => ({ s: 0, b: { ok: false, code: c } });
+      const x = await t.ls.route('POST', '/link/start', null, { device: PC, repo: REPO, account: 'B' });
+      ok(x[0] === s && x[1].code === c && /BlackBox/.test(x[1].message), `start: unreached ${c}: ${s} (${x[0]} ${x[1].message})`);
+    }
+    // a device the link doesn't name: words say "the main computer"
+    t.answer = () => ({ s: 0, b: { ok: false, code: 'offline' } });
+    const other = await t.ls.route('POST', '/link/start', null, { device: MINE, repo: REPO, account: 'B' });
+    ok(/the main computer is offline/.test(other[1].message), 'start: an unknown device is "the main computer"');
+    eq(LS.startBody({ repo: REPO, account: 'B' }), { account: 'B', blank: true }, 'startBody: no prompt is blank');
   }
 
   // ---------- the feed ----------

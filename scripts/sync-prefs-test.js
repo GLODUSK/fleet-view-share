@@ -89,7 +89,7 @@ const trMac = P.makeTranslate({ roots: () => Object.values(MACR), originOf: (r) 
 
 // a machine's settings, as fleet-view.js's prefsGroups gives them
 function machine() {
-  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoHues: [], sessHues: [], repoOrder: [], chatOrder: [], botLooks: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], dynamicChats: [], keepPins: [], parity: [] };
+  return { hidden: [], names: [], moved: [], hiddenRepos: [], addedRepos: [], repoNames: [], repoHues: [], sessHues: [], repoOrder: [], chatOrder: [], botLooks: [], mapSpots: [], teams: [], hostRules: [], pinOverrides: [], dynamicChats: [], keepPins: [], parity: [], mainMachine: [] };
 }
 const pcSet = machine(), macSet = machine();
 const T0 = Date.parse('2026-10-11T12:00:00Z');
@@ -777,6 +777,34 @@ const mac = P.createPrefs({ api, key: KEY, now: () => macClock.t, device: () => 
     X.A.keepPins = [];
     X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
     ok(!X.B.addedRepos.length && !X.B.keepPins.length, 'addedRepos, keepPins: a removal on the PC goes on the Mac');
+  }
+
+  // the main computer (mainMachine): picked on one, the same on the other; changed, cleared; picked on both at once
+  {
+    const X = pair();
+    X.A.mainMachine = [{ id: PC.toUpperCase(), name: 'BlackBox', at: X.ca.t }];
+    await X.a.tick(); X.step(10e3); await X.b.tick();
+    eq(X.B.mainMachine, [{ id: PC, name: 'BlackBox', at: T1 }], 'mainMachine: picked on the PC, the Mac has it (the id in lower case)');
+    X.B.mainMachine = [{ id: MAC, name: 'MacBook Air', at: X.cb.t }];
+    X.step(5e3); await X.b.tick(); X.step(10e3); await X.a.tick();
+    eq(X.A.mainMachine.map((m) => m.name), ['MacBook Air'], 'mainMachine: changed on the Mac, the PC follows');
+    X.A.mainMachine = [];
+    X.step(5e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    eq(X.B.mainMachine, [], 'mainMachine: cleared on the PC, cleared on the Mac');
+    X.A.mainMachine = [{ id: PC, name: 'BlackBox', at: X.ca.t }];
+    X.B.mainMachine = [{ id: MAC, name: 'MacBook Air', at: X.cb.t + 30e3 }];
+    X.step(5e3); await X.a.tick(); X.step(1e3); await X.b.tick(); X.step(10e3); await X.a.tick(); X.step(10e3); await X.b.tick();
+    ok(X.A.mainMachine.length === 1 && JSON.stringify(X.A.mainMachine) === JSON.stringify(X.B.mainMachine), `mainMachine: picked on both at once, one main computer on both (${JSON.stringify(X.A.mainMachine)} / ${JSON.stringify(X.B.mainMachine)})`);
+    eq(X.A.mainMachine[0] && X.A.mainMachine[0].name, 'MacBook Air', 'mainMachine: ...the later pick');
+  }
+  {
+    eq(P.cleanMainMachine({ id: PC.toUpperCase(), name: ' BlackBox\n', at: 5 }), { id: PC, name: 'BlackBox', at: 5 }, 'cleanMainMachine: id lower case, name trimmed');
+    ok([null, {}, { id: 'nope', name: 'x' }, { id: PC, name: '' }, { id: PC }].every((x) => P.cleanMainMachine(x) === null), 'cleanMainMachine: not one is null');
+    const me = { id: PC.toUpperCase(), name: 'BlackBox' }, macRow = { id: MAC, name: 'MacBook Air', online: false };
+    eq(P.mainView(null, me, [macRow]), { ok: true, main: null, me: { id: PC, name: 'BlackBox' }, isMain: false, online: null }, 'mainView: none picked');
+    eq(P.mainView({ id: PC, name: 'old name', at: 1 }, me, [macRow]), { ok: true, main: { id: PC, name: 'BlackBox' }, me: { id: PC, name: 'BlackBox' }, isMain: true, online: true }, 'mainView: on the main computer: isMain, online, its own name');
+    eq(P.mainView({ id: MAC, name: 'Mac', at: 1 }, me, [macRow]), { ok: true, main: { id: MAC, name: 'MacBook Air' }, me: { id: PC, name: 'BlackBox' }, isMain: false, online: false }, 'mainView: on the other: the main computer offline, its name now');
+    eq(P.mainView({ id: MAC, name: 'Mac', at: 1 }, null, null), { ok: true, main: { id: MAC, name: 'Mac' }, me: null, isMain: false, online: null }, 'mainView: this machine not known yet: online not known');
   }
 
   // D6: the page sends single-item ops; the server applies them per item

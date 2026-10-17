@@ -25,7 +25,7 @@
 //                      makeMaterializer, makeMover, makeLive, makePrefs, makeLink, makeCarry })
 //     -> { start(), stop(), check(), restart(reason), status(), move(id, { force, noWork }), moveStatus(id),
 //          cancelMove(id), owners(), device(), live(), prefsChanged(), link(), missing(), rescan(), note(id),
-//          dropNote(id), peer(route, body, from) }
+//          dropNote(id), peer(route, body, from), carry() }
 //   sync: sync-api.js createSync()'s object; projects: () => [{ account, dir }], every account's folder even when two
 //   are one (by default each side's own: ~/.claude and ~/.claude-a); accountOf(id) -> the account a conversation ran
 //   under here or null (fleet-view.js: its claude process, or remembered), the uploader's option of that name, so its
@@ -91,6 +91,8 @@ const S = require(path.join(__dirname, 'sync-api.js'));
 const C = require(path.join(__dirname, 'sync-crypto.js'));
 const M = require(path.join(__dirname, 'sync-move.js'));
 
+// this machine in the messages Henry reads (#580: the Mac said "this PC")
+const HERE = process.platform === 'win32' ? 'this PC' : process.platform === 'darwin' ? 'this Mac' : 'this machine';
 const CHECK_MS = 60e3;
 const INTERVAL_MS = 5e3;
 // every threshold of the health colours, in one place
@@ -239,7 +241,7 @@ function createSyncRunner(o = {}) {
     let mode = null;
     try { mode = modeOf(); } catch {}
     if (mode === 'local') return halt('this machine works locally (chosen at the start; the Sync card can switch it)', true);
-    if (!sync.enabled()) return halt('sync is not set up on this PC', true);
+    if (!sync.enabled()) return halt(`sync is not set up on ${HERE}`, true);
     const st = await sync.status();
     // signed out, not a member, no key: away.json stays (halt without the gate), so the session host still refuses the
     // other devices' conversations: a lost sign-in (a restart that could not read it) must never let this machine run
@@ -253,7 +255,7 @@ function createSyncRunner(o = {}) {
       key = r.key;
       if (r.fetched) log(r.created ? 'sync: made the sync key and put it in Blackbox' : r.replaced ? 'sync: the sync key here was not Blackbox\'s: using Blackbox\'s now' : 'sync: fetched the sync key from Blackbox');
     } catch (e) {
-      return halt(`no sync key on this PC (it could not be fetched from Blackbox: ${(e && e.message) || e})`);
+      return halt(`no sync key on ${HERE} (it could not be fetched from Blackbox: ${(e && e.message) || e})`);
     }
     const kid = keyId(key);
     if (accounts) {
@@ -333,7 +335,7 @@ function createSyncRunner(o = {}) {
     if (link) Promise.resolve(link.start()).catch((e) => log(`sync: the link did not start: ${e && e.message}`));
     log(`sync: running as ${st.email || 'the signed-in account'}`);
   }
-  const notRunning = () => Object.assign(new Error(run ? 'conversations can\'t move between devices on this PC' : why || 'sync is not running'), { code: 'not_running' });
+  const notRunning = () => Object.assign(new Error(run ? `conversations can't move between devices on ${HERE}` : why || 'sync is not running'), { code: 'not_running' });
 
   return {
     start() {
@@ -392,6 +394,9 @@ function createSyncRunner(o = {}) {
     },
     prefsChanged() { if (run && run.prefs) { try { run.prefs.nudge(); } catch {} } },
     link() { return run && run.link ? run.link : null; },
+    // "Clone workspace to this machine" (clone-workspace.js): the carry (sync-carry.js) while sync runs, for the
+    // snapshots of the work the other machine left; null while not running
+    carry() { return run && run.carry ? run.carry : null; },
     // "Clone what's missing" (sync-clone.js): the materializer's missing() ({ at: null, repos: [] } while not running),
     // and rescan(): a scan now, so a repo just cloned brings its conversations without waiting for the next round
     missing() {

@@ -130,6 +130,9 @@ new conversation's log, which does, so the chain and its Summary show on both ma
     - `keepPins` (since 2026-10-12): `{ repo: R, branch, at }` housekeeping's "Keep" on a GitHub branch (`housekeeping.js`
       `remotePins`, its `prefs.json` `pins` and `pinAt`). Worktrees' and local branches' pins stay on their machine.
     - `parity` (since 2026-10-12): `{ name, web, app, core }` the parity rules (`settings.parity`), one per repo name.
+    - `mainMachine` (since 2026-10-17): `{ id, name, at? }` the main computer (`settings.mainMachine`, `POST /sync/main`):
+      its sync device id and name; one item at most (one key, so a pick on both at once ends with the later one); none
+      when no main computer is picked. See `sync-prefs.js` `cleanMainMachine`.
     - `dynamicChats` (since 2026-10-12): `{ id, model, effort, at }` a chat's Dynamic parts (`settings.dynamicChats`,
       POST /chat/dynamic), one per chat; see `sync-prefs.js` `cleanDynamicChat`.
     - `repoHues` (since 2026-10-12): `{ root: R, hue, at? }` a workspace's colour picked in Fleet View

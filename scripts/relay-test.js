@@ -471,6 +471,8 @@ async function main() {
     ['GET', '/accounts'], ['POST', '/accounts/add'], ['POST', '/accounts/login'], ['POST', '/accounts/code'], ['POST', '/accounts/cancel'],
     // Continue here asked of a machine that is on, for a chat whose host is off (the phone with several machines)
     ['GET', '/sync/move'], ['POST', '/sync/move'],
+    // the main computer, read only (new chats from the phone start there)
+    ['GET', '/sync/main'],
   ];
   for (const [m, p] of allowed) ok(R.routeAllowed(m, p), `allowed: ${m} ${p}`);
   const refused = [
@@ -518,6 +520,8 @@ async function main() {
     // near misses of a move: nothing else under /sync
     ['POST', '/sync/move/'], ['GET', '/sync/moves'], ['POST', '/sync/move/cancel'], ['DELETE', '/sync/move'], ['POST', '/sync/activity'], ['GET', '/sync/activity'],
     ['POST', '/sync/connect'], ['POST', '/sync/Move'],
+    // picking the main computer is the page's own; near misses of reading it
+    ['POST', '/sync/main'], ['GET', '/sync/main/'], ['GET', '/sync/mains'], ['GET', '/sync/Main'], ['DELETE', '/sync/main'],
   ];
   eq(R.SIGNIN_LETTERS, require(path.join(ROOT, 'sync-accounts.js')).SYNC_LETTERS, 'the phone signs in exactly the letters sync knows (A and B)');
   for (const [m, p] of refused) ok(!R.routeAllowed(m, p), `refused: ${m} ${JSON.stringify(p)}`);

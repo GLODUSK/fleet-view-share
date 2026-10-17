@@ -3,23 +3,27 @@
 //
 // Top to bottom: a status block (one big state, Running / Not running / Working locally / Not signed in / Not set up,
 // with a ring in the health's colour: ok mint, warn gold, bad rose, off dim; then the signed-in account as a row with
-// its first letter in a circle, the membership chip and a quiet Sign out), Activity (three stat tiles, then one line
-// per loop where only an error stands out), the sync key in one row, Your machines, Repos, Set aside, and This machine
-// (the Claude accounts, Start clean, Work locally). Each section has a small-caps heading; a confirm is an inline panel
-// with a title line. Primary actions are filled cyan (sy-go), destructive ones rose (sy-danger), the rest outlined.
+// its first letter in a circle, the membership chip and a quiet Sign out), Activity (two stat tiles for the uploads,
+// then one line per loop where only an error stands out; downloads, conflicts and what was brought here stay in
+// /sync/activity and the logs, never on the card), the sync key in one row, Your machines (with the main computer),
+// Repos, Set aside, and This machine (the Claude accounts, Start clean, Work locally). Each section has a small-caps
+// heading; a confirm is an inline panel with a title line. Primary actions are filled cyan (sy-go), destructive ones
+// rose (sy-danger), the rest outlined. "This PC" / "this Mac" / "this machine" follow the platform (#580).
 //
 // It shows, read again every 3 seconds while it is open (and only then):
 //   GET /sync/status     not set up (the setup command to copy: setup needs the publishable key and stays in a
 //                        terminal) / signed out / signed in as <email>, on the members list or not
-//   GET /sync/activity   running or why not, and the two loops' counts and the number of conflicts in plain words
-//                        (never a title, a path, a token or the key: counts, and each loop's health: when it last went
-//                        through, its last error's message and time, and whether it is backing off)
-//   GET /sync/setup      whether the sync key is on this PC (hasKey). No passphrase: once signed in, the server
+//   GET /sync/activity   running or why not, and the uploads' counts in plain words (never a title, a path, a token or
+//                        the key: counts, and each loop's health: when it last went through, its last error's message
+//                        and time, and whether it is backing off)
+//   GET /sync/setup      whether the sync key is on this machine (hasKey). No passphrase: once signed in, the server
 //                        fetches the key from Blackbox by itself (sync-run.js), and this only says so
 //   GET /sync/fresh      (this machine's own page only; 404 where sync isn't set up: then none of Start clean shows)
 //                        the other machines' names, whether a fresh start waits to run (pending), the last one, and
 //                        the chats set aside here (newest first, at most 50, and their count)
-// and does, on this PC's own page only:
+//   GET /sync/main       (main-machine.js) the main computer: on the other computer the card's top says it works on
+//                        that one ("Working on BlackBox"), and whether it is offline
+// and does, on this machine's own page only:
 //   Sign in with Google  POST /sync/open-signin: the server opens the sign-in in the real default browser (Google
 //                        refuses embedded windows, and this page may be inside the Fleet View window); the card then
 //                        watches the status until it says signed in
@@ -46,11 +50,15 @@
 // Set aside on this machine (N): five rows (title, repo, when), Show all for the rest, each with Bring back (POST
 // /sync/fresh { bringBack: [id] }), and Bring all back ({ bringBack: 'all' }) after a second click.
 //
-// Your machines (link.js, docs/link.md): the other machines sync knows, each linked (online or offline), linking (they
-// link by themselves, no click), unlinked (Henry unlinked it) or offline (not linked, and not seen lately), and:
+// Your machines (link.js, docs/link.md): the other machines sync knows, each first of all online, offline (seen <when>)
+// or checking… (link.js status()'s online: the link's presence, else its last_seen_at); being linked is second: the
+// Unlink or Link button, "linking…" (they link by themselves, no click), or the unlinked line (Henry unlinked it):
 //   Unlink     POST /link/unlink { device }, after a second click: it stays unlinked on both until Link
 //   Link       POST /link/request { device }: link it now (after an unlink, or when it did not link by itself)
 // GET /link/status is read with the rest while the card is open (this machine's own page only).
+// The main computer, at the top of Your machines: with another machine linked and none picked, the card asks which one
+// it is (a button per machine, this one marked "this computer": POST /sync/main { device }); once picked, a line
+// "Main computer: <name>" with Change (the same buttons, No main computer: { device: null }, and Keep).
 //
 // The header pill's colour: GET /sync/activity's health (sync-run.js health(): ok, warn, bad or off, and a tip naming
 // the worst part and its error), read with the rest while the card is open and every 10 seconds while it is closed
@@ -61,7 +69,10 @@
 import { esc } from './cards.js';
 import { icon } from './icons.js';
 import { cloneSection } from './clone.js';
+import { mainMachine, noteMainMachine } from './main-machine.js';
 
+// this machine, as the card names it (#580: the Mac said "this PC")
+const HERE = /Mac/i.test(navigator.platform || navigator.userAgent || '') ? 'this Mac' : /Win/i.test(navigator.platform || navigator.userAgent || '') ? 'this PC' : 'this machine';
 const POLL_MS = 3000;
 const FINAL_STATES = new Set(['linked', 'declined', 'failed', 'expired', 'cancelled']);
 const POLL_WAIT_MS = 1500; // while a sign-in is going on in the browser
@@ -104,6 +115,8 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
   let freshOpen = false; // Start clean's confirm is open
   let freshPrev = null; // its preview: { loading } or { preview: { setAside, kept } | null, error }
   let asideAll = false, confirmBringAll = false;
+  let main = null; // GET /sync/main (main-machine.js): { main, me, isMain, online } | null
+  let pickMain = false; // the main computer's Change is open
 
   async function get(url) {
     if (fixture) return null;
@@ -113,9 +126,10 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
 
   async function refresh() {
     const my = gen;
-    const [st, act, su, ln, fr] = await Promise.all([get('/sync/status'), get('/sync/activity'), get('/sync/setup'),
-      remote() ? null : get('/link/status'), remote() ? null : get('/sync/fresh')]);
+    const [st, act, su, ln, fr, mm] = await Promise.all([get('/sync/status'), get('/sync/activity'), get('/sync/setup'),
+      remote() ? null : get('/link/status'), remote() ? null : get('/sync/fresh'), fixture ? null : mainMachine()]);
     link = ln && typeof ln.running === 'boolean' ? ln : null;
+    main = mm;
     setup = su && su.private ? su : null;
     keyInfo = su && typeof su.hasKey === 'boolean' ? { hasKey: su.hasKey, reason: su.reason || '' } : null;
     setHealth(act);
@@ -157,8 +171,8 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
         + `<div class="sy-btns">${btn('setup', 'Set it up', { cls: 'sy-go', off: false })}</div>`;
     }
     if (!st.configured) {
-      return hero('off', 'Not set up', `Sync is not set up on this PC${st.problem ? ` (${esc(st.problem)})` : ''}.`)
-        + (remote() ? '<div class="sy-line sy-dim">It is set up in a terminal on the PC.</div>'
+      return hero('off', 'Not set up', `Sync is not set up on ${remote() ? 'that computer' : HERE}${st.problem ? ` (${esc(st.problem)})` : ''}.`)
+        + (remote() ? '<div class="sy-line sy-dim">It is set up in a terminal on that computer.</div>'
           : '<div class="sy-line sy-dim">Set it up once in a terminal, in the Fleet View folder, with the project\'s publishable key:</div>'
             + `<div class="sy-cmd"><code>${esc(SETUP_CMD)}</code>${btn('copy', `${icon('copy', 12)}Copy`, { attrs: ' title="Copy the command"', off: false })}</div>`);
     }
@@ -166,7 +180,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       // the last sign-in was lost (a renewal Supabase refused): said, never silent
       const lost = st.lost ? `<div class="sy-line sy-bad">${esc(st.lost)}${st.lostAt ? ` (${esc(ago(st.lostAt))})` : ''}</div>` : '';
       heroLevel = st.lost ? 'bad' : 'off';
-      if (remote()) return hero(heroLevel, 'Not signed in', 'Sign-in is done on the PC, in its Sync card.') + lost;
+      if (remote()) return hero(heroLevel, 'Not signed in', 'Sign-in is done on that computer, in its Sync card.') + lost;
       return hero(heroLevel, 'Not signed in', waiting ? 'Finish the sign-in in your browser; this card updates by itself.'
         : `It opens in your default browser. ${st.onlyEmail ? `Sign in as ${esc(st.onlyEmail)}: no other account can sync here.` : 'Use a Google account on the sync members list.'}`)
         + lost + (st.refused ? `<div class="sy-line sy-bad">${esc(st.refused)} was turned away: only ${esc(st.onlyEmail || '')} can sync.</div>` : '')
@@ -191,7 +205,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     if (st.member === false) html += '<div class="sy-line sy-bad">This account can read and write nothing: sign out and sign in with one on the list.</div>';
     if (remote()) return html;
     if (confirmOut) {
-      html += confirmHtml('Sign out of sync on this PC?', 'Syncing stops until you sign in again; the sync key stays.',
+      html += confirmHtml(`Sign out of sync on ${HERE}?`, 'Syncing stops until you sign in again; the sync key stays.',
         btn('do-out', 'Sign out', { cls: 'sy-danger' }) + btn('keep', 'Keep', { off: false }), true);
     }
     return html;
@@ -299,35 +313,27 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     }
     return html;
   }
+  // what tells Henry sync works: the uploads (how many chats are up to date, when the last one went up) and the live
+  // status; downloads, conflicts and what was brought here stay in /sync/activity and the logs
   function activityLines(a) {
     const num = (v) => (Number.isFinite(v) ? v : 0);
     const up = a.up && typeof a.up === 'object' && !a.up.error ? a.up : null;
-    const down = a.down && typeof a.down === 'object' && !a.down.error ? a.down : null;
     const live = a.live && typeof a.live === 'object' && !a.live.error ? a.live : null;
-    const conflicts = Array.isArray(a.conflicts) ? a.conflicts.length : down && Number.isFinite(down.conflicts) ? down.conflicts : 0;
     const tile = (value, label, sub, title, cls = '') => `<div class="sy-tile${cls ? ` ${cls}` : ''}" title="${esc(title)}"><span class="sy-tv">${value}</span><span class="sy-tl">${esc(label)}</span><span class="sy-ts">${esc(sub)}</span></div>`;
     const tiles = [];
     if (up) {
-      const t = `Uploading: ${num(up.synced)} of ${n(num(up.conversations), 'conversation', 'conversations')} up to date${num(up.pending) ? `, ${num(up.pending)} waiting` : ''}${up.lastScanAt ? `; last look ${ago(up.lastScanAt)}` : ''}`;
+      const t = `Uploading: ${num(up.synced)} of ${n(num(up.conversations), 'chat', 'chats')} up to date${num(up.pending) ? `, ${num(up.pending)} waiting` : ''}${up.lastScanAt ? `; last look ${ago(up.lastScanAt)}` : ''}`;
       tiles.push(tile(`${num(up.synced)}<small>/${num(up.conversations)}</small>`, 'Up to date', num(up.pending) ? `${num(up.pending)} waiting` : 'all uploaded', t));
+      const went = up.health && up.health.lastSuccessAt;
+      tiles.push(tile(esc(went ? ago(went) : 'not yet'), 'Last upload', went ? clockOf(went) : 'nothing went up yet', went ? `The last upload went through at ${clockOf(went)}` : 'Nothing went up yet since Fleet View started'));
     }
-    if (down) {
-      const t = `From other machines: ${n(Number(down.laidDown) || 0, 'conversation', 'conversations')} brought here since Fleet View started${down.lastScanAt ? `; last look ${ago(down.lastScanAt)}` : ''}`;
-      tiles.push(tile(String(Number(down.laidDown) || 0), 'Brought here', 'since start', t));
-    }
-    tiles.push(tile(String(conflicts), 'Conflicts', conflicts ? 'left alone' : 'none', conflicts ? `${n(conflicts, 'conflict', 'conflicts')}: a copy on this PC differs from the synced one, so it is left alone.` : 'No conflicts.', conflicts ? 'warn' : ''));
-    const lines = [`<div class="sy-tiles">${tiles.join('')}</div>`, '<div class="sy-loops">'];
+    const lines = [tiles.length ? `<div class="sy-tiles">${tiles.join('')}</div>` : '', '<div class="sy-loops">'];
     if (up) {
       if (up.health) lines.push(partLines('Uploads', up, up.lastScanAt ? `last look ${ago(up.lastScanAt)}` : ''));
       else if (up.lastError) lines.push('<div class="sy-err bad">The last upload hit an error; it tries again by itself.</div>');
     }
-    if (down) {
-      if (down.health) lines.push(partLines('Downloads', down, down.lastScanAt ? `last look ${ago(down.lastScanAt)}` : ''));
-      else if (down.lastError) lines.push('<div class="sy-err bad">The last download hit an error; it tries again by itself.</div>');
-    }
     if (live && live.health) lines.push(partLines('Live status', live));
     lines.push('</div>');
-    if (conflicts) lines.push(`<div class="sy-err warn">${n(conflicts, 'conflict', 'conflicts')}: a copy on this PC differs from the synced one, so it is left alone.</div>`);
     return lines.join('');
   }
 
@@ -339,12 +345,14 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     if (!good && (m.linked || m.unlinked)) return '';
     return `<div class="sy-line ${good ? 'sy-ok' : 'sy-warn'}">${good ? `${icon('check', 12)} ` : ''}${esc(p.message)}${good ? '' : ' It tries again by itself.'}</div>`;
   }
+  // first whether that machine is on (link.js status()'s online), then, smaller, how it is linked
   function machineHtml(m, pairing) {
     const linking = !m.linked && !m.unlinked && (!!m.linking || (!!pairing && !FINAL_STATES.has(pairing.state)));
-    const pill = m.linked
-      ? `<span class="sy-pill ${m.online === true ? 'on' : m.online === false ? 'off' : ''}">${m.online === true ? 'linked · online' : m.online === false ? 'linked · offline' : 'linked'}</span>`
-      : m.unlinked ? '<span class="sy-pill off">unlinked</span>' : linking ? '<span class="sy-pill">linking…</span>' : '<span class="sy-pill off">offline</span>';
-    const seen = !m.linked && m.lastSeenAt ? `<span class="sy-seen">seen ${esc(ago(m.lastSeenAt))}</span>` : '';
+    const pill = m.online === true ? '<span class="sy-pill on">online</span>' : m.online === false ? '<span class="sy-pill off">offline</span>' : '<span class="sy-pill">checking…</span>';
+    const seen = m.online === false && m.lastSeenAt ? `<span class="sy-seen">seen ${esc(ago(m.lastSeenAt))}</span>` : '';
+    // (an unlinked one says so in its own line below)
+    const how = linking ? '<span class="sy-seen">linking…</span>' : !m.linked && !m.unlinked ? '<span class="sy-seen">not linked</span>' : '';
+    const isMain = !!(main && main.main && main.main.id === m.id);
     let action = '', conf = '';
     if (!remote()) {
       if (confirmUnlink === m.id) {
@@ -354,7 +362,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     }
     const off = m.unlinked && !conf ? '<div class="sy-line sy-dim">Unlinked: these two don\'t link by themselves until you press Link.</div>' : '';
     return `<div class="sy-mach${m.linked ? ' linked' : ''}"><div class="sy-mrow"><span class="sy-mic">${icon('computer', 16)}</span>`
-      + `<span class="sy-mt"><b title="${esc(m.name)}">${esc(m.name)}</b><span class="sy-msub">${pill}${seen}</span></span>${action}</div>`
+      + `<span class="sy-mt"><b title="${esc(m.name)}">${esc(m.name)}${isMain ? '<span class="sy-tag">main computer</span>' : ''}</b><span class="sy-msub">${pill}${seen}${how}</span></span>${action}</div>`
       + `${off}${pairingNote(m, pairing)}${conf}</div>`;
   }
   function linkHtml() {
@@ -371,7 +379,36 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       if (!machines.some((m) => m.id === p.peer.id) && !FINAL_STATES.has(p.state)) rows.push(`<div class="sy-mach"><div class="sy-line">${spin}Linking with <b>${esc(p.peer.name || 'another machine')}</b>…</div></div>`);
     }
     if (!rows.length) return '<div class="sy-line sy-dim">No other machine syncs with this one yet.</div>';
-    return `${rows.join('')}<div class="sy-line sy-dim">Your machines signed in to sync link by themselves, and can then reach each other's chats, with keys only the two of them hold.</div>`;
+    return `${mainHtml(machines)}${rows.join('')}<div class="sy-line sy-dim">Your machines signed in to sync link by themselves, and can then reach each other's chats, with keys only the two of them hold.</div>`;
+  }
+  // the main computer: asked once another machine is linked and none is picked; then one line with Change
+  function mainHtml(machines) {
+    if (!main || remote()) return '';
+    const cur = main.main, me = main.me;
+    const linked = machines.filter((m) => m && m.linked && m.id);
+    if (!cur && !linked.length) return '';
+    const opts = [...(me ? [{ id: me.id, name: me.name, here: true }] : []), ...linked.filter((m) => !me || m.id !== me.id).map((m) => ({ id: m.id, name: m.name }))];
+    if (!cur || pickMain) {
+      const picks = opts.map((o) => btn('main-pick', `${esc(o.name)}${o.here ? '<span class="sy-tag">this computer</span>' : ''}`,
+        { cls: cur && cur.id === o.id ? 'sy-go' : '', attrs: ` data-dev="${esc(o.id)}"` })).join('');
+      const more = cur ? btn('main-none', 'No main computer', { cls: 'sy-quiet' }) + btn('main-keep', 'Keep', { off: false }) : '';
+      return confirmHtml(cur ? 'Change the main computer' : 'Which one is the main computer?',
+        'Chats run on the main computer. The other one shows them live and types into them; new chats started there run on the main computer too.',
+        picks + more);
+    }
+    const sub = main.isMain ? 'Chats run here. The other computer shows them and types into them.'
+      : `Chats run on ${esc(cur.name)}${main.online === false ? ', which is offline now' : ''}. This computer shows them and types into them.`;
+    return `<div class="sy-orow sy-mainrow"><span class="sy-oic">${icon('star', 14)}</span><span class="sy-ot"><b>Main computer: ${esc(cur.name)}${main.isMain ? '<span class="sy-tag">this computer</span>' : ''}</b>`
+      + `<span>${sub}</span></span>${btn('main-change', 'Change')}</div>`;
+  }
+  // the top of the card on the other computer: it works on the main one
+  function whereHtml() {
+    if (!main || !main.main || main.isMain) return '';
+    const name = esc(main.main.name);
+    const state = main.online === true ? '<span class="sy-pill on">online</span>' : main.online === false ? '<span class="sy-pill off">offline</span>' : '<span class="sy-pill">checking…</span>';
+    const off = main.online === false ? `<div class="sy-line sy-warn">${name} is offline: you see its chats as they were last synced.</div>` : '';
+    return `<div class="sy-where-r"><span class="sy-mic">${icon('computer', 16)}</span><span class="sy-mt"><b>Working on ${name}</b>`
+      + `<span class="sy-msub"><span class="sy-dim">Its chats run there; you see them here and type into them.</span>${state}</span></span></div>${off}`;
   }
 
   // the sync key: here, or being fetched from Blackbox (sync-run.js says why when it can't)
@@ -385,7 +422,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     const step = keyStep();
     if (!step) return '';
     const from = esc((setup && setup.name) || 'Blackbox');
-    const right = step === 'have' ? `<span class="sy-kstate ok">${icon('check', 13)}On this PC</span>`
+    const right = step === 'have' ? `<span class="sy-kstate ok">${icon('check', 13)}On ${HERE}</span>`
       : step === 'wait' ? `<span class="sy-kstate">${spin}Getting it from ${from}…</span>` : `<span class="sy-kstate warn">${icon('alert', 13)}Not here yet</span>`;
     const why = step.startsWith('bad:') ? `<div class="sy-err warn">Couldn't get it from ${from} (${esc((step.match(/Blackbox: (.+)\)$/) || [])[1] || 'no answer')}); it tries again every minute.</div>` : '';
     return `<div class="sy-krow"><span class="sy-oic">${icon('key', 14)}</span><b>Sync key</b>${right}</div>${why}`;
@@ -400,10 +437,11 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
   }
   function draw() {
     if (!card) return;
-    const main = card.querySelector('.sy-main');
+    const top = card.querySelector('.sy-main');
     const body = accountHtml();
     const html = `<section class="sy-sec sy-top" data-lvl="${heroLevel}">${body}</section>`;
-    if (main._html !== html) { main.innerHTML = html; main._html = html; }
+    if (top._html !== html) { top.innerHTML = html; top._html = html; }
+    put('.sy-where', whereHtml());
     put('.sy-act', activityHtml(), head('sync', 'Activity'));
     put('.sy-key', keyHtml());
     put('.sy-link', linkHtml(), head('shield', 'Your machines'));
@@ -455,7 +493,16 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       if (r && r.ok) note = c === 'do-unlink' ? { text: 'Unlinked.' } : null;
       else if (r) note = { text: r.message || 'It did not work.', bad: true };
       await refresh();
-    } else if (c === 'unlink') { confirmUnlink = b.dataset.dev; note = null; }
+    } else if (c === 'main-pick' || c === 'main-none') {
+      if (busy || remote()) return;
+      const r = await act('/sync/main', { device: c === 'main-pick' ? b.dataset.dev : null });
+      if (r && r.ok) {
+        noteMainMachine(r); main = r; pickMain = false;
+        note = { text: r.main ? `${r.main.name} is the main computer${r.isMain ? ' (this computer)' : ''}: chats run there.` : 'No main computer now.' };
+      } else if (r) note = { text: r.message || 'It did not change.', bad: true };
+    } else if (c === 'main-change') { pickMain = true; note = null; }
+    else if (c === 'main-keep') pickMain = false;
+    else if (c === 'unlink') { confirmUnlink = b.dataset.dev; note = null; }
     else if (c === 'keep-link') confirmUnlink = null;
     else if (c === 'to-sync') {
       if (busy) return;
@@ -477,7 +524,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
       if (busy) return;
       const r = await act('/sync/signout', {});
       confirmOut = false;
-      if (r && r.ok) note = { text: 'Signed out of sync on this PC.' };
+      if (r && r.ok) note = { text: `Signed out of sync on ${HERE}.` };
       else if (r) note = { text: r.message || 'The sign-out did not work.', bad: true };
       await refresh();
     } else if (c === 'fresh-ask') {
@@ -517,7 +564,7 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     if (card) return;
     gen++;
     answered = false; status = activity = keyInfo = link = fresh = freshPrev = null; note = null; confirmOut = false; busy = false; confirmUnlink = null;
-    freshOpen = false; asideAll = false; confirmBringAll = false; confirmLocal = false;
+    freshOpen = false; asideAll = false; confirmBringAll = false; confirmLocal = false; pickMain = false;
     card = document.createElement('div');
     card.className = 'uw-pop sy-pop';
     card.setAttribute('role', 'dialog');
@@ -525,10 +572,10 @@ export function mountSync({ post, isRemote = () => false, fixture = false, openS
     card.tabIndex = -1;
     card.innerHTML = `<div class="uw-top"><span class="uw-title">${icon('sync', 14)}<b>Sync</b></span><span class="uw-sub">conversations across your machines</span>`
       + `<button type="button" class="uw-x" aria-label="close" title="close (Esc)">${icon('close', 13)}</button></div>`
-      + '<div class="uw-scroll"><div class="sy-main"></div><div class="sy-sec sy-act" hidden></div><div class="sy-sec sy-key" hidden></div><div class="sy-sec sy-link" hidden></div>'
+      + '<div class="uw-scroll"><div class="sy-sec sy-where" hidden></div><div class="sy-main"></div><div class="sy-sec sy-act" hidden></div><div class="sy-sec sy-key" hidden></div><div class="sy-sec sy-link" hidden></div>'
       + '<div class="sy-sec sy-clone" hidden></div><div class="sy-sec sy-aside" hidden></div><div class="sy-sec sy-mode" hidden></div>'
       + '<div class="sy-note" hidden aria-live="polite"></div></div>'
-      + `<div class="uw-foot">${remote() ? 'Read-only here: sign-in and sign-out are done on the PC.' : 'Chats sync through your Supabase project, encrypted with the sync key before they leave this PC.'}</div>`;
+      + `<div class="uw-foot">${remote() ? 'Read-only here: sign-in and sign-out are done on that computer.' : `Chats sync through your Supabase project, encrypted with the sync key before they leave ${HERE}.`}</div>`;
     document.body.appendChild(card);
     draw();
     cloneUi = cloneSection(card.querySelector('.sy-clone'), { post, isRemote: remote, fixture });

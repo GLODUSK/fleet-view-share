@@ -35,27 +35,21 @@
 // only show the tab ("press Enter"); Enter, a double-click or a button opens a session that stays.
 //
 // Another device owns it (sync, docs/sync.md): /state's syncOwner { device, name, live, moving? } is set while a
-// different PC owns the conversation. The tab never opens or moves such a one by itself (remote by default, Henry
-// 2026-10-13: typed in the Chat tab, it goes to that machine and runs there); it says "On <name>" (running or idle
-// there) and offers Continue on this machine, which moves it to this PC through Supabase (the server's sync-move.js).
-// The row's right-click menu offers the same (app.js continueItem: requestMove, then this tab shows the move):
-//   POST /sync/move { id, force? } -> the job | 409/400 { error }     GET /sync/move?id= -> the job | 404
-//   DELETE /sync/move?id= -> { ok }   (plain same-origin fetch, like the Sync card; remote browsers send their cookie)
-// While the tab shows that conversation it polls the job every second and shows its phase in one line (job.note,
-// else a line of its own): asking, waiting (what Claude is doing there, and "Take over now"), ending, uploading,
-// downloading, claiming, then ready, and the session opens here in ready.cwd with ready.account. offline and
-// noanswer offer "Use the cloud copy"; both force buttons POST again with force. Cancel (DELETE) until ready;
-// failed and cancelled show why and Try again. syncOwner.moving 'here' (a move this PC started, the tab reopened)
-// picks the job up again; 'away' (another PC is taking it from this one) says so with no button. When the folder
+// different PC owns the conversation. The tab never opens or moves such a one (remote by default, Henry 2026-10-13:
+// typed in the Chat tab, it goes to that machine and runs there; 2026-10-17: chats never move between machines, so
+// there is no Continue on this machine any more); it says "On <name>" (running or idle there), and why when it is
+// pinned there (workspace.pin: keeps.js).
+// A move an older phone build started (the server keeps POST /sync/move for those) still shows here while it runs:
+//   GET /sync/move?id= -> the job | 404     POST /sync/move { id, force } (Take over now, Use the cloud copy: the
+//   same move, forced)     DELETE /sync/move?id= -> { ok }   (plain same-origin fetch, like the Sync card)
+// syncOwner.moving 'here' picks the job up; while the tab shows that conversation it polls the job every second and
+// shows its phase in one line (job.note, else a line of its own): asking, waiting (and "Take over now"), ending,
+// uploading, downloading, claiming, then ready, and the session opens here in ready.cwd with ready.account. offline
+// and noanswer offer "Use the cloud copy". Cancel (DELETE) until ready; failed and cancelled say why (no Try again:
+// nothing here starts a move). 'away' (another PC is taking it from this one) says so with no button. When the folder
 // was never trusted for that account here (ready.trusted false) the tab says Claude will ask; it never answers.
-// A move carries the chat's work too (sync-carry.js): ready.missing (tools, sign-ins, env files this machine lacks)
-// shows in the card and then in a bar over the session until OK; a failed job whose work the other machine could not
-// pack (workRefused) offers "Move it without the work" (POST with noWork).
-// A chat pinned to the machine that has it (workspace.pin, a stays-on rule or Henry's own choice: keeps.js) says why.
-// It never continues on another machine by itself: one Henry pinned by hand offers "Unpin and continue on this
-// machine" (POST /sync/pin free, then the move as for any chat; the right-click menu's requestMove(id, { unpin }) does
-// the same), one a rule pins has no button (typed in the Chat tab, it goes there). A Continue on this machine the
-// server refused because its host is offline (409 pinned, offline) offers "Unpin and continue on this machine" too.
+// ready.missing (tools, sign-ins, env files this machine lacks: sync-carry.js) shows in the card and then in a bar
+// over the session until OK.
 //
 // The terminal is xterm.js, vendored in vendor/xterm/ and loaded the first time a session is shown. One xterm
 // per hosted conversation, kept while its pty exists, so switching between conversations keeps each one's
@@ -77,7 +71,7 @@
 import { esc, loadModule } from './cards.js';
 import { icon } from './icons.js';
 import { createRemoteTerm } from './remote-term.js';
-import { pinText, setPin } from './keeps.js';
+import { pinText } from './keeps.js';
 
 // a Claude account letter: one letter (A, B, C, ...), else B, the default login
 const acctOf = (a) => (typeof a === 'string' && /^[a-z]$/i.test(a) ? a.toUpperCase() : 'B');
@@ -633,14 +627,8 @@ export function renderSessionPane(pane, s, o) {
     if (pane._missing?.id !== s.id) pane._missing = null;
   }
   if (h && pane._opening && pane._opening.id === s.id) pane._opening = null;
-  // a move this PC started (or the one on show) is watched again whenever the tab shows it
+  // a move under way here (one an older phone started), or the one on show, is watched again whenever the tab shows it
   if (t && !h) watchMove(pane, s);
-  // the right-click menu's Continue on this machine (requestMove): started here, so this tab shows it
-  if (moveAsk && moveAsk.id === s.id) {
-    const ask = moveAsk;
-    moveAsk = null;
-    if (t && !h && s.syncOwner && !s.syncOwner.moving && Date.now() - ask.at < MOVE_ASK_MS) { if (ask.unpin) unpin(pane, s); else startMove(pane, s, false); return; }
-  }
   const moving = pane._move?.id === s.id && pane._move.job && !pane._move.opened;
   if (t && o.auto) {
     if (h && h.alive) { if (o.auto === 'explicit') { keep(s.id); pane._focusNext = s.id; } }
@@ -737,10 +725,7 @@ function buildPane(pane) {
     if (act === 'open' || act === 'open-anyway') openHere(pane, s, false);
     else if (act === 'reopen') reopen(pane, s);
     else if (act === 'dismiss') dismiss(pane, s);
-    else if (act === 'move' || act === 'move-retry') startMove(pane, s, false);
-    else if (act === 'move-force') startMove(pane, s, true);
-    else if (act === 'move-nowork') startMove(pane, s, false, { noWork: true });
-    else if (act === 'move-unpin') unpin(pane, s);
+    else if (act === 'move-force') forceMove(pane, s);
     else if (act === 'move-cancel') cancelMove(pane, s);
     else if (act === 'move-open') openReady(pane, s);
     else if (act === 'trust-hide') { pane._trust = null; rerender(pane); }
@@ -752,19 +737,13 @@ function buildPane(pane) {
 
 const rerender = (pane) => { if (pane._s) renderSessionPane(pane, pane._s, pane._o || {}); };
 
-// ---------- Continue on this machine: move a conversation another device owns to this PC (see the header) ----------
+// ---------- a move under way to this PC (one an older phone build started: see the header) ----------
 // pane._move: { id, job, err, busy, want, timer, fetching, opened }: the move the tab shows. job is the server's
 // (null before the first answer, or after a 404); busy while a POST or DELETE is on its way; want while the job
 // still changes (polled every second while the tab shows this conversation and the panel is open).
 const MOVE_POLL_MS = 1000;
 const MOVE_FINAL = new Set(['ready', 'failed', 'cancelled']);
 const newMove = (id) => ({ id, job: null, err: '', busy: false, want: false, timer: 0, fetching: false, opened: false });
-// a move asked for from outside the tab (the row's right-click menu, app.js): the next draw of that conversation's
-// Session tab starts it, as its own button would, and shows its phases. Asked for once, for a few seconds only, so a
-// panel that never drew it doesn't start a move later. o.unpin: a chat Henry pinned by hand, let go first (unpin)
-const MOVE_ASK_MS = 5000;
-let moveAsk = null; // { id, at, unpin }
-export function requestMove(id, o = {}) { moveAsk = id ? { id, at: Date.now(), unpin: !!o.unpin } : null; }
 
 // /sync/move: POST with a body, GET and DELETE with ?id=. -> { status, data } (data: the JSON, or null), or null
 // when Fleet View did not answer
@@ -820,53 +799,26 @@ function pollMove(pane, m, delay) {
   }, delay);
 }
 
-// Continue on this machine (force: Take over now, Use the cloud copy), and Try again: a second POST for the same move returns
-// that job (with force, upgraded); noWork: Move it without the work (the other machine could not pack it)
-async function startMove(pane, s, force, extra = {}) {
-  if (pane._move?.id !== s.id) { stopMove(pane); pane._move = newMove(s.id); }
+// Take over now, Use the cloud copy: the move under way, forced (a second POST for the same move returns that job,
+// upgraded). Only for a move on show: nothing here starts one
+async function forceMove(pane, s) {
   const m = pane._move;
-  if (m.busy) return;
+  if (!m || m.id !== s.id || !m.job || m.busy) return;
   clearTimeout(m.timer);
   m.timer = 0;
   m.busy = true;
   m.err = '';
   m.opened = false;
-  if (!force) m.job = null; // a new try starts at "asking"; a force keeps the phase on show until answered
   rerender(pane);
-  const body = { id: s.id };
-  if (force) body.force = true;
-  if (extra.noWork) body.noWork = true;
-  const r = await moveCall('POST', s.id, body);
+  const r = await moveCall('POST', s.id, { id: s.id, force: true });
   if (pane._move !== m) return;
   m.busy = false;
-  // pinned there (409 pinned): offline says so, and the card offers "Unpin and continue on this machine"
-  m.pinnedOff = !!(r && r.status === 409 && r.data && r.data.code === 'pinned' && r.data.offline);
   if (r && r.status === 200 && r.data) m.job = r.data;
-  else m.err = moveErr(r); // a 409: sync is not running, or no other device owns it, or it is pinned there
+  else m.err = moveErr(r);
   m.want = !!m.job && !MOVE_FINAL.has(m.job.phase);
   if (m.want) pollMove(pane, m, MOVE_POLL_MS);
   rerender(pane);
   if (m.job?.phase === 'ready') openReady(pane, pane._s);
-}
-
-// "Unpin and continue on this machine" on a chat pinned to the machine that has it (keeps.js setPin: POST /sync/pin
-// free, shared with the other machines): it is never pinned again, so it moves like any chat, and the move runs (an
-// offline host's next step is "Use the cloud copy", as for any chat)
-async function unpin(pane, s) {
-  if (pane._move?.id !== s.id) { stopMove(pane); pane._move = newMove(s.id); }
-  const m = pane._move;
-  if (m.busy) return;
-  m.busy = true;
-  m.err = '';
-  rerender(pane);
-  const r = await setPin(s.id, 'free');
-  if (pane._move !== m) return;
-  m.busy = false;
-  m.pinnedOff = false;
-  if (!r.ok) { m.err = r.message || 'It was not unpinned'; rerender(pane); return; }
-  // /state says so on its next poll: until then the card goes by this
-  pane._s = { ...s, workspace: { ...(s.workspace || {}), pin: undefined, kind: 'portable' } };
-  startMove(pane, pane._s, false);
 }
 
 async function cancelMove(pane, s) {
@@ -908,7 +860,7 @@ const missingNoteHtml = (list) => `<div class="s-note">${icon('error', 13)}<span
 const missingBarHtml = (list) => `<span class="s-note-t">${icon('error', 13)}<span>Missing here: ${missingList(list)}</span></span>`
   + '<span class="grow"></span><button type="button" class="btn s-btn" data-s="missing-hide">OK</button>';
 
-// another device owns it, no move on show: where it is, and Continue on this machine (none while it moves away from this PC)
+// another device owns it, no move on show: where it is, and that typing in the Chat tab goes there (it stays there)
 function ownerHtml(s, pane, m) {
   const o = s.syncOwner;
   const name = o.name || 'another PC';
@@ -920,30 +872,14 @@ function ownerHtml(s, pane, m) {
       + errHtml + '</div>';
   }
   const state = o.live ? '<span class="s-state live">running</span>' : '<span class="s-state">idle</span>';
-  // bound (/state's workspace.kind): its folder is only on that machine, so the conversation comes but its files don't
+  // bound (/state's workspace.kind): its folder is only on that machine; pinned there (workspace.pin, a stays-on rule
+  // or by hand): why
   const bound = s.workspace && s.workspace.kind === 'bound';
-  // pinned there by a stays-on rule or by hand (workspace.pin): why. One pinned by hand, or one a try found offline
-  // (409 pinned, offline), offers "Unpin and continue on this machine": it lets it go and brings it here. One a rule
-  // pins has no button: it never continues on another machine
   const pin = s.workspace && s.workspace.pin;
-  const dis = m && m.busy ? ' disabled' : '';
-  if (pin) {
-    const off = !!(m && m.pinnedOff);
-    const go = off || pin.manual ? `<div class="s-actions"><button type="button" class="btn primary s-go" data-s="move-unpin"${dis}>${icon('sync', 15)}<span>Unpin and continue on this machine</span></button></div>` : '';
-    return `<div class="s-card s-elsewhere s-move"><div class="s-ic">${icon('pin', 20)}</div><div class="s-title">On ${esc(name)} ${state}</div>`
-      + `<div class="s-text"><b>${esc(pinText(pin))}.</b></div>`
-      + `<div class="s-text">${off ? `${esc(name)} is offline. Unpin it to continue on this machine from its last copy; its files stay on ${esc(name)}.` : 'Type in the Chat tab: your messages go there, and it runs there.'}</div>`
-      + (off ? '' : errHtml) + go + '</div>';
-  }
-  const text = (o.live
-    ? `Claude is running it on ${esc(name)} right now. Continue on this machine asks ${esc(name)} to finish and upload its last lines, then opens it on this PC.`
-    : `It is idle on ${esc(name)}. Continue on this machine brings it to this PC with every line ${esc(name)} has written.`)
-    + (bound ? ` Its files stay on ${esc(name)}.` : '');
-  return `<div class="s-card s-elsewhere s-move"><div class="s-ic">${icon('sync', 20)}</div><div class="s-title">On ${esc(name)} ${state}</div>`
-    + (bound ? `<div class="s-text"><b>This workspace is only on ${esc(name)}.</b></div>` : '')
-    + `<div class="s-text">${text}</div>` + errHtml
-    + `<div class="s-actions"><button type="button" class="btn primary s-go" data-s="move"${dis}>${icon('sync', 15)}<span>${bound ? 'Continue on this machine anyway' : 'Continue on this machine'}</span></button></div>`
-    + `<div class="s-text">Or just type in the Chat tab: your messages go to ${esc(name)}, and it runs there.</div></div>`;
+  const text = o.live ? `Claude is running it on ${esc(name)} right now.` : `It is idle on ${esc(name)}.`;
+  return `<div class="s-card s-elsewhere s-move"><div class="s-ic">${icon(pin ? 'pin' : 'sync', 20)}</div><div class="s-title">On ${esc(name)} ${state}</div>`
+    + (pin ? `<div class="s-text"><b>${esc(pinText(pin))}.</b></div>` : bound ? `<div class="s-text"><b>This workspace is only on ${esc(name)}.</b></div>` : '')
+    + `<div class="s-text">${text} Type in the Chat tab: your messages go to ${esc(name)}, and it runs there.</div>` + errHtml + '</div>';
 }
 
 // a move on show: its phase in one line, and the buttons that phase allows
@@ -976,6 +912,8 @@ function moveHtml(s, pane, m) {
     detail += ' Take over now ends it there, even mid-turn.';
   } else if (phase === 'offline' || phase === 'noanswer') {
     detail = `The cloud copy has what ${name} last uploaded; anything newer stays on ${name}.`;
+  } else if (phase === 'failed' || phase === 'cancelled') {
+    detail = `It stays on ${name}: type in the Chat tab and it runs there.`;
   }
   const err = pane._err || (j && j.error) || m.err || '';
   const errHtml = err ? `<div class="s-err">${icon('error', 14)}<span>${esc(err)}</span></div>` : '';
@@ -985,9 +923,6 @@ function moveHtml(s, pane, m) {
   const btns = [];
   if (j && j.canForce && phase === 'waiting') btns.push(`<button type="button" class="btn primary s-go" data-s="move-force"${dis}>${icon('sync', 15)}<span>Take over now</span></button>`);
   if (j && j.canForce && (phase === 'offline' || phase === 'noanswer')) btns.push(`<button type="button" class="btn primary s-go" data-s="move-force"${dis}>${icon('sync', 15)}<span>Use the cloud copy</span></button>`);
-  // the other machine could not pack its work (a merge under way, a submodule, git-lfs, too big): it can move without it
-  if (phase === 'failed' && j && j.workRefused) btns.push(`<button type="button" class="btn s-go" data-s="move-nowork"${dis}>${icon('sync', 15)}<span>Move it without the work</span></button>`);
-  if (phase === 'failed' || phase === 'cancelled') btns.push(`<button type="button" class="btn primary s-go" data-s="move-retry"${dis}>${icon('sync', 15)}<span>Try again</span></button>`);
   if (phase === 'ready') btns.push(`<button type="button" class="btn primary s-go" data-s="move-open">${icon('shell', 15)}<span>Open here</span></button>`);
   else if (j && !MOVE_FINAL.has(phase)) btns.push(`<button type="button" class="btn s-btn" data-s="move-cancel"${dis}>Cancel</button>`);
   const working = !MOVE_FINAL.has(phase) && phase !== 'offline' && phase !== 'noanswer';

@@ -1,9 +1,14 @@
 // Tests for web/compose.js's decisions about a chat another machine runs (docs/sync-follow.md item 6, "Follow you"):
-// followPlan (what Send does: type it here, send it there through the link, the offline card, or link the machines
-// first; remote by default, Henry 2026-10-13: typing never moves a chat), hostOfChat, remoteMenu (the host's menu as the card's), movePhaseText and panelCommand.
+// followPlan (what Send does: type it here, send it there through the link, the offline note, or link the machines
+// first; remote by default, Henry 2026-10-13: typing never moves a chat; 2026-10-17: nothing moves a chat between
+// machines), hostOfChat, remoteMenu (the host's menu as the card's) and panelCommand.
 // Run: node scripts/follow-plan-test.mjs
 import assert from 'node:assert/strict';
-import { followPlan, hostOfChat, remoteMenu, movePhaseText, panelCommand, MODEL_IDS, EFFORTS } from '../web/compose.js';
+import * as compose from '../web/compose.js';
+
+const { followPlan, hostOfChat, remoteMenu, panelCommand, MODEL_IDS, EFFORTS } = compose;
+// the Chat tab's move is gone with Continue on this machine (its phases' words with it)
+assert.equal(compose.movePhaseText, undefined, 'no move phases in the chat box any more');
 
 const PC = '0afc6f7f-c6f1-4f46-9d69-4e6006385910';
 const host = { device: PC, name: 'BlackBox' };
@@ -38,9 +43,14 @@ assert.equal(followPlan(chat({ state: 'WORKING' }), { act: idle }).why, 'idle', 
 // portable and not linked, busy or idle: link first, never a move
 assert.deepEqual(followPlan(chat(), { act: working, linked: false }), { how: 'link', host, kind: 'portable', why: 'busy' });
 assert.deepEqual(followPlan(chat(), { act: idle, linked: false }), { how: 'link', host, kind: 'portable', why: 'idle' });
-// nothing followPlan says is a move: only an explicit Continue on this machine moves a chat
-for (const k of [chat(), chat({ state: 'WORKING' }), chat({ workspace: { kind: 'bound', host } }), chat({ bot: 'a1b2c3d4e5f6' })]) {
-  for (const o of [{}, { act: idle }, { act: working }, { act: asking }, { linked: false }, { online: true, linked: true }, { online: false }]) assert.notEqual(how(k, o), 'move', JSON.stringify(o));
+// nothing followPlan says is a move, pinned or not, offline or not: chats never move between machines
+const pinned = (manual) => ({ workspace: { kind: 'portable', host, pin: { rule: manual ? null : 'r1', host: 'BlackBox', manual } } });
+for (const k of [chat(), chat({ state: 'WORKING' }), chat({ workspace: { kind: 'bound', host } }), chat({ bot: 'a1b2c3d4e5f6' }), chat(pinned(true)), chat(pinned(false))]) {
+  for (const o of [{}, { act: idle }, { act: working }, { act: asking }, { linked: false }, { online: true, linked: true }, { online: false }, { online: false, linked: false }]) {
+    const p = followPlan(k, o);
+    assert.ok(['remote', 'link', 'offline'].includes(p.how), `${JSON.stringify(o)}: ${p.how}`);
+    assert.equal(p.force, undefined, 'never a forced move');
+  }
 }
 // bound: always sent there
 const bound = chat({ workspace: { kind: 'bound', host } });
@@ -51,11 +61,12 @@ assert.deepEqual(followPlan(bound, { linked: false }), { how: 'link', host, kind
 const bot = chat({ bot: 'a1b2c3d4e5f6' });
 assert.deepEqual(followPlan(bot, { act: idle, online: true, linked: true }), { how: 'remote', host, kind: 'bound', why: 'bot' });
 assert.equal(how(bot, { linked: false }), 'link');
-// offline: the card, for portable and bound
+// offline: the note (its chats come back when it's on), for portable, bound and pinned alike
 assert.deepEqual(followPlan(chat(), { online: false, linked: true }), { how: 'offline', host, kind: 'portable' });
 assert.deepEqual(followPlan(bound, { online: false, linked: true }), { how: 'offline', host, kind: 'bound' });
-assert.deepEqual(followPlan(bot, { online: false }), { how: 'offline', host, kind: 'bound' }, 'a bot\'s offline card never moves its files');
-// a move here under way
+assert.deepEqual(followPlan(bot, { online: false }), { how: 'offline', host, kind: 'bound' });
+assert.equal(how(chat(pinned(true)), { online: false }), 'offline', 'a chat pinned by hand: the same note');
+// a move here under way (one an older phone started): wait for it
 assert.equal(how(chat({ syncOwner: { device: PC, name: 'BlackBox', moving: 'here' } }), { online: true }), 'moving');
 
 // ---------- remoteMenu ----------
@@ -73,13 +84,6 @@ assert.equal(remoteMenu(null), null);
 assert.equal(remoteMenu({ options: [] }), null);
 assert.equal(remoteMenu({ options: [{ n: 'x' }] }), null, 'options without numbers: none');
 assert.equal(remoteMenu({ options: [{ n: 1, label: 'A' }] }).kind, 'other');
-
-// ---------- movePhaseText ----------
-assert.equal(movePhaseText({ phase: 'asking', from: { name: 'BlackBox' } }), 'Asking BlackBox to hand it over…');
-assert.equal(movePhaseText({ phase: 'waiting', note: 'BlackBox is working on it' }, 'BlackBox'), 'BlackBox is working on it', 'the job\'s own note first');
-assert.equal(movePhaseText({ phase: 'downloading' }, 'BlackBox'), 'Downloading the conversation…');
-assert.equal(movePhaseText({ phase: 'packing' }, 'BlackBox'), 'Moving it here from BlackBox…', 'a phase it doesn\'t know');
-assert.equal(movePhaseText(null, null), 'Moving it here from the other machine…');
 
 // ---------- panelCommand ----------
 assert.equal(panelCommand('/usage'), '/usage');

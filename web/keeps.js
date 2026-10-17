@@ -1,6 +1,6 @@
 // Fleet View web: where a workspace's work stays (fleet-view.js hostRules, host-rules.js; Henry, 2026-10-12: Blender
-// work stays on BlackBox). Every chat stays on the machine that runs it until Continue on this machine (Henry,
-// 2026-10-13); a chat a rule pins never continues on another machine: Continue on this machine can't take it off its own.
+// work stays on BlackBox). Every chat stays on the machine that runs it (Henry, 2026-10-13; 2026-10-17: chats never
+// move between machines, so nothing in the page offers to continue one on another); a rule's pin says why it is there.
 //
 //   openKeeps({ root, name, color, rules(), save(list), toast? }): the sheet "Never continue on another machine…" on a workspace's
 //     right-click menu (app.js) opens, for that workspace's one rule (id ws-<slug of its folder's name>, or the rule its
@@ -16,8 +16,8 @@
 //   pinText(pin) -> "Stays on BlackBox: it used Blender (mcp__blender__execute_blender_code), 2 h ago": why a chat is
 //     pinned, from /state's workspace.pin ({ rule, host, why?, manual? }; why only where it runs: elsewhere the synced
 //     rule's note, tools or paths say it)
-//   setPin(id, mode) -> Promise { ok, message? }: POST /sync/pin { id, mode: 'free' | 'stay' | 'clear' } ("Unpin and
-//     continue on this machine": the right-click menu and the Session tab for a chat pinned by hand, the offline cards)
+//   setPin(id, mode) -> Promise { ok, message? }: POST /sync/pin { id, mode: 'free' | 'stay' | 'clear' } (the page's
+//     "Unpin and continue on this machine" used it; nothing calls it now that chats never move, Henry 2026-10-17)
 // Controls use data-kp, never data-c or data-act (app.js takes those clicks).
 import { esc } from './cards.js';
 import { icon } from './icons.js';
@@ -155,7 +155,7 @@ export function openKeeps(o) {
       + (r ? `<button type="button" data-kp="stop" class="sy-danger kp-stop"${busy ? ' disabled' : ''}>Stop keeping it on a machine</button>` : '') + '</div>'
       + '<div class="sy-line sy-bad kp-msg" hidden></div>'
       + '</div>' + evHtml + '</div>'
-      + '<div class="uw-foot">A pinned chat never continues on another machine: Continue on this machine can\'t take it off that one, and what you type to it elsewhere goes there. The files stay there whatever moves.</div>';
+      + '<div class="uw-foot">A pinned chat stays on that machine: what you type to it elsewhere goes there. The files stay there too.</div>';
     drawPreview();
     schedule(0);
   }

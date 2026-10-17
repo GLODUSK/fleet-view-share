@@ -217,7 +217,9 @@ unlinked one that it stays so until Link. Nothing waits for Henry, so the card n
 the Chat tab sends, answers, stops and reads it through these, and each goes to that machine's own route through the
 link (`call()`), so its relay checks it and marks it as Henry's like the phone's. Only the fields listed go on. Every
 chat another machine hosts goes through these, portable or bound, idle or busy: typing never moves it (remote by
-default, Henry 2026-10-13); only Continue on this machine does (`/sync/move`).
+default, Henry 2026-10-13), and since 2026-10-17 nothing in the page moves one (the main computer:
+docs/sync-follow.md). `POST /link/start` starts a new chat on the main computer, in its own checkout of the repo
+(`POST /api/sessions` with `repoOf`).
 
 | Route | Goes to (on the host) |
 |---|---|

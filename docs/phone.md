@@ -341,7 +341,8 @@ lead, send: true }`, then `/teams/add` for a team above and `/teams/leave` with 
 relay's own route, never the server's: "Notifications").
 
 **GET and POST:** `/sync/move` (Continue here, asked of a machine that is on for a chat whose host is off: "Several
-machines" below). The POST takes only `{ id, force? }` (403 for any other field; 400 when `id` is not a conversation
+machines" below; the phone no longer asks it since 2026-10-17, kept for older builds). **GET:** `/sync/main` (the
+main computer). The POST takes only `{ id, force? }` (403 for any other field; 400 when `id` is not a conversation
 id or `force` is not true or false), the GET only `?id=<a conversation id>` (400). It reaches fleet-view.js's
 `/sync/move` as this machine's own page, as the other page routes do.
 
@@ -653,10 +654,9 @@ as above, one QR code per machine) and talks to each over its own channel or soc
   for an older machine its `syncOwner` (not one moving `away` from the lister), else the machine that listed it. A
   host is matched to a pairing by its sync device id, and by name only when that machine sends no `device`.
 - **A host the phone can't reach.** Not paired with it: the chat says "This chat runs on <name>. Pair <name> to type
-  here." and offers the pairing. Offline: a portable chat offers **Continue on <the machine that is on>**: `POST
-  /sync/move { id, force: true }` through that machine, then `GET /sync/move?id=` every second until `ready`; when
-  the job reaches `offline` or `noanswer` and says `canForce`, it asks once more with force, which takes the last
-  copy the host uploaded (the page's "Use the cloud copy"). From then on the chat goes to its new host. A bound chat
+  here." and offers the pairing. Offline: "<name> is offline. Its chats come back when it's on." (no chat moves
+  between machines since 2026-10-17, the main computer: docs/sync-follow.md; the phone reads `GET /sync/main` every
+  30 s and reads chats from the main computer first). A bound chat
   (`workspace.kind: 'bound'`, a folder only its host has) says "Only on <name>, which is offline." Either way the
   feed, its pictures and the transcript still come from the reading machine's synced copy, and nothing else is sent:
   each such request fails at once, nothing sent, with those words.

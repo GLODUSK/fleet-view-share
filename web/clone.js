@@ -13,6 +13,12 @@
 //     the card is open): every missing repo with its state and a Clone button, the clones under way and their
 //     installs, "Clone new repos automatically" (POST /sync/missing { auto }) and the clone folder, with Change
 //     (POST /sync/missing { folder }; empty: the default). Read every 3 s while it shows.
+//   cloneWorkspaceItem({ root, name, sessions }) -> the workspace right-click menu's "Clone workspace to this machine"
+//     ({ label, icon, note, run }), or null: shown only on this machine's own page (mountClone ran) and only when some
+//     of the workspace's chats (sessions: /state's, those whose repo is root) run on another computer (syncOwner):
+//     there is nothing to copy otherwise. Its run opens a card that posts /sync/clone-workspace { repo: root } and
+//     shows the job (GET /sync/clone-workspace?id= every 1.5 s): the checkout, the work brought over, the chats copied
+//     as this machine's own (the newest 20), and the notes. One card at a time.
 // Controls use data-cl, never data-c (the Sync card's own) or data-act (app.js takes those clicks).
 import { esc } from './cards.js';
 import { icon } from './icons.js';
@@ -49,10 +55,12 @@ function itemLine(x) {
   return `<div class="sy-line cl-item">${t}</div>`;
 }
 const settled = (job) => !!job && job.done && !job.items.some((x) => x.install && ['waiting', 'running'].includes(x.install.state));
+let wsCtx = null; // { post, isRemote } once mountClone ran on this machine's own page
 
 // ---------- the card the page shows by itself ----------
 export function mountClone({ post, isRemote = () => false, fixture = false } = {}) {
   if (fixture || isRemote()) return { refresh() {} };
+  wsCtx = { post, isRemote };
   let card = null, timer = null, hidden = false, view = null, job = null, note = null, busy = false;
 
   async function refresh() {
@@ -260,4 +268,76 @@ export function cloneSection(el, { post, isRemote = () => false, fixture = false
   });
   refresh();
   return { stop() { stopped = true; clearTimeout(timer); } };
+}
+
+// ---------- "Clone workspace to this machine" (the workspace's right-click menu) ----------
+const foldRoot = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+export function cloneWorkspaceItem(repo) {
+  if (!wsCtx || wsCtx.isRemote() || !repo || !repo.root) return null;
+  const k = foldRoot(repo.root);
+  const theirs = (Array.isArray(repo.sessions) ? repo.sessions : []).filter((s) => s && s.syncOwner && s.syncOwner.device && !s.syncOwner.moving && s.repo && foldRoot(s.repo.root) === k);
+  if (!theirs.length) return null;
+  const hosts = [...new Set(theirs.map((s) => s.syncOwner.name).filter(Boolean))];
+  return {
+    label: 'Clone workspace to this machine', icon: 'copy',
+    note: `${n(theirs.length, 'chat', 'chats')} from ${hosts.join(' and ') || 'another computer'}`,
+    run: () => openWorkspaceCard({ root: repo.root, name: repo.name || repo.root.split(/[\\/]/).filter(Boolean).pop() || repo.root, from: hosts.join(' and ') || 'the other computer' }),
+  };
+}
+let wsCard = null; // { el, job, repo, note, gen }
+const PHASE = { checkout: 'getting a checkout here…', waiting: 'waiting for its chats to come down…', work: 'bringing the work over…', chats: 'copying the chats…' };
+function wsHtml(c) {
+  const j = c.job;
+  let body = '';
+  if (!j) body = `<div class="sy-line sy-dim">Starting…</div>`;
+  else {
+    const co = j.checkout || {};
+    if (co.message) body += `<div class="sy-line cl-item"><b>Checkout</b>: ${co.state === 'failed' ? `<span class="sy-bad">${esc(co.message)}</span>` : esc(co.message)}</div>`;
+    for (const w of j.work || []) body += `<div class="sy-line cl-item"><b>${esc(w.name)}</b>: ${w.state === 'failed' ? `<span class="sy-warn">${esc(w.message)}</span>` : esc(w.message)}</div>`;
+    const ch = j.chats || {};
+    if (j.done && j.phase !== 'failed' && ch.total) {
+      const got = ch.copied || [];
+      body += `<div class="sy-line">${got.length ? `Copied ${n(got.length, 'chat', 'chats')} to this machine` : 'No new chats to copy'}${ch.already ? ` <span class="sy-dim">· ${esc(String(ch.already))} copied before</span>` : ''}</div>`;
+      if (got.length) body += `<div class="sy-line sy-dim">${got.slice(0, 20).map((x) => esc(x.name)).join(' · ')}</div>`;
+      for (const f of ch.failed || []) body += `<div class="sy-line cl-item"><b>${esc(f.name)}</b>: <span class="sy-warn">${esc(f.message)}</span></div>`;
+    }
+    if (!j.done) body += `<div class="sy-line sy-dim">${esc(PHASE[j.phase] || 'working…')}</div>`;
+    if (j.phase === 'failed' && j.message !== co.message) body += `<div class="sy-line sy-bad">${esc(j.message || 'it did not go through')}</div>`;
+    for (const t of j.notes || []) body += `<div class="sy-line sy-dim">${esc(t)}</div>`;
+    if (j.done) body += '<div class="sy-btns"><button type="button" data-cl="ws-close">Close</button></div>';
+  }
+  return `<div class="uw-top"><span class="uw-title">${icon('copy', 14)}<b>Clone ${esc(c.repo.name)} to this machine</b></span>`
+    + `<button type="button" class="uw-x" data-cl="ws-close" aria-label="close" title="close (Esc)">${icon('close', 13)}</button></div>`
+    + `<div class="uw-scroll"><div class="sy-sec">${body}</div>${c.note ? `<div class="sy-note bad">${esc(c.note)}</div>` : ''}</div>`
+    + `<div class="uw-foot">The copies are this machine's own: new work in them runs here. ${esc(c.repo.from)} keeps its chats as they are.</div>`;
+}
+function wsDraw() { if (wsCard) wsCard.el.innerHTML = wsHtml(wsCard); }
+function wsClose() { if (!wsCard) return; wsCard.el.remove(); wsCard = null; }
+async function openWorkspaceCard(repo) {
+  wsClose();
+  const el = document.createElement('div');
+  el.className = 'uw-pop sy-pop cl-pop cw-pop';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-label', `Clone ${repo.name} to this machine`);
+  el.tabIndex = -1;
+  document.body.appendChild(el);
+  const c = { el, job: null, repo, note: null };
+  wsCard = c;
+  el.addEventListener('click', (ev) => { if (ev.target.closest('[data-cl="ws-close"]')) wsClose(); });
+  el.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); wsClose(); } });
+  wsDraw();
+  el.focus();
+  const r = await Promise.resolve(wsCtx.post('/sync/clone-workspace', { repo: repo.root })).catch(() => null);
+  if (wsCard !== c) return;
+  if (!r || !r.ok || !r.job) { c.job = { done: true, phase: 'failed', checkout: {}, message: (r && r.message) || 'Fleet View did not answer.', notes: [] }; wsDraw(); return; }
+  c.job = r.job;
+  wsDraw();
+  while (wsCard === c && !c.job.done) {
+    await new Promise((res) => setTimeout(res, JOB_MS));
+    const { status, j } = await getJson(`/sync/clone-workspace?id=${encodeURIComponent(c.job.id)}`);
+    if (wsCard !== c) return;
+    if (status === 200 && j) c.job = j;
+    else if (status === 404) { c.job = { ...c.job, done: true }; c.note = 'Fleet View restarted meanwhile: what was copied stays; clone it again for the rest.'; }
+    wsDraw();
+  }
 }

@@ -892,7 +892,7 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api', does: 'this list, and fleetView: the Fleet View version (1.0.12; "" when unknown)' },
   { method: 'GET', path: '/api/conversations', query: 'state?, repo?, all?=1, limit?, prefix?', does: 'every conversation Fleet View shows (not only hosted): id, name, state, repo, branch, lastReply, hosted, alive, forkOf (a fork: { id, name, named } of the one it came from; its name reads "fork of <that one>" until it has its own); with prefix (8+ characters of an id) only { ids }: every conversation id starting with it, off the map too' },
   { method: 'GET', path: '/api/sessions', does: 'the sessions the desktop app hosts, with status, latest reply and role ("bot:<bot id>" or null)' },
-  { method: 'POST', path: '/api/sessions', body: '{ repo, account: "A"|"B"|"C"…, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt; temp: hidden from the map once it ends. An account at 90% of its 5-hour or weekly limit gives way to the one with the most left (accountSwitched in the reply) while "Switch accounts when one runs low" is on' },
+  { method: 'POST', path: '/api/sessions', body: '{ repo | repoOf: { origin, name }, account: "A"|"B"|"C"…, prompt | blank: true, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }', does: 'start a session in a repo (repoOf: this machine\'s checkout of that repo, 404 no_checkout when it has none; forkFrom: carrying a conversation\'s history), set its name/model/effort, send the prompt (blank: none, the reply comes once it has its id); temp: hidden from the map once it ends. An account at 90% of its 5-hour or weekly limit gives way to the one with the most left (accountSwitched in the reply) while "Switch accounts when one runs low" is on' },
   { method: 'GET', path: '/api/bots', does: 'Henry\'s bots (overseers of the fleet, each in its own folder ~/Bots/<name> with its CLAUDE.md): id, name, brief, role, account, model, effort, folder, createdAt, convId, live; and requests, the ones sessions asked for' },
   { method: 'POST', path: '/api/bots', body: '{ name (1-40 characters), brief? (up to 4000), role? (what it does, one line, up to 60 characters; "" none), account?: "B", model?: "dynamic" (the default: sized for each message Henry sends from the page) or a name like "claude-sonnet-5-5", effort?: "dynamic" (the default) or "medium", from?: your conversation id (a session) }', does: 'make a bot (its folder, its CLAUDE.md from the brief) and start it: { ok, bot, key, id }. Henry (his phone, through the relay), or a session on this machine (fv bot new), only when Henry directly asks it to make that bot; with from?: your conversation id, kept as its madeBy. Henry is told by a push after the fact and can remove it. Never a web page (an Origin gets 403)' },
   { method: 'GET', path: '/api/bots/requests', does: 'the bots sessions asked for, waiting on Henry, newest first: { ok, requests: [{ id, name, role, brief, account, model, effort, why, from, fromName, at }] } (each goes after 7 days)' },
@@ -941,7 +941,7 @@ function describeApi() {
     notes: 'ids: a conversation id, or the new-<n> key POST /api/sessions gave. wait: true (30 min), false, or seconds 1..3600. A reply is { ok, message?, ... }; 400 bad input, 401 token, 403 refused, 404 no such session, 409 state conflict, 503 the desktop app is not running.' }];
 }
 
-// POST /api/sessions { repo, account, prompt, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }
+// POST /api/sessions { repo | repoOf, account, prompt | blank, name?, model?, effort?, forkFrom?, temp?, chrome?, wait? }
 // A fresh claude that opens on the Claude in Chrome offer has it answered Yes (passChromeOffer; chromeOffer: 'accepted'
 // in the reply), unless chrome is false; any other startup dialog keeps the prompt from being sent, as before.
 // A caller gives no role (400): a bot's is startBot's.
@@ -953,11 +953,29 @@ const acctOk = (a, ctx) => typeof a === 'string' && acctsOf(ctx).includes(a);
 // only with it may role be a bot's ("bot:<id>", one live session each, 409)
 async function startSession(b, ctx, gone, origin = null, vouched = null) {
   if (!b || typeof b !== 'object') return [400, { ok: false, message: 'bad json' }];
-  const repo = b.repo, prompt = cleanText(b.prompt);
+  // repoOf { origin, name }: the repo as another machine names it (its new chat runs here, the main computer: Henry,
+  // 2026-10-17; link-send.js /link/start), started in this machine's checkout of it (ctx.rootIn); 404 no_checkout
+  let repo = b.repo;
+  if (repo == null && b.repoOf != null) {
+    const ro = b.repoOf;
+    // (sync-prefs.js cleanRoot's rule: an origin has no spaces, a name no slashes or control characters)
+    const originOk = (v) => v == null || (typeof v === 'string' && v.length > 0 && v.length <= 300 && !/\s/.test(v));
+    const nameOk = (v) => v == null || (typeof v === 'string' && v.length > 0 && v.length <= 255 && !/[\\/\x00-\x1f]/.test(v));
+    if (!ro || typeof ro !== 'object' || !(ro.origin || ro.name) || !originOk(ro.origin) || !nameOk(ro.name)) return [400, { ok: false, message: 'repoOf must be { origin, name }: the repo\'s origin and its folder\'s name' }];
+    let here = null;
+    try { here = typeof ctx.rootIn === 'function' ? ctx.rootIn({ origin: ro.origin || null, name: ro.name || null }) : null; } catch {}
+    if (typeof here !== 'string' || !here) return [404, { ok: false, code: 'no_checkout', message: `this machine has no checkout of ${ro.name || ro.origin}` }];
+    repo = here;
+  }
+  // blank: true starts it with no prompt (a new chat to type into): the reply comes once Claude Code named its id
+  if ('blank' in b && typeof b.blank !== 'boolean') return [400, { ok: false, message: 'blank must be true or false' }];
+  const blank = b.blank === true;
+  if (blank && b.prompt != null) return [400, { ok: false, message: 'a blank session takes no prompt' }];
+  const prompt = blank ? '' : cleanText(b.prompt);
   if (typeof repo !== 'string' || !repo || repo.length > 1024 || !path.isAbsolute(repo)) return [400, { ok: false, message: 'repo must be an absolute folder path' }];
   if (ctx.UNSAFE_PATH.test(repo)) return [400, { ok: false, message: 'that path has characters Fleet View will not pass on' }];
   if (!acctOk(b.account, ctx)) return [400, { ok: false, message: `account must be one of ${acctsOf(ctx).join(', ')}` }];
-  if (!prompt) return [400, { ok: false, message: 'prompt must be text, without control characters other than new lines and tabs' }];
+  if (!prompt && !blank) return [400, { ok: false, message: 'prompt must be text, without control characters other than new lines and tabs' }];
   if ('chrome' in b && typeof b.chrome !== 'boolean') return [400, { ok: false, message: 'chrome must be true or false' }];
   if (b.name != null && (typeof b.name !== 'string' || !b.name.trim() || b.name.length > 80 || NAME_BAD.test(b.name))) return [400, { ok: false, message: 'name must be text of 1 to 80 characters, without control characters' }];
   if (b.model != null && (typeof b.model !== 'string' || !MODEL_RE.test(b.model))) return [400, { ok: false, message: 'model must be a model name like opus, sonnet, haiku or claude-opus-5-5[1m] (letters, digits, . - [ ])' }];
@@ -1046,10 +1064,13 @@ async function startSession(b, ctx, gone, origin = null, vouched = null) {
       if (!p) return reply(502, { ok: false, message: 'the session ended before it was ready' });
       if (!p.alive) { out.id = convId(p.id); return reply(502, { ok: false, message: `the session ended before it was ready (code ${p.exitCode})` }); }
       if (H.ID_RE.test(p.id) && !p.pending) { out.id = p.id; keyToId.set(key, p.id); label(p.id); }
+      if (blank && out.id) break;
       if (out.id && p.status === 'idle') break;
       if (!out.chromeOffer && Date.now() - menuAt >= MENU_EVERY_MS) { menuAt = Date.now(); await chromeOffer(await menuNow(host, p)); }
     }
     const id = out.id;
+    // a blank one: nothing goes into it; it runs in the panel for Henry to type into (an id not named yet still runs)
+    if (blank) return reply(200, { ok: true, promptSent: false, blank: true, message: id ? 'started, with nothing typed into it' : 'started, with nothing typed into it; Claude Code has not named its id yet (it may be asking whether to trust the folder)' });
     if (!id || !p || p.status !== 'idle') {
       // nothing was typed: the session is left running for a person to look at in the panel
       return reply(200, { ok: false, promptSent: false, message: 'the session did not get ready within 60 s (it may be asking whether to trust the folder); the prompt was not sent, and the session is still running in the panel' });

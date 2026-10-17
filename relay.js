@@ -121,7 +121,9 @@
 //   POST /sync/move     only id (a conversation id) and force (true or false): Continue here for a chat whose host is
 //                       off, asked of a machine that is on (403 for any other field, 400 for a bad one);  GET /sync/move
 //                       id a conversation id (400)
-//   GET /accounts       (fleet-view.js: accounts.js view(), local only) passes on only each letter's a, email and
+//   GET /sync/main      read only: the main computer Henry picked (new chats from the phone start there); POST
+//                       /sync/main (picking it) is the page's own and not on the list
+//   GET /accounts      (fleet-view.js: accounts.js view(), local only) passes on only each letter's a, email and
 //                       signedIn, and the sign-ins of A and B: status, message, and the claude.ai link while one waits
 //   POST /accounts/add { letter }, /login { account }, /code { account, code }, /cancel { account }   (the Claude
 //                       accounts screen) only that body (403), only for A or B (SIGNIN_LETTERS, the letters a synced
@@ -371,7 +373,7 @@ const TASK = '[A-Za-z0-9][A-Za-z0-9._-]{0,63}';
 const ALLOW = {
   GET: ['/state', '/conversation', '/conversation/image', '/repo-history', '/chat/commands', '/chat/files', '/chat/kind', '/file',
     '/since', '/api/sessions', `/api/sessions/${KEY}`, `/api/sessions/${KEY}/(?:menu|transcript|activity)`, '/api/conversations',
-    '/api/teams', '/api/status', '/accounts', '/sync/move', '/api/bots/requests'],
+    '/api/teams', '/api/status', '/accounts', '/sync/move', '/sync/main', '/api/bots/requests'],
   POST: ['/api/sessions', `/api/sessions/${KEY}/(?:message|answer|interrupt|open|stop|remove|now|unsend|model|enter|background|mode|panel|rewind|fork)`, '/api/teams',
     `/api/teams/${TEAM}/(?:add|remove|lead|disband|message)`, '/settings', '/rename', '/sessions/move', '/push-target',
     '/repos/remove', '/repos/add', '/chat/image', '/upload', '/teams', '/teams/(?:add|remove|leave|lead|rename)',

@@ -32,7 +32,7 @@
 // for a file still on its way. A folder goes in by paste or drop (there is no folder button: attach does it).
 // The notes under the box (drawNotes) are only for trouble (Henry, 2026-10-14: "if ur gonna pop something in the text box it
 // better be an error otherwise forget it"): an error, or a warning you have to act on (a panel or dialog in the way, an
-// offline or unlinked machine, a move to cancel). Nothing that only says what is going on: no "Switching to Sonnet", no
+// offline or unlinked machine). Nothing that only says what is going on: no "Switching to Sonnet", no
 // "Starting session…", no "Runs on the Mac: your messages go there", no "Sent to …", no pin, no dictation progress.
 //
 // ↑ in an empty box (or with the caret at its start) brings back your last message, and again the one before;
@@ -83,7 +83,6 @@ import { termApi, hosts, refreshHosts, closePanel as closeHostPanel, typeInto, e
 import { uploads, upload, UPLOAD_MAX, sizeText, droppedFolders } from './pcfiles.js';
 import { takeHandoff } from './handto.js';
 import { sizeTask, dynamicSwitch, DYNAMIC, mateOf } from './chats-model.js';
-import { pinText, setPin } from './keeps.js';
 
 const POLL_MS = 400;
 const ENTER_DELAY_MS = 300; // the paste, then Enter on its own (api.js waits the same)
@@ -805,16 +804,15 @@ const BUSY_THERE = new Set(['WORKING', 'AGENTS', 'ASKING', 'QUESTION']);
 // /link/activity answer (busy, waiting), or null; o.online: the link's word on the host, true | false | null (not known,
 // or not linked); o.linked: false once the link said the machines aren't linked.
 // Remote by default (Henry, 2026-10-13): a chat stays on the machine that runs it, idle or busy, portable or bound, and
-// what is typed here goes there through the link, like a remote port to it. Nothing moves because of a message: it
-// moves only on an explicit Continue on this machine (the row's right-click menu, the Session tab, a card's button).
+// what is typed here goes there through the link, like a remote port to it. Chats never move between machines (Henry,
+// 2026-10-17: the other computer is a screen onto the main one); nothing here offers a move any more.
 //   { how: 'local' }                       it runs here, or no other machine runs it: typed into it here, as always
-//   { how: 'moving', host }                a move here is under way: wait for it
-//   { how: 'offline', host, kind }         the host is off: a card offers Continue on this machine (its last copy)
-//   { how: 'link', host, kind, why }       the machines aren't linked: link them first (or Continue on this machine)
+//   { how: 'moving', host }                a move here is under way (an older phone started it): wait for it
+//   { how: 'offline', host, kind }         the host is off: a note says its chats come back when it's on; the draft stays
+//   { how: 'link', host, kind, why }       the machines aren't linked: link them first
 //   { how: 'remote', host, kind, why }     sent to the host through the link, and it stays there: why 'bot' (a bot),
 //                                          'bound' (its workspace is only there), 'busy' (Claude works
 //                                          there, or asks something: it is queued there) or 'idle'
-// A forced move (the offline card's button with a draft) is Send's own { how: 'move', force: true }, never followPlan's.
 export function followPlan(s, o = {}) {
   const host = hostOfChat(s);
   if (!s || o.local || !host) return { how: 'local' };
@@ -839,22 +837,9 @@ export function remoteMenu(m) {
     more: !!m.more, options, submit: m.submit ? { on: !!m.submit.on } : null, sig: String(m.sig ?? ''), unnumbered: !!m.unnumbered, remote: true,
   };
 }
-// a move's phase (GET /sync/move's job) in one line for the box's status line: its own note, else the phase's words
-const MOVE_TEXT = {
-  asking: (n) => `Asking ${n} to hand it over…`, waiting: (n) => `${n} hands it over when Claude is done there…`,
-  ending: (n) => `Ending the session on ${n}…`, uploading: (n) => `${n} is uploading the last lines…`,
-  downloading: () => 'Downloading the conversation…', claiming: () => 'Making this machine its owner…', ready: () => 'On this machine now',
-  offline: (n) => `${n} is offline`, noanswer: (n) => `${n} did not answer`,
-};
-export function movePhaseText(job, name) {
-  const n = (job && job.from && job.from.name) || name || 'the other machine';
-  if (job && typeof job.note === 'string' && job.note.trim()) return job.note.trim();
-  const f = MOVE_TEXT[job && job.phase];
-  return f ? f(n) : `Moving it here from ${n}…`;
-}
 // A "/" command that opens a panel in Claude Code (/usage, /config, /model with nothing after it…): the box can't show
-// or drive one on the other machine, so it says to Continue on this machine. -> the command, or null (a plain message, or a
-// command that just runs: /compact, a skill's)
+// or drive one on the other machine, so it says it works only in a chat this machine runs. -> the command, or null (a
+// plain message, or a command that just runs: /compact, a skill's)
 const PANEL_CMDS = new Set(['usage', 'status', 'config', 'settings', 'mcp', 'model', 'effort', 'permissions', 'allowed-tools', 'agents', 'hooks',
   'memory', 'resume', 'continue', 'help', 'doctor', 'context', 'plugin', 'plugins', 'login', 'logout', 'add-dir', 'rewind', 'export', 'theme',
   'terminal-setup', 'ide', 'output-style', 'privacy-settings', 'release-notes', 'upgrade', 'bashes', 'tasks', 'todos', 'cost', 'stats', 'statusline',
@@ -870,8 +855,7 @@ export function panelCommand(msg) {
 // what the box knows of the machine that runs a chat (mountCompose's st.rem): its activity and menu as the link last
 // read them, whether it is online and the machines linked, when it was read, a read under way, and which reading (gen)
 const newRem = (gen = 0) => ({ act: null, menu: null, online: null, linked: null, at: 0, busy: false, gen });
-const MOVE_MAX_MS = 15 * 60e3; // a move from the Chat tab is followed this long at most
-const CONT_WORDS = 'works in a session on this machine';
+const CONT_WORDS = 'only works in a chat this machine runs';
 
 // ---------- the box ----------
 // slot: the element under the feed (chat.js); s: the conversation from /state. -> { update(s), destroy() }
@@ -929,8 +913,8 @@ export function mountCompose(slot, s) {
     sendAfter: false, // Send was pressed while the mic still had words to write out: it sends once they are in
     // (live: { text, stretch }, the preview of what is being said, drawn after the text until its final comes)
     // a chat another machine runs (see "a chat another machine runs" below): the host's activity and menu as the link
-    // last read them; the offline card; what needs Continue on this machine; a passing note; a Send that forces the move; a move
-    rem: newRem(), offline: null, cont: null, info: null, forceMove: null, moving: null, moveAbort: false, noWork: null, pinning: false,
+    // last read them; the offline note; what only a chat this machine runs can do; a passing note
+    rem: newRem(), offline: null, cont: null, info: null,
     drawn: {}, timer: 0, saveTimer: 0, alive: true,
   };
   boxes.add(st);
@@ -1136,8 +1120,6 @@ export function mountCompose(slot, s) {
     const h = hosts.get(st.id);
     const bits = [];
     if (!t) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>${esc(noTermMsg('Sending'))}</span></span>`);
-    // a move here you started: only its Cancel shows (no progress words)
-    else if (st.moving === st.id) bits.push(`<span class="cmp-chip warn"><span class="cmp-spin" aria-hidden="true"></span><span>Moving here</span><button type="button" class="cmp-chip-b" data-c="move-x">Cancel</button></span>`);
     // waiting with no menu or panel card here: a panel such as /usage this tab can't read (it holds back
     // background updates), a startup dialog, or a prompt this tab can't show. An older host sends no waitingFor.
     else if (h && h.status === 'waiting' && !st.menu && !st.panel) {
@@ -1154,31 +1136,19 @@ export function mountCompose(slot, s) {
       const p = planNow(), n = esc(p.host ? p.host.name : 'the other machine'), a = st.rem.act;
       const chip = (cls, text, btn = '') => bits.push(`<span class="cmp-chip ${cls}">${icon(cls === 'warn' ? 'alert' : 'sync', 13)}<span>${text}</span>${btn}</span>`);
       if (a && a.waiting === 'panel') chip('warn', `A panel is open in the session on ${n}`, '<button type="button" class="cmp-chip-b" data-c="rem-esc">Close it (Esc)</button>');
-      // not linked: nothing moves by itself; Continue on this machine is the other way (not a bot's: it would lose its role)
-      else if (p.how === 'link') chip('warn', `Runs on ${n}, which isn't linked with this machine yet: they link by themselves while both are on (Link in the Sync card if you unlinked it)`, p.why === 'bot' ? '' : contBtn(p.kind === 'bound' ? 'Continue on this machine anyway' : 'Continue on this machine'));
+      // not linked: it waits for the link; nothing moves
+      else if (p.how === 'link') chip('warn', `Runs on ${n}, which isn't linked with this machine yet: they link by themselves while both are on (Link in the Sync card if you unlinked it)`);
     }
     else if (!h && openElsewhere(st.s)) bits.push(`<span class="cmp-chip warn">${icon('alert', 13)}<span>Open in another window: sending here starts a second copy</span></span>`);
+    // the machine that runs it is off: a plain note (Henry, 2026-10-17). The draft stays in the box; nothing moves
     if (st.offline && st.offline.id === st.id) {
-      const o = st.offline, n = esc(o.name);
-      // pinned to that machine: its move is refused, so the way here is to let it go first (then the cloud copy)
-      if (o.pinned) {
-        bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>Stays on ${n}, which is offline. Unpin it to continue on this machine from its last copy, without its files</span>`
-          + `<button type="button" class="cmp-chip-b" data-c="off-unpin"${st.pinning ? ' disabled' : ''}>Unpin and continue on this machine</button><button type="button" class="cmp-chip-x" data-c="off-x" title="Not now" aria-label="not now">${icon('close', 11)}</button></span>`);
-      } else {
-        bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${o.kind === 'bound' ? `Only on ${n}, which is offline. Continue on this machine anyway brings the conversation, not its files` : `${n} is offline. Continue on this machine from its last copy?`}</span>`
-          + `<button type="button" class="cmp-chip-b" data-c="off-go">${o.kind === 'bound' ? 'Continue on this machine anyway' : 'Continue on this machine'}</button><button type="button" class="cmp-chip-x" data-c="off-x" title="Not now" aria-label="not now">${icon('close', 11)}</button></span>`);
-      }
-    }
-    // the other machine could not pack its work (too big, a merge under way...): it can come without it
-    if (st.noWork && st.noWork.id === st.id) {
-      bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${esc(st.noWork.text)}</span>`
-        + `<button type="button" class="cmp-chip-b" data-c="move-nowork">Move it without the work</button><button type="button" class="cmp-chip-x" data-c="nowork-x" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
+      bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${esc(st.offline.name)} is offline. Its chats come back when it's on.</span>`
+        + `<button type="button" class="cmp-chip-x" data-c="off-x" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
     }
     if (st.cont && st.cont.id === st.id) {
-      // a rule's pin keeps it on its host: no way here, so the chip says why instead
-      const btn = contBtn(), why = btn ? 'Continue on this machine to use this' : esc(pinText(pinNow()));
-      bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${esc(st.cont.what)} ${CONT_WORDS}: ${why}</span>`
-        + `${btn}<button type="button" class="cmp-chip-x" data-c="cont-x" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
+      const host = esc(hostOfChat(st.s)?.name || 'the other machine');
+      bits.push(`<span class="cmp-chip warn">${icon('sync', 13)}<span>${esc(st.cont.what)} ${CONT_WORDS}: this one runs on ${host}</span>`
+        + `<button type="button" class="cmp-chip-x" data-c="cont-x" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
     }
     for (const e of st.errs) bits.push(`<span class="cmp-chip err">${icon('error', 13)}<span>${esc(e.text)}</span><button type="button" class="cmp-chip-x" data-e="${e.key}" title="Dismiss" aria-label="dismiss">${icon('close', 11)}</button></span>`);
     const html = bits.join('');
@@ -1679,7 +1649,7 @@ export function mountCompose(slot, s) {
     if (fromBox) stopDictation(false);
     shutSlash();
     let id = st.id; // (keyNow: a new conversation may get its id while it starts)
-    let s0 = st.s;
+    const s0 = st.s;
     // a menu is up: text never goes in as a message (a digit would pick an option). A question with a "Type
     // something" option takes what the box holds as that answer; any other menu is answered first (here, or on the
     // machine that runs it)
@@ -1692,11 +1662,8 @@ export function mountCompose(slot, s) {
       ta.value = d.text; grow(); drawSend();
       return true;
     }
-    // another machine runs it (followPlan, see "a chat another machine runs"): sent there, or a card. It moves here
-    // only when the offline card's Continue on this machine was clicked with a draft (forceMove): then the draft follows
-    let plan = planNow();
-    if (st.forceMove === id && plan.how === 'offline') plan = { ...plan, how: 'move', force: true };
-    st.forceMove = null;
+    // another machine runs it (followPlan, see "a chat another machine runs"): sent there, or a note; it never moves
+    const plan = planNow();
     if (plan.how !== 'local') {
       st.offline = null; st.cont = null;
       if (shell) { contNeeded('Bash mode'); return false; }
@@ -1704,7 +1671,7 @@ export function mountCompose(slot, s) {
       if (plan.how === 'moving') { err(`It is moving here from ${plan.host.name}: wait a moment, then send`); return false; }
       // (a model or effort pick gets no card: its Continue would send the box's draft, not the pick)
       if (plan.how === 'offline' && menuPick) { err(`${plan.host.name} runs it and is offline: pick again once it is back`); return false; }
-      if (plan.how === 'offline') { st.offline = { id, name: plan.host.name, kind: plan.kind, pinned: !!pinNow() }; drawNotes(); return false; }
+      if (plan.how === 'offline') { st.offline = { id, name: plan.host.name }; drawNotes(); return false; }
       if (plan.how === 'remote') {
         if (list.some((a) => a.file)) { contNeeded('Attaching files'); return false; }
         const pc = panelCommand(text);
@@ -1722,19 +1689,6 @@ export function mountCompose(slot, s) {
     st.errs = [];
     drawSend(); drawNotes();
     try {
-      // the offline card's forced move: it moves here first (POST /sync/move, as Continue on this machine), then goes on
-      // as a chat of this machine's
-      if (plan.how === 'move') {
-        const ready = await moveHere(id, !!plan.force);
-        if (!ready || st.id !== id) return;
-        s0 = { ...s0, cwd: ready.cwd || s0.cwd, account: ready.account || s0.account };
-        if (ready.trusted === false) {
-          // a folder Fleet View does not list (it marks the ones it lists trusted itself): Henry answers the card, then sends again
-          ensureLive(s0, { sizeEl: sizeEl() }).catch(() => {});
-          err(`Claude Code asks once whether it may work in ${ready.cwd || 'its folder'} on this machine: pick "Yes, I trust this folder" on the card above, then send again`);
-          return;
-        }
-      }
       // the images first: a failed upload keeps the whole draft
       const paths = [];
       for (const a of list) {
@@ -1856,43 +1810,15 @@ export function mountCompose(slot, s) {
   // ----- a chat another machine runs (docs/sync-follow.md item 6, "Follow you") -----
   // Send does what followPlan says (see the top of that function): every chat another machine runs, idle or busy,
   // portable or bound, gets the message there through the link (POST /link/send: queued there behind what Claude
-  // does, resumed there when not running), and stays there (Henry, 2026-10-13: remote by default; it moves only on
-  // an explicit Continue on this machine). An offline host gets a card; machines not linked say to link them. While it
-  // runs there the box reads that machine instead of this one's screen: its
+  // does, resumed there when not running), and stays there (Henry, 2026-10-13: remote by default; 2026-10-17: chats
+  // never move between machines). An offline host gets a note (its chats come back when it's on; the draft stays);
+  // machines not linked say to link them. While it runs there the box reads that machine instead of this one's screen: its
   // activity line and its menu (GET /link/activity, /link/menu, every 1.5 s while Claude works there, else every 5 s,
   // as the phone does), the card's answers, Stop, and the queue's Interrupt and Unsend go there (/link/answer,
   // /link/interrupt, /link/now, /link/unsend), and images too (/link/image, saved there). Rewind and Edit, bash mode,
-  // a "/" command that opens a panel, the mode and the model are its session's: they say Continue on this machine,
-  // with the button. fleet-view.js and link-send.js serve the routes.
+  // a "/" command that opens a panel and the mode are its session's: a chip says they only work in a chat this machine
+  // runs. fleet-view.js and link-send.js serve the routes.
   function remoteOn() { return !hosts.get(st.id)?.alive && !!hostOfChat(st.s); }
-  // pinned to the machine that runs it (/state's workspace.pin: { rule, host, why?, manual? }), or null. Nothing follows
-  // Henry any more (remote by default), so a pin only means Continue on this machine can't take it off its host
-  function pinNow() { return (st.s && st.s.workspace && st.s.workspace.pin) || null; }
-  // a chip's Continue on this machine button. A chat pinned to its host: one Henry pinned by hand earlier offers
-  // "Unpin and continue on this machine" (POST /sync/pin free, then the move); a rule's pin keeps it there: no button
-  const contBtn = (label = 'Continue on this machine') => {
-    const p = pinNow();
-    if (!p) return `<button type="button" class="cmp-chip-b" data-c="cont">${label}</button>`;
-    return p.manual ? `<button type="button" class="cmp-chip-b" data-c="cont-unpin"${st.pinning ? ' disabled' : ''}>Unpin and continue on this machine</button>` : '';
-  };
-  // POST /sync/pin for this chat. -> true when it went through (else the error chip says why)
-  async function pinAct(mode) {
-    const id = st.id;
-    if (st.pinning) return false;
-    st.pinning = true;
-    drawNotes();
-    try {
-      const r = await setPin(id, mode);
-      if (st.id !== id) return r.ok;
-      if (!r.ok) { err(r.message || 'It did not go through'); return false; }
-      // /state shows it on the next poll; the chip goes by what came back until then
-      st.s = { ...st.s, workspace: { ...(st.s.workspace || {}), pin: r.pin || undefined } };
-      return true;
-    } finally {
-      st.pinning = false;
-      drawNotes();
-    }
-  }
   function planNow() { return followPlan(st.s, { local: !!hosts.get(st.id)?.alive, act: st.rem.act, online: st.rem.online, linked: st.rem.linked }); }
   // one of this machine's page routes -> its JSON with status and ok (a 2xx that didn't say ok: false), message
   async function call(method, url, body) {
@@ -1941,9 +1867,10 @@ export function mountCompose(slot, s) {
     drawAct(st.busy ? { verb: (a && a.verb) || 'Working', detail: (a && a.detail) || '' } : null);
     drawCard();
     drawPanel();
-    // the mode and the model are that session's: a click says Continue on this machine (they draw again here)
+    // the mode and the model are that session's: the mode's click says it works only in a chat this machine runs, a
+    // model or effort pick goes there as a message (they draw again here)
     st.drawn.mode = st.drawn.model = null;
-    for (const b of [modeBtn, modelBtn]) { b.disabled = false; b.title = `Its session runs on ${hostOfChat(st.s)?.name || 'the other machine'}: Continue on this machine to use this`; }
+    for (const b of [modeBtn, modelBtn]) { b.disabled = false; b.title = `Its session runs on ${hostOfChat(st.s)?.name || 'the other machine'}`; }
     drawSend();
     drawNotes();
   }
@@ -1988,75 +1915,8 @@ export function mountCompose(slot, s) {
     if (remoteOn() && st.menu?.remote) { answerRemote('esc'); return; }
     if (writeKey('\x1b')) { answered(st.menu?.sig || null, 'esc'); drawCard(); }
   }
-  // what only a session on this machine can do: the chip with Continue on this machine
+  // what only a session on this machine can do: a chip says so (the chat runs on the other machine, and stays there)
   function contNeeded(what) { st.cont = { id: st.id, what }; drawNotes(); }
-  // Continue on this machine from the Chat tab (POST /sync/move, as the Session tab's): the job every second, its phase
-  // in the status line (Cancel stops it), until it is ready -> its ready ({ cwd, account, trusted }), or null: it failed,
-  // was cancelled, or the other machine is offline (the card, whose button forces it: the last copy). A chat pinned
-  // there (409 pinned) whose host is offline gets the card with "Unpin and continue on this machine"; a move whose work the other
-  // machine could not pack (workRefused: too big, a merge under way...) gets "Move it without the work" (extra.noWork)
-  async function moveHere(id, force = false, extra = {}) {
-    const host = hostOfChat(st.s), name = host ? host.name : 'the other machine';
-    const kind = st.s?.bot || st.s?.workspace?.kind === 'bound' ? 'bound' : 'portable';
-    const show = (x) => { if (st.id === id) { st.step = x; drawNotes(); } };
-    st.moving = id;
-    st.moveAbort = false;
-    if (st.noWork && st.noWork.id === id) st.noWork = null;
-    try {
-      show(`Moving it here from ${name}…`);
-      let job = await call('POST', '/sync/move', { id, ...(force ? { force: true } : {}), ...(extra.noWork ? { noWork: true } : {}) });
-      if (!job.ok && job.code === 'pinned' && job.offline) { st.offline = { id, name: job.host || name, kind: 'bound', pinned: true }; drawNotes(); return null; }
-      if (!job.ok) { err(job.message || 'The move did not start'); return null; }
-      for (const end = Date.now() + MOVE_MAX_MS; ;) {
-        if (!st.alive) return null;
-        if (st.moveAbort) {
-          await call('DELETE', `/sync/move?id=${encodeURIComponent(id)}`);
-          err(`Move cancelled: it stays on ${name}`);
-          return null;
-        }
-        const ph = job.phase;
-        if (ph === 'ready') { st.offline = null; st.cont = null; return job.ready || {}; }
-        if (ph === 'failed' && job.workRefused && !extra.noWork) { st.noWork = { id, text: job.error || job.note || `${name} could not pack its work` }; drawNotes(); return null; }
-        if (ph === 'failed' || ph === 'cancelled') { err(job.error || job.note || 'The move did not finish'); return null; }
-        if ((ph === 'offline' || ph === 'noanswer') && !force) { st.offline = { id, name, kind }; drawNotes(); return null; }
-        if (Date.now() > end) { err(`${name} did not hand it over: try again`); return null; }
-        show(movePhaseText(job, name));
-        await sleep(1000);
-        const g = await call('GET', `/sync/move?id=${encodeURIComponent(id)}`);
-        if (g.ok) job = g;
-        else if (g.status === 404) { err('The move went away: try again'); return null; }
-      }
-    } finally {
-      if (st.moving === id) st.moving = null;
-      if (st.id === id) { st.step = ''; drawNotes(); }
-    }
-  }
-  // Continue on this machine with no message (a chip's button, the offline card with no draft or of a bound chat):
-  // move it, then open it here
-  async function continueHere(force = false, extra = {}) {
-    const id = st.id;
-    if (st.sending || !termApi()) return;
-    st.sending = true;
-    st.errs = [];
-    drawSend(); drawNotes();
-    try {
-      const ready = await moveHere(id, force, extra);
-      if (!ready || st.id !== id) return;
-      st.cont = null;
-      const s1 = { ...st.s, cwd: ready.cwd || st.s.cwd, account: ready.account || st.s.account };
-      if (ready.trusted === false) {
-        ensureLive(s1, { sizeEl: sizeEl() }).catch(() => {});
-        err(`Claude Code asks once whether it may work in ${ready.cwd || 'its folder'} on this machine: pick "Yes, I trust this folder" on the card above`);
-        return;
-      }
-      const r = await ensureLive(s1, { sizeEl: sizeEl(), ready: drawnNow, onStep: (x) => { if (st.id === id) { st.step = x; drawNotes(); } } });
-      if (!r.ok) err(r.message || 'could not start the session');
-    } finally {
-      st.sending = false;
-      st.step = '';
-      drawSend(); drawNotes();
-    }
-  }
   // the note a move left for Claude (GET /sync/note: { note | null }; a 404, from a Fleet View without it, is none)
   async function takeNote(id) {
     const r = await call('GET', `/sync/note?id=${encodeURIComponent(id)}`);
@@ -3074,16 +2934,8 @@ export function mountCompose(slot, s) {
     // a chat another machine runs: its mode is a key there (Shift+Tab), which the link can't press; a model or effort
     // pick is a "/model <id>" or "/effort <level>" message, so it goes there as one (pickModel)
     if (remoteOn() && c === 'mode') { contNeeded('The permission mode'); return; }
-    if (c === 'off-go') { const o = st.offline; st.offline = null; drawNotes(); if (!o) return; if (o.kind === 'bound' || !hasDraft()) continueHere(true); else { st.forceMove = st.id; send(); } return; }
     if (c === 'off-x') { st.offline = null; drawNotes(); return; }
-    // a chat pinned to its host by hand, and the offline card of a pinned chat: let it go (keeps.js setPin), then move it
-    if (c === 'cont-unpin') { const id = st.id; pinAct('free').then((ok) => { if (ok && st.id === id) continueHere(false); }); return; }
-    if (c === 'off-unpin') { const o = st.offline; pinAct('free').then((ok) => { if (!ok || st.id !== (o && o.id)) return; st.offline = null; continueHere(true); }); return; }
-    if (c === 'move-nowork') { st.noWork = null; drawNotes(); continueHere(false, { noWork: true }); return; }
-    if (c === 'nowork-x') { st.noWork = null; drawNotes(); return; }
-    if (c === 'cont') { continueHere(false); return; }
     if (c === 'cont-x') { st.cont = null; drawNotes(); return; }
-    if (c === 'move-x') { st.moveAbort = true; return; }
     if (c === 'rem-esc') { remoteAct('/link/interrupt'); return; }
     if (c === 'send') send();
     else if (c === 'bg') runInBackground();
@@ -3284,7 +3136,7 @@ export function mountCompose(slot, s) {
         st.panel = null; st.panelOwned = false; st.cmdAt = 0; st.cmd = '';
         st.menu = null; st.mode = null; st.effort = null; st.want = null; st.busy = false; st.errs = []; st.step = ''; st.elsewhereAt = 0;
         st.freeDraft = null;
-        st.rem = newRem(st.rem.gen + 1); st.offline = null; st.cont = null; st.forceMove = null; st.noWork = null;
+        st.rem = newRem(st.rem.gen + 1); st.offline = null; st.cont = null;
         st.drawn = {};
         loadDraft();
         st.s = next;

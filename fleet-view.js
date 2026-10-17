@@ -33,6 +33,7 @@ const SYNC_ACCOUNTS = require(path.join(__dirname, 'sync-accounts.js'));
 const SYNC_COMMON = require(path.join(__dirname, 'sync-common.js'));
 const SYNC_SETUP_JS = require(path.join(__dirname, 'sync-setup.js'));
 const SYNC_CLONE = require(path.join(__dirname, 'sync-clone.js'));
+const CLONE_WS = require(path.join(__dirname, 'clone-workspace.js'));
 const LINK_SEND_JS = require(path.join(__dirname, 'link-send.js'));
 const SYNC_MOVE_JS = require(path.join(__dirname, 'sync-move.js'));
 const VERSION = require(path.join(__dirname, 'version.js'));
@@ -444,6 +445,9 @@ function cleanParity(list) {
   return out;
 }
 let parityRules = cleanParity(saved.parity) || [];
+// The main computer (settings.mainMachine { id: a sync device id, name, at } | null; shared, sync-prefs.js): the one
+// whose chats run there, the other machine showing them and typing into them (GET/POST /sync/main). null: none picked
+let mainMachine = SYNC_PREFS.cleanMainMachine(saved.mainMachine);
 // Teams: conversations told to work together (the page's "Work together", POST /teams). Each is
 // { id, name, color, members: [ids], lead, order, at, messages: [{ t, from, to, text }], successors: [{ from, to, at }],
 // seenAt }: lead is the member that directs the others (null: they are peers; the conversation that carries on
@@ -7635,6 +7639,9 @@ const apiCtx = {
   sendJson, readBody, log: (t) => logOnce('api:' + t, t), UNSAFE_PATH, accounts: () => (DEMO ? ['A', 'B'] : accountsHere()),
   // a new conversation asked for on an account close to its limit: the one it starts on instead (switchPick), or null
   pickAccount: (a, name) => switchPick(a, name),
+  // a repo as another machine names it ({ origin, name }: POST /api/sessions repoOf, link-send.js /link/start) -> this
+  // machine's checkout of it, or null
+  rootIn: (r) => (DEMO ? null : PREFS_ROOTS.in(r)),
   allowedFolders() {
     const st = buildState(), out = [];
     const add = (p) => { if (typeof p === 'string' && p && !inBots(p)) out.push(p); };
@@ -7839,7 +7846,7 @@ const ACCOUNT_SYNC = SYNC_ACCOUNTS.createAccountSync({ accounts: ACCTS, log: (t)
 // The shared settings (sync-prefs.js): the groups every device holds the same (hidden and removed conversations,
 // names, moves, hidden / added / renamed / ordered workspaces, workspace and conversation colours, the map's spots, teams, stays-on rules and choices,
 // the Bots list's order and pins, the bots' looks (botLooks: by folder name; a bot here goes up from its registry),
-// housekeeping's keep-pins on GitHub branches, the parity rules), read from and put back into the
+// housekeeping's keep-pins on GitHub branches, the parity rules, the main computer), read from and put back into the
 // settings above; per-screen ones (view, zoom, camera, bounds, filters, map views, accounts off, push targets, bots,
 // compact, finishedOpen, steady, notify) never go. settings.prefsSync is what this device last agreed on with the table.
 function prefsGroups() {
@@ -7852,6 +7859,7 @@ function prefsGroups() {
     chatOrder: [...chatOrder.pinned.map((key) => ({ key, pin: true })), ...chatOrder.keys.map((key) => ({ key }))],
     repoHues: [...repoHues.values()], sessHues: [...sessHues.values()], botLooks: BOTS ? BOTS.lookItems(botLooks) : botLooks,
     addedRepos: addedRepos.map((r) => ({ root: r.root, at: r.at })), keepPins: HK.remotePins(), parity: parityRules,
+    mainMachine: mainMachine ? [mainMachine] : [],
   };
 }
 // another device's group, translated: replaces this one's (each cleaned as a POST /settings would be) and is saved
@@ -7895,7 +7903,11 @@ function applyPrefs(group, items) {
   else if (group === 'addedRepos') addedRepos = cleanAddedRepos(items) || [];
   else if (group === 'keepPins') { HK.setRemotePins(items); return; } // housekeeping's own file, not settings
   else if (group === 'parity') { parityRules = cleanParity(items) || []; saved.parity = parityRules; }
-  else if (group === 'teams') {
+  else if (group === 'mainMachine') {
+    const m = SYNC_PREFS.cleanMainMachine(Array.isArray(items) ? items[0] : null);
+    if ((m && m.id) !== (mainMachine && mainMachine.id)) logLine(`main computer: ${m ? m.name : 'none'} (picked on another machine)`);
+    mainMachine = m; saved.mainMachine = m;
+  } else if (group === 'teams') {
     const old = new Map(teams.map((t) => [t.id, t]));
     teams = cleanTeams(items.map((t) => ({ ...t, seenAt: old.has(t.id) ? old.get(t.id).seenAt : now, here: old.has(t.id) ? old.get(t.id).here : false }))) || [];
   } else return;
@@ -7970,14 +7982,46 @@ if (!DEMO) {
   const cloneTick = setInterval(() => { CLONER.tick().catch((e) => logOnce('clone:tick', `sync-clone: ${(e && e.message) || e}`)); }, 30e3);
   if (cloneTick.unref) cloneTick.unref();
 }
-// /sync/missing and /sync/clone: "Clone what's missing", on this machine's own page only (never a remote browser, never
-// another site's page); 404 while sync is not set up, as the other /sync routes.
+// "Clone workspace to this machine" (clone-workspace.js): this machine gets its own copy of a workspace another
+// computer runs: a checkout here (CLONER's clone when there is none), the work that computer left (its snapshots,
+// through the sync runner's carry) and its newest chats as new conversations of this machine's own; the originals and
+// their synced copies here are never touched
+const WS_CLONER = CLONE_WS.createWorkspaceCloner({ dataDir: LOG_DIR, log: (t) => logOnce(t, t), cloner: CLONER, roots: () => pageRepos(),
+  chats: (root) => workspaceChats(root), carry: () => (typeof SYNC_RUNNER.carry === 'function' ? SYNC_RUNNER.carry() : null),
+  online: (dev) => { try { const l = SYNC_RUNNER.link(); return l && typeof l.online === 'function' ? l.online(dev) : null; } catch { return null; } },
+  trust: (cwd, account) => trustMoved(cwd, account), rename: (id, name) => renameSession(id, name), rescan: () => SYNC_RUNNER.rescan() });
+// the conversations of the workspace at root that another computer owns, as their synced copies here have them (not a
+// removed one, not one moving or bound to its host): its repo is root, or its log is in the slug folder of root or of
+// one of its worktrees (where the materializer lays them down)
+function workspaceChats(root) {
+  const owners = syncOwners();
+  if (!owners || typeof root !== 'string' || !root) return [];
+  const k = rootKey(root), gone = new Set(hidden.map((h) => h.id)), slugs = new Set([SYNC_COMMON.slugOf(root)]);
+  for (const n of ls(path.join(root, '.claude', 'worktrees'))) slugs.add(SYNC_COMMON.slugOf(path.join(root, '.claude', 'worktrees', n)));
+  const out = [];
+  for (const s of sessions.values()) {
+    if (s.demo) continue;
+    const id = String(s.id).toLowerCase();
+    const o = owners.get(id);
+    if (!o || o.moving || o.bound || !o.device || gone.has(id)) continue;
+    const f = findLog(id);
+    if (!f || !((s.root && rootKey(s.root) === k) || slugs.has(path.basename(f.pdir || path.dirname(f.file))))) continue;
+    out.push({ id, file: f.file, account: f.account, name: plain(shownName(s) || s.name || ''), renamed: !!names.get(id), last: s.last || s.mtime || 0, device: o.device, deviceName: o.name || null });
+  }
+  return out;
+}
+// /sync/missing, /sync/clone and /sync/clone-workspace: "Clone what's missing" and "Clone workspace to this machine",
+// on this machine's own page only (never a remote browser, never another site's page); 404 while sync is not set up,
+// as the other /sync routes.
 //   GET  /sync/missing   -> the cloner's view(): { ok, at, repos: [{ origin, name, chats, newest, state, fresh, message? }],
 //                           ask, auto, folder, defaultFolder, picked, jobs }
 //   POST /sync/missing { notNow?: true, auto?: boolean, folder?: string | null } -> the same view, after the change
 //   POST /sync/clone { origins: [...], folder?, auto?, skip?: [...] } -> 200 { ok, job, busy } at once, the clones
 //                           going on in the background | 400 { ok: false, message }
 //   GET  /sync/clone?id=<job id> -> 200 the job | 404
+//   POST /sync/clone-workspace { repo: <workspace folder> | <origin> } -> 200 { ok, job } at once (clone-workspace.js's
+//                           job; the same one while it runs), the rest going on in the background | 400 { ok: false, message }
+//   GET  /sync/clone-workspace?id=<job id> | ?repo=<folder or origin> (its newest) -> 200 the job | 404
 function syncClone(req, res, pathname) {
   if (!SYNC.enabled()) return sendJson(res, 404, { ok: false, message: 'sync is not set up on this PC' });
   if (remoteOf(req)) return sendJson(res, 403, { ok: false, message: 'only on this machine' });
@@ -7992,6 +8036,18 @@ function syncClone(req, res, pathname) {
       if (!b || typeof b !== 'object') return sendJson(res, 400, { ok: false, message: 'bad json' });
       CLONER.setPolicy({ notNow: b.notNow === true, auto: typeof b.auto === 'boolean' ? b.auto : undefined, folder: b.folder })
         .then((v) => sendJson(res, 200, v), fail);
+    });
+  }
+  if (pathname === '/sync/clone-workspace') {
+    if (isGet) {
+      const q = new URL(req.url, 'http://x').searchParams;
+      const job = q.get('id') ? WS_CLONER.job(q.get('id')) : WS_CLONER.forRepo(q.get('repo') || '');
+      return job ? sendJson(res, 200, job) : sendJson(res, 404, { ok: false, message: 'no such clone' });
+    }
+    if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'GET or POST' });
+    return readBody(req, res, (b) => {
+      if (!b || typeof b !== 'object') return sendJson(res, 400, { ok: false, message: 'bad json' });
+      WS_CLONER.start(b.repo).then((job) => sendJson(res, 200, { ok: true, job }), fail);
     });
   }
   if (isGet) {
@@ -8268,6 +8324,54 @@ function syncFresh(req, res) {
     return sendJson(res, 200, { ok: true, message: `Starting clean: what is only here is set aside, then this machine mirrors ${syncName()}.` });
   });
 }
+// /sync/main: the main computer (mainMachine, shared by sync-prefs.js). GET for this machine's page and remote
+// browsers; POST on this machine's own page only. Working locally there is none (nothing syncs here).
+//   GET  /sync/main                   -> { ok, main: { id, name } | null, me: { id, name } | null, isMain, online }
+//   POST /sync/main { device: id | null } -> the same: this machine or one the link knows is the main computer, or none
+function linkMachines() {
+  try { const L = SYNC_RUNNER.link(); const st = L ? L.status() : null; return st && Array.isArray(st.machines) ? st.machines : []; } catch { return []; }
+}
+function mainMe() {
+  const d = SYNC_RUNNER.device();
+  if (d && d.id) return { id: d.id, name: d.name };
+  const j = deviceFileId();
+  return j ? { id: j, name: os.hostname() } : null;
+}
+// this machine's sync device id from <dataDir>/sync/device.json while sync is not running yet, or null
+function deviceFileId() {
+  if (!SYNC.enabled()) return null;
+  const j = SYNC_COMMON.readState(SYNC_COMMON.devicePath(LOG_DIR), null);
+  return j && typeof j.id === 'string' && UUID_RE.test(j.id.toLowerCase()) ? j.id.toLowerCase() : null;
+}
+const mainNow = () => SYNC_PREFS.mainView(SYNC_SETUP.mode() === 'local' ? null : mainMachine, mainMe(), linkMachines());
+function syncMain(req, res) {
+  if (DEMO || (!SYNC.enabled() && !SYNC_PRIVATE)) return sendJson(res, 404, { ok: false, message: 'sync is not set up on this machine' });
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site' || site === 'same-site') return sendJson(res, 403, { ok: false, message: 'bad origin' });
+  if (req.method === 'GET' || req.method === 'HEAD') return sendJson(res, 200, mainNow());
+  if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'GET or POST' });
+  if (remoteOf(req)) return sendJson(res, 403, { ok: false, message: 'only on this machine' });
+  return readBody(req, res, (b) => {
+    if (!b || typeof b !== 'object' || !('device' in b)) return sendJson(res, 400, { ok: false, message: 'send { device: <a sync device id> | null }' });
+    if (b.device === null) {
+      if (mainMachine) logLine('main computer: none (picked here)');
+      mainMachine = null; saved.mainMachine = null;
+      saveSettings();
+      return sendJson(res, 200, mainNow());
+    }
+    const id = typeof b.device === 'string' ? b.device.toLowerCase() : '';
+    if (!UUID_RE.test(id)) return sendJson(res, 400, { ok: false, message: 'device must be a sync device id' });
+    const me = mainMe(), row = linkMachines().find((m) => m && String(m.id).toLowerCase() === id);
+    const name = me && me.id.toLowerCase() === id ? me.name : row ? row.name : null;
+    if (!name) return sendJson(res, 404, { ok: false, message: 'no such machine: this one, or one sync knows' });
+    const m = SYNC_PREFS.cleanMainMachine({ id, name, at: Date.now() });
+    if (!m) return sendJson(res, 400, { ok: false, message: 'that machine has no name' });
+    if (!mainMachine || mainMachine.id !== m.id) logLine(`main computer: ${m.name} (picked here)`);
+    mainMachine = m; saved.mainMachine = m;
+    saveSettings();
+    return sendJson(res, 200, mainNow());
+  });
+}
 // /sync/move: "Continue here" brings a conversation another device has to this one (sync-run.js move, moveStatus,
 // cancelMove; sync-move.js does the work). This PC's page and approved remote browsers, as /sync/activity, and
 // never a request another site's page sent.
@@ -8535,8 +8639,9 @@ function awayEntry(id) {
 // Typing into a chat another machine runs (link-send.js, docs/sync-follow.md item 6): the Chat tab's sends, answers,
 // Stop, activity, menu and images go to that machine through the link; GET /conversation reads it there while the
 // link is up (conversationRoute)
-const LINK_SEND = LINK_SEND_JS.createLinkSend({ link: () => (DEMO ? null : SYNC_RUNNER.link()), owners: () => syncOwners(), away: awayEntry });
-const LINK_CHAT = new Set(['/link/send', '/link/answer', '/link/interrupt', '/link/now', '/link/unsend', '/link/activity', '/link/menu', '/link/image']);
+// (and POST /link/start: a new chat on the main computer, in its own checkout of the repo: PREFS_ROOTS names the repo)
+const LINK_SEND = LINK_SEND_JS.createLinkSend({ link: () => (DEMO ? null : SYNC_RUNNER.link()), owners: () => syncOwners(), away: awayEntry, rootOut: (root) => PREFS_ROOTS.out(root) });
+const LINK_CHAT = new Set(['/link/send', '/link/answer', '/link/interrupt', '/link/now', '/link/unsend', '/link/activity', '/link/menu', '/link/image', '/link/start']);
 // a JSON body of at most max bytes -> done(json | null); past max: 413 and nothing more is read
 function readBodyMax(req, res, max, done) {
   const parts = [];
@@ -8708,8 +8813,9 @@ function handleRequest(req, res) {
   if (pathname === '/sync/note') return syncNote(req, res);
   if (pathname === '/sync/pin') return syncPin(req, res);
   if (pathname === '/rules' || pathname.startsWith('/rules/')) return rulesRoute(req, res, pathname);
-  if (pathname === '/sync/missing' || pathname === '/sync/clone') return syncClone(req, res, pathname);
+  if (pathname === '/sync/missing' || pathname === '/sync/clone' || pathname === '/sync/clone-workspace') return syncClone(req, res, pathname);
   if (pathname === '/sync/fresh') return syncFresh(req, res);
+  if (pathname === '/sync/main') return syncMain(req, res);
   if (pathname === '/sync' || pathname.startsWith('/sync/')) return void Promise.resolve(SYNC.handle(req, res, pathname, pageCtx)).catch((e) => requestFailed(req, res, e));
   // GET /relay/status, POST /relay/pair | revoke (relay.js): this PC only, never a remote device; its POSTs need this page's Origin
   // the map's sky events: their log and the kinds switched off (sky-events.js)

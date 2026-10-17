@@ -2,8 +2,8 @@
 // removing a conversation, renaming one, moving one to a workspace, hiding, adding, renaming or ordering a workspace,
 // the colours picked for workspaces and conversations (repoHues, sessHues), the map's spots, the teams, where a kind of work stays (hostRules), a chat kept on or let go from a machine
 // (pinOverrides), the chats whose model or effort is Dynamic (dynamicChats), the Bots list's order and pins (chatOrder), a bot's look
-// (botLooks), housekeeping's keep-pins on GitHub branches (keepPins) and the parity rules (parity) are intent, not
-// a view of one screen: done on the PC, the Mac does it too. What belongs to one
+// (botLooks), housekeeping's keep-pins on GitHub branches (keepPins), the parity rules (parity) and the main computer
+// (mainMachine) are intent, not a view of one screen: done on the PC, the Mac does it too. What belongs to one
 // screen (view, zoom, camera, window bounds, query, the repo filter, saved map views, accounts turned off, push
 // targets, bots (the registry; only their looks go), compact, finishedOpen, steady, notify) never leaves the machine.
 //
@@ -340,6 +340,13 @@ const GROUPS = {
     out(x) { const p = this.clean(x); return p && { p, known: true }; },
     in: (p) => p, key: (p) => lower(p.name), lkey: (l) => lower(l.name),
   },
+  // the main computer (fleet-view.js mainMachine, POST /sync/main): [{ id: its sync device id, name, at }], one item at
+  // most (one key: picked on both at once, the later pick wins); none: no main computer picked
+  mainMachine: {
+    clean: (x) => cleanMainMachine(x),
+    out(x) { const p = this.clean(x); return p && { p, known: true }; },
+    in: (p) => p, key: () => 'main', lkey: () => 'main',
+  },
 };
 const GROUP_NAMES = Object.keys(GROUPS);
 // a group of { root, at } (hiddenRepos, addedRepos)
@@ -386,6 +393,28 @@ function cleanPinOverride(x) {
   if (x.mode === 'stay' && !host) return null;
   const hostDevice = host && typeof x.hostDevice === 'string' && UUID_RE.test(lower(x.hostDevice)) ? lower(x.hostDevice) : null;
   return { id: lower(x.id), mode: x.mode, ...(host ? { host } : {}), ...(hostDevice ? { hostDevice } : {}), at: num(x.at) };
+}
+
+// the main computer: { id: a sync device id (lower case), name: its name, at? }; null when it is not one
+function cleanMainMachine(x) {
+  if (!x || typeof x !== 'object' || !UUID_RE.test(lower(x.id))) return null;
+  const name = typeof x.name === 'string' ? x.name.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 100) : '';
+  if (!name) return null;
+  return { id: lower(x.id), name, ...(num(x.at) > 0 ? { at: num(x.at) } : {}) };
+}
+// GET /sync/main's answer, from the setting, this machine ({ id, name } | null: sync's device) and link.js status()'s
+// machines: { ok, main: { id, name } | null, me, isMain, online } where online is the main computer's as seen from
+// here (true on it, null while not known) and its name the devices table's now (renamed since it was picked)
+function mainView(main, me, machines) {
+  const m = cleanMainMachine(main);
+  const myId = me && typeof me === 'object' ? lower(me.id) : '';
+  const mine = UUID_RE.test(myId) ? { id: myId, name: (typeof me.name === 'string' && me.name.trim()) || 'this computer' } : null;
+  if (!m) return { ok: true, main: null, me: mine, isMain: false, online: null };
+  const isMain = !!mine && mine.id === m.id;
+  const row = !isMain && Array.isArray(machines) ? machines.find((x) => x && lower(x.id) === m.id) : null;
+  const name = isMain ? mine.name : (row && typeof row.name === 'string' && row.name.trim()) || m.name;
+  const online = isMain ? true : row && typeof row.online === 'boolean' ? row.online : null;
+  return { ok: true, main: { id: m.id, name }, me: mine, isMain, online };
 }
 
 // a chat's Dynamic parts: { id, model, effort (true: sized for each message), at }; null when neither is on
@@ -1044,5 +1073,5 @@ function createPrefs(o = {}) {
   return { start, stop, tick, nudge, status };
 }
 
-module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, GONE_MS, GONE_MAX, cleanRoot, cleanHostRule, cleanPinOverride, cleanDynamicChat, cleanChatOrder, CHAT_ORDER_MAX, cleanBotLook, BOT_SHAPES, spotId, portable, cleanItems,
+module.exports = { createPrefs, makeTranslate, GROUPS, GROUP_NAMES, TIMING, GONE_MS, GONE_MAX, cleanRoot, cleanHostRule, cleanPinOverride, cleanDynamicChat, cleanMainMachine, mainView, cleanChatOrder, CHAT_ORDER_MAX, cleanBotLook, BOT_SHAPES, spotId, portable, cleanItems,
   union, join, merge3, mergeOrder, weave, timeOf, applyOps, newest };
