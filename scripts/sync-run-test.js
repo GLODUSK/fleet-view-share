@@ -364,9 +364,27 @@ function fakeMover(args, made) {
       await r7.restart('starting clean');
       ok(made7[4].stopped === 1 && made7.length === 8 && made7[6].stopped === 0 && r7.status().running, 'restart() during beforeStart: one set of loops, made after it ran again');
       eq(order.slice(7), ['before', 'before', 'up'], '...beforeStart ran twice before them');
+      // restart() while the old loops are slow to stop (a materializer's scan finishing its rows): a check that comes
+      // meanwhile (the minute's, a sign-in, the page) makes no new loops until they have stopped. Two materializers at
+      // once laid the same files down together, and one found the other's copy "changed meanwhile" (#578)
+      let letGo = null;
+      const slowStop = new Promise((r) => { letGo = r; });
+      made7[7].stop = async () => { made7[7].stopped++; await slowStop; };
+      const t0 = Date.now();
+      await r7.check(); // how long a check takes here (the key's read): the one below gets three times that
+      const checkMs = Date.now() - t0;
+      const rs2 = r7.restart('starting clean');
+      await new Promise((r) => setImmediate(r));
+      const chk = r7.check();
+      await new Promise((r) => setTimeout(r, 3 * checkMs + 100));
+      ok(made7.length === 8 && !r7.status().running && order.length === 10, `restart() while the old loops stop slowly: a check meanwhile makes nothing, runs no beforeStart (${made7.length} loops)`);
+      letGo();
+      await rs2; await chk;
+      ok(made7[6].stopped === 1 && made7[7].stopped === 1 && made7.length === 10 && made7[8].stopped === 0 && r7.status().running, '...the new loops come once the old ones have stopped');
+      eq(order.slice(10), ['before', 'up'], '...after beforeStart, run once');
       failWith = 'starting clean: could not list';
       await r7.restart('starting clean');
-      ok(made7[6].stopped === 1 && made7[7].stopped === 1 && made7.length === 8 && !r7.status().running && r7.status().reason === failWith, 'restart() with beforeStart failing: stopped, nothing new made');
+      ok(made7[8].stopped === 1 && made7[9].stopped === 1 && made7.length === 10 && !r7.status().running && r7.status().reason === failWith, 'restart() with beforeStart failing: stopped, nothing new made');
       await r7.stop();
       ok(!r7.status().starting && r7.status().health.level === 'off', 'stop(): no longer getting ready');
     }

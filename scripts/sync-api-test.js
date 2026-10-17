@@ -622,6 +622,16 @@ async function main() {
     h.done(true);
     const s1 = h.status();
     ok(s1.lastError === null && s1.lastCleanAt === new Date(t).toISOString() && s1.lastSuccessAt === s1.lastCleanAt && !s1.backingOff, 'scan health: a clean scan clears the error');
+    // a row's error goes once that row goes through (#578), never for another row's, nor one from a failed scan
+    h.rowError(new S.SyncError('main: the local copy changed meanwhile', 0, 'changed'), 'id-1');
+    h.rowOk('id-2');
+    ok(h.status().lastError && h.status().lastError.code === 'changed', 'scan health: another row going through leaves a row\'s error');
+    h.rowOk('id-1');
+    ok(h.status().lastError === null, 'scan health: that row going through clears it');
+    h.rowError(new S.SyncError('x', 422), 'id-1');
+    h.failed(net);
+    h.rowOk('id-1');
+    ok(h.status().lastError && h.status().lastError.code === 'network', 'scan health: a failed scan\'s error stays');
   }
 
   // ---------- a renewal across a restart: the sign-in is never lost ----------

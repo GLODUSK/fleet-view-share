@@ -11,6 +11,7 @@
 //     fullListMs: how often every row is listed, FULL_LIST_MS by default, tests)
 //     -> { scanOnce(), start(intervalMs = 5000), stop(), status(), conflicts(), pull(id), owners(), owner(id),
 //          missing() }
+//     (stop(): the scan under way starts no more rows; it resolves once the rows and pulls under way are done)
 //
 // For S4's moves (sync-move.js), with ids lower-case:
 //   pull(id) -> Promise<{ outcome, reason?, dir?, folder?, row? }>: lay that conversation down now. It is urgent: it
@@ -97,6 +98,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const util = require('util');
 const P = require(path.join(__dirname, 'platform.js'));
 const S = require(path.join(__dirname, 'sync-api.js'));
 const X = require(path.join(__dirname, 'sync-crypto.js'));
@@ -126,12 +128,22 @@ const BY_ID = 100; // rows fetched by id in one request (the URL stays short)
 const SINCE_MAX = 3000;
 const BAD_SEG_RE = /[<>:"|?*\\\x00-\x1f]/; // what a rel_cwd segment may not hold (Windows names, drives, streams)
 const NO_CHECKOUT = 'no checkout of its repo here';
+const JSON_SIDE_MAX = 1024 * 1024; // a whole side file read as JSON (keysAdded) is at most this big
 
 const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const lstatOr = (p) => { try { return fs.lstatSync(p); } catch { return null; } };
 const fold = (p) => P.foldCase(path.resolve(p));
 const fail = (message, code) => { throw new S.SyncError(message, 0, code); };
 const downStatePath = (dataDir) => path.join(S.syncDir(dataDir), 'down-state.json');
+// a file holding one JSON object (not an array), at most JSON_SIDE_MAX -> the object, else null
+function jsonObjectOf(p) {
+  const st = lstatOr(p);
+  if (!st || !st.isFile() || st.size > JSON_SIDE_MAX) return null;
+  try { const j = JSON.parse(fs.readFileSync(p, 'utf8')); return j && typeof j === 'object' && !Array.isArray(j) ? j : null; } catch { return null; }
+}
+// theirs is mine with keys only added: every key of mine in it, with a deep-equal value (Claude Code rewrites a
+// subagent's .meta.json whole when it ends, with "finished":true added)
+const keysAdded = (mine, theirs) => Object.keys(mine).every((k) => Object.prototype.hasOwnProperty.call(theirs, k) && util.isDeepStrictEqual(mine[k], theirs[k]));
 
 // ---------- paths ----------
 // rel_cwd -> its segments ([] for the root), or null when it is not a plain relative path made of '/'-separated
@@ -204,6 +216,11 @@ function hashRange(fd, start, len, also) {
     if (!b.length) break;
   }
   return h.digest('hex');
+}
+// a file's first size bytes' sha256, or null when it can't be read
+function shaOf(p, size) {
+  let fd = null;
+  try { fd = fs.openSync(p, 'r'); return hashRange(fd, 0, size); } catch { return null; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
 }
 function renameOver(from, to) {
   for (let i = 0; ; i++) {
@@ -485,10 +502,12 @@ function createMaterializer(opts = {}) {
   // down last, or null) } -> { result: 'same' | 'written', sha256 (the whole file's) } | { result: 'conflict', reason,
   // localSize }. A chunk with laid: true (and no object) stands for the bytes laid down here before, when only the rows
   // past them were fetched: the local copy must hold them (its sha256), else it throws 'redo' (all rows are read again).
-  // Throws on a missing object, a bad sha256, a live conversation or a local file that changed meanwhile; then the
-  // .part is gone and the local copy untouched.
-  // ignoreLocal: replace the local copy whatever it holds (only for unchanged(), below)
-  async function layDown(job, key, ignoreLocal = false) {
+  // Throws on a missing object, a bad sha256, a live conversation or a local file that changed meanwhile (one that is
+  // now byte-for-byte the new version is 'same': another writer laid it down); then the .part is gone and the local
+  // copy untouched.
+  // ignoreLocal: replace the local copy whatever it holds (only for layDownFile's exceptions, below); take(part,
+  // target), when given, says right before the rename whether the new version may replace it (else a conflict)
+  async function layDown(job, key, ignoreLocal = false, take = null) {
     const { target } = job;
     const before = lstatOr(target);
     if (before && !before.isFile()) return { result: 'conflict', reason: 'not a plain file', localSize: null };
@@ -577,8 +596,13 @@ function createMaterializer(opts = {}) {
       if (fd !== null) { fs.closeSync(fd); fd = null; }
       // last checks, right before the rename: not opened here meanwhile, the local copy as it was, still inside
       if (live(job.id)) fail('the conversation was opened on this machine meanwhile', 'live');
+      if (take && !take(part, target)) return { result: 'conflict', reason: 'the local copy is different', localSize: before ? before.size : null };
       const now2 = lstatOr(target);
-      if (!!now2 !== !!before || (before && (now2.size !== before.size || now2.mtimeMs !== before.mtimeMs))) fail(`${job.file}: the local copy changed meanwhile`, 'changed');
+      if (!!now2 !== !!before || (before && (now2.size !== before.size || now2.mtimeMs !== before.mtimeMs))) {
+        // another writer put this very file down meanwhile (byte-for-byte what was just put together): nothing to do (#578)
+        if (now2 && now2.isFile() && now2.size === job.size && shaOf(target, now2.size) === sha) return { result: 'same', sha256: sha };
+        fail(`${job.file}: the local copy changed meanwhile`, 'changed');
+      }
       renameOver(part, target);
       wrote = false;
       if (cut) log(`sync-down: ${job.id} ${job.file}: its cut last line (${cut} bytes) was replaced`);
@@ -594,15 +618,20 @@ function createMaterializer(opts = {}) {
   function unchanged(target, known) {
     const st0 = lstatOr(target);
     if (!known || !st0 || !st0.isFile() || st0.size !== known.size || typeof known.sha256 !== 'string') return false;
-    let fd = null;
-    try { fd = fs.openSync(target, 'r'); return hashRange(fd, 0, st0.size) === known.sha256; } catch { return false; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
+    return shaOf(target, st0.size) === known.sha256;
   }
-  // layDown, and for a whole side file the one exception: a new version from the other machine replaces a local copy
-  // that is not its prefix when that copy is the one this side wrote and nobody changed since
+  // layDown, and for a whole side file two exceptions: a new version from the other machine replaces a local copy
+  // that is not its prefix when that copy is the one this side wrote and nobody changed since, or (no record of it
+  // here, or another one) when the local copy is a JSON object the new version only adds keys to
   async function layDownFile(job, key) {
     const r = await layDown(job, key);
-    if (r.result === 'conflict' && job.whole && unchanged(job.target, job.known)) return layDown(job, key, true);
-    return r;
+    if (r.result !== 'conflict' || !job.whole) return r;
+    if (unchanged(job.target, job.known)) return layDown(job, key, true);
+    if (!jsonObjectOf(job.target)) return r;
+    return layDown(job, key, true, (part, target) => {
+      const mine = jsonObjectOf(target), theirs = mine && jsonObjectOf(part);
+      return !!theirs && keysAdded(mine, theirs);
+    });
   }
 
   // ---------- chunk rows ----------
@@ -773,9 +802,12 @@ function createMaterializer(opts = {}) {
       const size = Number(row.size), gen = Number(row.generation);
       const files = {};
       let pending = 0, wroteAny = false;
+      // the side files laid down in this run: kept (known) when it ends early, a conflict or a throw on a later file,
+      // else the next version of one laid down here would find no record of it and be a conflict (#579)
+      const laidNow = {};
       const conflict = (file, target, r) => {
         state.conflicts[`${id}|${file}`] = { id, file, path: target, reason: r.reason, localSize: r.localSize, remoteSize: file === 'main' ? size : null, at: new Date(now()).toISOString() };
-        state.convos[id] = { sig: sigOf(row), dir: slugDir, files: prev ? prev.files || {} : {}, conflict: true, localStamp: stampOf(path.join(slugDir, `${id}.jsonl`)), at: now() };
+        state.convos[id] = { sig: sigOf(row), dir: slugDir, files: { ...(prev ? prev.files || {} : {}), ...laidNow }, conflict: true, localStamp: stampOf(path.join(slugDir, `${id}.jsonl`)), at: now() };
         changed();
         log(`sync-down: ${id} ${file}: ${r.reason}; left alone`);
         return { outcome: 'conflict', reason: r.reason, folder, dir };
@@ -826,7 +858,7 @@ function createMaterializer(opts = {}) {
           log(`sync-down: ${id}: made the folder it began in (${folder}), which this machine did not have`);
         }
       }
-      for (const s of sides) {
+      try { for (const s of sides) {
         const segs = s.file.split('/');
         const target = path.join(slugDir, id, ...segs);
         if (!inside(slugDir, target) || !noLinks(slugDir, [id, ...segs])) fail(`${s.file}: its path would leave the conversation's folder`, 'bad_path');
@@ -836,7 +868,13 @@ function createMaterializer(opts = {}) {
         const r = await layDownFile({ id, file: s.file, target, chunks: s.chunks, size: s.size, sha256: sha, whole: !s.file.endsWith('.jsonl'), known: before }, key);
         if (r.result === 'conflict') return conflict(s.file, target, r);
         if (r.result === 'written') wroteAny = true;
-        files[s.file] = { generation: s.g, size: s.size, sha256: r.sha256 || sha, seq: s.seq, stamp: stampOf(target) };
+        files[s.file] = laidNow[s.file] = { generation: s.g, size: s.size, sha256: r.sha256 || sha, seq: s.seq, stamp: stampOf(target) };
+      } } catch (e) {
+        if (Object.keys(laidNow).length) {
+          state.convos[id] = prev ? { ...prev, files: { ...(prev.files || {}), ...laidNow } } : { sig: null, dir: slugDir, files: laidNow, conflict: false, at: now() };
+          changed();
+        }
+        throw e;
       }
       for (const k of Object.keys(state.conflicts)) if (k.startsWith(`${id}|`)) delete state.conflicts[k];
       state.convos[id] = { sig: pending ? null : sigOf(row), dir: slugDir, files, conflict: false, at: now() };
@@ -988,7 +1026,7 @@ function createMaterializer(opts = {}) {
     let fatal = null;
     try {
       for (const listed of rows) {
-        if (fatal) break;
+        if (fatal || cut) break;
         // the row as it is now: a pull since the list may have read a newer one (or found it this device's)
         const row = rowsById.get(listed.id.toLowerCase());
         if (!row) continue;
@@ -1003,7 +1041,7 @@ function createMaterializer(opts = {}) {
         const b = backoff.get(id);
         if (b && now() < b.until) { tally.waiting++; continue; }
         await slot(id, false); // a pull() waiting goes first
-        if (fatal) { unslot(id); break; }
+        if (fatal || cut) { unslot(id); break; }
         // a pull of it ran while this waited: the row it read, and what it laid down, stand
         const cur = rowsById.get(id), p0 = state.convos[id];
         if (!cur || (cur !== row && p0 && p0.sig === sigOf(cur))) { unslot(id); tally.unchanged++; continue; }
@@ -1019,6 +1057,7 @@ function createMaterializer(opts = {}) {
               lacking.set(r.origin, was);
             }
             if (r.outcome === 'done') st.laidDown++;
+            if (r.outcome === 'done' || r.outcome === 'same') health.rowOk(id); // its error, if the last, goes (#578)
             backoff.delete(id); stuck.delete(id);
           } catch (e) {
             // Supabase out of reach, busy or failing (a request cut by sleep too), or signed out: not this conversation's
@@ -1035,7 +1074,7 @@ function createMaterializer(opts = {}) {
             if (!whole) {
               const n = b ? b.n + 1 : 1;
               backoff.set(id, { n, until: now() + Math.min(BACKOFF_MIN_MS * 2 ** (n - 1), BACKOFF_MAX_MS) });
-              health.rowError(e);
+              health.rowError(e, id);
             }
             const why = (e && e.message) || String(e);
             reasons[why] = (reasons[why] || 0) + 1;
@@ -1050,7 +1089,7 @@ function createMaterializer(opts = {}) {
     await Promise.allSettled([...going]);
     saveState();
     if (fatal) throw fatal;
-    if (!only) {
+    if (!only && !cut) {
       const newest = (r) => r.newest || '';
       missingNow = { at: new Date(listStart).toISOString(), repos: [...lacking.values()].sort((a, b) => (newest(a) < newest(b) ? 1 : newest(a) > newest(b) ? -1 : 0)) };
     }
@@ -1086,6 +1125,7 @@ function createMaterializer(opts = {}) {
       backoff.delete(id);
       const r = await syncOne(row, newCtx(me), key);
       if (r.outcome === 'done') st.laidDown++;
+      if (r.outcome === 'done' || r.outcome === 'same') health.rowOk(id);
       return { ...r, row };
     } catch (e) {
       log(`sync-down: ${id}: pull: ${(e && e.message) || e}`);
@@ -1103,9 +1143,12 @@ function createMaterializer(opts = {}) {
   }
   const missing = () => ({ at: missingNow.at, repos: missingNow.repos.map((r) => ({ ...r })) });
 
-  let current = null, timer = null, interval = 5000;
+  // cut: stop() was asked during the scan under way, which then starts no more rows (the ones under way finish), so a
+  // halt waits for those and not for the rest of a catch-up (#578: sync-run.js makes no new loops until it is through)
+  let current = null, timer = null, interval = 5000, cut = false;
   function scanOnce() {
     if (current) return current;
+    cut = false;
     st.scanning = true;
     current = (async () => {
       try {
@@ -1145,7 +1188,7 @@ function createMaterializer(opts = {}) {
   async function stop() {
     st.running = false;
     if (timer) { clearTimeout(timer); timer = null; }
-    if (current) { try { await current; } catch {} }
+    if (current) { cut = true; try { await current; } catch {} }
     await Promise.allSettled([...flights]);
     saveState();
   }

@@ -17,7 +17,8 @@
 // clean", a fresh start waiting in <dataDir>/sync/fresh.json; it does nothing when none is). say(reason) puts that
 // reason in status() while it works (starting: true, health 'warn', never 'bad'); a throw keeps the loops off, says its
 // message as the reason the same way, and the next gate check tries again. restart(reason) stops the loops (if they
-// run) and runs the gates again from the start, so beforeStart runs before anything goes up.
+// run) and runs the gates again from the start, so beforeStart runs before anything goes up. No new loops (nor
+// beforeStart) start while the ones a halt stopped are still finishing, whichever check comes meanwhile.
 //
 //   createSyncRunner({ sync, dataDir, log, projects, roots, host, isOpen, mode, accounts, snapshot, bound, accountOf,
 //                      busy, skip, beforeStart, intervalMs, checkMs, prefs, relay, version, makeUploader,
@@ -187,6 +188,10 @@ function createSyncRunner(o = {}) {
   let starting = false; // beforeStart works, or failed and waits for the next check (health 'warn')
   let restarts = 0; // restart() calls: one during beforeStart runs it again before any loop is made
   let timer = null, offChange = null, checking = null, again = false, stopped = true;
+  // the halts whose loops are still stopping (a materializer's scan finishes the rows it has under way): no new loops
+  // are made until they are through. Two runs' loops at once laid the same files down together after a Start clean's
+  // restart, and one found the other's copy "changed meanwhile" (#578)
+  const stopping = new Set();
 
   // the host's sessions that were alive at its last list (each list the mover asks for refreshes it)
   let hostAlive = new Set();
@@ -212,7 +217,9 @@ function createSyncRunner(o = {}) {
       const r = run;
       run = null;
       log(`sync: stopped (${reason})`);
-      await Promise.allSettled([r.link ? r.link.stop() : null, r.prefs ? r.prefs.stop() : null, r.live ? r.live.stop() : null, r.mover ? r.mover.stop() : null, r.up.stop(), r.down.stop()]);
+      const p = Promise.allSettled([r.link ? r.link.stop() : null, r.prefs ? r.prefs.stop() : null, r.live ? r.live.stop() : null, r.mover ? r.mover.stop() : null, r.up.stop(), r.down.stop()]);
+      stopping.add(p);
+      try { await p; } finally { stopping.delete(p); }
     }
     if (gate) M.dropAway(dataDir);
   }
@@ -257,6 +264,12 @@ function createSyncRunner(o = {}) {
     }
     if (run && run.uid === uid && run.keyId === kid) return;
     if (run) await halt(run.uid !== uid ? 'another account signed in' : 'the sync key changed', false, true);
+    // a halt's loops (restart(), another check's) still stopping: they finish first
+    if (stopping.size) {
+      const t0 = Date.now();
+      while (stopping.size) await Promise.allSettled([...stopping]);
+      log(`sync: the last loops took ${Math.round((Date.now() - t0) / 100) / 10} s more to stop`);
+    }
     if (stopped) return;
     // the step before any loop (a fresh start): until it is done nothing goes up or comes down; a failure keeps the
     // loops off and the next check tries again

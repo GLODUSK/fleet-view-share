@@ -27,7 +27,9 @@
 // Several at once: a scan has more than one and at most ROWS_AT_ONCE conversations under way, started in list order,
 // each saved in down-state.json; a pull asked while rows wait their turn goes before them; a pull of a row under way
 // starts only once it is done; Supabase out of reach on one row starts no more rows, lets the ones under way finish,
-// throws, leaves nothing unhandled; a scan starting while a pull is under way reloads its state only after it.
+// throws, leaves nothing unhandled; a scan starting while a pull is under way reloads its state only after it. A second
+// writer (two materializers at once, or one putting the file down mid-fetch): the very bytes are 'same', others still
+// fail, and that error goes once a later pass finds the conversation right; stop() mid-scan starts no more rows.
 // Many chunks: fetched more than one and at most FETCH_AHEAD at once, answered out of order, laid down byte-identical;
 // a fetch that fails or a bad sha256 mid-way writes nothing, starts nothing past the window and leaves no unhandled
 // rejection; a partly-here local copy fetches only what it lacks; one that differs mid-chunk is a conflict.
@@ -499,6 +501,40 @@ async function main() {
   r = await m.scanOnce();
   ok(same(path.join(side1, 'subagents', 'agent-a1.meta.json'), Buffer.from('{"edited":"here"}')), 'side: a whole file changed here is left alone');
   ok(m.conflicts().some((x) => x.id === c1.id && x.file === 'subagents/agent-a1.meta.json'), 'side: and reported');
+  // a whole side file with no record of it here (laid down before one was kept): the other machine's copy that only
+  // added keys to it (a finished subagent's "finished":true) is taken; one that changed a value is a conflict (#579)
+  const metaOld = '{"agentType":"general-purpose","description":"x","model":"opus","effort":"high"}';
+  const cM = putConvo({ pieces: [Buffer.concat(logOf('mf', 2))], side: { 'subagents/agent-f1.meta.json': Buffer.from('{"agentType":"general-purpose","description":"x","model":"opus","effort":"high","finished":true}'), 'subagents/agent-f2.meta.json': Buffer.from('{"agentType":"general-purpose","description":"y","model":"sonnet","effort":"high"}') } });
+  const sideM = path.join(slugDir(rootDir), cM.id, 'subagents');
+  write(path.join(sideM, 'agent-f1.meta.json'), metaOld);
+  r = await m.scanOnce();
+  ok(same(path.join(sideM, 'agent-f1.meta.json'), Buffer.from('{"agentType":"general-purpose","description":"x","model":"opus","effort":"high","finished":true}')), 'side, no record: a JSON object that only gained keys is replaced');
+  ok(!m.conflicts().some((x) => x.id === cM.id), 'side, no record: not a conflict');
+  write(path.join(sideM, 'agent-f2.meta.json'), metaOld);
+  fake.tables.chunks = fake.tables.chunks.filter((c) => !(c.conversation_id === cM.id && c.file === 'subagents/agent-f2.meta.json'));
+  putFile(cM.id, 'subagents/agent-f2.meta.json', 1, [Buffer.from('{"agentType":"general-purpose","description":"x","model":"sonnet","effort":"high","finished":true}')]);
+  cM.row.updated_at = stamp();
+  r = await m.scanOnce();
+  ok(same(path.join(sideM, 'agent-f2.meta.json'), Buffer.from(metaOld)), 'side, no record: one whose existing value changed is left alone');
+  ok(m.conflicts().some((x) => x.id === cM.id && x.file === 'subagents/agent-f2.meta.json'), 'side, no record: and reported');
+  // a run that lays a whole side file down and then fails on a later file keeps its record: the next version of it
+  // replaces it (before, nothing of that run was kept, and it was a conflict)
+  const cK = putConvo({ pieces: [Buffer.concat(logOf('mk', 2))], side: { 'subagents/agent-k1.meta.json': Buffer.from('{"description":"one"}'), 'tool-results/k1.txt': Buffer.from('out') } });
+  const sideK = path.join(slugDir(rootDir), cK.id);
+  const realDl = api.storage.download;
+  api.storage.download = async (p, o) => {
+    if (p === C.objectPath(cK.id, 'tool-results/k1.txt', 0, 0)) throw Object.assign(new S.SyncError('the connection was cut by sleep; trying again', 0, 'network'), { slept: true });
+    return realDl(p, o);
+  };
+  try { await m.scanOnce(); } catch {}
+  api.storage.download = realDl;
+  ok(same(path.join(sideK, 'subagents', 'agent-k1.meta.json'), Buffer.from('{"description":"one"}')) && !fs.existsSync(path.join(sideK, 'tool-results', 'k1.txt')), 'side, a run cut short: the meta file laid down, the later file not');
+  fake.tables.chunks = fake.tables.chunks.filter((c) => !(c.conversation_id === cK.id && c.file === 'subagents/agent-k1.meta.json'));
+  putFile(cK.id, 'subagents/agent-k1.meta.json', 1, [Buffer.from('{"description":"two"}')]);
+  cK.row.updated_at = stamp();
+  r = await m.scanOnce();
+  ok(same(path.join(sideK, 'subagents', 'agent-k1.meta.json'), Buffer.from('{"description":"two"}')) && same(path.join(sideK, 'tool-results', 'k1.txt'), Buffer.from('out')), 'side, a run cut short: its record kept, the next version replaces it');
+  ok(!m.conflicts().some((x) => x.id === cK.id), 'side, a run cut short: not a conflict');
 
   // ---------- once laid down, it stays in that slug folder ----------
   fs.mkdirSync(path.join(rootDir, '.claude', 'worktrees', 'not-here'), { recursive: true });
@@ -930,6 +966,54 @@ async function main() {
     const reloadAt = ev.findIndex((e) => e.k === 'state');
     ok(scanE && reloadAt > lastAt('got', pe.id) && lastAt('got', pe.id) >= 0, `reload: the scan's state reload waited for the pull (${reloadAt} after ${lastAt('got', pe.id)})`);
     ok(saved2()[pe.id], 'reload: the pull\'s conversation is still in down-state.json after the scan');
+
+    // (f) a second writer (#578): two materializers (two runs' loops at once, as a Start clean's restart once let
+    // them) lay the same conversations down together, into the one .part; the one that renames second finds the copy
+    // changed since it began, but byte-for-byte what it put together: 'same', not 'the local copy changed meanwhile'
+    fresh3();
+    const wf = several(6, 'rf');
+    const m4 = D.createMaterializer({ api, dataDir: path.join(T, 'data4'), key: KEY, home, roots: [repoDir], now: () => clock, only: (id) => scanIds.has(id), log: (t) => logs.push(t) });
+    const saidF = logs.length;
+    const [rf3, rf4] = await Promise.all([m3.scanOnce(), m4.scanOnce()]);
+    ok(rf3.failed === 0 && rf4.failed === 0 && !logs.slice(saidF).some((t) => /changed meanwhile/.test(t)), `two writers at once: no 'changed meanwhile' (${rf3.failed} + ${rf4.failed} failed)`);
+    ok(wf.every((c) => same(mainOf(c.id), c.main)) && parts().length === 0, 'two writers at once: every log byte-identical, no .part left');
+    // (g) the same, made sure of: another writer puts the very bytes down while this one fetches: 'same', laid down as
+    // far as down-state.json goes (the next scan costs nothing); other bytes put there are still a failure, and its
+    // Downloads error goes once a later pass finds that conversation as it should be (another's does not clear it)
+    fresh3();
+    const [wg] = several(1, 'rg');
+    net.onGet = (id) => { if (id === wg.id && !fs.existsSync(mainOf(wg.id))) write(mainOf(wg.id), wg.main); };
+    r = await m3.scanOnce();
+    net.onGet = null;
+    const dsg = saved2()[wg.id];
+    ok(r.failed === 0 && r.same === 1 && same(mainOf(wg.id), wg.main) && parts().length === 0, `another writer, the same bytes: 'same', no failure (${JSON.stringify(r)})`);
+    ok(dsg && !dsg.conflict && dsg.files.main && dsg.files.main.stamp === `${fs.statSync(mainOf(wg.id)).size}:${fs.statSync(mainOf(wg.id)).mtimeMs}`, 'another writer, the same bytes: recorded as laid down, with its copy\'s stamp');
+    r = await m3.scanOnce();
+    ok(r.unchanged === 1 && ev.filter((e) => e.k === 'chunks').length === 1, 'another writer, the same bytes: the next scan costs nothing');
+    fresh3();
+    const [wg2] = several(1, 'rg2');
+    const other = Buffer.from(wg2.main); other[5] ^= 1;
+    net.onGet = (id) => { if (id === wg2.id && !fs.existsSync(mainOf(wg2.id))) write(mainOf(wg2.id), other); };
+    r = await m3.scanOnce();
+    net.onGet = null;
+    const eg = m3.status().health.lastError;
+    ok(r.failed === 1 && same(mainOf(wg2.id), other) && eg && /changed meanwhile/.test(eg.message) && parts().length === 0, `another writer, other bytes: a failure, its copy left alone (${eg && eg.message})`);
+    write(mainOf(wg2.id), wg2.main); // the other writer's copy as it should be
+    ok((await m3.pull(wg.id)).outcome === 'same' && m3.status().health.lastError && m3.status().health.lastError.message === eg.message, 'Downloads error: another conversation found as it should be leaves it');
+    ok((await m3.pull(wg2.id)).outcome === 'same' && m3.status().health.lastError === null, 'Downloads error: gone once a later pass finds that conversation as it should be');
+    // (h) stop() mid-scan: no row starts after it (the ones under way finish), so a halt (Start clean's restart) waits
+    // for those, not for the rest of a catch-up; the next scan lays the rest down
+    fresh3();
+    const wh = several(10, 'rh');
+    let stopH = null;
+    net.onGet = (id) => { if (!stopH && id === wh[0].id) stopH = m3.stop(); };
+    r = await m3.scanOnce();
+    net.onGet = null;
+    await stopH;
+    const startedH = new Set(ev.filter((e) => e.k === 'chunks').map((e) => e.id));
+    ok(startedH.size >= 1 && startedH.size <= D.ROWS_AT_ONCE && wh.filter((c) => same(mainOf(c.id), c.main)).length === startedH.size, `stop mid-scan: only the rows under way finish (${startedH.size} of ${wh.length})`);
+    r = await m3.scanOnce();
+    ok(wh.every((c) => same(mainOf(c.id), c.main)), 'stop mid-scan: the next scan lays the rest down');
     eq(unhandled3.length, 0, 'several at once: no unhandled rejection');
   } finally {
     api.rest = realRest;

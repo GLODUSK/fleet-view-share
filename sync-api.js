@@ -123,7 +123,8 @@ function parseRetryAfter(v, nowMs = Date.now()) {
 // One loop's health (each of sync-up.js, sync-down.js and sync-live.js has one), for /sync/activity and the pill:
 //   done(clean)  a scan ran to its end: the back-off and the failure streak reset; clean (no error on any row) also
 //                clears lastError
-//   rowError(e)  one row failed and the scan goes on: lastError, nothing else
+//   rowError(e, key)  one row failed and the scan goes on: lastError, nothing else; key (its conversation id) names it
+//   rowOk(key)   that row went through since (a later pass found it as it should be): its lastError goes
 //   failed(e)    the scan failed as a whole: lastError, the streak + 1, and a transient error backs off -> the ms
 //   wait()       ms the next scan still waits for (0: none)
 //   status()     { lastSuccessAt, lastCleanAt, lastError: { at, message, code, status? } | null, failStreak, backingOff,
@@ -133,7 +134,7 @@ function createScanHealth(o = {}) {
   const minMs = Number(o.minMs) > 0 ? Number(o.minMs) : SCAN_BACKOFF_MIN_MS;
   const maxMs = Number(o.maxMs) > 0 ? Number(o.maxMs) : SCAN_BACKOFF_MAX_MS;
   const iso = (t) => (t ? new Date(t).toISOString() : null);
-  let lastSuccessAt = 0, lastCleanAt = 0, lastError = null, failStreak = 0, backoffs = 0, backoffUntil = 0;
+  let lastSuccessAt = 0, lastCleanAt = 0, lastError = null, errKey = null, failStreak = 0, backoffs = 0, backoffUntil = 0;
   const errOf = (e) => ({
     at: iso(now()), message: clip((e && e.message) || e || 'failed', 200),
     code: e && typeof e.code === 'string' && e.code ? e.code : null, ...(e && Number(e.status) > 0 ? { status: Number(e.status) } : {}),
@@ -142,11 +143,12 @@ function createScanHealth(o = {}) {
     done(clean = true) {
       const t = now();
       lastSuccessAt = t; failStreak = 0; backoffs = 0; backoffUntil = 0;
-      if (clean) { lastCleanAt = t; lastError = null; }
+      if (clean) { lastCleanAt = t; lastError = null; errKey = null; }
     },
-    rowError(e) { lastError = errOf(e); },
+    rowError(e, key = null) { lastError = errOf(e); errKey = key; },
+    rowOk(key) { if (lastError && key != null && errKey === key) { lastError = null; errKey = null; } },
     failed(e) {
-      lastError = errOf(e);
+      lastError = errOf(e); errKey = null;
       failStreak++;
       if (!isTransient(e)) return 0;
       backoffs++;
