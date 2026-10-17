@@ -5,6 +5,7 @@
 //   node scripts/sky-gpu-bench.js [--checkout <dir>] [--size 3840x2160] [--seconds 8] [--budget 5] [--out results.json]
 //        [--only planet,siege,...] [--prof <edge profile dir>] [--port 4797] [--wait 1500]
 //   node scripts/sky-gpu-bench.js --live [--seconds 8] [--budget 5] [--out results.json]
+//   node scripts/sky-gpu-bench.js --attach <debugging port> [--seconds 8] [--budget 5] [--out results.json] [--only ...]
 //
 // Bench (Windows): boots a demo server from the checkout (default: this one) on a free port with a temp LOCALAPPDATA
 // (never Henry's data; it checks /state's home is null before anything else), starts headless Edge on the real GPU
@@ -24,6 +25,11 @@
 // Not the real window: headless renders the page offscreen at --size, at its own frame rate, with no acrylic window or
 // desktop compositor; the real window (desktop/) also draws the map's 2D canvas over the sky at the screen's refresh.
 // Use the rows to compare events with each other and with the baseline; --live gives the whole-app number.
+//
+// --attach <port>: the same rows in a window already running with --remote-debugging-port=<port> (a test Fleet View
+// window on its own port and profile, say, to see the real window's numbers: acrylic, compositor, refresh), its page
+// opened with ?fixture=1 or ?debug=1. Nothing is started, navigated, resized or ended; its GPU process is the one the
+// process listening on that port started.
 //
 // --live: the running Fleet View as it is, no event control: on Windows the 3D utilisation of its GPU process (the
 // `--type=gpu-process` one whose path is under fleet-view\desktop); on the Mac the whole GPU's "Device Utilization %"
@@ -129,7 +135,7 @@ async function freePort(from) {
 async function bench() {
   if (process.platform !== 'win32') { console.log('the bench runs on Windows (headless Edge, Windows GPU counters); on the Mac use --live'); process.exit(2); }
   const checkout = path.resolve(opt.checkout && opt.checkout !== true ? opt.checkout : path.join(__dirname, '..'));
-  const [W, H] = String(opt.size && opt.size !== true ? opt.size : '3840x2160').split('x').map(Number);
+  let [W, H] = String(opt.size && opt.size !== true ? opt.size : '3840x2160').split('x').map(Number);
   const prof = path.resolve(opt.prof && opt.prof !== true ? opt.prof : 'B:/Temp/fvedge-gpubench');
   const only = opt.only && opt.only !== true ? new Set(String(opt.only).split(',')) : null;
   const kids = [];
@@ -138,41 +144,51 @@ async function bench() {
   process.on('SIGINT', () => { killAll(); process.exit(130); });
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'fv-gpubench-'));
   try {
-    // the demo server
-    const port = await freePort(Number(opt.port) || 4797);
-    const srv = spawn(process.execPath, ['fleet-view.js', '--web', '--demo', '--no-open', '--port', String(port)], {
-      cwd: checkout, env: { ...process.env, LOCALAPPDATA: scratch }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    });
-    kids.push(srv);
-    let srvOut = '';
-    srv.stdout.on('data', (d) => { srvOut += d; });
-    srv.stderr.on('data', (d) => { srvOut += d; });
-    let up = false;
-    for (let i = 0; i < 60 && !up; i++) {
-      await sleep(500);
-      try {
-        const r = await fetch(`http://127.0.0.1:${port}/state`), j = await r.json();
-        if (j.home) throw Object.assign(new Error(`the server on ${port} is not a demo (its /state has a home): stopping`), { fatal: true });
-        up = r.ok;
-      } catch (e) { if (e.fatal) throw e; }
-    }
-    if (!up) throw new Error('the demo server did not start\n' + srvOut.slice(-2000));
+    // --attach: a window already running with --remote-debugging-port (a test Electron window, say), as it is: its
+    // page with the map's tests (?fixture=1 or ?debug=1); no server or Edge is started, the page is not navigated or resized
+    const attach = opt.attach && opt.attach !== true ? Number(opt.attach) : null;
+    let page = null, port = null;
+    if (attach) {
+      const targets = await (await fetch(`http://127.0.0.1:${attach}/json`)).json();
+      page = targets.find((t) => t.type === 'page' && /[?&](fixture|debug)(=|&|$)/.test(t.url));
+      if (!page) throw new Error(`no page with ?fixture=1 or ?debug=1 on the debugging port ${attach}`);
+    } else {
+      // the demo server
+      port = await freePort(Number(opt.port) || 4797);
+      const srv = spawn(process.execPath, ['fleet-view.js', '--web', '--demo', '--no-open', '--port', String(port)], {
+        cwd: checkout, env: { ...process.env, LOCALAPPDATA: scratch }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+      });
+      kids.push(srv);
+      let srvOut = '';
+      srv.stdout.on('data', (d) => { srvOut += d; });
+      srv.stderr.on('data', (d) => { srvOut += d; });
+      let up = false;
+      for (let i = 0; i < 60 && !up; i++) {
+        await sleep(500);
+        try {
+          const r = await fetch(`http://127.0.0.1:${port}/state`), j = await r.json();
+          if (j.home) throw Object.assign(new Error(`the server on ${port} is not a demo (its /state has a home): stopping`), { fatal: true });
+          up = r.ok;
+        } catch (e) { if (e.fatal) throw e; }
+      }
+      if (!up) throw new Error('the demo server did not start\n' + srvOut.slice(-2000));
 
-    // headless Edge on the real GPU
-    const edge = [
-      path.join(process.env['ProgramFiles(x86)'] || 'C:/Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-      path.join(process.env.ProgramFiles || 'C:/Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-    ].find((p) => fs.existsSync(p));
-    if (!edge) throw new Error('no msedge.exe');
-    const cdp = await freePort(Number(opt.cdp) || 9411);
-    fs.mkdirSync(prof, { recursive: true });
-    const br = spawn(edge, ['--headless=new', `--remote-debugging-port=${cdp}`, `--user-data-dir=${prof}`, `--window-size=${W},${H}`,
-      '--force-device-scale-factor=1', '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore', windowsHide: true });
-    kids.push(br);
-    let targets = null;
-    for (let i = 0; i < 60 && !targets; i++) { await sleep(300); try { targets = await (await fetch(`http://127.0.0.1:${cdp}/json`)).json(); } catch {} }
-    const page = targets && targets.find((t) => t.type === 'page');
-    if (!page) throw new Error('headless Edge gave no page');
+      // headless Edge on the real GPU
+      const edge = [
+        path.join(process.env['ProgramFiles(x86)'] || 'C:/Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        path.join(process.env.ProgramFiles || 'C:/Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      ].find((p) => fs.existsSync(p));
+      if (!edge) throw new Error('no msedge.exe');
+      const cdp = await freePort(Number(opt.cdp) || 9411);
+      fs.mkdirSync(prof, { recursive: true });
+      const br = spawn(edge, ['--headless=new', `--remote-debugging-port=${cdp}`, `--user-data-dir=${prof}`, `--window-size=${W},${H}`,
+        '--force-device-scale-factor=1', '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore', windowsHide: true });
+      kids.push(br);
+      let targets = null;
+      for (let i = 0; i < 60 && !targets; i++) { await sleep(300); try { targets = await (await fetch(`http://127.0.0.1:${cdp}/json`)).json(); } catch {} }
+      page = targets && targets.find((t) => t.type === 'page');
+      if (!page) throw new Error('headless Edge gave no page');
+    }
     const ws = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((r, j) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', j, { once: true }); });
     let id = 0;
@@ -189,8 +205,10 @@ async function bench() {
       return r && r.result ? r.result.value : undefined;
     };
     await send('Runtime.enable'); await send('Page.enable');
-    await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?fixture=1` });
+    if (!attach) {
+      await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
+      await send('Page.navigate', { url: `http://127.0.0.1:${port}/?fixture=1` });
+    } else [W, H] = await ev('[Math.round(innerWidth * devicePixelRatio), Math.round(innerHeight * devicePixelRatio)]');
     for (let i = 0; i < 60 && !(await ev('!!(window.__map && document.querySelector(\'.tabs button[data-view="map"]\'))').catch(() => false)); i++) await sleep(500);
     await ev(`document.querySelector('.tabs button[data-view="map"]').click()`);
     await ev('__map.rest(false)');
@@ -198,14 +216,17 @@ async function bench() {
     let sky = null;
     // (the WebGL sky draws before its full program is linked, without a warp or voyage; the rows want it linked)
     while ((sky = await ev('(() => { const s = __map.stats(); return s && s.sky === "webgl2" && s.rects && s.rects.full === false ? "linking" : s && s.sky; })()')) !== 'webgl2' && Date.now() - c0 < WAIT * 1000) await sleep(2000);
-    console.log(`sky: ${sky} after ${Math.round((Date.now() - c0) / 1000)} s (profile ${prof})`);
+    console.log(`sky: ${sky} after ${Math.round((Date.now() - c0) / 1000)} s (${attach ? `attached to :${attach}` : `profile ${prof}`})`);
     if (sky !== 'webgl2') throw new Error(`the sky never went to WebGL2 in ${WAIT} s (a cold shader compile takes many minutes; try a longer --wait)\n` + problems.join('\n'));
 
-    // the headless browser's GPU process: the one with this profile on its command line
+    // the headless browser's GPU process: the one with this profile on its command line; attached, the GPU process
+    // started by the process that listens on the debugging port
     const base = path.basename(prof).replace(/'/g, "''");
-    const gp = (await ps(`Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -match '--type=gpu-process' -and $_.CommandLine -like '*${base}*' } | ForEach-Object { "$($_.ProcessId)" }`)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).map(Number);
+    const gp = (await ps(attach
+      ? `$o = (Get-NetTCPConnection -LocalPort ${attach} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess; if ($o) { Get-CimInstance Win32_Process -Filter "ParentProcessId=$o" | Where-Object { $_.CommandLine -match '--type=gpu-process' } | ForEach-Object { "$($_.ProcessId)" } }`
+      : `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -match '--type=gpu-process' -and $_.CommandLine -like '*${base}*' } | ForEach-Object { "$($_.ProcessId)" }`)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).map(Number);
     const gpuPid = gp[0] || null;
-    console.log(`headless Edge's GPU process: ${gpuPid || 'not found (no Windows GPU %)'}`);
+    console.log(`${attach ? 'the window' : 'headless Edge'}'s GPU process: ${gpuPid || 'not found (no Windows GPU %)'}`);
 
     const info = await ev(`(() => {
       __map.hold(true); __map.gpuMeter(true);
@@ -272,6 +293,8 @@ async function bench() {
       console.log(`  ${label}: ${row.gpuMs} ms/pass, ${row.msPerS} ms/s, ${row.fps} fps, GPU ${row.winPct} %`);
     }
     await ev('__bench.clear()');
+    // an attached window goes on as it was
+    if (attach) await ev('__map.hold(false); __map.gpuMeter(false); __map.rest(null)');
 
     // the table
     const base0 = rows.find((r) => r.label === 'baseline');
@@ -291,7 +314,7 @@ async function bench() {
       const up = [...r.up.events, r.up.scene && 'scene ' + r.up.scene, r.up.far && 'far ' + r.up.far].filter(Boolean).join(', ') || 'nothing';
       console.log(line([r.label, r.gpuMs, r.passes, r.msPerS, r.fps, r.winPct, r.deltaPct, r.deltaMsPerS, r.pass == null ? '?' : r.pass ? 'PASS' : 'OVER', up]));
     }
-    console.log('GPU %: Windows, 3D engine of the headless GPU process (whole page); sky ms/s: the timer, the sky shader only (/10 = %).');
+    console.log(`GPU %: Windows, 3D engine of the ${attach ? "window's" : 'headless'} GPU process (whole page); sky ms/s: the timer, the sky shader only (/10 = %).`);
     if (problems.length) console.log('page problems:\n' + problems.join('\n'));
     writeOut({ mode: 'bench', at: new Date().toISOString(), checkout, size: [W, H], seconds: SECONDS, budget: BUDGET, renderer: info.renderer, timer: !!g0.ext, gpuPid, rows, problems });
     try { ws.close(); } catch {}
